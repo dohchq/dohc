@@ -347,7 +347,7 @@ describe('R2.2/Finding-3 — no-key / agent-tool path is per-key, never a lying 
     // agent follows its prompt and records the ENTITY ref (no key)
     const res = await t.mutation(internal.captures._record, {
       workspaceId: OWNER,
-      items: [{ kind: 'entity', ref: 'person/anna', summary: 'beam touched anna' }],
+      items: [{ kind: 'entity', ref: 'person/anna', summary: 'dohc touched anna' }],
     })
     expect(res[0]).toMatchObject({ ref: 'person/anna', ok: true })
 

@@ -92,7 +92,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     await seedAtom(
       t,
       'dashboard.md',
-      '# Cockpit\n{hours: 13}\n```query\nentities.list("booking")\n```',
+      '# Workspace\n{hours: 13}\n```query\nentities.list("booking")\n```',
     )
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(

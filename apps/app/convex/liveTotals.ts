@@ -95,7 +95,7 @@ export async function resolveLiveTotalValue(
   if (notes.length > NOTE_SCAN_CAP) return null // fail-soft
   const atoms: ValueAtom[] = []
   for (const n of notes) {
-    // `_map.md` is a beam-GENERATED index that echoes note text; it is
+    // `_map.md` is a dohc-GENERATED index that echoes note text; it is
     // a derived artifact, NEVER a source of truth for value atoms.
     // Counting it would double-count atoms it copied into summaries
     // (Phase-4 review Codex HIGH). Exclude it (the gardening/map
@@ -154,7 +154,7 @@ export const resolveMany = query({
 })
 
 /**
- * Define / update a `{identifier}` binding (beam authors this when it
+ * Define / update a `{identifier}` binding (dohc authors this when it
  * builds a workflow/dashboard). Internal — the agent tool derives the
  * workspace from requireWorkspace and calls this. Idempotent: one
  * binding per (workspace, identifier); redefining updates it. Fails

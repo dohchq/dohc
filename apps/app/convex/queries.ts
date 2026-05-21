@@ -84,7 +84,7 @@ async function listAtomPathsCapped(
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(QUERY_SCAN_CAP + 1)
-  // `_map.md` is a beam-GENERATED derived index, never a queryable
+  // `_map.md` is a dohc-GENERATED derived index, never a queryable
   // source (design §4 double-count guard; Phase-4 made this
   // pre-existing wart visible — independent P4-review NIT).
   return rows

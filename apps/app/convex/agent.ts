@@ -57,14 +57,17 @@ export function pathDeriveLabel(path: string): string {
 }
 
 const SYSTEM_PROMPT = `\
-You are the dohc agent. You build and maintain ONE user's work
-cockpit: a vault of plain-text atoms (markdown files), backed by a
-flexible entity store (people, projects, clients, bookings, etc — types
-you declare per workspace).
+You are dohc, a calm AI workspace for documents and real work. You
+build and maintain ONE user's workspace: a vault of plain-text atoms
+(markdown files), backed by a flexible entity store (people, projects,
+clients, bookings, etc — types you declare per workspace).
 
-The user is a knowledge worker. Your job is to externalize their
-operational cognition. You author the atoms; you maintain the entities;
-you reshape both as the user's life changes.
+The user is a knowledge worker, and may be a founder, operator, PM, or
+any business user — not necessarily an engineer. Your job is to make
+their work clear, traceable, and ready: you author the atoms, maintain
+the entities, and reshape both as the user's work changes. Be
+plainspoken and precise. Show source state, what changed, and the next
+useful action. Never use hype or "AI magic" language.
 
 ## TOP-LEVEL RULE
 
@@ -93,7 +96,7 @@ call finish_onboarding (hard floor).
 From the brief, create a small COHERENT starter setup for their work
 — templates, not dogma:
 - \`me.md\` — a PORTABLE identity atom: who they are, how they work,
-  what bites them, how they want beam to operate. You re-read this
+  what bites them, how they want dohc to operate. You re-read this
   every session. Plain prose the USER owns.
 - 1–3 role-appropriate starter FILES they can grow into (e.g.
   \`logs/\`, \`projects/\`, \`clients/\`, an \`intent.md\` with one
@@ -102,7 +105,7 @@ From the brief, create a small COHERENT starter setup for their work
   (e.g. a log entry with \`{billable: 4.5}\`, a project with
   \`{budget: 8000} {status: active}\`). Modest and real.
 - a hero \`dashboard.md\` that is CONNECTED to those files — see §2.
-beam maintains \`_map.md\` (their navigable index) automatically —
+dohc maintains \`_map.md\` (their navigable index) automatically —
 never hand-write or mention maintaining it.
 
 ### 2 — THE DASHBOARD IS A CONNECTED, INVITING, EDITABLE DOCUMENT
@@ -763,7 +766,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     resolve_proposal: createTool({
       description:
-        'Accept or dismiss a weekly-loop proposal (approve at the edge). Accept is ADVISORY — it records the decision; beam does NOT auto-apply any change. The user acts on it themselves.',
+        'Accept or dismiss a weekly-loop proposal (approve at the edge). Accept is ADVISORY — it records the decision; dohc does NOT auto-apply any change. The user acts on it themselves.',
       inputSchema: z.object({
         proposalId: z.string(),
         accept: z.boolean(),
@@ -1598,7 +1601,7 @@ export const ensureThread = mutation({
 // `threadId` is client-supplied; bind it to the caller's OWN thread
 // via the existing `threadRefs` map. Fail-closed on any mismatch:
 // absent map, wrong owner, or guessed/foreign id ⇒ DENY. Without
-// this an authed user could read another user's entire beam chat
+// this an authed user could read another user's entire dohc chat
 // (capture summaries, entity data) or inject into their thread.
 export const _assertOwnThread = internalQuery({
   args: { workspaceId: v.string(), threadId: v.string() },
@@ -1875,7 +1878,7 @@ export const sendMessage = action({
   },
 })
 
-// P1 — kick beam's FIRST onboarding turn. NO user prompt: beam's
+// P1 — kick dohc's FIRST onboarding turn. NO user prompt: dohc's
 // SYSTEM_PROMPT makes it call onboarding_state then open DISCOVER
 // itself, so the transcript stays honest (no fake "begin" bubble;
 // @convex-dev/agent saves only the assistant output). Idempotent +
@@ -1924,11 +1927,11 @@ export const generateQuestions = action({
       model: anthropic('claude-sonnet-4-6'),
       schema: TailoredQuestions,
       temperature: 0.5,
-      prompt: `dohc is a personal work cockpit: it captures someone's real work as structured data and builds them a live dashboard + profile.
+      prompt: `dohc is a calm personal workspace: it captures someone's real work as structured data and builds them a live dashboard + profile.
 
 A new user just told us their work is: "${work}".
 
-Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a populated cockpit for THIS person specifically. Rules:
+Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a populated workspace for THIS person specifically. Rules:
 - Each question is a single- or multi-select with 3–6 CONCRETE options drawn from the real vocabulary of "${work}" (name actual things they'd track / tools / rituals / units — not generic "productivity" filler).
 - The 3 questions must cover DISTINCT dimensions — pick the 3 highest-signal of: what they need to keep on top of · their cadence/rhythm · their biggest recurring friction · who they answer to / share with.
 - Do NOT ask them to restate their job. No yes/no. No "other" option (the UI adds a free-text box itself). Keep each question and option tight (a few words).
@@ -1941,10 +1944,10 @@ Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a popu
 export const startOnboarding = action({
   // `intro` (optional): the user's questionnaire answers, composed
   // client-side into a first-person brief. When present it becomes
-  // beam's FIRST turn's prompt (one clear turn: "I answered → beam is
+  // dohc's FIRST turn's prompt (one clear turn: "I answered → dohc is
   // building from it"), replacing the old no-prompt opening + held
   // auto-send two-step. Absent (resume / stale-lease retry) ⇒
-  // no-prompt continue: the thread already holds the brief, beam
+  // no-prompt continue: the thread already holds the brief, dohc
   // picks up where it was. Lease semantics are prompt-agnostic.
   args: { intro: v.optional(v.string()) },
   handler: async (ctx, { intro }): Promise<{ started: boolean }> => {
@@ -1999,8 +2002,8 @@ export const startOnboarding = action({
     const result = await dohcAgent.streamText(
       ctx,
       { threadId },
-      // With a brief ⇒ that's beam's first turn's prompt (the user's
-      // honest questionnaire summary). Without ⇒ no prompt: beam
+      // With a brief ⇒ that's dohc's first turn's prompt (the user's
+      // honest questionnaire summary). Without ⇒ no prompt: dohc
       // opens itself (system prompt) or continues an existing thread.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (promptMessageId

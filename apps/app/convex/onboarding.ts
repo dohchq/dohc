@@ -85,11 +85,11 @@ export async function progressOf(
   const dashboards = atoms.filter(
     (a) => !isNonDataAtom(a.path, a.body) && a.body.includes('```query'),
   )
-  // Prefer a hero-named artifact (dashboard/cockpit/home/work/...),
-  // else the first ```query atom — beam writes exactly one hero.
+  // Prefer a hero-named artifact (dashboard/workspace/home/work/...),
+  // else the first ```query atom — dohc writes exactly one hero.
   const hero =
     dashboards.find((a) =>
-      /(^|\/)(dashboard|cockpit|home|work|tracker)\b/i.test(a.path),
+      /(^|\/)(dashboard|workspace|home|work|tracker)\b/i.test(a.path),
     ) ?? dashboards[0]
   const entities = await ctx.db
     .query('entities')

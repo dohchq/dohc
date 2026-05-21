@@ -6,7 +6,7 @@
 //   digest   — feeds a window another person can see. Batched into a
 //              once-a-session "ready to share?" review. Never blocks
 //              work; nothing reaches another human un-reviewed.
-//   inline   — beam is genuinely unsure (ambiguous value/owner). One
+//   inline   — dohc is genuinely unsure (ambiguous value/owner). One
 //              lightweight nudge, dismissible.
 //   blocking — DESTRUCTIVE (delete / overwrite of user-authored
 //              content) or destructive-from-untrusted-artifact. Must
@@ -35,7 +35,7 @@ export type CaptureAction = {
   target: ActionTarget
   /** the value/atom feeds a window another principal can see */
   shared?: boolean
-  /** beam is not confident about the value or its owner */
+  /** dohc is not confident about the value or its owner */
   unsure?: boolean
   /** the existing content being overwritten was authored by the
    *  human (not by a prior agent write) */

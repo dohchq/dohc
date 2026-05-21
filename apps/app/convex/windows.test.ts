@@ -232,7 +232,7 @@ describe('windows adapter — Phase-2 reviewed-by-default gate is ENFORCED via t
         workspaceId: OWNER,
         kind: 'entity',
         ref: 'person/alice',
-        summary: 'beam updated alice.hours',
+        summary: 'dohc updated alice.hours',
         tier: 'inline',
         status: 'pending',
         createdAt: 1,
@@ -371,7 +371,7 @@ describe('P2 consent surface — consentOverview', () => {
     await t.run(async (ctx) =>
       ctx.db.insert('captures', {
         workspaceId: OWNER, kind: 'entity', ref: 'person/alice', key: 'hours',
-        summary: 'beam set alice.hours', tier: 'digest', status: 'pending', createdAt: 1,
+        summary: 'dohc set alice.hours', tier: 'digest', status: 'pending', createdAt: 1,
       }),
     )
     const ov = await asOwner(t).query(api.windows.consentOverview, {})
@@ -390,7 +390,7 @@ describe('P2 consent surface — consentOverview', () => {
 })
 
 describe('P2 consent surface — public confirmWithheldFor ≡ the agent path', () => {
-  it('owner shares without beam; the granted viewer then receives EXACTLY what the agent path would release', async () => {
+  it('owner shares without dohc; the granted viewer then receives EXACTLY what the agent path would release', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerDesk(t)
     const w = await ownerCreatesWindow(t)
@@ -404,7 +404,7 @@ describe('P2 consent surface — public confirmWithheldFor ≡ the agent path', 
     // before: alice.hours withheld ⇒ only bob flows ⇒ team_hours = 4
     const before = await asViewer(t).query(api.windows.resolve, { windowId: w })
     expect(before.ok && before.view.team_hours).toBe(4)
-    // owner clicks "Share these N" (public, no beam)
+    // owner clicks "Share these N" (public, no dohc)
     const res = await asOwner(t).mutation(api.windows.confirmWithheldFor, { windowId: w })
     expect(res.ok).toBe(true)
     if (res.ok) {

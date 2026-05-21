@@ -12,7 +12,7 @@
 
 export type RollupOp = 'sum' | 'count'
 
-/** What an `{identifier}` binds to. Authored by beam/workflow (a
+/** What an `{identifier}` binds to. Authored by dohc/workflow (a
  *  `rollups` row) or derived from a Phase-3 window aggregate. */
 export type RollupSpec = { op: RollupOp; key: string }
 

@@ -108,7 +108,7 @@ export function joinFrontmatter(fm: string, rest: string): string {
 // ReDoS-guarded `splitFrontmatter` (single source — no second
 // frontmatter scan to ReDoS); the per-line anchored bounded test
 // over the already-bounded `fm` is linear/catastrophe-free. v1
-// assumes beam writes clean frontmatter (`type: html`, optionally
+// assumes dohc writes clean frontmatter (`type: html`, optionally
 // quoted) — a trailing `# comment` etc. is out of v1 scope (the
 // parser is dependency-free; full YAML is overkill here).
 const FM_TYPE_HTML_RE = /^type:[ \t]*['"]?html['"]?[ \t]*\r?$/m

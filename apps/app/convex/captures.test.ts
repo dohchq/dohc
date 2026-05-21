@@ -102,7 +102,7 @@ describe('confirm / reject', () => {
   it('reject is a PURE STATUS FLIP — host atom/entity is NOT destroyed', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: 'note.md', body: 'beam value + USER PROSE', updatedAt: 1, source: 'agent' })
+      await ctx.db.insert('atoms', { workspaceId: W, path: 'note.md', body: 'dohc value + USER PROSE', updatedAt: 1, source: 'agent' })
       await ctx.db.insert('entities', { workspaceId: W, type: 'client', slug: 'acme', data: { rate: 150 }, updatedAt: 1 })
     })
     await t.mutation(internal.captures._record, {

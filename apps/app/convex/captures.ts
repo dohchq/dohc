@@ -17,7 +17,7 @@ import { isNonDataAtom } from './atomId'
 // Invariants (re-review hardening):
 //  • A capture row IMPLIES the value exists — recordCapture VERIFIES
 //    the atom/entity is live before inserting (no ghost rows; not
-//    prompt-hope that beam "wrote it first").
+//    prompt-hope that dohc "wrote it first").
 //  • Status is LOAD-BEARING, not decorative: an UNREVIEWED value
 //    (status auto | pending | rejected — i.e. anything that is NOT
 //    `confirmed`) is withheld from every cross-desk window by

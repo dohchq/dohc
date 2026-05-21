@@ -213,7 +213,7 @@ export default defineSchema({
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
   // infer "ONBOARDING vs MAINTENANCE" from `list_atoms` being empty —
-  // which flipped mid-onboarding the instant beam wrote its first
+  // which flipped mid-onboarding the instant dohc wrote its first
   // atom, abandoning the flow half-built. State is now explicit:
   // present row + completedAt set ⇒ MAINTENANCE.
   onboarding: defineTable({
@@ -250,7 +250,7 @@ export default defineSchema({
     .index('by_deletedAt', ['deletedAt']),
 
   // Captures (Phase 2 keystone — reviewed-by-default ledger). When
-  // beam notes a structured value as a BYPRODUCT of the user's work
+  // dohc notes a structured value as a BYPRODUCT of the user's work
   // (no explicit "filing" by the user), a row is recorded here and
   // routed by the confirm-tier classifier:
   //   silent → status 'auto'    (private; accumulates, never surfaced
@@ -263,7 +263,7 @@ export default defineSchema({
   //                              every shared window via resolveWindow,
   //                              the owner's own copy is untouched)
   // Destructive never reaches here (the delete/overwrite gates handle
-  // 'blocking'). This is the engine; whether beam calls capture at the
+  // 'blocking'). This is the engine; whether dohc calls capture at the
   // right moments is agent behaviour (deploy-gated).
   captures: defineTable({
     workspaceId: v.string(),

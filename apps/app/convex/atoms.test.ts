@@ -78,10 +78,10 @@ describe('atoms._upsertInternal — user-content overwrite guard', () => {
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: W,
       path: 'dashboard.md',
-      body: 'beam update',
+      body: 'dohc update',
       source: 'agent',
     })
-    expect(await contentOf(t, 'dashboard.md')).toBe('beam update')
+    expect(await contentOf(t, 'dashboard.md')).toBe('dohc update')
   })
 
   it('does NOT gate fresh creates', async () => {

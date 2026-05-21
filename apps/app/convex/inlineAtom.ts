@@ -26,7 +26,7 @@ export type InlineAtom =
       start: number
       end: number
       raw: string
-      /** the bare identifier; beam fills this — non-authoritative (UC-3) */
+      /** the bare identifier; dohc fills this — non-authoritative (UC-3) */
       key: string
     }
   | {
@@ -510,7 +510,7 @@ export function parseInlineAtomsFromMarkdown(md: string): InlineAtom[] {
 // ── R3 — inline-atom → cross-desk window (design v4) ────────────────
 
 /**
- * THE single canonical name of the beam-generated index note. It is a
+ * THE single canonical name of the dohc-generated index note. It is a
  * DERIVED artifact (echoes other notes' text) — NEVER a source of
  * value atoms (double-count guard, Phase-4 Codex HIGH). One exported
  * constant so the own-desk gather, the cross-desk gather, AND the

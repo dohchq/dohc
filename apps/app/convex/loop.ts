@@ -109,8 +109,8 @@ function buildMapBody(notes: NoteRow[]): string {
   const out: string[] = [
     '# _map',
     '',
-    '> Auto-maintained by beam (regenerated weekly). This is a generated',
-    "> index — edit your notes, not this file. Delete it and beam",
+    '> Auto-maintained by dohc (regenerated weekly). This is a generated',
+    "> index — edit your notes, not this file. Delete it and dohc",
     '> rebuilds it next pass.',
     '',
     `total notes: ${indexed.length}`,
@@ -216,10 +216,10 @@ async function detectGardenIssues(
         .slice(0, 10)
         .join('; ')} — keep one`,
     )
-  return `Tidy-up suggestion (advisory — beam deletes nothing): ${parts.join(' | ')}`
+  return `Tidy-up suggestion (advisory — dohc deletes nothing): ${parts.join(' | ')}`
 }
 
-/** Regenerate `_map.md`. Overwrites ONLY a beam-authored map
+/** Regenerate `_map.md`. Overwrites ONLY a dohc-authored map
  *  (`source==='agent'`); a user-authored OR unknown/legacy-source
  *  `_map.md` is left untouched (Codex LOW/MED — only overwrite what we
  *  provably own). Fail-soft on scan overflow and on a duplicate-row
@@ -435,7 +435,7 @@ async function pendingProposalsImpl(
         identifier: r.identifier,
         goal: r.goal,
         actual,
-        message: `Behind on {${r.identifier}}: goal ${r.goal}, actual ${actual} (${r.goal - actual} to go). Review and decide — accepting is advisory, beam changes nothing automatically.`,
+        message: `Behind on {${r.identifier}}: goal ${r.goal}, actual ${actual} (${r.goal - actual} to go). Review and decide — accepting is advisory, dohc changes nothing automatically.`,
         createdAt: r.createdAt,
       })
     }
