@@ -150,7 +150,7 @@ export const _find = internalQuery({
 //       enable for it; "create" is additive, "update" is not).
 // The mode is OPTIONAL; omitted ⇒ unchanged byte-identical upsert
 // semantics for the agent's `update_entity` + pluginBridge
-// `window.vibeam.upsert` callers (no regression).
+// `window.dohc.upsert` callers (no regression).
 //
 // P2b.2 fold (Codex F1): a plain `Error` subclass's custom fields
 // (`.kind`, `.mode`, `.conflicts`) DO NOT survive the
@@ -293,7 +293,7 @@ export const _upsertMany = internalMutation({
       if (existing) {
         // recoverability: overwriting an entity's data is destructive
         // of the prior value — snapshot before the patch (covers the
-        // agent + the plugin-bridge `window.vibeam.upsert` path).
+        // agent + the plugin-bridge `window.dohc.upsert` path).
         if (JSON.stringify(existing.data) !== JSON.stringify(it.data)) {
           await recordTrashCoalesced(ctx, {
             workspaceId,
@@ -348,7 +348,7 @@ export const _patch = internalMutation({
     if (!existing) throw new Error(`not found: ${type}/${slug}`)
     const merged = { ...(existing.data ?? {}), ...data }
     // Re-review HIGH: _patch is reachable from the PUBLIC plugin
-    // bridge (window.vibeam.patch) and the agent's update_entity tool
+    // bridge (window.dohc.patch) and the agent's update_entity tool
     // and overwrites existing keys' values — a destructive overwrite
     // that previously bypassed trash entirely. Snapshot prior data
     // (coalesced) before the patch.

@@ -1,6 +1,6 @@
 const ASCII_SKETCH_LANGUAGE = 'ascii'
 const ASCII_SKETCH_LANGUAGE_PREFIX = 'ascii:v1:'
-const ASCII_SKETCH_CONTENT_PREFIX = 'vibe-ascii-sketch:v1:'
+const ASCII_SKETCH_CONTENT_PREFIX = 'dohc-ascii-sketch:v1:'
 
 function toBase64Url(value: string): string {
   const bytes = new TextEncoder().encode(value)

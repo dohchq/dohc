@@ -334,7 +334,7 @@ export function FileTree({
       e.preventDefault()
       e.stopPropagation()
       setDragOverPath(null)
-      const raw = e.dataTransfer.getData('application/vibeam-tree-row')
+      const raw = e.dataTransfer.getData('application/dohc-tree-row')
       if (!raw) return
       let source: DragSource
       try {
@@ -733,7 +733,7 @@ export function FileTree({
               // is over EMPTY SPACE within the tree (not on any
               // row). That's the root drop zone.
               if (
-                e.dataTransfer.types.includes('application/vibeam-tree-row')
+                e.dataTransfer.types.includes('application/dohc-tree-row')
               ) {
                 e.preventDefault()
                 e.dataTransfer.dropEffect = 'move'
@@ -1017,12 +1017,12 @@ function TreeRowNode({
           e.stopPropagation()
           e.dataTransfer.effectAllowed = 'move'
           e.dataTransfer.setData(
-            'application/vibeam-tree-row',
+            'application/dohc-tree-row',
             JSON.stringify({ path: filePath, kind: 'file' } satisfies DragSource),
           )
         }}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes('application/vibeam-tree-row')) {
+          if (e.dataTransfer.types.includes('application/dohc-tree-row')) {
             e.preventDefault()
             // D4.7b — stopPropagation so the tree container's
             // onDragOver doesn't ALSO fire and (in React's batched
@@ -1151,7 +1151,7 @@ function TreeRowNode({
           e.stopPropagation()
           e.dataTransfer.effectAllowed = 'move'
           e.dataTransfer.setData(
-            'application/vibeam-tree-row',
+            'application/dohc-tree-row',
             JSON.stringify({
               path: node.fullPath,
               kind: 'folder',
@@ -1159,7 +1159,7 @@ function TreeRowNode({
           )
         }}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes('application/vibeam-tree-row')) {
+          if (e.dataTransfer.types.includes('application/dohc-tree-row')) {
             e.preventDefault()
             e.stopPropagation()
             e.dataTransfer.dropEffect = 'move'

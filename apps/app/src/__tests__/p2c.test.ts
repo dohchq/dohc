@@ -109,7 +109,7 @@ describe('Track-3 P2c — SKILL_MAX_BYTES + pathDeriveLabel pure helpers', () =>
 describe('Track-3 P2c — `run_skill` tool surface (structural)', () => {
   const runSkillBody = TOOL_BODIES['run_skill']
 
-  it('run_skill is registered as a tool in vibeamAgent', () => {
+  it('run_skill is registered as a tool in dohcAgent', () => {
     expect(runSkillBody).toMatch(/run_skill:\s*createTool\(\{/)
   })
 

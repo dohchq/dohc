@@ -168,7 +168,7 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
 
   return (
     <div
-      className="vibeam-wikilink-picker"
+      className="dohc-wikilink-picker"
       style={{
         position: 'fixed',
         left: coords.left,
@@ -179,7 +179,7 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className="vibeam-wikilink-picker__empty">
+        <div className="dohc-wikilink-picker__empty">
           No files match "{state.query}"
         </div>
       ) : (
@@ -197,7 +197,7 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
                 }}
                 type="button"
                 className={
-                  'vibeam-wikilink-picker__item' +
+                  'dohc-wikilink-picker__item' +
                   (i === activeIdx ? ' is-active' : '')
                 }
                 onMouseEnter={() => setActiveIdx(i)}
@@ -207,10 +207,10 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
                   className="size-3.5 shrink-0 opacity-60"
                   strokeWidth={1.8}
                 />
-                <span className="vibeam-wikilink-picker__item-title">
+                <span className="dohc-wikilink-picker__item-title">
                   {display}
                 </span>
-                <span className="vibeam-wikilink-picker__item-path">
+                <span className="dohc-wikilink-picker__item-path">
                   {subpath}
                 </span>
               </button>

@@ -52,7 +52,7 @@ export async function recordTrash(
 /** Default coalescing window: at most one snapshot per (kind,ref) per
  *  10 min, so a tight edit/plugin loop can't flood the trash table
  *  (the entity path previously had NO coalescing — a plugin calling
- *  window.vibeam.patch in a loop was an unbounded-growth DoS). */
+ *  window.dohc.patch in a loop was an unbounded-growth DoS). */
 export const COALESCE_MS = 10 * 60 * 1000
 
 /** recordTrash, but skipped if an equivalent snapshot for the same

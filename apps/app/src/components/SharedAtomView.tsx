@@ -127,7 +127,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
 
   return (
     <div className="doc doc-editing mx-auto w-full max-w-[760px] px-6 py-8">
-      <div className="vibeam-shared-banner mb-4 flex items-center gap-2 rounded-md border border-rule bg-surface px-3 py-2 text-[12px] text-ink-dim">
+      <div className="dohc-shared-banner mb-4 flex items-center gap-2 rounded-md border border-rule bg-surface px-3 py-2 text-[12px] text-ink-dim">
         <span className="font-medium text-ink-strong">Shared with you</span>
         <span className="opacity-60">·</span>
         <span>{canEdit ? 'can edit' : 'view only'}</span>
@@ -164,7 +164,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
       )}
 
       <input
-        className="vibeam-title-field"
+        className="dohc-title-field"
         value={title || leaf}
         placeholder="Untitled"
         readOnly

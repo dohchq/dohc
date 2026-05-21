@@ -517,12 +517,12 @@
  * `[[path]]` (or `\[\[path]]`):
  *   1. A widget at the start position whose DOM is the pill.
  *   2. An inline decoration over the literal text with class
- *      `vibeam-wikilink-hidden` that collapses the source text
+ *      `dohc-wikilink-hidden` that collapses the source text
  *      via `font-size:0`. Text stays in the document for the
  *      cursor/serializer; just renders invisibly.
  * The pill widget has `contentEditable=false` so PM treats it as
  * an atom (clicks land on it; the cursor skips past). */
-.vibeam-wikilink-pill {
+.dohc-wikilink-pill {
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -539,24 +539,24 @@
   white-space: nowrap;
   transition: background var(--t-fast);
 }
-.vibeam-wikilink-pill:hover {
+.dohc-wikilink-pill:hover {
   background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
 }
-.vibeam-wikilink-pill__icon {
+.dohc-wikilink-pill__icon {
   display: inline-flex;
   align-items: center;
   opacity: 0.72;
 }
-.vibeam-wikilink-pill__icon svg {
+.dohc-wikilink-pill__icon svg {
   display: block;
 }
-.vibeam-wikilink-pill--broken {
+.dohc-wikilink-pill--broken {
   background: transparent;
   color: var(--color-ink-faint);
   border: 1px dashed var(--color-ink-faint);
   padding: 0 5px 0 4px;
 }
-.vibeam-wikilink-hidden {
+.dohc-wikilink-hidden {
   font-size: 0 !important;
   line-height: 0 !important;
   letter-spacing: 0 !important;
@@ -566,7 +566,7 @@
  * the raw `[[path]]` text styled lightly so the user can see +
  * edit it. The pill (preview mode) re-renders the moment the
  * cursor moves out of the range — Obsidian's live-preview pattern. */
-.vibeam-wikilink-source {
+.dohc-wikilink-source {
   color: var(--color-accent-2);
   background: color-mix(in oklab, var(--color-accent-2) 7%, transparent);
   border-radius: 2px;
@@ -578,7 +578,7 @@
  * value, with the full source on hover. Cursor INSIDE the range
  * toggles to source mode (raw text + value chip at the end for
  * non-value kinds). Three subtle color variants by kind. */
-.vibeam-atom-pill {
+.dohc-atom-pill {
   display: inline;
   padding: 0 4px;
   border-radius: 3px;
@@ -589,35 +589,35 @@
   white-space: nowrap;
   transition: background var(--t-fast);
 }
-.vibeam-atom-pill:hover {
+.dohc-atom-pill:hover {
   background: color-mix(in oklab, var(--color-accent) 16%, transparent);
 }
 /* value = author-typed truth (accent pink/red family). */
-.vibeam-atom-pill--value {
+.dohc-atom-pill--value {
   background: color-mix(in oklab, var(--color-accent) 8%, transparent);
   color: var(--color-accent);
 }
-.vibeam-atom-pill--value:hover {
+.dohc-atom-pill--value:hover {
   background: color-mix(in oklab, var(--color-accent) 16%, transparent);
 }
 /* liveTotal + formula = computed projections (accent-2 violet). */
-.vibeam-atom-pill--liveTotal,
-.vibeam-atom-pill--formula {
+.dohc-atom-pill--liveTotal,
+.dohc-atom-pill--formula {
   background: color-mix(in oklab, var(--color-accent-2) 10%, transparent);
   color: var(--color-accent-2);
 }
-.vibeam-atom-pill--liveTotal:hover,
-.vibeam-atom-pill--formula:hover {
+.dohc-atom-pill--liveTotal:hover,
+.dohc-atom-pill--formula:hover {
   background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
 }
-.vibeam-atom-pill--broken {
+.dohc-atom-pill--broken {
   color: var(--color-ink-faint);
   background: transparent;
   border: 1px dashed var(--color-ink-faint);
   padding: 0 3px;
   opacity: 0.75;
 }
-.vibeam-atom-hidden {
+.dohc-atom-hidden {
   font-size: 0 !important;
   line-height: 0 !important;
   letter-spacing: 0 !important;
@@ -626,7 +626,7 @@
 /* D4.8b — autocomplete picker (the popover that appears when the
  * user types `[[`). Positioned absolutely just below the cursor by
  * the React component. */
-.vibeam-wikilink-picker {
+.dohc-wikilink-picker {
   background: var(--color-elevated);
   border: 1px solid var(--color-rule);
   border-radius: 6px;
@@ -637,12 +637,12 @@
   overflow-y: auto;
   box-shadow: var(--shadow-md);
 }
-.vibeam-wikilink-picker__empty {
+.dohc-wikilink-picker__empty {
   padding: 8px 12px;
   font-size: 12px;
   color: var(--color-ink-faint);
 }
-.vibeam-wikilink-picker__item {
+.dohc-wikilink-picker__item {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -656,15 +656,15 @@
   color: var(--color-ink);
   transition: background var(--t-fast);
 }
-.vibeam-wikilink-picker__item.is-active,
-.vibeam-wikilink-picker__item:hover {
+.dohc-wikilink-picker__item.is-active,
+.dohc-wikilink-picker__item:hover {
   background: var(--color-hover);
 }
-.vibeam-wikilink-picker__item-title {
+.dohc-wikilink-picker__item-title {
   font-weight: 500;
   flex-shrink: 0;
 }
-.vibeam-wikilink-picker__item-path {
+.dohc-wikilink-picker__item-path {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--color-ink-faint);
@@ -1032,20 +1032,20 @@
 /* D4.19 — page properties panel (Notion-style frontmatter editor).
  * Sits above the editor; quiet by default, fills the role of the
  * frontmatter `id:` zone. */
-.vibeam-props {
+.dohc-props {
   display: flex;
   flex-direction: column;
   gap: 1px;
   margin: 0 0 14px;
   font-size: 13px;
 }
-.vibeam-props__row {
+.dohc-props__row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 2px 0;
 }
-.vibeam-props__key {
+.dohc-props__key {
   width: 140px;
   flex-shrink: 0;
   border: none;
@@ -1057,11 +1057,11 @@
   padding: 2px 4px;
   border-radius: 4px;
 }
-.vibeam-props__key:not([readonly]):hover,
-.vibeam-props__key:focus {
+.dohc-props__key:not([readonly]):hover,
+.dohc-props__key:focus {
   background: var(--color-hover, var(--bg-panel));
 }
-.vibeam-props__value {
+.dohc-props__value {
   flex: 1;
   border: none;
   background: transparent;
@@ -1071,22 +1071,22 @@
   padding: 2px 6px;
   border-radius: 4px;
 }
-.vibeam-props__value:not([readonly]):hover,
-.vibeam-props__value:focus {
+.dohc-props__value:not([readonly]):hover,
+.dohc-props__value:focus {
   background: var(--color-hover, var(--bg-panel));
 }
-.vibeam-props__value[readonly],
-.vibeam-props__key[readonly] {
+.dohc-props__value[readonly],
+.dohc-props__key[readonly] {
   color: var(--color-ink-faint, var(--ink-faint));
   font-family: var(--font-mono);
   font-size: 11.5px;
   cursor: default;
 }
 /* D4.23 — a user property keyed `id`/`title` is reserved + not saved. */
-.vibeam-props__key.is-reserved {
+.dohc-props__key.is-reserved {
   color: var(--color-amber, #b45309);
 }
-.vibeam-props__reserved {
+.dohc-props__reserved {
   flex: 1;
   font-size: 11.5px;
   color: var(--color-amber, #b45309);
@@ -1094,7 +1094,7 @@
   padding: 2px 6px;
   user-select: none;
 }
-.vibeam-props__remove {
+.dohc-props__remove {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1105,14 +1105,14 @@
   opacity: 0;
   transition: opacity var(--t-fast), background var(--t-fast);
 }
-.vibeam-props__row:hover .vibeam-props__remove {
+.dohc-props__row:hover .dohc-props__remove {
   opacity: 1;
 }
-.vibeam-props__remove:hover {
+.dohc-props__remove:hover {
   background: var(--color-hover, var(--bg-panel));
   color: var(--color-ink, var(--ink));
 }
-.vibeam-props__add {
+.dohc-props__add {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1125,7 +1125,7 @@
   opacity: 0.7;
   transition: opacity var(--t-fast), background var(--t-fast);
 }
-.vibeam-props__add:hover {
+.dohc-props__add:hover {
   opacity: 1;
   background: var(--color-hover, var(--bg-panel));
   color: var(--color-ink-dim, var(--ink-dim));
@@ -1136,7 +1136,7 @@
  * reads as the page title. (Supersedes D4.18's in-editor first-H1
  * boost — the title is now its own field, so a content H1 inside the
  * editor styles as a normal heading.) */
-.vibeam-title-field {
+.dohc-title-field {
   width: 100%;
   border: none;
   background: transparent;
@@ -1151,7 +1151,7 @@
   padding: 6px 0 8px;
   margin: 0;
 }
-.vibeam-title-field::placeholder {
+.dohc-title-field::placeholder {
   color: var(--ink-faint);
   opacity: 0.5;
 }
@@ -1161,59 +1161,59 @@
  * theme-aware palette so they adapt to light/dark. The editable
  * textarea is transparent over the highlighted <pre>; keep its caret
  * visible. */
-.vibeam-source {
+.dohc-source {
   width: 100%;
   color: var(--color-ink-strong, var(--ink-strong));
   caret-color: var(--color-accent, var(--accent));
 }
-.vibeam-source textarea {
+.dohc-source textarea {
   outline: none;
 }
-.vibeam-source textarea::selection {
+.dohc-source textarea::selection {
   background: var(--color-selection);
 }
-.vibeam-source .token.comment,
-.vibeam-source .token.prolog,
-.vibeam-source .token.doctype,
-.vibeam-source .token.cdata,
-.vibeam-source .token.blockquote {
+.dohc-source .token.comment,
+.dohc-source .token.prolog,
+.dohc-source .token.doctype,
+.dohc-source .token.cdata,
+.dohc-source .token.blockquote {
   color: var(--color-ink-faint, var(--ink-faint));
   font-style: italic;
 }
-.vibeam-source .token.punctuation {
+.dohc-source .token.punctuation {
   color: var(--color-ink-dim, var(--ink-dim));
 }
-.vibeam-source .token.tag,
-.vibeam-source .token.keyword,
-.vibeam-source .token.title {
+.dohc-source .token.tag,
+.dohc-source .token.keyword,
+.dohc-source .token.title {
   color: var(--color-folder-purple);
   font-weight: 600;
 }
-.vibeam-source .token.attr-name,
-.vibeam-source .token.key,
-.vibeam-source .token.selector,
-.vibeam-source .token.namespace {
+.dohc-source .token.attr-name,
+.dohc-source .token.key,
+.dohc-source .token.selector,
+.dohc-source .token.namespace {
   color: var(--color-folder-blue);
 }
-.vibeam-source .token.attr-value,
-.vibeam-source .token.string,
-.vibeam-source .token.url,
-.vibeam-source .token.entity {
+.dohc-source .token.attr-value,
+.dohc-source .token.string,
+.dohc-source .token.url,
+.dohc-source .token.entity {
   color: var(--color-folder-green);
 }
-.vibeam-source .token.code,
-.vibeam-source .token.code-snippet {
+.dohc-source .token.code,
+.dohc-source .token.code-snippet {
   color: var(--color-accent-2);
 }
-.vibeam-source .token.list.punctuation,
-.vibeam-source .token.hr,
-.vibeam-source .token.number {
+.dohc-source .token.list.punctuation,
+.dohc-source .token.hr,
+.dohc-source .token.number {
   color: var(--color-accent);
 }
-.vibeam-source .token.bold {
+.dohc-source .token.bold {
   font-weight: 700;
 }
-.vibeam-source .token.italic {
+.dohc-source .token.italic {
   font-style: italic;
 }
 .doc-editing .milkdown h2 {
@@ -2401,19 +2401,19 @@
    quiet pill, color as a budget. value = author-typed truth (accent);
    liveTotal = a computed projection, non-authoritative (violet, dashed
    underline to read as "derived, not typed"). */
-.vibeam-atom {
+.dohc-atom {
   border-radius: 5px;
   padding: 0.5px 5px;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.92em;
   white-space: nowrap;
 }
-.vibeam-atom-value {
+.dohc-atom-value {
   background: var(--color-accent-soft);
   color: var(--color-accent-hover);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
-.vibeam-atom-liveTotal {
+.dohc-atom-liveTotal {
   background: var(--color-accent-2-soft);
   color: var(--color-accent-2);
   text-decoration: underline dashed 1px;
@@ -2422,7 +2422,7 @@
 /* atom-address-v1 §3 — a `{= … }` formula token. Same violet
    computed-family as a live-total (it IS a computed projection); the
    resolved value renders right after it via .live-total-value. */
-.vibeam-atom-formula {
+.dohc-atom-formula {
   background: var(--color-accent-2-soft);
   color: var(--color-accent-2);
   text-decoration: underline dashed 1px;

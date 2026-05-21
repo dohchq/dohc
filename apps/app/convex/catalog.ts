@@ -87,7 +87,7 @@ kernel: custom
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c])
   }
-  window.vibeam.onUpdate(({ entities }) => {
+  window.dohc.onUpdate(({ entities }) => {
     const root = document.getElementById('root')
     const withDates = entities.filter(e => e.data && e.data.start && e.data.end)
     if (withDates.length === 0) { root.className = 'empty'; root.textContent = '(no projects with start + end dates)'; return }
@@ -149,7 +149,7 @@ kernel: custom
 </div>
 
 <script>
-  window.vibeam.onUpdate(({ entities }) => {
+  window.dohc.onUpdate(({ entities }) => {
     const counts = { 'hard-booked': 0, 'pre-booked': 0, 'potential': 0 }
     entities.forEach(e => { const s = e.data && e.data.status; if (s in counts) counts[s]++ })
     const total = counts['hard-booked'] + counts['pre-booked'] + counts['potential']
@@ -288,7 +288,7 @@ Edit \`itemTemplate\` to reshape how each person renders.
     id: 'booking-promoter',
     name: 'Interactive booking promoter',
     description:
-      'Click a booking cell to cycle its status (potential → pre-booked → hard-booked). Demonstrates plugin writes via window.vibeam.patch.',
+      'Click a booking cell to cycle its status (potential → pre-booked → hard-booked). Demonstrates plugin writes via window.dohc.patch.',
     kernel: 'custom',
     category: 'Utilities',
     body: `---
@@ -329,12 +329,12 @@ commands:
   <span><span class="swatch" style="background:#c75a1f"></span>hard-booked</span>
 </div>
 <div id="root"></div>
-<div class="hint">writes via window.vibeam.patch — other views update live</div>
+<div class="hint">writes via window.dohc.patch — other views update live</div>
 
 <script>
   const NEXT = { potential: 'pre-booked', 'pre-booked': 'hard-booked', 'hard-booked': 'potential' }
   const CLASS = { potential: 'potential', 'pre-booked': 'pre', 'hard-booked': 'hard' }
-  window.vibeam.onUpdate(({ entities }) => {
+  window.dohc.onUpdate(({ entities }) => {
     const byPerson = {}, weeksSet = {}
     entities.forEach(b => {
       const d = b.data || {}
@@ -357,7 +357,7 @@ commands:
       el.addEventListener('click', () => {
         const slug = el.getAttribute('data-slug')
         const cur = el.getAttribute('data-status')
-        window.vibeam.patch({ type: 'booking', slug, data: { status: NEXT[cur] || 'potential' } })
+        window.dohc.patch({ type: 'booking', slug, data: { status: NEXT[cur] || 'potential' } })
       })
     })
   })
@@ -399,7 +399,7 @@ kernel: custom
 </div>
 
 <script>
-  const LS = 'vibeam-pomodoro-end'
+  const LS = 'dohc-pomodoro-end'
   let endAt = parseInt(localStorage.getItem(LS) || '0', 10) || 0
   function fmt(s) {
     const m = Math.floor(s / 60), r = s % 60
@@ -434,7 +434,7 @@ kernel: custom
     id: 'sdk-docs',
     name: 'Plugin SDK reference',
     description:
-      'In-vault reference for plugin authors. Shows what\'s available in window.vibeam inside a custom kernel.',
+      'In-vault reference for plugin authors. Shows what\'s available in window.dohc inside a custom kernel.',
     kernel: '',
     category: 'Reference',
     body: `---
@@ -444,15 +444,15 @@ name: Plugin SDK reference
 description: Reference for plugin authors.
 ---
 
-# vibeam plugin SDK
+# dohc plugin SDK
 
 If you're writing a \`kernel: custom\` plugin, your iframe's body is the
-document. The parent injects \`window.vibeam\` for you.
+document. The parent injects \`window.dohc\` for you.
 
 ## reading data
 
 \`\`\`js
-window.vibeam.onUpdate(({ entities, plugin, query }) => {
+window.dohc.onUpdate(({ entities, plugin, query }) => {
   // fires on load + on every Convex update
 })
 \`\`\`
@@ -460,15 +460,15 @@ window.vibeam.onUpdate(({ entities, plugin, query }) => {
 ## writing entities
 
 \`\`\`js
-await window.vibeam.upsert({ type, slug, data })
-await window.vibeam.patch({ type, slug, data })
-await window.vibeam.delete({ type, slug })
+await window.dohc.upsert({ type, slug, data })
+await window.dohc.patch({ type, slug, data })
+await window.dohc.delete({ type, slug })
 \`\`\`
 
 ## fetching other entity types
 
 \`\`\`js
-const projects = await window.vibeam.fetchEntities('project')
+const projects = await window.dohc.fetchEntities('project')
 \`\`\`
 
 ## sandbox

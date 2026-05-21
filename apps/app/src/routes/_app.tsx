@@ -50,7 +50,7 @@ function AppLayout() {
   )
 }
 
-const BUILD_PLUGIN_PROMPT = `I want to build a new plugin. Available kernels are heatmap, list (with layouts: cards/kanban/template), table, and custom. Custom kernels are full HTML/JS in a sandboxed iframe with read+write access via window.vibeam. Ask me what view I want, what query it should claim (e.g. entities.list("booking")), which kernel to use, and which kernel-specific fields / commands / overlay flag to set. Then write the plugin atom to plugins/<id>.md with the right frontmatter.`
+const BUILD_PLUGIN_PROMPT = `I want to build a new plugin. Available kernels are heatmap, list (with layouts: cards/kanban/template), table, and custom. Custom kernels are full HTML/JS in a sandboxed iframe with read+write access via window.dohc. Ask me what view I want, what query it should claim (e.g. entities.list("booking")), which kernel to use, and which kernel-specific fields / commands / overlay flag to set. Then write the plugin atom to plugins/<id>.md with the right frontmatter.`
 
 type View = 'atom' | 'graph' | 'plugins'
 
@@ -206,9 +206,9 @@ function App() {
   const [optimisticPath, setOptimisticPath] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
     try {
-      const handoff = window.localStorage.getItem('vibeam:onboarding:open')
+      const handoff = window.localStorage.getItem('dohc:onboarding:open')
       if (handoff) {
-        window.localStorage.removeItem('vibeam:onboarding:open')
+        window.localStorage.removeItem('dohc:onboarding:open')
         return handoff
       }
     } catch {
@@ -241,11 +241,11 @@ function App() {
   // localStorage so the preference survives reloads.
   const [chatOpen, setChatOpen] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
-    return window.localStorage.getItem('vibeam-chat-open') === '1'
+    return window.localStorage.getItem('dohc-chat-open') === '1'
   })
   useEffect(() => {
     try {
-      window.localStorage.setItem('vibeam-chat-open', chatOpen ? '1' : '0')
+      window.localStorage.setItem('dohc-chat-open', chatOpen ? '1' : '0')
     } catch {
       // localStorage unavailable / quota exceeded — non-fatal.
     }

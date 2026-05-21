@@ -106,7 +106,7 @@ describe('P2 dual-review fold — Codex BLOCK regressions (dispositive)', () => 
     const o = sanitizeAtomHtml(
       `<style>a{content:"$\`$'$&$1$$"}</style><div data-z="x">tail</div>`,
     )
-    expect(o).not.toContain('vibeam-style-') // no placeholder concept now
+    expect(o).not.toContain('dohc-style-') // no placeholder concept now
     expect((o.match(/<style>/g) ?? []).length).toBe(1) // no duplicated <style>
     expect(o).toContain('tail')
     assertNoExec(o.toLowerCase())

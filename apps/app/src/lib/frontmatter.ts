@@ -37,7 +37,7 @@ export function fmString(meta: Record<string, unknown>, key: string, fallback = 
 
 // ── D4.19 — page properties (Notion-style frontmatter editing) ──────
 // The properties UI reads ORDERED key/value entries and writes them
-// back losslessly-enough (js-yaml round-trip). Frontmatter in vibeam
+// back losslessly-enough (js-yaml round-trip). Frontmatter in dohc
 // is simple key:value, so a yaml.dump rebuild is safe + clean.
 
 export type FmEntry = { key: string; value: string }

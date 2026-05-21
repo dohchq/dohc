@@ -15,7 +15,7 @@ export class QueryErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: unknown) {
     // eslint-disable-next-line no-console
-    console.error('[vibeam plugin error]', error, info, this.props.source)
+    console.error('[dohc plugin error]', error, info, this.props.source)
   }
 
   reset = () => this.setState({ error: null })

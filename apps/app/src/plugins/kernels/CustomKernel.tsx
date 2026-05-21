@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAction, useQuery } from 'convex/react'
+import { PLUGIN_PROTOCOL } from '@dohc/plugin-sdk'
 import { api } from '../../../convex/_generated/api'
 import type { KernelProps } from '../types'
 
 // Sandboxed-iframe kernel. The plugin atom's body is the iframe's
 // document. Communicates with the parent via postMessage.
 //
-// Bridge surface (auto-injected; see vibeam-plugin.d.ts for types):
-//   window.vibeam.data        — { entities, plugin, query } | null
-//   window.vibeam.onUpdate(cb)
-//   window.vibeam.upsert({ type, slug, data })       — Promise<MutationResult>
-//   window.vibeam.patch({ type, slug, data })        — Promise<MutationResult>
-//   window.vibeam.delete({ type, slug })             — Promise<MutationResult>
-//   window.vibeam.fetchEntities(type)                — Promise<Entity[]>
+// Bridge surface (auto-injected; see dohc-plugin.d.ts for types):
+//   window.dohc.data        — { entities, plugin, query } | null
+//   window.dohc.onUpdate(cb)
+//   window.dohc.upsert({ type, slug, data })       — Promise<MutationResult>
+//   window.dohc.patch({ type, slug, data })        — Promise<MutationResult>
+//   window.dohc.delete({ type, slug })             — Promise<MutationResult>
+//   window.dohc.fetchEntities(type)                — Promise<Entity[]>
 //
 // Sandbox: allow-scripts only. No cookies, no parent DOM, no top-nav.
 
@@ -39,13 +40,13 @@ export function CustomKernel({ plugin, query }: KernelProps) {
       const d = e.data
       if (!d || typeof d !== 'object') return
 
-      if (d.type === 'vibeam:resize') {
+      if (d.type === PLUGIN_PROTOCOL.resize) {
         const h = Math.max(40, Math.min(2000, Number(d.height) || 80))
         setHeight(h)
         return
       }
 
-      if (d.type === 'vibeam:rpc') {
+      if (d.type === PLUGIN_PROTOCOL.rpc) {
         const { requestId, method, args } = d as {
           requestId: string
           method: string
@@ -53,7 +54,7 @@ export function CustomKernel({ plugin, query }: KernelProps) {
         }
         const reply = (result: unknown) =>
           iframeRef.current?.contentWindow?.postMessage(
-            { type: 'vibeam:rpc:result', requestId, result },
+            { type: PLUGIN_PROTOCOL.rpcResult, requestId, result },
             '*',
           )
         try {
@@ -95,7 +96,7 @@ export function CustomKernel({ plugin, query }: KernelProps) {
     if (!win) return
     win.postMessage(
       {
-        type: 'vibeam:data',
+        type: PLUGIN_PROTOCOL.data,
         entities: entities ?? [],
         plugin: {
           id: plugin.id,
@@ -121,7 +122,7 @@ export function CustomKernel({ plugin, query }: KernelProps) {
           if (!win) return
           win.postMessage(
             {
-              type: 'vibeam:data',
+              type: PLUGIN_PROTOCOL.data,
               entities: entities ?? [],
               plugin: {
                 id: plugin.id,
@@ -139,6 +140,7 @@ export function CustomKernel({ plugin, query }: KernelProps) {
 }
 
 function wrapPluginBody(body: string): string {
+  const P = PLUGIN_PROTOCOL
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -159,7 +161,7 @@ function wrapPluginBody(body: string): string {
 <body>
 ${body}
 <script>
-  /* vibeam plugin bridge — auto-injected. See SDK types: window.vibeam */
+  /* dohc plugin bridge — auto-injected. See SDK types: window.dohc */
   (function() {
     var _cb = null;
     var _pending = {};
@@ -169,16 +171,16 @@ ${body}
       return new Promise(function(resolve) {
         var requestId = 'r' + (++_seq);
         _pending[requestId] = resolve;
-        parent.postMessage({ type: 'vibeam:rpc', requestId: requestId, method: method, args: args || {} }, '*');
+        parent.postMessage({ type: '${P.rpc}', requestId: requestId, method: method, args: args || {} }, '*');
       });
     }
 
-    window.vibeam = {
+    window.dohc = {
       data: null,
       onUpdate: function(cb) {
         _cb = cb;
-        if (window.vibeam.data) {
-          try { cb(window.vibeam.data); } catch (e) { console.error(e); }
+        if (window.dohc.data) {
+          try { cb(window.dohc.data); } catch (e) { console.error(e); }
         }
       },
       upsert: function(args) { return rpc('upsert', args); },
@@ -190,18 +192,18 @@ ${body}
     window.addEventListener('message', function(e) {
       var d = e.data;
       if (!d) return;
-      if (d.type === 'vibeam:data') {
-        window.vibeam.data = {
+      if (d.type === '${P.data}') {
+        window.dohc.data = {
           entities: d.entities || [],
           plugin: d.plugin || {},
           query: d.query || {}
         };
         if (_cb) {
-          try { _cb(window.vibeam.data); } catch (err) { console.error(err); }
+          try { _cb(window.dohc.data); } catch (err) { console.error(err); }
         }
         return;
       }
-      if (d.type === 'vibeam:rpc:result' && _pending[d.requestId]) {
+      if (d.type === '${P.rpcResult}' && _pending[d.requestId]) {
         var resolve = _pending[d.requestId];
         delete _pending[d.requestId];
         resolve(d.result);
@@ -214,7 +216,7 @@ ${body}
         document.documentElement.scrollHeight,
         document.body.scrollHeight
       );
-      parent.postMessage({ type: 'vibeam:resize', height: h + 4 }, '*');
+      parent.postMessage({ type: '${P.resize}', height: h + 4 }, '*');
     }
     var ro = new ResizeObserver(postHeight);
     ro.observe(document.body);

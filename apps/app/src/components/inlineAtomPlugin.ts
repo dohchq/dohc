@@ -21,7 +21,7 @@ import { parseInlineAtoms } from '../lib/inlineAtom'
 // (AtomEditor) keep working unchanged.
 export { inlineAtomsEnabled } from '../lib/featureFlags'
 
-export const inlineAtomKey = new PluginKey('vibeam-inline-atom')
+export const inlineAtomKey = new PluginKey('dohc-inline-atom')
 
 // Minimal structural shapes so the range logic is testable without a
 // real ProseMirror/jsdom instance.
@@ -80,7 +80,7 @@ export function computeAtomRanges(doc: PMDocLike): AtomRange[] {
     if ((node.marks ?? []).some(isCodeMark)) return
     for (const atom of parseInlineAtoms(node.text)) {
       // atom-address-v1 Phase 3: `{= … }` formulas now ALSO get a
-      // range — the token is styled (vibeam-atom-formula) and the
+      // range — the token is styled (dohc-atom-formula) and the
       // formula widget anchors its computed value at `to`. v0 inputs
       // contain no `{= }`, so every v0 decoration is byte-identical
       // (Phase 2's parse-only `continue` is intentionally removed
@@ -94,7 +94,7 @@ export function computeAtomRanges(doc: PMDocLike): AtomRange[] {
 function buildAtomDecorations(doc: unknown): DecorationSet {
   const decorations = computeAtomRanges(doc as PMDocLike).map((r) =>
     Decoration.inline(r.from, r.to, {
-      class: `vibeam-atom vibeam-atom-${r.kind}`,
+      class: `dohc-atom dohc-atom-${r.kind}`,
     }),
   )
   return DecorationSet.create(doc as never, decorations)

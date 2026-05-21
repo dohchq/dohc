@@ -12,7 +12,7 @@ type AuthCtx = {
 
 // SECURITY: there is intentionally NO "unauthenticated request →
 // data" escape here. An earlier env-gated dev bypass
-// (`VIBEAM_DEV_AUTH`) was a critical hole — Convex public functions
+// (`DOHC_DEV_AUTH`) was a critical hole — Convex public functions
 // are raw internet endpoints on the shared deployment, so the escape
 // served the whole internet, not "local dev". It was removed and the
 // env var unset on the live deployment. Backend behaviour is now

@@ -39,7 +39,7 @@ import type { Id } from '../../convex/_generated/dataModel'
 // Global event name that any UI affordance can dispatch to ask AtomShell to
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
 // the command palette's "Insert ASCII sketch" entry both fire this.
-export const OPEN_SKETCH_EVENT = 'vibeam:open-sketch'
+export const OPEN_SKETCH_EVENT = 'dohc:open-sketch'
 
 const ASCII_SKETCH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>`
 // D4.8 — slash-menu icon for the /link command. lucide "link-2".
@@ -80,7 +80,7 @@ type Props = {
 // with a marker class so CSS can strip the Crepe code-block chrome and
 // (2) intercepts clicks on those blocks to fire a callback. The callback
 // is held in a ref so callers can swap it without rebuilding the editor.
-const asciiBlockKey = new PluginKey('vibeam-ascii-block')
+const asciiBlockKey = new PluginKey('dohc-ascii-block')
 
 function makeAsciiBlockPlugin(
   onClickRef: React.RefObject<
@@ -214,7 +214,7 @@ export function humanizeQuery(src: string): string {
 // a query reads as an intentional "live data" element, not scary DSL
 // (impressions #17). The raw query stays an editable code block —
 // markdown is still the truth; a power user edits it directly.
-const queryBlockKey = new PluginKey('vibeam-query-block')
+const queryBlockKey = new PluginKey('dohc-query-block')
 // atom-address-v1 §5.2 Phase-4 (4B-editor) — KILL THE SLOP BOX. The
 // query block kept showing its DSL *source* (`vault.find(…)`) and no
 // data. Now the evaluated RESULT renders right after it (reactive via
@@ -327,7 +327,7 @@ function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
 // meta (mirrors the ascii plugin's ref pattern). Reuses the
 // unit-tested computeAtomRanges for the ranges (no parallel walk);
 // the identifier is read back from the doc text (token = {ident}).
-const liveTotalKey = new PluginKey('vibeam-live-total')
+const liveTotalKey = new PluginKey('dohc-live-total')
 
 // D4.8h — liveTotal handling folded into the unified
 // makeAtomPillPlugin below; liveTotalKey is retained because the
@@ -343,7 +343,7 @@ const liveTotalKey = new PluginKey('vibeam-live-total')
 // source, never rewritten — this is a view-only widget). A malformed
 // /half-typed `{= sum(lo` is not a formula atom ⇒ no range ⇒ no
 // chip ⇒ calm plain source (§3 NIT #5, for free via the parser).
-const formulaKey = new PluginKey('vibeam-formula')
+const formulaKey = new PluginKey('dohc-formula')
 // A Map (NOT a plain object) — `src` keys are author-influenceable;
 // a Map.get lookup is prototype-pollution-proof (Codex P3-fold).
 type FormulaMap = Map<string, { value: number | string | null }>
@@ -391,9 +391,9 @@ function makeAtomPillElement(args: {
   const el = document.createElement('span')
   el.setAttribute('contenteditable', 'false')
   el.className =
-    'vibeam-atom-pill vibeam-atom-pill--' +
+    'dohc-atom-pill dohc-atom-pill--' +
     args.kind +
-    (args.isBroken ? ' vibeam-atom-pill--broken' : '')
+    (args.isBroken ? ' dohc-atom-pill--broken' : '')
   el.title = args.rawSource
   el.setAttribute('data-atom-pos', String(args.fromPos))
   el.textContent = args.valueText
@@ -422,7 +422,7 @@ function formatValueAtom(
  *    cursor INSIDE  → source visible + value chip at r.to for
  *                     non-value kinds.
  *    cursor OUTSIDE → pill at r.from + source hidden via
- *                     vibeam-atom-hidden font-size:0.
+ *                     dohc-atom-hidden font-size:0.
  *  Replaces the old formula-only buildFormulaDecorations + the
  *  liveTotalPlugin (folded in here). */
 function buildAtomPillDecorations(
@@ -530,7 +530,7 @@ function buildAtomPillDecorations(
     )
     decorations.push(
       Decoration.inline(r.from, r.to, {
-        class: 'vibeam-atom-hidden',
+        class: 'dohc-atom-hidden',
       }),
     )
   }
@@ -656,7 +656,7 @@ function CrepeEditor({
           // for to open the sketcher modal.
           buildMenu: (builder) => {
             builder
-              .addGroup('vibeam', 'vibe')
+              .addGroup('dohc', 'dohc')
               .addItem('ascii-sketch', {
                 label: 'ASCII sketch',
                 icon: ASCII_SKETCH_ICON_SVG,
@@ -706,7 +706,7 @@ function CrepeEditor({
       // resolved target in `data-wikilink-target`; closest()
       // climbs from the click target up to the decoration's span.
       const wikilinkClickPlugin = new Plugin({
-        key: new PluginKey('vibeam-wikilink-click'),
+        key: new PluginKey('dohc-wikilink-click'),
         props: {
           handleClick(view, _pos, event) {
             const t = event.target as HTMLElement | null
@@ -729,11 +729,11 @@ function CrepeEditor({
       // sets the selection just inside the range, triggering the
       // source-mode re-render via the selection-aware apply().
       const formulaClickPlugin = new Plugin({
-        key: new PluginKey('vibeam-atom-pill-click'),
+        key: new PluginKey('dohc-atom-pill-click'),
         props: {
           handleClick(view, _pos, event) {
             const t = event.target as HTMLElement | null
-            const el = t?.closest('.vibeam-atom-pill') as HTMLElement | null
+            const el = t?.closest('.dohc-atom-pill') as HTMLElement | null
             if (!el) return false
             const posAttr = el.getAttribute('data-atom-pos')
             if (!posAttr) return false

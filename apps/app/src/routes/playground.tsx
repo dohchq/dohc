@@ -33,7 +33,7 @@ function Playground() {
     // Force the flag on for this page, then mount client-only (Crepe
     // needs the DOM; never SSR it).
     try {
-      localStorage.setItem('vibeam:inline-atoms', '1')
+      localStorage.setItem('dohc:inline-atoms', '1')
     } catch {
       /* ignore */
     }

@@ -250,19 +250,19 @@ describe('Track-3 P2b.4 — sendMessage lifecycle (saveMessage → clear → str
   })
 
   it('sendMessage calls saveMessage BEFORE streamText (stable promptMessageId)', () => {
-    const saveIdx = sendMessageBody.search(/vibeamAgent\.saveMessage\(/)
-    const streamIdx = sendMessageBody.search(/vibeamAgent\.streamText\(/)
+    const saveIdx = sendMessageBody.search(/dohcAgent\.saveMessage\(/)
+    const streamIdx = sendMessageBody.search(/dohcAgent\.streamText\(/)
     expect(saveIdx).toBeGreaterThan(0)
     expect(streamIdx).toBeGreaterThan(0)
     expect(saveIdx).toBeLessThan(streamIdx)
   })
 
   it('sendMessage calls _clearTurnState BETWEEN saveMessage and streamText', () => {
-    const saveIdx = sendMessageBody.search(/vibeamAgent\.saveMessage\(/)
+    const saveIdx = sendMessageBody.search(/dohcAgent\.saveMessage\(/)
     const clearIdx = sendMessageBody.search(
       /internal\.skillTurnGate\._clearTurnState/,
     )
-    const streamIdx = sendMessageBody.search(/vibeamAgent\.streamText\(/)
+    const streamIdx = sendMessageBody.search(/dohcAgent\.streamText\(/)
     expect(saveIdx).toBeLessThan(clearIdx)
     expect(clearIdx).toBeLessThan(streamIdx)
   })
@@ -290,7 +290,7 @@ describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same p
   })()
 
   it('startOnboarding with intro saves the message before clearing turn state', () => {
-    const saveIdx = startOnboardingBody.search(/vibeamAgent\.saveMessage\(/)
+    const saveIdx = startOnboardingBody.search(/dohcAgent\.saveMessage\(/)
     const clearIdx = startOnboardingBody.search(
       /internal\.skillTurnGate\._clearTurnState/,
     )

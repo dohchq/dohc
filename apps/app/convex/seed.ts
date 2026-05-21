@@ -475,7 +475,7 @@ kernel: custom
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   }
 
-  window.vibeam.onUpdate(function({ entities }) {
+  window.dohc.onUpdate(function({ entities }) {
     var root = document.getElementById('root')
     var withDates = entities.filter(function(e) { return e.data && e.data.start && e.data.end })
     if (withDates.length === 0) {
@@ -584,7 +584,7 @@ commands:
   <span><span class="swatch" style="background:#c75a1f"></span>hard-booked</span>
 </div>
 <div id="root"></div>
-<div class="hint">writes to the entities store via window.vibeam.patch — heatmap above updates live</div>
+<div class="hint">writes to the entities store via window.dohc.patch — heatmap above updates live</div>
 
 <script>
   var NEXT = { potential: 'pre-booked', 'pre-booked': 'hard-booked', 'hard-booked': 'potential' }
@@ -592,7 +592,7 @@ commands:
 
   function pad(s, n) { return (s + '        ').slice(0, n) }
 
-  window.vibeam.onUpdate(function({ entities }) {
+  window.dohc.onUpdate(function({ entities }) {
     var byPerson = {}
     var weeksSet = {}
     entities.forEach(function(b) {
@@ -620,7 +620,7 @@ commands:
         var slug = el.getAttribute('data-slug')
         var current = el.getAttribute('data-status')
         var next = NEXT[current] || 'potential'
-        window.vibeam.patch({ type: 'booking', slug: slug, data: { status: next } })
+        window.dohc.patch({ type: 'booking', slug: slug, data: { status: next } })
       })
     })
   })
@@ -634,18 +634,18 @@ commands:
 type: plugin
 id: sdk-docs
 name: Plugin SDK docs
-description: Reference for plugin authors. Shows what's available in window.vibeam inside a custom kernel.
+description: Reference for plugin authors. Shows what's available in window.dohc inside a custom kernel.
 ---
 
-# vibeam plugin SDK
+# dohc plugin SDK
 
 If you're writing a \`kernel: custom\` plugin, your iframe's body is the
-document. The parent injects \`window.vibeam\` for you.
+document. The parent injects \`window.dohc\` for you.
 
 ## reading data
 
 \`\`\`js
-window.vibeam.onUpdate(({ entities, plugin, query }) => {
+window.dohc.onUpdate(({ entities, plugin, query }) => {
   // fires on load + on every Convex update
   // entities[] are of type \`query.resource\`
   // plugin.config has any extra frontmatter fields
@@ -656,27 +656,27 @@ window.vibeam.onUpdate(({ entities, plugin, query }) => {
 
 \`\`\`js
 // upsert: create or replace
-await window.vibeam.upsert({
+await window.dohc.upsert({
   type: 'booking',
   slug: 'anna-acme-2026-05-11',
   data: { person: 'anna', percent: 50, status: 'hard-booked' }
 })
 
 // patch: merge fields into an existing entity
-await window.vibeam.patch({
+await window.dohc.patch({
   type: 'booking',
   slug: 'anna-acme-2026-05-11',
   data: { status: 'hard-booked' }
 })
 
 // delete
-await window.vibeam.delete({ type: 'booking', slug: 'anna-acme-2026-05-11' })
+await window.dohc.delete({ type: 'booking', slug: 'anna-acme-2026-05-11' })
 \`\`\`
 
 ## fetching other entity types
 
 \`\`\`js
-const projects = await window.vibeam.fetchEntities('project')
+const projects = await window.dohc.fetchEntities('project')
 \`\`\`
 
 ## sandbox
@@ -730,7 +730,7 @@ kernel: custom
 </div>
 
 <script>
-  window.vibeam.onUpdate(function({ entities }) {
+  window.dohc.onUpdate(function({ entities }) {
     var counts = { 'hard-booked': 0, 'pre-booked': 0, 'potential': 0 }
     entities.forEach(function(e) {
       var s = e.data && e.data.status

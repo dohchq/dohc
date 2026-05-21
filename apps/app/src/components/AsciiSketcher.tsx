@@ -27,7 +27,7 @@ const PAD_Y = 4
 // user pans, so every visible pixel always lands on a real cell.
 const PAN_HEADROOM_W = 64
 const PAN_HEADROOM_H = 24
-const SKETCH_CLIPBOARD_PREFIX = 'vibe-ascii-sketch-clipboard:v1:'
+const SKETCH_CLIPBOARD_PREFIX = 'dohc-ascii-sketch-clipboard:v1:'
 
 type FillStyle = 'none' | 'light' | 'medium' | 'dark' | 'solid'
 const FILL_CHARS: Record<FillStyle, string> = {

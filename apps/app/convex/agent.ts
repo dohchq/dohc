@@ -57,7 +57,7 @@ export function pathDeriveLabel(path: string): string {
 }
 
 const SYSTEM_PROMPT = `\
-You are the vibeam agent. You build and maintain ONE user's work
+You are the dohc agent. You build and maintain ONE user's work
 cockpit: a vault of plain-text atoms (markdown files), backed by a
 flexible entity store (people, projects, clients, bookings, etc — types
 you declare per workspace).
@@ -303,7 +303,7 @@ Namespaces + verbs available:
 Plugins are atoms in plugins/. Each binds a built-in kernel (heatmap,
 list with layouts cards/kanban/template, table, or custom) to a query
 pattern. Custom kernels are HTML+JS in a sandboxed iframe with
-window.vibeam.{onUpdate, upsert, patch, delete, fetchEntities}.
+window.dohc.{onUpdate, upsert, patch, delete, fetchEntities}.
 
 You have two ways to add plugins:
 
@@ -499,8 +499,8 @@ plain markdown the user owns and can edit.
 - After a tool call, narrate ONE line: "wrote X" or "synced X".
 `
 
-export const vibeamAgent = new Agent(components.agent, {
-  name: 'vibeam',
+export const dohcAgent = new Agent(components.agent, {
+  name: 'dohc',
   languageModel: anthropic('claude-sonnet-4-6'),
   instructions: SYSTEM_PROMPT,
   stopWhen: stepCountIs(40),
@@ -1584,9 +1584,9 @@ export const ensureThread = mutation({
       return rows[0].threadId
     }
 
-    const { threadId } = await vibeamAgent.createThread(ctx, {
+    const { threadId } = await dohcAgent.createThread(ctx, {
       userId: workspaceId,
-      title: 'vibeam',
+      title: 'dohc',
     })
     await ctx.db.insert('threadRefs', { workspaceId, threadId })
     return threadId
@@ -1852,7 +1852,7 @@ export const sendMessage = action({
     //      older than N hours.
     //   3. streamText is called with the stable promptMessageId
     //      + prepareStep + experimental_context.entry.
-    const { messageId } = await vibeamAgent.saveMessage(ctx, {
+    const { messageId } = await dohcAgent.saveMessage(ctx, {
       threadId,
       prompt,
     })
@@ -1860,7 +1860,7 @@ export const sendMessage = action({
       threadId,
       promptMessageId: messageId,
     })
-    const result = await vibeamAgent.streamText(
+    const result = await dohcAgent.streamText(
       ctx,
       { threadId },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1924,7 +1924,7 @@ export const generateQuestions = action({
       model: anthropic('claude-sonnet-4-6'),
       schema: TailoredQuestions,
       temperature: 0.5,
-      prompt: `vibeam is a personal work cockpit: it captures someone's real work as structured data and builds them a live dashboard + profile.
+      prompt: `dohc is a personal work cockpit: it captures someone's real work as structured data and builds them a live dashboard + profile.
 
 A new user just told us their work is: "${work}".
 
@@ -1986,7 +1986,7 @@ export const startOnboarding = action({
     // turn has run on this thread yet.
     let promptMessageId: string | undefined
     if (trimmed) {
-      const saved = await vibeamAgent.saveMessage(ctx, {
+      const saved = await dohcAgent.saveMessage(ctx, {
         threadId,
         prompt: trimmed,
       })
@@ -1996,7 +1996,7 @@ export const startOnboarding = action({
         promptMessageId,
       })
     }
-    const result = await vibeamAgent.streamText(
+    const result = await dohcAgent.streamText(
       ctx,
       { threadId },
       // With a brief ⇒ that's beam's first turn's prompt (the user's

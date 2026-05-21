@@ -53,7 +53,7 @@ const CONVEX_URL =
 function wrap(bodyHtml: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
-    '<title>vibeam</title>' +
+    '<title>dohc</title>' +
     '<style>' + HTML_ATOM_HEAD_STYLE + '</style>' +
     '</head><body>' +
     bodyHtml +

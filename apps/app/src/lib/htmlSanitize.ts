@@ -155,7 +155,7 @@ const CONFIG: Parameters<typeof DOMPurify.sanitize>[1] = {
 // re-import), so the guard must too — otherwise addHook would stack
 // duplicates (security-safe per dual-review r2 — over-scrub at
 // worst — but the guard removes the sharp edge). Never add per-call.
-const HOOKS_FLAG = '__vibeamHtmlAtomHooks'
+const HOOKS_FLAG = '__dohcHtmlAtomHooks'
 type Guarded = typeof DOMPurify & { [HOOKS_FLAG]?: true }
 function registerHooksOnce(): void {
   const dp = DOMPurify as Guarded

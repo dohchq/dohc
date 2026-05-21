@@ -65,7 +65,7 @@ function RootComponent() {
 // Inline script that runs before React hydrates — reads the persisted
 // theme choice from localStorage and applies it to <html data-theme>
 // so there's no flash of the wrong palette on first paint.
-const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('vibeam-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();`
+const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('dohc-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();`
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (

@@ -173,10 +173,10 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(/bg-accent-2-soft\s+ring-1\s+ring-accent-2/)
   })
 
-  it('D4.7 — uses a custom mime "application/vibeam-tree-row" (avoids cross-origin DnD leak)', () => {
-    expect(SRC).toMatch(/application\/vibeam-tree-row/)
+  it('D4.7 — uses a custom mime "application/dohc-tree-row" (avoids cross-origin DnD leak)', () => {
+    expect(SRC).toMatch(/application\/dohc-tree-row/)
     // Always 4 occurrences: dragStart×2 (leaf+folder) + dragOver×3 (leaf,folder,root) + drop×3 (read in handleDrop).
-    const occurrences = SRC.match(/application\/vibeam-tree-row/g) ?? []
+    const occurrences = SRC.match(/application\/dohc-tree-row/g) ?? []
     expect(occurrences.length).toBeGreaterThanOrEqual(6)
   })
 })

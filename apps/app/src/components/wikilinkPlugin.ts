@@ -11,7 +11,7 @@
 //      Crepe's markdown serializer.
 //      Mechanism: emit a Decoration.widget at the start of the
 //      range with the pill DOM, plus a Decoration.inline over the
-//      full range with `class: vibeam-wikilink-hidden` that
+//      full range with `class: dohc-wikilink-hidden` that
 //      collapses the original text via `font-size:0`. The text is
 //      still in the document for the cursor + serialization; it
 //      just renders invisibly.
@@ -29,7 +29,7 @@ import { Plugin, PluginKey } from '@milkdown/kit/prose/state'
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
 import type { PMDocLike, PMNodeLike } from './inlineAtomPlugin'
 
-export const wikilinkPluginKey = new PluginKey('vibeam-wikilink')
+export const wikilinkPluginKey = new PluginKey('dohc-wikilink')
 
 export type WikilinkFile = {
   /** The vault path (e.g. `playground/a.md`). */
@@ -150,14 +150,14 @@ function makePillElement(
 ): HTMLElement {
   const span = document.createElement('span')
   span.className =
-    'vibeam-wikilink-pill' + (resolved ? '' : ' vibeam-wikilink-pill--broken')
+    'dohc-wikilink-pill' + (resolved ? '' : ' dohc-wikilink-pill--broken')
   span.setAttribute('data-wikilink-target', target)
   // The pill is NOT editable. PM treats contentEditable=false as
   // an atom — clicks land on the widget itself; cursor skips past.
   span.contentEditable = 'false'
 
   const icon = document.createElement('span')
-  icon.className = 'vibeam-wikilink-pill__icon'
+  icon.className = 'dohc-wikilink-pill__icon'
   icon.setAttribute('aria-hidden', 'true')
   // lucide arrow-up-right
   icon.innerHTML =
@@ -165,7 +165,7 @@ function makePillElement(
   span.appendChild(icon)
 
   const label = document.createElement('span')
-  label.className = 'vibeam-wikilink-pill__label'
+  label.className = 'dohc-wikilink-pill__label'
   label.textContent = display
   span.appendChild(label)
   return span
@@ -210,7 +210,7 @@ function buildWikilinkDecorations(
     if (cursorInside) {
       decorations.push(
         Decoration.inline(r.from, r.to, {
-          class: 'vibeam-wikilink-source',
+          class: 'dohc-wikilink-source',
           'data-wikilink-target': r.target,
         } as Record<string, string>),
       )
@@ -229,7 +229,7 @@ function buildWikilinkDecorations(
     )
     decorations.push(
       Decoration.inline(r.from, r.to, {
-        class: 'vibeam-wikilink-hidden',
+        class: 'dohc-wikilink-hidden',
         'data-wikilink-source': r.target,
       } as Record<string, string>),
     )

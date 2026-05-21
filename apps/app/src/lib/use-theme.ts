@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 export type Theme = 'light' | 'dark' | 'system'
 
-const STORAGE_KEY = 'vibeam-theme'
+const STORAGE_KEY = 'dohc-theme'
 
 // Hook backing the theme toggle.
 // - 'system' (default): respects prefers-color-scheme via CSS media query.

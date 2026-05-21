@@ -318,7 +318,7 @@ export function Onboarding({ state }: Props) {
     ) {
       try {
         window.localStorage.setItem(
-          'vibeam:onboarding:open',
+          'dohc:onboarding:open',
           progress.dashboardPath,
         )
       } catch {

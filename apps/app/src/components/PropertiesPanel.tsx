@@ -81,14 +81,14 @@ export function PropertiesPanel({ body, onChange }: Props) {
   const hasAny = entries.length > 0
 
   return (
-    <div className="vibeam-props">
+    <div className="dohc-props">
       {entries.map((e, i) => {
         const reserved = isReserved(e.key)
         return (
-          <div className="vibeam-props__row" key={`${i}`}>
+          <div className="dohc-props__row" key={`${i}`}>
             <input
               className={
-                'vibeam-props__key' + (reserved ? ' is-reserved' : '')
+                'dohc-props__key' + (reserved ? ' is-reserved' : '')
               }
               value={e.key}
               placeholder="Property"
@@ -97,14 +97,14 @@ export function PropertiesPanel({ body, onChange }: Props) {
             />
             {reserved ? (
               <span
-                className="vibeam-props__reserved"
+                className="dohc-props__reserved"
                 title={`"${e.key.trim()}" is reserved — it's set by the title field / managed automatically. Pick a different name.`}
               >
                 reserved name — not saved
               </span>
             ) : (
               <input
-                className="vibeam-props__value"
+                className="dohc-props__value"
                 value={e.value}
                 placeholder="Empty"
                 onChange={(ev) => setValue(i, ev.target.value)}
@@ -113,7 +113,7 @@ export function PropertiesPanel({ body, onChange }: Props) {
             )}
             <button
               type="button"
-              className="vibeam-props__remove"
+              className="dohc-props__remove"
               title="Remove property"
               aria-label={`Remove property ${e.key || ''}`}
               onClick={() => remove(i)}
@@ -123,7 +123,7 @@ export function PropertiesPanel({ body, onChange }: Props) {
           </div>
         )
       })}
-      <button type="button" className="vibeam-props__add" onClick={add}>
+      <button type="button" className="dohc-props__add" onClick={add}>
         <Plus className="size-3" strokeWidth={2} />
         {hasAny ? 'Add property' : 'Add a property'}
       </button>

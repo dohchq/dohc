@@ -8,7 +8,7 @@ function SignedOut() {
   return (
     <div className="centered">
       <div className="signin-card">
-        <pre className="signin-logo">{`  vibeam
+        <pre className="signin-logo">{`  dohc
 
   signed out.`}</pre>
         <a className="signin-button" href="/api/auth/sign-in">

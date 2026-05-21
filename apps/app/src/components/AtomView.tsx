@@ -431,7 +431,7 @@ function AtomShell({
   // the dismissal per-atom in localStorage so it never nags again.
   const suffixedKey =
     advisory && advisory.kind === 'suffixed' && advisory.fileId
-      ? `vibeam:dismiss-suffixed:${advisory.fileId}`
+      ? `dohc:dismiss-suffixed:${advisory.fileId}`
       : null
   const [suffixedDismissed, setSuffixedDismissed] = useState(false)
   useEffect(() => {
@@ -700,7 +700,7 @@ function AtomShell({
           properties. Backed by the frontmatter `title:` property. */}
       {!sourceMode && supportsTitle && (
         <input
-          className="vibeam-title-field"
+          className="dohc-title-field"
           value={pageTitle || (isHtml ? leafName : '')}
           placeholder="Untitled"
           spellCheck={false}
@@ -747,7 +747,7 @@ function AtomShell({
           onBlur={() => onCommitSource?.(sourceDraft)}
           autoFocus
           padding={0}
-          className="vibeam-source min-h-[60vh] font-mono text-[13px] leading-relaxed"
+          className="dohc-source min-h-[60vh] font-mono text-[13px] leading-relaxed"
         />
       ) : isHtml ? (
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
