@@ -1,0 +1,5 @@
+{
+  "name": "@dohc/config",
+  "private": true,
+  "type": "module"
+}

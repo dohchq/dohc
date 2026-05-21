@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12">
+  <title>vibeam</title>
+  <!-- Fitted Beam mark — see docs/brand/vibeam-logo-options.md.
+       Sub-pixel block-art: a chunky V that converges to a precise
+       2-pixel aperture at the bottom (the "fitted" cut). Left stems
+       in violet (vi), right stems in pink (beam). Designed to match
+       the proportions of the in-app ASCII <VibeamLogo /> when
+       rendered in monospace — the V fills the full 12×12 square so
+       it reads square (1:1), not wide (2:1). -->
+  <style>
+    .vi { fill: #6b3fa0; }
+    .beam { fill: #b8389a; }
+    @media (prefers-color-scheme: dark) {
+      .vi { fill: #ab92e1; }
+      .beam { fill: #fd77d7; }
+    }
+  </style>
+  <!-- Top of V (3-cell stems at the outer edges). -->
+  <rect class="vi"   x="0" y="0" width="3" height="4"/>
+  <rect class="beam" x="9" y="0" width="3" height="4"/>
+  <!-- Mid (stems contracting inward by 2 cols). -->
+  <rect class="vi"   x="2" y="4" width="3" height="4"/>
+  <rect class="beam" x="7" y="4" width="3" height="4"/>
+  <!-- Wide bottom row (4 cells, color split at the middle). -->
+  <rect class="vi"   x="4" y="8" width="2" height="2"/>
+  <rect class="beam" x="6" y="8" width="2" height="2"/>
+  <!-- The aperture — the 2-cell point where the beam fits through. -->
+  <rect class="vi"   x="5" y="10" width="1" height="2"/>
+  <rect class="beam" x="6" y="10" width="1" height="2"/>
+</svg>

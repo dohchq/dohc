@@ -1,0 +1,2499 @@
+/* vibeam — warm studio palette, Inter + Instrument Serif + Geist Mono.
+ *
+ * Tailwind v4 is the source of truth for utility classes; everything below
+ * still-CSS-only is either (a) complex, scoped, embedded-editor styling
+ * (Crepe / CodeMirror / ascii sketcher / kernels) that's not worth
+ * rewriting as utilities, or (b) the design-token layer that Tailwind
+ * resolves from. */
+
+@import 'tailwindcss';
+
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/inter/400-italic.css';
+@import '@fontsource/geist-mono/400.css';
+@import '@fontsource/geist-mono/500.css';
+@import '@fontsource/geist-mono/600.css';
+
+/* Make `dark:` Tailwind variant respect the manually-set `data-theme=dark`
+ * attribute on <html> (our existing theme toggle writes this), instead of
+ * Tailwind's default of just listening to prefers-color-scheme. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* ---------- DESIGN TOKENS ----------
+ * Warm-neutral surfaces sourced from vibeam-web's current iteration
+ * (cream / charcoal — the Brand Refresh v1 in vibeam-ui tokens).
+ * Pink + violet are reserved for sparkle moments: wordmark letters,
+ * the signin CTA, active page rail, selection. The dominant reading
+ * surface stays calm and editorial. */
+:root {
+  /* Surfaces — warm cream, as on vibeam-web. */
+  --color-page: #faf8f3;
+  --color-surface: #ffffff;
+  --color-elevated: #ffffff;
+  --color-panel: #f2efe8;
+  --color-hover: rgba(22, 22, 24, 0.05);
+  --color-pressed: rgba(22, 22, 24, 0.08);
+
+  /* Ink — warm near-black. */
+  --color-ink: #161618;
+  --color-ink-strong: #0a0a0b;
+  --color-ink-dim: #3a3640;          /* warm slate */
+  --color-ink-faint: #807d78;
+  --color-ink-ghost: #d9d5cc;
+
+  /* Borders — warm rules. */
+  --color-rule: #e8e2d6;
+  --color-rule-strong: #d0c9bb;
+
+  /* Brand accents — deep pink + deep violet (light-mode adjusted for AA). */
+  --color-accent: #b8389a;
+  --color-accent-hover: #93246f;
+  --color-accent-soft: #fce5f3;
+  --color-accent-foreground: #ffffff;
+
+  --color-accent-2: #6b3fa0;
+  --color-accent-2-soft: #e8ddf2;
+
+  /* file-org-v1 §4.3 / D4.5 — folder color tokens. Used by the
+   * folder picker (D4.5b) + the FileTree's folder icon render.
+   * Default falls back to --color-ink-dim so legacy folders
+   * (no folderMetadata row) look UNCHANGED. The 7 chromatic tokens
+   * are tuned for muted, paper-on-warm-white aesthetic in the
+   * light theme; the dark-theme variants below lift saturation. */
+  --color-folder-red: #d63b3b;
+  --color-folder-orange: #d97706;
+  --color-folder-yellow: #b88207;
+  --color-folder-green: #15803d;
+  --color-folder-blue: #1d4ed8;
+  --color-folder-purple: #6b3fa0;
+  --color-folder-pink: #b8389a;
+
+  /* The signature gradient — used sparingly: wordmark "beam" letters,
+   * the primary signin CTA. */
+  --vibeam-gradient: linear-gradient(135deg, #b8389a 0%, #6b3fa0 100%);
+
+  /* Status colors. */
+  --color-success: #1a8a60;
+  --color-warning: #b45309;
+  --color-danger: #b91c1c;
+  --color-danger-soft: #fde2e4;
+
+  --color-selection: #ece5d6;
+  --color-backdrop: rgba(22, 22, 24, 0.34);
+
+  /* Depth scale — multi-layer, warm-tinted. */
+  --shadow-xs: 0 1px 2px rgba(28, 25, 23, 0.04);
+  --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.04), 0 2px 6px rgba(28, 25, 23, 0.05);
+  --shadow-md: 0 2px 6px rgba(28, 25, 23, 0.05), 0 8px 20px rgba(28, 25, 23, 0.07);
+  --shadow-lg: 0 8px 16px rgba(28, 25, 23, 0.06), 0 16px 40px rgba(28, 25, 23, 0.08);
+  --shadow-modal: 0 18px 32px rgba(28, 25, 23, 0.10), 0 32px 64px rgba(28, 25, 23, 0.12);
+
+  /* Radii. */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+
+  /* Motion. */
+  --t-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-base: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-slow: 280ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Typography. */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'Berkeley Mono',
+    'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+}
+
+/* Dark — warm charcoals, brand pinks lift for visibility but the
+ * dominant surface is neutral, NOT lavender-purple. */
+[data-theme='dark'] {
+  --color-page: #161618;
+  --color-surface: #1a1a1f;
+  --color-elevated: #22222a;
+  --color-panel: #1f1f25;
+  --color-hover: rgba(245, 242, 236, 0.05);
+  --color-pressed: rgba(245, 242, 236, 0.08);
+
+  --color-ink: #f5f2ec;
+  --color-ink-strong: #ffffff;
+  --color-ink-dim: #c5c2bb;
+  --color-ink-faint: #8a8580;
+  --color-ink-ghost: #3a3a42;
+
+  --color-rule: #2a2a30;
+  --color-rule-strong: #3a3a42;
+
+  --color-accent: #fd77d7;
+  --color-accent-hover: #ffa8dd;
+  --color-accent-soft: rgba(253, 119, 215, 0.12);
+  --color-accent-foreground: #161618;
+
+  --color-accent-2: #ab92e1;
+  --color-accent-2-soft: rgba(171, 146, 225, 0.12);
+
+  /* file-org-v1 D4.5 — dark-theme folder colors: lift saturation
+   * + brightness so they read against the warm-charcoal surfaces. */
+  --color-folder-red: #ff6b6b;
+  --color-folder-orange: #fb923c;
+  --color-folder-yellow: #facc15;
+  --color-folder-green: #4ade80;
+  --color-folder-blue: #60a5fa;
+  --color-folder-purple: #ab92e1;
+  --color-folder-pink: #fd77d7;
+
+  --vibeam-gradient: linear-gradient(135deg, #fd77d7 0%, #ab92e1 100%);
+
+  --color-success: #7ae1bf;
+  --color-warning: #f3ea5d;
+  --color-danger: #ff5869;
+  --color-danger-soft: rgba(255, 88, 105, 0.12);
+
+  --color-selection: rgba(245, 242, 236, 0.16);
+  --color-backdrop: rgba(8, 6, 12, 0.74);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.6);
+  --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 32px 64px rgba(0, 0, 0, 0.7);
+}
+/* Auto-dark when the user hasn't explicitly picked a theme. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark']) {
+    --color-page: #161618;
+    --color-surface: #1a1a1f;
+    --color-elevated: #22222a;
+    --color-panel: #1f1f25;
+    --color-hover: rgba(245, 242, 236, 0.05);
+    --color-pressed: rgba(245, 242, 236, 0.08);
+
+    --color-ink: #f5f2ec;
+    --color-ink-strong: #ffffff;
+    --color-ink-dim: #c5c2bb;
+    --color-ink-faint: #8a8580;
+    --color-ink-ghost: #3a3a42;
+
+    --color-rule: #2a2a30;
+    --color-rule-strong: #3a3a42;
+
+    --color-accent: #fd77d7;
+    --color-accent-hover: #ffa8dd;
+    --color-accent-soft: rgba(253, 119, 215, 0.12);
+    --color-accent-foreground: #161618;
+
+    --color-accent-2: #ab92e1;
+    --color-accent-2-soft: rgba(171, 146, 225, 0.12);
+
+    /* R4 fold (indep FAIL-2) — the @media (prefers-color-scheme:
+     * dark) branch was missing folder-color overrides, so users on
+     * system-prefers-dark with no explicit theme were seeing the
+     * LIGHT-theme deep blues/greens on a dark surface. Mirror the
+     * [data-theme='dark'] block. */
+    --color-folder-red: #ff6b6b;
+    --color-folder-orange: #fb923c;
+    --color-folder-yellow: #facc15;
+    --color-folder-green: #4ade80;
+    --color-folder-blue: #60a5fa;
+    --color-folder-purple: #ab92e1;
+    --color-folder-pink: #fd77d7;
+
+    --vibeam-gradient: linear-gradient(135deg, #fd77d7 0%, #ab92e1 100%);
+
+    --color-success: #7ae1bf;
+    --color-warning: #f3ea5d;
+    --color-danger: #ff5869;
+    --color-danger-soft: rgba(255, 88, 105, 0.12);
+
+    --color-selection: rgba(245, 242, 236, 0.16);
+    --color-backdrop: rgba(8, 6, 12, 0.74);
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.6);
+    --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 32px 64px rgba(0, 0, 0, 0.7);
+  }
+}
+
+/* Expose tokens to Tailwind so `bg-page`, `text-ink`, `border-rule`,
+ * `bg-accent`, `font-serif`, `shadow-md`, `rounded-lg` etc. all generate
+ * utilities that resolve from the live CSS variables (i.e. swap with
+ * data-theme). */
+@theme inline {
+  --color-page: var(--color-page);
+  --color-surface: var(--color-surface);
+  --color-elevated: var(--color-elevated);
+  --color-panel: var(--color-panel);
+  --color-hover: var(--color-hover);
+  --color-pressed: var(--color-pressed);
+  --color-ink: var(--color-ink);
+  --color-ink-strong: var(--color-ink-strong);
+  --color-ink-dim: var(--color-ink-dim);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-ink-ghost: var(--color-ink-ghost);
+  --color-rule: var(--color-rule);
+  --color-rule-strong: var(--color-rule-strong);
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-soft: var(--color-accent-soft);
+  --color-accent-foreground: var(--color-accent-foreground);
+  --color-accent-2: var(--color-accent-2);
+  --color-accent-2-soft: var(--color-accent-2-soft);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+  --color-danger-soft: var(--color-danger-soft);
+  --color-selection: var(--color-selection);
+  --color-backdrop: var(--color-backdrop);
+
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-modal: var(--shadow-modal);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* Aliases so existing component CSS that still uses --bg / --ink / etc.
+ * keeps working until each module is migrated. Same values, old names. */
+:root {
+  --bg: var(--color-page);
+  --bg-panel: var(--color-panel);
+  --bg-elevated: var(--color-elevated);
+  --bg-hover: var(--color-hover);
+  --ink: var(--color-ink);
+  --ink-strong: var(--color-ink-strong);
+  --ink-dim: var(--color-ink-dim);
+  --ink-faint: var(--color-ink-faint);
+  --rule: var(--color-rule);
+  --rule-strong: var(--color-rule-strong);
+  --accent: var(--color-accent);
+  --accent-soft: var(--color-accent-soft);
+  --selection: var(--color-selection);
+  --backdrop: var(--color-backdrop);
+  --signal-on: var(--color-success);
+  --signal-warn: var(--color-danger);
+  --signal-warn-bg: var(--color-danger-soft);
+}
+
+/* All base-element styles live in @layer base so utility classes from
+ * Tailwind always win on equal specificity. */
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: var(--color-page);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Monospace strictly for code, data, and ASCII content. */
+  code, pre, kbd, samp,
+  .atom-editor,
+  .heatmap-grid,
+  .heatmap-week-label,
+  .heatmap-percent,
+  .heatmap-person-name,
+  .query-source code,
+  .data-table td.cell-percent,
+  .cell-percent,
+  .cell-date {
+    font-family: var(--font-mono);
+    font-feature-settings: 'zero', 'ss01';
+  }
+
+  ::selection { background: var(--color-selection); color: var(--color-ink-strong); }
+
+  /* Focus rings — warm-ink halo with a soft tint. Pink reserved for
+   * the few moments where it earns its place (signin CTA, wordmark). */
+  :focus { outline: none; }
+  button:focus-visible, a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+  input:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: -1px;
+  }
+
+  /* Buttons inherit font; visual styling comes from utility classes or
+   * component-specific CSS. No global background/border so Tailwind
+   * utilities don't have to fight a base style. */
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  button:disabled { cursor: not-allowed; }
+
+  /* Custom thin scrollbars — match the page's neutral palette, hover
+   * brings them up gently. Hidden in panels via component-level CSS. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+    transition: background var(--t-fast);
+  }
+  *:hover > ::-webkit-scrollbar-thumb,
+  :hover::-webkit-scrollbar-thumb {
+    background: var(--color-ink-ghost);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-faint);
+    background-clip: padding-box;
+  }
+}
+
+/* Inputs / textareas inherit the page font; styling is via utilities or
+ * component CSS. Resets only — no opinionated frame. */
+@layer base {
+  textarea, input {
+    font-family: inherit;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    outline: none;
+    resize: none;
+  }
+  textarea::placeholder, input::placeholder { color: var(--color-ink-faint); }
+
+  /* Links keep their accent color but no underline by default. */
+  a { color: var(--color-accent); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 2px; }
+}
+
+/* Generic pane primitive — scrollable column, full viewport height. Used
+ * for the main editor pane (other panes have moved to Tailwind utilities). */
+.pane {
+  height: 100vh;
+  overflow: auto;
+  position: relative;
+}
+
+/* Pane chrome (header, breadcrumbs, file tree) all live in Tailwind now —
+ * see FileTree.tsx / AtomView.tsx. */
+
+/* doc — Notion / AppFlowy-style rhythm.
+ *
+ * Body: 16px / 1.5 line-height for comfortable reading.
+ * Blocks use padding (not margin) so adjacent paragraphs sit ~6px
+ * apart and headings can hug the next block (3px below) while still
+ * having generous breathing space above (28-36px depending on level).
+ * Headings scale: 30 / 24 / 20 / 17 / 15 / 15. h5/h6 reuse the ink
+ * scale instead of going smaller — Notion keeps them readable. */
+.doc {
+  padding: 36px 48px 120px;
+  max-width: 760px;
+  margin: 0 auto;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
+  font-weight: 700;
+  letter-spacing: -0.014em;
+  color: var(--ink-strong);
+  line-height: 1.25;
+  margin: 0;
+  padding: 0;
+}
+.doc h1 { font-size: 30px; padding: 28px 0 4px; }
+.doc h2 { font-size: 24px; padding: 24px 0 3px; }
+.doc h3 { font-size: 20px; padding: 20px 0 2px; font-weight: 600; }
+.doc h4 { font-size: 17px; padding: 16px 0 2px; font-weight: 600; }
+.doc h5 { font-size: 15px; padding: 14px 0 2px; font-weight: 600; }
+.doc h6 {
+  font-size: 13px;
+  padding: 12px 0 2px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.doc p { margin: 0; padding: 3px 0; }
+.doc ul, .doc ol { margin: 0; padding: 2px 0 2px 1.6em; }
+.doc li { padding: 1px 0; margin: 0; }
+.doc li > p { padding: 0; }
+.doc strong { font-weight: 600; color: var(--ink-strong); }
+.doc em { font-style: italic; }
+.doc blockquote {
+  border-left: 3px solid var(--rule-strong);
+  padding: 4px 0 4px 16px;
+  margin: 6px 0;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.doc hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 24px 0;
+}
+.doc pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 10px 0;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+}
+.doc code {
+  background: var(--bg-panel);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.doc pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* D4.8b — wikilink Notion-style pill rendering. The wikilinkPlugin
+ * (see src/components/wikilinkPlugin.ts) emits TWO decorations per
+ * `[[path]]` (or `\[\[path]]`):
+ *   1. A widget at the start position whose DOM is the pill.
+ *   2. An inline decoration over the literal text with class
+ *      `vibeam-wikilink-hidden` that collapses the source text
+ *      via `font-size:0`. Text stays in the document for the
+ *      cursor/serializer; just renders invisibly.
+ * The pill widget has `contentEditable=false` so PM treats it as
+ * an atom (clicks land on it; the cursor skips past). */
+.vibeam-wikilink-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--color-accent-2) 11%, transparent);
+  color: var(--color-accent-2);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  font-size: 0.95em;
+  line-height: 1.4;
+  vertical-align: baseline;
+  white-space: nowrap;
+  transition: background var(--t-fast);
+}
+.vibeam-wikilink-pill:hover {
+  background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
+}
+.vibeam-wikilink-pill__icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.72;
+}
+.vibeam-wikilink-pill__icon svg {
+  display: block;
+}
+.vibeam-wikilink-pill--broken {
+  background: transparent;
+  color: var(--color-ink-faint);
+  border: 1px dashed var(--color-ink-faint);
+  padding: 0 5px 0 4px;
+}
+.vibeam-wikilink-hidden {
+  font-size: 0 !important;
+  line-height: 0 !important;
+  letter-spacing: 0 !important;
+}
+
+/* D4.8c — wikilink "source mode" (cursor INSIDE the range). Renders
+ * the raw `[[path]]` text styled lightly so the user can see +
+ * edit it. The pill (preview mode) re-renders the moment the
+ * cursor moves out of the range — Obsidian's live-preview pattern. */
+.vibeam-wikilink-source {
+  color: var(--color-accent-2);
+  background: color-mix(in oklab, var(--color-accent-2) 7%, transparent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* D4.8h — unified pill rendering for ALL `{}` atoms (value /
+ * liveTotal / formula). Minimal: the pill is just the rendered
+ * value, with the full source on hover. Cursor INSIDE the range
+ * toggles to source mode (raw text + value chip at the end for
+ * non-value kinds). Three subtle color variants by kind. */
+.vibeam-atom-pill {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  color: var(--color-accent);
+  cursor: text;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background var(--t-fast);
+}
+.vibeam-atom-pill:hover {
+  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+}
+/* value = author-typed truth (accent pink/red family). */
+.vibeam-atom-pill--value {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  color: var(--color-accent);
+}
+.vibeam-atom-pill--value:hover {
+  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+}
+/* liveTotal + formula = computed projections (accent-2 violet). */
+.vibeam-atom-pill--liveTotal,
+.vibeam-atom-pill--formula {
+  background: color-mix(in oklab, var(--color-accent-2) 10%, transparent);
+  color: var(--color-accent-2);
+}
+.vibeam-atom-pill--liveTotal:hover,
+.vibeam-atom-pill--formula:hover {
+  background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
+}
+.vibeam-atom-pill--broken {
+  color: var(--color-ink-faint);
+  background: transparent;
+  border: 1px dashed var(--color-ink-faint);
+  padding: 0 3px;
+  opacity: 0.75;
+}
+.vibeam-atom-hidden {
+  font-size: 0 !important;
+  line-height: 0 !important;
+  letter-spacing: 0 !important;
+}
+
+/* D4.8b — autocomplete picker (the popover that appears when the
+ * user types `[[`). Positioned absolutely just below the cursor by
+ * the React component. */
+.vibeam-wikilink-picker {
+  background: var(--color-elevated);
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 240px;
+  max-width: 360px;
+  max-height: 260px;
+  overflow-y: auto;
+  box-shadow: var(--shadow-md);
+}
+.vibeam-wikilink-picker__empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-ink-faint);
+}
+.vibeam-wikilink-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  transition: background var(--t-fast);
+}
+.vibeam-wikilink-picker__item.is-active,
+.vibeam-wikilink-picker__item:hover {
+  background: var(--color-hover);
+}
+.vibeam-wikilink-picker__item-title {
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.vibeam-wikilink-picker__item-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-ink-faint);
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+
+/* keep the doc table left-aligned & narrow for query blocks/plugins, etc.
+   pre-existing rule unchanged below */
+.query-block {
+  border: 1px solid var(--rule);
+  background: var(--bg-panel);
+  margin: 0.6em 0;
+  padding: 0;
+}
+.query-source {
+  font-size: 11px;
+  color: var(--ink-faint);
+  padding: 6px 10px;
+  border-bottom: 1px dashed var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.query-source code { background: transparent; padding: 0; color: var(--ink-dim); }
+.query-result {
+  padding: 10px 12px;
+}
+.query-result ul { margin: 0; padding-left: 1em; }
+.query-result li { margin: 0.15em 0; }
+
+/* action header, plugin header, empty state, chat, sign-in are now styled
+ * inline via Tailwind utilities. */
+
+/* ---------- query block (extra) ---------- */
+
+.query-badge {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.query-refresh-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+.query-refresh-row button { font-size: 11px; padding: 2px 8px; }
+
+/* ---------- heatmap plugin ---------- */
+
+.heatmap-plugin {
+  background: white;
+  border: 1px solid var(--rule);
+  padding: 14px 14px 12px;
+  margin: 0;
+}
+.heatmap-loading { color: var(--ink-faint); font-style: italic; }
+
+.heatmap-grid {
+  display: grid;
+  gap: 3px;
+  align-items: stretch;
+}
+
+.heatmap-week-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  text-align: center;
+  padding: 2px 0 6px;
+}
+
+.heatmap-person {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink);
+  padding-right: 10px;
+  font-weight: 500;
+}
+.heatmap-person-tag {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border: 1px solid var(--rule);
+  padding: 0 4px;
+  border-radius: 2px;
+}
+
+.heatmap-cell {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: rgba(0, 0, 0, 0.55);
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+}
+.heatmap-percent { font-variant-numeric: tabular-nums; }
+
+.heatmap-hard-booked {
+  background: var(--ink);
+  color: var(--bg-elevated);
+  border-color: var(--ink);
+}
+.heatmap-pre-booked {
+  background: var(--accent-soft);
+  color: var(--bg-elevated);
+}
+.heatmap-potential {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--rule-strong),
+    var(--rule-strong) 4px,
+    var(--bg-elevated) 4px,
+    var(--bg-elevated) 8px
+  );
+  color: var(--ink-dim);
+}
+.heatmap-empty {
+  background: var(--bg-panel);
+  color: var(--ink-faint);
+}
+
+.heatmap-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--rule);
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.heatmap-legend-item { display: flex; align-items: center; gap: 5px; }
+.heatmap-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* Plugin panel is fully Tailwind-styled in PluginPanel.tsx. */
+
+/* File-tree styling moved to Tailwind utilities in FileTree.tsx. */
+
+/* ---------- kanban kernel ---------- */
+
+.kanban {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(180px, 1fr);
+  gap: 10px;
+  overflow-x: auto;
+  padding: 8px 0;
+}
+.kanban-loading { color: var(--ink-faint); }
+.kanban-col {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  min-height: 100px;
+}
+.kanban-col-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: white;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-dim);
+}
+.kanban-col-count {
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+.kanban-cards {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kanban-empty {
+  text-align: center;
+  color: var(--ink-faint);
+  padding: 14px;
+}
+.kanban-card {
+  background: white;
+  border: 1px solid var(--rule);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  border-left: 2px solid var(--accent);
+}
+.kanban-card-title { font-weight: 600; }
+.kanban-card-sub { color: var(--ink-dim); margin-top: 2px; font-size: 12px; }
+.kanban-card-meta { color: var(--ink-faint); margin-top: 4px; font-size: 11px; }
+
+/* ---------- cards kernel ---------- */
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 4px 0;
+}
+.cards-loading, .cards-empty { color: var(--ink-faint); font-style: italic; }
+
+.card {
+  background: white;
+  border: 1px solid var(--rule);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.card-title { font-weight: 600; font-size: 13px; }
+.card-sub { color: var(--ink-dim); font-size: 12px; }
+.card-meta { color: var(--ink-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.card-fields { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.card-field {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+  border-top: 1px dashed var(--rule);
+  padding-top: 3px;
+}
+.card-field-key { text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; color: var(--ink-faint); }
+
+
+.kernel-row {
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--rule);
+}
+.kernel-name code { font-weight: 600; }
+.kernel-desc { color: var(--ink-dim); font-size: 12.5px; margin-top: 2px; }
+.kernel-fields {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.kernel-fields code {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+/* Breadcrumbs, subpages, pane-header, primary/danger button variants
+ * have all moved to Tailwind utilities. */
+
+/* Hide ONLY the horizontal scrollbar on the pane — wide ascii sketches use
+ * middle-mouse-drag instead of a bar at the bottom. Firefox shows both. */
+.pane::-webkit-scrollbar:horizontal {
+  height: 0;
+  display: none;
+}
+/* Middle-mouse-drag pan mode set from JS — applies a grab cursor and
+ * disables text selection so the drag bypasses CodeMirror selection. */
+.pane.pane-panning,
+.pane.pane-panning * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.doc {
+  cursor: text;
+}
+.doc-editing {
+  cursor: text;
+}
+
+/* Milkdown editor — strip the default frame chrome so it inherits the
+ * doc column (.doc max-width + padding) and matches our font stack. */
+.doc-editing .milkdown {
+  background: transparent;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+  /* Crepe applies its own --crepe-font-* vars (Noto Sans / Noto Serif /
+   * Space Mono) inside the editor, which would otherwise override our
+   * cascade. Map them to our chosen pair so headings, paragraphs, and
+   * code in the markdown match the rest of the app. */
+  --crepe-font-default: var(--font-sans);
+  --crepe-font-title: var(--font-sans);
+  --crepe-font-code: var(--font-mono);
+  /* Crepe's frame theme hardcodes a LIGHT palette on `.milkdown`
+   * (surface #f7f7f7, background #fff, …), so code/query blocks and
+   * the editor chrome rendered as a glaring white box in dark mode.
+   * Map every Crepe design token to our theme-aware --color-* tokens
+   * (they already flip light/dark) — ONE source, so the whole editor
+   * follows the palette in both modes. Neutral mappings (ink/panel/
+   * rule) keep contrast safe; accent only where Crepe means accent. */
+  --crepe-color-background: var(--color-page);
+  --crepe-color-on-background: var(--color-ink);
+  --crepe-color-surface: var(--color-panel);
+  --crepe-color-surface-low: color-mix(
+    in srgb,
+    var(--color-ink) 7%,
+    var(--color-panel)
+  );
+  --crepe-color-on-surface: var(--color-ink);
+  --crepe-color-on-surface-variant: var(--color-ink-dim);
+  --crepe-color-outline: var(--color-rule-strong);
+  --crepe-color-primary: var(--color-ink-strong);
+  --crepe-color-secondary: var(--color-rule);
+  --crepe-color-on-secondary: var(--color-ink);
+  --crepe-color-inverse: var(--color-ink-strong);
+  --crepe-color-on-inverse: var(--color-surface);
+  --crepe-color-inline-code: var(--color-accent);
+  --crepe-color-error: var(--color-danger);
+  --crepe-color-hover: color-mix(
+    in srgb,
+    var(--color-ink) 8%,
+    transparent
+  );
+  --crepe-color-selected: color-mix(
+    in srgb,
+    var(--color-accent) 18%,
+    transparent
+  );
+  --crepe-color-inline-area: var(--color-rule);
+}
+
+/* Editor block rhythm — Notion/AppFlowy-style. Crepe ships much larger
+ * defaults (h1 = 42px / mt 32px, etc.) so we override every heading,
+ * paragraph, list, and blockquote rule with a 2-class selector to win
+ * on specificity. Padding is the spacing primitive (not margin) so
+ * adjacent blocks sit ~6px apart and headings can have generous top
+ * breathing space while hugging the next block below them. */
+.doc-editing .milkdown h1 {
+  font-size: 30px;
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  padding: 28px 0 4px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+/* D4.19 — page properties panel (Notion-style frontmatter editor).
+ * Sits above the editor; quiet by default, fills the role of the
+ * frontmatter `id:` zone. */
+.vibeam-props {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+.vibeam-props__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.vibeam-props__key {
+  width: 140px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-size: 12.5px;
+  font-weight: 500;
+  outline: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.vibeam-props__key:not([readonly]):hover,
+.vibeam-props__key:focus {
+  background: var(--color-hover, var(--bg-panel));
+}
+.vibeam-props__value {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-ink, var(--ink));
+  font-size: 13px;
+  outline: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.vibeam-props__value:not([readonly]):hover,
+.vibeam-props__value:focus {
+  background: var(--color-hover, var(--bg-panel));
+}
+.vibeam-props__value[readonly],
+.vibeam-props__key[readonly] {
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: default;
+}
+/* D4.23 — a user property keyed `id`/`title` is reserved + not saved. */
+.vibeam-props__key.is-reserved {
+  color: var(--color-amber, #b45309);
+}
+.vibeam-props__reserved {
+  flex: 1;
+  font-size: 11.5px;
+  color: var(--color-amber, #b45309);
+  opacity: 0.85;
+  padding: 2px 6px;
+  user-select: none;
+}
+.vibeam-props__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--color-ink-faint, var(--ink-faint));
+  opacity: 0;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+.vibeam-props__row:hover .vibeam-props__remove {
+  opacity: 1;
+}
+.vibeam-props__remove:hover {
+  background: var(--color-hover, var(--bg-panel));
+  color: var(--color-ink, var(--ink));
+}
+.vibeam-props__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-ink-faint, var(--ink-faint));
+  opacity: 0.7;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+.vibeam-props__add:hover {
+  opacity: 1;
+  background: var(--color-hover, var(--bg-panel));
+  color: var(--color-ink-dim, var(--ink-dim));
+}
+
+/* D4.20 — Notion-style page TITLE field (separate input above the
+ * properties + editor). Backed by the leading `# H1`. Big, borderless,
+ * reads as the page title. (Supersedes D4.18's in-editor first-H1
+ * boost — the title is now its own field, so a content H1 inside the
+ * editor styles as a normal heading.) */
+.vibeam-title-field {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  /* Clearly larger than a content `# H1` (30px) so the hierarchy
+   * reads: this is THE page title, headings inside are sections. */
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: -0.024em;
+  line-height: 1.15;
+  color: var(--ink-strong);
+  padding: 6px 0 8px;
+  margin: 0;
+}
+.vibeam-title-field::placeholder {
+  color: var(--ink-faint);
+  opacity: 0.5;
+}
+
+/* D4.34 — syntax-highlighted raw `⟨⟩ source` editor
+ * (react-simple-code-editor + Prism). Token colours use the app's
+ * theme-aware palette so they adapt to light/dark. The editable
+ * textarea is transparent over the highlighted <pre>; keep its caret
+ * visible. */
+.vibeam-source {
+  width: 100%;
+  color: var(--color-ink-strong, var(--ink-strong));
+  caret-color: var(--color-accent, var(--accent));
+}
+.vibeam-source textarea {
+  outline: none;
+}
+.vibeam-source textarea::selection {
+  background: var(--color-selection);
+}
+.vibeam-source .token.comment,
+.vibeam-source .token.prolog,
+.vibeam-source .token.doctype,
+.vibeam-source .token.cdata,
+.vibeam-source .token.blockquote {
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-style: italic;
+}
+.vibeam-source .token.punctuation {
+  color: var(--color-ink-dim, var(--ink-dim));
+}
+.vibeam-source .token.tag,
+.vibeam-source .token.keyword,
+.vibeam-source .token.title {
+  color: var(--color-folder-purple);
+  font-weight: 600;
+}
+.vibeam-source .token.attr-name,
+.vibeam-source .token.key,
+.vibeam-source .token.selector,
+.vibeam-source .token.namespace {
+  color: var(--color-folder-blue);
+}
+.vibeam-source .token.attr-value,
+.vibeam-source .token.string,
+.vibeam-source .token.url,
+.vibeam-source .token.entity {
+  color: var(--color-folder-green);
+}
+.vibeam-source .token.code,
+.vibeam-source .token.code-snippet {
+  color: var(--color-accent-2);
+}
+.vibeam-source .token.list.punctuation,
+.vibeam-source .token.hr,
+.vibeam-source .token.number {
+  color: var(--color-accent);
+}
+.vibeam-source .token.bold {
+  font-weight: 700;
+}
+.vibeam-source .token.italic {
+  font-style: italic;
+}
+.doc-editing .milkdown h2 {
+  font-size: 24px;
+  line-height: 1.3;
+  font-weight: 700;
+  letter-spacing: -0.014em;
+  padding: 24px 0 3px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .milkdown h3 {
+  font-size: 20px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  padding: 20px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .milkdown h4 {
+  font-size: 17px;
+  line-height: 1.35;
+  font-weight: 600;
+  padding: 16px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .milkdown h5 {
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 600;
+  padding: 14px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .milkdown h6 {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 600;
+  padding: 12px 0 2px;
+  margin: 0;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.doc-editing .milkdown p {
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 3px 0;
+  margin: 0;
+}
+.doc-editing .milkdown ul,
+.doc-editing .milkdown ol {
+  margin: 0;
+  padding: 2px 0;
+}
+.doc-editing .milkdown li {
+  margin: 0;
+  padding: 1px 0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+.doc-editing .milkdown li p {
+  padding: 0;
+}
+.doc-editing .milkdown blockquote {
+  border-left: 3px solid var(--rule-strong);
+  padding: 4px 0 4px 16px;
+  margin: 6px 0;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.doc-editing .milkdown blockquote p {
+  padding: 0;
+}
+.doc-editing .milkdown hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 16px 0;
+}
+.doc-editing .milkdown code {
+  background: var(--bg-panel);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+/* Crepe's "Please enter..." placeholder uses `color-mix(--crepe-color-on-background, transparent 60%)`
+ * which lands near-black on dark backgrounds and is basically invisible.
+ * Force it to our theme's dim ink so it stays readable in both modes. */
+.doc-editing .milkdown .crepe-placeholder::before {
+  color: var(--ink-faint) !important;
+}
+.doc-editing .milkdown .ProseMirror {
+  outline: none;
+  padding: 0;
+  background: transparent;
+  font-family: var(--font-sans);
+}
+.doc-editing .milkdown .ProseMirror:focus {
+  outline: none;
+}
+
+/* Crepe's default list layout pads the marker to a fixed 32px / 24px box
+ * (height + padding tuned for their default body size). At our 15px /
+ * 1.7 line-height the marker box is taller than the content paragraph
+ * and `align-items: flex-start` pushes the marker above the text
+ * baseline. Strip the fixed sizing and switch to baseline alignment so
+ * marker and text share the same line. */
+.doc-editing .milkdown .milkdown-list-item-block > .list-item {
+  align-items: baseline;
+  gap: 0.5em;
+}
+.doc-editing .milkdown .milkdown-list-item-block .label-wrapper {
+  height: auto;
+  width: auto;
+  min-width: 1.4em;
+  padding: 0;
+  line-height: inherit;
+}
+.doc-editing .milkdown .milkdown-list-item-block .label-wrapper .label {
+  height: auto;
+  width: auto;
+  min-width: 1.4em;
+  padding: 0;
+  line-height: inherit;
+  text-align: right;
+}
+
+/* ---------- inline ASCII sketches ----------
+ * A code-block decoration (.ascii-sketch-block) tags any `language: ascii`
+ * fence; strip the Crepe code-block chrome so the art reads as a piece of
+ * the page rather than a syntax-highlighter widget. Click anywhere on the
+ * block to re-open the sketcher with that content. */
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0.6em 0;
+  cursor: text;
+  position: relative;
+  /* Block sizes itself to its content. .doc caps the page column at 760px,
+   * but we explicitly let ascii blocks extend past that — a wide sketch
+   * should feel like art the page makes room for, not something stuffed
+   * into a scroll widget. */
+  width: max-content;
+  max-width: none;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .language-picker {
+  display: none;
+}
+/* The block's `.tools` row holds the language picker + a `.tools-button-group`
+ * with the copy/preview-toggle buttons. The copy icon was overlapping with
+ * the "click to edit" hint we add below — hide the whole row since none of
+ * those affordances make sense for a sketch. */
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools,
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools-button-group {
+  display: none !important;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .milkdown-code-block-placeholder {
+  display: none;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-gutters {
+  display: none !important;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor {
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  /* Crepe ships a CodeMirror theme that paints code text in a soft
+   * mid-grey — fine for syntax-highlighted code, way too low-contrast for
+   * plain ascii art. Force the page's primary ink color (and override the
+   * inner spans Crepe colors via cm-line :where()). */
+  color: var(--ink);
+  /* Editor sizes to the longest line — no fixed width box, no scrollbar.
+   * The block's parent (.ascii-sketch-block) decides whether to overflow
+   * the page column. */
+  width: max-content;
+  max-width: none;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line,
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line * {
+  color: var(--ink);
+}
+/* CodeMirror's outer scroller would otherwise put a horizontal scrollbar
+ * under the art for any sketch wider than the column. We don't want a
+ * scrollbar in read view; the art is meant to be seen at once. */
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-scroller {
+  overflow: visible;
+  width: max-content;
+  max-width: none;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor .cm-content {
+  padding: 0;
+  width: max-content;
+  min-width: 0;
+}
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line {
+  padding: 0;
+  width: max-content;
+}
+.doc-editing .milkdown .ascii-sketch-block.ascii-sketch-block-has-metadata .cm-line:first-child {
+  display: none;
+}
+/* CodeMirror tints the row holding the cursor (`.cm-activeLine`) and its
+ * gutter — appears as a horizontal bar across the block when the editor
+ * has focus. We don't want it on display-style ASCII art. */
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLine,
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLineGutter {
+  background: transparent !important;
+}
+/* Same idea for ProseMirror's "this code block is the selected node"
+ * background tint when the user clicks the block. */
+.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block.ProseMirror-selectednode {
+  background: transparent !important;
+  outline: none !important;
+}
+/* ── Query atom block (impressions #17) ───────────────────────────
+ * A `language: query` fence is the LIVE-DATA primitive, but raw
+ * `entities.list("project", {…})` reads as scary code. Tame Crepe's
+ * code-block chrome (like ascii) and present it as a calm "live"
+ * card with a human caption; the DSL stays an editable, but quiet
+ * and SECONDARY, source line (markdown is still the truth). */
+.doc-editing .milkdown .query-atom-block.milkdown-code-block {
+  background: color-mix(in srgb, var(--color-accent) 5%, var(--color-surface));
+  border: 1px solid var(--rule);
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  border-radius: var(--radius-md);
+  padding: 8px 12px 10px;
+  margin: 0.7em 0;
+  position: relative;
+}
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .language-picker,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools-button-group,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .milkdown-code-block-placeholder,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-gutters {
+  display: none !important;
+}
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-editor {
+  background: transparent;
+  font-family: var(--font-mono);
+  /* the source is secondary — small + muted, present for the power
+   * user to edit, never the loud thing the eye lands on. */
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line * {
+  color: var(--ink-faint);
+}
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLine,
+.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLineGutter {
+  background: transparent !important;
+}
+.doc-editing .milkdown .query-atom-block.milkdown-code-block.ProseMirror-selectednode {
+  outline: none !important;
+}
+/* The human caption widget rendered just before the block. Unlike
+ * the ascii zero-size affordance this one TAKES layout space — it is
+ * the primary, legible label that replaces "wtf is this code". */
+.doc-editing .milkdown .query-atom-caption {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0.7em 0 -0.4em;
+  font-size: 12px;
+  user-select: none;
+}
+.doc-editing .milkdown .query-atom-caption .query-atom-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.doc-editing .milkdown .query-atom-caption .query-atom-live {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+.doc-editing .milkdown .query-atom-caption .query-atom-label {
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+/* atom-address-v1 §5.2 4B — the RESULT, rendered right after the
+ * (now-secondary) source. THIS is the prominent, legible thing the
+ * eye lands on: the data, not the DSL. pre-wrap preserves ascii
+ * heatmaps + line structure; text-only (no innerHTML — XSS-safe). */
+.doc-editing .milkdown .query-atom-result {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-strong);
+  margin: -0.2em 0 0.7em;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--rule);
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: color-mix(in srgb, var(--color-accent) 4%, var(--color-surface));
+  user-select: none;
+}
+.doc-editing .milkdown .query-atom-empty {
+  margin: -0.2em 0 0.7em;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--ink-faint);
+  user-select: none;
+}
+/* Edit-button widget. Rendered as a zero-size span placed just before the
+ * ascii block by the ProseMirror plugin; CSS positions the actual button
+ * absolutely so it floats over the block's top-left corner. The widget
+ * itself doesn't take layout space — the block above flows as normal. */
+.doc-editing .milkdown .ascii-sketch-edit-affordance {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 0;
+  /* Don't add the widget to text-selection — clicking the button shouldn't
+   * select the preceding paragraph. */
+  user-select: none;
+}
+.doc-editing .milkdown .ascii-sketch-edit-btn {
+  position: absolute;
+  /* Sit just inside the top-left corner of the block that follows. The
+   * widget is at the block's start position so (0, 0) of the button =
+   * top-left of the block. */
+  top: 4px;
+  left: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  z-index: 1;
+  white-space: nowrap;
+}
+.doc-editing .milkdown .ascii-sketch-edit-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+/* Reveal the button when the user hovers EITHER the button itself OR the
+ * ascii block immediately following the affordance widget. :has lets us
+ * react to hover on the sibling. */
+.doc-editing .milkdown .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
+.doc-editing .milkdown .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------- table kernel ---------- */
+
+.table-wrap { overflow-x: auto; }
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.data-table th, .data-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--rule);
+}
+.data-table th {
+  background: var(--bg-panel);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+}
+.data-table th:hover { color: var(--accent); }
+.data-table th.th-active { color: var(--accent); }
+.data-table tbody tr:hover { background: var(--bg-panel); }
+.cell-empty { color: var(--ink-faint); }
+.cell-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+}
+.cell-badge-hard-booked { background: var(--ink); color: var(--bg-elevated); border-color: var(--ink); }
+.cell-badge-pre-booked { background: var(--accent-soft); color: var(--bg-elevated); border-color: var(--accent-soft); }
+.cell-badge-potential { background: var(--bg-panel); color: var(--ink-dim); border-color: var(--rule-strong); }
+.cell-badge-committed { background: var(--ink); color: var(--bg-elevated); border-color: var(--ink); }
+.cell-badge-shipped { background: var(--rule); color: var(--ink-dim); }
+.cell-badge-active { background: var(--bg-panel); color: var(--ink); border-color: var(--ink); }
+.cell-badge-prospect { background: var(--bg-panel); color: var(--ink-faint); }
+.cell-date { font-variant-numeric: tabular-nums; }
+.cell-percent { font-variant-numeric: tabular-nums; font-weight: 500; }
+.table-empty { text-align: center; color: var(--ink-faint); font-style: italic; padding: 16px; }
+.table-empty-config {
+  padding: 12px;
+  background: var(--bg-panel);
+  border: 1px dashed var(--rule);
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+/* ---------- template kernel ---------- */
+
+/* .template-kernel inherits doc styling — no rules needed. */
+.template-loading { color: var(--ink-faint); font-style: italic; }
+
+/* ---------- query error boundary ---------- */
+
+.query-error {
+  border: 1px solid var(--signal-warn);
+  background: var(--signal-warn-bg);
+  padding: 10px 14px;
+  color: var(--signal-warn);
+  font-size: 12.5px;
+}
+.query-error-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.query-error-head button {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-color: var(--signal-warn);
+  color: var(--signal-warn);
+}
+.query-error-msg {
+  background: var(--bg-elevated);
+  padding: 6px 8px;
+  border: 1px solid var(--rule);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  margin: 4px 0;
+  color: var(--ink);
+}
+.query-error-source { font-size: 11px; }
+.query-error-hint { margin-top: 6px; color: var(--ink-dim); font-style: italic; }
+
+/* ---------- query block (additions) ---------- */
+
+.query-source-tags { display: flex; gap: 6px; align-items: center; }
+.query-badge-text {
+  border-color: var(--ink-faint);
+  color: var(--ink-faint);
+}
+
+/* ---------- plugin header (when viewing a plugin atom) ---------- */
+
+.plugin-header {
+  border: 1px solid var(--rule);
+  background: var(--bg-panel);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+.plugin-header-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.plugin-header-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.plugin-header-fields strong {
+  font-weight: 500;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  margin-right: 4px;
+}
+.plugin-header-fields code {
+  background: white;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  font-size: 11.5px;
+}
+
+/* Plugin marketplace (tabs, catalog, import) — all Tailwind in
+ * PluginPanel.tsx. */
+
+/* ---------- kernel docs ---------- */
+
+.kernel-card {
+  border: 1px solid var(--rule);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--bg-panel);
+}
+.kernel-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.kernel-card-head code {
+  font-weight: 600;
+  font-size: 14px;
+  background: white;
+  padding: 2px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+}
+.kernel-card-summary { color: var(--ink-dim); font-size: 12.5px; }
+.kernel-card-bestfor {
+  font-size: 12px;
+  color: var(--ink-dim);
+  margin-bottom: 12px;
+}
+.kernel-card-bestfor strong {
+  font-weight: 500;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+.kernel-fields-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  background: white;
+  border: 1px solid var(--rule);
+  margin-top: 8px;
+}
+.kernel-fields-table th, .kernel-fields-table td {
+  text-align: left;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+.kernel-fields-table th {
+  background: var(--bg-panel);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+.kernel-fields-table code {
+  background: var(--bg-panel);
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+.kf-required { color: var(--accent); font-weight: 700; }
+.kf-type {
+  display: inline-block;
+  padding: 1px 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.kernel-no-fields { color: var(--ink-faint); font-style: italic; font-size: 12px; }
+
+/* ---------- pinned sidebar entries ---------- */
+
+.tree-row-pinned { color: var(--accent); }
+.tree-row-pinned:hover { background: var(--bg-panel); }
+.tree-row-pinned .indent { color: var(--accent); }
+
+.tree-footer-hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.tree-user-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.tree-user-dot {
+  color: var(--signal-on);
+  font-size: 9px;
+}
+.tree-user-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-user-signout {
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  text-decoration: none;
+}
+.tree-user-signout:hover {
+  color: var(--accent);
+}
+
+/* ---------- atom overlays (plugin overlays render above body) ---------- */
+
+.atom-overlay {
+  margin-bottom: 18px;
+  padding: 0;
+}
+
+/* ---------- surface tags on plugin rows ---------- */
+
+.plugin-surfaces {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.surface-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  color: var(--ink-dim);
+}
+.surface-tag code {
+  background: transparent;
+  padding: 0;
+  font-size: 11px;
+}
+.surface-render { border-color: var(--rule-strong); color: var(--ink-dim); }
+.surface-command { border-color: var(--rule-strong); color: var(--ink-dim); }
+.surface-overlay { border-color: var(--ink); color: var(--ink); }
+
+/* Command palette is fully Tailwind-styled in CommandPalette.tsx. */
+
+/* ---------- import modal ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.modal {
+  width: 640px;
+  max-width: 92vw;
+  background: var(--bg-elevated);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+.modal-hint { padding: 12px 16px 0; color: var(--ink-dim); font-size: 12.5px; margin: 0; }
+.modal-textarea {
+  flex: 1;
+  margin: 12px 16px;
+  min-height: 280px;
+  border: 1px solid var(--rule);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--bg-panel);
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+.modal-err {
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  background: var(--signal-warn-bg);
+  border: 1px solid var(--signal-warn);
+  color: var(--signal-warn);
+  font-size: 12px;
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--rule);
+}
+.modal-foot button.primary {
+  background: var(--ink);
+  color: var(--bg-elevated);
+  border-color: var(--ink);
+}
+
+/* Theme toggle styling moved to FileTree.tsx ThemeToggleButton. */
+
+/* ---------- Sketch modal (Excalidraw) ---------- */
+
+.sketch-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+.sketch-backdrop-fullscreen {
+  padding: 0;
+}
+
+.sketch-modal {
+  width: min(96vw, 1400px);
+  height: min(94vh, 900px);
+  max-width: 96vw;
+  max-height: 94vh;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width var(--t-fast), height var(--t-fast), border-radius var(--t-fast);
+}
+.sketch-modal.sketch-modal-fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0;
+  border: none;
+}
+.sketch-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sketch-modal-fullscreen-toggle {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.sketch-modal-fullscreen-toggle:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.sketch-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--rule);
+  flex: 0 0 auto;
+}
+.sketch-modal-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+.sketch-modal-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.sketch-modal-close:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+
+/* The retained-mode ASCII sketcher fills the modal body. */
+.ascii-sketcher {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  outline: none;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+/* Stage = relative-positioned container hosting the canvas underneath
+ * plus the floating Excalidraw-style top toolbar and left panel on top. */
+.ascii-sketcher-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.ascii-sketcher-top-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.ascii-sketcher-left-panel {
+  position: absolute;
+  top: 80px;
+  left: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 14px;
+  width: 180px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.ascii-sketcher-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ascii-sketcher-panel-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+.ascii-sketcher-layer-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.ascii-sketcher-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ascii-sketcher-tools,
+.ascii-sketcher-fills {
+  display: flex;
+  gap: 2px;
+}
+.ascii-sketcher-tool,
+.ascii-sketcher-fill,
+.ascii-sketcher-action {
+  width: 32px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.ascii-sketcher-tool:hover,
+.ascii-sketcher-fill:hover,
+.ascii-sketcher-action:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.ascii-sketcher-tool.active,
+.ascii-sketcher-fill.active {
+  color: var(--ink-strong);
+  background: var(--bg-panel);
+  border-color: var(--ink);
+}
+.ascii-sketcher-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* Text-label variant of the action button — auto width + horizontal padding
+ * so labels like "clear all" don't get clipped by the icon-sized 32px box. */
+.ascii-sketcher-action-text {
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+.ascii-sketcher-fill-glyph {
+  font-family: var(--font-mono);
+}
+.ascii-sketcher-size-glyph {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.ascii-sketcher-line-type-icon,
+.ascii-sketcher-line-type-icon svg {
+  display: block;
+}
+.ascii-sketcher-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--rule);
+  margin: 0 4px;
+  flex: 0 0 auto;
+}
+.ascii-sketcher-canvas-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* No scroll — panning is handled by translating the pan-viewport via
+   * CSS transform. The wrap just clips. */
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  width: 100%;
+}
+/* The pan-viewport hosts the canvas + all overlays. CSS transform moves
+ * this one element; the wrap clips whatever runs off the visible area.
+ * Using transform (not scroll) lets pan go in any direction — including
+ * past the top-left origin — with no hard wall. */
+.ascii-sketcher-pan-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.ascii-sketcher-canvas {
+  position: relative;
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--ink);
+  user-select: none;
+  padding: 8px;
+  touch-action: none;
+  /* Faint graph-paper grid, one square per character cell. Aligned to
+   * the content box (rows start there); background-size is set inline
+   * from the measured cell px. Lines are subtle on light + dark. */
+  background-image:
+    linear-gradient(to right, rgba(128, 128, 128, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(128, 128, 128, 0.1) 1px, transparent 1px);
+  background-origin: content-box;
+  background-clip: content-box;
+}
+.ascii-sketcher-canvas.tool-select { cursor: default; }
+/* Inline SVG eraser as the cursor. White fill + dark stroke so it stays
+ * legible on both light and dark canvas backgrounds. Hotspot is the
+ * bottom-left tip of the eraser (where the rubber would touch). */
+.ascii-sketcher-canvas.tool-erase {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23fff' stroke='%23111' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'><path d='M16.24 3.56L21.19 8.51c.78.78.78 2.05 0 2.83L12 20.53H5.59a2 2 0 0 1-1.41-.58L2.81 18.6a2 2 0 0 1 0-2.83L13.41 5.17a2 2 0 0 1 2.83-1.61z'/><path d='M8.5 9.5l6 6'/><path d='M22 21H7'/></svg>") 3 21, crosshair;
+}
+.ascii-sketcher-canvas:not(.tool-select):not(.tool-erase) { cursor: crosshair; }
+/* Pan mode — space held OR middle-mouse drag OR empty-space drag in
+ * select mode. `space-held` and `panning` are toggled from JS. */
+.ascii-sketcher-canvas.space-held { cursor: grab; }
+.ascii-sketcher-canvas.panning,
+.ascii-sketcher-canvas.space-held.panning { cursor: grabbing; }
+.ascii-sketcher-row {
+  display: block;
+  white-space: pre;
+}
+.ascii-sketcher-cell {
+  width: 1ch;
+  min-width: 1ch;
+  display: inline-block;
+  text-align: center;
+}
+.ascii-sketcher-measure-cell {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  visibility: hidden;
+  pointer-events: none;
+}
+.ascii-sketcher-selection {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed var(--ink);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.04);
+}
+/* snap indicator — highlights the grid cell the cursor will draw into */
+.ascii-sketcher-hover-cell {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+  background: rgba(128, 128, 128, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.4);
+}
+.ascii-sketcher-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--bg);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  z-index: 3;
+  pointer-events: auto;
+  touch-action: none;
+  transition: background var(--t-fast), transform var(--t-fast);
+}
+.ascii-sketcher-handle:hover {
+  background: var(--ink);
+  transform: scale(1.1);
+}
+.ascii-sketcher-handle.handle-tl,
+.ascii-sketcher-handle.handle-br {
+  cursor: nwse-resize;
+}
+.ascii-sketcher-handle.handle-tr,
+.ascii-sketcher-handle.handle-bl {
+  cursor: nesw-resize;
+}
+.ascii-sketcher-handle.handle-point {
+  cursor: move;
+  border-radius: 50%;
+}
+.ascii-sketcher-textinput {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--ink-strong);
+  background: var(--bg-hover);
+  padding: 0 1px;
+  white-space: pre;
+  overflow: visible;
+}
+/* CSS-sized text overlay drawn on top of the grid. The grid is rasterized
+ * with skipText, so this is the sole visual source for text shapes and
+ * shape labels. Font-size is set inline (cellPx × per-size scale) so the
+ * letters grow with the canvas zoom AND with the chosen TextSize. */
+.ascii-sketcher-text-overlay {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  color: var(--ink-strong);
+  white-space: nowrap;
+  overflow: visible;
+  display: flex;
+  align-items: center;
+}
+.ascii-sketcher-text-overlay.align-left {
+  justify-content: flex-start;
+}
+.ascii-sketcher-text-overlay.align-center {
+  justify-content: center;
+  text-align: center;
+}
+.ascii-sketcher-textinput.attached {
+  background: var(--bg-panel);
+}
+.ascii-sketcher-textinput-caret {
+  display: inline-block;
+  width: 1ch;
+  height: 1em;
+  background: var(--ink);
+  animation: ascii-sketcher-blink 1s steps(2) infinite;
+}
+@keyframes ascii-sketcher-blink {
+  50% { opacity: 0; }
+}
+
+.ascii-sketcher-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.ascii-sketcher-spacer { flex: 1; }
+.ascii-sketcher-hint {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  font-family: var(--font-sans);
+}
+.ascii-sketcher-actions button {
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.ascii-sketcher-actions button:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.ascii-sketcher-actions button.primary {
+  color: var(--bg);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.ascii-sketcher-actions button.primary:hover {
+  background: var(--ink-strong);
+  border-color: var(--ink-strong);
+}
+.ascii-sketcher-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ================================================================
+ * vibeam brand utilities — applied via className from JSX.
+ * ================================================================ */
+
+/* Pink → violet gradient text. Used on the wordmark and hero
+ * moments. The padding-right works around -webkit-background-clip
+ * clipping the trailing italic glyph. */
+.vibeam-gradient {
+  background: var(--vibeam-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  padding-right: 0.04em;
+}
+
+/* Drop-shadow halo for the brand pink — used on accent dots and the
+ * sign-in indicator to give a soft glow without compositing layers. */
+.vibeam-glow {
+  filter: drop-shadow(0 0 10px var(--color-accent));
+}
+
+/* Animated diagonal "beam" — the brand's signature visual motif from
+ * vibeam-web. A thin pink line drifts laterally over its host. Sized
+ * via inset on the parent; respects prefers-reduced-motion. */
+.vibeam-beam {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.vibeam-beam::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: -25%;
+  width: 150%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--color-accent-2) 30%,
+    var(--color-accent) 50%,
+    var(--color-accent-2) 70%,
+    transparent 100%
+  );
+  transform: rotate(15deg);
+  opacity: 0.55;
+  filter: blur(0.5px);
+  animation: vibeam-drift 14s ease-in-out infinite;
+}
+.vibeam-beam::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: -25%;
+  width: 150%;
+  height: 120px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--color-accent) 50%,
+    transparent 100%
+  );
+  transform: translateY(-60px) rotate(15deg);
+  opacity: 0.18;
+  filter: blur(40px);
+  animation: vibeam-drift 14s ease-in-out infinite;
+}
+@keyframes vibeam-drift {
+  0%, 100% { transform: translateX(-3%) rotate(15deg); }
+  50% { transform: translateX(3%) rotate(15deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vibeam-beam::before,
+  .vibeam-beam::after { animation: none; }
+}
+
+/* ── Phase 1b: inline atoms (flag-gated; see inlineAtomPlugin.ts) ──
+   Decoration only — the markdown text is unchanged. Restrained: a
+   quiet pill, color as a budget. value = author-typed truth (accent);
+   liveTotal = a computed projection, non-authoritative (violet, dashed
+   underline to read as "derived, not typed"). */
+.vibeam-atom {
+  border-radius: 5px;
+  padding: 0.5px 5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+.vibeam-atom-value {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.vibeam-atom-liveTotal {
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  text-decoration: underline dashed 1px;
+  text-underline-offset: 3px;
+}
+/* atom-address-v1 §3 — a `{= … }` formula token. Same violet
+   computed-family as a live-total (it IS a computed projection); the
+   resolved value renders right after it via .live-total-value. */
+.vibeam-atom-formula {
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  text-decoration: underline dashed 1px;
+  text-underline-offset: 3px;
+}
+/* The resolved value rendered just AFTER a {identifier} live-total
+   or `{= … }` formula in SOURCE mode (cursor inside the range).
+   D4.8h: dropped the `→` prefix per user feedback — the chip is
+   adjacent to the source, the relationship is visually obvious. */
+.live-total-value {
+  margin-left: 6px;
+  padding: 0.5px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.92em;
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.live-total-empty {
+  margin-left: 6px;
+  padding: 0.5px 6px;
+  border-radius: 4px;
+  font-size: 0.92em;
+  color: var(--color-ink-faint);
+  border: 1px dashed var(--color-ink-faint);
+  user-select: none;
+}
