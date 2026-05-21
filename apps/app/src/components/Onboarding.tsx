@@ -12,7 +12,7 @@ import {
   Pencil,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
-import { VibeamLogo } from '@/components/VibeamLogo'
+import { DohcLogo } from '@/components/DohcLogo'
 import { Markdown } from '@/components/Markdown'
 
 // P1 — the onboarding wedge. Design:
@@ -332,12 +332,8 @@ export function Onboarding({ state }: Props) {
     return (
       <div className="grid h-screen place-items-center bg-page px-6">
         <div className="w-full max-w-[460px] text-center animate-[oFade_.5s_ease]">
-          <div className="flex flex-col items-center gap-3">
-            <VibeamLogo size="lg" />
-            <span className="text-[22px] font-semibold tracking-tight leading-none">
-              <span style={{ color: 'var(--color-accent-2)' }}>vi</span>
-              <span style={{ color: 'var(--color-accent)' }}>beam</span>
-            </span>
+          <div className="flex flex-col items-center gap-3 text-accent">
+            <DohcLogo size="lg" />
           </div>
           <h1 className="mt-10 text-[27px] font-semibold tracking-tight leading-[1.2] text-ink-strong">
             Let’s set up your cockpit.

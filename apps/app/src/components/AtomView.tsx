@@ -33,7 +33,7 @@ import { usePlugins } from '../plugins/usePlugins'
 import { KERNELS } from '../plugins/kernels'
 import { QueryErrorBoundary } from './QueryErrorBoundary'
 import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEditor'
-import { VibeamBrandBlock } from './VibeamLogo'
+import { DohcBrandBlock } from './DohcLogo'
 import { AsciiSketchModal } from './AsciiSketchModal'
 import {
   findSubpages,
@@ -312,25 +312,20 @@ export function AtomView({
 function NoFile() {
   return (
     <div className="flex h-[calc(100vh-44px)] flex-col items-center justify-center gap-8 px-8">
-      {/* Claude-Code-style brand block — logo on the left, stacked
-       *  one-liner info on the right. */}
-      <VibeamBrandBlock
-        lines={[
-          'vibeam · workspace',
-          'the workspace that knows you',
-          '~/vault',
-        ]}
+      {/* dohc brand block — mark on the left, calm metadata on the right. */}
+      <DohcBrandBlock
+        lines={['dohc · workspace', 'your documents, sources, and drafts', '~/workspace']}
       />
       <div className="flex flex-col items-center gap-2">
         <h2 className="text-[22px] tracking-tight text-ink-strong font-semibold">
-          Pick a page
+          Open a document
         </h2>
         <p className="text-[13.5px] text-ink-dim max-w-sm text-center leading-relaxed">
-          Open something from the sidebar — or hit{' '}
+          Pick a page from the sidebar to start reading or editing — or press{' '}
           <kbd className="rounded bg-panel border border-rule px-1.5 py-0.5 text-[11px] font-medium text-ink-dim">
             ⌘K
           </kbd>{' '}
-          to run a command.
+          to search and run a command.
         </p>
       </div>
     </div>

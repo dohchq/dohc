@@ -13,6 +13,11 @@ export default defineConfig({
     port: 3000,
     allowedHosts: ['localhost'],
   },
+  // Internal workspace packages ship raw TS/TSX source (no build step),
+  // so they must be transpiled rather than externalized for SSR.
+  ssr: {
+    noExternal: ['@dohc/brand', '@dohc/plugin-sdk'],
+  },
   resolve: {
     tsconfigPaths: true,
   },

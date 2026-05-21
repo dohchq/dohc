@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
-import { VibeamMark } from './VibeamLogo'
+import { DohcMark } from './DohcLogo'
 import { useTheme } from '@/lib/use-theme'
 import {
   buildTree,
@@ -624,13 +624,12 @@ export function FileTree({
           onClose={() => setPickerFile(null)}
         />
       )}
-      {/* Brand header — Fitted Beam mark + sans wordmark. */}
+      {/* Brand header — drop-lobe mark + lowercase wordmark. */}
       <header className="flex items-center justify-between px-4 pt-4 pb-3">
-        <div className="flex items-center gap-2">
-          <VibeamMark size={20} />
-          <span className="text-[15px] font-semibold tracking-tight leading-none">
-            <span style={{ color: 'var(--color-accent-2)' }}>vi</span>
-            <span style={{ color: 'var(--color-accent)' }}>beam</span>
+        <div className="flex items-center gap-2 text-accent">
+          <DohcMark size={20} />
+          <span className="text-[16px] font-semibold tracking-tight leading-none text-ink-strong">
+            dohc
           </span>
         </div>
         <div className="relative">

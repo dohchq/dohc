@@ -1,0 +1,41 @@
+/* dohc brand tokens — source of truth for the design system.
+ *
+ * Brand tokens are kept separate from component tokens so future theme
+ * work can change surfaces without changing the brand itself. Mirrors
+ * dohc-brand-bible.html sections 03 (color) and 04 (type). */
+
+:root {
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, serif;
+  --font-sans: 'Aptos', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* Light mode (warm paper) */
+  --dohc-bg: #f7f6f1;
+  --dohc-panel: #fffefa;
+  --dohc-panel-2: #ece9e1;
+  --dohc-ink: #151515;
+  --dohc-muted: #66635d;
+  --dohc-subtle: #8b867b;
+  --dohc-accent: #2d342e;
+  --dohc-line: rgba(21, 21, 21, 0.12);
+  --dohc-grid: rgba(21, 21, 21, 0.026);
+
+  /* Semantic state colors — muted, functional, never decorative */
+  --dohc-success: #4f7666;
+  --dohc-warning: #a77a35;
+  --dohc-danger: #b64b37;
+  --dohc-info: #3868a6;
+}
+
+[data-theme='dark'] {
+  /* Dark mode (green-black, warm ink — never pure black/white) */
+  --dohc-bg: #101211;
+  --dohc-panel: #191c1a;
+  --dohc-panel-2: #252923;
+  --dohc-ink: #f4f1ea;
+  --dohc-muted: #aaa69c;
+  --dohc-subtle: #78746d;
+  --dohc-accent: #d7d0c0;
+  --dohc-line: rgba(244, 241, 234, 0.14);
+  --dohc-grid: rgba(244, 241, 234, 0.035);
+}

@@ -27,7 +27,7 @@ import { SharingPanel } from '@/components/SharingPanel'
 import { ProposalsPanel } from '@/components/ProposalsPanel'
 import { PluginPanel } from '@/components/PluginPanel'
 import { CommandPalette } from '@/components/CommandPalette'
-import { VibeamLogo } from '@/components/VibeamLogo'
+import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
@@ -108,12 +108,8 @@ function SignInPrompt() {
   return (
     <div className="grid h-screen place-items-center bg-page">
       <div className="w-[400px] max-w-[92vw] rounded-2xl border border-rule bg-surface px-10 py-12 shadow-md">
-        <div className="flex flex-col items-center gap-4">
-          <VibeamLogo size="lg" />
-          <span className="text-[24px] font-semibold tracking-tight leading-none">
-            <span style={{ color: 'var(--color-accent-2)' }}>vi</span>
-            <span style={{ color: 'var(--color-accent)' }}>beam</span>
-          </span>
+        <div className="flex flex-col items-center gap-4 text-accent">
+          <DohcLogo size="lg" />
         </div>
 
         <p className="mt-6 text-[15px] text-ink-strong leading-snug text-center tracking-tight font-medium">

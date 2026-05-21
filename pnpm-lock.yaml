@@ -19,6 +19,12 @@ importers:
       '@convex-dev/workos-authkit':
         specifier: ^0.2.2
         version: 0.2.5(@edge-runtime/vm@4.0.4)(@standard-schema/spec@1.1.0)(@types/debug@4.1.13)(@types/node@22.19.19)(@workos-inc/authkit-react@0.11.0(react@19.2.6))(@workos-inc/node@8.13.0)(convex@1.39.1(react@19.2.6))(jiti@2.7.0)(jsdom@29.1.1)(lightningcss@1.32.0)(react@19.2.6)(typescript@5.9.3)(zod@3.25.76)
+      '@dohc/brand':
+        specifier: workspace:*
+        version: link:../../packages/brand
+      '@dohc/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
       '@emoji-mart/data':
         specifier: ^1.2.1
         version: 1.2.1
@@ -156,7 +162,14 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1)(lightningcss@1.32.0)
 
-  packages/brand: {}
+  packages/brand:
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.14
+        version: 19.2.15
+      react:
+        specifier: ^19.2.5
+        version: 19.2.6
 
   packages/config: {}
 
