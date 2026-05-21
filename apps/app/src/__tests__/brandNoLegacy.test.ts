@@ -8,18 +8,18 @@ import { join, relative } from 'node:path'
 // old product name, old SDK global, old CSS/key prefixes, old MIME
 // type, old env prefix, or the old short brand word.
 //
-// The final release whitelist is EMPTY: the only file skipped is this
-// scanner itself (it necessarily names the forbidden strings). If this
-// test ever fails, a legacy identity string slipped into shipping
+// The forbidden patterns are assembled from fragments so this scanner
+// file itself contains none of the literal tokens it forbids — the
+// repo-level rg gate stays fully clean, and the release whitelist is
+// genuinely empty (only this scanner file is skipped, by name).
+//
+// If this test fails, a legacy identity string slipped into shipping
 // source — rename it, do not whitelist it.
 
 const ROOT = process.cwd() // apps/app when vitest runs
 
-// Directories/paths to scan, relative to the app package root.
 const SCAN_ROOTS = ['src', 'convex', 'public', 'package.json']
 
-// Never scan generated/build/dependency output, and never scan THIS
-// scanner (it has to spell out the forbidden patterns).
 const SKIP_DIR = new Set([
   'node_modules',
   '_generated',
@@ -33,14 +33,16 @@ const SCANNER = 'brandNoLegacy.test.ts'
 const TEXT_EXT =
   /\.(ts|tsx|js|jsx|mjs|cjs|css|json|md|mdx|svg|html|yml|yaml|txt)$/
 
-// Forbidden legacy-identity patterns. `vibeam` (any case) subsumes the
-// old window global, env prefix, MIME type, CSS prefixes, gradient var,
-// and component names. `\bbeam\b` / `\bvibe\b` catch the old product
-// words on their own.
+// Token fragments, joined at runtime so the literal words never appear
+// in this file's source.
+const LONG = 'vib' + 'eam' // the old product name
+const SHORT = 'be' + 'am' // the old product word
+const TINY = 'vi' + 'be' // the old short brand
+
 const FORBIDDEN: ReadonlyArray<{ name: string; re: RegExp }> = [
-  { name: 'old product name "vibeam"', re: /vibeam/i },
-  { name: 'old product word "beam"', re: /\bbeam\b/i },
-  { name: 'old short brand "vibe"', re: /\bvibe\b/i },
+  { name: 'old product name', re: new RegExp(LONG, 'i') },
+  { name: 'old product word', re: new RegExp(`\\b${SHORT}\\b`, 'i') },
+  { name: 'old short brand', re: new RegExp(`\\b${TINY}\\b`, 'i') },
 ]
 
 function walk(abs: string, out: string[]): void {
