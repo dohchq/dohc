@@ -1,5 +1,5 @@
 // The inline-atom authoring instruction. This is BOTH the eval prompt
-// and the spec for what beam's system prompt must contain when the
+// and the spec for what dohc's system prompt must contain when the
 // agent inline-atom integration lands (it is deploy-gated). Frozen to
 // match inline-atom-format-v0.md exactly — if the contract changes,
 // change it there first, then mirror here.

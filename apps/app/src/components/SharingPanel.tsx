@@ -35,12 +35,12 @@ type OverviewWindow = {
 const shortWs = (w: string) => (w.length > 14 ? `${w.slice(0, 12)}…` : w)
 
 export function SharingPanel({
-  onAskBeam,
+  onAskDohc,
 }: {
   // Frame E / §3 + §5: the truncated state must DEFER to the agent
   // (the existing capable bulk path) — never a dead-end. App wires
   // this to open Chat with a pending prompt.
-  onAskBeam: (prompt: string) => void
+  onAskDohc: (prompt: string) => void
 }) {
   const overview = useQuery(api.windows.consentOverview) as
     | OverviewWindow[]
@@ -76,7 +76,7 @@ export function SharingPanel({
       {/* Frame A — the never-invisible header / standing summary */}
       <div className="shrink-0 border-b border-rule px-5 py-3">
         <p className="text-[11.5px] leading-relaxed text-ink-dim">
-          beam captures as you work.{' '}
+          dohc captures as you work.{' '}
           <span className="text-ink">Nothing is shared until you say so.</span>
         </p>
         {summary && (
@@ -153,7 +153,7 @@ export function SharingPanel({
                     key={w.windowId}
                     w={w}
                     myId={myId ?? null}
-                    onAskBeam={onAskBeam}
+                    onAskDohc={onAskDohc}
                   />
                 ))}
               </div>
@@ -197,11 +197,11 @@ export function SharingPanel({
 function WindowCard({
   w,
   myId,
-  onAskBeam,
+  onAskDohc,
 }: {
   w: OverviewWindow
   myId: string | null
-  onAskBeam: (prompt: string) => void
+  onAskDohc: (prompt: string) => void
 }) {
   const confirmWithheld = useMutation(api.windows.confirmWithheldFor)
   const rejectKey = useMutation(api.captures.rejectKey)
@@ -292,7 +292,7 @@ function WindowCard({
       if (!r.ok) {
         setNote(
           r.reason === 'too-many-to-enumerate'
-            ? 'Too many to share at once — ask beam to help clear this.'
+            ? 'Too many to share at once — ask dohc to help clear this.'
             : "This isn't your window.",
         )
       } else {
@@ -395,7 +395,7 @@ function WindowCard({
 
       {w.truncated ? (
         // Frame E — fail-closed, honest, and NEVER a dead-end: the
-        // copy is explicit AND defers to beam (the existing capable
+        // copy is explicit AND defers to dohc (the existing capable
         // bulk path) via the standard pending-prompt → Chat handoff.
         <div className="mt-2 rounded-md bg-danger-soft px-2.5 py-2">
           <p className="text-[11px] leading-relaxed text-danger">
@@ -404,7 +404,7 @@ function WindowCard({
           </p>
           <button
             onClick={() =>
-              onAskBeam(
+              onAskDohc(
                 `The "${w.name}" window has too many unreviewed ` +
                   `values to review here. Walk me through what's ` +
                   `waiting to share for it and help me clear it.`,
@@ -412,7 +412,7 @@ function WindowCard({
             }
             className="mt-1.5 inline-flex h-6 items-center gap-1 rounded-md bg-danger px-2.5 text-[11px] font-medium text-surface hover:opacity-90 transition-opacity"
           >
-            Ask beam to clear this →
+            Ask dohc to clear this →
           </button>
         </div>
       ) : nWithheld === 0 ? (
@@ -425,7 +425,7 @@ function WindowCard({
         // Frame D — the batched, non-blocking digest
         <div className="mt-2">
           <p className="text-[11px] text-ink-dim">
-            beam captured{' '}
+            dohc captured{' '}
             <span className="font-medium text-ink">{nWithheld}</span> value
             {nWithheld === 1 ? '' : 's'} this window would show.
           </p>
@@ -647,7 +647,7 @@ function WindowBuilder({ onClose }: { onClose: () => void }) {
         </p>
         <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
           Windows share specific values from your work. Do a little
-          work with beam first — the values you create show up here.
+          work with dohc first — the values you create show up here.
         </p>
         <button
           onClick={onClose}

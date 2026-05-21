@@ -17,15 +17,15 @@ import { Markdown } from '@/components/Markdown'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
-// intro → a short guided questionnaire (its answers ARE beam's first
+// intro → a short guided questionnaire (its answers ARE dohc's first
 // turn) → a working surface that always says what's happening, renders
-// beam's markdown properly, and shows the build assembling without
+// dohc's markdown properly, and shows the build assembling without
 // clipping. Server state machine + "never end empty" invariant remain
 // the source of truth; the client cannot fake completion.
 
 type Props = { state: 'NEW' | 'IN_PROGRESS' }
 
-// ── the questionnaire (drives beam's first turn) ────────────────────
+// ── the questionnaire (drives dohc's first turn) ────────────────────
 type Q = {
   id: string
   q: string
@@ -57,7 +57,7 @@ const SEED_Q: Q = {
 const FALLBACK_QS: Q[] = [
   {
     id: 'fb_focus',
-    q: 'What should beam keep on top of for you?',
+    q: 'What should dohc keep on top of for you?',
     help: 'Pick any that fit.',
     kind: 'multi',
     options: [
@@ -84,7 +84,7 @@ const FALLBACK_QS: Q[] = [
   },
   {
     id: 'fb_now',
-    q: 'Anything you’re working on right now beam should know about?',
+    q: 'Anything you’re working on right now dohc should know about?',
     help: 'Optional — a sentence is plenty.',
     kind: 'free',
   },
@@ -109,7 +109,7 @@ function composeIntro(ordered: Q[], a: Answers): string {
     })
     .filter((x): x is string => x !== null)
   return [
-    'Here’s me, so you can set up my cockpit:',
+    'Here’s me, so you can set up my workspace:',
     ...lines,
     '',
     'Set it up now — build me a populated dashboard and my profile (me.md). Don’t re-ask what I just answered; if a realistic example helps make it concrete, use one that fits my work.',
@@ -181,7 +181,7 @@ export function Onboarding({ state }: Props) {
     }
   }, [ensureThread])
 
-  // Kick beam's first turn. With the questionnaire brief ⇒ that's the
+  // Kick dohc's first turn. With the questionnaire brief ⇒ that's the
   // prompt (one clear turn). Idempotent + race-proof + crash-
   // recoverable server-side (single-doc CAS lease) — safe to re-call.
   const kicked = useRef(false)
@@ -238,7 +238,7 @@ export function Onboarding({ state }: Props) {
     [messages],
   )
   const composerReady = hasCompletedAssistant && !busy
-  const cockpitReady = !!progress?.hasMe && !!progress?.hasDashboardWithQuery
+  const workspaceReady = !!progress?.hasMe && !!progress?.hasDashboardWithQuery
 
   // ── composer ───────────────────────────────────────────────────
   const [input, setInput] = useState('')
@@ -287,7 +287,7 @@ export function Onboarding({ state }: Props) {
   }, [phase, busy, hasCompletedAssistant, messages.length, kickFailed])
 
   type Status = 'connecting' | 'building' | 'waiting' | 'ready' | 'stalled'
-  const status: Status = cockpitReady
+  const status: Status = workspaceReady
     ? 'ready'
     : stalled
       ? 'stalled'
@@ -300,7 +300,7 @@ export function Onboarding({ state }: Props) {
             : 'connecting'
 
   // Frame-6 handoff: hand <App/> the hero path so the first post-
-  // onboarding frame is the populated cockpit. One-shot, SSR-guarded.
+  // onboarding frame is the populated workspace. One-shot, SSR-guarded.
   const upsertAtom = useMutation(api.atoms.upsert)
   const meAtom = useQuery(
     api.atoms.getByPath,
@@ -312,7 +312,7 @@ export function Onboarding({ state }: Props) {
   )
   useEffect(() => {
     if (
-      cockpitReady &&
+      workspaceReady &&
       progress?.dashboardPath &&
       typeof window !== 'undefined'
     ) {
@@ -325,7 +325,7 @@ export function Onboarding({ state }: Props) {
         /* private-mode / quota — App shows its normal default */
       }
     }
-  }, [cockpitReady, progress?.dashboardPath])
+  }, [workspaceReady, progress?.dashboardPath])
 
   // ── Intro — exactly two choices ────────────────────────────────
   if (phase === 'intro') {
@@ -336,10 +336,10 @@ export function Onboarding({ state }: Props) {
             <DohcLogo size="lg" />
           </div>
           <h1 className="mt-10 text-[27px] font-semibold tracking-tight leading-[1.2] text-ink-strong">
-            Let’s set up your cockpit.
+            Let’s set up your workspace.
           </h1>
           <p className="mx-auto mt-3 max-w-[360px] text-[13.5px] leading-relaxed text-ink-dim">
-            A handful of quick questions so beam builds around how you
+            A handful of quick questions so dohc builds around how you
             actually work. About a minute — then it does the rest.
           </p>
           <button
@@ -347,7 +347,7 @@ export function Onboarding({ state }: Props) {
             className="group mt-10 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-ink-strong text-[14px] font-medium tracking-wide text-surface shadow-sm transition-all hover:-translate-y-px hover:shadow-md"
           >
             <Sparkles className="size-4" strokeWidth={2} />
-            Set up my cockpit
+            Set up my workspace
             <ArrowRight
               className="size-4 transition-transform group-hover:translate-x-0.5"
               strokeWidth={2}
@@ -394,8 +394,8 @@ export function Onboarding({ state }: Props) {
             <ThinkingBubble
               label={
                 status === 'stalled'
-                  ? 'beam didn’t get going.'
-                  : 'beam is reading what you told me…'
+                  ? 'dohc didn’t get going.'
+                  : 'dohc is reading what you told me…'
               }
             />
           ) : (
@@ -416,7 +416,7 @@ export function Onboarding({ state }: Props) {
                     send()
                   }
                 }}
-                placeholder="Reply to beam, or tell it what to fix…"
+                placeholder="Reply to dohc, or tell it what to fix…"
                 rows={3}
                 className="w-full resize-none bg-transparent px-3.5 pb-9 pt-3 text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-ink-faint"
               />
@@ -445,7 +445,7 @@ export function Onboarding({ state }: Props) {
             </button>
           ) : (
             <p className="py-3 text-center text-[12px] text-ink-faint">
-              beam is working — your cockpit is taking shape on the
+              dohc is working — your workspace is taking shape on the
               right →
             </p>
           )}
@@ -457,7 +457,7 @@ export function Onboarding({ state }: Props) {
         <div className="flex items-center gap-2 border-b border-rule px-5 py-4">
           <Sparkles className="size-3.5 text-ink-dim" strokeWidth={2} />
           <span className="text-[12px] font-semibold tracking-tight text-ink-strong">
-            Your cockpit, live
+            Your workspace, live
           </span>
         </div>
 
@@ -484,10 +484,10 @@ export function Onboarding({ state }: Props) {
             />
           )}
 
-          {hasCompletedAssistant && !cockpitReady && (
+          {hasCompletedAssistant && !workspaceReady && (
             <Card title="Not quite right?">
               <p className="text-[11.5px] leading-relaxed text-ink-dim">
-                Tell beam what to fix — it learns you as it goes.
+                Tell dohc what to fix — it learns you as it goes.
               </p>
               <button
                 onClick={() => {
@@ -499,17 +499,17 @@ export function Onboarding({ state }: Props) {
                 disabled={!composerReady}
                 className="mt-2 text-[11.5px] font-medium text-accent transition-colors hover:text-accent-hover disabled:text-ink-faint"
               >
-                correct beam →
+                correct dohc →
               </button>
             </Card>
           )}
         </div>
 
         <div className="border-t border-rule px-5 py-4">
-          {cockpitReady ? (
+          {workspaceReady ? (
             <p className="flex items-center gap-1.5 text-[12px] font-medium leading-relaxed text-success">
               <Check className="size-4" strokeWidth={2.4} />
-              Your cockpit is ready — opening…
+              Your workspace is ready — opening…
             </p>
           ) : (
             <button
@@ -652,7 +652,7 @@ function Questionnaire({
             Tailoring your setup…
           </h2>
           <p className="mx-auto mt-2 max-w-[360px] text-[13px] leading-relaxed text-ink-dim">
-            beam is shaping a few questions around how you actually
+            dohc is shaping a few questions around how you actually
             work. Just a moment.
           </p>
         </div>
@@ -774,7 +774,7 @@ function Questionnaire({
               disabled={!valid || !shown}
               className="group inline-flex h-10 items-center gap-2 rounded-xl bg-ink-strong px-5 text-[13px] font-medium text-surface shadow-sm transition-all hover:-translate-y-px hover:shadow-md disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-ink-ghost disabled:shadow-none"
             >
-              {isLast ? 'Build my cockpit' : 'Continue'}
+              {isLast ? 'Build my workspace' : 'Continue'}
               <ArrowRight
                 className="size-4 transition-transform group-hover:translate-x-0.5"
                 strokeWidth={2}
@@ -805,26 +805,26 @@ function StatusBar({
   const map = {
     connecting: {
       t: 'Getting things ready',
-      s: 'beam is spinning up — just a few seconds.',
+      s: 'dohc is spinning up — just a few seconds.',
       spin: true,
     },
     building: {
-      t: 'beam is building your cockpit',
+      t: 'dohc is building your workspace',
       s: 'Reading what you told me and setting things up — about a minute.',
       spin: true,
     },
     waiting: {
-      t: 'beam needs a word from you',
+      t: 'dohc needs a word from you',
       s: 'Reply below to keep going.',
       spin: false,
     },
     ready: {
-      t: 'Your cockpit is ready',
+      t: 'Your workspace is ready',
       s: 'Opening it now…',
       spin: false,
     },
     stalled: {
-      t: 'beam didn’t get going',
+      t: 'dohc didn’t get going',
       s: 'It happens — give it another go.',
       spin: false,
     },
@@ -965,9 +965,9 @@ function BuildChecklist({
   )
 }
 
-// D6 — the profile beam wrote, shown back and editable. Markdown
+// D6 — the profile dohc wrote, shown back and editable. Markdown
 // preview by default (not a raw mono wall); Edit reveals the textarea.
-// beam may keep refining it — we keep showing its latest UNTIL the
+// dohc may keep refining it — we keep showing its latest UNTIL the
 // user edits, then stop clobbering them. Save = real atoms.upsert.
 function MeCard({
   path,
@@ -1003,7 +1003,7 @@ function MeCard({
     <div className="rounded-xl border border-rule bg-surface px-3.5 py-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-ink-faint">
-          What beam learned about you
+          What dohc learned about you
         </p>
         {!editing && (
           <button
@@ -1063,7 +1063,7 @@ function MeCard({
 }
 
 // Same part-handling as Chat (text + tool chips; reasoning hidden) —
-// but beam's text is rendered as proper markdown, not a wall.
+// but dohc's text is rendered as proper markdown, not a wall.
 function Msg({ m }: { m: UIMessage }) {
   if (m.role === 'system') return null
   const isUser = m.role === 'user'
@@ -1074,7 +1074,7 @@ function Msg({ m }: { m: UIMessage }) {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
-        {isUser ? 'you' : 'beam'}
+        {isUser ? 'you' : 'dohc'}
       </span>
       <div
         className={

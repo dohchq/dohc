@@ -5,7 +5,7 @@ import type { Components } from 'react-markdown'
 
 // One styled markdown renderer for AI prose (the chat) and the live
 // previews (dashboard / profile). Maps every element to the
-// warm-paper type scale so beam's output reads as a designed
+// warm-paper type scale so dohc's output reads as a designed
 // document, never a wall of raw text. Streaming-safe: partial
 // markdown just renders as far as it parses, then settles.
 

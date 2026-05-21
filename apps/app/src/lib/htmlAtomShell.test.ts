@@ -2,21 +2,22 @@ import { describe, it, expect } from 'vitest'
 import { HTML_ATOM_HEAD_STYLE } from './htmlAtomShell'
 
 // html-atoms-v1 §2a — locks the curated, app-bundled, zero-network
-// typographic shell: Inter 400+600 must be data:-base64-inlined as
-// `@font-face`, and a calm typographic baseline must ship by
+// typographic shell: IBM Plex Mono 400+500 must be data:-base64-inlined
+// as `@font-face` (the one shipped brand webfont), body text uses the
+// system sans stack, and a calm warm-paper baseline must ship by
 // default so html atoms are never "underwhelming". Server-only (the
 // shell module reads woff2 via node:fs at module init).
 
-describe('HTML_ATOM_HEAD_STYLE — §2a Inter + typographic baseline', () => {
-  it('Inter regular (400) is base64-inlined as @font-face', () => {
-    expect(HTML_ATOM_HEAD_STYLE).toContain("@font-face")
-    expect(HTML_ATOM_HEAD_STYLE).toContain("font-family:'Inter'")
+describe('HTML_ATOM_HEAD_STYLE — §2a dohc mono + typographic baseline', () => {
+  it('IBM Plex Mono regular (400) is base64-inlined as @font-face', () => {
+    expect(HTML_ATOM_HEAD_STYLE).toContain('@font-face')
+    expect(HTML_ATOM_HEAD_STYLE).toContain("font-family:'IBM Plex Mono'")
     expect(HTML_ATOM_HEAD_STYLE).toContain('font-weight:400')
     expect(HTML_ATOM_HEAD_STYLE).toMatch(/src:url\("data:font\/woff2;base64,/)
   })
 
-  it('Inter semibold (600) is base64-inlined as @font-face', () => {
-    expect(HTML_ATOM_HEAD_STYLE).toContain('font-weight:600')
+  it('IBM Plex Mono medium (500) is base64-inlined as @font-face', () => {
+    expect(HTML_ATOM_HEAD_STYLE).toContain('font-weight:500')
   })
 
   it('is ZERO-network: no http(s):/file:/data:image schemes anywhere', () => {
@@ -31,8 +32,9 @@ describe('HTML_ATOM_HEAD_STYLE — §2a Inter + typographic baseline', () => {
     ).toBe(true)
   })
 
-  it('ships a sane typographic baseline (no underwhelming default)', () => {
-    expect(HTML_ATOM_HEAD_STYLE).toMatch(/body\s*\{[^}]*font-family:'Inter'/)
+  it('ships a sane dohc typographic baseline (system sans on warm paper)', () => {
+    expect(HTML_ATOM_HEAD_STYLE).toMatch(/body\s*\{[^}]*font-family:'Aptos'/)
+    expect(HTML_ATOM_HEAD_STYLE).toMatch(/body\s*\{[^}]*background:#f7f6f1/)
     expect(HTML_ATOM_HEAD_STYLE).toMatch(/h1\s*\{[^}]*font-size:26px/)
     expect(HTML_ATOM_HEAD_STYLE).toMatch(/code\b/)
     expect(HTML_ATOM_HEAD_STYLE).toMatch(/blockquote\b/)

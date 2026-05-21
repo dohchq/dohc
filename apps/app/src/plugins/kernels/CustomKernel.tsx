@@ -147,7 +147,7 @@ function wrapPluginBody(body: string): string {
   html, body {
     margin: 0;
     padding: 0;
-    font-family: 'Geist Mono', ui-monospace, 'Berkeley Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+    font-family: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
     font-size: 13px;
     line-height: 1.55;
     color: #1b1b1b;

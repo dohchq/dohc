@@ -7,8 +7,8 @@ import type { Id } from '../../convex/_generated/dataModel'
 // P4 — the loop UX (advisory proposals, in-product).
 // Design: docs/strategy/loop-ux-design.md (gate CLEARED v2).
 // A PULL surface: opened on demand, never a per-item nag. The
-// advisory spine: beam NEVER changes your work — accept is a pure
-// status flip; Run-now writes only the proposals table + beam's own
+// advisory spine: dohc NEVER changes your work — accept is a pure
+// status flip; Run-now writes only the proposals table + dohc's own
 // _map.md index, never user content. This panel renders DIRECTLY
 // from the live `listPending` query — it intentionally keeps NO
 // client snapshot of `items` (a frozen list could resurface a
@@ -31,11 +31,11 @@ type RunResult = {
 }
 
 export function ProposalsPanel({
-  onAskBeam,
+  onAskDohc,
 }: {
-  // Frame Q: the truncated state defers to beam (the existing
+  // Frame Q: the truncated state defers to dohc (the existing
   // capable bulk path) — never a dead-end.
-  onAskBeam: (prompt: string) => void
+  onAskDohc: (prompt: string) => void
 }) {
   const pending = useQuery(api.loop.listPending) as
     | { truncated: boolean; items: Item[] }
@@ -78,10 +78,10 @@ export function ProposalsPanel({
           // query will drop it; just say so, never double-apply.
           setNote('Already resolved.')
         } else if (isAccept) {
-          setNote('Noted — advice recorded. beam didn’t change your work.')
+          setNote('Noted — advice recorded. dohc didn’t change your work.')
         } else {
           setNote(
-            'Dismissed. If you’re still behind this goal next week, beam raises it again.',
+            'Dismissed. If you’re still behind this goal next week, dohc raises it again.',
           )
         }
       } catch {
@@ -104,14 +104,14 @@ export function ProposalsPanel({
   const runLine = (() => {
     if (!runResult) return null
     if (runResult.reason)
-      return 'Set goals in intent.md (e.g. {goal_billable: 40}) and beam will track them.'
+      return 'Set goals in intent.md (e.g. {goal_billable: 40}) and dohc will track them.'
     if (runResult.proposed === 0 && runResult.gardening === 0)
       return hasItems
         ? 'Already checked this week — nothing new.'
         : 'Checked — nothing behind your goals right now.'
     if (runResult.gardening > 0)
       return 'Checked — a tidy-up suggestion is below.'
-    return 'Checked — see what beam flagged below.'
+    return 'Checked — see what dohc flagged below.'
   })()
 
   return (
@@ -126,10 +126,10 @@ export function ProposalsPanel({
       {/* Frame M — the advisory spine, stated up front */}
       <div className="shrink-0 border-b border-rule px-5 py-3">
         <p className="text-[11.5px] leading-relaxed text-ink-dim">
-          beam compares your stated goals to where things actually are
+          dohc compares your stated goals to where things actually are
           and suggests where to look.{' '}
           <span className="text-ink">
-            Advice only — beam never changes your work.
+            Advice only — dohc never changes your work.
           </span>
         </p>
       </div>
@@ -153,7 +153,7 @@ export function ProposalsPanel({
             <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-faint">
               {runResult
                 ? runLine
-                : "Either you're on track, or beam hasn't looked yet."}
+                : "Either you're on track, or dohc hasn't looked yet."}
             </p>
             <button
               onClick={doRun}
@@ -171,15 +171,15 @@ export function ProposalsPanel({
           // Frame O — the batched digest
           <div className="flex flex-col gap-3">
             {pending.truncated && (
-              // Frame Q — fail-closed, honest, defers to beam
+              // Frame Q — fail-closed, honest, defers to dohc
               <div className="rounded-md bg-elevated px-3 py-2">
                 <p className="text-[11px] leading-relaxed text-ink-dim">
-                  Showing the first 100. Run a focused review with beam
+                  Showing the first 100. Run a focused review with dohc
                   to work through the rest.
                 </p>
                 <button
                   onClick={() =>
-                    onAskBeam(
+                    onAskDohc(
                       'My weekly loop has more than 100 pending ' +
                         'proposals — walk me through them in batches ' +
                         'and help me clear them.',
@@ -187,7 +187,7 @@ export function ProposalsPanel({
                   }
                   className="mt-1.5 text-[11px] font-medium text-ink hover:underline"
                 >
-                  Ask beam →
+                  Ask dohc →
                 </button>
               </div>
             )}

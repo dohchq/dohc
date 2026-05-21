@@ -106,26 +106,33 @@ function SignInPrompt() {
       ? `/api/auth/sign-in?returnPathname=${encodeURIComponent(href)}`
       : '/api/auth/sign-in'
   return (
-    <div className="grid h-screen place-items-center bg-page">
-      <div className="w-[400px] max-w-[92vw] rounded-2xl border border-rule bg-surface px-10 py-12 shadow-md">
+    <div
+      className="grid h-screen place-items-center bg-page px-6"
+      style={{
+        backgroundImage:
+          'linear-gradient(90deg, var(--dohc-grid) 1px, transparent 1px), linear-gradient(0deg, var(--dohc-grid) 1px, transparent 1px)',
+        backgroundSize: '48px 48px',
+      }}
+    >
+      <div className="w-[420px] max-w-[92vw] rounded-[18px] border border-rule bg-surface px-10 py-12 shadow-md">
         <div className="flex flex-col items-center gap-4 text-accent">
           <DohcLogo size="lg" />
         </div>
 
-        <p className="mt-6 text-[15px] text-ink-strong leading-snug text-center tracking-tight font-medium">
-          The workspace that knows you.
-        </p>
+        <h1 className="mt-8 text-center font-serif text-[30px] leading-[1.1] text-ink-strong">
+          The quiet workspace for your work.
+        </h1>
 
-        <p className="mt-2 text-[13px] text-ink-dim text-center leading-relaxed max-w-[280px] mx-auto">
-          Bring your real work. beam turns it into a space that bends
-          to you — and you own every word.
+        <p className="mx-auto mt-3 max-w-[300px] text-center text-[13.5px] leading-relaxed text-ink-dim">
+          dohc keeps your documents, sources, and drafts in one calm
+          place — clear, traceable, and yours.
         </p>
 
         <a
           href={signInHref}
-          className="group mt-10 flex h-11 items-center justify-center gap-2 rounded-lg bg-ink-strong text-surface text-[13.5px] font-medium tracking-wide shadow-sm transition-all hover:translate-y-[-1px] hover:shadow-md"
+          className="group mt-9 flex h-11 items-center justify-center gap-2 rounded-lg bg-ink-strong text-surface text-[13.5px] font-medium tracking-wide shadow-sm transition-all hover:translate-y-[-1px] hover:shadow-md"
         >
-          <span>sign in</span>
+          <span>Sign in</span>
           <span
             aria-hidden
             className="text-[16px] leading-none transition-transform group-hover:translate-x-0.5"
@@ -134,10 +141,9 @@ function SignInPrompt() {
           </span>
         </a>
 
-        <div className="mt-5 flex items-center justify-center gap-2 text-[10.5px] text-ink-faint uppercase tracking-[0.14em]">
-          <span className="size-1 rounded-full bg-ink-faint" />
-          <span>welcome back</span>
-        </div>
+        <p className="mt-5 text-center font-mono text-[10.5px] uppercase tracking-[0.14em] text-ink-faint">
+          secure sign-in · your work stays private
+        </p>
       </div>
     </div>
   )
@@ -172,7 +178,7 @@ function App() {
   const [threadId, setThreadId] = useState<string | null>(null)
   // Onboarding hand-off (P1 spec line 263): the wedge wrote the hero
   // path here right before the Gate flipped DONE → <App/>. Open it as
-  // the FIRST frame so the wow moment lands on the populated cockpit,
+  // the FIRST frame so the wow moment lands on the populated workspace,
   // never an empty "Pick a page". One-shot: read AND clear on mount
   // (this App subtree mounts client-side post-gate, so the lazy
   // initializer runs on the client — same pattern as chatOpen).
@@ -686,7 +692,7 @@ function App() {
       )}
       {sharingOpen && (
         <SharingPanel
-          onAskBeam={(p) => {
+          onAskDohc={(p) => {
             setPendingPrompt(p)
             setChatOpen(true)
             setSharingOpen(false)
@@ -696,7 +702,7 @@ function App() {
       )}
       {proposalsOpen && (
         <ProposalsPanel
-          onAskBeam={(p) => {
+          onAskDohc={(p) => {
             setPendingPrompt(p)
             setChatOpen(true)
             setSharingOpen(false)

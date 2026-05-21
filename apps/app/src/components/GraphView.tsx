@@ -107,12 +107,15 @@ export function GraphView({
 
   // ── theme-aware palette (concrete rgb so we can modulate alpha for
   // the hover dim/highlight). Re-read when the theme flips.
+  // First-frame defaults in dohc graphite/muted; the effect below reads
+  // the live CSS tokens (getComputedStyle normalizes hex → rgb) and
+  // re-paints, so these only show for one frame and on theme flips.
   const [palette, setPalette] = useState({
-    personal: '184,56,154',
-    shared: '107,63,160',
-    label: '128,125,120',
-    labelStrong: '10,10,11',
-    link: '128,125,120',
+    personal: '45,52,46',
+    shared: '102,99,93',
+    label: '139,134,123',
+    labelStrong: '10,10,10',
+    link: '139,134,123',
   })
   useEffect(() => {
     const host = wrapRef.current
@@ -128,11 +131,11 @@ export function GraphView({
     }
     const refresh = () =>
       setPalette({
-        personal: read('--color-accent', '184,56,154'),
-        shared: read('--color-accent-2', '107,63,160'),
-        label: read('--color-ink-faint', '128,125,120'),
-        labelStrong: read('--color-ink-strong', '10,10,11'),
-        link: read('--color-ink-faint', '128,125,120'),
+        personal: read('--color-accent', '45,52,46'),
+        shared: read('--color-accent-2', '102,99,93'),
+        label: read('--color-ink-faint', '139,134,123'),
+        labelStrong: read('--color-ink-strong', '10,10,10'),
+        link: read('--color-ink-faint', '139,134,123'),
       })
     refresh()
     // explicit theme toggle (data-theme attr) …
@@ -366,7 +369,7 @@ export function GraphView({
               if (dim) labelAlpha = 0
               if (labelAlpha > 0.02) {
                 ctx.globalAlpha = labelAlpha
-                ctx.font = `${11 / scale}px Inter, system-ui, sans-serif`
+                ctx.font = `${11 / scale}px 'Aptos', ui-sans-serif, system-ui, sans-serif`
                 ctx.textAlign = 'center'
                 ctx.textBaseline = 'top'
                 ctx.fillStyle =

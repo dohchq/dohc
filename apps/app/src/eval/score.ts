@@ -6,7 +6,7 @@
 // Two metrics:
 //  • conformance — of every `{…}` the model emitted, what fraction is
 //    a VALID v0 atom that round-trips. This is the hard gate
-//    (syntactic correctness of what beam writes — DX-T2/Eng-EG8).
+//    (syntactic correctness of what dohc writes — DX-T2/Eng-EG8).
 //  • recall — of the golden atoms a correct extraction should contain,
 //    what fraction the model captured. Advisory quality signal.
 
@@ -143,7 +143,7 @@ export type Aggregate = {
   /** non-empty-golden fixtures where the model emitted NO atoms at all
    *  (the H1/H3 hole — "do nothing" must not pass) */
   coverageFailures: number
-  /** The honest hard gate — masterplan §5 ("beam writes them
+  /** The honest hard gate — masterplan §5 ("dohc writes them
    *  correctly ≥95%") = the atoms it writes are well-formed, round-
    *  trip, and it actually writes them where due:
    *   - meanConformance ≥ 0.95   (what it writes is valid v0)

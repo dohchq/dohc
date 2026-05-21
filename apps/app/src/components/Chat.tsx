@@ -200,7 +200,7 @@ export function Chat({
             strokeWidth={2}
           />
           <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
-            agent
+            dohc
           </span>
         </div>
         {busy && (
@@ -220,15 +220,16 @@ export function Chat({
             <div className="flex items-center gap-1.5">
               <span className="size-1.5 rounded-full bg-ink-dim" />
               <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
-                agent
+                dohc
               </span>
             </div>
             <p className="text-[18px] text-ink-strong leading-snug tracking-tight font-semibold">
-              Hey — what do you do at work?
+              What can I help you with?
             </p>
             <p className="text-[12.5px] text-ink-dim leading-relaxed mt-1">
-              Tell me about your day — I'll set up pages and plugins
-              that fit how you actually work.
+              Ask me to find something, draft a document, or organize
+              your pages. I'll show my sources and what I changed, so
+              you can always check the work.
             </p>
           </div>
         )}
@@ -249,7 +250,7 @@ export function Chat({
                 submit()
               }
             }}
-            placeholder={threadId ? 'Tell the agent what you want…' : 'Starting up…'}
+            placeholder={threadId ? 'Ask dohc to find, draft, or organize something…' : 'Starting up…'}
             disabled={!threadId}
             rows={3}
             className="w-full resize-none bg-transparent px-3 pt-3 pb-9 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint outline-none disabled:text-ink-faint"
@@ -286,7 +287,7 @@ function MessageView({ message }: { message: UIMessage }) {
           }`}
         />
         <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
-          {isUser ? 'you' : 'beam'}
+          {isUser ? 'you' : 'dohc'}
         </span>
       </div>
       <div className="max-w-full break-words">
@@ -296,7 +297,7 @@ function MessageView({ message }: { message: UIMessage }) {
             .map((p) => (p as { text?: string }).text ?? '')
             .join('')
           if (!text.trim()) return null
-          // beam writes markdown — render it as a document, not raw
+          // dohc writes markdown — render it as a document, not raw
           // text. The user's own turns stay plain.
           return isUser ? (
             <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">

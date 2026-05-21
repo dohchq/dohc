@@ -44,14 +44,14 @@ describe('Phase 1b — live ≥95% conformance gate', () => {
   })
 
   it.runIf(KEY)(
-    'beam writes conformant inline atoms ≥95% across the corpus',
+    'dohc writes conformant inline atoms ≥95% across the corpus',
     async () => {
       const scores: FixtureScore[] = []
       for (const f of FIXTURES) {
         const out = await callModel(f.artifact)
         const s = scoreFixture(out, f.golden)
         scores.push(s)
-        // Diagnostic: surface exactly what beam wrote when it missed
+        // Diagnostic: surface exactly what dohc wrote when it missed
         // recall or tripped a false positive — evidence, not guessing.
         if (s.falsePositives > 0 || (s.goldenCount > 0 && s.recallRate < 1)) {
           console.log(

@@ -859,7 +859,7 @@ function EmptyAtom({ path }: { path: string }) {
           doesn't exist yet.
         </p>
         <p className="text-[14px] text-ink-dim leading-relaxed">
-          Tell the agent what you do — it'll build your cockpit.
+          Tell the agent what you do — it'll build your workspace.
         </p>
       </div>
     </div>

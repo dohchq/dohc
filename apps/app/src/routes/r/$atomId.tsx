@@ -46,10 +46,10 @@ const CONVEX_URL =
 
 // Trusted, fixed shell — author HTML is the ONLY untrusted part and
 // it is sanitized before interpolation. §2a typographic baseline +
-// Inter data:-inlined via HTML_ATOM_HEAD_STYLE — zero network,
-// permitted by the header CSP (`style-src 'unsafe-inline'; font-src
-// data:`). The §3 walk SKIPs STYLE ancestors ⇒ no `{= }` resolves
-// inside this trusted block.
+// IBM Plex Mono data:-inlined via HTML_ATOM_HEAD_STYLE (body uses the
+// system sans stack) — zero network, permitted by the header CSP
+// (`style-src 'unsafe-inline'; font-src data:`). The §3 walk SKIPs
+// STYLE ancestors ⇒ no `{= }` resolves inside this trusted block.
 function wrap(bodyHtml: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
