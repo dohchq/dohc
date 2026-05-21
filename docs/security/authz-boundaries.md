@@ -1,0 +1,42 @@
+# Authorization boundaries
+
+dohc's safety properties are enforced server-side in Convex and must not
+be weakened by rebrand or UI work.
+
+## Identity
+
+- The authenticated identity is derived server-side via
+  `ctx.auth.getUserIdentity()`. Functions NEVER accept a `userId` (or any
+  user identifier) as an argument for authorization.
+- There is intentionally **no** unauthenticated request → data escape.
+  An earlier env-gated dev bypass was removed because Convex public
+  functions are raw internet endpoints on a shared deployment.
+
+## Ownership
+
+- Every atom, folder, entity, and share is scoped to a `workspaceId`
+  derived from the authenticated identity (`requireWorkspace`).
+  `workspace` is a domain concept, not legacy brand — it stays.
+- A user cannot read or mutate another workspace's data. Sharing is the
+  only cross-user path and is consent-gated.
+
+## Locks and gates
+
+- A user lock on an atom refuses all agent writes at the data layer; the
+  user's own editor still works.
+- The skill-turn gate and inline-window caps are structural, fail-closed
+  invariants. The supporting tests (`skillTurnGate`, `strictKeystone`,
+  `r3InlineWindow`, `windows`, `atomShares`) must keep passing.
+
+## Plugins
+
+- Custom plugins run in `sandbox="allow-scripts"` iframes: no cookies, no
+  parent DOM, no top-navigation. Writes via `window.dohc` are routed
+  through the host and subject to the same authz gates as any write.
+
+## HTML atoms
+
+- Author HTML is sanitized before interpolation into a trusted,
+  server-built shell. The shell is fixed and never resolves inline
+  `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
+  `style-src 'unsafe-inline'; font-src data:` with no network fetches.
