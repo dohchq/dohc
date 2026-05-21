@@ -1,21 +1,20 @@
-/* vibeam — warm studio palette, Inter + Instrument Serif + Geist Mono.
+/* dohc — logo-native design system. Warm paper + graphite in light,
+ * green-black + warm ink in dark. Brand tokens are the source of truth
+ * (see packages/brand/src/tokens.css and dohc-brand-bible.html); the
+ * --color-* layer below resolves from them so Tailwind utilities
+ * (bg-page, text-ink, border-rule, …) swap with data-theme.
  *
- * Tailwind v4 is the source of truth for utility classes; everything below
- * still-CSS-only is either (a) complex, scoped, embedded-editor styling
- * (Crepe / CodeMirror / ascii sketcher / kernels) that's not worth
- * rewriting as utilities, or (b) the design-token layer that Tailwind
- * resolves from. */
+ * Type: system serif (Iowan Old Style) for brand moments, system sans
+ * (Aptos) for daily UI, IBM Plex Mono for metadata/source/state. Only
+ * the mono is shipped as a webfont — sans and serif use system stacks
+ * (no heavy webfont, per the brand bible). */
 
 @import 'tailwindcss';
 
-@import '@fontsource/inter/400.css';
-@import '@fontsource/inter/500.css';
-@import '@fontsource/inter/600.css';
-@import '@fontsource/inter/700.css';
-@import '@fontsource/inter/400-italic.css';
-@import '@fontsource/geist-mono/400.css';
-@import '@fontsource/geist-mono/500.css';
-@import '@fontsource/geist-mono/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/ibm-plex-mono/600.css';
+@import '@fontsource/ibm-plex-mono/700.css';
 
 /* Make `dark:` Tailwind variant respect the manually-set `data-theme=dark`
  * attribute on <html> (our existing theme toggle writes this), instead of
@@ -23,202 +22,229 @@
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
 /* ---------- DESIGN TOKENS ----------
- * Warm-neutral surfaces sourced from vibeam-web's current iteration
- * (cream / charcoal — the Brand Refresh v1 in vibeam-ui tokens).
- * Pink + violet are reserved for sparkle moments: wordmark letters,
- * the signin CTA, active page rail, selection. The dominant reading
- * surface stays calm and editorial. */
+ * dohc brand tokens (--dohc-*) are the source of truth. Surface tokens
+ * (--color-*) resolve from them with neutral names so existing Tailwind
+ * utilities keep working. The palette is almost monochrome: warm paper
+ * + graphite. Color exists to separate surface, hierarchy, and state —
+ * never as decoration. */
 :root {
-  /* Surfaces — warm cream, as on vibeam-web. */
-  --color-page: #faf8f3;
-  --color-surface: #ffffff;
-  --color-elevated: #ffffff;
-  --color-panel: #f2efe8;
-  --color-hover: rgba(22, 22, 24, 0.05);
-  --color-pressed: rgba(22, 22, 24, 0.08);
+  /* Brand tokens — light (warm paper). */
+  --dohc-bg: #f7f6f1;
+  --dohc-panel: #fffefa;
+  --dohc-panel-2: #ece9e1;
+  --dohc-ink: #151515;
+  --dohc-muted: #66635d;
+  --dohc-subtle: #8b867b;
+  --dohc-accent: #2d342e;
+  --dohc-line: rgba(21, 21, 21, 0.12);
+  --dohc-grid: rgba(21, 21, 21, 0.026);
+  --dohc-success: #4f7666;
+  --dohc-warning: #a77a35;
+  --dohc-danger: #b64b37;
+  --dohc-info: #3868a6;
 
-  /* Ink — warm near-black. */
-  --color-ink: #161618;
-  --color-ink-strong: #0a0a0b;
-  --color-ink-dim: #3a3640;          /* warm slate */
-  --color-ink-faint: #807d78;
-  --color-ink-ghost: #d9d5cc;
+  /* Surfaces. */
+  --color-page: var(--dohc-bg);
+  --color-surface: var(--dohc-panel);
+  --color-elevated: var(--dohc-panel);
+  --color-panel: var(--dohc-panel-2);
+  --color-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
+  --color-pressed: color-mix(in srgb, var(--dohc-ink) 8%, transparent);
 
-  /* Borders — warm rules. */
-  --color-rule: #e8e2d6;
-  --color-rule-strong: #d0c9bb;
+  /* Ink. */
+  --color-ink: var(--dohc-ink);
+  --color-ink-strong: #0a0a0a;
+  --color-ink-dim: var(--dohc-muted);
+  --color-ink-faint: var(--dohc-subtle);
+  --color-ink-ghost: #cdc8bd;
 
-  /* Brand accents — deep pink + deep violet (light-mode adjusted for AA). */
-  --color-accent: #b8389a;
-  --color-accent-hover: #93246f;
-  --color-accent-soft: #fce5f3;
-  --color-accent-foreground: #ffffff;
+  /* Borders. */
+  --color-rule: var(--dohc-line);
+  --color-rule-strong: rgba(21, 21, 21, 0.22);
 
-  --color-accent-2: #6b3fa0;
-  --color-accent-2-soft: #e8ddf2;
+  /* Accent — graphite. Almost monochrome; the mark owns recognition. */
+  --color-accent: var(--dohc-accent);
+  --color-accent-hover: #1c211d;
+  --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 10%, transparent);
+  --color-accent-foreground: var(--dohc-panel);
 
-  /* file-org-v1 §4.3 / D4.5 — folder color tokens. Used by the
-   * folder picker (D4.5b) + the FileTree's folder icon render.
-   * Default falls back to --color-ink-dim so legacy folders
-   * (no folderMetadata row) look UNCHANGED. The 7 chromatic tokens
-   * are tuned for muted, paper-on-warm-white aesthetic in the
-   * light theme; the dark-theme variants below lift saturation. */
-  --color-folder-red: #d63b3b;
-  --color-folder-orange: #d97706;
-  --color-folder-yellow: #b88207;
-  --color-folder-green: #15803d;
-  --color-folder-blue: #1d4ed8;
-  --color-folder-purple: #6b3fa0;
-  --color-folder-pink: #b8389a;
+  /* Secondary accent — kept in the muted family (no second hue). */
+  --color-accent-2: var(--dohc-muted);
+  --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 12%, transparent);
 
-  /* The signature gradient — used sparingly: wordmark "beam" letters,
-   * the primary signin CTA. */
-  --vibeam-gradient: linear-gradient(135deg, #b8389a 0%, #6b3fa0 100%);
+  /* file-org-v1 §4.3 / D4.5 — folder color tokens. These are an opt-in
+   * USER feature (a person tags a folder a color), not brand chrome, so
+   * the chromatic set stays — toned to sit calmly on warm paper. */
+  --color-folder-red: #b64b37;
+  --color-folder-orange: #b3702f;
+  --color-folder-yellow: #a77a35;
+  --color-folder-green: #4f7666;
+  --color-folder-blue: #3868a6;
+  --color-folder-purple: #5f5a86;
+  --color-folder-pink: #9c5478;
 
-  /* Status colors. */
-  --color-success: #1a8a60;
-  --color-warning: #b45309;
-  --color-danger: #b91c1c;
-  --color-danger-soft: #fde2e4;
+  /* Status colors — muted, functional, used only for state. */
+  --color-success: var(--dohc-success);
+  --color-warning: var(--dohc-warning);
+  --color-danger: var(--dohc-danger);
+  --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 12%, transparent);
 
-  --color-selection: #ece5d6;
-  --color-backdrop: rgba(22, 22, 24, 0.34);
+  --color-selection: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+  --color-backdrop: rgba(21, 21, 21, 0.34);
 
-  /* Depth scale — multi-layer, warm-tinted. */
-  --shadow-xs: 0 1px 2px rgba(28, 25, 23, 0.04);
-  --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.04), 0 2px 6px rgba(28, 25, 23, 0.05);
-  --shadow-md: 0 2px 6px rgba(28, 25, 23, 0.05), 0 8px 20px rgba(28, 25, 23, 0.07);
-  --shadow-lg: 0 8px 16px rgba(28, 25, 23, 0.06), 0 16px 40px rgba(28, 25, 23, 0.08);
-  --shadow-modal: 0 18px 32px rgba(28, 25, 23, 0.10), 0 32px 64px rgba(28, 25, 23, 0.12);
+  /* Depth scale — subtle, for major surfaces only (brand bible §05). */
+  --shadow-xs: 0 1px 2px rgba(21, 21, 21, 0.04);
+  --shadow-sm: 0 1px 2px rgba(21, 21, 21, 0.04), 0 2px 6px rgba(21, 21, 21, 0.05);
+  --shadow-md: 0 2px 6px rgba(21, 21, 21, 0.05), 0 8px 20px rgba(21, 21, 21, 0.07);
+  --shadow-lg: 0 8px 16px rgba(21, 21, 21, 0.06), 0 18px 54px rgba(21, 21, 21, 0.08);
+  --shadow-modal: 0 18px 32px rgba(21, 21, 21, 0.10), 0 30px 90px rgba(21, 21, 21, 0.12);
 
-  /* Radii. */
-  --radius-xs: 2px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --radius-xl: 14px;
+  /* Radii — 8px controls, 12px cards, 18px panels (brand bible §05). */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
   --radius-pill: 999px;
 
-  /* Motion. */
-  --t-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* Motion — ease out, no bounce (brand bible §05). */
+  --t-fast: 140ms cubic-bezier(0.4, 0, 0.2, 1);
   --t-base: 180ms cubic-bezier(0.4, 0, 0.2, 1);
-  --t-slow: 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-slow: 260ms cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* Typography. */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont,
-    'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, 'Berkeley Mono',
-    'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  /* Typography — system serif + sans, IBM Plex Mono webfont. */
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, serif;
+  --font-sans: 'Aptos', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 
-/* Dark — warm charcoals, brand pinks lift for visibility but the
- * dominant surface is neutral, NOT lavender-purple. */
+/* Dark — green-black surfaces + warm ink, never pure black/white
+ * (brand bible §10). The mark's graphite accent lifts to warm bone. */
 [data-theme='dark'] {
-  --color-page: #161618;
-  --color-surface: #1a1a1f;
-  --color-elevated: #22222a;
-  --color-panel: #1f1f25;
-  --color-hover: rgba(245, 242, 236, 0.05);
-  --color-pressed: rgba(245, 242, 236, 0.08);
+  --dohc-bg: #101211;
+  --dohc-panel: #191c1a;
+  --dohc-panel-2: #252923;
+  --dohc-ink: #f4f1ea;
+  --dohc-muted: #aaa69c;
+  --dohc-subtle: #78746d;
+  --dohc-accent: #d7d0c0;
+  --dohc-line: rgba(244, 241, 234, 0.14);
+  --dohc-grid: rgba(244, 241, 234, 0.035);
+  --dohc-success: #7faf9a;
+  --dohc-warning: #c89a4a;
+  --dohc-danger: #d6745f;
+  --dohc-info: #7196c8;
 
-  --color-ink: #f5f2ec;
-  --color-ink-strong: #ffffff;
-  --color-ink-dim: #c5c2bb;
-  --color-ink-faint: #8a8580;
-  --color-ink-ghost: #3a3a42;
+  --color-page: var(--dohc-bg);
+  --color-surface: var(--dohc-panel);
+  --color-elevated: var(--dohc-panel-2);
+  --color-panel: var(--dohc-panel-2);
+  --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
+  --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
 
-  --color-rule: #2a2a30;
-  --color-rule-strong: #3a3a42;
+  --color-ink: var(--dohc-ink);
+  --color-ink-strong: #fbf9f3;
+  --color-ink-dim: var(--dohc-muted);
+  --color-ink-faint: var(--dohc-subtle);
+  --color-ink-ghost: #3a3f38;
 
-  --color-accent: #fd77d7;
-  --color-accent-hover: #ffa8dd;
-  --color-accent-soft: rgba(253, 119, 215, 0.12);
-  --color-accent-foreground: #161618;
+  --color-rule: var(--dohc-line);
+  --color-rule-strong: rgba(244, 241, 234, 0.24);
 
-  --color-accent-2: #ab92e1;
-  --color-accent-2-soft: rgba(171, 146, 225, 0.12);
+  --color-accent: var(--dohc-accent);
+  --color-accent-hover: #e8e2d4;
+  --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+  --color-accent-foreground: var(--dohc-bg);
 
-  /* file-org-v1 D4.5 — dark-theme folder colors: lift saturation
-   * + brightness so they read against the warm-charcoal surfaces. */
-  --color-folder-red: #ff6b6b;
-  --color-folder-orange: #fb923c;
-  --color-folder-yellow: #facc15;
-  --color-folder-green: #4ade80;
-  --color-folder-blue: #60a5fa;
-  --color-folder-purple: #ab92e1;
-  --color-folder-pink: #fd77d7;
+  --color-accent-2: var(--dohc-muted);
+  --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 16%, transparent);
 
-  --vibeam-gradient: linear-gradient(135deg, #fd77d7 0%, #ab92e1 100%);
+  /* file-org-v1 D4.5 — dark folder colors lifted to read on green-black. */
+  --color-folder-red: #e07a64;
+  --color-folder-orange: #d3914a;
+  --color-folder-yellow: #d8b04e;
+  --color-folder-green: #79b099;
+  --color-folder-blue: #7196c8;
+  --color-folder-purple: #9a93c0;
+  --color-folder-pink: #c0879f;
 
-  --color-success: #7ae1bf;
-  --color-warning: #f3ea5d;
-  --color-danger: #ff5869;
-  --color-danger-soft: rgba(255, 88, 105, 0.12);
+  --color-success: var(--dohc-success);
+  --color-warning: var(--dohc-warning);
+  --color-danger: var(--dohc-danger);
+  --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 16%, transparent);
 
-  --color-selection: rgba(245, 242, 236, 0.16);
-  --color-backdrop: rgba(8, 6, 12, 0.74);
+  --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
+  --color-backdrop: rgba(4, 6, 5, 0.74);
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
   --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
-  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.6);
-  --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 32px 64px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 18px 54px rgba(0, 0, 0, 0.6);
+  --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 30px 90px rgba(0, 0, 0, 0.7);
 }
-/* Auto-dark when the user hasn't explicitly picked a theme. */
+/* Auto-dark when the user hasn't explicitly picked a theme. Mirrors the
+ * [data-theme='dark'] dohc tokens exactly. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']):not([data-theme='dark']) {
-    --color-page: #161618;
-    --color-surface: #1a1a1f;
-    --color-elevated: #22222a;
-    --color-panel: #1f1f25;
-    --color-hover: rgba(245, 242, 236, 0.05);
-    --color-pressed: rgba(245, 242, 236, 0.08);
+    --dohc-bg: #101211;
+    --dohc-panel: #191c1a;
+    --dohc-panel-2: #252923;
+    --dohc-ink: #f4f1ea;
+    --dohc-muted: #aaa69c;
+    --dohc-subtle: #78746d;
+    --dohc-accent: #d7d0c0;
+    --dohc-line: rgba(244, 241, 234, 0.14);
+    --dohc-grid: rgba(244, 241, 234, 0.035);
+    --dohc-success: #7faf9a;
+    --dohc-warning: #c89a4a;
+    --dohc-danger: #d6745f;
+    --dohc-info: #7196c8;
 
-    --color-ink: #f5f2ec;
-    --color-ink-strong: #ffffff;
-    --color-ink-dim: #c5c2bb;
-    --color-ink-faint: #8a8580;
-    --color-ink-ghost: #3a3a42;
+    --color-page: var(--dohc-bg);
+    --color-surface: var(--dohc-panel);
+    --color-elevated: var(--dohc-panel-2);
+    --color-panel: var(--dohc-panel-2);
+    --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
+    --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
 
-    --color-rule: #2a2a30;
-    --color-rule-strong: #3a3a42;
+    --color-ink: var(--dohc-ink);
+    --color-ink-strong: #fbf9f3;
+    --color-ink-dim: var(--dohc-muted);
+    --color-ink-faint: var(--dohc-subtle);
+    --color-ink-ghost: #3a3f38;
 
-    --color-accent: #fd77d7;
-    --color-accent-hover: #ffa8dd;
-    --color-accent-soft: rgba(253, 119, 215, 0.12);
-    --color-accent-foreground: #161618;
+    --color-rule: var(--dohc-line);
+    --color-rule-strong: rgba(244, 241, 234, 0.24);
 
-    --color-accent-2: #ab92e1;
-    --color-accent-2-soft: rgba(171, 146, 225, 0.12);
+    --color-accent: var(--dohc-accent);
+    --color-accent-hover: #e8e2d4;
+    --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+    --color-accent-foreground: var(--dohc-bg);
 
-    /* R4 fold (indep FAIL-2) — the @media (prefers-color-scheme:
-     * dark) branch was missing folder-color overrides, so users on
-     * system-prefers-dark with no explicit theme were seeing the
-     * LIGHT-theme deep blues/greens on a dark surface. Mirror the
-     * [data-theme='dark'] block. */
-    --color-folder-red: #ff6b6b;
-    --color-folder-orange: #fb923c;
-    --color-folder-yellow: #facc15;
-    --color-folder-green: #4ade80;
-    --color-folder-blue: #60a5fa;
-    --color-folder-purple: #ab92e1;
-    --color-folder-pink: #fd77d7;
+    --color-accent-2: var(--dohc-muted);
+    --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 16%, transparent);
 
-    --vibeam-gradient: linear-gradient(135deg, #fd77d7 0%, #ab92e1 100%);
+    --color-folder-red: #e07a64;
+    --color-folder-orange: #d3914a;
+    --color-folder-yellow: #d8b04e;
+    --color-folder-green: #79b099;
+    --color-folder-blue: #7196c8;
+    --color-folder-purple: #9a93c0;
+    --color-folder-pink: #c0879f;
 
-    --color-success: #7ae1bf;
-    --color-warning: #f3ea5d;
-    --color-danger: #ff5869;
-    --color-danger-soft: rgba(255, 88, 105, 0.12);
+    --color-success: var(--dohc-success);
+    --color-warning: var(--dohc-warning);
+    --color-danger: var(--dohc-danger);
+    --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 16%, transparent);
 
-    --color-selection: rgba(245, 242, 236, 0.16);
-    --color-backdrop: rgba(8, 6, 12, 0.74);
+    --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
+    --color-backdrop: rgba(4, 6, 5, 0.74);
 
     --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
     --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
-    --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.6);
-    --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 32px 64px rgba(0, 0, 0, 0.7);
+    --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 18px 54px rgba(0, 0, 0, 0.6);
+    --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 30px 90px rgba(0, 0, 0, 0.7);
   }
 }
 
@@ -264,6 +290,7 @@
   --radius-lg: var(--radius-lg);
   --radius-xl: var(--radius-xl);
 
+  --font-serif: var(--font-serif);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -2364,82 +2391,10 @@
 }
 
 /* ================================================================
- * vibeam brand utilities — applied via className from JSX.
+ * dohc inline-atom decorations — applied via className from JSX.
+ * The brand is gradient-free; decorative gradient/glow/beam motifs
+ * have been removed. Color here is a budget, not decoration.
  * ================================================================ */
-
-/* Pink → violet gradient text. Used on the wordmark and hero
- * moments. The padding-right works around -webkit-background-clip
- * clipping the trailing italic glyph. */
-.vibeam-gradient {
-  background: var(--vibeam-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  padding-right: 0.04em;
-}
-
-/* Drop-shadow halo for the brand pink — used on accent dots and the
- * sign-in indicator to give a soft glow without compositing layers. */
-.vibeam-glow {
-  filter: drop-shadow(0 0 10px var(--color-accent));
-}
-
-/* Animated diagonal "beam" — the brand's signature visual motif from
- * vibeam-web. A thin pink line drifts laterally over its host. Sized
- * via inset on the parent; respects prefers-reduced-motion. */
-.vibeam-beam {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-  z-index: 0;
-}
-.vibeam-beam::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: -25%;
-  width: 150%;
-  height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--color-accent-2) 30%,
-    var(--color-accent) 50%,
-    var(--color-accent-2) 70%,
-    transparent 100%
-  );
-  transform: rotate(15deg);
-  opacity: 0.55;
-  filter: blur(0.5px);
-  animation: vibeam-drift 14s ease-in-out infinite;
-}
-.vibeam-beam::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: -25%;
-  width: 150%;
-  height: 120px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--color-accent) 50%,
-    transparent 100%
-  );
-  transform: translateY(-60px) rotate(15deg);
-  opacity: 0.18;
-  filter: blur(40px);
-  animation: vibeam-drift 14s ease-in-out infinite;
-}
-@keyframes vibeam-drift {
-  0%, 100% { transform: translateX(-3%) rotate(15deg); }
-  50% { transform: translateX(3%) rotate(15deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .vibeam-beam::before,
-  .vibeam-beam::after { animation: none; }
-}
 
 /* ── Phase 1b: inline atoms (flag-gated; see inlineAtomPlugin.ts) ──
    Decoration only — the markdown text is unchanged. Restrained: a
