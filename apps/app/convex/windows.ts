@@ -380,7 +380,7 @@ export async function resolveWindowForViewer(
 // identical to a missing grant. Chosen over refactoring the security
 // core specifically so the locked viewer path has ZERO behaviour
 // change (T5 / fuzz / N=2 still prove it).
-const OWNER_PREVIEW_VIEWER = ' vibeam:owner-preview'
+const OWNER_PREVIEW_VIEWER = ' dohc:owner-preview'
 
 export async function resolveWindowOwnerPreview(
   ctx: QueryCtx,
@@ -419,7 +419,7 @@ export const resolve = query({
 // ── R2 consent-at-the-edge. Under STRICT reviewed-by-default every
 // entity write is withheld until the owner confirms. The owner needs
 // to SEE exactly what a window would expose that is still withheld,
-// and confirm it as the deliberate sharing act (masterplan: "beam
+// and confirm it as the deliberate sharing act (masterplan: "dohc
 // asks when unsure" / "always visible who sees what"). Owner-only;
 // own-desk only — never a cross-person read (no resolveWindow here;
 // the owner is inspecting their OWN data before sharing it).
@@ -572,7 +572,7 @@ export const withheldFor = query({
  *  The SHARED impl (design v1 §4): called by BOTH the internal
  *  agent-tool path (`_confirmWithheldFor`) AND the public consent
  *  surface (`confirmWithheldFor`). ONE code path ⇒ the button and
- *  beam do byte-identical things (the Phase-3 anti-duplication
+ *  dohc do byte-identical things (the Phase-3 anti-duplication
  *  lesson). `workspaceId` is the OWNER, derived by each caller from
  *  requireWorkspace — never a client arg. Never auto-runs. */
 async function confirmWithheldForImpl(
@@ -674,7 +674,7 @@ export const _confirmWithheldFor = internalMutation({
 })
 
 /** PUBLIC consent surface (design v1 §4.2): the owner clicks "Share
- *  these N" without going through beam. Owner STRICTLY from
+ *  these N" without going through dohc. Owner STRICTLY from
  *  requireWorkspace — never a client arg. Byte-identical to the agent
  *  path (same `confirmWithheldForImpl`). */
 export const confirmWithheldFor = mutation({
