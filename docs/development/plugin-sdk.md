@@ -43,3 +43,18 @@ single source of truth is `PLUGIN_PROTOCOL` in `@dohc/plugin-sdk`):
   })
 </script>
 ```
+
+## Migrating an existing deployment
+
+The host injects only `window.dohc`. A **fresh** dohc deployment needs no
+migration — the seed and catalog already use `window.dohc`.
+
+If you point dohc at a **pre-rebrand** Convex deployment, custom plugin
+atoms authored against the previous SDK global will throw. There is no
+permanent compatibility alias by design. Instead run a **one-shot**
+internal Convex mutation that rewrites stored plugin atom bodies — replace
+the old `window.<previous-global>.{onUpdate,upsert,patch,delete,fetchEntities}`
+calls with `window.dohc.…` — verify the affected atoms render, then delete
+the migration from the codebase. Do not commit a migration that contains
+the old identity string (the brand no-legacy guard will reject it).
+
