@@ -380,7 +380,7 @@ export async function resolveWindowForViewer(
 // identical to a missing grant. Chosen over refactoring the security
 // core specifically so the locked viewer path has ZERO behaviour
 // change (T5 / fuzz / N=2 still prove it).
-const OWNER_PREVIEW_VIEWER = ' dohc:owner-preview'
+const OWNER_PREVIEW_VIEWER = 'dohc:owner-preview'
 
 export async function resolveWindowOwnerPreview(
   ctx: QueryCtx,

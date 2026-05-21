@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
-import { Send, Sparkles } from 'lucide-react'
+import { Send } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
+import { DohcMark } from './DohcLogo'
 
 // Track-3 P3 — slash-command detection. EXACT design-pinned
 // grammar (skills-commands-v1 §3.3 line 317):
@@ -194,11 +195,8 @@ export function Chat({
   return (
     <aside className="flex h-screen flex-col bg-panel border-l border-rule">
       <header className="flex h-11 items-center justify-between px-4 border-b border-rule">
-        <div className="flex items-center gap-2">
-          <Sparkles
-            className="size-3.5 text-ink-dim"
-            strokeWidth={2}
-          />
+        <div className="flex items-center gap-2 text-ink-dim">
+          <DohcMark size={14} />
           <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
             dohc
           </span>

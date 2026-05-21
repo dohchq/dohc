@@ -351,8 +351,8 @@
 
   ::selection { background: var(--color-selection); color: var(--color-ink-strong); }
 
-  /* Focus rings — warm-ink halo with a soft tint. Pink reserved for
-   * the few moments where it earns its place (signin CTA, wordmark). */
+  /* Focus rings — warm-ink halo. Always visible on keyboard focus
+   * (brand bible accessibility rule). */
   :focus { outline: none; }
   button:focus-visible, a:focus-visible, summary:focus-visible {
     outline: 2px solid var(--color-ink);
@@ -592,7 +592,7 @@
 .dohc-atom-pill:hover {
   background: color-mix(in oklab, var(--color-accent) 16%, transparent);
 }
-/* value = author-typed truth (accent pink/red family). */
+/* value = author-typed truth (graphite accent). */
 .dohc-atom-pill--value {
   background: color-mix(in oklab, var(--color-accent) 8%, transparent);
   color: var(--color-accent);

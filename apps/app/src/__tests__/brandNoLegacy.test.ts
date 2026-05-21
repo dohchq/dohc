@@ -45,6 +45,11 @@ const FORBIDDEN: ReadonlyArray<{ name: string; re: RegExp }> = [
   { name: 'old short brand', re: new RegExp(`\\b${TINY}\\b`, 'i') },
 ]
 
+// A NUL byte makes a file binary-flagged, so rg / git grep silently skip
+// it and a legacy token could hide there (exactly how the baseline
+// planted one). Built from a char code so this file stays plain text.
+const NUL = String.fromCharCode(0)
+
 function walk(abs: string, out: string[]): void {
   let st: ReturnType<typeof statSync>
   try {
@@ -75,6 +80,11 @@ describe('brand no-legacy gate', () => {
     const violations: string[] = []
     for (const file of collectFiles()) {
       const text = readFileSync(file, 'utf8')
+      if (text.includes(NUL)) {
+        violations.push(
+          `${relative(ROOT, file)} — contains a NUL byte (binary-hidden content not allowed in source)`,
+        )
+      }
       const lines = text.split('\n')
       for (const { name, re } of FORBIDDEN) {
         lines.forEach((line, i) => {

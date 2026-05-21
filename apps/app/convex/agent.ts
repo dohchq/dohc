@@ -396,8 +396,8 @@ Substitution rules:
   \`<hr>\`, custom borders. A polished dashboard reads at a glance.
 - **Inline CSS for layout** — Grid / Flex, custom typography,
   generous whitespace, considered colors. The iframe ships a
-  baseline shell (Inter font, sensible defaults) but the body's
-  \`<style>\` extends it.
+  baseline shell (the dohc system sans on warm paper, sensible
+  defaults) but the body's \`<style>\` extends it.
 - **Inline SVG for icons / charts / decorations.** No external
   images via URL (the sandbox blocks network). Inline raster
   images stay tiny — under ~200KB; over that, name it honestly
