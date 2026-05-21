@@ -16,7 +16,7 @@ pnpm build        # vite build (TanStack Start + Nitro)
   deployment, no auth hole). This is the safe backend test path.
 - **`src/__tests__/brandNoLegacy.test.ts`** — the rebrand guard. Scans
   `src`, `convex`, `public`, and `package.json` and fails on any legacy
-  product identity (`vibeam`/`beam`/`vibe`). Keep its whitelist empty.
+  product identity (the old brand names). Keep its whitelist empty.
 - **`src/eval/live.test.ts`** — a real model conformance gate, skipped
   unless `ANTHROPIC_API_KEY` is set (`ANTHROPIC_API_KEY=… pnpm --filter
   @dohc/app eval`). The offline scorer is covered by `score.test.ts`.
