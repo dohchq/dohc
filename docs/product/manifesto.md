@@ -4,6 +4,12 @@ dohc (spoken "dock") is a quiet AI workspace for documents and real work.
 It turns the work you already do into something clear, traceable, and
 ready — without turning into an engineering console.
 
+The key distinction: dohc is not a builder-first document platform where
+the user has to assemble apps by hand before value appears. The user stays
+at the center as author, owner, and decision maker, while the AI builds and
+maintains the useful documents, views, maps, and workflows around their
+intent. See `docs/product/ai-native-positioning.md`.
+
 ## What dohc is
 
 - A **document-first workspace**. Your work lives as plain-text atoms

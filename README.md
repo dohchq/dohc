@@ -32,7 +32,8 @@ pnpm build       # vite build (TanStack Start + Nitro)
 ## Docs
 
 - Product: [`docs/product/manifesto.md`](docs/product/manifesto.md),
-  [`docs/product/spec.md`](docs/product/spec.md)
+  [`docs/product/spec.md`](docs/product/spec.md),
+  [`docs/product/ai-native-positioning.md`](docs/product/ai-native-positioning.md)
 - Brand: [`docs/brand/design-system.md`](docs/brand/design-system.md)
 - Development: [`docs/development/local-dev.md`](docs/development/local-dev.md),
   [`testing.md`](docs/development/testing.md),
