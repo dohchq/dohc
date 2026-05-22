@@ -20,6 +20,10 @@ import {
   Star,
   Palette,
   Share2,
+  Compass,
+  User,
+  Building2,
+  Target,
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
@@ -36,6 +40,11 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
+import {
+  partitionTree,
+  selectQuickAccess,
+  type QuickItem,
+} from '@/lib/file-tree-sections'
 
 type Props = {
   files: FileRow[]
@@ -96,6 +105,257 @@ type Props = {
   onOpenShared?: (shareId: string) => void
 }
 
+function readSectionOpen(key: string, dflt: boolean): boolean {
+  if (typeof window === 'undefined') return dflt
+  try {
+    const v = window.localStorage.getItem(key)
+    return v === null ? dflt : v === '1'
+  } catch {
+    return dflt
+  }
+}
+
+function writeSectionOpen(key: string, open: boolean) {
+  try {
+    window.localStorage.setItem(key, open ? '1' : '0')
+  } catch {
+    // localStorage unavailable / quota — non-fatal.
+  }
+}
+
+/** A section's open/closed state, persisted to localStorage by key. */
+function usePersistedSectionToggle(key: string, dflt: boolean) {
+  const [open, setOpen] = useState(() => readSectionOpen(key, dflt))
+  useEffect(() => {
+    writeSectionOpen(key, open)
+  }, [key, open])
+  return [open, setOpen] as const
+}
+
+/**
+ * A collapsible sidebar section, VSCode-explorer style: a chevron +
+ * uppercase label header that toggles a region below it. The header is
+ * a real <button> with aria-expanded/aria-controls; the chevron is
+ * visual-only. `trailing` holds optional header-right actions (e.g. the
+ * "+ new" menu on Personal workspace).
+ */
+function TreeSection({
+  id,
+  label,
+  open,
+  onToggle,
+  divider = false,
+  trailing,
+  children,
+}: {
+  id: string
+  label: string
+  open: boolean
+  onToggle: () => void
+  /** Draw a top rule — the explorer-style separator between sections. */
+  divider?: boolean
+  trailing?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div className={divider ? 'border-t border-rule mt-1 pt-1' : ''}>
+      <div className="group flex items-center pl-2.5 pr-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls={id}
+          className="flex flex-1 items-center gap-1 py-1 text-left text-ink-faint hover:text-ink-dim transition-colors"
+        >
+          {open ? (
+            <ChevronDown className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+          ) : (
+            <ChevronRight className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+          )}
+          <span
+            id={`${id}-label`}
+            className="text-[10px] uppercase tracking-[0.12em] font-medium"
+          >
+            {label}
+          </span>
+        </button>
+        {trailing}
+      </div>
+      <div id={id} role="group" aria-labelledby={`${id}-label`} hidden={!open}>
+        {open && children}
+      </div>
+    </div>
+  )
+}
+
+// Context section: a small, read-only list of the reserved "maps &
+// manuals" files. Curated labels + icons (the section is not a tree —
+// these files aren't dragged or renamed from here; they open on click).
+const CONTEXT_META: Record<
+  string,
+  { label: string; Icon: typeof Compass; locked?: boolean }
+> = {
+  '_map.md': { label: 'Map · your setup', Icon: Compass, locked: true },
+  'me.md': { label: 'Me', Icon: User },
+  'company.md': { label: 'Company', Icon: Building2 },
+  'intent.md': { label: 'Intent', Icon: Target },
+}
+// Quick access — a blended, read-only shortcut list (starred pages
+// first, each badged with a star, then recently-edited pages). Opens on
+// click like the Context rows; not a drag/rename surface.
+function QuickRow({
+  item,
+  active,
+  onClick,
+}: {
+  item: QuickItem
+  active: boolean
+  onClick: () => void
+}) {
+  const label =
+    item.title ||
+    item.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ||
+    item.path
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={item.path}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
+        active
+          ? 'bg-hover text-ink-strong font-medium'
+          : 'text-ink-dim hover:text-ink hover:bg-hover'
+      }`}
+    >
+      <span
+        className="flex size-3.5 shrink-0 items-center justify-center"
+        aria-hidden
+      >
+        {item.icon ? (
+          <span className="text-[12px] leading-none">{item.icon}</span>
+        ) : item.type === 'html' ? (
+          <Globe className="size-3.5" strokeWidth={2} />
+        ) : item.type === 'skill' ? (
+          <Sparkles className="size-3.5" strokeWidth={2} />
+        ) : (
+          <FileText className="size-3.5" strokeWidth={2} />
+        )}
+      </span>
+      <span className="truncate">{label}</span>
+      {item.starred && (
+        <Star
+          className="ml-auto size-3 shrink-0 fill-current text-ink-faint"
+          strokeWidth={2}
+          aria-hidden
+        />
+      )}
+    </button>
+  )
+}
+
+function QuickAccessList({
+  items,
+  activePath,
+  onOpen,
+}: {
+  items: QuickItem[]
+  activePath: string | null
+  onOpen: (path: string) => void
+}) {
+  return (
+    <div className="px-1.5 pb-1">
+      {items.map((item) => (
+        <QuickRow
+          key={item.path}
+          item={item}
+          active={activePath === item.path}
+          onClick={() => onOpen(item.path)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function ContextRow({
+  icon: Icon,
+  label,
+  active,
+  locked,
+  onClick,
+}: {
+  icon: typeof Compass
+  label: string
+  active: boolean
+  locked?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
+        active
+          ? 'bg-hover text-ink-strong font-medium'
+          : 'text-ink-dim hover:text-ink hover:bg-hover'
+      }`}
+    >
+      <Icon className="size-3.5 shrink-0" strokeWidth={2} />
+      <span className="truncate">{label}</span>
+      {locked && (
+        <Lock className="ml-auto size-3 shrink-0 text-ink-faint" strokeWidth={2} />
+      )}
+    </button>
+  )
+}
+
+function ContextList({
+  files,
+  activePath,
+  onOpen,
+}: {
+  files: FileRow[]
+  activePath: string | null
+  onOpen: (path: string) => void
+}) {
+  const byPath = new Map(files.map((f) => [f.path, f]))
+  // Object key order is the curated display order (insertion order).
+  const roots = Object.keys(CONTEXT_META).filter((p) => byPath.has(p))
+  const skills = files
+    .filter((f) => f.path.startsWith('skills/'))
+    .sort((a, b) => a.path.localeCompare(b.path))
+  return (
+    <div className="px-1.5 pb-1">
+      {roots.map((p) => {
+        const meta = CONTEXT_META[p]
+        return (
+          <ContextRow
+            key={p}
+            icon={meta.Icon}
+            label={meta.label}
+            locked={meta.locked}
+            active={activePath === p}
+            onClick={() => onOpen(p)}
+          />
+        )
+      })}
+      {skills.map((f) => {
+        const name =
+          f.title || f.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() || f.path
+        return (
+          <ContextRow
+            key={f.path}
+            icon={Sparkles}
+            label={name}
+            active={activePath === f.path}
+            onClick={() => onOpen(f.path)}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 export function FileTree({
   files,
   folders,
@@ -120,8 +380,38 @@ export function FileTree({
   activeShareId,
   onOpenShared,
 }: Props) {
-  const tree = useMemo(() => buildTree(files, folders), [files, folders])
+  // Partition the flat lists into the three sidebar sections. Pure
+  // presentation — no file moves. The main tree is built from the
+  // Personal-workspace subset; Context surfaces the reserved files.
+  const { personalFiles, personalFolders, contextFiles } = useMemo(
+    () => partitionTree(files, folders),
+    [files, folders],
+  )
+  const tree = useMemo(
+    () => buildTree(personalFiles, personalFolders),
+    [personalFiles, personalFolders],
+  )
   const label = user?.firstName || user?.email?.split('@')[0] || 'signed in'
+
+  // Collapsible-section open state, persisted per section (mirrors the
+  // chat-open localStorage pattern in _app.tsx). Personal + Context +
+  // Shared all default open.
+  const [openQuick, setOpenQuick] = usePersistedSectionToggle(
+    'dohc-section-quick',
+    true,
+  )
+  const [openPersonal, setOpenPersonal] = usePersistedSectionToggle(
+    'dohc-section-personal',
+    true,
+  )
+  const [openContext, setOpenContext] = usePersistedSectionToggle(
+    'dohc-section-context',
+    true,
+  )
+  const [openShared, setOpenShared] = usePersistedSectionToggle(
+    'dohc-section-shared',
+    true,
+  )
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   useEffect(() => {
@@ -148,6 +438,12 @@ export function FileTree({
   // first Tab into the tree lands on their open file.
   const [focusedPath, setFocusedPath] = useState<string | null>(activePath)
   const rowRefs = useRef(new Map<string, HTMLDivElement | null>())
+  // Programmatic DOM focus must follow ONLY keyboard arrow-nav — never
+  // the automatic bootstrap re-anchor (which would steal focus from the
+  // editor when the open file lives in another section) and never mount
+  // (clicks/onFocus already place DOM focus). Set true just before a
+  // keyboard-driven setFocusedPath; the focus-DOM effect consumes it.
+  const wantDomFocusRef = useRef(false)
 
   // Flatten the visible rows in render order. This is the lookup the
   // pure nav function uses. Re-derived each render because both
@@ -200,10 +496,13 @@ export function FileTree({
     }
   }, [focusedPath, flatRows, activePath])
 
-  // After a focus change, move DOM focus onto the corresponding row so
-  // the screen reader announces it. Only acts when the row is in the
-  // visible set (a focused row whose folder collapsed disappears).
+  // Move DOM focus onto the focused row so the screen reader announces
+  // it — but ONLY when a keyboard arrow-nav requested it (wantDomFocus).
+  // The bootstrap re-anchor and mount must not grab focus, or opening a
+  // file in another section would yank focus off the editor.
   useEffect(() => {
+    if (!wantDomFocusRef.current) return
+    wantDomFocusRef.current = false
     if (focusedPath === null) return
     const el = rowRefs.current.get(focusedPath)
     if (el && document.activeElement !== el) el.focus({ preventScroll: false })
@@ -235,8 +534,23 @@ export function FileTree({
   // Trigger a render when the optimistic maps mutate so the row
   // re-evaluates its current state. The ref is the source of truth;
   // this counter is just a tickle.
-  const [, setPendingTick] = useState(0)
+  const [pendingTick, setPendingTick] = useState(0)
   const bumpPending = useCallback(() => setPendingTick((n) => n + 1), [])
+
+  // Quick access overlay (starred + recent). A shortcut layer over the
+  // same files — items here also appear in their real section. We apply
+  // the optimistic `pendingStars` overlay (the same one the tree rows
+  // read) so a Shift+S reorders Quick access INSTANTLY, not after the
+  // server round-trip; `pendingTick` forces the recompute when that ref
+  // mutates (the ref itself can't be a dependency).
+  const quickItems = useMemo(() => {
+    const overlaid = files.map((f) => {
+      const opt = pendingStars.current.get(f.path)
+      return opt === undefined ? f : { ...f, starred: opt }
+    })
+    return selectQuickAccess(overlaid)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, pendingTick])
 
   // Reconcile: when the projection finally matches the optimistic
   // intent, drop the entry. Defends against the race where a
@@ -483,6 +797,8 @@ export function FileTree({
       e.preventDefault()
       switch (action.kind) {
         case 'focus':
+          // Keyboard nav — DOM focus should follow to the new row.
+          wantDomFocusRef.current = true
           setFocusedPath(action.path)
           break
         case 'expand':
@@ -563,6 +879,10 @@ export function FileTree({
   // a focused folder, auto-expand it so the new row will be
   // visible right after commit. Cheap defensive UX.
   function beginPending(kind: 'page' | 'folder') {
+    // The inline create row lives inside the Personal section; make
+    // sure it's expanded or the input would mount hidden (and never
+    // focus) when the user creates while the section is collapsed.
+    setOpenPersonal(true)
     if (targetDir !== '' && !expanded.has(targetDir)) {
       setExpanded((prev) => new Set(prev).add(targetDir))
     }
@@ -687,17 +1007,36 @@ export function FileTree({
         </div>
       </header>
 
-      {/* Section label */}
-      <div className="px-4 pt-1 pb-2">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-ink-faint font-medium">
-          Vault
-        </span>
-      </div>
+      {/* Sections — VSCode-explorer style: collapsible groups over the
+          same flat file list (a pure presentation partition). */}
+      <div className="flex-1 overflow-y-auto pb-3">
+        {/* Quick access — starred + recent, blended into one list. A
+            shortcut overlay (not part of the partition); hidden when
+            there's nothing to surface (e.g. a fresh workspace). */}
+        {quickItems.length > 0 && (
+          <TreeSection
+            id="filetree-quick"
+            label="Quick access"
+            open={openQuick}
+            onToggle={() => setOpenQuick((v) => !v)}
+          >
+            <QuickAccessList
+              items={quickItems}
+              activePath={activePath}
+              onOpen={onOpen}
+            />
+          </TreeSection>
+        )}
 
-      {/* Tree list */}
-      {/* pt-1 so the topmost row's focus ring isn't clipped by the
-          scroll container's top edge. */}
-      <div className="flex-1 overflow-y-auto px-1.5 pt-1 pb-3">
+        <TreeSection
+          id="filetree-personal"
+          label="Personal workspace"
+          open={openPersonal}
+          onToggle={() => setOpenPersonal((v) => !v)}
+          divider={quickItems.length > 0}
+        >
+          {/* pt-1 so the topmost row's focus ring isn't clipped. */}
+          <div className="px-1.5 pt-1">
         {/* D4.6b — PendingRow renders INLINE at the target folder's
             depth (VSCode-style). The root case (targetDir === '')
             still renders at the top of the tree container; the
@@ -713,14 +1052,14 @@ export function FileTree({
 
         {tree.children.length === 0 && !pending ? (
           <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
-            Empty vault — hit{' '}
+            No pages yet — hit{' '}
             <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">⌘K</kbd>{' '}
             or the <Plus className="inline size-3 -mt-0.5" /> button to start.
           </div>
         ) : (
           <div
             role="tree"
-            aria-label="vault"
+            aria-label="personal workspace"
             onKeyDown={onTreeKeyDown}
             // D4.7 — root drop zone. Dropping on empty space in the
             // tree container (not on any row) moves the source to
@@ -809,16 +1148,43 @@ export function FileTree({
             ))}
           </div>
         )}
-      </div>
-
-      {/* sharing-v1 1a — "Shared with me" section (second explorer
-          group). Hidden when nothing is shared with the user. */}
-      {(sharedWithMe?.length ?? 0) > 0 && (
-        <div className="border-t border-rule px-2 py-2 overflow-y-auto max-h-[30vh]">
-          <div className="px-2 pb-1 text-[10.5px] font-semibold uppercase tracking-wide text-ink-faint">
-            Shared with me
           </div>
-          {sharedWithMe!.map((s) => {
+        </TreeSection>
+
+        {/* Context — the AI-OS "maps & manuals": the reserved files you
+            and dohc navigate by. Read-only here; they open on click. */}
+        {contextFiles.length > 0 && (
+          <TreeSection
+            id="filetree-context"
+            label="Context"
+            open={openContext}
+            onToggle={() => setOpenContext((v) => !v)}
+            divider
+          >
+            <ContextList
+              files={contextFiles}
+              activePath={activePath}
+              onOpen={onOpen}
+            />
+          </TreeSection>
+        )}
+
+        {/* sharing-v1 1a — "Shared with me". Always shown so the surface
+            is discoverable, with a calm empty state when nothing's shared. */}
+        <TreeSection
+          id="filetree-shared"
+          label="Shared with me"
+          open={openShared}
+          onToggle={() => setOpenShared((v) => !v)}
+          divider
+        >
+          <div className="px-1.5 pb-1">
+            {(sharedWithMe?.length ?? 0) === 0 && (
+              <p className="px-2 py-1 text-[11.5px] leading-relaxed text-ink-faint">
+                Nothing shared with you yet.
+              </p>
+            )}
+          {(sharedWithMe ?? []).map((s) => {
             const leaf =
               s.title ||
               s.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ||
@@ -843,8 +1209,9 @@ export function FileTree({
               </button>
             )
           })}
-        </div>
-      )}
+          </div>
+        </TreeSection>
+      </div>
 
       {/* Footer — Plugins lives in the activity bar now. */}
       <footer className="border-t border-rule px-3 py-2.5 flex flex-col gap-2">

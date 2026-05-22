@@ -562,7 +562,7 @@ function App() {
           () =>
             window.alert(
               `Moved ${fromPath} → ${toPath}\n` +
-                `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across the vault.`,
+                `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across your workspace.`,
             ),
           0,
         )
