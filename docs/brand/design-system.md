@@ -22,15 +22,15 @@ decoration.
 
 | Token        | Light       | Dark        |
 | ------------ | ----------- | ----------- |
-| bg           | `#f7f6f1`   | `#121211`   |
-| panel        | `#fffefa`   | `#1c1b1a`   |
+| bg           | `#f7f6f1`   | `#101211`   |
+| panel        | `#fffefa`   | `#191c1a`   |
 | panel-2      | `#ece9e1`   | `#0e0e0d`   |
 | ink          | `#151515`   | `#f4f1ea`   |
 | muted        | `#66635d`   | `#aaa69c`   |
 | accent       | `#2d342e`   | `#d7d0c0`   |
 
 Semantic (state only): success `#4f7666`, warning `#a77a35`, danger
-`#b64b37`, info `#3868a6`. Dark mode is warm-neutral charcoal + warm ink — never
+`#b64b37`, info `#3868a6`. Dark mode is green-black + warm ink — never
 pure black/white.
 
 ## Type

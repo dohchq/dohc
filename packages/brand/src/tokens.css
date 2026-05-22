@@ -28,9 +28,10 @@
 }
 
 [data-theme='dark'] {
-  /* Dark mode (warm-neutral charcoal, warm ink — never pure black/white) */
-  --dohc-bg: #121211;
-  --dohc-panel: #1c1b1a;
+  /* Dark mode (green-black surfaces, warm ink — never pure black/white).
+   * panel-2 (side nav / panels) is a darker neutral charcoal. */
+  --dohc-bg: #101211;
+  --dohc-panel: #191c1a;
   --dohc-panel-2: #0e0e0d;
   --dohc-ink: #f4f1ea;
   --dohc-muted: #aaa69c;
