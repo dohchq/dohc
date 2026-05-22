@@ -17,8 +17,22 @@ import { join, relative } from 'node:path'
 // source — rename it, do not whitelist it.
 
 const ROOT = process.cwd() // apps/app when vitest runs
+const REPO = join(ROOT, '..', '..') // monorepo root
 
-const SCAN_ROOTS = ['src', 'convex', 'public', 'package.json']
+// App-scoped roots plus the monorepo-level shared packages and docs, so
+// the in-suite guard matches the repo-level rg gate's scope (a legacy
+// string reintroduced into packages/* or docs/* is caught here too).
+const SCAN_ROOTS = [
+  join(ROOT, 'src'),
+  join(ROOT, 'convex'),
+  join(ROOT, 'public'),
+  join(ROOT, 'package.json'),
+  join(REPO, 'packages'),
+  join(REPO, 'docs'),
+  join(REPO, 'README.md'),
+  join(REPO, 'package.json'),
+  join(REPO, 'pnpm-workspace.yaml'),
+]
 
 const SKIP_DIR = new Set([
   'node_modules',
@@ -71,7 +85,7 @@ function walk(abs: string, out: string[]): void {
 
 function collectFiles(): string[] {
   const out: string[] = []
-  for (const root of SCAN_ROOTS) walk(join(ROOT, root), out)
+  for (const root of SCAN_ROOTS) walk(root, out)
   return out
 }
 

@@ -373,7 +373,7 @@ export async function resolveWindowForViewer(
 // the SAME `gatherWindowAtoms`, satisfying the grant + owner≠viewer
 // gates with a SERVER-ONLY synthetic principal. A WorkOS subject is
 // always a non-empty `user_…`/uuid-shaped token — it can NEVER equal
-// this space-prefixed literal, and this constant is NEVER
+// this reserved `dohc:`-namespaced literal, and this constant is NEVER
 // client-supplied (callers pass only `windowId`; `viewer` in the
 // real path is strictly `requireWorkspace`). Real authz is the
 // STRICT owner-equality check below: a foreign/forged windowId ⇒ DENY,
