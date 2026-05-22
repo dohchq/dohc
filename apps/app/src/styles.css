@@ -1,5 +1,5 @@
 /* dohc — logo-native design system. Warm paper + graphite in light,
- * green-black + warm ink in dark. Brand tokens are the source of truth
+ * warm-neutral charcoal + warm ink in dark. Brand tokens are the source of truth
  * (see packages/brand/src/tokens.css and dohc-brand-bible.html); the
  * --color-* layer below resolves from them so Tailwind utilities
  * (bg-page, text-ink, border-rule, …) swap with data-theme.
@@ -118,12 +118,12 @@
   --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 
-/* Dark — green-black surfaces + warm ink, never pure black/white
+/* Dark — warm-neutral charcoal surfaces + warm ink, never pure black/white
  * (brand bible §10). The mark's graphite accent lifts to warm bone. */
 [data-theme='dark'] {
-  --dohc-bg: #101211;
-  --dohc-panel: #191c1a;
-  --dohc-panel-2: #252923;
+  --dohc-bg: #121211;
+  --dohc-panel: #1c1b1a;
+  --dohc-panel-2: #272624;
   --dohc-ink: #f4f1ea;
   --dohc-muted: #aaa69c;
   --dohc-subtle: #78746d;
@@ -159,7 +159,7 @@
   --color-accent-2: var(--dohc-muted);
   --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 16%, transparent);
 
-  /* file-org-v1 D4.5 — dark folder colors lifted to read on green-black. */
+  /* file-org-v1 D4.5 — dark folder colors lifted to read on warm-neutral charcoal. */
   --color-folder-red: #e07a64;
   --color-folder-orange: #d3914a;
   --color-folder-yellow: #d8b04e;
@@ -186,9 +186,9 @@
  * [data-theme='dark'] dohc tokens exactly. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']):not([data-theme='dark']) {
-    --dohc-bg: #101211;
-    --dohc-panel: #191c1a;
-    --dohc-panel-2: #252923;
+    --dohc-bg: #121211;
+    --dohc-panel: #1c1b1a;
+    --dohc-panel-2: #272624;
     --dohc-ink: #f4f1ea;
     --dohc-muted: #aaa69c;
     --dohc-subtle: #78746d;

@@ -28,10 +28,10 @@
 }
 
 [data-theme='dark'] {
-  /* Dark mode (green-black, warm ink — never pure black/white) */
-  --dohc-bg: #101211;
-  --dohc-panel: #191c1a;
-  --dohc-panel-2: #252923;
+  /* Dark mode (warm-neutral charcoal, warm ink — never pure black/white) */
+  --dohc-bg: #121211;
+  --dohc-panel: #1c1b1a;
+  --dohc-panel-2: #272624;
   --dohc-ink: #f4f1ea;
   --dohc-muted: #aaa69c;
   --dohc-subtle: #78746d;

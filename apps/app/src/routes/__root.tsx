@@ -22,7 +22,7 @@ export const Route = createRootRoute({
         content:
           'The quiet AI and docs workspace where work becomes clear, traceable, and ready.',
       },
-      // Warm paper in light mode, green-black in dark mode.
+      // Warm paper in light mode, warm-neutral charcoal in dark mode.
       {
         name: 'theme-color',
         content: '#f7f6f1',
@@ -30,7 +30,7 @@ export const Route = createRootRoute({
       },
       {
         name: 'theme-color',
-        content: '#101211',
+        content: '#121211',
         media: '(prefers-color-scheme: dark)',
       },
       { property: 'og:title', content: 'dohc' },
