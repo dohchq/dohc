@@ -109,7 +109,7 @@ describe('Phase-4 precondition — non-truncated eval byte-unchanged', () => {
     ).toBe('_(no match)_') // plain, NOT the truncated variant
   })
 
-  it('vault.glob: matches under the cap, plain no-match', async () => {
+  it('docs.glob: matches under the cap, plain no-match', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: W,
@@ -118,10 +118,10 @@ describe('Phase-4 precondition — non-truncated eval byte-unchanged', () => {
       source: 'user',
     })
     const as = t.withIdentity({ subject: W })
-    expect(await as.action(api.queries.run, { src: 'vault.glob("dash*")' })).toBe(
+    expect(await as.action(api.queries.run, { src: 'docs.glob("dash*")' })).toBe(
       '- [[dashboard.md]]',
     )
-    expect(await as.action(api.queries.run, { src: 'vault.glob("zzz*")' })).toBe(
+    expect(await as.action(api.queries.run, { src: 'docs.glob("zzz*")' })).toBe(
       '_(no matches)_',
     )
   })
@@ -194,7 +194,7 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     expect(r.length).toBe(5)
   })
 
-  it('Independent P4: vault.find is a DIGEST (frontmatter stripped); _map.md excluded', async () => {
+  it('Independent P4: docs.find is a DIGEST (frontmatter stripped); _map.md excluded', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: W,
@@ -215,19 +215,19 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     const as = t.withIdentity({ subject: W })
     const r = await as.query(api.queries.evalQueryBlocks, {
       srcs: [
-        'vault.find("logs/2025-07-14.md")',
-        'vault.find("_map.md")', // derived index — not findable
-        'vault.glob("*.md")', // matches _map.md by pattern — filter must drop it
+        'docs.find("logs/2025-07-14.md")',
+        'docs.find("_map.md")', // derived index — not findable
+        'docs.glob("*.md")', // matches _map.md by pattern — filter must drop it
       ],
     })
     const m = new Map(r.map((e) => [e.src, e.value]))
-    const find = m.get('vault.find("logs/2025-07-14.md")') as string
+    const find = m.get('docs.find("logs/2025-07-14.md")') as string
     expect(find).not.toContain('---\nid:') // frontmatter stripped (digest)
     expect(find).toContain('# July 14') // the actual content shows
-    expect(m.get('vault.find("_map.md")')).toBe('_(missing: _map.md)_')
+    expect(m.get('docs.find("_map.md")')).toBe('_(missing: _map.md)_')
     // `*.md` matches `_map.md` by pattern; the exclusion filter must
     // drop it ⇒ no matches (logs/… has a slash, `*` is single-seg).
-    expect(m.get('vault.glob("*.md")')).toBe('_(no matches)_')
+    expect(m.get('docs.glob("*.md")')).toBe('_(no matches)_')
   })
 
   it('Codex P4-fold-2: a 40-line note + trailing newline is NOT falsely "truncated"; >40 IS', async () => {
@@ -247,12 +247,12 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     })
     const as = t.withIdentity({ subject: W })
     const r = await as.query(api.queries.evalQueryBlocks, {
-      srcs: ['vault.find("forty.md")', 'vault.find("fifty.md")'],
+      srcs: ['docs.find("forty.md")', 'docs.find("fifty.md")'],
     })
     const m = new Map(r.map((e) => [e.src, e.value as string]))
-    expect(m.get('vault.find("forty.md")')).not.toContain('truncated') // honest
-    expect(m.get('vault.find("forty.md")')).toContain('L40')
-    expect(m.get('vault.find("fifty.md")')).toContain('truncated') // really is
+    expect(m.get('docs.find("forty.md")')).not.toContain('truncated') // honest
+    expect(m.get('docs.find("forty.md")')).toContain('L40')
+    expect(m.get('docs.find("fifty.md")')).toContain('truncated') // really is
   })
 
   it('Codex P4-fold: digestBody is ReDoS-safe on a pathological frontmatter prefix', async () => {
@@ -271,9 +271,32 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     const as = t.withIdentity({ subject: W })
     const t0 = Date.now()
     const r = await as.query(api.queries.evalQueryBlocks, {
-      srcs: ['vault.find("evil.md")'],
+      srcs: ['docs.find("evil.md")'],
     })
     expect(Date.now() - t0).toBeLessThan(500) // linear, not quadratic hang
     expect(typeof r[0].value === 'string').toBe(true) // resolved, didn't throw
+  })
+
+  it('vault.* still resolves as a legacy alias for docs.*', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.atoms._upsertInternal, {
+      workspaceId: W,
+      path: 'dashboard.md',
+      body: '# d',
+      source: 'user',
+    })
+    const as = t.withIdentity({ subject: W })
+    // The legacy `vault.` namespace must resolve identically to `docs.`
+    // so query blocks authored before the rename keep working.
+    expect(await as.action(api.queries.run, { src: 'vault.glob("dash*")' })).toBe(
+      await as.action(api.queries.run, { src: 'docs.glob("dash*")' }),
+    )
+    expect(
+      await as.action(api.queries.run, { src: 'vault.glob("dash*")' }),
+    ).toBe('- [[dashboard.md]]')
+    // …and the find verb routes through the alias too (not just glob).
+    expect(await as.action(api.queries.run, { src: 'vault.find("dashboard.md")' })).toBe(
+      await as.action(api.queries.run, { src: 'docs.find("dashboard.md")' }),
+    )
   })
 })

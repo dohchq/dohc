@@ -296,8 +296,8 @@ Namespaces + verbs available:
 - entities.list(type, {filters})         — list entities
 - entities.count(type, {filters})        — count
 - entities.find(type, slug)              — single entity
-- vault.glob(path-pattern)               — list atoms by path glob
-- vault.find(path)                       — read an atom inline
+- docs.glob(path-pattern)                — list atoms by path glob
+- docs.find(path)                        — read an atom inline
 - capacity.heatmap({ window: "next-8w" }) — ASCII heatmap
 - capacity.risks()                        — overbook risks
 

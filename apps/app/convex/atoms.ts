@@ -698,7 +698,7 @@ function escapeRegex(s: string): string {
 
 export const _listInternal = internalQuery({
   // atom-address-v1 §5.2 (Phase-4 precondition 1): optional `limit`
-  // to BOUND the query-block `vault.glob` read. Omitted ⇒ unbounded
+  // to BOUND the query-block `docs.glob` read. Omitted ⇒ unbounded
   // (byte-identical for the agent callers); given ⇒ take limit+1 so
   // truncation is detectable + honestly disclosed.
   args: { workspaceId: v.string(), limit: v.optional(v.number()) },

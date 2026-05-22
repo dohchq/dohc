@@ -216,7 +216,7 @@ export function humanizeQuery(src: string): string {
 // markdown is still the truth; a power user edits it directly.
 const queryBlockKey = new PluginKey('dohc-query-block')
 // atom-address-v1 §5.2 Phase-4 (4B-editor) — KILL THE SLOP BOX. The
-// query block kept showing its DSL *source* (`vault.find(…)`) and no
+// query block kept showing its DSL *source* (`docs.find(…)`) and no
 // data. Now the evaluated RESULT renders right after it (reactive via
 // evalQueryBlocks; the literal DSL stays the editable source/truth —
 // manifesto locked-#1, mirrors the Phase-3 formula widget). The

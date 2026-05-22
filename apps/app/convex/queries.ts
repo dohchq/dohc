@@ -6,7 +6,7 @@ import { requireWorkspace } from './auth'
 import { MAP_PATH } from './inlineAtom'
 import { splitFrontmatter } from './atomId'
 
-// vault.find dumping a whole note's RAW markdown body (frontmatter +
+// docs.find dumping a whole note's RAW markdown body (frontmatter +
 // all) as a grey blob is "slop wearing a card" — the user's exact
 // screenshotted case (independent P4-review SHOULD-FIX). Digest it:
 // drop the leading frontmatter, cap the length, mark truncation.
@@ -42,7 +42,8 @@ function digestBody(path: string, body: string): string {
 //
 // Grammar: namespace.verb("resource", { filters })
 //
-// Namespaces (v0): entities | vault | capacity
+// Namespaces (v0): entities | docs | capacity
+//   (`vault` is still accepted as a legacy alias for `docs`.)
 // Verbs: list | count | recent | glob | find | heatmap
 
 // atom-address-v1 §5.2 Phase-4 precondition 1 — every internal list
@@ -173,8 +174,11 @@ async function evalQuery(
   try {
     if (parsed.namespace === 'entities')
       return { ok: true, md: await runEntities(ctx, workspaceId, parsed) }
-    if (parsed.namespace === 'vault')
-      return { ok: true, md: await runVault(ctx, workspaceId, parsed) }
+    // `docs` is the canonical document namespace; `vault` is kept as a
+    // silent backward-compat alias so query blocks authored before the
+    // rename keep resolving (no body migration needed).
+    if (parsed.namespace === 'docs' || parsed.namespace === 'vault')
+      return { ok: true, md: await runDocs(ctx, workspaceId, parsed) }
     if (parsed.namespace === 'capacity')
       return { ok: true, md: await runCapacity(ctx, workspaceId, parsed) }
     return { ok: false, md: `_(unknown namespace: ${parsed.namespace})_` }
@@ -325,7 +329,7 @@ function formatValue(v: unknown): string {
   return String(v)
 }
 
-async function runVault(
+async function runDocs(
   ctx: QueryCtx,
   workspaceId: string,
   q: ParsedQuery,
@@ -350,7 +354,7 @@ async function runVault(
       ? `_(missing: ${q.resource})_`
       : digestBody(q.resource, body)
   }
-  throw new Error(`verb ${q.verb} not implemented for vault`)
+  throw new Error(`verb ${q.verb} not implemented for docs`)
 }
 
 function globMatch(path: string, pattern: string): boolean {
