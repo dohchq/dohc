@@ -57,4 +57,3 @@ the old `window.<previous-global>.{onUpdate,upsert,patch,delete,fetchEntities}`
 calls with `window.dohc.…` — verify the affected atoms render, then delete
 the migration from the codebase. Do not commit a migration that contains
 the old identity string (the brand no-legacy guard will reject it).
-

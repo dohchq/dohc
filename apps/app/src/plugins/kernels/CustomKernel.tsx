@@ -157,11 +157,12 @@ function wrapPluginBody(body: string): string {
   }
   body { padding: 4px; }
 </style>
-</head>
-<body>
-${body}
 <script>
-  /* dohc plugin bridge — auto-injected. See SDK types: window.dohc */
+  /* dohc plugin bridge — auto-injected. Defined in <head> BEFORE the
+   * plugin body so a body inline script can call window.dohc (e.g.
+   * window.dohc.onUpdate) synchronously without a race. The
+   * ResizeObserver is deferred until the body exists. See SDK types:
+   * window.dohc (@dohc/plugin-sdk). */
   (function() {
     var _cb = null;
     var _pending = {};
@@ -212,19 +213,32 @@ ${body}
     });
 
     function postHeight() {
-      var h = Math.max(
-        document.documentElement.scrollHeight,
-        document.body.scrollHeight
-      );
+      var de = document.documentElement;
+      var b = document.body;
+      var h = Math.max(de ? de.scrollHeight : 0, b ? b.scrollHeight : 0);
       parent.postMessage({ type: '${P.resize}', height: h + 4 }, '*');
     }
-    var ro = new ResizeObserver(postHeight);
-    ro.observe(document.body);
+    function startResize() {
+      try {
+        if (typeof ResizeObserver !== 'undefined' && document.body) {
+          new ResizeObserver(postHeight).observe(document.body);
+        }
+      } catch (e) { /* observer unavailable — fall back to load/timeout */ }
+      postHeight();
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startResize);
+    } else {
+      startResize();
+    }
     window.addEventListener('load', postHeight);
     setTimeout(postHeight, 100);
     setTimeout(postHeight, 500);
   })();
 </script>
+</head>
+<body>
+${body}
 </body>
 </html>`
 }
