@@ -30,7 +30,7 @@ export const Route = createRootRoute({
       },
       {
         name: 'theme-color',
-        content: '#101211',
+        content: '#100f0e',
         media: '(prefers-color-scheme: dark)',
       },
       { property: 'og:title', content: 'dohc' },

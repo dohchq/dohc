@@ -24,7 +24,7 @@ export const LIGHT_TOKENS = {
 } as const
 
 export const DARK_TOKENS = {
-  bg: '#101211',
+  bg: '#100f0e',
   panel: '#191c1a',
   panel2: '#0e0e0d',
   ink: '#f4f1ea',

@@ -22,7 +22,7 @@ decoration.
 
 | Token        | Light       | Dark        |
 | ------------ | ----------- | ----------- |
-| bg           | `#f7f6f1`   | `#101211`   |
+| bg           | `#f7f6f1`   | `#100f0e`   |
 | panel        | `#fffefa`   | `#191c1a`   |
 | panel-2      | `#ece9e1`   | `#0e0e0d`   |
 | ink          | `#151515`   | `#f4f1ea`   |

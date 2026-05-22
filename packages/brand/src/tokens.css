@@ -28,9 +28,10 @@
 }
 
 [data-theme='dark'] {
-  /* Dark mode (green-black surfaces, warm ink — never pure black/white).
-   * panel-2 (side nav / panels) is a darker neutral charcoal. */
-  --dohc-bg: #101211;
+  /* Dark mode — warm ink, never pure black/white. Neutral-charcoal
+   * background, faint green-black card surface, darker neutral-charcoal
+   * side panels (panel-2). */
+  --dohc-bg: #100f0e;
   --dohc-panel: #191c1a;
   --dohc-panel-2: #0e0e0d;
   --dohc-ink: #f4f1ea;

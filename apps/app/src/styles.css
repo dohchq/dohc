@@ -118,13 +118,15 @@
   --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 
-/* Dark — green-black surfaces + warm ink, never pure black/white
- * (brand bible §10). The mark's graphite accent lifts to warm bone. */
+/* Dark — warm ink, never pure black/white (brand bible §10). The mark's
+ * graphite accent lifts to warm bone. Background is a neutral charcoal;
+ * the card surface keeps a faint green-black cast; side panels are a
+ * darker neutral charcoal (product preference). */
 [data-theme='dark'] {
-  --dohc-bg: #101211;
+  --dohc-bg: #100f0e;
   --dohc-panel: #191c1a;
   /* side nav / panels: a darker neutral charcoal (recessed below the
-   * green-black canvas), per product preference. */
+   * canvas), per product preference. */
   --dohc-panel-2: #0e0e0d;
   --dohc-ink: #f4f1ea;
   --dohc-muted: #aaa69c;
@@ -188,7 +190,7 @@
  * [data-theme='dark'] dohc tokens exactly. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']):not([data-theme='dark']) {
-    --dohc-bg: #101211;
+    --dohc-bg: #100f0e;
     --dohc-panel: #191c1a;
     --dohc-panel-2: #0e0e0d;
     --dohc-ink: #f4f1ea;
