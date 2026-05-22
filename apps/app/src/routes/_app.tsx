@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createFileRoute,
   useNavigate,
@@ -14,7 +14,8 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
-import { applyFrontmatter } from '@/lib/frontmatter'
+import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
+import { useDocumentMeta } from '@/lib/use-document-meta'
 import { FileTree } from '@/components/FileTree'
 import { AtomView } from '@/components/AtomView'
 import { SharedAtomView } from '@/components/SharedAtomView'
@@ -53,6 +54,15 @@ function AppLayout() {
 const BUILD_PLUGIN_PROMPT = `I want to build a new plugin. Available kernels are heatmap, list (with layouts: cards/kanban/template), table, and custom. Custom kernels are full HTML/JS in a sandboxed iframe with read+write access via window.dohc. Ask me what view I want, what query it should claim (e.g. entities.list("booking")), which kernel to use, and which kernel-specific fields / commands / overlay flag to set. Then write the plugin atom to plugins/<id>.md with the right frontmatter.`
 
 type View = 'atom' | 'graph' | 'plugins'
+
+// Display name for a file path: the leaf, sans a single extension
+// (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
+// fallback when an atom has no frontmatter `title:` — mirrors how the
+// tree labels untitled files.
+function leafName(path: string): string {
+  const leaf = path.split('/').pop() ?? path
+  return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
+}
 
 function Home() {
   const { user, loading } = useAuth()
@@ -224,6 +234,49 @@ function App() {
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>('atom')
+
+  // Notion-style browser tab: reflect the open surface in the title +
+  // favicon. This shell is the single owner — the open page lives in
+  // live Convex queries here, not in route loader data. For a shared
+  // page (`/shared/<id>`) we read its title/emoji from the SAME query
+  // SharedAtomView uses; Convex multiplexes the identical subscription,
+  // so it costs nothing extra.
+  const sharedAtomForMeta = useQuery(
+    api.atomShares.getSharedAtom,
+    urlShareId ? { shareId: urlShareId as Id<'atomShares'> } : 'skip',
+  )
+  const { docTitle, docEmoji } = useMemo<{
+    docTitle: string | null | undefined
+    docEmoji: string | null | undefined
+  }>(() => {
+    if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
+    if (view === 'plugins') return { docTitle: 'Plugins', docEmoji: null }
+    if (urlShareId) {
+      // undefined ⇒ still loading: hold the current tab (no brand flash).
+      // null ⇒ gone/forbidden: fall back to the brand default.
+      if (sharedAtomForMeta === undefined)
+        return { docTitle: undefined, docEmoji: undefined }
+      if (sharedAtomForMeta === null)
+        return { docTitle: null, docEmoji: null }
+      const { meta } = parseFrontmatter(sharedAtomForMeta.body)
+      const title =
+        (typeof meta.title === 'string' && meta.title.trim()) ||
+        leafName(sharedAtomForMeta.path)
+      const emoji =
+        typeof meta.icon === 'string' && meta.icon.trim()
+          ? meta.icon.trim()
+          : null
+      return { docTitle: title, docEmoji: emoji }
+    }
+    if (!activePath) return { docTitle: null, docEmoji: null }
+    const f = (files ?? []).find((x) => x.path === activePath)
+    return {
+      docTitle: (f?.title && f.title.trim()) || leafName(activePath),
+      docEmoji: f?.icon ?? null,
+    }
+  }, [view, urlShareId, sharedAtomForMeta, activePath, files])
+  useDocumentMeta({ title: docTitle, emoji: docEmoji })
+
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
   // P3+P4 Codex fold F2+F3: a STRUCTURALLY-typed second channel
   // for programmatic skill-fire dispatches. Palette skill clicks
