@@ -22,9 +22,9 @@ decoration.
 
 | Token        | Light       | Dark        |
 | ------------ | ----------- | ----------- |
-| bg           | `#f7f6f1`   | `#121211`   |
-| panel        | `#fffefa`   | `#1c1b1a`   |
-| panel-2      | `#ece9e1`   | `#272624`   |
+| bg           | `#f7f6f1`   | `#0d0d0c`   |
+| panel        | `#fffefa`   | `#161514`   |
+| panel-2      | `#ece9e1`   | `#1d1c1a`   |
 | ink          | `#151515`   | `#f4f1ea`   |
 | muted        | `#66635d`   | `#aaa69c`   |
 | accent       | `#2d342e`   | `#d7d0c0`   |
