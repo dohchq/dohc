@@ -121,9 +121,9 @@
 /* Dark — warm-neutral charcoal surfaces + warm ink, never pure black/white
  * (brand bible §10). The mark's graphite accent lifts to warm bone. */
 [data-theme='dark'] {
-  --dohc-bg: #0d0d0c;
-  --dohc-panel: #161514;
-  --dohc-panel-2: #1d1c1a;
+  --dohc-bg: #121211;
+  --dohc-panel: #1c1b1a;
+  --dohc-panel-2: #0e0e0d;
   --dohc-ink: #f4f1ea;
   --dohc-muted: #aaa69c;
   --dohc-subtle: #78746d;
@@ -137,7 +137,7 @@
 
   --color-page: var(--dohc-bg);
   --color-surface: var(--dohc-panel);
-  --color-elevated: var(--dohc-panel-2);
+  --color-elevated: var(--dohc-panel);
   --color-panel: var(--dohc-panel-2);
   --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
   --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
@@ -186,9 +186,9 @@
  * [data-theme='dark'] dohc tokens exactly. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']):not([data-theme='dark']) {
-    --dohc-bg: #0d0d0c;
-    --dohc-panel: #161514;
-    --dohc-panel-2: #1d1c1a;
+    --dohc-bg: #121211;
+    --dohc-panel: #1c1b1a;
+    --dohc-panel-2: #0e0e0d;
     --dohc-ink: #f4f1ea;
     --dohc-muted: #aaa69c;
     --dohc-subtle: #78746d;
@@ -202,7 +202,7 @@
 
     --color-page: var(--dohc-bg);
     --color-surface: var(--dohc-panel);
-    --color-elevated: var(--dohc-panel-2);
+    --color-elevated: var(--dohc-panel);
     --color-panel: var(--dohc-panel-2);
     --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
     --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
