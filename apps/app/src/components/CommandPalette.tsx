@@ -53,7 +53,7 @@ export function CommandPalette({
   // disableParallelToolUse} — the model can only call run_skill.
   // Zero new wiring at this layer; the palette is a discoverable
   // hotkey over the same structural-enforcement chain.
-  const skills = useQuery(api.skills.list) ?? []
+  const skills = useQuery(api.skills.list, {}) ?? []
   const [filter, setFilter] = useState('')
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)

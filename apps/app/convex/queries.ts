@@ -199,8 +199,20 @@ export const _evalOne = internalQuery({
 // pattern). The editor does NOT use this (it uses the reactive
 // `evalQueryBlocks` query below).
 export const run = action({
-  args: { src: v.string() },
-  handler: async (ctx, { src }): Promise<string> => {
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal. NOTE: actions cannot validate membership (no ctx.db); the
+  // default-personal path is the only safe branch when omitted. A caller
+  // passing an org workspaceId here would error in requireWorkspace.
+  args: { src: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { src, activeWorkspaceId }): Promise<string> => {
+    // Actions can only use the default-personal `requireWorkspace(ctx)`
+    // form (the active-membership lookup needs db). Org callers must
+    // route via a mutation/query that forwards to the action.
+    if (activeWorkspaceId !== undefined) {
+      throw new Error(
+        'queries.run (action) cannot validate an active workspace; route via a query/mutation that calls evalQueryBlocks instead.',
+      )
+    }
     const workspaceId = await requireWorkspace(ctx)
     const r: { ok: boolean; md: string } = await ctx.runQuery(
       internal.queries._evalOne,
@@ -220,12 +232,20 @@ export const run = action({
 // truncation markers, which are legitimate results, not errors).
 // Never throws.
 export const evalQueryBlocks = query({
-  args: { srcs: v.array(v.string()) },
+  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
+  // for back-compat with personal-only callers; Phase B.3 will tighten
+  // to REQUIRED once the URL routing (Phase D) lands. Defaulting to
+  // personal in an org context would silently render org content
+  // against personal data — a privacy bug.
+  args: {
+    srcs: v.array(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
+  },
   handler: async (
     ctx,
-    { srcs },
+    { srcs, activeWorkspaceId },
   ): Promise<Array<{ src: string; value: string | null }>> => {
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const uniq = Array.from(new Set(srcs)).slice(0, MAX_QUERY_BLOCKS)
     const out: Array<{ src: string; value: string | null }> = []
     for (const src of uniq) {

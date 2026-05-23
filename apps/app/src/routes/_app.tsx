@@ -28,6 +28,7 @@ import { SharingPanel } from '@/components/SharingPanel'
 import { ProposalsPanel } from '@/components/ProposalsPanel'
 import { PluginPanel } from '@/components/PluginPanel'
 import { CommandPalette } from '@/components/CommandPalette'
+import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
 
@@ -161,10 +162,10 @@ function SignInPrompt() {
 
 function App() {
   const { user } = useAuth()
-  const files = useQuery(api.atoms.list)
-  const folders = useQuery(api.folders.list)
+  const files = useQuery(api.atoms.list, {})
+  const folders = useQuery(api.folders.list, {})
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
-  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe)
+  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {})
   // The fileId currently being shared (drives the ShareDialog).
   const [sharePromptFor, setSharePromptFor] = useState<string | null>(null)
   const ensureThread = useMutation(api.agent.ensureThread)
@@ -289,6 +290,7 @@ function App() {
   )
   const [enterEdit, setEnterEdit] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   // Chat panel is hidden by default — when the user wants to talk to the
   // agent they pop it open via the floating toggle (or ⌘\). Persisted to
   // localStorage so the preference survives reloads.
@@ -346,6 +348,15 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((p) => !p)
+      }
+      // ⌘⇧F opens full-content search across all pages.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === 'f'
+      ) {
+        e.preventDefault()
+        setSearchOpen((s) => !s)
       }
       // ⌘\ toggles the chat panel.
       if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
@@ -676,6 +687,7 @@ function App() {
         folders={folders ?? []}
         activePath={activePath}
         view={view === 'plugins' ? 'plugins' : 'atom'}
+        onOpenSearch={() => setSearchOpen(true)}
         user={user}
         sharedWithMe={sharedWithMe ?? []}
         activeShareId={urlShareId}
@@ -818,6 +830,11 @@ function App() {
         )}
         <span>{chatOpen ? 'Hide chat' : 'Chat'}</span>
       </button>
+      <SearchOverlay
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onOpenAtom={openAtom}
+      />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

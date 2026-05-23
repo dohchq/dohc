@@ -20,7 +20,7 @@ export function ShareDialog({
 }) {
   const me = useQuery(api.auth.whoami)
   const myOrgs = useQuery(api.orgs.myOrgs)
-  const myShares = useQuery(api.atomShares.listMyShares)
+  const myShares = useQuery(api.atomShares.listMyShares, {})
   const shareAtom = useMutation(api.atomShares.shareAtom)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)

@@ -6,10 +6,13 @@ import {
   internalMutation,
 } from './_generated/server'
 import { requireWorkspace } from './auth'
+import { scheduleMapRegen } from './loop'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
 import { isSafeAtomPath } from './inlineAtom'
+import { deriveSearchFields } from './searchText'
+import { internal } from './_generated/api'
 import {
   seedAtomIdIntoBody,
   reconcileAtomIdIndex,
@@ -205,6 +208,7 @@ export async function upsertAtomImpl(
       source: source ?? existing.source,
       ...noticePatch,
       ...systemLockPatch,
+      ...deriveSearchFields(path, finalBody),
     })
     // R3 §1 — structural atom capture (the body-change chokepoint):
     // diff prior vs new inline values; changed ⇒ withheld until
@@ -228,6 +232,7 @@ export async function upsertAtomImpl(
     updatedAt: now,
     source: source ?? (isUserEdit ? 'user' : 'agent'),
     ...systemLockInsert,
+    ...deriveSearchFields(path, finalBody),
   })
   // R3 §1 — new note: no prior ⇒ every inline value is withheld
   // until the owner confirms it (strict; closes C2 for atoms).
@@ -303,9 +308,13 @@ export async function removeAtomImpl(
 // Public CRUD for synthesized atoms. workspaceId is derived from auth.
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal. Membership-gated by requireWorkspace when an org id is
+  // supplied. (Adds to every public atoms surface; see also getByPath,
+  // upsert, remove, move, setLock, setIcon, setStar, idAdvisory.)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
@@ -356,9 +365,9 @@ export const list = query({
 })
 
 export const getByPath = query({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     return await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -380,16 +389,16 @@ export const getByPath = query({
 //   suffixed   — benign: the address was auto-named `<wanted>_n`
 //                because another file wanted `<wanted>`.
 export const idAdvisory = query({
-  args: { path: v.string() },
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (
     ctx,
-    { path },
+    { path, activeWorkspaceId },
   ): Promise<{
     kind: 'collision' | 'suffixed' | null
     fileId: string | null
     wanted: string | null
   }> => {
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const none = { kind: null, fileId: null, wanted: null } as const
     const atom = await ctx.db
       .query('atoms')
@@ -429,19 +438,23 @@ export const upsert = mutation({
     path: v.string(),
     body: v.string(),
     source: v.optional(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { path, body, source }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  handler: async (ctx, { path, body, source, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     // The user's own editor. Overwriting their own content is allowed
     // (isUserEdit) but still snapshotted (coalesced) so a fat-finger
     // auto-save is recoverable.
-    return await upsertAtomImpl(ctx, {
+    const out = await upsertAtomImpl(ctx, {
       workspaceId,
       path,
       body,
       source,
       isUserEdit: true,
     })
+    // org-plan §5/§13 Phase C — debounced _map.md regen (2s coalesced).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
@@ -521,10 +534,12 @@ export const upsertSharedAtom = mutation({
 })
 
 export const remove = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     await removeAtomImpl(ctx, workspaceId, path)
+    // Phase C — debounced _map.md regen.
+    await scheduleMapRegen(ctx, workspaceId)
   },
 })
 
@@ -535,9 +550,13 @@ export const remove = mutation({
 //      point at the new path
 // This keeps wikilinks/transclusions stable across moves.
 export const move = mutation({
-  args: { fromPath: v.string(), toPath: v.string() },
-  handler: async (ctx, { fromPath, toPath }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    fromPath: v.string(),
+    toPath: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fromPath, toPath, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     if (fromPath === toPath)
       return {
         ok: true as const,
@@ -595,6 +614,9 @@ export const move = mutation({
       // user moving the file IS acknowledgment that they've decided
       // about its skill-ness (moved out of `skills/` ⇒ no longer a
       // skill; moved within `skills/` ⇒ they kept it, deliberately).
+      // Recompute search fields — the path changed (basename/path feed
+      // searchText), even though the body is unchanged.
+      ...deriveSearchFields(toPath, src.body),
     })
     // snapshot the source before the delete side of the move
     await recordTrash(ctx, {
@@ -670,7 +692,11 @@ export const move = mutation({
           a.body,
           a.source ?? 'agent',
         )
-        await ctx.db.patch(a._id, { body: rewritten, updatedAt: now })
+        await ctx.db.patch(a._id, {
+          body: rewritten,
+          updatedAt: now,
+          ...deriveSearchFields(a.path, rewritten),
+        })
         // R3 §1 — cascade is a link-only rewrite ⇒ the value-atom
         // diff is empty (no-op); but route it through the contract so
         // a body that DID change a value can never bypass capture.
@@ -679,6 +705,8 @@ export const move = mutation({
       }
     }
 
+    // Phase C — debounced _map.md regen (rename moves paths in the map).
+    await scheduleMapRegen(ctx, workspaceId)
     return {
       ok: true as const,
       moved: 1,
@@ -837,9 +865,13 @@ async function setLockImpl(
 }
 
 export const setLock = mutation({
-  args: { path: v.string(), locked: v.boolean() },
-  handler: async (ctx, { path, locked }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    locked: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, locked, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     return await setLockImpl(ctx, workspaceId, path, locked)
   },
 })
@@ -867,9 +899,13 @@ export const _setLockInternal = internalMutation({
 // lives in the frontmatter `icon:` (the file's metadata), so this
 // rewrites the body through the normal chokepoint (preserves the id).
 export const setIcon = mutation({
-  args: { path: v.string(), icon: v.string() },
-  handler: async (ctx, { path, icon }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    icon: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, icon, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const existing = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -893,9 +929,13 @@ export const setIcon = mutation({
 })
 
 export const setStar = mutation({
-  args: { path: v.string(), starred: v.boolean() },
-  handler: async (ctx, { path, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    starred: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const existing = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -1003,11 +1043,55 @@ export const migrateBodyTitlesToFrontmatter = internalMutation({
       const stripped = joinFrontmatter(fm, h1.bodyWithoutH1)
       const next = injectFrontmatterTitle(stripped, title)
       if (next !== a.body) {
-        await ctx.db.patch(a._id, { body: next, updatedAt: Date.now() })
+        await ctx.db.patch(a._id, {
+          body: next,
+          updatedAt: Date.now(),
+          ...deriveSearchFields(a.path, next),
+        })
         if (existingTitle) deduped++
         else migrated++
       }
     }
     return { migrated, deduped }
+  },
+})
+
+// app-wide search backfill (docs/development/search-plan.md §5). Populates
+// `searchText`/`searchable` on existing atoms that predate the feature.
+// Paginates and self-schedules so each transaction stays within Convex's
+// read/write limits; a modest page size keeps large bodies safe. Run via
+// `npx convex run atoms:_backfillSearch '{}'` (all workspaces) or scoped
+// from `search.ensureIndexed` (one workspace, self-healing on first
+// search). Idempotent — patches only rows whose fields aren't in sync.
+export const _backfillSearch = internalMutation({
+  args: {
+    workspaceId: v.optional(v.string()),
+    cursor: v.optional(v.string()),
+    batch: v.optional(v.number()),
+  },
+  handler: async (ctx, { workspaceId, cursor, batch }) => {
+    const numItems = batch ?? 40
+    const q = workspaceId
+      ? ctx.db
+          .query('atoms')
+          .withIndex('by_workspace', (i) => i.eq('workspaceId', workspaceId))
+      : ctx.db.query('atoms')
+    const page = await q.paginate({ cursor: cursor ?? null, numItems })
+    let patched = 0
+    for (const a of page.page) {
+      const sf = deriveSearchFields(a.path, a.body)
+      if (a.searchText !== sf.searchText || a.searchable !== sf.searchable) {
+        await ctx.db.patch(a._id, sf)
+        patched++
+      }
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.atoms._backfillSearch, {
+        workspaceId,
+        cursor: page.continueCursor,
+        batch: numItems,
+      })
+    }
+    return { patched, done: page.isDone }
   },
 })

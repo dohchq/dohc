@@ -28,7 +28,9 @@ describe('Track-3 P3.2 — CommandPalette wires skills via api.skills.list', () 
   })
 
   it('subscribes to api.skills.list', () => {
-    expect(SRC).toMatch(/useQuery\(api\.skills\.list\)/)
+    // Org-plan §5: queries now accept an optional `activeWorkspaceId`
+    // — palette passes `{}` (omitted ⇒ caller's personal workspace).
+    expect(SRC).toMatch(/useQuery\(api\.skills\.list,\s*\{\}\)/)
   })
 
   it('iterates skills and pushes a Command per skill', () => {

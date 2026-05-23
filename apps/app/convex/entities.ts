@@ -59,9 +59,14 @@ async function captureChangedKeys(
 }
 
 export const list = query({
-  args: { type: v.optional(v.string()) },
-  handler: async (ctx, { type }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal if omitted; membership-gated when an org workspace given.
+  args: {
+    type: v.optional(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { type, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     if (type) {
       return await ctx.db
         .query('entities')
@@ -78,9 +83,13 @@ export const list = query({
 })
 
 export const get = query({
-  args: { type: v.string(), slug: v.string() },
-  handler: async (ctx, { type, slug }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    type: v.string(),
+    slug: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { type, slug, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     return await ctx.db
       .query('entities')
       .withIndex('by_workspace_type_slug', (q) =>

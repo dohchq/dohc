@@ -11,6 +11,7 @@ import {
 } from './captures'
 import { parseInlineAtomsFromMarkdownWithStatus } from './inlineAtom'
 import { isNonDataAtom } from './atomId'
+import { deriveSearchFields } from './searchText'
 
 // Test-only: skip the onboarding conversation and drop in a fully-
 // populated capacity manager vault. Trigger via the convex CLI:
@@ -757,6 +758,7 @@ kernel: custom
         body: a.body,
         updatedAt: now,
         source: 'agent',
+        ...deriveSearchFields(a.path, a.body),
       })
       // Track-3 P1 §6 retrofit: curated demo bodies that are
       // type:html/skill (or legacy `skills/*`) are VIEWS/INSTRUCTIONS,

@@ -267,12 +267,19 @@ async function buildStore(
  * Unknown / malformed ⇒ value:null. Never throws.
  */
 export const evalFormulas = query({
-  args: { srcs: v.array(v.string()) },
+  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
+  // for back-compat; Phase B.3 tightens to REQUIRED once URL routing
+  // (Phase D) lands. Defaulting to personal in an org context would
+  // silently evaluate org formulas against personal data.
+  args: {
+    srcs: v.array(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
+  },
   handler: async (
     ctx,
-    { srcs },
+    { srcs, activeWorkspaceId },
   ): Promise<Array<{ src: string; value: FormulaValue }>> => {
-    const viewer = await requireWorkspace(ctx)
+    const viewer = await requireWorkspace(ctx, activeWorkspaceId)
     const uniq = Array.from(new Set(srcs)).slice(0, MAX_FORMULAS)
     // Return an ARRAY, NOT an object keyed by `src` (Codex P3-fold
     // FAIL): a canonical src is attacker/author-influenceable — as an

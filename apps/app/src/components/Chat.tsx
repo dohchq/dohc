@@ -73,7 +73,7 @@ export function Chat({
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
   // collect; filtered to type:skill or skills/* path).
-  const skills = useQuery(api.skills.list) ?? []
+  const skills = useQuery(api.skills.list, {}) ?? []
 
   const messagesQuery = useUIMessages(
     api.agent.listMessages,

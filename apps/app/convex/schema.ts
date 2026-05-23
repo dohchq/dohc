@@ -51,9 +51,31 @@ export default defineSchema({
     // tree). This column is retained only so pre-existing rows that
     // were written with it still validate; it is no longer read/written.
     icon: v.optional(v.string()),
+    // app-wide search (docs/development/search-plan.md). Derived on every
+    // path/body write via deriveSearchFields(); see convex/searchText.ts.
+    //   searchText  — indexed: title×3 + basename + path + plaintext(body)
+    //   searchable  — false only for the derived index `_map.md`
+    searchText: v.optional(v.string()),
+    searchable: v.optional(v.boolean()),
+    // org-plan §4/§7 — collaborator edit lease for human-vs-human
+    // conflict (NOT the AI/system locks; those stay on systemLocked /
+    // userLocked). `editingBy` is the writer's WorkOS subject;
+    // `editingUntil` is the lease expiry (ms epoch). Expires naturally
+    // — no heartbeat — so a closed tab can't permanently block teammates.
+    editingBy: v.optional(v.string()),
+    editingUntil: v.optional(v.number()),
+    // org-plan §4 — provenance. The pill shows "last writer," not the
+    // original author (the name is precise: lastEdited, not author).
+    lastEditedByUserId: v.optional(v.string()),
   })
     .index('by_workspace_path', ['workspaceId', 'path'])
-    .index('by_workspace', ['workspaceId']),
+    .index('by_workspace', ['workspaceId'])
+    // recent-docs empty state for search (newest-updated first).
+    .index('by_workspace_updated', ['workspaceId', 'updatedAt'])
+    .searchIndex('search_text', {
+      searchField: 'searchText',
+      filterFields: ['workspaceId', 'searchable'],
+    }),
 
   // skills-commands-v1 §2-A.2 (Track-3 P2b.1) — per-turn structural
   // enforcement of the UNAUTHORIZABLE-set rule. Keyed by
@@ -154,7 +176,19 @@ export default defineSchema({
     inviteCode: v.string(),
     createdBy: v.string(),
     createdAt: v.number(),
-  }).index('by_inviteCode', ['inviteCode']),
+    // org-plan §4 additions (Phase 3: orgs promoted from share-audience
+    // to tenancy unit). All optional + back-compatible.
+    //   accent       — tiny visual identity token (v1.5 polish).
+    //   workosOrgId  — SSO link to a WorkOS Organization (deferred — set
+    //                  via the reconcile bridge once WorkOS wiring lands).
+    //   status       — 'active' | 'archived'. Defaults to 'active' on new
+    //                  orgs; existing rows treated as 'active'.
+    accent: v.optional(v.string()),
+    workosOrgId: v.optional(v.string()),
+    status: v.optional(v.union(v.literal('active'), v.literal('archived'))),
+  })
+    .index('by_inviteCode', ['inviteCode'])
+    .index('by_workos_org', ['workosOrgId']),
 
   // Entities — the underlying data the user's atoms query. The agent
   // declares types per workspace (e.g. 'person', 'project', 'booking').
@@ -209,6 +243,20 @@ export default defineSchema({
   threadRefs: defineTable({
     workspaceId: v.string(),
     threadId: v.string(),
+  }).index('by_workspace', ['workspaceId']),
+
+  // org-plan §5/§13 Phase C — DEBOUNCED `_map.md` regen.
+  //
+  // Each row says "a regen for this workspace is already scheduled to
+  // fire at `scheduledFor`". A second mutation arriving inside that
+  // 2-second window short-circuits — no extra schedule, no extra row.
+  // When the scheduled job runs it deletes its own row; the NEXT
+  // mutation re-arms. Net effect: rapid edits coalesce to one regen
+  // per `REGEN_DEBOUNCE_MS` window per workspace.
+  mapRegenSchedule: defineTable({
+    workspaceId: v.string(),
+    scheduledFor: v.number(),
+    scheduledJobId: v.optional(v.id('_scheduled_functions')),
   }).index('by_workspace', ['workspaceId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
@@ -375,10 +423,31 @@ export default defineSchema({
   memberships: defineTable({
     orgId: v.string(),
     workspaceId: v.string(), // == the member's user/workspace id
-    role: v.string(),
+    // role is the typed v1 union (org-plan §6 / decisions.md §3).
+    // Phase 0 rows only ever wrote 'owner' / 'member' (legacy code path
+    // had no admin tier), so this tightening doesn't fail existing data.
+    role: v.union(v.literal('owner'), v.literal('member')),
+    // org-plan §4 additions. All optional + back-compatible (rows that
+    // predate this default to status:'active'). status='invited' is the
+    // pending-invite row written by a future inviteMember mutation;
+    // joinOrg flips it to 'active'. status='removed' is the soft-tombstone
+    // for offboarding (preserves the row so joinOrg-via-invite reactivates
+    // instead of orphaning a duplicate row).
+    //   invitedBy   — WorkOS subject of the inviting owner.
+    //   invitedAt   — ms epoch, set on row insert.
+    //   acceptedAt  — ms epoch, set when the invitee joins.
+    status: v.optional(
+      v.union(v.literal('active'), v.literal('invited'), v.literal('removed')),
+    ),
+    invitedBy: v.optional(v.string()),
+    invitedAt: v.optional(v.number()),
+    acceptedAt: v.optional(v.number()),
   })
     .index('by_org', ['orgId'])
-    .index('by_workspace', ['workspaceId']),
+    .index('by_workspace', ['workspaceId'])
+    // exact (org, member) lookup — the hot path for requireWorkspace /
+    // requireRole. Replaces the by_workspace + linear scan in isMember.
+    .index('by_org_workspace', ['orgId', 'workspaceId']),
 
   // An owner-defined, permissioned projection of their own atoms.
   // selector/shape/audience are declarative config (data, not code).

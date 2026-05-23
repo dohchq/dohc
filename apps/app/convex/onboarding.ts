@@ -5,6 +5,7 @@ import {
   mutation,
 } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { requireWorkspace } from './auth'
 import { regenerateMap } from './loop'
@@ -69,6 +70,30 @@ export type OnboardingProgress = {
   dashboardPath: string | null
 }
 
+/** org-plan §6 / §11-step-4 — workspace-kind branch. A workspace is an
+ *  org iff its id matches a row in `orgs`; otherwise it's personal
+ *  (workspaceId === WorkOS subject). Cached per call.
+ *
+ *  The identity-atom path differs by kind:
+ *    personal → `me.md`   (the user's about-themselves brief)
+ *    org      → `company.md` (the org's about-itself brief)
+ *  This lets the same onboarding flow assemble the appropriate
+ *  identity artifact without forking the whole pipeline. */
+async function isOrgWorkspace(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+): Promise<boolean> {
+  // orgs._id IS the workspace id for org workspaces; ctx.db.get on a
+  // non-org-shaped id returns null so this short-circuits cleanly.
+  try {
+    const row = await ctx.db.get(workspaceId as unknown as Id<'orgs'>)
+    return row !== null
+  } catch {
+    // Not an orgs id-shape at all ⇒ personal.
+    return false
+  }
+}
+
 /** The SAME helper `_complete` uses, so the public `progress` query
  *  and the never-empty invariant can never desync. Bounded scans. */
 export async function progressOf(
@@ -79,8 +104,12 @@ export async function progressOf(
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(500)
+  // Identity atom: personal ⇒ me.md, org ⇒ company.md (org-plan §6).
+  const identityFile = (await isOrgWorkspace(ctx, workspaceId))
+    ? 'company.md'
+    : 'me.md'
   const me = atoms.find(
-    (a) => a.path === 'me.md' || a.path.endsWith('/me.md'),
+    (a) => a.path === identityFile || a.path.endsWith(`/${identityFile}`),
   )
   const dashboards = atoms.filter(
     (a) => !isNonDataAtom(a.path, a.body) && a.body.includes('```query'),

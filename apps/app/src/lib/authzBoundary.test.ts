@@ -51,12 +51,31 @@ const SHARE_TARGET_ALLOW = new Set([
   // cross-workspace READ (atomShares.getSharedAtom) correctly takes NO
   // workspace arg — viewer = requireWorkspace via resolveShareAccess.
   'atomShares.ts:shareAtom',
+  // org-plan §6 — Owner-gated member ops. `memberWorkspaceId` names the
+  // GRANTEE (which member to remove / change role for); the caller's
+  // authority is requireRole(ctx, orgId, 'owner') which internally calls
+  // requireWorkspace. Same grant-style shape as windows.grant.
+  'orgs.ts:removeMember',
+  'orgs.ts:changeRole',
 ])
 
 // crude export-block splitter: `export const NAME = (mutation|query|
 // action|internalMutation|…)({ … })` up to the args/handler region.
 // Also reports whether the fn body calls requireWorkspace (so an
 // allowlisted exception cannot silently lose its auth check).
+//
+// Org-plan §5 NOTE: a NEW shape entered the codebase in Phase B —
+// `activeWorkspaceId: v.optional(v.string())`. Unlike the legacy
+// `workspaceId` / `viewerWorkspaceId` / `granteeWorkspaceId` args (which
+// claim to BE someone's workspace and are the dangerous bug class), the
+// `activeWorkspaceId` arg is the URL-derived ACTIVE workspace handle:
+// the caller is asking "evaluate this in workspace X" and the gate is
+// `requireWorkspace(ctx, activeWorkspaceId)` which membership-checks it.
+// Spoofing `activeWorkspaceId` to point at someone else's workspace is
+// caught by the membership lookup in convex/auth.ts. We therefore strip
+// `activeWorkspaceId` from the args head BEFORE scanning for "workspace"
+// so it doesn't trigger the tripwire — but the regex still catches every
+// other workspace-naming arg shape.
 function publicFnsTakingWorkspace(
   src: string,
 ): Array<{ name: string; kind: string; authed: boolean }> {
@@ -67,9 +86,21 @@ function publicFnsTakingWorkspace(
   while ((m = re.exec(src))) {
     const [, name, kind, head] = m
     const isPublic = !kind.startsWith('internal')
-    if (isPublic && /\bargs\s*:\s*\{[\s\S]*?workspace/i.test(head)) {
+    // Strip the §5 `activeWorkspaceId` arg from the head; it is the
+    // intended Phase-B shape and is gated by requireWorkspace(ctx, x).
+    const headWithoutActive = head.replace(
+      /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
+      '',
+    )
+    if (isPublic && /\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
       const body = src.slice(m.index, m.index + 2000)
-      hits.push({ name, kind, authed: /requireWorkspace\s*\(/.test(body) })
+      // `requireRole(ctx, …)` internally calls `requireWorkspace` — it
+      // is also a valid auth check (org-plan §6 introduced it).
+      hits.push({
+        name,
+        kind,
+        authed: /\b(requireWorkspace|requireRole)\s*\(/.test(body),
+      })
     }
   }
   return hits

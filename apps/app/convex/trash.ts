@@ -6,6 +6,7 @@ import { isCanonicalEntityId } from './entityId'
 import { recordEntityWriteCapture } from './captures'
 import { applyAtomCapture } from './atomCapture'
 import { reconcileAtomIdIndex } from './atomId'
+import { deriveSearchFields } from './searchText'
 
 // Structural recoverability (Phase 2). Snapshot-before-destroy, at the
 // data layer, model-independent, convex-test-verified.
@@ -153,6 +154,10 @@ async function restoreRow(
     if (p.userLocked === true) insertDoc.userLocked = true
     if (p.starred === true) insertDoc.starred = true
     if (isStr(p.migrationNotice)) insertDoc.migrationNotice = p.migrationNotice
+    Object.assign(
+      insertDoc,
+      deriveSearchFields(p.path, isStr(p.body) ? p.body : ''),
+    )
     await ctx.db.insert('atoms', insertDoc as any)
     // R3 §1 — restore is the 5th atom-write chokepoint: no prior ⇒
     // every inline value is FRESH-withheld (coalesced non-confirmed),

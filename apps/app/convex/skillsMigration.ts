@@ -8,6 +8,7 @@ import {
   seedAtomIdIntoBody,
   reconcileAtomIdIndex,
 } from './atomId'
+import { deriveSearchFields } from './searchText'
 
 // skills-commands-v1 §6.4 (Track-3 P2a) — the ONE migration mutation
 // that collapses the §6 OR-compat term `isLegacySkillPath` into the
@@ -132,6 +133,7 @@ export const _migrateLegacyPaths = internalMutation({
         body: seeded,
         migrationNotice: 'skills-v1',
         updatedAt: Date.now(),
+        ...deriveSearchFields(r.path, seeded),
       })
       await reconcileAtomIdIndex(ctx, workspaceId, r.path, seeded, {
         isRestore: false,

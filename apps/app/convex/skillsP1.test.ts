@@ -181,7 +181,7 @@ describe('§6 end-to-end — skill body {k:v} never captures or resolves', () =>
       await insert('skills/legacy.md', 'no frontmatter')
       await insert('notes/plain.md', MD)
     })
-    const rows = await t.withIdentity({ subject: W }).query(api.atoms.list)
+    const rows = await t.withIdentity({ subject: W }).query(api.atoms.list, {})
     const byPath = Object.fromEntries(rows.map((r) => [r.path, r.type]))
     expect(byPath['report.md']).toBe('html')
     expect(byPath['weekly.md']).toBe('skill')

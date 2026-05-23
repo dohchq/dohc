@@ -6,11 +6,13 @@ import {
 } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
+import { scheduleMapRegen } from './loop'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
 import { isSafeAtomPath } from './inlineAtom'
+import { deriveSearchFields } from './searchText'
 import {
   SystemLockError,
   UserLockError,
@@ -39,9 +41,11 @@ import { cascadeDeleteSharesForFileId } from './atomShares'
 // folders via the UI and they persist.
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal; membership-gated when an org id is supplied.
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const [folderRows, metaRows] = await Promise.all([
       ctx.db
         .query('folders')
@@ -104,10 +108,13 @@ export const list = query({
 })
 
 export const create = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await createImpl(ctx, workspaceId, path)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const id = await createImpl(ctx, workspaceId, path)
+    // Phase C — debounced _map.md regen (new folder appears in the map).
+    await scheduleMapRegen(ctx, workspaceId)
+    return id
   },
 })
 
@@ -150,10 +157,17 @@ async function createImpl(ctx: any, workspaceId: string, path: string) {
 // Throws on conflict (destination already exists) or when the destination
 // is inside the source (would create an unreachable cycle).
 export const move = mutation({
-  args: { fromPath: v.string(), toPath: v.string() },
-  handler: async (ctx, { fromPath, toPath }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await moveImpl(ctx, workspaceId, fromPath, toPath)
+  args: {
+    fromPath: v.string(),
+    toPath: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fromPath, toPath, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const out = await moveImpl(ctx, workspaceId, fromPath, toPath)
+    // Phase C — debounced _map.md regen (folder rename moves children).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
@@ -335,6 +349,8 @@ async function moveImpl(
       // so userLocked here is moot but harmless to forward (defensive).
       ...(a.starred ? { starred: true } : {}),
       ...(a.userLocked ? { userLocked: true } : {}),
+      // path changed in the folder rename → recompute search fields.
+      ...deriveSearchFields(newPath, a.body),
     })
     await ctx.db.delete(a._id)
     // R3 §1 — folder move = per-atom move: drop old-path captures,
@@ -434,7 +450,11 @@ async function moveImpl(
           a.body,
           a.source ?? 'agent',
         )
-        await ctx.db.patch(a._id, { body: rewritten, updatedAt: now })
+        await ctx.db.patch(a._id, {
+          body: rewritten,
+          updatedAt: now,
+          ...deriveSearchFields(a.path, rewritten),
+        })
         // R3 §1 — link-only rewrite ⇒ value diff empty (no-op); routed
         // through the contract so a value change can never bypass it.
         await applyAtomCapture(ctx, workspaceId, a.path, a.body, rewritten)
@@ -460,10 +480,13 @@ function escapeRegex(s: string): string {
 // `<path>/` AND any nested folder rows. The parent folder row itself
 // is also deleted. Returns counts for the caller's confirmation toast.
 export const remove = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await removeImpl(ctx, workspaceId, path, true)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const out = await removeImpl(ctx, workspaceId, path, true)
+    // Phase C — debounced _map.md regen (folder deletion drops subtree).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
@@ -735,9 +758,10 @@ export const setMeta = mutation({
     icon: v.optional(v.union(v.string(), v.null())),
     color: v.optional(v.union(v.string(), v.null())),
     starred: v.optional(v.boolean()),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { path, icon, color, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  handler: async (ctx, { path, icon, color, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const check = validateFolderPath(path)
     if (!check.ok) throw new Error(check.reason)
     const clean = check.path
@@ -812,9 +836,13 @@ export const setMeta = mutation({
 
 // Sugar over setMeta for the common "favorite a folder" path.
 export const setStar = mutation({
-  args: { path: v.string(), starred: v.boolean() },
-  handler: async (ctx, { path, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    starred: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const check = validateFolderPath(path)
     if (!check.ok) throw new Error(check.reason)
     const clean = check.path

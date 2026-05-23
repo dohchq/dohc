@@ -21,7 +21,7 @@ async function makeOrgWithMember(t: ReturnType<typeof convexTest>) {
     .withIdentity({ subject: A })
     .mutation(api.orgs.createOrg, { name: 'Acme Inc' })
   await t.withIdentity({ subject: B }).mutation(api.orgs.joinOrg, { inviteCode })
-  return { orgId }
+  return { orgId, inviteCode }
 }
 
 describe('orgs 1c — create / join / membership', () => {
@@ -103,5 +103,123 @@ describe('orgs 1c — company graph (opt-in only; scoped formulas)', () => {
     expect(
       (await t.withIdentity({ subject: C }).query(api.graph.companyGraph, {})).nodes,
     ).toHaveLength(0)
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 3 (org-plan.md §6 / decisions.md §2): orgs promoted from
+// share-audience to tenancy unit. Two roles (Owner / Member), multiple
+// Owners allowed, last-Owner protections, soft-remove for offboarding,
+// myWorkspaces drives the workspace switcher.
+// ──────────────────────────────────────────────────────────────────────
+
+describe('org workspace lifecycle (Phase 3)', () => {
+  it('createOrg → myWorkspaces shows personal + the org with the right role', async () => {
+    const t = convexTest(schema, modules)
+    const { orgId } = await makeOrgWithMember(t)
+
+    const aWs = await t.withIdentity({ subject: A }).query(api.orgs.myWorkspaces, {})
+    expect(aWs.map((w) => w.kind)).toEqual(['personal', 'org'])
+    expect(aWs[0]).toMatchObject({ workspaceId: A, role: 'owner' })
+    expect(aWs[1]).toMatchObject({
+      workspaceId: orgId,
+      kind: 'org',
+      name: 'Acme Inc',
+      role: 'owner',
+    })
+
+    const bWs = await t.withIdentity({ subject: B }).query(api.orgs.myWorkspaces, {})
+    expect(bWs[1]).toMatchObject({ workspaceId: orgId, role: 'member' })
+  })
+
+  it('multiple Owners allowed; last Owner cannot leave/be demoted/be removed', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asB = t.withIdentity({ subject: B })
+    const { orgId } = await makeOrgWithMember(t)
+
+    // A is the sole Owner.
+    await expect(
+      asA.mutation(api.orgs.leaveOrg, { orgId }),
+    ).rejects.toThrow(/last Owner/)
+
+    // Promote B → two Owners.
+    await asA.mutation(api.orgs.changeRole, {
+      orgId,
+      memberWorkspaceId: B,
+      role: 'owner',
+    })
+    // B can now demote A (one Owner remains).
+    await asB.mutation(api.orgs.changeRole, {
+      orgId,
+      memberWorkspaceId: A,
+      role: 'member',
+    })
+    // B is the only Owner — cannot self-demote.
+    await expect(
+      asB.mutation(api.orgs.changeRole, {
+        orgId,
+        memberWorkspaceId: B,
+        role: 'member',
+      }),
+    ).rejects.toThrow(/last Owner/)
+    // B is the only Owner — A (Member) cannot remove B.
+    await expect(
+      asB.mutation(api.orgs.removeMember, {
+        orgId,
+        memberWorkspaceId: B,
+      }),
+    ).rejects.toThrow(/last Owner/)
+  })
+
+  it('Members cannot invite-by-role-change or remove others (Owner-gated)', async () => {
+    const t = convexTest(schema, modules)
+    const asB = t.withIdentity({ subject: B })
+    const { orgId } = await makeOrgWithMember(t)
+
+    await expect(
+      asB.mutation(api.orgs.removeMember, {
+        orgId,
+        memberWorkspaceId: A,
+      }),
+    ).rejects.toThrow(/Requires Owner/)
+    await expect(
+      asB.mutation(api.orgs.changeRole, {
+        orgId,
+        memberWorkspaceId: A,
+        role: 'member',
+      }),
+    ).rejects.toThrow(/Requires Owner/)
+  })
+
+  it('removeMember soft-removes; the member loses access; rejoin reactivates', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asB = t.withIdentity({ subject: B })
+    const { orgId, inviteCode } = await makeOrgWithMember(t)
+
+    expect((await asB.query(api.orgs.myWorkspaces, {})).length).toBe(2)
+    await asA.mutation(api.orgs.removeMember, {
+      orgId,
+      memberWorkspaceId: B,
+    })
+    expect((await asB.query(api.orgs.myWorkspaces, {})).length).toBe(1)
+
+    // Re-joining via the invite re-activates the removed row.
+    await asB.mutation(api.orgs.joinOrg, { inviteCode })
+    expect((await asB.query(api.orgs.myWorkspaces, {})).length).toBe(2)
+  })
+
+  it('a non-member is invisible to the org and to org.orgMembers', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asC = t.withIdentity({ subject: C })
+    const { orgId } = await makeOrgWithMember(t)
+    // C is NOT a member; orgMembers' own gate returns null for non-members.
+    expect(await asC.query(api.orgs.orgMembers, { orgId })).toBeNull()
+    // A (Owner) sees the active list (A + B from the helper).
+    const members = await asA.query(api.orgs.orgMembers, { orgId })
+    expect(members?.length).toBe(2)
+    expect(members?.map((m) => m.workspaceId).sort()).toEqual([A, B].sort())
   })
 })

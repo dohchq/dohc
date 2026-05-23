@@ -533,6 +533,70 @@ export const _gardenAndMap = internalMutation({
   handler: (ctx, { workspaceId }) => gardenAndMapImpl(ctx, workspaceId),
 })
 
+// ── org-plan §5/§13 Phase C — DEBOUNCED `_map.md` regen ──────────────
+//
+// Goal: rapid edits coalesce to ONE regen per `REGEN_DEBOUNCE_MS`
+// window per workspace, so the map "feels in sync" without the
+// 7-day cron lag and without a regen-per-keystroke storm.
+//
+// Mechanism: `mapRegenSchedule` row per workspace tracks the next
+// pending regen's `scheduledFor` timestamp + the scheduler job id.
+// Triggers (atoms.upsert/move/remove + folders.create/move/remove)
+// call `scheduleMapRegen`, which:
+//   - if a pending schedule is still in the future → no-op (coalesce)
+//   - else inserts/patches the row and schedules `_gardenAndMapDebounced`
+//     for `now + REGEN_DEBOUNCE_MS`.
+// The scheduled mutation deletes its own row (so the next trigger
+// re-arms) and runs `gardenAndMapImpl`.
+
+export const REGEN_DEBOUNCE_MS = 2_000
+
+export async function scheduleMapRegen(
+  ctx: MutationCtx,
+  workspaceId: string,
+): Promise<void> {
+  const existing = await ctx.db
+    .query('mapRegenSchedule')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .unique()
+  const now = Date.now()
+  // Already pending in the future ⇒ coalesce (do nothing).
+  if (existing && existing.scheduledFor > now) return
+
+  const scheduledFor = now + REGEN_DEBOUNCE_MS
+  const jobId = await ctx.scheduler.runAfter(
+    REGEN_DEBOUNCE_MS,
+    internal.loop._gardenAndMapDebounced,
+    { workspaceId },
+  )
+  if (existing) {
+    await ctx.db.patch(existing._id, { scheduledFor, scheduledJobId: jobId })
+  } else {
+    await ctx.db.insert('mapRegenSchedule', {
+      workspaceId,
+      scheduledFor,
+      scheduledJobId: jobId,
+    })
+  }
+}
+
+export const _gardenAndMapDebounced = internalMutation({
+  args: { workspaceId: v.string() },
+  handler: async (ctx, { workspaceId }) => {
+    // Delete the schedule row FIRST so a trigger arriving while regen
+    // runs can re-arm immediately (otherwise the trigger would see the
+    // row still present + scheduledFor <= now and would no-op the
+    // wrong way, missing the regen). Workspace-scoped lookup; no
+    // cross-tenant exposure.
+    const row = await ctx.db
+      .query('mapRegenSchedule')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .unique()
+    if (row) await ctx.db.delete(row._id)
+    return await gardenAndMapImpl(ctx, workspaceId)
+  },
+})
+
 // ── P4 public surface (design loop-ux v2 §4) — owner-scoped wrappers;
 // workspace STRICTLY from requireWorkspace (never a client arg —
 // C1/L8). listPending/accept/dismiss delegate to the shared impls

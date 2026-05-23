@@ -9,8 +9,14 @@ import { query, mutation } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
+import { countActiveOwners, requireRole } from './orgRoles'
 
-// The orgIds the given workspace belongs to.
+// Membership rows with `status === undefined` predate the status field
+// (org-plan §4); treat them as 'active' for back-compat.
+const isActive = (m: { status?: string } | null | undefined): boolean =>
+  !!m && (m.status === undefined || m.status === 'active')
+
+// The orgIds the given workspace belongs to (active memberships only).
 export async function viewerOrgIds(
   ctx: QueryCtx | MutationCtx,
   workspaceId: string,
@@ -19,7 +25,7 @@ export async function viewerOrgIds(
     .query('memberships')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .collect()
-  return new Set(rows.map((r) => r.orgId))
+  return new Set(rows.filter(isActive).map((r) => r.orgId))
 }
 
 export async function isMember(
@@ -27,11 +33,13 @@ export async function isMember(
   orgId: string,
   workspaceId: string,
 ): Promise<boolean> {
-  const rows = await ctx.db
+  const row = await ctx.db
     .query('memberships')
-    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-    .collect()
-  return rows.some((r) => r.orgId === orgId)
+    .withIndex('by_org_workspace', (q) =>
+      q.eq('orgId', orgId).eq('workspaceId', workspaceId),
+    )
+    .unique()
+  return isActive(row)
 }
 
 export const createOrg = mutation({
@@ -52,16 +60,22 @@ export const createOrg = mutation({
         .first()
       if (!clash) break
     }
+    const now = Date.now()
     const orgId = await ctx.db.insert('orgs', {
       name: clean,
       inviteCode,
       createdBy: owner,
-      createdAt: Date.now(),
+      createdAt: now,
+      status: 'active',
     })
     await ctx.db.insert('memberships', {
       orgId,
       workspaceId: owner,
       role: 'owner',
+      status: 'active',
+      invitedBy: owner,
+      invitedAt: now,
+      acceptedAt: now,
     })
     return { orgId, name: clean, inviteCode }
   },
@@ -77,13 +91,26 @@ export const joinOrg = mutation({
       .withIndex('by_inviteCode', (q) => q.eq('inviteCode', code))
       .first()
     if (!org) throw new Error('No company found for that invite code.')
-    const already = await isMember(ctx, org._id, caller)
-    if (!already) {
+    const existing = await ctx.db
+      .query('memberships')
+      .withIndex('by_org_workspace', (q) =>
+        q.eq('orgId', org._id).eq('workspaceId', caller),
+      )
+      .unique()
+    const now = Date.now()
+    if (!existing) {
       await ctx.db.insert('memberships', {
         orgId: org._id,
         workspaceId: caller,
         role: 'member',
+        status: 'active',
+        invitedBy: org.createdBy,
+        invitedAt: now,
+        acceptedAt: now,
       })
+    } else if (existing.status === 'invited' || existing.status === 'removed') {
+      // re-activate a previously-invited or previously-removed row
+      await ctx.db.patch(existing._id, { status: 'active', acceptedAt: now })
     }
     return { orgId: org._id, name: org.name }
   },
@@ -93,13 +120,85 @@ export const leaveOrg = mutation({
   args: { orgId: v.id('orgs') },
   handler: async (ctx, { orgId }) => {
     const caller = await requireWorkspace(ctx)
-    const rows = await ctx.db
+    const row = await ctx.db
       .query('memberships')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', caller))
-      .collect()
-    for (const r of rows) {
-      if (r.orgId === orgId) await ctx.db.delete(r._id)
+      .withIndex('by_org_workspace', (q) =>
+        q.eq('orgId', orgId).eq('workspaceId', caller),
+      )
+      .unique()
+    if (!row) return { ok: true as const }
+    // Refuse last-Owner leave (decisions.md §2) — the org must always
+    // have at least one active Owner.
+    if (
+      row.role === 'owner' &&
+      isActive(row) &&
+      (await countActiveOwners(ctx, orgId)) <= 1
+    ) {
+      throw new Error('Cannot leave: you are the last Owner of this org.')
     }
+    // Soft-remove (status:'removed') instead of hard delete so re-joining
+    // via the same invite code reactivates this row (joinOrg flips status
+    // back to 'active' — see :112) rather than orphaning a duplicate.
+    // Phase D Members admin will also read this row to show "Removed by
+    // X on date" attribution; Phase B/D atom attribution
+    // (lastEditedByUserId) will rely on the row surviving offboarding.
+    await ctx.db.patch(row._id, { status: 'removed' })
+    return { ok: true as const }
+  },
+})
+
+// Owner-only: remove another member. Refuses last-Owner removal.
+export const removeMember = mutation({
+  args: {
+    orgId: v.id('orgs'),
+    memberWorkspaceId: v.string(),
+  },
+  handler: async (ctx, { orgId, memberWorkspaceId }) => {
+    await requireRole(ctx, orgId, 'owner')
+    const row = await ctx.db
+      .query('memberships')
+      .withIndex('by_org_workspace', (q) =>
+        q.eq('orgId', orgId).eq('workspaceId', memberWorkspaceId),
+      )
+      .unique()
+    if (!row) throw new Error('Member not found.')
+    if (
+      row.role === 'owner' &&
+      isActive(row) &&
+      (await countActiveOwners(ctx, orgId)) <= 1
+    ) {
+      throw new Error('Cannot remove the last Owner of this org.')
+    }
+    await ctx.db.patch(row._id, { status: 'removed' })
+    return { ok: true as const }
+  },
+})
+
+// Owner-only: change a member's role. Refuses demoting the last Owner.
+export const changeRole = mutation({
+  args: {
+    orgId: v.id('orgs'),
+    memberWorkspaceId: v.string(),
+    role: v.union(v.literal('owner'), v.literal('member')),
+  },
+  handler: async (ctx, { orgId, memberWorkspaceId, role }) => {
+    await requireRole(ctx, orgId, 'owner')
+    const row = await ctx.db
+      .query('memberships')
+      .withIndex('by_org_workspace', (q) =>
+        q.eq('orgId', orgId).eq('workspaceId', memberWorkspaceId),
+      )
+      .unique()
+    if (!row || !isActive(row)) throw new Error('Active member not found.')
+    if (row.role === role) return { ok: true as const } // idempotent no-op
+    if (
+      row.role === 'owner' &&
+      role === 'member' &&
+      (await countActiveOwners(ctx, orgId)) <= 1
+    ) {
+      throw new Error('Cannot demote the last Owner of this org.')
+    }
+    await ctx.db.patch(row._id, { role })
     return { ok: true as const }
   },
 })
@@ -120,6 +219,7 @@ export const myOrgs = query({
       inviteCode: string | null
     }> = []
     for (const r of rows) {
+      if (!isActive(r)) continue
       const org = await ctx.db.get(r.orgId as Id<'orgs'>)
       if (!org) continue
       out.push({
@@ -128,6 +228,49 @@ export const myOrgs = query({
         role: r.role,
         // only an owner sees the invite code (to invite others)
         inviteCode: r.role === 'owner' ? org.inviteCode : null,
+      })
+    }
+    return out
+  },
+})
+
+/** Workspaces the caller can switch to: their personal workspace plus
+ *  every org they're an active member of. Drives the UI switcher
+ *  (org-plan §9). The personal entry always appears first. */
+export const myWorkspaces = query({
+  args: {},
+  handler: async (ctx) => {
+    const caller = await requireWorkspace(ctx)
+    const rows = await ctx.db
+      .query('memberships')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', caller))
+      .collect()
+    const out: Array<{
+      workspaceId: string
+      kind: 'personal' | 'org'
+      name: string
+      role: 'owner' | 'member'
+      accent: string | null
+    }> = [
+      // Personal first — always available; implicit Owner.
+      {
+        workspaceId: caller,
+        kind: 'personal',
+        name: 'Personal',
+        role: 'owner',
+        accent: null,
+      },
+    ]
+    for (const r of rows) {
+      if (!isActive(r)) continue
+      const org = await ctx.db.get(r.orgId as Id<'orgs'>)
+      if (!org) continue
+      out.push({
+        workspaceId: r.orgId, // org's workspaceId IS orgs._id (string)
+        kind: 'org',
+        name: org.name,
+        role: r.role,
+        accent: org.accent ?? null,
       })
     }
     return out
@@ -144,6 +287,8 @@ export const orgMembers = query({
       .query('memberships')
       .withIndex('by_org', (q) => q.eq('orgId', orgId))
       .collect()
-    return rows.map((r) => ({ workspaceId: r.workspaceId, role: r.role }))
+    return rows
+      .filter(isActive)
+      .map((r) => ({ workspaceId: r.workspaceId, role: r.role }))
   },
 })

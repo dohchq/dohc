@@ -25,9 +25,14 @@ import {
 // the Convex runtime. This returns the raw post-frontmatter HTML;
 // the route sanitizes + wraps + sets the §2-C headers.
 export const getRenderable = query({
-  args: { atomId: v.string() },
-  handler: async (ctx, { atomId }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
+  // for back-compat; Phase B.3 tightens to REQUIRED once URL routing
+  // (Phase D) lands. The /r/<atomId> route must always supply the
+  // active workspace (defaulting personal renders an org page in the
+  // wrong tenant).
+  args: { atomId: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { atomId, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     if (!atomId) return null
 
     // .take(2), NOT .unique(): a duplicate (ws,fileId) row is index

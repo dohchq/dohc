@@ -126,9 +126,13 @@ export const shareAtom = mutation({
     fileId: v.string(),
     granteeWorkspaceId: v.string(),
     permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { fileId, granteeWorkspaceId, permission }) => {
-    const owner = await requireWorkspace(ctx)
+  handler: async (
+    ctx,
+    { fileId, granteeWorkspaceId, permission, activeWorkspaceId },
+  ) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     if (granteeWorkspaceId === owner) {
       throw new Error('Cannot share a file with yourself.')
     }
@@ -172,9 +176,10 @@ export const shareAtomToOrg = mutation({
     fileId: v.string(),
     orgId: v.id('orgs'),
     permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { fileId, orgId, permission }) => {
-    const owner = await requireWorkspace(ctx)
+  handler: async (ctx, { fileId, orgId, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     if (!(await isMember(ctx, orgId, owner))) {
       throw new Error('You are not a member of that company.')
     }
@@ -210,9 +215,12 @@ export const shareAtomToOrg = mutation({
 // delete the row by id (one row per shareId). Works for person- and
 // org-shares alike (the row _id is the handle either way).
 export const unshareAtom = mutation({
-  args: { shareId: v.id('atomShares') },
-  handler: async (ctx, { shareId }) => {
-    const owner = await requireWorkspace(ctx)
+  args: {
+    shareId: v.id('atomShares'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { shareId, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     const row = await ctx.db.get(shareId)
     if (!row) return { ok: true as const } // already gone — idempotent
     if (row.ownerWorkspaceId !== owner) {
@@ -246,9 +254,9 @@ export async function cascadeDeleteSharesForFileId(
 // for each file shared TO the caller, resolving each owner atom's
 // current path + display title through the gated path.
 export const listSharedWithMe = query({
-  args: {},
-  handler: async (ctx) => {
-    const viewer = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const viewer = await requireWorkspace(ctx, activeWorkspaceId)
     const grants = await ctx.db
       .query('atomShares')
       .withIndex('by_grantee', (q) => q.eq('granteeWorkspaceId', viewer))
@@ -280,9 +288,9 @@ export const listSharedWithMe = query({
 
 // What I have shared (owner's manage/revoke view).
 export const listMyShares = query({
-  args: {},
-  handler: async (ctx) => {
-    const owner = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await ctx.db
       .query('atomShares')
       .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))

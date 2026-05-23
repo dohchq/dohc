@@ -1565,9 +1565,14 @@ export const dohcAgent = new Agent(components.agent, {
 })
 
 export const ensureThread = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5 — NON-DEFAULTABLE thread surface). Currently
+  // OPTIONAL for back-compat; Phase B.3 tightens to REQUIRED once URL
+  // routing (Phase D) lands. A thread created in a personal workspace
+  // is THIS workspace's thread; an org workspace gets its own row
+  // (threadRefs is workspace-keyed — no cross-workspace bridging).
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     // P1 design v2: CONVERGE to one canonical row. Two racing tabs
     // (same user) can each miss the row and both insert (separate
     // txns, no DB uniqueness). by_workspace is workspace-keyed so
@@ -1819,12 +1824,22 @@ export const sendMessage = action({
   // 'skill-fire' the prepareStep restricts activeTools to
   // {run_skill} for the first step. Direct user prompts omit it
   // ⇒ normal user turn.
+  // Phase B (org-plan §5 — NON-DEFAULTABLE). Action context: can only
+  // use the default-personal `requireWorkspace(ctx)` branch (membership
+  // lookup needs db). If activeWorkspaceId is supplied, error out and
+  // require the caller to route through a mutation/query.
   args: {
     threadId: v.string(),
     prompt: v.string(),
     entry: v.optional(v.literal('skill-fire')),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { threadId, prompt, entry }) => {
+  handler: async (ctx, { threadId, prompt, entry, activeWorkspaceId }) => {
+    if (activeWorkspaceId !== undefined) {
+      throw new Error(
+        'agent.sendMessage (action) cannot validate an active workspace; the org thread surface must derive it from the bound threadId after Phase B.3.',
+      )
+    }
     const workspaceId = await requireWorkspace(ctx)
     const ok = await ctx.runQuery(internal.agent._assertOwnThread, {
       workspaceId,
@@ -1949,8 +1964,23 @@ export const startOnboarding = action({
   // auto-send two-step. Absent (resume / stale-lease retry) ⇒
   // no-prompt continue: the thread already holds the brief, dohc
   // picks up where it was. Lease semantics are prompt-agnostic.
-  args: { intro: v.optional(v.string()) },
-  handler: async (ctx, { intro }): Promise<{ started: boolean }> => {
+  // Phase B (org-plan §5 — NON-DEFAULTABLE). Action context: same
+  // limitation as sendMessage — only default-personal is supported in
+  // Phase B.1; the org onboarding flow lands with Phase B.4 (which
+  // routes through a mutation that forwards the activeWorkspaceId).
+  args: {
+    intro: v.optional(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { intro, activeWorkspaceId },
+  ): Promise<{ started: boolean }> => {
+    if (activeWorkspaceId !== undefined) {
+      throw new Error(
+        'agent.startOnboarding (action) cannot validate an active workspace; org-onboarding lands in Phase B.4.',
+      )
+    }
     const workspaceId = await requireWorkspace(ctx)
     // canonical thread (ensureThread converges any racing dups)
     const threadId: string = await ctx.runMutation(api.agent.ensureThread, {})
@@ -2038,14 +2068,17 @@ export const startOnboarding = action({
 })
 
 export const listMessages = query({
+  // Phase B (org-plan §5 — NON-DEFAULTABLE). Optional for back-compat;
+  // Phase B.3 tightens to required once URL routing (Phase D) lands.
   args: {
     threadId: v.string(),
     paginationOpts: paginationOptsValidator,
     streamArgs: v.optional(vStreamArgs),
+    activeWorkspaceId: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId = await requireWorkspace(ctx, args.activeWorkspaceId)
     // Same fail-closed gate as sendMessage (C1), with the P1 design
     // v2 read-side tolerance: canonical = earliest of N (workspace-
     // keyed ⇒ same-tenant; ensureThread converges to it). A foreign

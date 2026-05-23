@@ -1,12 +1,22 @@
 // Auth helpers. Every public-facing query/mutation/action derives the
 // caller's workspaceId from ctx.auth. Throws if unauthenticated.
 //
-// For v0 the workspace IS the user — workspaceId === WorkOS user id
-// (the JWT's `sub` claim). Multi-user workspaces come later.
+// Phase 3 (org-plan.md): `requireWorkspace(ctx, activeWorkspaceId?)`
+// is the migration valve. With no second arg, returns the caller's
+// PERSONAL workspace (workspaceId === WorkOS user subject — the v0
+// semantics). With a second arg, the user must be an `active` member
+// of that workspace via the `memberships` table, or the call throws.
+// Personal workspaces grant implicit Owner to the WorkOS subject; no
+// membership row is needed (workspaceId == subject ⇒ self-access).
 
 import { query } from './_generated/server'
+import type { QueryCtx, MutationCtx } from './_generated/server'
 
-type AuthCtx = {
+// Structural type for callers that pass NO `active` arg (the
+// default-to-personal path). Actions have `auth` but no `db`, so this
+// is the loosest shape we accept. Explicit non-personal active requires
+// QueryCtx | MutationCtx (membership lookup needs db).
+type AuthOnlyCtx = {
   auth: { getUserIdentity: () => Promise<{ subject: string } | null> }
 }
 
@@ -17,12 +27,43 @@ type AuthCtx = {
 // served the whole internet, not "local dev". It was removed and the
 // env var unset on the live deployment. Backend behaviour is now
 // tested with `convex-test` (mocked identity), never by widening auth.
-export async function requireWorkspace(ctx: AuthCtx): Promise<string> {
+export function requireWorkspace(ctx: AuthOnlyCtx): Promise<string>
+export function requireWorkspace(
+  ctx: QueryCtx | MutationCtx,
+  active?: string,
+): Promise<string>
+export async function requireWorkspace(
+  ctx: AuthOnlyCtx | QueryCtx | MutationCtx,
+  active?: string,
+): Promise<string> {
   const identity = await ctx.auth.getUserIdentity()
   if (!identity) {
     throw new Error('Not authenticated')
   }
-  return identity.subject
+  const subject = identity.subject
+  // Default (no `active` arg) → personal workspace. Preserves v0 behavior
+  // for the long tail of callers that don't yet pass an active workspace.
+  if (active === undefined || active === subject) return subject
+  // Active workspace ≠ caller's personal subject → must be an `active`
+  // member of that org workspace. Membership rows that predate the
+  // `status` field are treated as 'active' for back-compat.
+  const dbCtx = ctx as QueryCtx | MutationCtx
+  if (!('db' in dbCtx)) {
+    throw new Error(
+      'requireWorkspace(ctx, active) requires a query/mutation ctx (actions cannot read membership)',
+    )
+  }
+  const m = await dbCtx.db
+    .query('memberships')
+    .withIndex('by_org_workspace', (q) =>
+      q.eq('orgId', active).eq('workspaceId', subject),
+    )
+    .unique()
+  if (!m) throw new Error(`Not a member of workspace ${active}`)
+  if (m.status !== undefined && m.status !== 'active') {
+    throw new Error(`Membership not active (status=${m.status})`)
+  }
+  return active
 }
 
 // Track-3 P4 — minimal "who am I" query for the UI's share-text
