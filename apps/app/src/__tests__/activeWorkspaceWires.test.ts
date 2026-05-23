@@ -64,6 +64,18 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     )
   })
 
+  it('Chat + Onboarding ALSO pass activeWorkspaceId to the action surfaces (sendMessage, startOnboarding)', () => {
+    // org-plan §5 — Phase B.3 action-bridge: sendMessage/startOnboarding
+    // route through _resolveWorkspaceForCaller. Without the frontend
+    // wire, the action defaults to personal and _assertOwnThread fails
+    // when the thread is bound to an org workspace — chat broken in
+    // org context. This regression is the bug we just fixed.
+    expect(CHAT).toMatch(/sendMessage\([\s\S]{0,300}activeWorkspaceId/)
+    expect(ONBOARDING).toMatch(
+      /startOnboarding\([\s\S]{0,200}activeWorkspaceId/,
+    )
+  })
+
   it('ensureThread callers (_app + Onboarding) pass activeWorkspaceId', () => {
     expect(APP).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)
     expect(ONBOARDING).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)

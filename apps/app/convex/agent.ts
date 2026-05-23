@@ -1601,6 +1601,19 @@ export const ensureThread = mutation({
   },
 })
 
+// org-plan §5 Phase B.3 action-bridge — actions can't `ctx.db` so they
+// can't directly validate active membership. This internalQuery runs
+// with the caller's auth context (proxied through ctx.runQuery from
+// the action) and returns the validated active workspaceId. Same
+// gate semantics as requireWorkspace(ctx, active) — non-members are
+// rejected by the membership lookup inside requireWorkspace.
+export const _resolveWorkspaceForCaller = internalQuery({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    return await requireWorkspace(ctx, activeWorkspaceId)
+  },
+})
+
 // R1 / C1 — the chat thread is a cross-person surface OUTSIDE
 // `windows` (tenancy-authz-v0.md §4: there must be NO such path).
 // `threadId` is client-supplied; bind it to the caller's OWN thread
@@ -1824,10 +1837,11 @@ export const sendMessage = action({
   // 'skill-fire' the prepareStep restricts activeTools to
   // {run_skill} for the first step. Direct user prompts omit it
   // ⇒ normal user turn.
-  // Phase B (org-plan §5 — NON-DEFAULTABLE). Action context: can only
-  // use the default-personal `requireWorkspace(ctx)` branch (membership
-  // lookup needs db). If activeWorkspaceId is supplied, error out and
-  // require the caller to route through a mutation/query.
+  // Phase B.3 (org-plan §5) — sendMessage routes the activeWorkspaceId
+  // through `_resolveWorkspaceForCaller` (an internalQuery that DOES
+  // have ctx.db and validates active membership). The action then uses
+  // the validated workspaceId for the _assertOwnThread gate, so the
+  // thread surface works correctly in org workspaces.
   args: {
     threadId: v.string(),
     prompt: v.string(),
@@ -1835,12 +1849,10 @@ export const sendMessage = action({
     activeWorkspaceId: v.optional(v.string()),
   },
   handler: async (ctx, { threadId, prompt, entry, activeWorkspaceId }) => {
-    if (activeWorkspaceId !== undefined) {
-      throw new Error(
-        'agent.sendMessage (action) cannot validate an active workspace; the org thread surface must derive it from the bound threadId after Phase B.3.',
-      )
-    }
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId: string = await ctx.runQuery(
+      internal.agent._resolveWorkspaceForCaller,
+      { activeWorkspaceId },
+    )
     const ok = await ctx.runQuery(internal.agent._assertOwnThread, {
       workspaceId,
       threadId,
@@ -1964,10 +1976,10 @@ export const startOnboarding = action({
   // auto-send two-step. Absent (resume / stale-lease retry) ⇒
   // no-prompt continue: the thread already holds the brief, dohc
   // picks up where it was. Lease semantics are prompt-agnostic.
-  // Phase B (org-plan §5 — NON-DEFAULTABLE). Action context: same
-  // limitation as sendMessage — only default-personal is supported in
-  // Phase B.1; the org onboarding flow lands with Phase B.4 (which
-  // routes through a mutation that forwards the activeWorkspaceId).
+  // Phase B.3 (org-plan §5) — startOnboarding routes activeWorkspaceId
+  // through `_resolveWorkspaceForCaller` (same action-bridge as
+  // sendMessage), then ensureThread is called with the validated
+  // workspaceId so onboarding lands in the active workspace.
   args: {
     intro: v.optional(v.string()),
     activeWorkspaceId: v.optional(v.string()),
@@ -1976,14 +1988,14 @@ export const startOnboarding = action({
     ctx,
     { intro, activeWorkspaceId },
   ): Promise<{ started: boolean }> => {
-    if (activeWorkspaceId !== undefined) {
-      throw new Error(
-        'agent.startOnboarding (action) cannot validate an active workspace; org-onboarding lands in Phase B.4.',
-      )
-    }
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId: string = await ctx.runQuery(
+      internal.agent._resolveWorkspaceForCaller,
+      { activeWorkspaceId },
+    )
     // canonical thread (ensureThread converges any racing dups)
-    const threadId: string = await ctx.runMutation(api.agent.ensureThread, {})
+    const threadId: string = await ctx.runMutation(api.agent.ensureThread, {
+      activeWorkspaceId,
+    })
     // single-document atomic CAS: exactly one concurrent winner;
     // a fresh (heartbeating) run keeps the lease ⇒ losers no-op.
     const { won, owner } = await ctx.runMutation(

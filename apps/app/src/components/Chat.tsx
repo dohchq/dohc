@@ -151,10 +151,11 @@ export function Chat({
           threadId,
           prompt: promptText,
           entry: 'skill-fire',
+          activeWorkspaceId,
         })
         return
       }
-      await sendMessage({ threadId, prompt })
+      await sendMessage({ threadId, prompt, activeWorkspaceId })
     } catch (e) {
       console.error(e)
     } finally {
@@ -189,6 +190,7 @@ export function Chat({
           threadId,
           prompt: path,
           entry: 'skill-fire',
+          activeWorkspaceId,
         })
       } catch (e) {
         console.error(e)

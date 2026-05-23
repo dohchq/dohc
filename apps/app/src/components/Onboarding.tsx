@@ -199,11 +199,13 @@ export function Onboarding({ state }: Props) {
       if (!threadId) return
       setKicking(true)
       setKickFailed(false)
-      startOnboarding(intro ? { intro } : {})
+      startOnboarding(
+        intro ? { intro, activeWorkspaceId } : { activeWorkspaceId },
+      )
         .catch(() => setKickFailed(true))
         .finally(() => setKicking(false))
     },
-    [threadId, startOnboarding],
+    [threadId, startOnboarding, activeWorkspaceId],
   )
   useEffect(() => {
     if (phase === 'working' && threadId && !kicked.current) {

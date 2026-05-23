@@ -361,6 +361,36 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
     ).rejects.toThrow(/Not a member of workspace/)
   })
 
+  it('agent action surfaces (Phase B.3 action-bridge) accept activeWorkspaceId without throwing', async () => {
+    // Regression for the bug where sendMessage/startOnboarding threw
+    // on non-undefined activeWorkspaceId (the pre-B.3 limitation).
+    // Now they route through `_resolveWorkspaceForCaller` so org
+    // workspaces work end-to-end. We can't easily test the streaming
+    // path with convex-test, but we can prove the validator accepts
+    // the arg (no throw on parse) by calling `_resolveWorkspaceForCaller`
+    // directly, which is the bridge.
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    // personal — undefined ⇒ returns the subject (personal id).
+    const wsPersonal = await t.run(async (ctx) => {
+      // Lifted: action proxies this via runQuery; we hit the internal
+      // query the same way.
+      const m = await import('./_generated/api')
+      return await asA.query(m.internal.agent._resolveWorkspaceForCaller, {
+        activeWorkspaceId: undefined,
+      })
+    })
+    expect(wsPersonal).toBe(A)
+    // org — supply orgId after joining; returns the org's id.
+    const { orgId } = await asA.mutation(api.orgs.createOrg, {
+      name: 'Bridge Co',
+    })
+    const wsOrg = await asA.query(internal.agent._resolveWorkspaceForCaller, {
+      activeWorkspaceId: orgId,
+    })
+    expect(wsOrg).toBe(orgId)
+  })
+
   it('agent.listMessages rejects cross-tenant spoofing on the thread surface', async () => {
     const t = convexTest(schema, modules)
     const asB = t.withIdentity({ subject: B })
@@ -409,10 +439,17 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           !/requireWorkspace\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*\)/.test(
             body,
           ) &&
-          // Action-context surfaces that explicitly refuse a non-undefined
-          // activeWorkspaceId (queries.run, agent.sendMessage,
-          // agent.startOnboarding) are also valid — the arg is GATED by
-          // the throw and then ctx-default is used.
+          // Action surfaces can't ctx.db, so they route through
+          // `_resolveWorkspaceForCaller` (an internalQuery that DOES
+          // have db — see agent.ts). The runQuery proxy carries the
+          // caller's auth context, so the gate is equivalent.
+          !/runQuery\([\s\S]{0,80}_resolveWorkspaceForCaller[\s\S]{0,200}activeWorkspaceId/.test(
+            body,
+          ) &&
+          // Action surfaces that explicitly refuse a non-undefined
+          // activeWorkspaceId (queries.run still uses this shape — no
+          // bridge yet) are also valid — the arg is GATED by the
+          // throw and then ctx-default is used.
           !/activeWorkspaceId\s*!==\s*undefined[\s\S]{0,200}?throw/.test(body)
         ) {
           offenders.push(`${f.split('/convex/')[1]}: ${name} (${kind})`)
