@@ -14,15 +14,24 @@
  * (undefined ⇒ personal entry).
  */
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, Plus, User as UserIcon, Building2 } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  Plus,
+  Settings,
+  User as UserIcon,
+  Building2,
+} from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '@/lib/active-workspace'
+import { WorkspaceManagementDialog } from './WorkspaceManagementDialog'
 
 export function WorkspaceSwitcher() {
   const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
   const workspaces = useQuery(api.orgs.myWorkspaces, {})
   const [open, setOpen] = useState(false)
+  const [manageOpen, setManageOpen] = useState(false)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
 
@@ -140,20 +149,37 @@ export function WorkspaceSwitcher() {
               </button>
             )
           })}
-          {/* Separator + create-org affordance. Deliberately quiet — */}
-          {/* the create-org flow itself lives in a (future) settings */}
-          {/* page; this entry just nudges discoverability. */}
+          {/* Separator + management affordances. */}
           <div className="my-1 h-px bg-rule/60" />
-          <a
-            href="/settings/workspaces"
+          <button
+            type="button"
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink-dim hover:bg-hover transition-colors"
-            onClick={() => setOpen(false)}
+            onClick={() => {
+              setManageOpen(true)
+              setOpen(false)
+            }}
           >
             <Plus className="size-3.5" strokeWidth={2} />
             <span>Create workspace</span>
-          </a>
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink-dim hover:bg-hover transition-colors"
+            onClick={() => {
+              setManageOpen(true)
+              setOpen(false)
+            }}
+          >
+            <Settings className="size-3.5" strokeWidth={2} />
+            <span>Manage workspaces</span>
+          </button>
         </div>
       )}
+
+      <WorkspaceManagementDialog
+        open={manageOpen}
+        onClose={() => setManageOpen(false)}
+      />
     </div>
   )
 }

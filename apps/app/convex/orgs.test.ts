@@ -210,6 +210,47 @@ describe('org workspace lifecycle (Phase 3)', () => {
     expect((await asB.query(api.orgs.myWorkspaces, {})).length).toBe(2)
   })
 
+  it('renameOrg (decisions.md §3): Owner-only, trims, rejects empty/over-long, idempotent', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asB = t.withIdentity({ subject: B })
+    const { orgId } = await makeOrgWithMember(t)
+
+    // Member cannot rename — Owner-gated.
+    await expect(
+      asB.mutation(api.orgs.renameOrg, { orgId, name: 'Members R Us' }),
+    ).rejects.toThrow(/Requires Owner/)
+
+    // Owner can rename — trims whitespace.
+    const r1 = await asA.mutation(api.orgs.renameOrg, {
+      orgId,
+      name: '  New Name  ',
+    })
+    expect(r1).toMatchObject({ ok: true, changed: true })
+    const after = await asA.query(api.orgs.myWorkspaces, {})
+    expect(after.find((w) => w.workspaceId === orgId)?.name).toBe('New Name')
+
+    // Same name ⇒ idempotent no-op.
+    const r2 = await asA.mutation(api.orgs.renameOrg, {
+      orgId,
+      name: 'New Name',
+    })
+    expect(r2).toMatchObject({ ok: true, changed: false })
+
+    // Empty name (after trim) ⇒ reject.
+    await expect(
+      asA.mutation(api.orgs.renameOrg, { orgId, name: '   ' }),
+    ).rejects.toThrow(/empty/)
+
+    // Over-long ⇒ reject (the cap is 80 chars).
+    await expect(
+      asA.mutation(api.orgs.renameOrg, {
+        orgId,
+        name: 'x'.repeat(81),
+      }),
+    ).rejects.toThrow(/too long/)
+  })
+
   it('a non-member is invisible to the org and to org.orgMembers', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })

@@ -174,6 +174,24 @@ export const removeMember = mutation({
   },
 })
 
+// Owner-only: rename the org (decisions.md §3). Trims + falls back to
+// the prior name if the new one is whitespace-only (renaming an org
+// to "" would brick the switcher). Idempotent.
+export const renameOrg = mutation({
+  args: { orgId: v.id('orgs'), name: v.string() },
+  handler: async (ctx, { orgId, name }) => {
+    await requireRole(ctx, orgId, 'owner')
+    const org = await ctx.db.get(orgId)
+    if (!org) throw new Error('Org not found.')
+    const clean = name.trim()
+    if (clean.length === 0) throw new Error('Org name cannot be empty.')
+    if (clean.length > 80) throw new Error('Org name too long (max 80 chars).')
+    if (clean === org.name) return { ok: true as const, changed: false }
+    await ctx.db.patch(orgId, { name: clean })
+    return { ok: true as const, changed: true }
+  },
+})
+
 // Owner-only: change a member's role. Refuses demoting the last Owner.
 export const changeRole = mutation({
   args: {

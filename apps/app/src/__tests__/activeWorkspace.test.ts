@@ -95,6 +95,34 @@ describe('WorkspaceSwitcher component (org-plan §9)', () => {
   })
 })
 
+describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () => {
+  const DIALOG_SRC = readFileSync(
+    resolve(__dirname, '../../src/components/WorkspaceManagementDialog.tsx'),
+    'utf8',
+  )
+
+  it('uses the Phase-A Owner-gated mutations + queries', () => {
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.myWorkspaces/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.orgMembers/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.createOrg/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.renameOrg/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.removeMember/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.changeRole/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.leaveOrg/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.joinOrg/)
+  })
+
+  it('auto-switches into a freshly-created org so the user sees their new workspace', () => {
+    expect(DIALOG_SRC).toMatch(
+      /createOrg\([\s\S]{0,200}setActiveWorkspaceId\(\s*orgId/,
+    )
+  })
+
+  it('confirms before destructive leave (no silent offboarding)', () => {
+    expect(DIALOG_SRC).toMatch(/window\.confirm/)
+  })
+})
+
 describe('_app.tsx wires the switcher into the live queries', () => {
   it('imports ActiveWorkspaceProvider + useActiveWorkspaceId', () => {
     expect(APP_SRC).toMatch(
