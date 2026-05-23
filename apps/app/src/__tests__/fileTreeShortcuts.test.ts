@@ -53,9 +53,11 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(
       /\(e\.key\s*===\s*['"]s['"]\s*\|\|\s*e\.key\s*===\s*['"]S['"]\)\s*&&\s*e\.shiftKey/,
     )
-    expect(SRC).toMatch(
-      /onToggleStar\(\s*pathSnapshot\s*,\s*currentlyStarred\s*\)/,
-    )
+    // The keyboard handler delegates to the shared toggleFileStar
+    // (also used by the row's star button), which reads the optimistic
+    // state then calls onToggleStar with the current value.
+    expect(SRC).toMatch(/toggleFileStar\(\s*pathSnapshot\s*\)/)
+    expect(SRC).toMatch(/onToggleStar\(\s*path\s*,\s*current\s*\)/)
   })
 
   it('pending* Maps drive optimistic lock/star/folder-star (R4 fold of Codex FAIL-3 second-pass)', () => {
@@ -104,11 +106,11 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
   // R3 fold: path captured as `pathSnapshot` so the .finally
   // resolves against a stable id (defends against focusedPath
   // changing while the mutation is in flight).
-  it('S key on a folder row dispatches onToggleFolderStar with current star state', () => {
-    expect(SRC).toMatch(/onToggleFolderStar/)
-    expect(SRC).toMatch(
-      /onToggleFolderStar\(\s*pathSnapshot\s*,\s*currentlyStarred\s*\)/,
-    )
+  it('S key on a folder row delegates to the shared toggleFolderStar', () => {
+    // Mirrors the file path: the handler calls toggleFolderStar, which
+    // reads the optimistic state then calls onToggleFolderStar(path, current).
+    expect(SRC).toMatch(/toggleFolderStar\(\s*pathSnapshot\s*\)/)
+    expect(SRC).toMatch(/onToggleFolderStar\(\s*path\s*,\s*current\s*\)/)
   })
 
   it('Folder row renders the folder shape colored via colorVarFor (no icon — color only)', () => {

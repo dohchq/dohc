@@ -24,6 +24,7 @@ import {
   User,
   Building2,
   Target,
+  Search,
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
@@ -103,6 +104,8 @@ type Props = {
   }>
   activeShareId?: string | null
   onOpenShared?: (shareId: string) => void
+  // Opens the full-content search overlay (⌘⇧F).
+  onOpenSearch?: () => void
 }
 
 function readSectionOpen(key: string, dflt: boolean): boolean {
@@ -379,6 +382,7 @@ export function FileTree({
   sharedWithMe,
   activeShareId,
   onOpenShared,
+  onOpenSearch,
 }: Props) {
   // Partition the flat lists into the three sidebar sections. Pure
   // presentation — no file moves. The main tree is built from the
@@ -594,6 +598,39 @@ export function FileTree({
     return m
   }, [files])
 
+  // Optimistic-aware "is this file starred?" — reads the pending
+  // override first so a just-clicked/just-pressed star reflects
+  // instantly, before the Convex projection catches up.
+  const starredOf = useCallback(
+    (path: string) => {
+      const o = pendingStars.current.get(path)
+      return o !== undefined ? o : fileByPath.get(path)?.starred === true
+    },
+    [fileByPath],
+  )
+
+  // Toggle a file's favorite, optimistically. Shared by the row's star
+  // button and the Shift+S shortcut so both behave identically.
+  const toggleFileStar = useCallback(
+    (path: string) => {
+      if (!onToggleStar) return
+      const current = starredOf(path)
+      const willStar = !current
+      setAnnouncement(willStar ? 'starring…' : 'unstarring…')
+      pendingStars.current.set(path, willStar)
+      bumpPending()
+      void onToggleStar(path, current).then(
+        () => setAnnouncement(willStar ? 'starred' : 'unstarred'),
+        () => {
+          setAnnouncement('')
+          pendingStars.current.delete(path)
+          bumpPending()
+        },
+      )
+    },
+    [onToggleStar, starredOf, bumpPending],
+  )
+
   // file-org-v1 D4.6 — VSCode-style "create where you're standing".
   // The "+" button (header) creates at the level of the currently
   // FOCUSED row:
@@ -690,6 +727,36 @@ export function FileTree({
     return m
   }, [folders])
 
+  // Folder favorite — the optimistic-aware read + toggle, mirroring the
+  // file-star pair. Shared by the folder row's star button and Shift+S.
+  const folderStarredOf = useCallback(
+    (path: string) => {
+      const o = pendingFolderStars.current.get(path)
+      return o !== undefined ? o : folderStarByPath.get(path) === true
+    },
+    [folderStarByPath],
+  )
+  const toggleFolderStar = useCallback(
+    (path: string) => {
+      if (!onToggleFolderStar) return
+      const current = folderStarredOf(path)
+      const willStar = !current
+      setAnnouncement(willStar ? 'starring folder…' : 'unstarring folder…')
+      pendingFolderStars.current.set(path, willStar)
+      bumpPending()
+      void onToggleFolderStar(path, current).then(
+        () =>
+          setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
+        () => {
+          setAnnouncement('')
+          pendingFolderStars.current.delete(path)
+          bumpPending()
+        },
+      )
+    },
+    [onToggleFolderStar, folderStarredOf, bumpPending],
+  )
+
   const onTreeKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       // file-org-v1 D4.4a — Track-4 affordance shortcuts. L toggles
@@ -738,43 +805,11 @@ export function FileTree({
         const row = fileByPath.get(focusedPath)
         const pathSnapshot = focusedPath
         if (row) {
-          if (!onToggleStar) return
-          const optimistic = pendingStars.current.get(focusedPath)
-          const currentlyStarred =
-            optimistic !== undefined ? optimistic : row.starred === true
-          const willStar = !currentlyStarred
-          setAnnouncement(willStar ? 'starring…' : 'unstarring…')
-          pendingStars.current.set(focusedPath, willStar)
-          bumpPending()
-          void onToggleStar(pathSnapshot, currentlyStarred).then(
-            () => setAnnouncement(willStar ? 'starred' : 'unstarred'),
-            () => {
-              setAnnouncement('')
-              pendingStars.current.delete(pathSnapshot)
-              bumpPending()
-            },
-          )
+          toggleFileStar(pathSnapshot)
           return
         }
         // Folder row
-        if (!onToggleFolderStar) return
-        const optimistic = pendingFolderStars.current.get(focusedPath)
-        const currentlyStarred =
-          optimistic !== undefined
-            ? optimistic
-            : folderStarByPath.get(pathSnapshot) === true
-        const willStar = !currentlyStarred
-        setAnnouncement(willStar ? 'starring folder…' : 'unstarring folder…')
-        pendingFolderStars.current.set(focusedPath, willStar)
-        bumpPending()
-        void onToggleFolderStar(pathSnapshot, currentlyStarred).then(
-          () => setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
-          () => {
-            setAnnouncement('')
-            pendingFolderStars.current.delete(pathSnapshot)
-            bumpPending()
-          },
-        )
+        toggleFolderStar(pathSnapshot)
         return
       }
 
@@ -824,6 +859,8 @@ export function FileTree({
       onToggleLock,
       onToggleStar,
       onToggleFolderStar,
+      toggleFileStar,
+      toggleFolderStar,
       setAnnouncement,
       bumpPending,
     ],
@@ -952,7 +989,19 @@ export function FileTree({
             dohc
           </span>
         </div>
-        <div className="relative">
+        <div className="flex items-center gap-0.5">
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+              title="search (⌘⇧F)"
+              aria-label="search pages"
+            >
+              <Search className="size-4" strokeWidth={2} />
+            </button>
+          )}
+          <div className="relative">
           <button
             onClick={() => setNewOpen((v) => !v)}
             className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
@@ -1004,6 +1053,7 @@ export function FileTree({
               </div>
             </>
           )}
+          </div>
         </div>
       </header>
 
@@ -1138,6 +1188,12 @@ export function FileTree({
                     ? (path, current) => setPickerFile({ path, current })
                     : undefined
                 }
+                onToggleFileStar={onToggleStar ? toggleFileStar : undefined}
+                starredOf={starredOf}
+                onToggleFolderStar={
+                  onToggleFolderStar ? toggleFolderStar : undefined
+                }
+                folderStarredOf={folderStarredOf}
                 dragOverPath={dragOverPath}
                 setDragOverPath={setDragOverPath}
                 handleDrop={handleDrop}
@@ -1309,6 +1365,10 @@ function TreeRowNode({
   onRenameFile,
   onOpenPicker,
   onOpenFileIcon,
+  onToggleFileStar,
+  starredOf,
+  onToggleFolderStar,
+  folderStarredOf,
   dragOverPath,
   setDragOverPath,
   handleDrop,
@@ -1334,6 +1394,13 @@ function TreeRowNode({
   onOpenPicker?: (node: TreeNode) => void
   // emoji-icons — file rows only; opens the EmojiPicker for the file.
   onOpenFileIcon?: (path: string, current: string | null) => void
+  // Favorite toggle for file rows (optimistic-aware). Wired only when
+  // the parent provided a star mutation; absent ⇒ read-only star.
+  onToggleFileStar?: (path: string) => void
+  starredOf?: (path: string) => boolean
+  // Favorite toggle for folder rows (optimistic-aware), same contract.
+  onToggleFolderStar?: (path: string) => void
+  folderStarredOf?: (path: string) => boolean
   // file-org-v1 D4.7 — DnD state + handler from the parent.
   dragOverPath: string | null
   setDragOverPath: (path: string | null) => void
@@ -1469,12 +1536,21 @@ function TreeRowNode({
             }
           />
         )}
-        {node.page!.starred && (
-          <Star
-            className="size-3 shrink-0 fill-current text-accent-2"
-            strokeWidth={1.5}
-            aria-label="starred"
+        {onToggleFileStar ? (
+          <StarToggle
+            starred={
+              starredOf ? starredOf(filePath) : node.page!.starred === true
+            }
+            onToggle={() => onToggleFileStar(filePath)}
           />
+        ) : (
+          node.page!.starred && (
+            <Star
+              className="size-3 shrink-0 fill-current text-accent-2"
+              strokeWidth={1.5}
+              aria-label="starred"
+            />
+          )
         )}
         <RowActions
           onRename={() => void onRenameFile(filePath)}
@@ -1580,12 +1656,23 @@ function TreeRowNode({
         {/* file-org-v1 D4.5 — folder star icon (next to label,
             before the row-actions menu). Mirrors the leaf-row
             star treatment for consistency. */}
-        {node.starred && (
-          <Star
-            className="size-3 shrink-0 fill-current text-accent-2"
-            strokeWidth={1.5}
-            aria-label="starred folder"
+        {onToggleFolderStar ? (
+          <StarToggle
+            starred={
+              folderStarredOf
+                ? folderStarredOf(node.fullPath)
+                : node.starred === true
+            }
+            onToggle={() => onToggleFolderStar(node.fullPath)}
           />
+        ) : (
+          node.starred && (
+            <Star
+              className="size-3 shrink-0 fill-current text-accent-2"
+              strokeWidth={1.5}
+              aria-label="starred folder"
+            />
+          )
         )}
         <RowActions
           onRename={() => void onRenameFolder(node.fullPath)}
@@ -1642,6 +1729,10 @@ function TreeRowNode({
             onRenameFile={onRenameFile}
             onOpenPicker={onOpenPicker}
             onOpenFileIcon={onOpenFileIcon}
+            onToggleFileStar={onToggleFileStar}
+            starredOf={starredOf}
+            onToggleFolderStar={onToggleFolderStar}
+            folderStarredOf={folderStarredOf}
             dragOverPath={dragOverPath}
             setDragOverPath={setDragOverPath}
             handleDrop={handleDrop}
@@ -1651,6 +1742,40 @@ function TreeRowNode({
           />
         ))}
     </Fragment>
+  )
+}
+
+// Favorite toggle on a file row. Persistent (filled, accent) when
+// starred; revealed on hover when not — so it both indicates and
+// toggles the favorite without a second always-on star.
+function StarToggle({
+  starred,
+  onToggle,
+}: {
+  starred: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation()
+        onToggle()
+      }}
+      title={starred ? 'unfavorite' : 'favorite'}
+      aria-label={starred ? 'unfavorite' : 'favorite'}
+      aria-pressed={starred}
+      className={`flex size-5 shrink-0 items-center justify-center rounded hover:bg-hover transition-opacity ${
+        starred
+          ? 'opacity-100 text-accent-2'
+          : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-ink-faint hover:text-ink'
+      }`}
+    >
+      <Star
+        className={`size-3 ${starred ? 'fill-current' : ''}`}
+        strokeWidth={starred ? 1.5 : 2}
+      />
+    </button>
   )
 }
 

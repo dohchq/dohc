@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Check, Star } from 'lucide-react'
+import { X, Check } from 'lucide-react'
 import { FOLDER_COLORS } from '@/lib/folderTokens'
 
 // file-org-v1 §4.4 / D4.5b — FolderPicker popover. Modal dialog with
@@ -48,7 +48,10 @@ type Props = {
 
 export function FolderPicker({ path, initial, onClose, onCommit }: Props) {
   const [color, setColor] = useState<string | null>(initial?.color ?? null)
-  const [starred, setStarred] = useState<boolean>(initial?.starred ?? false)
+  // Favoriting now lives on the row's inline star, not in this picker.
+  // We preserve the folder's current starred value through setMeta so
+  // changing icon/color (or clearing it) never flips the favorite.
+  const starred = initial?.starred ?? false
   const [busy, setBusy] = useState(false)
   // R3 fold (Codex FAIL-5 / indep FAIL-3) — error surface. When
   // onCommit throws, we display its message inside the card and
@@ -172,7 +175,7 @@ export function FolderPicker({ path, initial, onClose, onCommit }: Props) {
     setBusy(true)
     setError(null)
     try {
-      await onCommit({ icon: null, color: null, starred: false })
+      await onCommit({ icon: null, color: null, starred })
       onClose()
     } catch (e) {
       if (!mountedRef.current) return
@@ -263,22 +266,6 @@ export function FolderPicker({ path, initial, onClose, onCommit }: Props) {
             </div>
           </div>
 
-          {/* Star toggle */}
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={starred}
-              disabled={busy}
-              onChange={(e) => setStarred(e.target.checked)}
-              className="size-4 accent-current disabled:opacity-50"
-              style={{ accentColor: 'var(--color-accent-2)' }}
-            />
-            <Star
-              className={`size-3.5 ${starred ? 'fill-current text-accent-2' : 'text-ink-faint'}`}
-              strokeWidth={1.5}
-            />
-            <span className="text-[12.5px] text-ink">Favorite</span>
-          </label>
         </div>
 
         {/* R3 fold (Codex FAIL-5 / indep FAIL-3) — error surface.
