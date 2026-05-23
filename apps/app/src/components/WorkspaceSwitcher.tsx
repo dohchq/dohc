@@ -17,7 +17,6 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
-  Plus,
   Settings,
   User as UserIcon,
   Building2,
@@ -54,6 +53,19 @@ export function WorkspaceSwitcher() {
     return () => window.removeEventListener('mousedown', onDown)
   }, [open])
 
+  // Self-heal: if the persisted activeWorkspaceId points at an org the
+  // caller is NOT (or no longer) a member of, reset to personal so the
+  // sidebar doesn't get stuck on a workspace whose queries all reject.
+  // MUST run before any early return — React Rules of Hooks require the
+  // hook order to be stable across renders, and the loading branch
+  // below is a render-conditional early return.
+  const known = workspaces?.find((w) => w.workspaceId === activeWorkspaceId)
+  const isStale =
+    workspaces !== undefined && activeWorkspaceId !== undefined && !known
+  useEffect(() => {
+    if (isStale) setActiveWorkspaceId(undefined)
+  }, [isStale, setActiveWorkspaceId])
+
   // Loading: render a stable empty button-frame (no skeleton churn).
   if (workspaces === undefined) {
     return (
@@ -63,16 +75,6 @@ export function WorkspaceSwitcher() {
       />
     )
   }
-
-  // Self-heal: if the persisted activeWorkspaceId points at an org the
-  // caller is NOT (or no longer) a member of, reset to personal so the
-  // sidebar doesn't get stuck on a workspace whose queries will all
-  // reject. This is the offboarded-mid-tab recovery path.
-  const known = workspaces.find((w) => w.workspaceId === activeWorkspaceId)
-  const isStale = activeWorkspaceId !== undefined && !known
-  useEffect(() => {
-    if (isStale) setActiveWorkspaceId(undefined)
-  }, [isStale, setActiveWorkspaceId])
 
   // Resolve the row to display. undefined activeWorkspaceId ⇒ personal
   // (which myWorkspaces always returns first).
@@ -149,19 +151,10 @@ export function WorkspaceSwitcher() {
               </button>
             )
           })}
-          {/* Separator + management affordances. */}
+          {/* Separator + the single management affordance. The dialog
+              renders the create-org form at the top of its body, so a
+              dedicated "Create workspace" entry is redundant. */}
           <div className="my-1 h-px bg-rule/60" />
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink-dim hover:bg-hover transition-colors"
-            onClick={() => {
-              setManageOpen(true)
-              setOpen(false)
-            }}
-          >
-            <Plus className="size-3.5" strokeWidth={2} />
-            <span>Create workspace</span>
-          </button>
           <button
             type="button"
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink-dim hover:bg-hover transition-colors"

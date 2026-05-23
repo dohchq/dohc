@@ -109,8 +109,25 @@ export const joinOrg = mutation({
         acceptedAt: now,
       })
     } else if (existing.status === 'invited' || existing.status === 'removed') {
-      // re-activate a previously-invited or previously-removed row
-      await ctx.db.patch(existing._id, { status: 'active', acceptedAt: now })
+      // re-activate a previously-invited or previously-removed row.
+      //
+      // Codex round-2 HIGH: a former Owner who was `removeMember`'d
+      // would silently REGAIN Owner status by rejoining via the
+      // public invite code (the patch left `role` untouched). Reset
+      // role on reactivation from 'removed' so re-join is always a
+      // Member entry; an Owner promote-back requires an existing
+      // Owner to `changeRole` the rejoined member up. The 'invited'
+      // branch keeps role because the inviter explicitly chose it
+      // when writing the row (no inviteMember mutation exists yet,
+      // so this branch is unreachable today — preserved for the
+      // future invite flow).
+      const nextRole =
+        existing.status === 'removed' ? 'member' : existing.role
+      await ctx.db.patch(existing._id, {
+        status: 'active',
+        acceptedAt: now,
+        role: nextRole,
+      })
     }
     return { orgId: org._id, name: org.name }
   },
@@ -254,7 +271,11 @@ export const myOrgs = query({
 
 /** Workspaces the caller can switch to: their personal workspace plus
  *  every org they're an active member of. Drives the UI switcher
- *  (org-plan §9). The personal entry always appears first. */
+ *  (org-plan §9). The personal entry always appears first.
+ *
+ *  Each org row carries its inviteCode for Owner callers (null for
+ *  Members) — the Members admin dialog reads it from here so it
+ *  doesn't need a second `myOrgs` subscription. */
 export const myWorkspaces = query({
   args: {},
   handler: async (ctx) => {
@@ -269,6 +290,7 @@ export const myWorkspaces = query({
       name: string
       role: 'owner' | 'member'
       accent: string | null
+      inviteCode: string | null
     }> = [
       // Personal first — always available; implicit Owner.
       {
@@ -277,6 +299,7 @@ export const myWorkspaces = query({
         name: 'Personal',
         role: 'owner',
         accent: null,
+        inviteCode: null,
       },
     ]
     for (const r of rows) {
@@ -289,6 +312,9 @@ export const myWorkspaces = query({
         name: org.name,
         role: r.role,
         accent: org.accent ?? null,
+        // Owner-only: invite code (Members get null — they shouldn't
+        // share an invite they don't own). Same gate as `myOrgs`.
+        inviteCode: r.role === 'owner' ? org.inviteCode : null,
       })
     }
     return out

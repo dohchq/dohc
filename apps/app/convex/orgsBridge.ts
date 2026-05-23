@@ -57,23 +57,47 @@ export const createOrgWithBridge = action({
     // would risk an orphan WorkOS org if the Convex mutation failed.
     const created = await ctx.runMutation(api.orgs.createOrg, { name })
 
-    // 2. Try to sync to WorkOS. Failures are logged + swallowed so the
-    // user's create-org click doesn't fail because of a transient
-    // WorkOS outage. A later rename re-attempts (and could optionally
-    // backfill on first successful call — kept simple here).
+    // 2. Sync to WorkOS — idempotent via externalId reconcile (Codex
+    // round-2 HIGH). The flow tolerates ANY of these states without
+    // creating a WorkOS-orphan or a Convex-side stale link:
+    //   - First successful run: list returns empty, create runs,
+    //     patch records the link.
+    //   - WorkOS create succeeded but patch failed last run: list
+    //     finds the existing WorkOS org by externalId, we skip the
+    //     redundant create + just patch the link forward. No duplicate.
+    //   - WorkOS unavailable: list/create throw → caught + swallowed;
+    //     the next user-triggered op (rename) re-runs reconcile.
     let workosOrgId: string | null = null
     try {
       const workos = await getWorkOS()
       if (workos) {
-        const org = await workos.organizations.createOrganization({
-          name: created.name,
-          // externalId pins the WorkOS row to our Convex orgs._id so
-          // we can recover from a lost workosOrgId field by listing
-          // WorkOS orgs and matching externalId. The Convex _id is
-          // already opaque + stable.
-          externalId: created.orgId,
-        })
-        workosOrgId = org.id
+        // Reconcile pass first: if a previous partial-failed run left
+        // a WorkOS org with externalId === created.orgId, reuse it.
+        // `getOrganizationByExternalId` is the SDK's direct hit; it
+        // throws on not-found, which is the GO path (create below).
+        let existingId: string | null = null
+        try {
+          const existing = await workos.organizations.getOrganizationByExternalId(
+            created.orgId,
+          )
+          existingId = existing.id
+        } catch {
+          // not-found ⇒ proceed to create. Other errors fall through
+          // to the same path; the create call itself may then succeed
+          // (idempotent if WorkOS dedupes on externalId at the API
+          // layer) or fail (swallowed by the outer catch).
+        }
+        if (existingId) {
+          workosOrgId = existingId
+        } else {
+          const org = await workos.organizations.createOrganization({
+            name: created.name,
+            // externalId pins the WorkOS row to our Convex orgs._id —
+            // the join key for this reconcile.
+            externalId: created.orgId,
+          })
+          workosOrgId = org.id
+        }
         await ctx.runMutation(internal.orgs._patchWorkosOrgId, {
           orgId: created.orgId,
           workosOrgId,
@@ -84,8 +108,9 @@ export const createOrgWithBridge = action({
         )
       }
     } catch (err) {
-      // Don't fail the user's create — log and move on.
-      console.error('[orgsBridge] WorkOS createOrganization failed:', err)
+      // Don't fail the user's create — log and move on. Next op
+      // re-runs the reconcile (idempotent via externalId).
+      console.error('[orgsBridge] WorkOS create/reconcile failed:', err)
     }
 
     return { ...created, workosOrgId }

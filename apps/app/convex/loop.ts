@@ -563,6 +563,20 @@ export async function scheduleMapRegen(
   // Already pending in the future ⇒ coalesce (do nothing).
   if (existing && existing.scheduledFor > now) return
 
+  // Re-arming a stale row (scheduledFor <= now): the old scheduled job
+  // is still in the queue but the row's scheduledFor is in the past.
+  // Cancel it so a delayed scheduler firing it doesn't trigger a
+  // SECOND regen alongside the new one we're about to schedule.
+  // (Round-2 review H1.) Cancel is best-effort — a job that already
+  // fired returns an error; we ignore and proceed.
+  if (existing && existing.scheduledJobId) {
+    try {
+      await ctx.scheduler.cancel(existing.scheduledJobId)
+    } catch {
+      /* already fired or cancelled — fine */
+    }
+  }
+
   const scheduledFor = now + REGEN_DEBOUNCE_MS
   const jobId = await ctx.scheduler.runAfter(
     REGEN_DEBOUNCE_MS,
@@ -583,16 +597,18 @@ export async function scheduleMapRegen(
 export const _gardenAndMapDebounced = internalMutation({
   args: { workspaceId: v.string() },
   handler: async (ctx, { workspaceId }) => {
-    // Delete the schedule row FIRST so a trigger arriving while regen
-    // runs can re-arm immediately (otherwise the trigger would see the
-    // row still present + scheduledFor <= now and would no-op the
-    // wrong way, missing the regen). Workspace-scoped lookup; no
-    // cross-tenant exposure.
+    // Row-missing is the SIGNAL that another fire (or a manual call)
+    // has already done the regen — early return prevents double-work.
+    // Combined with scheduler.cancel on re-arm (above), this makes
+    // the regen exactly-once per coalesce window even when the OCC
+    // race window opens between two near-simultaneous fires.
+    // (Round-2 review H1 + L3.)
     const row = await ctx.db
       .query('mapRegenSchedule')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .unique()
-    if (row) await ctx.db.delete(row._id)
+    if (!row) return
+    await ctx.db.delete(row._id)
     return await gardenAndMapImpl(ctx, workspaceId)
   },
 })

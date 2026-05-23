@@ -199,21 +199,16 @@ export const _evalOne = internalQuery({
 // pattern). The editor does NOT use this (it uses the reactive
 // `evalQueryBlocks` query below).
 export const run = action({
-  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
-  // personal. NOTE: actions cannot validate membership (no ctx.db); the
-  // default-personal path is the only safe branch when omitted. A caller
-  // passing an org workspaceId here would error in requireWorkspace.
+  // Phase B.3 (org-plan §5): activeWorkspaceId routes through the
+  // `_resolveWorkspaceForCaller` action-bridge (same pattern as
+  // agent.sendMessage / agent.startOnboarding) so this action validates
+  // active membership without needing ctx.db directly.
   args: { src: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { src, activeWorkspaceId }): Promise<string> => {
-    // Actions can only use the default-personal `requireWorkspace(ctx)`
-    // form (the active-membership lookup needs db). Org callers must
-    // route via a mutation/query that forwards to the action.
-    if (activeWorkspaceId !== undefined) {
-      throw new Error(
-        'queries.run (action) cannot validate an active workspace; route via a query/mutation that calls evalQueryBlocks instead.',
-      )
-    }
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId: string = await ctx.runQuery(
+      internal.agent._resolveWorkspaceForCaller,
+      { activeWorkspaceId },
+    )
     const r: { ok: boolean; md: string } = await ctx.runQuery(
       internal.queries._evalOne,
       { workspaceId, src },

@@ -86,14 +86,30 @@ function publicFnsTakingWorkspace(
   while ((m = re.exec(src))) {
     const [, name, kind, head] = m
     const isPublic = !kind.startsWith('internal')
-    // Strip the §5 `activeWorkspaceId` arg from the head; it is the
-    // intended Phase-B shape and is gated by requireWorkspace(ctx, x).
-    const headWithoutActive = head.replace(
-      /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
-      '',
-    )
-    if (isPublic && /\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
-      const body = src.slice(m.index, m.index + 2000)
+    if (!isPublic) continue
+    const body = src.slice(m.index, m.index + 2000)
+    // Codex round-2 LOW tightening: only exempt `activeWorkspaceId`
+    // from the workspace-arg detection when the body ACTUALLY routes
+    // it through a known auth check. Otherwise a future fn could
+    // declare `activeWorkspaceId` as args + ignore it (or pass it
+    // directly into a db query as a workspaceId) and silently pass
+    // CI. The exemption now requires one of:
+    //   - `requireWorkspace(ctx, activeWorkspaceId)`  (mutation/query)
+    //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
+    const validatesActive =
+      /requireWorkspace\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*\)/.test(
+        body,
+      ) ||
+      /runQuery\([\s\S]{0,80}_resolveWorkspaceForCaller[\s\S]{0,200}activeWorkspaceId/.test(
+        body,
+      )
+    const headWithoutActive = validatesActive
+      ? head.replace(
+          /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
+          '',
+        )
+      : head
+    if (/\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
       // `requireRole(ctx, …)` internally calls `requireWorkspace` — it
       // is also a valid auth check (org-plan §6 introduced it).
       hits.push({

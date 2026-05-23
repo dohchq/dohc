@@ -391,7 +391,9 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
     expect(wsOrg).toBe(orgId)
   })
 
-  it('agent.listMessages rejects cross-tenant spoofing on the thread surface', async () => {
+  it('agent.listMessages rejects cross-tenant spoofing on the WORKSPACE gate', async () => {
+    // First gate: requireWorkspace rejects B passing A's personal id.
+    // This proves the workspace check fires before the thread check.
     const t = convexTest(schema, modules)
     const asB = t.withIdentity({ subject: B })
     await expect(
@@ -401,6 +403,33 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
         activeWorkspaceId: A,
       }),
     ).rejects.toThrow(/Not a member of workspace/)
+  })
+
+  it('agent.listMessages also rejects on the THREAD gate (workspace ok, thread foreign)', async () => {
+    // Second gate: even when the workspace gate passes, listMessages
+    // must reject a threadId that doesn't belong to the caller's
+    // workspace. Insert the threadRefs row directly to bypass
+    // `dohcAgent.createThread` (convex-test cannot register the agent
+    // component) — we only need the gate (`_assertOwnThread`) under
+    // test, not the agent SDK plumbing.
+    const t = convexTest(schema, modules)
+    const asB = t.withIdentity({ subject: B })
+    // A's thread row in A's personal workspace.
+    await t.run(async (ctx) => {
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 'thread_for_A',
+      })
+    })
+    // B queries listMessages for B's OWN workspace, but supplies A's
+    // threadId. Workspace gate passes (B is in B's personal). Thread
+    // gate rejects: A's threadId isn't in B's threadRefs.
+    await expect(
+      asB.query(api.agent.listMessages, {
+        threadId: 'thread_for_A',
+        paginationOpts: { numItems: 10, cursor: null },
+      }),
+    ).rejects.toThrow(/thread does not belong to this workspace/)
   })
 
   it('every public Convex fn that accepts activeWorkspaceId routes through requireWorkspace', async () => {

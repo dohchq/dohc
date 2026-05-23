@@ -83,15 +83,17 @@ async function isOrgWorkspace(
   ctx: QueryCtx | MutationCtx,
   workspaceId: string,
 ): Promise<boolean> {
-  // orgs._id IS the workspace id for org workspaces; ctx.db.get on a
-  // non-org-shaped id returns null so this short-circuits cleanly.
-  try {
-    const row = await ctx.db.get(workspaceId as unknown as Id<'orgs'>)
-    return row !== null
-  } catch {
-    // Not an orgs id-shape at all ⇒ personal.
-    return false
-  }
+  // orgs._id IS the workspace id for org workspaces. A personal
+  // workspaceId is a WorkOS subject (e.g. `user_01ABC…`) — not a valid
+  // Convex Id shape. `normalizeId` is the docs-blessed way to ask "is
+  // this string a valid Id for this table" without a try/catch: it
+  // returns the typed Id on hit, null on shape mismatch. Then a single
+  // `db.get` confirms the row actually exists (defensive only — once
+  // normalizeId returns an Id, get returns either the row or null).
+  const orgId = ctx.db.normalizeId('orgs', workspaceId)
+  if (orgId === null) return false
+  const row = await ctx.db.get(orgId)
+  return row !== null
 }
 
 /** The SAME helper `_complete` uses, so the public `progress` query

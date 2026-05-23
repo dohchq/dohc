@@ -25,13 +25,11 @@ type Props = {
 }
 
 export function WorkspaceManagementDialog({ open, onClose }: Props) {
+  // myWorkspaces carries the inviteCode field for Owner rows, so no
+  // separate `myOrgs` subscription is needed (pragmatist round-2 #8).
   const workspaces = useQuery(api.orgs.myWorkspaces, {})
-  const myOrgs = useQuery(api.orgs.myOrgs, {})
-  // org-plan §10 Phase E — createOrg + renameOrg go through the bridge
-  // ACTIONS so the WorkOS Organization stays in sync. The bridge is
-  // graceful: with no WORKOS_API_KEY, the Convex side still operates
-  // exactly as before — workosOrgId stays unset, the org works inside
-  // dohc, and a future bridge run can backfill.
+  // Phase E — createOrg + renameOrg go through the bridge ACTIONS so
+  // the WorkOS Organization stays in sync (graceful when key unset).
   const createOrg = useAction(api.orgsBridge.createOrgWithBridge)
   const renameOrg = useAction(api.orgsBridge.renameOrgWithBridge)
   const removeMember = useMutation(api.orgs.removeMember)
@@ -55,7 +53,6 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   if (!open) return null
 
   const orgWorkspaces = (workspaces ?? []).filter((w) => w.kind === 'org')
-  const orgMeta = new Map((myOrgs ?? []).map((o) => [o.orgId, o]))
 
   async function onCreate(name: string) {
     setBusy(true)
@@ -146,7 +143,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                   orgId={w.workspaceId as Id<'orgs'>}
                   name={w.name}
                   isOwner={w.role === 'owner'}
-                  inviteCode={orgMeta.get(w.workspaceId)?.inviteCode ?? null}
+                  inviteCode={w.inviteCode}
                   onRename={async (name) => {
                     await renameOrg({ orgId: w.workspaceId as Id<'orgs'>, name })
                   }}
