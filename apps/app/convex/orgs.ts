@@ -5,7 +5,7 @@
 // checks it. NO public function takes a workspaceId arg (the caller
 // is always requireWorkspace); orgId/inviteCode are not workspace ids.
 import { v } from 'convex/values'
-import { query, mutation } from './_generated/server'
+import { query, mutation, internalMutation, internalQuery } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
@@ -292,6 +292,31 @@ export const myWorkspaces = query({
       })
     }
     return out
+  },
+})
+
+// org-plan §10 Phase E — WorkOS bridge helpers (called only from
+// `convex/orgsBridge.ts` actions via ctx.runMutation / ctx.runQuery).
+
+// Internal: patch the workosOrgId field after the bridge creates the
+// WorkOS org. NOT public — actions are the only legitimate caller.
+export const _patchWorkosOrgId = internalMutation({
+  args: { orgId: v.id('orgs'), workosOrgId: v.string() },
+  handler: async (ctx, { orgId, workosOrgId }) => {
+    await ctx.db.patch(orgId, { workosOrgId })
+  },
+})
+
+// Internal: gated read of an org's workosOrgId for the bridge's
+// rename path. The caller MUST be an Owner of the org (renameOrg
+// already enforced this on the mutation; we re-check here so a
+// malicious internal caller can't read another org's external link).
+export const _getWorkosOrgIdForCaller = internalQuery({
+  args: { orgId: v.id('orgs') },
+  handler: async (ctx, { orgId }): Promise<string | null> => {
+    await requireRole(ctx, orgId, 'owner')
+    const org = await ctx.db.get(orgId)
+    return org?.workosOrgId ?? null
   },
 })
 

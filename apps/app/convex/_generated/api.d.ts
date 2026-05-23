@@ -33,6 +33,7 @@ import type * as loop from "../loop.js";
 import type * as onboarding from "../onboarding.js";
 import type * as orgRoles from "../orgRoles.js";
 import type * as orgs from "../orgs.js";
+import type * as orgsBridge from "../orgsBridge.js";
 import type * as pluginBridge from "../pluginBridge.js";
 import type * as plugins from "../plugins.js";
 import type * as queries from "../queries.js";
@@ -78,6 +79,7 @@ declare const fullApi: ApiFromModules<{
   onboarding: typeof onboarding;
   orgRoles: typeof orgRoles;
   orgs: typeof orgs;
+  orgsBridge: typeof orgsBridge;
   pluginBridge: typeof pluginBridge;
   plugins: typeof plugins;
   queries: typeof queries;

@@ -13,7 +13,7 @@
  * Owner-gated ones (last-Owner protection happens server-side).
  */
 import { useEffect, useState } from 'react'
-import { useMutation, useQuery } from 'convex/react'
+import { useAction, useMutation, useQuery } from 'convex/react'
 import { Plus, X, Copy, Trash2, UserCog, Building2, User as UserIcon } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '../lib/active-workspace'
@@ -27,8 +27,13 @@ type Props = {
 export function WorkspaceManagementDialog({ open, onClose }: Props) {
   const workspaces = useQuery(api.orgs.myWorkspaces, {})
   const myOrgs = useQuery(api.orgs.myOrgs, {})
-  const createOrg = useMutation(api.orgs.createOrg)
-  const renameOrg = useMutation(api.orgs.renameOrg)
+  // org-plan §10 Phase E — createOrg + renameOrg go through the bridge
+  // ACTIONS so the WorkOS Organization stays in sync. The bridge is
+  // graceful: with no WORKOS_API_KEY, the Convex side still operates
+  // exactly as before — workosOrgId stays unset, the org works inside
+  // dohc, and a future bridge run can backfill.
+  const createOrg = useAction(api.orgsBridge.createOrgWithBridge)
+  const renameOrg = useAction(api.orgsBridge.renameOrgWithBridge)
   const removeMember = useMutation(api.orgs.removeMember)
   const changeRole = useMutation(api.orgs.changeRole)
   const leaveOrg = useMutation(api.orgs.leaveOrg)

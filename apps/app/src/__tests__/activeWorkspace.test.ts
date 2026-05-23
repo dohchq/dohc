@@ -101,11 +101,14 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
     'utf8',
   )
 
-  it('uses the Phase-A Owner-gated mutations + queries', () => {
+  it('uses the Owner-gated APIs (createOrg/renameOrg via Phase E bridge actions; others direct)', () => {
     expect(DIALOG_SRC).toMatch(/api\.orgs\.myWorkspaces/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.orgMembers/)
-    expect(DIALOG_SRC).toMatch(/api\.orgs\.createOrg/)
-    expect(DIALOG_SRC).toMatch(/api\.orgs\.renameOrg/)
+    // Phase E (org-plan §10) — createOrg + renameOrg go through the
+    // WorkOS bridge actions so the Convex side AND WorkOS Organizations
+    // stay in sync. The bridge is graceful when WORKOS_API_KEY is unset.
+    expect(DIALOG_SRC).toMatch(/api\.orgsBridge\.createOrgWithBridge/)
+    expect(DIALOG_SRC).toMatch(/api\.orgsBridge\.renameOrgWithBridge/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.removeMember/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.changeRole/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.leaveOrg/)
