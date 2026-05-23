@@ -255,9 +255,14 @@ export const heartbeat = internalMutation({
  *  to the client only while auth/token bootstraps (Convex semantics);
  *  the gate treats undefined as "still loading". */
 export const state = query({
-  args: {},
-  handler: async (ctx): Promise<OnboardingState> => {
-    const ws = await requireWorkspace(ctx)
+  // org-plan §5 + Jenny/ultrathink M3: pass activeWorkspaceId so the
+  // Gate component sees the ACTIVE workspace's onboarding state. The
+  // prior shape only ever returned personal's state, so an org user
+  // who completed personal onboarding would be sent to <App/> for
+  // their org even when org-onboarding hasn't run yet.
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }): Promise<OnboardingState> => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     return deriveState(await onboardingRow(ctx, ws))
   },
 })
@@ -266,9 +271,9 @@ export const state = query({
  *  in" surface. Same helper as the never-empty invariant ⇒ the
  *  surface cannot claim more than the server will actually accept. */
 export const progress = query({
-  args: {},
-  handler: async (ctx): Promise<OnboardingProgress> => {
-    const ws = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }): Promise<OnboardingProgress> => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     return progressOf(ctx, ws)
   },
 })
@@ -279,9 +284,9 @@ export const progress = query({
  *  (a deferred user is still resumable; `finish_onboarding` still
  *  requires a populated vault). Idempotent. */
 export const defer = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const ws = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     const row = await onboardingRow(ctx, ws)
     if (!row) {
       await ctx.db.insert('onboarding', {

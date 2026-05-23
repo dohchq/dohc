@@ -93,7 +93,14 @@ function Gate() {
   // Gate only mounts post-auth, so this query always runs authed;
   // `undefined` ⇒ the state query is still resolving ⇒ keep showing
   // loading (never flash the wrong screen — P1 design v1 §gate).
-  const state = useQuery(api.onboarding.state)
+  //
+  // Jenny/ultrathink M3: `state` must be scoped to the ACTIVE workspace,
+  // not personal-by-default. Otherwise an org user who finished personal
+  // onboarding skips the wedge for their (still-NEW) org. The hook is
+  // safe to use here because <Gate /> renders inside the provider via
+  // <Home />.
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const state = useQuery(api.onboarding.state, { activeWorkspaceId })
   if (state === undefined) {
     return (
       <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">

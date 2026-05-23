@@ -165,17 +165,17 @@ export function Onboarding({ state }: Props) {
   )
   const introRef = useRef<string | null>(null)
 
-  const ensureThread = useMutation(api.agent.ensureThread)
-  const startOnboarding = useAction(api.agent.startOnboarding)
-  const defer = useMutation(api.onboarding.defer)
-  const sendMessage = useAction(api.agent.sendMessage)
-  const progress = useQuery(api.onboarding.progress)
   // org-plan §5: onboarding is always per-workspace. ensureThread +
   // listMessages thread the active workspace (non-defaultable). The
   // startOnboarding + sendMessage actions stay personal-default for
   // now (the action limitation; thread→workspace binding is the
   // long-term fix).
   const activeWorkspaceId = useActiveWorkspaceId()
+  const ensureThread = useMutation(api.agent.ensureThread)
+  const startOnboarding = useAction(api.agent.startOnboarding)
+  const defer = useMutation(api.onboarding.defer)
+  const sendMessage = useAction(api.agent.sendMessage)
+  const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
 
   const [threadId, setThreadId] = useState<string | null>(null)
   useEffect(() => {

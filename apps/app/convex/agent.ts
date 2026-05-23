@@ -41,6 +41,24 @@ async function activeWorkspaceFromTool(
     activeWorkspaceId: exp?.activeWorkspaceId,
   })) as string
 }
+
+// org-plan §6 + Jenny round-2 H-3 — privileged tools (install_plugin,
+// save_skill) are the "largest catastrophic surface" per the existing
+// install_plugin comment. In an ORG workspace they must require Owner;
+// in personal they're always self (no extra check). Same bridge shape
+// as `activeWorkspaceFromTool` but routes through the Owner-aware
+// resolver `_resolveOwnerWorkspaceForCaller` (defined below).
+async function ownerWorkspaceFromTool(
+  ctx: ToolCtx,
+  options?: { experimental_context?: unknown },
+): Promise<string> {
+  const exp = options?.experimental_context as
+    | { activeWorkspaceId?: string }
+    | undefined
+  return (await ctx.runQuery(internal.agent._resolveOwnerWorkspaceForCaller, {
+    activeWorkspaceId: exp?.activeWorkspaceId,
+  })) as string
+}
 import { requireDirectUserAuthorization } from './skillTurnGate'
 import {
   isSkillAtomBody,
@@ -1048,7 +1066,9 @@ export const dohcAgent = new Agent(components.agent, {
         // self-modifying-vault. A skill body authoring this would
         // mint elevated-capability artifacts unsupervised.
         await requireDirectUserAuthorization(ctx, 'save_skill')
-        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        // org-plan §6 + Jenny round-2 H-3: only Owners save skills
+        // in an org workspace (personal stays self-Owner).
+        const workspaceId = await ownerWorkspaceFromTool(ctx, options)
         const slug = name
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
@@ -1598,6 +1618,10 @@ export const dohcAgent = new Agent(components.agent, {
         // on every atom view. A skill body authoring this would
         // self-elevate to RCE on the user's vault.
         await requireDirectUserAuthorization(ctx, 'install_plugin')
+        // org-plan §6 + Jenny round-2 H-3: in an org workspace ONLY
+        // Owners may install plugins (the kernel runs across every
+        // member's view). Personal is implicit Owner — no extra check.
+        await ownerWorkspaceFromTool(ctx, options)
         const result = (await ctx.runAction(api.catalog.install, {
           id,
         })) as { name: string; path: string }
@@ -1654,6 +1678,25 @@ export const _resolveWorkspaceForCaller = internalQuery({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     return await requireWorkspace(ctx, activeWorkspaceId)
+  },
+})
+
+// org-plan §6 + Jenny round-2 H-3 — Owner-aware variant for privileged
+// tools (install_plugin, save_skill). Personal workspace (workspaceId
+// === WorkOS subject) ⇒ implicit Owner, no extra check. Org workspace
+// ⇒ `requireRole(ctx, workspaceId, 'owner')` throws on Members.
+export const _resolveOwnerWorkspaceForCaller = internalQuery({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const subject = identity?.subject
+    // Personal workspace (caller == subject) is implicit Owner.
+    if (workspaceId === subject) return workspaceId
+    // Org workspace: requireRole enforces Owner-or-throw.
+    const { requireRole } = await import('./orgRoles')
+    await requireRole(ctx, workspaceId, 'owner')
+    return workspaceId
   },
 })
 

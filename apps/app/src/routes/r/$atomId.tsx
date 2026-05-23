@@ -135,6 +135,15 @@ export const Route = createFileRoute('/r/$atomId')({
           if (/not authenticated/i.test(msg)) {
             return safeResponse(401, 'Sign in to view this page.')
           }
+          // Ultrathink M5 — an authenticated-but-not-authorized caller
+          // (e.g. ?w=<org I'm not in>) used to hit the generic 500.
+          // Authz failures are 404 (deliberately not 403) to avoid
+          // confirming the workspace exists — minor enumeration vector.
+          if (
+            /not a member of workspace|membership not active/i.test(msg)
+          ) {
+            return safeResponse(404, 'Not found.')
+          }
           console.error('[r/$atomId] render failed:', err)
           return safeResponse(500, 'Could not render this page.')
         }
