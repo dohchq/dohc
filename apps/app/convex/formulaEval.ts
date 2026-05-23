@@ -267,10 +267,12 @@ async function buildStore(
  * Unknown / malformed ⇒ value:null. Never throws.
  */
 export const evalFormulas = query({
-  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
-  // for back-compat; Phase B.3 tightens to REQUIRED once URL routing
-  // (Phase D) lands. Defaulting to personal in an org context would
-  // silently evaluate org formulas against personal data.
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
+  // Frontend callers (AtomEditor, HtmlAtomFrame, /r/<atomId> route)
+  // all pass activeWorkspaceId from `useActiveWorkspaceId()` /
+  // `?w=<wsId>`. Backend keeps the arg optional only for backend
+  // tests; cross-tenant safety holds either way (requireWorkspace
+  // rejects a spoofed non-member id).
   args: {
     srcs: v.array(v.string()),
     activeWorkspaceId: v.optional(v.string()),

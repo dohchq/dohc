@@ -232,11 +232,16 @@ export const run = action({
 // truncation markers, which are legitimate results, not errors).
 // Never throws.
 export const evalQueryBlocks = query({
-  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
-  // for back-compat with personal-only callers; Phase B.3 will tighten
-  // to REQUIRED once the URL routing (Phase D) lands. Defaulting to
-  // personal in an org context would silently render org content
-  // against personal data — a privacy bug.
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
+  // Frontend caller (AtomEditor) MUST pass activeWorkspaceId from
+  // `useActiveWorkspaceId()`. Backend keeps the arg optional only so
+  // that backend tests calling this with a single-workspace user
+  // (personal === subject) can still pass without per-test threading;
+  // in that path `requireWorkspace(ctx, undefined)` returns the
+  // caller's personal workspace, which IS the right answer for any
+  // single-workspace caller. The cross-tenant safety property holds
+  // either way: a non-member supplying another user's workspace id
+  // here is rejected by requireWorkspace's membership lookup.
   args: {
     srcs: v.array(v.string()),
     activeWorkspaceId: v.optional(v.string()),

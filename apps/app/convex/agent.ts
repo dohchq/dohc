@@ -1565,11 +1565,11 @@ export const dohcAgent = new Agent(components.agent, {
 })
 
 export const ensureThread = mutation({
-  // Phase B (org-plan §5 — NON-DEFAULTABLE thread surface). Currently
-  // OPTIONAL for back-compat; Phase B.3 tightens to REQUIRED once URL
-  // routing (Phase D) lands. A thread created in a personal workspace
-  // is THIS workspace's thread; an org workspace gets its own row
-  // (threadRefs is workspace-keyed — no cross-workspace bridging).
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE thread surface).
+  // Frontend callers (_app.tsx + Onboarding) thread `activeWorkspaceId`
+  // from `useActiveWorkspaceId()`. The thread is workspace-keyed via
+  // threadRefs.by_workspace — switching workspace creates / returns a
+  // DIFFERENT thread, so org chats stay isolated from personal chats.
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
@@ -2068,8 +2068,10 @@ export const startOnboarding = action({
 })
 
 export const listMessages = query({
-  // Phase B (org-plan §5 — NON-DEFAULTABLE). Optional for back-compat;
-  // Phase B.3 tightens to required once URL routing (Phase D) lands.
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE). Chat + Onboarding both
+  // thread `activeWorkspaceId` via useUIMessages; backend gate via
+  // requireWorkspace + the existing rows[0].threadId === args.threadId
+  // check pins messages to the active workspace's thread.
   args: {
     threadId: v.string(),
     paginationOpts: paginationOptsValidator,

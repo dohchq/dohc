@@ -345,13 +345,13 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    ensureThread({}).then((id) => {
+    ensureThread({ activeWorkspaceId }).then((id) => {
       if (!cancelled) setThreadId(id as string)
     })
     return () => {
       cancelled = true
     }
-  }, [ensureThread])
+  }, [ensureThread, activeWorkspaceId])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {

@@ -25,11 +25,13 @@ import {
 // the Convex runtime. This returns the raw post-frontmatter HTML;
 // the route sanitizes + wraps + sets the §2-C headers.
 export const getRenderable = query({
-  // Phase B (org-plan §5 — NON-DEFAULTABLE surface). Currently OPTIONAL
-  // for back-compat; Phase B.3 tightens to REQUIRED once URL routing
-  // (Phase D) lands. The /r/<atomId> route must always supply the
-  // active workspace (defaulting personal renders an org page in the
-  // wrong tenant).
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
+  // The /r/<atomId> server-side route forwards `?w=<wsId>` here; the
+  // client-side HtmlAtomFrame appends that param to the iframe URL
+  // from `useActiveWorkspaceId()`. Backend stays optional for URL
+  // back-compat: old shared links without `?w=` resolve against the
+  // caller's personal workspace via requireWorkspace(ctx, undefined),
+  // which is the documented v0 surface — not a regression.
   args: { atomId: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { atomId, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)

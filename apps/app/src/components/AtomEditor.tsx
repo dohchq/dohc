@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
   parseInlineAtoms,
   parseInlineAtomsFromMarkdown,
@@ -980,9 +981,15 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // sharing-v1 — own-workspace resolution for my own atoms; SCOPED
   // resolution (evalFormulasShared) for a shared atom. Exactly one is
   // ever active; the other is 'skip'.
+  // org-plan §5 — non-defaultable: must pass activeWorkspaceId so the
+  // formula resolves against the workspace the user is *viewing*, not
+  // their personal default.
+  const activeWorkspaceId = useActiveWorkspaceId()
   const resolvedFormulasOwn = useQuery(
     api.formulaEval.evalFormulas,
-    !shareId && formulaSrcs.length ? { srcs: formulaSrcs } : 'skip',
+    !shareId && formulaSrcs.length
+      ? { srcs: formulaSrcs, activeWorkspaceId }
+      : 'skip',
   )
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
@@ -1018,7 +1025,11 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     // sharing-v1 — query blocks read the own-workspace vault; disabled
     // in a shared atom (v1) — they'd otherwise resolve in the viewer's
     // workspace, not the owner's, and scoping them is a later task.
-    !shareId && querySrcs.length ? { srcs: querySrcs } : 'skip',
+    // org-plan §5 non-defaultable: activeWorkspaceId routes the query
+    // through the workspace the user is viewing.
+    !shareId && querySrcs.length
+      ? { srcs: querySrcs, activeWorkspaceId }
+      : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
   const [queryTick, setQueryTick] = useState(0)

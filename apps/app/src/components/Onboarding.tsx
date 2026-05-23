@@ -14,6 +14,7 @@ import {
 import { api } from '../../convex/_generated/api'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Markdown } from '@/components/Markdown'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
@@ -169,17 +170,23 @@ export function Onboarding({ state }: Props) {
   const defer = useMutation(api.onboarding.defer)
   const sendMessage = useAction(api.agent.sendMessage)
   const progress = useQuery(api.onboarding.progress)
+  // org-plan §5: onboarding is always per-workspace. ensureThread +
+  // listMessages thread the active workspace (non-defaultable). The
+  // startOnboarding + sendMessage actions stay personal-default for
+  // now (the action limitation; thread→workspace binding is the
+  // long-term fix).
+  const activeWorkspaceId = useActiveWorkspaceId()
 
   const [threadId, setThreadId] = useState<string | null>(null)
   useEffect(() => {
     let alive = true
-    ensureThread({})
+    ensureThread({ activeWorkspaceId })
       .then((id) => alive && setThreadId(id))
       .catch(() => {})
     return () => {
       alive = false
     }
-  }, [ensureThread])
+  }, [ensureThread, activeWorkspaceId])
 
   // Kick dohc's first turn. With the questionnaire brief ⇒ that's the
   // prompt (one clear turn). Idempotent + race-proof + crash-
@@ -208,7 +215,7 @@ export function Onboarding({ state }: Props) {
   // ── live conversation (same pipeline as Chat — not a fork) ──────
   const mq = useUIMessages(
     api.agent.listMessages,
-    threadId ? { threadId } : 'skip',
+    threadId ? { threadId, activeWorkspaceId } : 'skip',
     { initialNumItems: 50, stream: true },
   )
   const messages: UIMessage[] = useMemo(() => {

@@ -5,6 +5,7 @@ import { Send } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 
 // Track-3 P3 — slash-command detection. EXACT design-pinned
 // grammar (skills-commands-v1 §3.3 line 317):
@@ -73,11 +74,17 @@ export function Chat({
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
   // collect; filtered to type:skill or skills/* path).
-  const skills = useQuery(api.skills.list, {}) ?? []
+  // org-plan §5: active workspace threaded through skills + the
+  // (org-plan §5 non-defaultable) listMessages thread surface. The
+  // agent.sendMessage action remains personal-default for now (an
+  // action cannot validate active membership; the thread itself
+  // binds to a workspace via threadRefs, which is the long-term fix).
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
 
   const messagesQuery = useUIMessages(
     api.agent.listMessages,
-    threadId ? { threadId } : 'skip',
+    threadId ? { threadId, activeWorkspaceId } : 'skip',
     { initialNumItems: 50, stream: true },
   )
 

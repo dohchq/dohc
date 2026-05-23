@@ -82,6 +82,7 @@ export const Route = createFileRoute('/r/$atomId')({
   server: {
     handlers: {
       GET: async ({
+        request,
         params,
       }: {
         request: Request
@@ -100,6 +101,17 @@ export const Route = createFileRoute('/r/$atomId')({
           return safeResponse(401, 'Sign in to view this page.')
         }
 
+        // org-plan §5: the active workspace is supplied via the URL
+        // `?w=<wsId>` query param (HtmlAtomFrame appends it; old
+        // shared links may omit it, in which case requireWorkspace
+        // defaults to the caller's personal workspace via the
+        // back-compat path). The route NEVER reads localStorage —
+        // server-side runtime has no client state.
+        const url = new URL(request.url)
+        const wParam = url.searchParams.get('w')
+        const activeWorkspaceId =
+          wParam && wParam.length > 0 ? wParam : undefined
+
         // (b) Fetch the atom, workspace-scoped SERVER-SIDE by the
         // token (requireWorkspace in the query). Any negative case
         // (missing / tombstoned / other workspace / not html) → null.
@@ -109,6 +121,7 @@ export const Route = createFileRoute('/r/$atomId')({
           client.setAuth(auth.accessToken)
           result = await client.query(api.htmlAtoms.getRenderable, {
             atomId: params.atomId,
+            activeWorkspaceId,
           })
         } catch (err) {
           // requireWorkspace throws 'Not authenticated' on an
@@ -174,6 +187,7 @@ export const Route = createFileRoute('/r/$atomId')({
               fc.setAuth(auth.accessToken)
               const rows = await fc.query(api.formulaEval.evalFormulas, {
                 srcs,
+                activeWorkspaceId,
               })
               map = new Map(rows.map((r) => [r.src, r.value]))
             }

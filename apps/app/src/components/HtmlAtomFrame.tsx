@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { ATOM_BODY_MAX_BYTES } from '../lib/inlineAtom'
 import { harvestFormulaSrcsFromDoc } from '../lib/htmlFormula'
 
@@ -84,9 +85,12 @@ export function HtmlAtomFrame({
     setSrcs(harvestFormulaSrcs(body))
   }, [body])
 
+  // org-plan §5 non-defaultable: pass the active workspace so the
+  // formulas resolve in the workspace the user is *viewing*.
+  const activeWorkspaceId = useActiveWorkspaceId()
   const resolved = useQuery(
     api.formulaEval.evalFormulas,
-    srcs.length ? { srcs } : 'skip',
+    srcs.length ? { srcs, activeWorkspaceId } : 'skip',
   )
   const sig = useMemo(() => JSON.stringify(resolved ?? []), [resolved])
 
@@ -95,8 +99,14 @@ export function HtmlAtomFrame({
     setNonce((n) => n + 1)
   }, [sig, atomId])
 
+  // The iframe also routes through the server-side /r/<atomId> route
+  // which itself calls getRenderable + evalFormulas. Forward the active
+  // workspace via `?w=` so the route can pass it through (default-
+  // personal at the route layer for old shared links with no `?w=`).
+  const wParam =
+    activeWorkspaceId ? `&w=${encodeURIComponent(activeWorkspaceId)}` : ''
   const src = atomId
-    ? `/r/${encodeURIComponent(atomId)}?v=${nonce}`
+    ? `/r/${encodeURIComponent(atomId)}?v=${nonce}${wParam}`
     : null
 
   // ── double buffer + best-effort re-pin ───────────────────────────
