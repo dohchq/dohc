@@ -29,6 +29,7 @@ import {
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
 import { DohcMark } from './DohcLogo'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { useTheme } from '@/lib/use-theme'
 import {
   buildTree,
@@ -1056,6 +1057,11 @@ export function FileTree({
           </div>
         </div>
       </header>
+
+      {/* org-plan §9 Phase D — workspace switcher. Compact dropdown
+          between the brand header and the file sections; "Personal"
+          when no org is active, otherwise the active org's name. */}
+      <WorkspaceSwitcher />
 
       {/* Sections — VSCode-explorer style: collapsible groups over the
           same flat file list (a pure presentation partition). */}

@@ -31,6 +31,10 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
+import {
+  ActiveWorkspaceProvider,
+  useActiveWorkspaceId,
+} from '@/lib/active-workspace'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
 // PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
@@ -45,10 +49,10 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   return (
-    <>
+    <ActiveWorkspaceProvider>
       <Home />
       <Outlet />
-    </>
+    </ActiveWorkspaceProvider>
   )
 }
 
@@ -162,10 +166,16 @@ function SignInPrompt() {
 
 function App() {
   const { user } = useAuth()
-  const files = useQuery(api.atoms.list, {})
-  const folders = useQuery(api.folders.list, {})
+  // org-plan §5 Phase B — every read/write is scoped to the active
+  // workspace. undefined ⇒ caller's personal workspace (the v0 default;
+  // back-compat preserved by requireWorkspace(ctx, undefined)).
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const files = useQuery(api.atoms.list, { activeWorkspaceId })
+  const folders = useQuery(api.folders.list, { activeWorkspaceId })
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
-  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {})
+  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
+    activeWorkspaceId,
+  })
   // The fileId currently being shared (drives the ShareDialog).
   const [sharePromptFor, setSharePromptFor] = useState<string | null>(null)
   const ensureThread = useMutation(api.agent.ensureThread)
@@ -468,7 +478,7 @@ function App() {
   }, [urlFileId])
 
   async function createAtom(path: string, body = '') {
-    await upsertAtom({ path, body, source: 'user' })
+    await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
     // openAtom shows it immediately (optimistic); the bridge effect
     // writes the URL once the new file lands in `files` with a fileId.
     openAtom(path)
@@ -500,7 +510,7 @@ function App() {
     const clean = name.trim().replace(/^\/+|\/+$/g, '')
     if (!clean) return
     try {
-      await createFolder({ path: clean })
+      await createFolder({ path: clean, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't create folder: ${(e as Error).message}`)
     }
@@ -517,7 +527,7 @@ function App() {
   // miss for sighted users; the alert is loud).
   async function toggleLockAtPath(path: string, currentlyLocked: boolean) {
     try {
-      await setLockAtom({ path, locked: !currentlyLocked })
+      await setLockAtom({ path, locked: !currentlyLocked, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyLocked ? 'unlock' : 'lock'}: ${(e as Error).message}`)
       throw e
@@ -525,7 +535,7 @@ function App() {
   }
   async function toggleStarAtPath(path: string, currentlyStarred: boolean) {
     try {
-      await setStarAtom({ path, starred: !currentlyStarred })
+      await setStarAtom({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'}: ${(e as Error).message}`)
       throw e
@@ -533,7 +543,7 @@ function App() {
   }
   async function toggleFolderStarAtPath(path: string, currentlyStarred: boolean) {
     try {
-      await setFolderStar({ path, starred: !currentlyStarred })
+      await setFolderStar({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'} folder: ${(e as Error).message}`)
       throw e
@@ -552,6 +562,7 @@ function App() {
       icon: next.icon,
       color: next.color,
       starred: next.starred,
+      activeWorkspaceId,
     })
   }
 
@@ -564,7 +575,7 @@ function App() {
     // wikilink cascade sees the latest body.
     await pendingSaveRef.current?.()
     try {
-      const result = await moveAtom({ fromPath, toPath })
+      const result = await moveAtom({ fromPath, toPath, activeWorkspaceId })
       // D4.30 — no URL change: the open atom's fileId is stable
       // across the move, so `activePath` re-derives to `toPath`
       // automatically when `files` refreshes.
@@ -587,7 +598,7 @@ function App() {
     // D4.7c — flush autosave before the cascade runs.
     await pendingSaveRef.current?.()
     try {
-      await moveFolder({ fromPath, toPath })
+      await moveFolder({ fromPath, toPath, activeWorkspaceId })
       // D4.8 — link-cascade alert removed per user feedback;
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
@@ -601,7 +612,7 @@ function App() {
     const ok = window.confirm(`Delete ${path}?\n\nThis can't be undone.`)
     if (!ok) return
     try {
-      await removeAtom({ path })
+      await removeAtom({ path, activeWorkspaceId })
       // D4.30 — if we just deleted the open atom, clear the URL.
       if (activePath === path) clearOpenAtom({ replace: true })
     } catch (e) {
@@ -622,7 +633,7 @@ function App() {
     // D4.7c — flush autosave so the cascade reads the latest body.
     await pendingSaveRef.current?.()
     try {
-      await moveAtom({ fromPath: path, toPath: target })
+      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
       // D4.30 — no URL change; fileId is stable, activePath
       // re-derives to `target` automatically.
       // D4.8 — link-cascade alert removed; the rewrite is silent.
@@ -639,7 +650,7 @@ function App() {
     // D4.7c — flush autosave before cascade.
     await pendingSaveRef.current?.()
     try {
-      await moveFolder({ fromPath: path, toPath: target })
+      await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
       // D4.30 — no URL change: every moved atom keeps its fileId
       // (folders.move reconciles the index), so the open atom's
       // `activePath` re-derives to its new path automatically.
@@ -655,7 +666,10 @@ function App() {
     )
     if (!ok) return
     try {
-      const { atomCount, folderCount } = await removeFolder({ path })
+      const { atomCount, folderCount } = await removeFolder({
+        path,
+        activeWorkspaceId,
+      })
       // D4.30 — if the open atom was inside the deleted folder, clear the URL.
       if (activePath && (activePath === path || activePath.startsWith(`${path}/`))) {
         clearOpenAtom({ replace: true })
@@ -704,7 +718,7 @@ function App() {
         onToggleFolderStar={toggleFolderStarAtPath}
         onSetFolderMeta={setFolderMetaAtPath}
         onSetFileIcon={async (path, icon) => {
-          await setIconAtom({ path, icon })
+          await setIconAtom({ path, icon, activeWorkspaceId })
         }}
         onMoveFile={moveFileByDrop}
         onMoveFolder={moveFolderByDrop}
