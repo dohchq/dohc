@@ -753,3 +753,53 @@ keeping for forward compat):
 
 Implementation proceeds in 9 sub-commits matching v3 "Implementation
 plan" — each referenced back to specific Codex findings absorbed.
+
+## v4.1 — sub-commit 3.6 serializer architecture (post-build codex consult)
+
+After sub-commits 3.1-3.5 landed, the build hit the PM JSON →
+markdown server-side fork. Consulted /codex (session
+019e59a4, 4th pass). Picked B/D-hybrid:
+
+**Server-side PM JSON → mdast → remark-stringify, driven by
+`onSnapshot(snapshotContent)`.**
+
+Key correction from Codex: use the `snapshotContent` passed to
+onSnapshot DIRECTLY. Do NOT call `prosemirrorSync.getDoc()` for
+projection — its 100-delta cap (Codex v3 NOT-CLOSED #8) means
+arbitrary replay can return partial state. onSnapshot fires with
+the committed snapshot content at snapshotVersion already; serialize
+it after validating commit.
+
+What we own: PM JSON node walker → mdast builder. ~300-500 LOC
+scoped to Crepe's node set. Everything else (escaping, list
+formatting, link/image emission, table layout) belongs to
+remark-stringify (the proven pipeline from 3.1).
+
+THREE NEW CRITICAL CONCERNS Codex flagged (must absorb in 3.6+):
+
+1. **Frontmatter preservation**: Crepe edits only the post-
+   frontmatter `rest`. Server projection must split frontmatter
+   from existing.body, replace ONLY the rest with the serialized
+   PM markdown, join them back. `seedAtomIdIntoBody` only
+   protects `id` — won't preserve `title`, `icon`, `type`, etc.
+
+2. **Unknown node fail-loud**: if Crepe introduces a node type
+   the walker doesn't recognize, freeze the projection + signal
+   conflict — DO NOT emit lossy markdown.
+
+3. **Client snapshot submission missing**: today's collab-sync
+   (M1 step 2) only calls submitSteps. Without periodic
+   submitSnapshot from the client, onSnapshot only fires at
+   bootstrap. Sub-commit 3.6 must add a snapshot-debounce on
+   the client.
+
+REVISED SUB-COMMIT PLAN (sub-3.6 split into smaller chunks):
+
+- 3.6.1: PM JSON → mdast walker (the structural traversal)
+- 3.6.2: PM serializer end-to-end + frontmatter preservation
+- 3.6.3: onSnapshot integration in convex/prosemirror.ts (server
+         side: validates snapshotVersion, calls 3.4 writer)
+- 3.6.4: Client snapshot-debounce in collab-sync.ts
+
+Original 3.7-3.9 follow with the conflict handler, AtomEditor
+bootstrap render-gate, E2E test rig.
