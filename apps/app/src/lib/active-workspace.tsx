@@ -32,7 +32,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { useLocation } from '@tanstack/react-router'
+import { useLocation, useNavigate } from '@tanstack/react-router'
 
 const STORAGE_KEY = 'dohc.activeWorkspaceId'
 
@@ -82,20 +82,32 @@ export function ActiveWorkspaceProvider({ children }: { children: ReactNode }) {
   // localStorage; takes precedence when present.
   const { pathname } = useLocation()
   const urlValue = workspaceIdFromPathname(pathname)
+  const navigate = useNavigate()
 
-  const setActiveWorkspaceId = useCallback((next: string | null | undefined) => {
-    const clean = next && next.length > 0 ? next : undefined
-    setStorageValue(clean)
-    try {
-      if (clean === undefined) window.localStorage.removeItem(STORAGE_KEY)
-      else window.localStorage.setItem(STORAGE_KEY, clean)
-    } catch {
-      /* private mode etc. — silently best-effort */
-    }
-    // (Follow-up commit: ALSO navigate so the URL becomes the authoritative
-    // signal immediately. For this foundation commit, the URL picks up
-    // the next page navigation naturally + localStorage carries until then.)
-  }, [])
+  const setActiveWorkspaceId = useCallback(
+    (next: string | null | undefined) => {
+      const clean = next && next.length > 0 ? next : undefined
+      // Write localStorage first so legacy URLs landing without context
+      // pick up the choice on next visit.
+      setStorageValue(clean)
+      try {
+        if (clean === undefined) window.localStorage.removeItem(STORAGE_KEY)
+        else window.localStorage.setItem(STORAGE_KEY, clean)
+      } catch {
+        /* private mode etc. — silently best-effort */
+      }
+      // R1 commit 3 — navigate to the new workspace's HOME on switch.
+      // Why home (not "find the same atom in the new workspace"): atoms
+      // are per-workspace; switching from personal to org wouldn't find
+      // your personal dashboard in the org anyway. Home is the safe +
+      // predictable landing. User clicks around to find their work.
+      void navigate({
+        to: '/w/$wsId',
+        params: { wsId: clean ?? 'me' },
+      })
+    },
+    [navigate],
+  )
 
   // Cross-tab sync: a switch in another tab updates this one's storage
   // fallback. (URL is per-tab — cross-tab navigation is the user's job.)

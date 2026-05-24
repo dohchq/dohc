@@ -192,4 +192,16 @@ describe('active-workspace.tsx (R1 hook resolution)', () => {
   it('localStorage cross-tab sync still wired (storage event listener)', () => {
     expect(SRC).toMatch(/addEventListener\(['"]storage['"]/)
   })
+
+  it('setActiveWorkspaceId navigates to /w/$wsId on switch (URL stays authoritative)', () => {
+    // Without this, clicking "Acme" in the switcher writes localStorage
+    // but the URL stays put → URL parser wins → activeWorkspaceId stays
+    // the previous value → user sees nothing change. Locking the contract.
+    expect(SRC).toMatch(
+      /navigate\(\{[\s\S]{0,150}to:\s*['"]\/w\/\$wsId['"][\s\S]{0,100}wsId:\s*clean\s*\?\?\s*['"]me['"]/,
+    )
+    expect(SRC).toMatch(
+      /import\s+\{[\s\S]*?useNavigate[\s\S]*?\}\s+from\s+['"]@tanstack\/react-router['"]/,
+    )
+  })
 })
