@@ -24,6 +24,7 @@ import {
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '@/lib/active-workspace'
+import { useChatBusy } from '@/lib/chat-busy'
 import { WorkspaceManagementDialog } from './WorkspaceManagementDialog'
 
 export function WorkspaceSwitcher() {
@@ -33,6 +34,12 @@ export function WorkspaceSwitcher() {
   const [manageOpen, setManageOpen] = useState(false)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
+  // F1 — block the switcher while a chat stream is mid-flight. Without
+  // this, navigating mid-send (R1 commit 3 → setActiveWorkspaceId
+  // navigates) rebinds the chat to the new workspace's thread and
+  // orphans the in-flight assistant tokens. v1 disables the button +
+  // tooltip; v2 (deferred) is the full abandon-confirm + AbortController.
+  const chatBusy = useChatBusy()
 
   // Click-outside to close. (The same pattern the New + menu in
   // FileTree uses — fixed overlay catches the click.)
@@ -89,10 +96,16 @@ export function WorkspaceSwitcher() {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12.5px] text-ink hover:bg-hover transition-colors"
+        disabled={chatBusy}
+        className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12.5px] text-ink hover:bg-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
         aria-haspopup="listbox"
         aria-expanded={open}
-        title={`workspace: ${active?.name ?? 'Personal'}`}
+        aria-disabled={chatBusy}
+        title={
+          chatBusy
+            ? 'dohc is sending a message — wait for it to finish before switching workspaces.'
+            : `workspace: ${active?.name ?? 'Personal'}`
+        }
       >
         {active?.kind === 'org' ? (
           <Building2 className="size-3.5 shrink-0 text-ink-dim" strokeWidth={2} />

@@ -6,6 +6,7 @@ import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
+import { useSetChatBusy } from '../lib/chat-busy'
 
 // Track-3 P3 — slash-command detection. EXACT design-pinned
 // grammar (skills-commands-v1 §3.3 line 317):
@@ -102,6 +103,19 @@ export function Chat({
       ),
     [uiMessages],
   )
+
+  // F1 (multiplayer-and-h-followups §7) — publish busy state up to
+  // ChatBusyContext so the WorkspaceSwitcher can disable itself while
+  // a stream is mid-flight. Without this, switching workspace mid-send
+  // navigates (R1 commit 3) → chat rebinds to new workspace's thread
+  // → in-flight assistant tokens are orphaned. v1 fix: block the
+  // switcher. v2 (deferred): confirm dialog + AbortController via the
+  // agent action.
+  const setChatBusy = useSetChatBusy()
+  useEffect(() => {
+    setChatBusy(busy)
+    return () => setChatBusy(false)
+  }, [busy, setChatBusy])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({

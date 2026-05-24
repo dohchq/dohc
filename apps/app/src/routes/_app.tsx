@@ -35,6 +35,7 @@ import {
   ActiveWorkspaceProvider,
   useActiveWorkspaceId,
 } from '@/lib/active-workspace'
+import { ChatBusyProvider } from '@/lib/chat-busy'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
 // PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
@@ -50,8 +51,10 @@ export const Route = createFileRoute('/_app')({
 function AppLayout() {
   return (
     <ActiveWorkspaceProvider>
-      <Home />
-      <Outlet />
+      <ChatBusyProvider>
+        <Home />
+        <Outlet />
+      </ChatBusyProvider>
     </ActiveWorkspaceProvider>
   )
 }
