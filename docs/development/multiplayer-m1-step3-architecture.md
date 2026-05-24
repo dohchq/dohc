@@ -698,4 +698,58 @@ At this point the meaningful options are:
 - **Start prototyping** (real code under tests will surface execution-level bugs the design review can't see; accept some rework when those land)
 - **Defer M1 step 3 entirely** and ship the M1 step 1+2 plumbing as part of the PR with multiplayer flag staying unset
 
-Decision belongs to the human.
+**Decision (2026-05-24)**: PROTOTYPE. Code-first absorbs the 3 critical
++ 5 NEW v3 findings as implementation fixes; real execution surfaces
+the next class of bugs that doc review can't see.
+
+## v4 implementation fixes (informs the build)
+
+The following six fixes are absorbed directly into each sub-commit
+rather than via a v4 doc round-trip. Each sub-commit's tests assert
+the fix landed correctly.
+
+1. **Helper queries by atomId, not by path** (Codex critical #1).
+   `replaceAtomBodyForCollabProjection` uses `ctx.db.get(atomId)` and
+   verifies the row exists; refuses if `atom.workspaceId` /
+   `atom.path` don't match the expected values. Tests assert
+   "rename-mid-session writes to the original atomId, not the new
+   path's atom."
+
+2. **baseBodyHash from finalBody (post-seed)** (Codex critical #2 part
+   1). The CAS witness stored in `collabDocs.baseBodyHash` is
+   `sha256(finalBody)` where finalBody is the result of
+   `seedAtomIdIntoBody(...)`. Tests assert "seeding doesn't desync
+   the CAS witness."
+
+3. **Coalesced or dropped projection-trash** (Codex critical #2 part
+   2). Projection trash is the autosave-flood path I dismissed in
+   v3. Drop it entirely for v1 — collab recovery flows through
+   prosemirror-sync's own version history (snapshots + deltas serve
+   as the audit trail). Atom trash is preserved for non-collab
+   writes via the existing `upsertAtomImpl` chain.
+
+4. **schemaCtx import from `@milkdown/kit/core`** (Codex critical #3
+   part 1). NOT `@milkdown/core/internal-plugin/schema` (not a
+   public export). Tests assert structural — the import path is in
+   the source.
+
+5. **Crepe `defaultValue: { type: 'json', value: pmJson }`** (Codex
+   critical #3 part 2). Replaces the v3 post-mount doc replacement
+   + first-mount cache. Eliminates a whole class of mount-ordering
+   bugs. Tests assert structural — the call site uses the JSON
+   defaultValue variant when `multiplayerDocId` is set.
+
+6. **Aggressive snapshot submission to dodge `getSteps` 100-cap**
+   (Codex NOT-CLOSED). Server-side projection writer also fires
+   `submitSnapshot` after each successful projection (resets the
+   delta count, keeps `getDoc` replays bounded). Tests assert
+   "100+ steps don't cause partial replay in projection."
+
+PLUS Codex's recommended additional collabDocs fields (non-blockers,
+keeping for forward compat):
+- `lastProjectedHash` (helps debug projection cycles)
+- `lastConflictAt` (UI can show "last conflict 3min ago")
+- `pruneAfter` (explicit snapshot-prune trigger)
+
+Implementation proceeds in 9 sub-commits matching v3 "Implementation
+plan" — each referenced back to specific Codex findings absorbed.
