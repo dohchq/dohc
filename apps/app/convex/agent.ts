@@ -1825,7 +1825,8 @@ export const dohcAgent = new Agent(components.agent, {
             proposedText,
             instruction,
             expectedText,
-            authorIsAgent: true,
+            // 3.9.7 — authorIsAgent dropped from the args;
+            // derived server-side from agentSecret.
             authorUserId: viewerSubject,
             agentSecret,
           },

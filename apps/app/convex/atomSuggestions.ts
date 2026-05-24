@@ -60,17 +60,20 @@ export const _createSuggestion = internalMutation({
     proposedText: v.string(),
     instruction: v.string(),
     // M1 step 3.9.6 — SIGNED AGENT TOKEN (plan §3 M3 +
-    // codex HIGH 2). authorIsAgent is no longer trusted from
-    // the caller — it's DERIVED here from agentSecret
+    // codex HIGH 2). authorIsAgent is derived from agentSecret
     // matching process.env.DOHC_AGENT_SECRET. A caller without
     // the env secret gets authorIsAgent=false regardless of
-    // what they claim. Defense-in-depth: _createSuggestion is
-    // an internalMutation (not exposed to clients), so the
+    // intent. Defense-in-depth: _createSuggestion is an
+    // internalMutation (not exposed to clients), so the
     // direct-forge attack requires writing new server code;
     // the secret makes that attack require code review WITH
     // the env var, which is more auditable than a silent
     // flag toggle.
-    authorIsAgent: v.boolean(), // hint only; verified via agentSecret below
+    //
+    // 3.9.7 — codex 17th-pass [P2] cleanup: the prior
+    // authorIsAgent caller-claim arg is dropped. authorIsAgent
+    // is now derived solely from the verified secret; no
+    // misleading caller-controlled field on the API surface.
     authorUserId: v.string(),
     /** Bearer token the caller claims as proof of agent runtime
      *  origin. Compared to process.env.DOHC_AGENT_SECRET. When
@@ -91,7 +94,6 @@ export const _createSuggestion = internalMutation({
       rangeTo,
       proposedText,
       instruction,
-      authorIsAgent: _authorIsAgentClaim,
       authorUserId,
       agentSecret,
       expectedText,

@@ -1099,19 +1099,35 @@ export function makeSuggestionDecorationsPlugin({
           let pmTo = docSize
           let anchored = false
           if (s.expectedText && s.expectedText.length > 0) {
-            // Naive indexOf — good enough for v1; suggestions
-            // are typically <1KB so the cost is minimal.
-            const idx = docText.indexOf(s.expectedText)
-            if (idx >= 0) {
+            // M1 step 3.9.7 — codex 17th-pass [P1]:
+            // UNIQUENESS-GATED anchoring. If expectedText
+            // appears multiple times in the doc, anchoring
+            // to the FIRST match while accept applies at the
+            // original markdown offsets could highlight one
+            // occurrence and rewrite a different one. CAS
+            // wouldn't catch it (the text matches at both
+            // positions). User-visible wrong-location accept.
+            //
+            // Fix: anchor only when the match is unique.
+            // Duplicate matches render unanchored with the
+            // existing "Original text changed — accept will
+            // be rejected" warning (technically not rejected
+            // — CAS WOULD pass — but the user is told the
+            // anchor isn't trustworthy, which is the safer
+            // signal). A richer fix would store the
+            // surrounding context at suggest time; deferred.
+            const first = docText.indexOf(s.expectedText)
+            const last = docText.lastIndexOf(s.expectedText)
+            if (first >= 0 && first === last) {
               // textBetween offset → approximate PM position.
               // For docs without block boundaries (most
               // simple cases) this is exact. For complex
               // structures it's off by ~1 per block boundary;
               // tolerable for a decoration anchor.
-              pmFrom = Math.max(0, Math.min(idx + 1, docSize))
+              pmFrom = Math.max(0, Math.min(first + 1, docSize))
               pmTo = Math.max(
                 pmFrom,
-                Math.min(idx + s.expectedText.length + 1, docSize),
+                Math.min(first + s.expectedText.length + 1, docSize),
               )
               anchored = true
             }
@@ -1191,8 +1207,14 @@ function renderSuggestionBubble(
     const warn = document.createElement('div')
     warn.style.cssText =
       'color:#b45309;background:#fef3c7;border-radius:3px;padding:2px 5px;font-size:10px;'
+    // 3.9.7 — copy covers both unanchored cases:
+    // (a) expectedText not found (doc drifted — CAS will reject)
+    // (b) expectedText found multiple times (ambiguous — accept
+    //     may rewrite the wrong occurrence even though CAS
+    //     passes)
+    // The user's safe path in both is: ask for a fresh suggestion.
     warn.textContent =
-      'Original text changed — accept will be rejected. Ask for a fresh suggestion.'
+      "Couldn't anchor this suggestion in the current doc (the text changed or appears more than once). Ask for a fresh suggestion."
     root.appendChild(warn)
   }
   // Proposed text preview (first 120 chars)
