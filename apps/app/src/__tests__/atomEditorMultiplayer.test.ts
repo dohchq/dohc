@@ -152,3 +152,74 @@ describe('AtomEditor — frozen banner (M1 3.8.1.1)', () => {
     expect(SRC).toMatch(/collabDocState\.frozen/)
   })
 })
+
+// M1 step 3.8.1.2 — rebootstrap auto-reload overlay. When the
+// conflict resolver (3.7 case B) flags needsRebootstrap=true,
+// show a brief "Updating..." overlay + auto-reload via
+// window.location.reload(). Reload triggers fresh AtomEditor
+// mount → fresh useCollabSync → bootstrap mutation fires →
+// server clears the flag.
+describe('AtomEditor — rebootstrap overlay (M1 3.8.1.2)', () => {
+  it('overlay has accessible role="status" + aria-live="polite"', () => {
+    // Status role + polite live region: announces to screen
+    // readers when the overlay appears WITHOUT interrupting
+    // (which would happen with role="alert" / aria-live=assertive).
+    // The overlay is transient + informational, not a warning.
+    expect(SRC).toMatch(/data-testid="collab-rebootstrap-overlay"/)
+    expect(SRC).toMatch(/role="status"/)
+    expect(SRC).toMatch(/aria-live="polite"/)
+  })
+
+  it('auto-reload uses setTimeout + window.location.reload', () => {
+    // The 1500ms delay lets the user see the explanatory text
+    // before reload kicks in. Cleanup via clearTimeout in case
+    // the component unmounts before the timer fires (e.g. user
+    // navigates away).
+    expect(SRC).toMatch(/setTimeout\([\s\S]*?window\.location\.reload\(\)[\s\S]*?,\s*1500\s*\)/)
+    expect(SRC).toMatch(/return\s*\(\)\s*=>\s*clearTimeout\(t\)/)
+  })
+
+  it('overlay + auto-reload effect both gated by multiplayerDocId', () => {
+    // BOTH the render branch AND the useEffect must check
+    // multiplayerDocId first — otherwise single-user mounts could
+    // theoretically hit them if collabDocState ever populated stray.
+    // The auto-reload effect's first line MUST be the gate.
+    expect(SRC).toMatch(
+      /if\s*\(\s*multiplayerDocId\s*&&[\s\S]+?collabDocState[\s\S]+?\.needsRebootstrap\s*\)/,
+    )
+    // Effect's gate at the top:
+    expect(SRC).toMatch(
+      /useEffect\(\(\)\s*=>\s*\{\s*\n\s*if\s*\(!multiplayerDocId\)\s*return/,
+    )
+  })
+
+  it("overlay copy names what's happening + why (no panic)", () => {
+    // Different message than the frozen banner: this is INFO,
+    // not an alert. Tells the user WHAT (updating) + WHY
+    // (changed elsewhere) + WHAT'S HAPPENING (reconnecting).
+    // No "you lost work" because case B means PM had no
+    // unprojected edits.
+    expect(SRC).toMatch(/Updating to latest content/i)
+    expect(SRC).toMatch(/changed elsewhere|while you were idle/i)
+    expect(SRC).toMatch(/Reconnecting/i)
+    // Should NOT mention "unsaved" — that's the frozen banner's job
+    const overlayText = SRC.split('collab-rebootstrap-overlay')[1]?.split('collab-frozen-banner')[0] ?? ''
+    expect(overlayText.toLowerCase()).not.toContain('unsaved')
+  })
+
+  it('frozen banner + rebootstrap overlay are MUTUALLY EXCLUSIVE conditions', () => {
+    // Order matters: rebootstrap overlay checks needsRebootstrap
+    // FIRST, frozen banner checks frozen SECOND. Server invariant
+    // (3.9.5 fix #4) ensures frozen dominates if both flags ever
+    // simultaneously true — the rebootstrap path on server wouldn't
+    // clear frozen, so client's frozen banner would still show
+    // after the rebootstrap-overlay-induced reload. UI ordering
+    // here matches that intent: rebootstrap overlay handles the
+    // gentler case B; frozen banner handles the hard case A.
+    const rebootstrapIdx = SRC.indexOf('collab-rebootstrap-overlay')
+    const frozenIdx = SRC.indexOf('collab-frozen-banner')
+    expect(rebootstrapIdx).toBeGreaterThan(-1)
+    expect(frozenIdx).toBeGreaterThan(-1)
+    expect(rebootstrapIdx).toBeLessThan(frozenIdx)
+  })
+})

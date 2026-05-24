@@ -1311,6 +1311,66 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     [],
   )
 
+  // M1 step 3.8.1.2 — REBOOTSTRAP AUTO-RELOAD. When the conflict
+  // resolver (3.7 case B) flags needsRebootstrap=true (OOB write
+  // while PM had no unprojected edits), the user hasn't lost
+  // any unsubmitted work — PM is at the same state the server
+  // last projected. The cleanest UX: show a brief "Updating..."
+  // overlay + auto-reload after 1.5s. Reload triggers a fresh
+  // AtomEditor mount → fresh useCollabSync → bootstrap mutation
+  // fires → server's rebootstrap branch (3.8.0) clears the flag
+  // + adopts the new body as baseline.
+  //
+  // Why auto-reload (not manual): needsRebootstrap stays sticky
+  // until bootstrap runs. If the user ignores a manual banner,
+  // the next projection just re-fires the signal. Auto-reload
+  // breaks the loop within bounded latency. The brief warning
+  // exists for context, not for action.
+  //
+  // Gated by multiplayerDocId so single-user mounts never trigger.
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (!collabDocState || collabDocState === null) return
+    if (!('exists' in collabDocState) || !collabDocState.exists) return
+    if (!collabDocState.needsRebootstrap) return
+    // Auto-reload after a brief delay so the overlay text is
+    // visible. window.location.reload() drops us out of this
+    // React tree entirely.
+    const t = setTimeout(() => {
+      if (typeof window !== 'undefined') window.location.reload()
+    }, 1500)
+    return () => clearTimeout(t)
+  }, [
+    multiplayerDocId,
+    collabDocState,
+  ])
+
+  if (
+    multiplayerDocId &&
+    collabDocState &&
+    collabDocState !== null &&
+    'exists' in collabDocState &&
+    collabDocState.exists &&
+    collabDocState.needsRebootstrap
+  ) {
+    return (
+      <div
+        className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center"
+        data-testid="collab-rebootstrap-overlay"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="text-[15px] font-medium text-ink-strong">
+          Updating to latest content…
+        </div>
+        <div className="text-[12px] text-ink-dim">
+          The document was changed elsewhere while you were idle.
+          Reconnecting now.
+        </div>
+      </div>
+    )
+  }
+
   // M1 step 3.8.1.1 — FROZEN BANNER. When the conflict resolver
   // (3.7 case A) flags frozen=true, replace the editor with a
   // reload prompt. User CAN'T continue editing the stale collab
