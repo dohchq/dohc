@@ -42,10 +42,13 @@ import {
   useRemoteVersion,
   applyRemoteSteps,
   applyRemoteCursors,
+  applySuggestions,
   makeRemoteCursorsPlugin,
   makeLocalCursorObserverPlugin,
-  getVersion,
+  makeSuggestionDecorationsPlugin,
+  type SuggestionHandlers,
 } from '@/lib/collab-sync'
+import { getVersion } from '@/lib/collab-sync'
 import { sendableSteps } from 'prosemirror-collab'
 // M1 step 3 sub-commit 3.2 — schema cache populated from the first
 // mounted Crepe; useCollabSync's bootstrap reads it for snapshot
@@ -923,6 +926,13 @@ function CrepeEditor({
           makeLocalCursorObserverPlugin({
             onCursorChange: (pos) => cursorReporterRef.current(pos),
           }),
+          // M1 step 3.9.1 (M3) — agent-suggestion decoration
+          // plugin. Handlers ref is stable for the plugin's
+          // lifetime; React updates it when the mutations
+          // change identity (rare, but defensive).
+          makeSuggestionDecorationsPlugin({
+            handlersRef: suggestionHandlersRef,
+          }),
         )
       }
       // Phase 1b: inline-atom rendering, additive + flag-gated. The
@@ -1339,6 +1349,87 @@ function CrepeEditor({
       // effect retries.
     }
   }, [multiplayerDocId, collabInstalled, remoteCursors])
+
+  // M1 step 3.9.1 (M3) — agent suggestion bubble wiring.
+  //
+  // Two parts symmetric to cursor presence:
+  //
+  //   (1) suggestionHandlersRef: stable ref the decoration
+  //       plugin reads when the user clicks Accept/Reject in
+  //       the bubble DOM. React updates the ref via effect to
+  //       always close over the latest mutations + active
+  //       workspace.
+  //
+  //   (2) suggestions useQuery → applySuggestions dispatch:
+  //       editor's plugin state stays in sync with the
+  //       atomSuggestions sidecar table. Triggers re-decoration
+  //       on every change (new suggestion arrives; user on
+  //       another tab accepts; fade-out window expires).
+  const acceptSuggestionMut = useMutation(api.atomSuggestions.acceptSuggestion)
+  const rejectSuggestionMut = useMutation(api.atomSuggestions.rejectSuggestion)
+  const suggestionHandlersRef = useRef<SuggestionHandlers>({
+    onAccept: () => {},
+    onReject: () => {},
+  })
+  useEffect(() => {
+    suggestionHandlersRef.current = {
+      onAccept: (id: string) => {
+        void acceptSuggestionMut({
+          suggestionId: id as Id<'atomSuggestions'>,
+          activeWorkspaceId: activeWorkspaceIdForBootstrap,
+        }).catch(() => {
+          // Surface in a future toast; for v1, the bubble
+          // simply won't transition (and the user can retry).
+        })
+      },
+      onReject: (id: string) => {
+        void rejectSuggestionMut({
+          suggestionId: id as Id<'atomSuggestions'>,
+          activeWorkspaceId: activeWorkspaceIdForBootstrap,
+        }).catch(() => {})
+      },
+    }
+  }, [acceptSuggestionMut, rejectSuggestionMut, activeWorkspaceIdForBootstrap])
+
+  // multiplayerDocId carries the atom id we need for listPending.
+  // Parse it (same shape as the server's atomDocId / parseDocId):
+  // 'atom:<workspaceId>:<atomDbId>' → take the suffix after the
+  // second colon. Defensive against shape drift; null when
+  // multiplayer is off OR the docId is malformed (shouldn't
+  // happen but cheap to guard).
+  const suggestionAtomId = useMemo<Id<'atoms'> | null>(() => {
+    if (!multiplayerDocId) return null
+    const parts = multiplayerDocId.split(':')
+    if (parts.length !== 3 || parts[0] !== 'atom') return null
+    return parts[2] as Id<'atoms'>
+  }, [multiplayerDocId])
+
+  const suggestions = useQuery(
+    api.atomSuggestions.listPending,
+    suggestionAtomId
+      ? {
+          atomId: suggestionAtomId,
+          activeWorkspaceId: activeWorkspaceIdForBootstrap,
+        }
+      : 'skip',
+  )
+
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (!collabInstalled) return
+    if (!suggestions) return
+    const crepe = crepeRef.current
+    if (!crepe) return
+    try {
+      crepe.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx)
+        if (!view) return
+        applySuggestions(view, suggestions)
+      })
+    } catch {
+      // mid-mount; retry next render
+    }
+  }, [multiplayerDocId, collabInstalled, suggestions])
 
   useEffect(() => {
     if (!autoFocus) return

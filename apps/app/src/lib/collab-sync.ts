@@ -958,6 +958,190 @@ export function makeLocalCursorObserverPlugin({
 // of file).
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
 
+// M1 step 3.9.1 (multiplayer-and-h-followups §3 PR M3) —
+// AGENT-SUGGESTION DECORATION PLUGIN.
+//
+// Renders a highlighted [from, to] range + a floating accept/
+// reject bubble for each pending atomSuggestion. The bubble's
+// click handlers fire mutations (acceptSuggestion /
+// rejectSuggestion) via a ref-stable handler — same pattern as
+// the cursor reporter (3.8.2.3).
+//
+// State: plugin holds the latest suggestion list (updated via
+// meta-transactions from React). Decorations are computed each
+// render from that state. Bubbles render via Decoration.widget
+// at the suggestion's range END; the highlight uses
+// Decoration.inline across the range.
+export type SuggestionRow = {
+  _id: string
+  rangeFrom: number
+  rangeTo: number
+  proposedText: string
+  instruction: string
+  authorIsAgent: boolean
+  status: 'pending' | 'accepted' | 'rejected'
+  resolvedByUserId?: string
+  resolvedAt?: number
+}
+
+export type SuggestionHandlers = {
+  onAccept: (id: string) => void
+  onReject: (id: string) => void
+}
+
+const suggestionsKey = new PluginKey<SuggestionRow[]>('dohcAgentSuggestions')
+
+export function makeSuggestionDecorationsPlugin({
+  handlersRef,
+}: {
+  /** Ref the plugin reads on each bubble render. React updates
+   *  the ref when mutation handles change (mostly stable but
+   *  defensive against Convex client identity churn). */
+  handlersRef: { current: SuggestionHandlers }
+}): Plugin {
+  return new Plugin<SuggestionRow[]>({
+    key: suggestionsKey,
+    state: {
+      init: () => [],
+      apply: (tr, current) => {
+        const next = tr.getMeta(suggestionsKey)
+        return Array.isArray(next) ? (next as SuggestionRow[]) : current
+      },
+    },
+    props: {
+      decorations: (state) => {
+        const suggestions = suggestionsKey.getState(state) ?? []
+        if (suggestions.length === 0) return DecorationSet.empty
+        const docSize = state.doc.content.size
+        const decos: Decoration[] = []
+        for (const s of suggestions) {
+          // Clamp positions defensively (v1 stale-range
+          // limitation — see commit 3.9.0 commit message).
+          const from = Math.max(0, Math.min(s.rangeFrom, docSize))
+          const to = Math.max(from, Math.min(s.rangeTo, docSize))
+          // Range highlight (a soft yellow underline so the
+          // bubble's anchor is obvious without distorting the
+          // text).
+          if (to > from) {
+            decos.push(
+              Decoration.inline(from, to, {
+                class: 'dohc-suggestion-range',
+                style:
+                  'background:rgba(255,213,79,0.18);border-bottom:1px dashed rgba(255,165,0,0.6);',
+              }),
+            )
+          }
+          // Bubble widget at the range end. For accepted/
+          // rejected, render a fade-out version (the plan's
+          // "accepted by Bob 2s ago" UX); the listPending
+          // server query already strips resolved rows after
+          // 10s.
+          const bubble = renderSuggestionBubble(s, handlersRef)
+          decos.push(
+            Decoration.widget(to, bubble, {
+              key: `suggestion-${s._id}-${s.status}`,
+              side: 1,
+              ignoreSelection: true,
+              stopEvent: () => true,
+            }),
+          )
+        }
+        return DecorationSet.create(state.doc, decos)
+      },
+    },
+  })
+}
+
+function renderSuggestionBubble(
+  s: SuggestionRow,
+  handlersRef: { current: SuggestionHandlers },
+): HTMLElement {
+  const root = document.createElement('div')
+  root.className = `dohc-suggestion-bubble dohc-suggestion-${s.status}`
+  const colorAgent = '#7c3aed' // violet for agent suggestions
+  const colorRes = s.status === 'accepted' ? '#10b981' : '#9ca3af'
+  const color = s.status === 'pending' ? colorAgent : colorRes
+  root.style.cssText = `display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px;background:white;color:#111;border:1px solid ${color};border-radius:6px;padding:6px 8px;margin:2px 0;font-size:11px;font-family:system-ui,sans-serif;box-shadow:0 1px 3px rgba(0,0,0,0.08);max-width:280px;position:relative;z-index:5;${s.status !== 'pending' ? 'opacity:0.6;' : ''}`
+  // Header — agent label + instruction
+  const header = document.createElement('div')
+  header.style.cssText = `display:flex;align-items:center;gap:6px;width:100%;`
+  const dot = document.createElement('span')
+  dot.style.cssText = `display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};`
+  header.appendChild(dot)
+  const label = document.createElement('span')
+  label.style.cssText = 'font-weight:600;color:#444;'
+  label.textContent =
+    s.status === 'pending'
+      ? s.authorIsAgent
+        ? 'Agent suggestion'
+        : 'Suggestion'
+      : s.status === 'accepted'
+        ? 'Accepted'
+        : 'Rejected'
+  header.appendChild(label)
+  root.appendChild(header)
+  // Instruction
+  if (s.instruction) {
+    const ins = document.createElement('div')
+    ins.style.cssText = 'color:#555;font-style:italic;line-height:1.3;'
+    ins.textContent = s.instruction
+    root.appendChild(ins)
+  }
+  // Proposed text preview (first 120 chars)
+  const preview = document.createElement('div')
+  preview.style.cssText =
+    'color:#333;background:#f9fafb;border-radius:4px;padding:4px 6px;font-family:ui-monospace,monospace;line-height:1.35;white-space:pre-wrap;word-break:break-word;'
+  preview.textContent =
+    s.proposedText.length > 120
+      ? `${s.proposedText.slice(0, 120)}…`
+      : s.proposedText
+  root.appendChild(preview)
+  // Buttons (only on pending)
+  if (s.status === 'pending') {
+    const buttons = document.createElement('div')
+    buttons.style.cssText =
+      'display:flex;gap:6px;margin-top:2px;align-self:flex-end;'
+    const accept = document.createElement('button')
+    accept.type = 'button'
+    accept.textContent = 'Accept'
+    accept.style.cssText = `background:${colorAgent};color:white;border:none;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;`
+    accept.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      handlersRef.current.onAccept(s._id)
+    })
+    const reject = document.createElement('button')
+    reject.type = 'button'
+    reject.textContent = 'Reject'
+    reject.style.cssText =
+      'background:white;color:#666;border:1px solid #ddd;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;'
+    reject.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      handlersRef.current.onReject(s._id)
+    })
+    buttons.appendChild(reject)
+    buttons.appendChild(accept)
+    root.appendChild(buttons)
+  } else if (s.resolvedByUserId) {
+    const credit = document.createElement('div')
+    credit.style.cssText = 'color:#888;font-size:10px;margin-top:2px;'
+    credit.textContent = `${s.status} by ${s.resolvedByUserId.slice(0, 8)}`
+    root.appendChild(credit)
+  }
+  return root
+}
+
+/** Dispatch fresh suggestions into a mounted editor's plugin
+ *  state. Call from AtomEditor when useQuery returns updates. */
+export function applySuggestions(
+  view: EditorView,
+  suggestions: SuggestionRow[],
+): void {
+  const tr = view.state.tr.setMeta(suggestionsKey, suggestions)
+  view.dispatch(tr)
+}
+
 // Re-export getVersion so the integration can compare without
 // pulling prosemirror-collab directly.
 export { getVersion } from 'prosemirror-collab'
