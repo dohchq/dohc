@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useQuery } from 'convex/react'
+import { useConvex, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
@@ -35,6 +35,12 @@ import {
   type WikilinkFile,
 } from './wikilinkPlugin'
 import { WikilinkPicker } from './WikilinkPicker'
+import {
+  useCollabSync,
+  useRemoteVersion,
+  applyRemoteSteps,
+  getVersion,
+} from '@/lib/collab-sync'
 import type { Id } from '../../convex/_generated/dataModel'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
@@ -65,6 +71,22 @@ type Props = {
   shareId?: Id<'atomShares'>
   // sharing-v1 — view-only shared atom: Crepe is read-only.
   readOnly?: boolean
+  // M1 step 2 (multiplayer-and-h-followups §8) — opt-in collab
+  // mode. When set, the doc id (atom:<ws>:<atomId> or
+  // share:<shareId>) is used to mount the prosemirror-sync
+  // plugins via useCollabSync. UNSET by default — every existing
+  // call site stays single-user. The wiring is staged behind this
+  // flag so a regression is bounded to multiplayer callers only.
+  //
+  // V1 LIMITATION (documented for follow-up): when a snapshot
+  // exists server-side, the editor briefly mounts with the local
+  // `value` (markdown) before the first remote-pull rebases to
+  // the server state. The window is one rebase cycle (< 1s with
+  // a warm connection); acceptable for v1 since the first user
+  // input also triggers a rebase. A future commit will bootstrap
+  // the editor directly from the server snapshot (waits for
+  // useCollabSync.bootstrap.ready before mounting Crepe).
+  multiplayerDocId?: string
   /** Fired when the user clicks an `language: ascii` code block. The
    *  position is the doc offset of the node — pass it back to
    *  replaceCodeBlockAt on commit. */
@@ -617,6 +639,12 @@ type CrepeEditorProps = {
     ReadonlyMap<string, { path: string; title?: string | null }>
   >
   readOnly?: boolean
+  // M1 step 2 — multiplayer collab opt-in. When set, useCollabSync
+  // resolves the schema + bootstraps the snapshot + returns the two
+  // plugins (prosemirror-collab + sync bridge). Plugins are folded
+  // into prosePluginsCtx alongside the existing inline-atom set.
+  // UNSET ⇒ single-user editor, byte-identical to pre-M1 behavior.
+  multiplayerDocId?: string
 }
 
 function CrepeEditor({
@@ -636,6 +664,7 @@ function CrepeEditor({
   onOpenWikilinkRef,
   fileIdMapRef,
   readOnly,
+  multiplayerDocId,
 }: CrepeEditorProps) {
   // D4.8b — autocomplete state from the wikilink plugin.
   const [acState, setAcState] = useState<AutocompleteState>({
@@ -645,6 +674,41 @@ function CrepeEditor({
   useEffect(() => {
     setAcStateRef.current = setAcState
   }, [])
+
+  // M1 step 2 — collab plugins (off by default). Schema is null
+  // until Crepe mounts (the bootstrap returns 'ready' without one
+  // when disabled). When `multiplayerDocId` is set, the hook
+  // bootstraps the snapshot + builds the prosemirror-collab +
+  // sync-bridge plugins; we capture them in a ref so the
+  // useEditor closure (which runs once at mount) can pick them
+  // up. V1 limitation: closure-once means the plugins must be
+  // ready before mount, OR they get attached late and lose their
+  // chance to gate the first user edits. We currently START the
+  // editor without waiting (defaultValue mode); when the bootstrap
+  // resolves AFTER mount, the plugins are still added (via the
+  // ctx.update path below) but the local clock is already past
+  // version 0. The remote-pull effect rebases on first divergence,
+  // converging to server state in one cycle. The follow-up commit
+  // hardens this with a loading gate.
+  const collabSync = useCollabSync({
+    docId: multiplayerDocId ?? null,
+    // Schema isn't known yet at this point (Crepe builds it on
+    // construction). Pass null → useCollabSync skips the bootstrap
+    // entirely; the editor mount path below initializes collab
+    // from version=0 after Crepe boots, then the remote-pull
+    // effect rebases against server state.
+    schema: null,
+    enabled: !!multiplayerDocId,
+  })
+  // The ref the editor closure reads when building its plugin
+  // list. Captured because useEditor runs once; this lets the
+  // collab plugins arrive via the React render cycle.
+  const collabPluginsRef = useRef<typeof collabSync.plugins>(null)
+  collabPluginsRef.current = collabSync.plugins
+  // Subscribe to the live server version. When it bumps, the
+  // effect below fetches the new steps + applies them.
+  const remoteVersion = useRemoteVersion(multiplayerDocId ?? null)
+
   const { get } = useEditor((root) => {
     const crepe = new Crepe({
       root,
@@ -757,6 +821,16 @@ function CrepeEditor({
         formulaClickPlugin,
         makeQueryBlockPlugin(queryResultsRef),
       ]
+      // M1 step 2 — fold in the multiplayer plugins WHEN they're
+      // ready at mount time. Bootstrap may resolve after the
+      // editor mounts; in that case the ctx.update path in the
+      // useEffect below adds them post-hoc. Both paths converge
+      // on the same prosePluginsCtx (the order doesn't matter for
+      // the collab plugin, which keys all its state by plugin
+      // instance).
+      if (collabPluginsRef.current) {
+        for (const p of collabPluginsRef.current) extra.push(p)
+      }
       // Phase 1b: inline-atom rendering, additive + flag-gated. The
       // live-total value chip only ANNOTATES a styled {identifier}
       // token — without that decoration it's an orphan number, so it
@@ -787,6 +861,91 @@ function CrepeEditor({
       crepeRef.current = null
     }
   }, [crepeRef])
+
+  // M1 step 2 — late install of collab plugins. If useCollabSync's
+  // bootstrap resolves AFTER the editor mounts, the plugins
+  // weren't in extra at mount time; fold them in now via the same
+  // prosePluginsCtx update path the inline-atom + wikilink
+  // plugins use at boot. Idempotent because Milkdown's plugin
+  // matching is by instance and we only ever pass the same array
+  // (collab-sync's pluginsRef stays stable per docId).
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (!collabSync.plugins) return
+    const crepe = crepeRef.current
+    if (!crepe) return
+    let installed = false
+    crepe.editor.action((ctx) => {
+      ctx.update(prosePluginsCtx, (current) => {
+        // Skip if already in (handles the closure-time install
+        // path; idempotent on rerender).
+        const setHas = new Set(current)
+        const toAdd = collabSync.plugins!.filter((p) => !setHas.has(p))
+        if (toAdd.length === 0) return current
+        installed = true
+        return [...current, ...toAdd]
+      })
+    })
+    // No cleanup: collab plugins live for the editor's lifetime.
+    // Switching docs unmounts the whole CrepeEditor (parent
+    // re-keys on path change).
+    void installed
+  }, [multiplayerDocId, collabSync.plugins])
+
+  // M1 step 2 — remote-pull loop. Convex's useQuery on
+  // latestVersion is the network heartbeat: when another tab/peer
+  // submits steps, the server version bumps, our component re-
+  // renders, this effect runs. We compare against the editor's
+  // local version (read from the collab plugin via getVersion)
+  // and fetch + apply any missing steps via receiveTransaction.
+  //
+  // ORDER MATTERS: the fetch is deferred to a microtask so we
+  // never dispatch into the editor inside a render. ProseMirror
+  // disallows reentrant dispatches; a sync apply during render
+  // would corrupt state.
+  const convex = useConvex()
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (remoteVersion === undefined) return
+    const crepe = crepeRef.current
+    if (!crepe) return
+    let cancelled = false
+    void (async () => {
+      // Read the local version from the collab plugin state
+      // (inside an action so we get the live EditorView ref).
+      let localVersion = -1
+      let view: import('@milkdown/kit/prose/view').EditorView | null = null
+      crepe.editor.action((ctx) => {
+        view = ctx.get(editorViewCtx)
+        localVersion = getVersion(view.state)
+      })
+      if (cancelled || !view || localVersion === -1) return
+      if (remoteVersion <= localVersion) return
+      // Behind — fetch the gap.
+      try {
+        const result = await convex.query(api.prosemirror.getSteps, {
+          id: multiplayerDocId,
+          version: localVersion,
+        })
+        if (cancelled) return
+        if (result.steps.length === 0) return
+        applyRemoteSteps({
+          view,
+          rawSteps: result.steps,
+          clientIds: result.clientIds,
+        })
+      } catch {
+        // Auth revocation or transient outage: leave the editor
+        // alone. The next bump (from the still-subscribed
+        // useQuery) will retry. User keeps editing locally; any
+        // pending local steps live in the collab plugin state
+        // and will eventually rebase against server.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [multiplayerDocId, remoteVersion, convex])
 
   useEffect(() => {
     if (!autoFocus) return
@@ -883,6 +1042,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     onOpenWikilink,
     shareId,
     readOnly,
+    multiplayerDocId,
   },
   ref,
 ) {
@@ -1099,6 +1259,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
         formulaTick={formulaTick}
         queryResultsRef={queryResultsRef}
         queryTick={queryTick}
+        multiplayerDocId={multiplayerDocId}
         knownFilesRef={knownFilesRef}
         knownFilesArray={knownFiles ?? []}
         onOpenWikilinkRef={onOpenWikilinkRef}
