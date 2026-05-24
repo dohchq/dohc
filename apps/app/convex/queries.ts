@@ -3,6 +3,7 @@ import { action, internalQuery, query } from './_generated/server'
 import type { QueryCtx } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
 import { MAP_PATH } from './inlineAtom'
 import { splitFrontmatter } from './atomId'
 
@@ -80,15 +81,22 @@ async function listEntitiesCapped(
 async function listAtomPathsCapped(
   ctx: QueryCtx,
   workspaceId: string,
+  viewerSubject: string,
 ): Promise<string[]> {
   const rows = await ctx.db
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(QUERY_SCAN_CAP + 1)
-  // `_map.md` is a dohc-GENERATED derived index, never a queryable
-  // source (design §4 double-count guard; Phase-4 made this
-  // pre-existing wart visible — independent P4-review NIT).
-  return rows
+  // P1 (multiplayer-and-h-followups §6.5) — filter BEFORE the
+  // sort/slice so `docs.glob(...)` in a query block never enumerates
+  // a private atom path for a viewer who can't read it. Filter is
+  // per-row via the shared resolver — same gate the editor / search
+  // / render route use. `_map.md` filter remains (derived index).
+  const visible: typeof rows = []
+  for (const r of rows) {
+    if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
+  }
+  return visible
     .map((r) => r.path)
     .filter((p) => p !== MAP_PATH)
     .sort()
@@ -97,6 +105,7 @@ async function getAtomBody(
   ctx: QueryCtx,
   workspaceId: string,
   path: string,
+  viewerSubject: string,
 ): Promise<string | null> {
   if (path === MAP_PATH) return null // derived index — not findable
   const row = await ctx.db
@@ -105,7 +114,12 @@ async function getAtomBody(
       q.eq('workspaceId', workspaceId).eq('path', path),
     )
     .unique()
-  return row?.body ?? null
+  if (!row) return null
+  // P1 — fail closed to null (same shape as missing). `docs.find("x")`
+  // for a private atom must look identical to "missing": never an
+  // existence oracle. Same pattern as atoms.getByPath / search.run.
+  if (!(await canReadAtom(ctx, row._id, viewerSubject))) return null
+  return row.body
 }
 
 export type ParsedQuery = {
@@ -164,6 +178,7 @@ async function evalQuery(
   ctx: QueryCtx,
   workspaceId: string,
   src: string,
+  viewerSubject: string,
 ): Promise<{ ok: boolean; md: string }> {
   let parsed: ParsedQuery
   try {
@@ -178,7 +193,10 @@ async function evalQuery(
     // silent backward-compat alias so query blocks authored before the
     // rename keep resolving (no body migration needed).
     if (parsed.namespace === 'docs' || parsed.namespace === 'vault')
-      return { ok: true, md: await runDocs(ctx, workspaceId, parsed) }
+      return {
+        ok: true,
+        md: await runDocs(ctx, workspaceId, parsed, viewerSubject),
+      }
     if (parsed.namespace === 'capacity')
       return { ok: true, md: await runCapacity(ctx, workspaceId, parsed) }
     return { ok: false, md: `_(unknown namespace: ${parsed.namespace})_` }
@@ -188,9 +206,17 @@ async function evalQuery(
 }
 
 export const _evalOne = internalQuery({
-  args: { workspaceId: v.string(), src: v.string() },
-  handler: async (ctx, { workspaceId, src }) =>
-    await evalQuery(ctx, workspaceId, src),
+  // P1 — viewerSubject threaded through so the `run` action
+  // (callable via the agent's `run_query` tool) filters
+  // docs.glob/docs.find against the SIGNED-IN user's access. The
+  // action resolves its own caller subject and forwards it.
+  args: {
+    workspaceId: v.string(),
+    src: v.string(),
+    viewerSubject: v.string(),
+  },
+  handler: async (ctx, { workspaceId, src, viewerSubject }) =>
+    await evalQuery(ctx, workspaceId, src, viewerSubject),
 })
 
 // Kept for backward-compat / any non-editor caller — its STRING
@@ -209,9 +235,18 @@ export const run = action({
       internal.agent._resolveWorkspaceForCaller,
       { activeWorkspaceId },
     )
+    // P1 — pull the caller's subject so docs.glob / docs.find filter
+    // against THIS user's access (the action is reached via the
+    // agent's `run_query` tool; the user is the actor on whose
+    // behalf the agent runs, per the same model as the read/list
+    // tools).
+    const viewerSubject: string = await ctx.runQuery(
+      internal.agent._viewerSubjectForCaller,
+      {},
+    )
     const r: { ok: boolean; md: string } = await ctx.runQuery(
       internal.queries._evalOne,
-      { workspaceId, src },
+      { workspaceId, src, viewerSubject },
     )
     return r.md
   },
@@ -246,10 +281,17 @@ export const evalQueryBlocks = query({
     { srcs, activeWorkspaceId },
   ): Promise<Array<{ src: string; value: string | null }>> => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 — reactive editor query runs in the SIGNED-IN user's
+    // context, so subject is available directly via auth. No
+    // identity → empty viewerSubject string (canReadAtom treats this
+    // as "not-the-owner, not-on-allowlist" — strictest possible
+    // gate, fail-closed for private/restricted atoms).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const uniq = Array.from(new Set(srcs)).slice(0, MAX_QUERY_BLOCKS)
     const out: Array<{ src: string; value: string | null }> = []
     for (const src of uniq) {
-      const r = await evalQuery(ctx, workspaceId, src)
+      const r = await evalQuery(ctx, workspaceId, src, viewerSubject)
       out.push({ src, value: r.ok ? r.md : null })
     }
     return out
@@ -353,10 +395,11 @@ async function runDocs(
   ctx: QueryCtx,
   workspaceId: string,
   q: ParsedQuery,
+  viewerSubject: string,
 ): Promise<string> {
   if (q.verb === 'glob') {
     const pattern = q.resource
-    const raw = await listAtomPathsCapped(ctx, workspaceId)
+    const raw = await listAtomPathsCapped(ctx, workspaceId, viewerSubject)
     const truncated = raw.length > QUERY_SCAN_CAP
     const paths = truncated ? raw.slice(0, QUERY_SCAN_CAP) : raw
     const matches = paths.filter((p) => globMatch(p, pattern))
@@ -369,7 +412,7 @@ async function runDocs(
     return truncated ? `${body}\n\n_(… and more — refine the pattern)_` : body
   }
   if (q.verb === 'find') {
-    const body = await getAtomBody(ctx, workspaceId, q.resource)
+    const body = await getAtomBody(ctx, workspaceId, q.resource, viewerSubject)
     return body === null
       ? `_(missing: ${q.resource})_`
       : digestBody(q.resource, body)
