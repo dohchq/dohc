@@ -305,10 +305,11 @@ describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
     expect(SRC).toMatch(
       /if \(bootstrapState\.phase !== 'ok'\) return/,
     )
-    // Phase is in the dep array so the install fires when it
-    // transitions ok.
+    // 3.8.1.9 adds collabInstalledFor to deps so a docId
+    // swap-in-place clears the stale install marker before
+    // a fresh install pass runs.
     expect(SRC).toMatch(
-      /\[multiplayerDocId, collabSync\.plugins, bootstrapState\.phase\]/,
+      /\[\s*multiplayerDocId,\s*collabSync\.plugins,\s*bootstrapState\.phase,\s*collabInstalledFor,\s*\]/,
     )
   })
 
@@ -411,11 +412,26 @@ describe('AtomEditor — 3.8.1.8 mount-frame race + collabInstalled', () => {
     )
   })
 
-  it('collabInstalled state is set true only after late-install succeeds', () => {
-    expect(SRC).toMatch(/const \[collabInstalled, setCollabInstalled\] = useState\(false\)/)
-    expect(SRC).toMatch(/if \(installed\) setCollabInstalled\(true\)/)
-    // Reset on docId change (multiplayer disabled).
-    expect(SRC).toMatch(/if \(!multiplayerDocId\) \{[\s\S]+?setCollabInstalled\(false\)/)
+  it('collabInstalled tracks docId, set only after late-install succeeds (3.8.1.9)', () => {
+    // 3.8.1.9 [P2] #1: was a boolean that only reset when
+    // multiplayerDocId became falsy. If parent swapped docId
+    // in-place (no re-key) the old install registered as true
+    // while new plugins weren't yet installed. Fix: track the
+    // installed docId; gate on equality.
+    expect(SRC).toMatch(
+      /const \[collabInstalledFor, setCollabInstalledFor\] = useState<\s*string \| null\s*>\(null\)/,
+    )
+    expect(SRC).toMatch(
+      /const collabInstalled =[\s\S]+?collabInstalledFor === multiplayerDocId/,
+    )
+    // Set on successful install.
+    expect(SRC).toMatch(/if \(installed\) setCollabInstalledFor\(multiplayerDocId\)/)
+    // Reset when multiplayer disabled.
+    expect(SRC).toMatch(/if \(!multiplayerDocId\) \{[\s\S]+?setCollabInstalledFor\(null\)/)
+    // Reset when docId swaps in-place.
+    expect(SRC).toMatch(
+      /collabInstalledFor !== null && collabInstalledFor !== multiplayerDocId/,
+    )
   })
 
   it('remote-pull effect gates on collabInstalled', () => {

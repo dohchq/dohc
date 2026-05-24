@@ -954,10 +954,21 @@ function CrepeEditor({
   // unlock: editor becomes writable before edits would be
   // tracked.
   //
+  // M1 step 3.8.1.9 — codex 10th-pass [P2] #1: track the docId
+  // installation belongs to, not just a boolean. If a parent
+  // ever swaps multiplayerDocId in-place (no re-key) the old
+  // installation would still register as "true" while the new
+  // doc's plugins aren't installed yet. Storing the installed
+  // docId + comparing to current makes the check correct under
+  // that scenario.
+  //
   // Set inside the late-install effect AFTER ctx.update
-  // succeeds. Reset to false when docId changes (switching
-  // atoms requires re-installation).
-  const [collabInstalled, setCollabInstalled] = useState(false)
+  // succeeds. Reset to null when docId changes / disables.
+  const [collabInstalledFor, setCollabInstalledFor] = useState<
+    string | null
+  >(null)
+  const collabInstalled =
+    !!multiplayerDocId && collabInstalledFor === multiplayerDocId
 
   // M1 step 3.8.1.7 — codex 8th-pass [P1] #2 GATE.
   //
@@ -1076,7 +1087,14 @@ function CrepeEditor({
   // Resets to false when docId changes.
   useEffect(() => {
     if (!multiplayerDocId) {
-      setCollabInstalled(false)
+      setCollabInstalledFor(null)
+      return
+    }
+    // 3.8.1.9: doc switched in-place without re-key. Clear the
+    // stale installation marker so the new doc gets its own
+    // install pass.
+    if (collabInstalledFor !== null && collabInstalledFor !== multiplayerDocId) {
+      setCollabInstalledFor(null)
       return
     }
     if (!collabSync.plugins) return
@@ -1099,11 +1117,16 @@ function CrepeEditor({
         return [...current, ...toAdd]
       })
     })
-    if (installed) setCollabInstalled(true)
+    if (installed) setCollabInstalledFor(multiplayerDocId)
     // No cleanup: collab plugins live for the editor's lifetime.
     // Switching docs unmounts the whole CrepeEditor (parent
     // re-keys on path change).
-  }, [multiplayerDocId, collabSync.plugins, bootstrapState.phase])
+  }, [
+    multiplayerDocId,
+    collabSync.plugins,
+    bootstrapState.phase,
+    collabInstalledFor,
+  ])
 
   // M1 step 2 — remote-pull loop. Convex's useQuery on
   // latestVersion is the network heartbeat: when another tab/peer
