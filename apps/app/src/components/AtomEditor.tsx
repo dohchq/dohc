@@ -1200,6 +1200,17 @@ function CrepeEditor({
             )
             tr.setMeta('addToHistory', false)
             view.dispatch(tr)
+            // 3.9.13 — codex 21st-pass [P2]: fallback clear.
+            // If Crepe doesn't fire markdownUpdated for this
+            // dispatch (e.g. PM doc differs but serializes
+            // to same markdown), the ref would stay set and
+            // swallow the next real edit. Microtask defer is
+            // after Milkdown's synchronous listener firing
+            // path, so this only clears if the listener
+            // didn't.
+            queueMicrotask(() => {
+              installingSnapshotRef.current = false
+            })
           }
         }
       }
