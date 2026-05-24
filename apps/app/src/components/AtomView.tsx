@@ -276,7 +276,20 @@ export function AtomView({
         <EmptyAtom path={effectivePath} />
       ) : (
         <AtomShell
-          key={effectivePath}
+          /* M1 step 3.8.2.2 — key includes multiplayer suffix.
+             Pre-3.8.2.2 the key was just effectivePath. If a
+             user flipped the flag on without reloading, AtomShell
+             would NOT remount; its existing Crepe instance was
+             built in single-user mode and the 3.8.1.x bootstrap
+             pipeline assumes a fresh mount. Suffixing the key
+             with the multiplayerDocId ('single' when off) forces
+             a remount when the flag changes — same machinery
+             that already handles atom switches. */
+          key={`${effectivePath}:${
+            featureEnabled('multiplayer') && row?._id && row?.workspaceId
+              ? `mp:${row._id}`
+              : 'single'
+          }`}
           draft={draft}
           onChange={setDraft}
           onRunAction={onRunAction}

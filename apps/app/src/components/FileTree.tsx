@@ -1622,8 +1622,8 @@ function TreeRowNode({
         {isPresent && (
           <span
             className="ml-1 inline-block size-1.5 shrink-0 rounded-full bg-emerald-500"
-            aria-label="Someone is editing this page"
-            title="Live collab session active"
+            aria-label="Live editing session active"
+            title="Live editing session active"
           />
         )}
         {/* file-org-v1 D4.4a — lock + star affordances. Lock icon

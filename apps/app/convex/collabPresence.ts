@@ -231,34 +231,55 @@ export const _finalProjectIdleDoc = internalMutation({
 // format prefers arrays). The client wraps in `new Set(...)`
 // for O(1) lookups during render.
 //
-// Auth: workspace membership only. We DO NOT filter per-atom
-// P1 read access here — that would require an N-way canReadAtom
-// loop on every presence query, which is wasteful for the
-// file-tree-decoration use case (the tree already P1-filters
-// what it renders; an atomId only present in the result that
-// the tree wouldn't render is invisible anyway). This is a
-// deliberate cost/correctness trade-off; revisit if presence
-// becomes a stronger oracle for restricted-atom existence.
+// M1 step 3.8.2.2 — codex 12th-pass [P1] FIX: filter through
+// canReadAtom. Without it, ANY workspace member could call this
+// query, observe an atomId in the result they couldn't read
+// directly, and infer the existence of a restricted atom + an
+// active editing session on it. That's an existence-oracle
+// leak through the P1 access boundary.
+//
+// The N-way check is bounded: collabSessions are de-duped into
+// unique atomIds first (typical workspaces have <100 active
+// sessions, so <100 distinct atoms), then canReadAtom is called
+// once per distinct atom. The pre-dedup take(500) cap keeps the
+// scan bounded too.
+//
+// Newest-first via .order('desc') so when the 500 cap engages,
+// we keep the most recently active sessions (the ones users
+// actually care about for "is anyone editing this RIGHT NOW").
 export const getActiveAtomIds = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return []
+    const subject = identity.subject
+
     const cutoff = Date.now() - PRESENCE_EXPIRY_MS
-    // Pull recent sessions globally then filter to docs in this
-    // workspace. The by_lastSeenAt index is descending-friendly;
-    // we take a generous slice (most workspaces have <100 active
-    // collab sessions at peak) then in-memory filter.
     const recent = await ctx.db
       .query('collabSessions')
       .withIndex('by_lastSeenAt', (q) => q.gte('lastSeenAt', cutoff))
+      .order('desc')
       .take(500)
-    const atomIds = new Set<Id<'atoms'>>()
+
+    // Dedupe FIRST so canReadAtom fires at most once per atom.
+    const candidateAtomIds = new Set<Id<'atoms'>>()
     for (const session of recent) {
       const parsed = parseDocId(session.docId)
       if (parsed.kind !== 'atom') continue
       if (parsed.workspaceId !== workspaceId) continue
-      atomIds.add(parsed.atomId)
+      candidateAtomIds.add(parsed.atomId)
     }
-    return Array.from(atomIds)
+
+    // P1 filter: drop any atom the caller can't read. Restricted
+    // atoms stay invisible to non-grantees (presence dot would
+    // otherwise leak existence).
+    const visible: Id<'atoms'>[] = []
+    for (const atomId of candidateAtomIds) {
+      if (await canReadAtom(ctx, atomId, subject)) {
+        visible.push(atomId)
+      }
+    }
+    return visible
   },
 })
