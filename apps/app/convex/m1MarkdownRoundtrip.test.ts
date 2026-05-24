@@ -64,28 +64,33 @@ describe('markdownRoundtrip — dohc-specific shapes are preserved', () => {
     expect(out).toContain('{projects}')
   })
 
-  it('wikilinks survive but get backslash-escaped (KNOWN GAP for production)', () => {
-    // remark-stringify escapes `[[` as `\[\[` because `[` is the
-    // markdown link syntax. Round-trip is LOSSY for wikilinks today:
+  it('wikilinks round-trip LOSSLESS (M1 step 3.9.16; closes plan §3 hard blocker)', () => {
+    // Pre-3.9.16: remark-stringify escaped `[[` as `\[\[` →
+    // `[[clients/acme]]` came back as `\[\[clients/acme]]`.
+    // The plan called this an M1-blocking round-trip gap.
+    //
+    // 3.9.16 added a unified plugin (remarkWikilinks) that
+    // parses `[[target]]` text into custom wikiLink mdast
+    // nodes + a custom handler in remark-stringify that emits
+    // them back as `[[target]]` literally. Bypasses bracket
+    // escape entirely. Verbatim round-trip:
     //   in:  See [[clients/acme]] for details.
-    //   out: See \[\[clients/acme]] for details.
-    //
-    // PRODUCTION GAP: the collab projection's PM → markdown writer
-    // needs to either (a) emit a different markdown form for
-    // wikilinks that remark won't escape, OR (b) use a serializer
-    // that knows about dohc's wikilink syntax (e.g. a remark plugin
-    // like `remark-wiki-link`, or our own custom serializer).
-    //
-    // Pinning this test against the lossy current behavior so a
-    // future fix (adding the wikilink handler) shows up as a passing
-    // test that's now strict (just update expectation to verbatim).
+    //   out: See [[clients/acme]] for details.
     const md = 'See [[clients/acme]] for details.\n'
     const out = roundtripMarkdown(md)
-    // Either form is acceptable until the wikilink handler lands.
-    // The slug content must survive in some form.
-    expect(out).toContain('clients/acme')
-    // Document the lossy form — the production serializer must close this.
-    expect(out).toMatch(/\\\[\\\[clients\/acme]]|\[\[clients\/acme]]/)
+    expect(out).toContain('[[clients/acme]]')
+    expect(out).not.toMatch(/\\\[\\\[/)
+    // Stronger pin: round-trip stable through a second pass.
+    expect(roundtripMarkdown(out)).toBe(out)
+  })
+
+  it('multiple wikilinks in one line all round-trip lossless', () => {
+    const md = 'See [[a]] and [[b/c]] and [[long path/with spaces]] end.\n'
+    const out = roundtripMarkdown(md)
+    expect(out).toContain('[[a]]')
+    expect(out).toContain('[[b/c]]')
+    expect(out).toContain('[[long path/with spaces]]')
+    expect(out).not.toMatch(/\\\[/)
   })
 
   it('query blocks survive (code fence with `query` lang)', () => {
