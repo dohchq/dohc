@@ -150,44 +150,42 @@ export const {
     }
   },
 
-  // SNAPSHOT hook. Called whenever the sync component persists a
-  // fresh snapshot — i.e. when the editor's debounced flush
-  // triggers. This is THE markdown-canonical bridge per the spike
-  // §"Markdown canonical model": the prosemirror doc state lives in
-  // the sync component, but our existing storage layer (atoms.body)
-  // still holds markdown. On every snapshot we walk the doc back
-  // to markdown and patch the atoms row, so all existing read paths
-  // (search.run, evalFormulas, htmlAtoms render, agent tools) keep
-  // working unchanged.
+  // SNAPSHOT hook (M1 step 3 sub-commit 3.6.3 — WIRED).
   //
-  // CRITICAL: this MUST be fast + bounded. A bad serializer would
-  // turn every keystroke into an O(doc) walk. The Milkdown adapter
-  // (in M1 step 2) will produce a markdown string from the doc
-  // JSON — we just patch ctx.db here.
+  // Called by the prosemirror-sync component WHEN a snapshot is
+  // committed (Codex v3 verification: this fires AFTER the
+  // snapshot row is written; we don't need to validate commit
+  // separately). We schedule _projectSnapshotToBody via the
+  // existing scheduler.runAfter pattern with cancel-on-newer
+  // logic, debounced 1500ms (coalesces bursts during active
+  // typing).
   //
-  // For v1 we STAGE this hook: the body update is wired in M1 step 3
-  // when the Milkdown serializer is integrated. Today's body is the
-  // empty placeholder; the snapshot hook below validates the doc id
-  // and atom existence then no-ops on the markdown side.
+  // Why pass snapshotContent through the scheduled job (codex
+  // 4th-pass key correction): getDoc replays via getSteps which
+  // has a hard 100-delta cap that can return partial replay
+  // with only a warning. The snapshot content we receive HERE
+  // is the COMMITTED PM JSON at this version — no replay needed.
+  //
+  // Schedule errors are best-effort: if we can't schedule the
+  // projection, we don't block the snapshot commit. The next
+  // snapshot's onSnapshot will retry.
   async onSnapshot(
     ctx: MutationCtx,
     id: string,
-    _snapshot: string,
-    _version: number,
+    snapshot: string,
+    version: number,
   ) {
-    const parsed = parseDocId(id)
-    if (parsed.kind !== 'atom') return // shared atoms: no body roundtrip yet
-    const atom = await ctx.db.get(parsed.atomId)
-    if (!atom) return
-    if (atom.workspaceId !== parsed.workspaceId) return
-    // STAGED: when the Milkdown ↔ ProseMirror serializer lands in
-    // M1 step 3, this is where:
-    //   const md = prosemirrorJsonToMarkdown(JSON.parse(_snapshot))
-    //   await ctx.db.patch(parsed.atomId, { body: md, updatedAt: Date.now() })
-    // and the existing upsertAtomImpl side-effects (capture +
-    // atomId reconcile) fire via a shared helper. Wiring without
-    // the serializer would lose the markdown body — refused until
-    // the serializer is proven round-trip-stable.
+    const { schedulePostSnapshotProjection } = await import(
+      './collabProjection'
+    )
+    try {
+      await schedulePostSnapshotProjection(ctx, id, version, snapshot)
+    } catch (e) {
+      // Defensive: any schedule failure logs + skips. Next
+      // snapshot retries. Throwing here would unwind the
+      // snapshot commit — never want that.
+      console.error('[prosemirror.onSnapshot] schedule failed:', e)
+    }
   },
 
   // Keep only the initial snapshot + the newest. The deltas table
