@@ -570,6 +570,50 @@ export function useRemoteVersion(docId: string | null): number | undefined {
   return v == null ? undefined : v
 }
 
+// M1 step 3.8.1.0 — companion query subscription for the
+// collabDocs row state. Drives three downstream client behaviors
+// that the AtomEditor integration consumes:
+//
+//   - `frozen: true` → render a "reload to continue" banner
+//     (real conflict: 3.7 case A; client must reload, not retry)
+//   - `needsRebootstrap: true` → tear down sync session + re-call
+//     bootstrapSnapshotFromAtomBody with fresh atoms.body
+//     (3.7 case B; gentle auto-rebuild after OOB write while
+//     PM was idle)
+//   - `projectedVersion` → debug telemetry (UI may show "synced
+//     N seconds ago")
+//
+// AUTH NOTE: the server query (collabBootstrap.getCollabDocState)
+// gates on P1 read access. Non-readers see `exists: false` instead
+// of a denial (defense-in-depth against existence oracle leaks).
+//
+// SHAPE NOTE: returns `undefined` while the query loads (Convex's
+// idiom) and `null` when the query is skipped (no docId). The
+// `exists: false` variant means "query ran successfully, no row
+// (or no access)". Caller should treat undefined + null + exists:
+// false ALL as "no actionable state" (the editor renders as if
+// nothing's happening).
+export type CollabDocState =
+  | { exists: false }
+  | {
+      exists: true
+      frozen: boolean
+      needsRebootstrap: boolean
+      lastConflictAt: number | null
+      projectedVersion: number
+    }
+
+export function useCollabDocState(
+  docId: string | null,
+  activeWorkspaceId: string | undefined,
+): CollabDocState | undefined | null {
+  // 'skip' when no docId — same idiom as useRemoteVersion.
+  return useQuery(
+    api.collabBootstrap.getCollabDocState,
+    docId ? { docId, activeWorkspaceId } : 'skip',
+  )
+}
+
 // Re-export getVersion so the integration can compare without
 // pulling prosemirror-collab directly.
 export { getVersion } from 'prosemirror-collab'

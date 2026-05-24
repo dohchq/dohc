@@ -112,6 +112,28 @@ describe('collab-sync — orchestration invariants', () => {
     expect(SRC).toContain('snapshotInFlight')
   })
 
+  it('exports useCollabDocState — collabDocs subscription (M1 3.8.1.0)', () => {
+    // The AtomEditor integration consumes this for the frozen
+    // banner + rebootstrap loop. The hook must be exported
+    // (used outside collab-sync.ts) and call the right Convex
+    // query with the conditional skip pattern.
+    expect(SRC).toMatch(/export function useCollabDocState/)
+    expect(SRC).toMatch(/api\.collabBootstrap\.getCollabDocState/)
+    // 'skip' idiom: useQuery gets 'skip' when docId is null
+    expect(SRC).toMatch(/docId\s*\?\s*\{[\s\S]*?\}\s*:\s*'skip'/)
+  })
+
+  it('CollabDocState type discriminates exists:false vs exists:true', () => {
+    // The discriminated union is the contract for the AtomEditor
+    // integration. exists:true variant carries frozen, needsRebootstrap,
+    // lastConflictAt, projectedVersion. exists:false is the
+    // no-row / no-access / invalid-docId collapsed signal.
+    expect(SRC).toMatch(/export type CollabDocState/)
+    expect(SRC).toMatch(/\|\s*\{\s*exists:\s*false\s*\}/)
+    expect(SRC).toMatch(/exists:\s*true[\s\S]+?frozen:\s*boolean/)
+    expect(SRC).toMatch(/needsRebootstrap:\s*boolean/)
+  })
+
   it('bootstrap honors the `enabled` flag (off-switch for AtomEditor opt-in)', () => {
     expect(SRC).toMatch(/if \(!enabled \|\| !docId \|\| !schema\)/)
     // Plugins null when disabled so the editor mounts in
