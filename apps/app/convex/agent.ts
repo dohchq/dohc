@@ -1684,10 +1684,19 @@ export const dohcAgent = new Agent(components.agent, {
         // more catastrophic than delete_atom; confirm:true path).
         await requireDirectUserAuthorization(ctx, 'delete_folder')
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        const result = (await ctx.runMutation(
-          internal.folders._removeInternal,
-          { workspaceId, path: p },
-        )) as { atomCount: number; folderCount: number; done: boolean }
+        const viewerSubject = await viewerSubjectFromTool(ctx)
+        let result: { atomCount: number; folderCount: number; done: boolean }
+        try {
+          result = (await ctx.runMutation(
+            internal.folders._removeInternal,
+            { workspaceId, path: p, viewerSubject },
+          )) as { atomCount: number; folderCount: number; done: boolean }
+        } catch (e) {
+          if (/access to delete this folder/.test((e as Error).message)) {
+            return `REFUSED: "${p}" contains atoms you cannot read (private/restricted). Refusing the whole delete — never partial.`
+          }
+          throw e
+        }
         const tail = result.done
           ? ''
           : ' — large folder, more being removed in the background'

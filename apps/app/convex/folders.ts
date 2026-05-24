@@ -6,7 +6,7 @@ import {
 } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
-import { canWriteInFolder } from './atomAccess'
+import { canReadAtom, canWriteInFolder } from './atomAccess'
 import { scheduleMapRegen } from './loop'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
@@ -507,18 +507,32 @@ export const remove = mutation({
   args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { path, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const out = await removeImpl(ctx, workspaceId, path, true)
+    // P1 (multiplayer-and-h-followups §6.5) — recursive delete is
+    // the most dangerous P1 surface: a teammate could erase a
+    // private folder's contents in one shot. Pre-scan the WHOLE
+    // subtree and refuse the delete if ANY atom is unreadable to
+    // the viewer (same all-or-nothing posture as the lock pre-scan
+    // already used here — partial-deletes are the wrong fail mode).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    const out = await removeImpl(ctx, workspaceId, path, true, viewerSubject)
     // Phase C — debounced _map.md regen (folder deletion drops subtree).
     await scheduleMapRegen(ctx, workspaceId)
     return out
   },
 })
 
-// Internal version called by the agent's delete_folder tool.
+// Internal version called by the agent's delete_folder tool. P1:
+// optional viewerSubject — agent passes it, system callers omit it
+// (back-compat; system path is unconstrained as in `_upsertInternal`).
 export const _removeInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
-    return await removeImpl(ctx, workspaceId, path, true)
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    return await removeImpl(ctx, workspaceId, path, true, viewerSubject)
   },
 })
 
@@ -529,11 +543,12 @@ export const _removeInternal = internalMutation({
 // file-org-v1 §2.3 — continuation passes `isFirstInvocation: false`
 // so the lock pre-scan does NOT run again. The first pass already
 // proved no locks; subsequent passes are pure batched deletes of
-// the proven-safe subtree.
+// the proven-safe subtree. P1 access check ALSO runs only on the
+// first pass — subsequent passes inherit its proof.
 export const _removeContinue = internalMutation({
   args: { workspaceId: v.string(), path: v.string() },
   handler: async (ctx, { workspaceId, path }) => {
-    return await removeImpl(ctx, workspaceId, path, false)
+    return await removeImpl(ctx, workspaceId, path, false, undefined)
   },
 })
 
@@ -549,6 +564,9 @@ async function removeImpl(
   workspaceId: string,
   path: string,
   isFirstInvocation: boolean,
+  // P1 — first-invocation only; continuations inherit the proof.
+  // undefined ⇒ no access gate (system caller back-compat).
+  viewerSubject: string | undefined,
 ) {
   const clean = path.replace(/^\/+|\/+$/g, '')
   const prefix = `${clean}/`
@@ -590,6 +608,20 @@ async function removeImpl(
         subtreeCount++
         if (a.systemLocked) throw new SystemLockError(a.path, 'delete')
         if (a.userLocked) throw new UserLockError(a.path, 'delete')
+        // P1 — refuse the WHOLE delete if ANY atom in the subtree
+        // is unreadable to the viewer. Same all-or-nothing posture
+        // as the lock pre-scan above: a partial-delete (skip the
+        // unreadable ones, take the rest) would leave a teammate's
+        // private subtree intact but its enclosing folder gone —
+        // a confusing, unsafe outcome. Fail loud instead.
+        if (
+          viewerSubject !== undefined &&
+          !(await canReadAtom(ctx, a._id, viewerSubject))
+        ) {
+          throw new Error(
+            'You do not have access to delete this folder — it contains atoms you cannot read.',
+          )
+        }
       }
     }
     if (subtreeCount > SCAN_CAP) {
