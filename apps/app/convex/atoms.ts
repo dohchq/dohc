@@ -7,7 +7,7 @@ import {
 } from './_generated/server'
 import { requireWorkspace } from './auth'
 import { scheduleMapRegen } from './loop'
-import { canReadAtom } from './atomAccess'
+import { canReadAtom, canWriteAtomPath } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
@@ -462,6 +462,18 @@ export const upsert = mutation({
   },
   handler: async (ctx, { path, body, source, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — write-path access
+    // gate. Notion-full: read == write at the per-atom layer, so a
+    // teammate can't overwrite your private atom (canWriteAtomPath
+    // routes to canReadAtom for an existing path), AND can't
+    // PLANT a doc in your private folder (folder cascade applies
+    // on the creation branch). Hard-error rather than fail-soft —
+    // a silent no-op would mask data loss in the editor.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to write at this path.')
+    }
     // The user's own editor. Overwriting their own content is allowed
     // (isUserEdit) but still snapshotted (coalesced) so a fat-finger
     // auto-save is recoverable.
@@ -557,6 +569,14 @@ export const remove = mutation({
   args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { path, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 — delete is a write. Same gate as upsert; canWriteAtomPath
+    // returns false for a tombstoned atom (correct: the tombstone
+    // recovery flow is the ONLY way to operate on it).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to delete this atom.')
+    }
     await removeAtomImpl(ctx, workspaceId, path)
     // Phase C — debounced _map.md regen.
     await scheduleMapRegen(ctx, workspaceId)
@@ -590,6 +610,20 @@ export const move = mutation({
     // only upsert (the claim must equal the code).
     if (!isSafeAtomPath(toPath)) {
       throw new Error(`invalid atom path (contains U+0000): ${JSON.stringify(toPath)}`)
+    }
+
+    // P1 — move is a write at BOTH ends: the rename touches the
+    // source atom (so the caller must be able to write the source)
+    // AND lands a new row at the destination (so the destination
+    // folder cascade applies — can't move a doc INTO a teammate's
+    // private folder). Both checks before any state changes.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, fromPath, viewerSubject))) {
+      throw new Error('You do not have access to move this atom.')
+    }
+    if (!(await canWriteAtomPath(ctx, workspaceId, toPath, viewerSubject))) {
+      throw new Error('You do not have access to move into this destination.')
     }
 
     const src = await ctx.db

@@ -158,6 +158,66 @@ export async function canReadAtom(
   return (await resolveAtomAccess(ctx, atomId, viewerSubject)).allowed
 }
 
+/** Write-path gate for an atom PATH (not id) — handles both create
+ *  and overwrite. Notion-full §6.5 semantic: read == write at the
+ *  per-atom layer. So:
+ *    • atom already exists at `path` → the answer IS canReadAtom on
+ *      that atom (the existing row carries any atom-level override
+ *      or sits under folder cascade);
+ *    • atom does NOT exist (creation) → walk the folder cascade only
+ *      (deepest match wins, same order as the read resolver). A
+ *      folder marked private/restricted to someone-else blocks
+ *      creation INSIDE it — otherwise a teammate could plant a
+ *      doc in your private `alice/` folder. Org-default allows.
+ *
+ *  Tombstoned atoms are READ-denied but their PATHS are still in
+ *  the live table (tombstone is a separate row). A "create at the
+ *  same path" attempts to write the existing atom — caught by the
+ *  canReadAtom branch above (tombstoned ⇒ allowed=false). So a
+ *  member can't quietly write over a departed teammate's private
+ *  doc by reusing its path. */
+export async function canWriteAtomPath(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+  path: string,
+  viewerSubject: string,
+): Promise<boolean> {
+  const existing = await ctx.db
+    .query('atoms')
+    .withIndex('by_workspace_path', (q) =>
+      q.eq('workspaceId', workspaceId).eq('path', path),
+    )
+    .unique()
+  if (existing) return canReadAtom(ctx, existing._id, viewerSubject)
+
+  // Creation path — walk folder cascade only. Same bottom-up,
+  // deepest-wins order as the read resolver, minus the atom-level
+  // step (no atom exists yet).
+  const segments = path.split('/')
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const folderPath = segments.slice(0, i).join('/')
+    const folderAccessRow = await ctx.db
+      .query('folderAccess')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('folderPath', folderPath),
+      )
+      .unique()
+    if (folderAccessRow) {
+      if (viewerSubject === folderAccessRow.ownerUserId) return true
+      if (
+        folderAccessRow.mode === 'restricted' &&
+        folderAccessRow.allowedUserIds.includes(viewerSubject)
+      ) {
+        return true
+      }
+      return false
+    }
+  }
+  // No folder rule found — org-default allows (membership was
+  // already validated by the calling mutation's requireWorkspace).
+  return true
+}
+
 // ── Mutations ─────────────────────────────────────────────────────────
 
 /** Set or clear an atom's access mode. v1 contract: any active
