@@ -27,15 +27,15 @@ async function makeAtomId(
     path,
     body: 'body',
   })
-  const row = await t.run(async (ctx) =>
-    ctx.db
-      .query('atoms')
-      .withIndex('by_workspace_path', (q) =>
-        q.eq('workspaceId', orgId).eq('path', path),
-      )
-      .unique(),
+  // Use .collect() (no withIndex) — convex-test's t.run ctx
+  // doesn't surface user-table indexes via TS, even though
+  // they work at runtime (cf. p1AccessByFileId.test.ts).
+  const rows = await t.run(async (ctx) => ctx.db.query('atoms').collect())
+  const row = rows.find(
+    (r: { workspaceId: string; path: string }) =>
+      r.workspaceId === orgId && r.path === path,
   )
-  return row!._id
+  return (row as { _id: import('./_generated/dataModel').Id<'atoms'> })._id
 }
 
 // M1 step 3 sub-commit 3.3 — presence + cleanup contract. Codex
