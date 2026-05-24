@@ -6,6 +6,7 @@ import {
 } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
+import { canWriteInFolder } from './atomAccess'
 import { scheduleMapRegen } from './loop'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
@@ -111,6 +112,16 @@ export const create = mutation({
   args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { path, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — creating a folder
+    // inside a private/restricted parent must obey the folder
+    // cascade (otherwise a teammate could mkdir inside your private
+    // `alice/` and start dropping docs in it). canWriteInFolder
+    // walks bottom-up from the target path; org-default allows.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteInFolder(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to create folders here.')
+    }
     const id = await createImpl(ctx, workspaceId, path)
     // Phase C — debounced _map.md regen (new folder appears in the map).
     await scheduleMapRegen(ctx, workspaceId)
@@ -118,10 +129,23 @@ export const create = mutation({
   },
 })
 
-// Internal version for the agent's create_folder tool.
+// Internal version for the agent's create_folder tool. P1: same
+// optional `viewerSubject` pattern as `_upsertInternal` — the agent
+// callers pass it; system callers omit it (back-compat). When
+// passed, run the folder-cascade write gate before creating.
 export const _createInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    if (
+      viewerSubject &&
+      !(await canWriteInFolder(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to create folders here.')
+    }
     return await createImpl(ctx, workspaceId, path)
   },
 })

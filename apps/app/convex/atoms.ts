@@ -427,6 +427,15 @@ export const idAdvisory = query({
       )
       .unique()
     if (!atom) return none
+    // P1 (multiplayer-and-h-followups §6.5) — collapse to the
+    // missing-shape for atoms the viewer can't read. Without this,
+    // a teammate could probe whether `alice/secret.md` exists by
+    // calling idAdvisory and getting back a non-`none` fileId.
+    // Same no-existence-oracle pattern as atoms.getByPath /
+    // htmlAtoms.getRenderable / search.run.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, atom._id, viewerSubject))) return none
     const fileId = extractFrontmatterId(atom.body)
     if (fileId === null) return none
 

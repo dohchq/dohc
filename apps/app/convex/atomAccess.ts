@@ -158,6 +158,51 @@ export async function canReadAtom(
   return (await resolveAtomAccess(ctx, atomId, viewerSubject)).allowed
 }
 
+/** Folder-creation gate — would this viewer be allowed to create
+ *  content at `folderPath` (or inside it)? Walks the folder cascade
+ *  bottom-up from `folderPath` itself UPWARD (deepest match wins),
+ *  same precedence as the read resolver's folder portion. Returns
+ *  true when no rule applies (org-default) or when the deepest
+ *  matching rule allows this viewer. So a teammate can't `mkdir`
+ *  inside your private folder, and the agent's create_folder tool
+ *  inherits the same gate without a separate code path.
+ *
+ *  An empty `folderPath` (workspace root) only blocks if a root
+ *  folderAccess row exists that denies — by convention we never set
+ *  one, so root creation is always allowed for a member. */
+export async function canWriteInFolder(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+  folderPath: string,
+  viewerSubject: string,
+): Promise<boolean> {
+  // folderPath '' (root) ⇒ segments = ['']; iterate i=0 only, checks
+  // the empty folderPath. A non-empty 'a/b' ⇒ segments ['a','b'];
+  // iterate i=2,1,0 checking 'a/b', 'a', ''.
+  const segments = folderPath === '' ? [''] : folderPath.split('/')
+  for (let i = segments.length; i >= 0; i--) {
+    const path = i === 0 ? '' : segments.slice(0, i).join('/')
+    const row = await ctx.db
+      .query('folderAccess')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('folderPath', path),
+      )
+      .unique()
+    if (row) {
+      if (viewerSubject === row.ownerUserId) return true
+      if (
+        row.mode === 'restricted' &&
+        row.allowedUserIds.includes(viewerSubject)
+      ) {
+        return true
+      }
+      return false
+    }
+    if (i === 0) break // we already checked the root; avoid loop underflow
+  }
+  return true
+}
+
 /** Write-path gate for an atom PATH (not id) — handles both create
  *  and overwrite. Notion-full §6.5 semantic: read == write at the
  *  per-atom layer. So:

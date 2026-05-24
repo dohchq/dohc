@@ -1642,10 +1642,19 @@ export const dohcAgent = new Agent(components.agent, {
       inputSchema: z.object({ path: z.string() }),
       execute: async (ctx, { path }: { path: string }, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        await ctx.runMutation(internal.folders._createInternal, {
-          workspaceId,
-          path,
-        })
+        const viewerSubject = await viewerSubjectFromTool(ctx)
+        try {
+          await ctx.runMutation(internal.folders._createInternal, {
+            workspaceId,
+            path,
+            viewerSubject,
+          })
+        } catch (e) {
+          if (/access to create folders/.test((e as Error).message)) {
+            return `REFUSED: you do not have access to create folders at "${path}" (private/restricted folder).`
+          }
+          throw e
+        }
         return `created folder ${path}`
       },
     }),
