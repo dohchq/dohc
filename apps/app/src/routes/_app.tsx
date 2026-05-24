@@ -215,13 +215,20 @@ function App() {
   // + the files list, so a rename/move (path changes, fileId stable)
   // re-derives the open path automatically — NO URL change needed.
   const location = useLocation()
+  // R1 — recognize BOTH the legacy URL shape AND the new workspace-
+  // scoped `/w/<wsId>/...` shape. Either form opens the right atom;
+  // the activeWorkspaceId is derived separately by the hook (URL
+  // wins → `useActiveWorkspaceId()`). Order in the regex alternation
+  // matters: the workspace-scoped match must come FIRST so a literal
+  // `/w/me/p/<id>` doesn't accidentally match `/p/<id>` on the suffix.
   const urlFileId = (() => {
-    const m = /^\/p\/(.+)$/.exec(location.pathname)
+    const m = /^(?:\/w\/[^/]+)?\/p\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   // sharing-v1 1a — `/shared/<shareId>` opens an atom shared WITH me.
+  // Same R1 dual-shape: matches `/shared/<id>` and `/w/<wsId>/shared/<id>`.
   const urlShareId = (() => {
-    const m = /^\/shared\/(.+)$/.exec(location.pathname)
+    const m = /^(?:\/w\/[^/]+)?\/shared\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const navigate = useNavigate()
@@ -424,23 +431,31 @@ function App() {
       setOptimisticPath(path)
       const fid = (files ?? []).find((f) => f.path === path)?.fileId
       if (fid) {
+        // R1 — navigate to the new workspace-scoped URL. `me` sentinel
+        // for personal (activeWorkspaceId === undefined ⇒ /w/me/...);
+        // the literal org id for org workspaces (/w/<orgId>/...).
         void navigate({
-          to: '/p/$atomId',
-          params: { atomId: fid },
+          to: '/w/$wsId/p/$atomId',
+          params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
           replace: opts?.replace ?? false,
         })
       }
     },
-    [files, navigate],
+    [files, navigate, activeWorkspaceId],
   )
 
   // Clear the open atom (→ home). Used on delete of the open atom.
   const clearOpenAtom = useCallback(
     (opts?: { replace?: boolean }) => {
       setOptimisticPath(null)
-      void navigate({ to: '/', replace: opts?.replace ?? false })
+      // R1 — workspace home, not bare root. Stays in the active workspace.
+      void navigate({
+        to: '/w/$wsId',
+        params: { wsId: activeWorkspaceId ?? 'me' },
+        replace: opts?.replace ?? false,
+      })
     },
-    [navigate],
+    [navigate, activeWorkspaceId],
   )
 
   // sharing-v1 1a — open an atom shared WITH me (by share id).
@@ -448,9 +463,13 @@ function App() {
     (sid: string) => {
       setOptimisticPath(null)
       setView('atom')
-      void navigate({ to: '/shared/$shareId', params: { shareId: sid } })
+      // R1 — workspace-scoped share URL.
+      void navigate({
+        to: '/w/$wsId/shared/$shareId',
+        params: { wsId: activeWorkspaceId ?? 'me', shareId: sid },
+      })
     },
-    [navigate],
+    [navigate, activeWorkspaceId],
   )
 
   // Bridge: once the optimistic path's file gains a real fileId in
@@ -460,13 +479,14 @@ function App() {
     if (!optimisticPath || !files) return
     const fid = files.find((f) => f.path === optimisticPath)?.fileId
     if (fid && urlFileId !== fid) {
+      // R1 — workspace-scoped URL.
       void navigate({
-        to: '/p/$atomId',
-        params: { atomId: fid },
+        to: '/w/$wsId/p/$atomId',
+        params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
         replace: true,
       })
     }
-  }, [optimisticPath, files, urlFileId, navigate])
+  }, [optimisticPath, files, urlFileId, navigate, activeWorkspaceId])
 
   // Once the URL→files derivation converges to the optimistic path,
   // drop the override so the URL is the sole source of truth (a

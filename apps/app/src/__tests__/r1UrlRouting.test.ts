@@ -98,13 +98,72 @@ describe('R1 route file structure', () => {
     ).toMatch(/createFileRoute\(['"]\/_app\/w\/\$wsId\/shared\/\$shareId['"]\)/)
   })
 
-  it('legacy routes still exist (no breaking removal in foundation commit)', () => {
-    // The foundation commit adds new routes alongside legacy. Subsequent
-    // commits add redirects from legacy → /w/me/... ; this test locks
-    // that we don't accidentally remove the legacy routes here.
+  it('legacy routes still exist as REDIRECT shims (preserve bookmarks)', () => {
+    // Legacy paths (`/p`, `/shared`, `/`) keep working — but they now
+    // redirect to the new `/w/me/...` canonical URLs via beforeLoad.
+    // Tests below assert the redirect contract.
     expect(existsSync(resolve(ROUTES, '_app.p.$atomId.tsx'))).toBe(true)
     expect(existsSync(resolve(ROUTES, '_app.shared.$shareId.tsx'))).toBe(true)
     expect(existsSync(resolve(ROUTES, '_app.index.tsx'))).toBe(true)
+  })
+
+  it('legacy /p/<atomId> redirects to /w/me/p/<atomId>', () => {
+    const src = readFileSync(resolve(ROUTES, '_app.p.$atomId.tsx'), 'utf8')
+    expect(src).toMatch(/beforeLoad/)
+    expect(src).toMatch(/redirect\(\{[\s\S]{0,200}to:\s*['"]\/w\/\$wsId\/p\/\$atomId['"]/)
+    expect(src).toMatch(/wsId:\s*['"]me['"]/)
+    expect(src).toMatch(/atomId:\s*params\.atomId/)
+  })
+
+  it('legacy /shared/<shareId> redirects to /w/me/shared/<shareId>', () => {
+    const src = readFileSync(
+      resolve(ROUTES, '_app.shared.$shareId.tsx'),
+      'utf8',
+    )
+    expect(src).toMatch(/beforeLoad/)
+    expect(src).toMatch(
+      /redirect\(\{[\s\S]{0,200}to:\s*['"]\/w\/\$wsId\/shared\/\$shareId['"]/,
+    )
+    expect(src).toMatch(/wsId:\s*['"]me['"]/)
+    expect(src).toMatch(/shareId:\s*params\.shareId/)
+  })
+
+  it('bare / redirects to /w/me (personal workspace home)', () => {
+    const src = readFileSync(resolve(ROUTES, '_app.index.tsx'), 'utf8')
+    expect(src).toMatch(/beforeLoad/)
+    expect(src).toMatch(/redirect\(\{[\s\S]{0,200}to:\s*['"]\/w\/\$wsId['"]/)
+    expect(src).toMatch(/wsId:\s*['"]me['"]/)
+  })
+})
+
+describe('_app.tsx shell recognizes both URL shapes', () => {
+  const APP_SRC = readFileSync(
+    resolve(__dirname, '../../src/routes/_app.tsx'),
+    'utf8',
+  )
+
+  it('urlFileId parser accepts /p/<id> AND /w/<wsId>/p/<id>', () => {
+    // The regex alternation must cover both shapes so:
+    //   (a) legacy /p/<id> still resolves (during a brief window
+    //       between the redirect arming and the URL update); AND
+    //   (b) new /w/<wsId>/p/<id> resolves natively.
+    // Looking for the dual-shape regex literal in source. The actual
+    // regex in source is: /^(?:\/w\/[^/]+)?\/p\/(.+)$/
+    expect(APP_SRC).toContain('/^(?:\\/w\\/[^/]+)?\\/p\\/(.+)$/')
+    expect(APP_SRC).toContain('/^(?:\\/w\\/[^/]+)?\\/shared\\/(.+)$/')
+  })
+
+  it('navigate calls use the new /w/$wsId/p/$atomId shape with me sentinel fallback', () => {
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/p\/\$atomId['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/shared\/\$shareId['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+    // home navigation also uses /w/$wsId
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
   })
 })
 
