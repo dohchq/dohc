@@ -1226,20 +1226,30 @@ function renderSuggestionBubble(
       ? `${s.proposedText.slice(0, 120)}…`
       : s.proposedText
   root.appendChild(preview)
-  // Buttons (only on pending)
+  // Buttons (only on pending). M1 step 3.9.8 — codex 18th-
+  // pass [P2]: hide Accept when the bubble is unanchored.
+  // Two unanchored cases: text not found (CAS will reject)
+  // OR text duplicated (CAS would pass but accept might
+  // rewrite the wrong occurrence — the original 17th-pass
+  // [P1]). Either way, Accept is risky. Reject is always
+  // safe — explicitly dismissing the suggestion is the right
+  // user action when the bubble can't be trusted.
   if (s.status === 'pending') {
     const buttons = document.createElement('div')
     buttons.style.cssText =
       'display:flex;gap:6px;margin-top:2px;align-self:flex-end;'
-    const accept = document.createElement('button')
-    accept.type = 'button'
-    accept.textContent = 'Accept'
-    accept.style.cssText = `background:${colorAgent};color:white;border:none;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;`
-    accept.addEventListener('click', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-      handlersRef.current.onAccept(s._id)
-    })
+    if (anchored) {
+      const accept = document.createElement('button')
+      accept.type = 'button'
+      accept.textContent = 'Accept'
+      accept.style.cssText = `background:${colorAgent};color:white;border:none;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;`
+      accept.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        handlersRef.current.onAccept(s._id)
+      })
+      buttons.appendChild(accept)
+    }
     const reject = document.createElement('button')
     reject.type = 'button'
     reject.textContent = 'Reject'
@@ -1250,8 +1260,14 @@ function renderSuggestionBubble(
       e.stopPropagation()
       handlersRef.current.onReject(s._id)
     })
-    buttons.appendChild(reject)
-    buttons.appendChild(accept)
+    // 3.9.8 — reject first when accept isn't rendered, so the
+    // single button isn't right-justified alone in a way that
+    // reads as the primary action.
+    if (anchored) {
+      buttons.insertBefore(reject, buttons.firstChild)
+    } else {
+      buttons.appendChild(reject)
+    }
     root.appendChild(buttons)
   } else if (s.resolvedByUserId) {
     const credit = document.createElement('div')
