@@ -449,6 +449,74 @@ export default defineSchema({
     // requireRole. Replaces the by_workspace + linear scan in isMember.
     .index('by_org_workspace', ['orgId', 'workspaceId']),
 
+  // P1 (multiplayer-and-h-followups §6.5) — per-atom + per-folder
+  // access controls. Notion-full model: org workspaces stay "everyone
+  // sees everything by default," but EVERY atom + folder gets an
+  // opt-in access toggle (private / restricted-to-list). Absence of a
+  // row means "org-default" (the common case — keeps the sidecar
+  // table small + the resolver fast for the 99% of atoms with no
+  // restriction).
+
+  /** Per-atom access override. Set by `atoms.setAccess` mutation;
+   *  consulted by `resolveAtomAccess` after the membership gate but
+   *  before the org-default ALLOW. Owners do NOT bypass (decision
+   *  P1-B): the `ownerUserId` field is the only principal allowed to
+   *  read a `private` atom. */
+  atomAccess: defineTable({
+    atomId: v.id('atoms'),
+    mode: v.union(v.literal('private'), v.literal('restricted')),
+    /** The single principal allowed to read + edit + change access.
+     *  For `restricted`, this is the owner; `allowedUserIds` extends
+     *  read+edit to a list. For `private`, `allowedUserIds` must be
+     *  `[]` — only the owner reads. */
+    ownerUserId: v.string(),
+    allowedUserIds: v.array(v.string()),
+    setAt: v.number(),
+    setByUserId: v.string(),
+  }).index('by_atom', ['atomId']),
+
+  /** Per-folder access override. Cascades to atoms inside the folder
+   *  via `resolveAtomAccess`'s folder-walk (deepest folder with a row
+   *  wins). An atom inside a restricted folder can override back to
+   *  org-default by setting its own `atomAccess` row with the right
+   *  mode + allowedUserIds. */
+  folderAccess: defineTable({
+    workspaceId: v.string(),
+    /** Canonical folder path (no leading/trailing slash; matches
+     *  `folders.path` shape). Empty string means "workspace root" —
+     *  a workspace-wide private mark (rare; used for "this whole
+     *  org is restricted to a sub-team"). */
+    folderPath: v.string(),
+    mode: v.union(v.literal('private'), v.literal('restricted')),
+    ownerUserId: v.string(),
+    allowedUserIds: v.array(v.string()),
+    setAt: v.number(),
+    setByUserId: v.string(),
+  }).index('by_workspace_path', ['workspaceId', 'folderPath']),
+
+  /** Tombstoned atoms (decision P1-C). When a member is removed from
+   *  an org (`removeMember` / `leaveOrg`), their `private` atoms are
+   *  not deleted — they get a tombstone row that makes them invisible
+   *  to everyone (including org Owners) until an Owner explicitly
+   *  calls `recoverTombstonedAtom` to re-categorize them.
+   *
+   *  Preserves the departed member's work without leaking it on
+   *  accidental offboarding + without orphaning data. */
+  atomTombstones: defineTable({
+    atomId: v.id('atoms'),
+    workspaceId: v.string(),
+    reason: v.union(v.literal('member-departed')),
+    tombstonedAt: v.number(),
+    originalOwnerUserId: v.string(),
+    /** Set when an Owner calls `recoverTombstonedAtom` — the tombstone
+     *  row stays for audit but the atom becomes visible per its new
+     *  access. */
+    recoveredByOwnerUserId: v.optional(v.string()),
+    recoveredAt: v.optional(v.number()),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_atom', ['atomId']),
+
   // An owner-defined, permissioned projection of their own atoms.
   // selector/shape/audience are declarative config (data, not code).
   windows: defineTable({

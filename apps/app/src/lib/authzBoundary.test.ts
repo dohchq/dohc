@@ -96,18 +96,29 @@ function publicFnsTakingWorkspace(
     // CI. The exemption now requires one of:
     //   - `requireWorkspace(ctx, activeWorkspaceId)`  (mutation/query)
     //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
+    //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
+    //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
+    //     uses required `v.string()` form because the recovery action
+    //     only makes sense in an org context (no `me` sentinel value).
     const validatesActive =
       /requireWorkspace\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*\)/.test(
         body,
       ) ||
       /runQuery\([\s\S]{0,80}_resolveWorkspaceForCaller[\s\S]{0,200}activeWorkspaceId/.test(
         body,
+      ) ||
+      /requireRole\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
       )
+    // Strip BOTH optional + required shapes of activeWorkspaceId when
+    // validated (P1's recoverTombstonedAtom uses the required form).
     const headWithoutActive = validatesActive
-      ? head.replace(
-          /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
-          '',
-        )
+      ? head
+          .replace(
+            /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
+            '',
+          )
+          .replace(/\bactiveWorkspaceId\s*:\s*v\.string\(\)\s*,?/g, '')
       : head
     if (/\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
       // `requireRole(ctx, …)` internally calls `requireWorkspace` — it
