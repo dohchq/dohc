@@ -831,6 +831,7 @@ export function useCollabBootstrapMutation({
 export type RemoteCursor = {
   clientId: string
   userId: string
+  userName?: string
   cursorPos: number
 }
 
@@ -901,12 +902,19 @@ export function makeRemoteCursorsPlugin(): Plugin {
           const caret = document.createElement('span')
           caret.className = 'dohc-remote-caret'
           caret.style.cssText = `display:inline-block;width:0;border-left:2px solid ${color};margin-left:-1px;height:1.1em;vertical-align:text-bottom;pointer-events:none;position:relative;`
-          // Label that floats below the caret with the userId.
-          // Truncated to keep the badge small; full id in title.
+          // Label that floats below the caret. 3.9.18: prefer
+          // the cached display name (identity.name from WorkOS)
+          // when available; fall back to userId.slice for IdPs
+          // that don't provide a name. Truncated to 16 chars
+          // to keep the badge small.
           const label = document.createElement('span')
-          label.textContent = c.userId.slice(0, 8)
+          const displayName =
+            c.userName && c.userName.length > 0
+              ? c.userName.slice(0, 16)
+              : c.userId.slice(0, 8)
+          label.textContent = displayName
           label.style.cssText = `position:absolute;top:1.2em;left:-1px;background:${color};color:white;padding:1px 4px;font-size:9px;line-height:1.2;border-radius:2px;white-space:nowrap;font-family:system-ui,sans-serif;`
-          label.title = c.userId
+          label.title = c.userName ?? c.userId
           caret.appendChild(label)
           decos.push(
             Decoration.widget(pos, caret, {
@@ -1032,8 +1040,12 @@ export type SuggestionRow = {
   proposedText: string
   instruction: string
   authorIsAgent: boolean
+  /** 3.9.18 — author display name; for bubble headers */
+  authorUserName?: string
   status: 'pending' | 'accepted' | 'rejected'
   resolvedByUserId?: string
+  /** 3.9.18 — resolver display name; for "accepted by Alice" credit */
+  resolvedByUserName?: string
   resolvedAt?: number
   /** M1 step 3.9.5 — the expected body text at [rangeFrom,
    *  rangeTo] at suggest time. The decoration plugin searches
@@ -1272,7 +1284,12 @@ function renderSuggestionBubble(
   } else if (s.resolvedByUserId) {
     const credit = document.createElement('div')
     credit.style.cssText = 'color:#888;font-size:10px;margin-top:2px;'
-    credit.textContent = `${s.status} by ${s.resolvedByUserId.slice(0, 8)}`
+    // 3.9.18 — prefer cached display name
+    const resolverName =
+      s.resolvedByUserName && s.resolvedByUserName.length > 0
+        ? s.resolvedByUserName
+        : s.resolvedByUserId.slice(0, 8)
+    credit.textContent = `${s.status} by ${resolverName}`
     root.appendChild(credit)
   }
   return root

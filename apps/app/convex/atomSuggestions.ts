@@ -76,6 +76,12 @@ export const _createSuggestion = internalMutation({
     // is now derived solely from the verified secret; no
     // misleading caller-controlled field on the API surface.
     authorUserId: v.string(),
+    /** 3.9.18 — cached display name from identity.name at
+     *  create time. Stored on the row so listPending can
+     *  return it for bubble rendering. Optional — agents
+     *  may not have a usable name, and tests calling the
+     *  internal mutation may not provide one. */
+    authorUserName: v.optional(v.string()),
     /** Bearer token the caller claims as proof of agent runtime
      *  origin. Compared to process.env.DOHC_AGENT_SECRET. When
      *  missing or non-matching, authorIsAgent is forced to
@@ -96,6 +102,7 @@ export const _createSuggestion = internalMutation({
       proposedText,
       instruction,
       authorUserId,
+      authorUserName,
       agentSecret,
       expectedText,
     },
@@ -150,6 +157,7 @@ export const _createSuggestion = internalMutation({
       instruction,
       authorIsAgent,
       authorUserId,
+      authorUserName, // 3.9.18 — cached at insert time
       expectedText,
       status: 'pending',
       createdAt: Date.now(),
@@ -210,8 +218,11 @@ export const listPending = query({
         instruction: r.instruction,
         authorIsAgent: r.authorIsAgent,
         authorUserId: r.authorUserId,
+        // 3.9.18 — display names for bubble UI
+        authorUserName: r.authorUserName,
         status: r.status,
         resolvedByUserId: r.resolvedByUserId,
+        resolvedByUserName: r.resolvedByUserName,
         resolvedAt: r.resolvedAt,
         createdAt: r.createdAt,
         // M1 step 3.9.5 — client decoration plugin needs
@@ -249,6 +260,11 @@ export const acceptSuggestion = mutation({
     const identity = await ctx.auth.getUserIdentity()
     if (!identity) throw new Error('Not authenticated')
     const subject = identity.subject
+    // 3.9.18 — cache resolver display name on every patch
+    const resolverName =
+      typeof identity.name === 'string' && identity.name.length > 0
+        ? identity.name
+        : undefined
 
     const row = await ctx.db.get(suggestionId)
     if (!row) throw new Error('Suggestion not found.')
@@ -288,6 +304,7 @@ export const acceptSuggestion = mutation({
       await ctx.db.patch(suggestionId, {
         status: 'rejected',
         resolvedByUserId: subject,
+        resolvedByUserName: resolverName,
         resolvedAt: Date.now(),
       })
       return {
@@ -305,6 +322,7 @@ export const acceptSuggestion = mutation({
       await ctx.db.patch(suggestionId, {
         status: 'rejected',
         resolvedByUserId: subject,
+        resolvedByUserName: resolverName,
         resolvedAt: Date.now(),
       })
       return {
@@ -319,6 +337,7 @@ export const acceptSuggestion = mutation({
       await ctx.db.patch(suggestionId, {
         status: 'rejected',
         resolvedByUserId: subject,
+        resolvedByUserName: resolverName,
         resolvedAt: Date.now(),
       })
       return {
@@ -410,6 +429,7 @@ export const acceptSuggestion = mutation({
     await ctx.db.patch(suggestionId, {
       status: 'accepted',
       resolvedByUserId: subject,
+      resolvedByUserName: resolverName,
       resolvedAt: Date.now(),
     })
     return { ok: true as const, alreadyResolved: false }
@@ -433,6 +453,11 @@ export const rejectSuggestion = mutation({
     const identity = await ctx.auth.getUserIdentity()
     if (!identity) throw new Error('Not authenticated')
     const subject = identity.subject
+    // 3.9.18 — cache resolver display name for bubble UI
+    const resolverName =
+      typeof identity.name === 'string' && identity.name.length > 0
+        ? identity.name
+        : undefined
 
     const row = await ctx.db.get(suggestionId)
     if (!row) throw new Error('Suggestion not found.')
@@ -449,6 +474,7 @@ export const rejectSuggestion = mutation({
     await ctx.db.patch(suggestionId, {
       status: 'rejected',
       resolvedByUserId: subject,
+      resolvedByUserName: resolverName,
       resolvedAt: Date.now(),
     })
     return { ok: true as const, alreadyResolved: false }

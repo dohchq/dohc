@@ -80,15 +80,29 @@ export const recordCollabPresence = mutation({
         q.eq('docId', docId).eq('clientId', clientId),
       )
       .unique()
+    // M1 step 3.9.18 — cache display name on heartbeat. Updates
+    // on every ping so a user rename propagates within 30s.
+    // identity.name is undefined when the IdP doesn't provide;
+    // store as null (not undefined) so we can distinguish
+    // "no name available" from "wasn't set yet".
+    const userName =
+      typeof identity.name === 'string' && identity.name.length > 0
+        ? identity.name
+        : undefined
     if (existing) {
       // 3.8.2.3 — only write cursorPos when caller passed it
       // (undefined arg means "don't touch the existing value";
       // null arg means "clear it"). Lets the heartbeat fire
       // without overwriting cursor state every 30s.
-      const patch: { lastSeenAt: number; cursorPos?: number | null } = {
+      const patch: {
+        lastSeenAt: number
+        cursorPos?: number | null
+        userName?: string
+      } = {
         lastSeenAt: now,
       }
       if (cursorPos !== undefined) patch.cursorPos = cursorPos
+      if (userName !== undefined) patch.userName = userName
       // M1 step 3.9.11 — ultrathink P1 #3 HEARTBEAT/CLEANUP
       // RACE. At t=89.9s heartbeat reads the row; at t=90.0s
       // _cleanupIdleSessions cron deletes it; heartbeat patches
@@ -108,6 +122,7 @@ export const recordCollabPresence = mutation({
       docId,
       clientId,
       userId: subject,
+      userName, // 3.9.18 — cached display name; undefined if IdP has none
       lastSeenAt: now,
       cursorPos: cursorPos ?? null,
     })
@@ -173,6 +188,7 @@ export const getCursorsForDoc = query({
       .map((r) => ({
         clientId: r.clientId,
         userId: r.userId,
+        userName: r.userName, // 3.9.18 — display name for the cursor label
         cursorPos: r.cursorPos as number,
       }))
   },

@@ -668,6 +668,13 @@ export default defineSchema({
     docId: v.string(),
     clientId: v.string(), // per-tab UUID
     userId: v.string(), // identity.subject; for audit + UI labels
+    // M1 step 3.9.18 — cached display name (identity.name from
+    // WorkOS/OIDC). Stored at heartbeat time so cursor labels
+    // can render "Alice" instead of "ws_alice_". Optional —
+    // older rows + IdPs that don't provide a name fall back to
+    // userId.slice(0,8) client-side. Cache can go stale when a
+    // user changes their name; acceptable for v1.
+    userName: v.optional(v.string()),
     lastSeenAt: v.number(),
     // M1 step 3.8.2.3 — cursor presence v1.
     // The PM doc-relative cursor position (head of selection) for
@@ -724,8 +731,15 @@ export default defineSchema({
     authorIsAgent: v.boolean(),
     // identity.subject of the agent or human author.
     authorUserId: v.string(),
+    // 3.9.18 — cached display name (identity.name) at create
+    // time. Bubble headers render "Agent suggestion (Alice)"
+    // instead of "Agent suggestion (ws_alice_)".
+    authorUserName: v.optional(v.string()),
     // Set when accepted; the human who clicked Accept.
     resolvedByUserId: v.optional(v.string()),
+    // 3.9.18 — cached display name at resolve time. Bubble
+    // shows "accepted by Alice 2s ago" instead of subject prefix.
+    resolvedByUserName: v.optional(v.string()),
     resolvedAt: v.optional(v.number()),
     // 'pending' until accept/reject; then 'accepted' or 'rejected'.
     // We keep accepted/rejected rows briefly (see 3.9.1

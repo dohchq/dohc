@@ -1828,6 +1828,12 @@ export const dohcAgent = new Agent(components.agent, {
             // 3.9.7 — authorIsAgent dropped from the args;
             // derived server-side from agentSecret.
             authorUserId: viewerSubject,
+            // 3.9.18 — agent name for bubble display. Constant
+            // 'AI Agent' since the agent doesn't have an
+            // identity.name; signals to the UI that this row
+            // is agent-authored (the violet "Agent suggestion"
+            // label is the canonical agent indicator).
+            authorUserName: 'AI Agent',
             agentSecret,
           },
         )) as { ok: true; id: string } | { ok: false; reason: string }
