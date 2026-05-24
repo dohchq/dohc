@@ -219,39 +219,58 @@ export const acceptSuggestion = mutation({
       throw new Error('Not authorized to edit this atom.')
     }
 
-    // M1 step 3.9.2 — codex 14th-pass [P1] #1 RANGE CAS.
+    // M1 step 3.9.2 + 3.9.3 — codex 14th + 15th-pass [P1] CAS.
     //
-    // The suggestion stores markdown-body offsets + the EXACT
-    // text the agent thought was there (expectedText). Before
-    // splicing, verify body.slice(from, to) === expectedText.
-    // If the doc drifted between suggest_in_doc and accept
-    // (user typed, another agent wrote, projection landed) we
-    // ABORT the accept rather than splice the wrong bytes.
+    // 3.9.3 [P1]: validate the RAW range BEFORE any clamping.
+    // The 3.9.2 version clamped first then compared the slice —
+    // an out-of-bounds range with empty expectedText would
+    // collapse to EOF and pass the check, then append at the
+    // wrong position. The fix: any out-of-bounds range fails
+    // outright. Clamping is only for the (no-write) decoration
+    // plugin's rendering.
     //
-    // Pre-3.9.2 rows (no expectedText) bypass CAS for backward
-    // compatibility but should not exist in practice — the
-    // suggest_in_doc tool always populates it.
+    // Also 3.9.3: expectedText is now REQUIRED. A row missing
+    // it (pre-3.9.2 in-flight or test artifact) is rejected
+    // immediately. Removes the silent-bypass path codex 15th-
+    // pass [P2] flagged.
     const body = atom.body
-    const clampedFrom = Math.max(0, Math.min(row.rangeFrom, body.length))
-    const clampedTo = Math.max(clampedFrom, Math.min(row.rangeTo, body.length))
-    if (row.expectedText !== undefined) {
-      const actual = body.slice(clampedFrom, clampedTo)
-      if (actual !== row.expectedText) {
-        // Don't write. Mark the suggestion 'rejected' with the
-        // caller as resolver — the doc moved on; the suggestion
-        // is no longer valid.
-        await ctx.db.patch(suggestionId, {
-          status: 'rejected',
-          resolvedByUserId: subject,
-          resolvedAt: Date.now(),
-        })
-        throw new Error(
-          'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
-        )
-      }
+    if (row.expectedText === undefined) {
+      await ctx.db.patch(suggestionId, {
+        status: 'rejected',
+        resolvedByUserId: subject,
+        resolvedAt: Date.now(),
+      })
+      throw new Error(
+        'Suggestion is missing the required expectedText CAS witness. Discarded.',
+      )
+    }
+    if (
+      row.rangeFrom < 0 ||
+      row.rangeTo < row.rangeFrom ||
+      row.rangeTo > body.length
+    ) {
+      await ctx.db.patch(suggestionId, {
+        status: 'rejected',
+        resolvedByUserId: subject,
+        resolvedAt: Date.now(),
+      })
+      throw new Error(
+        'Suggestion range is out of bounds (document shrank or range was invalid). Discarded; ask again.',
+      )
+    }
+    const actual = body.slice(row.rangeFrom, row.rangeTo)
+    if (actual !== row.expectedText) {
+      await ctx.db.patch(suggestionId, {
+        status: 'rejected',
+        resolvedByUserId: subject,
+        resolvedAt: Date.now(),
+      })
+      throw new Error(
+        'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
+      )
     }
     const newBody =
-      body.slice(0, clampedFrom) + row.proposedText + body.slice(clampedTo)
+      body.slice(0, row.rangeFrom) + row.proposedText + body.slice(row.rangeTo)
 
     // NOTE on collab projection: when an atom has an active
     // collab session, this write races the projection writer.

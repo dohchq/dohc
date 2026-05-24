@@ -932,11 +932,23 @@ export function makeLocalCursorObserverPlugin({
     // someone who isn't actually editing. blur fires → clear to
     // null → server patches cursorPos=null → getCursorsForDoc
     // filters it out.
+    //
+    // M1 step 3.9.3 — codex 15th-pass [P2] focus re-publish.
+    // After a blur the cursorPos is null. If the user refocuses
+    // WITHOUT moving the selection, the update() callback below
+    // never fires (selection.head didn't change), so the cursor
+    // stays invisible to other tabs until the next keystroke.
+    // focus → report the CURRENT selection head so it reappears
+    // immediately.
     props: {
       handleDOMEvents: {
         blur: (_view, _event) => {
           onCursorChange(null)
           return false // don't prevent default blur handling
+        },
+        focus: (view, _event) => {
+          onCursorChange(view.state.selection.head)
+          return false
         },
       },
     },
