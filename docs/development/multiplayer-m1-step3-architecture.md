@@ -1,9 +1,10 @@
-# M1 step 3 architecture v2 — markdown ↔ prosemirror projection
+# M1 step 3 architecture v3 — markdown ↔ prosemirror projection
 
-**Status**: PROPOSED v2 — pre-implementation. Seeking second codex review
-pass before build. v1 (in git history at commit 608888a) was REVISED by
-codex (see GSTACK REVIEW REPORT at the bottom of this doc for the v1
-findings absorbed below).
+**Status**: PROPOSED v3 — pre-implementation. v1 (REVISE, 608888a) and
+v2 (REVISE, 501f8c2) have been superseded — see GSTACK REVIEW REPORT
+at the bottom for the v2 findings absorbed below. v3 addresses Codex's
+top 3 remaining concerns (table split, concrete shared-helper contract,
+schema-extraction resolution) plus the 4 NEW issues v2 introduced.
 
 **Context**:
 - Builds on `multiplayer-and-h-followups-plan.md` + `transport-spike-result.md`.
@@ -14,442 +15,625 @@ findings absorbed below).
 - Multiplayer is OFF on every callsite today (no `multiplayerDocId`
   prop passed anywhere). Branch state: 1013 tests passing.
 
-This doc proposes the v2 architecture for M1 step 3, which closes the
-loop so multiplayer docs feed back into dohc's existing read paths
-(search, formulas, /r render, agent tools) WITHOUT silently corrupting
-data on concurrent writes.
+---
+
+## The problem (unchanged from v1/v2)
+
+dohc stores doc content as **markdown text** in `atoms.body`. Every
+read path parses that markdown directly: search FTS, formula evaluator,
+DSL queries, `/r` render route, agent tools (`read_atom`), inline-atom
+parsers. Multiplayer introduces a parallel ProseMirror snapshot+deltas
+store. Without reconciliation, search/formulas/render see stale data.
 
 ---
 
-## The problem (unchanged from v1)
+## What changed from v2 (the structural fixes)
 
-dohc stores doc content as **markdown text** in `atoms.body`. Every read
-path in the system parses that markdown directly:
+Codex's v2 review surfaced 11 issues: 3 RESOLVED, 5 PARTIAL, 4 NEW.
+v3 addresses all of them concretely. Key structural shifts:
 
-- `search.run` — FTS index built from `atoms.body` (`deriveSearchFields`)
-- `formulaEval` — parses inline `{key: value}` atoms from `atoms.body`
-- `queries.run` (DSL) — `docs.find("path")` returns digested `atoms.body`
-- `/r/<atomId>` route — sanitizes `atoms.body` HTML, resolves formulas
-- Agent tools — `read_atom` returns `atoms.body` verbatim
-- Inline-atom parsers — `parseInlineAtomsFromMarkdown` operates on markdown
+1. **Server doesn't parse markdown.** Projection is one-way: PM JSON
+   → markdown. The reverse direction (atoms.body → PM JSON) is
+   client-only at bootstrap. This **eliminates** the Convex-runtime
+   `remark-parse` feasibility concern; only the serializer must run
+   server-side.
 
-Multiplayer introduces a SECOND representation: **ProseMirror JSON
-snapshots + step deltas** in `@convex-dev/prosemirror-sync`'s tables.
-Without reconciliation, search/formulas/render/agent tools see stale
-markdown while the live editor moves on.
+2. **Tables split** per Codex: `collabDocs` (per-doc CAS state,
+   server-computed) + `collabSessions` (per-client presence, heartbeat
+   only). False conflicts from per-client hash divergence are gone.
+
+3. **Concrete helper that matches `upsertAtomImpl` byte-for-byte.** v3
+   spells out every step: `isSafeAtomPath` → `seedAtomIdIntoBody` →
+   existing-row lookup → lock check → `recordTrash(pre-overwrite)` →
+   patch with `deriveSearchFields` → `applyAtomCapture` →
+   `reconcileAtomIdIndex({isRestore: false})`. No omissions.
+
+4. **Schema extraction unblocked** via `editor.action((ctx) =>
+   ctx.get(schemaCtx))` after Crepe mounts — `schemaCtx` IS exported
+   from `@milkdown/core/internal-plugin/schema` (Codex was right that
+   `Crepe.getSchema()` doesn't exist, but the underlying slice is
+   accessible). Cache globally; share across mounts.
+
+5. **Conflict policy is two-state**: if PM has no unprojected edits,
+   AUTO-REBUILD from new atoms.body (Codex's suggested gentle path).
+   Only freeze+reload when both sides have changed.
+
+6. **`onSnapshot` BEFORE commit**: projection passes `snapshotVersion`
+   and validates the version exists server-side before firing. No
+   stale-version writes.
+
+7. **`frozen` field added** to schema (Codex caught the omission in v2).
+
+8. **Cleanup cron at 60s** matches the 90s heartbeat expiry promise
+   (or — alternatively — drops the 90s claim).
 
 ---
 
-## What changed from v1 (and why)
+## Proposed v3 architecture
 
-Codex's v1 review (verbatim in GSTACK REVIEW REPORT below) surfaced three
-critical bugs:
-
-1. **Race vs concurrent `atoms.upsert`**: an agent's `write_atom` call
-   landing during a live collab session would be silently overwritten by
-   the next periodic flush.
-2. **Side-effect bypass**: v1 proposed `ctx.db.patch(atomId, {body:...})`
-   which skips the full `upsertAtomImpl` chain (`atomCapture`,
-   `reconcileAtomIdIndex`, `deriveSearchFields`, `scheduleMapRegen`).
-3. **Wrong `create()` semantics**: v1 claimed `prosemirrorSync.create()`
-   is broadly idempotent. It only silently-accepts on IDENTICAL content;
-   throws on divergent races. Also: initial snapshot version is `1`,
-   not `0`.
-
-Plus terminology + lifecycle gaps. v2 fixes all eight. See "Changes from v1"
-appendix at the bottom for a finding-by-finding map.
-
----
-
-## Proposed v2 architecture
-
-### Mental model: **eventual markdown projection**
+### Mental model: persistent projection vs live authoritative source
 
 `atoms.body` is the **persistent projection** of doc content. The
 prosemirror-sync snapshot is **authoritative DURING an active edit
-session**. The projection lags the snapshot by at most the flush window
-(typically < 2s under the onSnapshot-driven model).
+session**. The projection lags the snapshot by at most one debounce
+window (~1500ms onSnapshot-driven).
 
 | State | Authoritative for content | Authoritative for read paths |
 |---|---|---|
 | At rest (no live editors) | `atoms.body` | `atoms.body` |
-| Active edit session | prosemirror snapshot + deltas | `atoms.body` (projection; eventually consistent) |
+| Active edit session | prosemirror snapshot + deltas | `atoms.body` (projection; lags by ~1500ms) |
 
-This is **not** "canonical vs transient" — it's **"persistent vs live."**
-Both stores carry truth; the projection is a debounced copy that lags by
-design.
+### Lifecycle
 
-### Lifecycle (revised)
+#### 1. Open
 
-1. **Open (bootstrap with race-safety)**
-   - Client mounts AtomEditor with `multiplayerDocId`.
-   - AtomEditor gates rendering on `useCollabSync.bootstrap.ready` — the
-     editor mounts AFTER the snapshot resolves (fixes the v1 step-2 bug
-     where edits could happen before bootstrap).
-   - If no snapshot exists for this docId, the FIRST client to open
-     calls `bootstrapSnapshotFromAtomBody(docId, atomBodyHash)` (server
-     mutation). The server:
-     - Reads `atoms.body` (P1 access check fires)
-     - Parses markdown → PM JSON via the shared parser
-     - Calls `prosemirrorSync.submitSnapshot(docId, version: 1, content: pmJson)`
-     - On `create-already-exists` with IDENTICAL content: success
-       (another client got there first; both derived the same PM JSON)
-     - On `create-already-exists` with DIFFERENT content: this is a
-       deterministic-parser bug; fail loud
-     - Records the initial `atomBodyHash → projectedVersion: 1` in the
-       `collabSessions` table
+- AtomEditor mounts with `multiplayerDocId`.
+- AtomEditor calls `useCollabSync({docId, schema: getCachedSchema(),
+  enabled: true})`. If schema isn't cached yet, returns null until the
+  first mount populates it (see "Schema extraction" below).
+- AtomEditor GATES the editor render on `bootstrap.ready` — shows a
+  small skeleton until snapshot resolves. **Fixes the v2 step-2 bug
+  where edits could happen before bootstrap.**
+- Bootstrap flow inside useCollabSync:
+  - Server `getSnapshot(docId)` → exists? bootstrap from snapshot+deltas
+  - No snapshot? Client parses `atoms.body` → PM JSON via the cached
+    schema's parser, calls `bootstrapSnapshotFromAtomBody(docId,
+    pmJsonStr, atomBodyAtBootstrapHash)`. Server:
+    - P1 access check (reuses canReadAtom/requireWorkspace)
+    - Re-reads atoms.body, computes server hash
+    - If client hash matches server hash: `prosemirrorSync.create(ctx,
+      docId, parsedJson)` — submits at version 1 per the package's
+      actual contract. Duplicates with identical content are silently
+      accepted (verified in package); divergent content throws (which
+      is a determinism bug — fail loud).
+    - If client hash DOESN'T match: another client wrote between
+      client-parse and server-submit. Client retries with the fresh
+      body (bounded retries, ~3).
+    - Either way, write/update the per-doc `collabDocs` row with
+      `baseBodyHash` = the body that was just submitted as snapshot v1
+      (so the first projection sees no out-of-band change).
 
-2. **Edit** (collab steps flow through prosemirror-sync; `atoms.body`
-   is untouched until the next projection)
+- The editor mounts with the PM doc derived from the bootstrap (PM
+  JSON, not markdown defaultValue). Crepe accepts a PM doc via... need
+  to verify: Crepe's `defaultValue` is markdown; the PM-doc-direct path
+  is to set state via `editor.action((ctx) => ctx.get(editorViewCtx).
+  dispatch(replaceWithPMDoc))` AFTER mount but BEFORE collab plugins
+  attach. Pinned as a SPECIFIC implementation step (see "Open question
+  for v3 codex pass" #1).
 
-3. **Projection (onSnapshot-driven, not cron)**
-   - The component's `onSnapshot` callback fires when the editor
-     debounces a fresh snapshot to the server (typically every few
-     seconds during active typing).
-   - `onSnapshot` schedules a debounced projection via
-     `ctx.scheduler.runAfter(N, _projectSnapshotToBody, {docId, snapshotVersion})`
-     where N is a small backoff (e.g. 1500ms) to coalesce bursts.
-     If a prior projection is already scheduled at a higher version, the
-     newer one supersedes it (cheap: just update the projection target).
-   - `_projectSnapshotToBody` runs through the **compare-and-swap +
-     side-effect-safe writer** (see next section).
+#### 2. Edit
 
-4. **On idle (heartbeat presence model, not tab-close)**
-   - Each editor sends a heartbeat presence ping every ~30s via a thin
-     mutation (separate from the sync component) that touches
-     `collabSessions.{docId, clientId}.lastSeenAt`.
-   - A scheduled cleanup fn (every 5min) finds sessions with
-     `lastSeenAt < now - 90s` and:
-     - Runs a final projection at the latest known version
-     - Removes the session row
-     - If no sessions remain for a docId for >24h, schedules a snapshot
-       prune (clears the prosemirror snapshot/deltas for that doc;
-       `atoms.body` is now the only source)
-   - Tab close is NOT the correctness mechanism. The heartbeat is.
+- Collab steps flow through prosemirror-sync. `atoms.body` is
+  untouched until the next projection. The local editor sees its own
+  + remote steps converged via prosemirror-collab.
 
-### The compare-and-swap projection write (Option G)
+#### 3. Projection (onSnapshot-driven, version-validated)
 
-New table:
+- `onSnapshot(docId, snapshotContent, snapshotVersion)` callback in
+  `convex/prosemirror.ts` schedules `_projectSnapshotToBody({docId,
+  snapshotVersion})` via `ctx.scheduler.runAfter(1500, ...)`. Stores
+  the scheduled job id in `collabDocs.scheduledJobId` for cancellation
+  on a newer snapshot.
+- `_projectSnapshotToBody` runs the CAS + serialize + replace flow:
 
 ```ts
-collabSessions: defineTable({
-  docId: v.string(),           // 'atom:<ws>:<atomId>' or 'share:<shareId>'
-  clientId: v.string(),        // per-tab UUID
-  lastSeenAt: v.number(),      // heartbeat timestamp
-  // The body hash AT THE TIME this client opened the doc OR at the time
-  // of the most recent projection that THIS client observed. Used as the
-  // CAS witness for safe projection.
-  baseBodyHash: v.string(),
-  projectedVersion: v.number(), // last snapshot version we projected to atoms.body
-  workspaceId: v.string(),
-  atomId: v.optional(v.id('atoms')), // null for share: docs (resolved through resolveShareAccess)
-})
-.index('by_docId', ['docId'])
-.index('by_docId_clientId', ['docId', 'clientId'])
-.index('by_lastSeenAt', ['lastSeenAt'])
-```
+async function _projectSnapshotToBody({docId, snapshotVersion}) {
+  // Codex new-issue #1: validate the version EXISTS server-side.
+  // syncApi.submitSnapshot fires onSnapshot BEFORE commit; a divergent
+  // snapshot that throws still scheduled this projection.
+  const latest = await prosemirrorSync.latestVersion(ctx, docId)
+  if (latest === null || latest < snapshotVersion) return // committed snapshot doesn't exist
 
-`_projectSnapshotToBody({docId, snapshotVersion})` flow:
+  const parsed = parseDocId(docId)
+  if (parsed.kind !== 'atom') return  // shared atoms: M2+ follow-up
+  const atom = await ctx.db.get(parsed.atomId)
+  if (!atom) return
 
-```ts
-// 1. Resolve atom + read CURRENT body
-const parsed = parseDocId(docId)
-if (parsed.kind !== 'atom') return   // shared atoms: defer (M2 follow-up)
-const atom = await ctx.db.get(parsed.atomId)
-if (!atom) return                     // doc deleted while session active
-const currentBodyHash = await sha256Hex(atom.body)
+  // Server-computed body hash (NOT trusted from any client)
+  const currentBodyHash = await sha256Hex(atom.body)
 
-// 2. CAS: do all live sessions agree the current body is what we last projected?
-const sessions = await ctx.db.query('collabSessions')
-  .withIndex('by_docId', q => q.eq('docId', docId)).collect()
-if (sessions.length === 0) return     // no live editors; nothing to project
-const expectedHash = sessions[0].baseBodyHash // all sessions should agree
-const allAgree = sessions.every(s => s.baseBodyHash === expectedHash)
-if (!allAgree || currentBodyHash !== expectedHash) {
-  // SOMEONE wrote to atoms.body OUT-OF-BAND while collab was live.
-  // Could be: an agent's write_atom, a /atoms/upsert from a non-multiplayer
-  // tab, a manual restore from trash. Conflict policy below.
-  await ctx.scheduler.runAfter(0, _handleCollabConflict, {docId, snapshotVersion})
-  return  // do NOT silently overwrite
-}
+  const doc = await ctx.db.query('collabDocs')
+    .withIndex('by_docId', q => q.eq('docId', docId)).unique()
+  if (!doc) return // no live session — nothing to project
 
-// 3. Get the snapshot + serialize to markdown
-const schema = getCrepeSchema()
-const { doc, version } = await prosemirrorSync.getDoc(ctx, docId, schema)
-if (version <= sessions[0].projectedVersion) return  // already projected
-const newMd = await serializeToMarkdown(doc)
-const newBodyHash = await sha256Hex(newMd)
+  if (doc.projectedVersion >= snapshotVersion) return // already projected
 
-// 4. Route through the SHARED body-replacement helper (fires full side-effect chain)
-await replaceAtomBodyForCollabProjection(ctx, {
-  atomId: parsed.atomId,
-  newBody: newMd,
-  expectedCurrentBodyHash: expectedHash,  // second CAS — db read could have raced
-  source: 'collab',
-})
+  // CAS witness: server's last projection hash vs the body NOW.
+  if (currentBodyHash !== doc.baseBodyHash) {
+    // Out-of-band write happened. Decide between auto-rebuild and freeze:
+    // Auto-rebuild path (Codex's "gentle" policy): if the snapshot at
+    // doc.projectedVersion EQUALS the new body (i.e. PM has no
+    // unprojected edits since the OOB write), just re-bootstrap PM
+    // from atoms.body — no user-visible disruption.
+    await ctx.scheduler.runAfter(0, _handleCollabConflict,
+      {docId, currentBodyHash, snapshotVersion})
+    return
+  }
 
-// 5. Update all session rows to the new hash + version
-for (const s of sessions) {
-  await ctx.db.patch(s._id, {
+  const schema = getServerlessSchema()  // see "Schema sharing" below
+  const { doc: pmDoc, version: replayVersion } =
+    await prosemirrorSync.getDoc(ctx, docId, schema)
+  // getDoc replays from snapshot+deltas up to current. Codex new-issue
+  // #2: getSteps caps at 100 rows; the package's getDoc handles this
+  // internally by triggering compaction. Trust the package here.
+
+  const newMd = await serializeToMarkdown(pmDoc)
+  const newBodyHash = await sha256Hex(newMd)
+
+  // Skip the write entirely if the serialized markdown matches the
+  // existing body (no-op projection — saves a write + side-effect cycle).
+  if (newBodyHash === currentBodyHash) {
+    await ctx.db.patch(doc._id, {projectedVersion: replayVersion})
+    return
+  }
+
+  // Route through the shared body writer (see next section)
+  await replaceAtomBodyForCollabProjection(ctx, {
+    atomId: parsed.atomId,
+    workspaceId: atom.workspaceId,
+    path: atom.path,
+    newBody: newMd,
+    expectedCurrentBodyHash: doc.baseBodyHash,
+    source: 'collab',
+  })
+
+  await ctx.db.patch(doc._id, {
     baseBodyHash: newBodyHash,
-    projectedVersion: version,
+    projectedVersion: replayVersion,
+    updatedAt: Date.now(),
   })
 }
 ```
 
-### The shared body-replacement helper
+#### 4. Conflict handling (two-state)
 
-Refactored out of `upsertAtomImpl` so it can be called from BOTH the
-existing public/agent write surfaces AND the collab projection path,
-with identical side effects:
+`_handleCollabConflict({docId, currentBodyHash, snapshotVersion})`:
 
 ```ts
-// New: convex/atomWriter.ts
+const doc = await ctx.db.query('collabDocs')...
+const schema = getServerlessSchema()
+const { doc: pmDoc, version: replayVersion } =
+  await prosemirrorSync.getDoc(ctx, docId, schema)
+const pmMd = await serializeToMarkdown(pmDoc)
+const pmMdHash = await sha256Hex(pmMd)
+
+// Compare: does PM at the LAST projected version equal the current
+// atoms.body? Two cases:
+const lastProjectedDoc = doc.projectedVersion === replayVersion
+  ? pmDoc
+  : null // PM has unprojected edits; can't auto-rebuild
+
+const pmHasNewEdits = lastProjectedDoc === null
+const oobWriteSemanticallyEqualsPM = pmMdHash === currentBodyHash
+
+if (oobWriteSemanticallyEqualsPM) {
+  // The "out-of-band" write actually matches what PM would produce.
+  // No real conflict; just re-baseline.
+  await ctx.db.patch(doc._id, {baseBodyHash: currentBodyHash, updatedAt: Date.now()})
+  return
+}
+
+if (!pmHasNewEdits) {
+  // GENTLE PATH (Codex's recommendation): PM has no edits since last
+  // projection. The OOB write is the new truth. Re-bootstrap PM from
+  // atoms.body. Existing editors keep working; the next snapshot
+  // will be against the rebuilt baseline.
+  const newPmJson = await parseMarkdownToPmJsonClient_OR_ServerlessFallback(atom.body)
+  // NOTE: server-side parse is the open question. Two paths:
+  // (a) signal the FRONTEND to call bootstrapSnapshotFromAtomBody
+  //     (client owns the markdown parser; this path uses the
+  //     established bootstrap mutation)
+  // (b) implement a minimal server-side markdown→PM parser for the
+  //     auto-rebuild path
+  // v3 default: (a) — emit a "needs rebootstrap" signal via
+  // collabDocs.needsRebootstrap = true; client polls (useQuery),
+  // tears down its sync, re-bootstraps. UX: brief reconnect, no
+  // freeze banner.
+  await ctx.db.patch(doc._id, {needsRebootstrap: true, updatedAt: Date.now()})
+  return
+}
+
+// FREEZE PATH: both sides changed. Real conflict — surface to user.
+await ctx.db.patch(doc._id, {frozen: true, updatedAt: Date.now()})
+// Frontend reads collabDocs.frozen; shows reload banner.
+```
+
+#### 5. Idle + cleanup (heartbeat + tight cron)
+
+- Each client mutation `recordCollabPresence({docId, clientId})` every
+  ~30s. Updates `collabSessions.{docId, clientId}.lastSeenAt`. P1
+  access check fires (same gate as the sync component).
+- Scheduled cleanup at **60s cadence** (matches the 90s expiry — Codex
+  flagged the v2 5min cron as too slow):
+  - Delete sessions with `lastSeenAt < now - 90s`
+  - For docs with no remaining sessions, schedule final projection
+  - For docs idle >24h, schedule snapshot prune (clears prosemirror
+    snapshot/deltas — atoms.body is the only source again)
+
+### Tables
+
+```ts
+// New table 1: per-doc CAS + projection state (NEVER per-client)
+collabDocs: defineTable({
+  docId: v.string(),               // 'atom:<ws>:<atomId>' or 'share:<shareId>'
+  atomId: v.optional(v.id('atoms')),  // null for share: docs
+  workspaceId: v.string(),
+  // The body hash SERVER computed at the time of the last projection
+  // (or initial bootstrap). The CAS witness; not trusted from clients.
+  baseBodyHash: v.string(),
+  // The last snapshot version we projected to atoms.body. Compared
+  // against the snapshot version arriving in onSnapshot — stale
+  // projections short-circuit.
+  projectedVersion: v.number(),
+  // Conflict policy state. frozen=true freezes editing + shows reload
+  // banner. needsRebootstrap=true tells clients to re-bootstrap PM
+  // from the new atoms.body (gentle auto-recovery from OOB writes).
+  frozen: v.boolean(),
+  needsRebootstrap: v.boolean(),
+  // Currently scheduled projection job id, for cancel-on-newer.
+  scheduledJobId: v.optional(v.id('_scheduled_functions')),
+  updatedAt: v.number(),
+})
+.index('by_docId', ['docId']),
+
+// New table 2: per-client presence (heartbeat ONLY — no projection state)
+collabSessions: defineTable({
+  docId: v.string(),
+  clientId: v.string(),            // per-tab UUID
+  userId: v.string(),              // identity.subject; for audit
+  lastSeenAt: v.number(),
+})
+.index('by_docId', ['docId'])
+.index('by_docId_clientId', ['docId', 'clientId'])
+.index('by_lastSeenAt', ['lastSeenAt']),
+```
+
+### The shared body writer (concrete contract matching `upsertAtomImpl`)
+
+After reading `apps/app/convex/atoms.ts:77-244` carefully, the
+collab-projection writer must replicate exactly the
+`existing && finalBody !== existing.body` branch of `upsertAtomImpl`,
+with three deliberate behavior shifts:
+1. No `existing.source === 'user' && !isUserEdit && !allowUserOverwrite`
+   refusal (collab IS the multi-user write; this guard is for the
+   agent-vs-user case).
+2. Uses `recordTrash` (uncoalesced) for the pre-overwrite snapshot,
+   not `snapshotAtomBodyCoalesced` — collab projection is not the
+   editor's autosave flood path; every projection deserves its own
+   trash row for recovery.
+3. `source: 'collab'` (Codex's recommendation; preserves existing
+   source attribution via a separate sentinel rather than overloading
+   `'user'`).
+
+```ts
+// New file: apps/app/convex/atomWriter.ts
 export async function replaceAtomBodyForCollabProjection(
   ctx: MutationCtx,
   args: {
     atomId: Id<'atoms'>
+    workspaceId: string
+    path: string
     newBody: string
-    expectedCurrentBodyHash: string  // CAS — refuses to write if hash differs
+    expectedCurrentBodyHash: string  // CAS — re-checked inside
     source: 'collab'
   },
-): Promise<{ ok: true } | { ok: false, reason: 'hash-mismatch' }> {
-  const atom = await ctx.db.get(args.atomId)
-  if (!atom) return { ok: false, reason: 'hash-mismatch' }
-  if (await sha256Hex(atom.body) !== args.expectedCurrentBodyHash) {
+): Promise<{ ok: true, fileId: string } | { ok: false, reason: string }> {
+  // Mirror upsertAtomImpl's path-safety check.
+  if (!isSafeAtomPath(args.path)) {
+    return { ok: false, reason: 'invalid-path' }
+  }
+  // Mirror upsertAtomImpl line 123: seed frontmatter id BEFORE write.
+  // Idempotent — a body that already has the id is returned unchanged.
+  // For collab projection, atoms.body already has an id (the bootstrap
+  // path persists with one); this re-asserts on every projection.
+  const finalBody = await seedAtomIdIntoBody(ctx, args.workspaceId, args.path, args.newBody)
+
+  const existing = await ctx.db.query('atoms')
+    .withIndex('by_workspace_path', q =>
+      q.eq('workspaceId', args.workspaceId).eq('path', args.path)
+    ).unique()
+  if (!existing) return { ok: false, reason: 'atom-deleted' }
+
+  // CAS RE-CHECK INSIDE the mutation (per Codex: server-computed,
+  // never trusted from client). The hash passed in was a server
+  // compute at projection-start; this re-check catches a race
+  // between projection-start and write inside the same mutation.
+  if ((await sha256Hex(existing.body)) !== args.expectedCurrentBodyHash) {
     return { ok: false, reason: 'hash-mismatch' }
   }
-  // Locks still apply — a user-locked atom blocks collab projection
-  // (rare; user explicitly froze it; surface the conflict).
-  if (atom.systemLocked) throw new SystemLockError(atom.path, 'project')
-  if (atom.userLocked) throw new UserLockError(atom.path, 'project')
 
-  // Fire the FULL side-effect chain (this is what v1's ctx.db.patch missed):
-  await applyAtomCapture(ctx, atom.workspaceId, atom.path, atom.body, args.newBody)
-  await ctx.db.patch(args.atomId, {
-    body: args.newBody,
+  // Mirror upsertAtomImpl lock checks (Codex: keep them — locks
+  // should freeze projection). No allowSystemOverride / isUserEdit
+  // for the collab path; both lock kinds freeze.
+  if (existing.systemLocked) throw new SystemLockError(args.path, 'edit')
+  if (existing.userLocked) throw new UserLockError(args.path, 'edit')
+
+  // Trash the pre-overwrite body — uncoalesced (every projection
+  // gets its own restore point; collab is not the autosave flood path).
+  if (finalBody !== existing.body) {
+    await recordTrash(ctx, {
+      workspaceId: args.workspaceId,
+      kind: 'atom',
+      ref: `${args.path} (pre-collab-projection)`,
+      payload: {
+        path: args.path,
+        body: existing.body,
+        source: existing.source ?? 'agent',
+      },
+    })
+  }
+
+  // Mirror upsertAtomImpl's body+searchFields patch.
+  await ctx.db.patch(existing._id, {
+    body: finalBody,
     updatedAt: Date.now(),
     source: args.source,
-    ...deriveSearchFields(atom.path, args.newBody),
+    ...deriveSearchFields(args.path, finalBody),
   })
-  await reconcileAtomIdIndex(ctx, atom.workspaceId, atom.path, args.newBody)
-  await scheduleMapRegen(ctx, atom.workspaceId)
-  return { ok: true }
+
+  // Mirror upsertAtomImpl's two side-effect calls.
+  await applyAtomCapture(ctx, args.workspaceId, args.path, existing.body, finalBody)
+  await reconcileAtomIdIndex(ctx, args.workspaceId, args.path, finalBody, {
+    isRestore: false,
+  })
+
+  // Map regen lives OUTSIDE upsertAtomImpl in the existing code
+  // (atoms.upsert / atoms.remove call it after the impl returns).
+  // Mirror that: caller (the projection internalMutation) calls
+  // scheduleMapRegen after this returns ok.
+
+  return { ok: true, fileId: extractFrontmatterId(finalBody) ?? '' }
 }
 ```
 
-And the existing `upsertAtomImpl` continues to do its `isUserEdit`-aware
-work (lock check + user-overwrite guard + the same side-effect chain).
-They share `applyAtomCapture / deriveSearchFields / reconcileAtomIdIndex /
-scheduleMapRegen` but have different write-permission semantics.
+The caller (`_projectSnapshotToBody`) is responsible for
+`scheduleMapRegen(ctx, atom.workspaceId)` after a successful write —
+matches the public `atoms.upsert` pattern exactly.
 
-### Conflict policy when a non-collab write lands during active collab
+### Schema sharing (client + server)
 
-`_handleCollabConflict` fires when the CAS in step 2 detects the body
-changed out-of-band. v1 didn't address this; v2 picks the most defensive
-policy and surfaces it to the user:
+Codex flagged this as a v2 blocker; v3 has a concrete plan.
 
-1. **PAUSE the collab session for this doc** — flip a `frozen: true`
-   flag on the `collabSessions` rows. The frontend reads this via a
-   query and shows a banner: "Another writer changed this file; reload
-   to continue editing collaboratively."
-2. **Do NOT auto-merge**. The PM doc state can't easily merge against
-   an arbitrary markdown overwrite; trying would corrupt one side.
-3. **On user reload**: the frontend tears down the session, deletes the
-   collab session row, and rebootstraps from the new `atoms.body` at
-   a fresh version.
+**Client-side**: cache the schema via Crepe's existing context system.
 
-The conflict is rare — it requires an agent/non-collab write WHILE a
-live multiplayer session is open. But it can happen (e.g. user opens
-the doc in a non-multiplayer tab and saves) and silent corruption is
-the wrong fail mode.
+```ts
+// apps/app/src/lib/crepe-schema-cache.ts
+import { schemaCtx } from '@milkdown/core/internal-plugin/schema'
+import type { Schema } from '@milkdown/kit/prose/model'
 
----
+let cached: Schema | null = null
+const subscribers = new Set<(s: Schema) => void>()
 
-## What needs to be built
+// Called from CrepeEditor's useEditor mount AFTER ctx.update(...) runs.
+// The schema is invariant across mounts (Crepe constructor always
+// produces the same schema given the same features), so caching once
+// is safe.
+export function captureSchemaFromEditor(editor: Editor) {
+  if (cached) return
+  editor.action((ctx) => {
+    cached = ctx.get(schemaCtx)
+    for (const fn of subscribers) fn(cached)
+  })
+}
 
-### 1. Markdown ↔ PM JSON serializer + parser (the hard part — needs proof)
+export function getCachedSchema(): Schema | null { return cached }
 
-Convex runtime is a sandboxed V8 environment (not Node). Codex correctly
-flagged that v1 hand-waved this. v2 requires a real Convex-runtime
-test BEFORE committing the architecture:
+// useCollabSync subscribes; re-renders when schema becomes available.
+export function subscribeSchema(fn: (s: Schema) => void): () => void {
+  if (cached) { fn(cached); return () => {} }
+  subscribers.add(fn)
+  return () => subscribers.delete(fn)
+}
+```
 
-- **Step 1a (DECIDER)**: write a tiny `convex/_testRemarkRuntime.ts`
-  internalQuery that imports `remark-parse` + `remark-stringify` +
-  `mdast-util-from-markdown` + `mdast-util-to-markdown`. Push it to a
-  Convex dev deploy. Run a roundtrip on a fixture markdown string.
-  Either:
-  - **It works**: adopt library-based serialization (lower risk than
-    hand-rolling)
-  - **It fails** (bundler / dynamic import / Node-only dep): fall back
-    to a custom 200-LOC serializer for Crepe's 12-node schema. Document
-    the failure mode + edge-case gaps (tables, escaping, wikilinks,
-    inline atoms, frontmatter, code fences).
-- **Step 1b**: build the chosen serializer with a deterministic-roundtrip
-  test rig covering ALL of dohc's content shapes:
-  - Plain paragraphs + headings
-  - Inline atoms (`{key: value}`, `{:key value}`)
-  - Formulas (`{= sum(...) }`)
-  - Live totals (`{identifier}`)
-  - Wikilinks (`[[path]]`)
-  - Query blocks (` ```query ... ``` `)
-  - ASCII sketches (` ```ascii ... ``` `)
-  - Frontmatter (`---\nid: x\n---\n`)
-  - Tables (Crepe schema)
-  - HTML atoms (` ```html ... ``` `)
-- **Step 1c**: cross-runtime determinism test — run the parser in both
-  the browser (Vitest jsdom env) and Convex runtime (via convex-test);
-  assert byte-identical PM JSON output. This is Codex's explicit
-  requirement: bootstrap races depend on determinism.
+The FIRST CrepeEditor that mounts populates the cache; subsequent
+useCollabSync calls get the cached schema synchronously. For the very
+first mount, the editor renders without collab (bootstrap.ready is
+false → skeleton), and a useEffect on schema arrival re-mounts the
+collab plugins.
 
-### 2. The `collabSessions` table + heartbeat presence
+**Server-side**: the projection writer only needs PM JSON → markdown,
+NOT markdown → PM JSON. The `prosemirrorSync.getDoc(ctx, docId,
+schema)` call requires a schema, but it's only used to deserialize the
+stored snapshot JSON — it never needs to know dohc's custom node
+specs (those are encoded in the JSON itself). We can construct a
+minimal schema server-side that matches Crepe's structure ONLY for
+the nodes/marks present in the JSON.
 
-- Schema as defined above
-- `_recordCollabPresence({docId, clientId, baseBodyHash})` public
-  mutation — gated by `checkRead` semantics (same as prosemirror-sync's
-  read gate); client calls every ~30s while editing
-- `_cleanupIdleSessions` internal mutation, scheduled every 5min via
-  cron: removes rows with `lastSeenAt < now - 90s`, triggers final
-  projection, optionally prunes snapshot+deltas for docs idle >24h
+```ts
+// apps/app/convex/serverlessSchema.ts
+import { Schema } from '@milkdown/kit/prose/model'
+// Hand-built schema MATCHING Crepe's structural output. ~50 LOC.
+// This schema is used ONLY for getDoc deserialization, NOT for
+// editing. The CLIENT uses Crepe's real schema for the bootstrap
+// parse; the SERVER uses this thin shim for projection-time
+// deserialization.
+export function getServerlessSchema(): Schema { /* ... */ }
+```
 
-### 3. The projection writer
+This is feasible because PM JSON serialization is schema-agnostic at
+the JSON level — `Node.toJSON()` produces a structure-only
+representation; deserialization needs a schema only to validate +
+provide methods. A minimal schema that ACCEPTS Crepe's node types as
+opaque containers (no validation beyond structural) works for the
+projection use case.
 
-- `replaceAtomBodyForCollabProjection` in new `convex/atomWriter.ts`
-- `_projectSnapshotToBody` internalMutation that does the full CAS +
-  serialize + replace flow above
-- `onSnapshot` callback in `convex/prosemirror.ts` schedules
-  `_projectSnapshotToBody` debounced 1500ms
+If this turns out problematic in practice, fall back to:
+- (b) project ONLY on the client. Client subscribes to a "needs
+  projection" signal from collabDocs; runs serializer locally; calls a
+  `submitProjection(docId, snapshotVersion, newMd, expectedHash)` mutation
+  that does the CAS + write. Loses the "server-driven projection"
+  property but doesn't need server-side schema.
 
-### 4. Conflict handling
+v3 default is (a) server-side minimal schema; fallback (b) is
+documented in case (a) hits a real blocker.
 
-- `_handleCollabConflict` flips `frozen: true` on session rows
-- Frontend banner reads `useQuery(api.collab.sessionStatus, ...)`,
-  shows a reload prompt when `frozen: true`
-- Reload tears down + rebootstraps
+### Markdown serializer
 
-### 5. AtomEditor bootstrap fix (resolves Codex finding #6)
+Codex's verdict: library if Convex-runtime test passes; hand-roll
+otherwise. v3 keeps Step 1a as a DECIDER gate but TIGHTENS the test
+rig per Codex's critique:
 
-Currently `useCollabSync` is called with `schema: null` and the editor
-mounts from markdown defaultValue. v2:
+- Single fixture roundtrip is insufficient
+- Must test BUNDLING (Convex's esbuild pipeline) + dohc-specific
+  content shapes: tables, escaping, wikilinks, inline atoms, formulas,
+  query blocks, ASCII sketches, frontmatter, code fences, HTML atoms,
+  live totals
+- Cross-runtime determinism test: SAME markdown input → SAME PM JSON
+  output between browser (Vitest jsdom) and Convex (convex-test
+  runtime, OR a real Convex dev deploy invocation)
 
-- Pass the real Crepe schema to `useCollabSync` (need to construct it
-  outside Crepe so it's available before mount — Crepe exposes
-  `Crepe.getSchema()` or similar; verify in next investigation)
-- Gate the editor render on `useCollabSync.bootstrap.ready` — show a
-  small skeleton until snapshot resolves
-- If the bootstrap derives a PM doc, mount Crepe FROM that doc (not
-  from `defaultValue`). Crepe accepts initial state via... TBD; needs
-  one more research pass before commit
+If the library test fails, hand-roll the serializer scoped to Crepe's
+12 node types + dohc's decoration shapes (~300 LOC accounting for
+edge cases Codex listed). Maintenance burden, but bounded.
 
 ---
 
-## Open questions for codex (v2)
+## Open questions for v3 codex pass
 
-1. **Is the heartbeat presence model the right floor for "active session"?**
-   Are there simpler signals we missed? (e.g., prosemirror-sync's own
-   step-submission cadence could imply presence without a separate
-   mutation — but cleanup would be harder.)
+1. **Crepe doc-direct mount path**: Crepe's `defaultValue` is markdown.
+   To mount with a PM doc (the bootstrap output), we need to inject
+   the doc state post-mount via `editor.action((ctx) => view.dispatch(
+   replaceDocTransaction(pmDoc)))`. Is there a cleaner Milkdown idiom?
 
-2. **The conflict policy ("freeze + reload") is the most defensive
-   choice. Is there a saner policy we're missing?** Notion's analog
-   (concurrent edit from another user) just shows the latest write
-   and lets the editor reconcile; but Notion isn't trying to keep
-   markdown in sync.
+2. **The serverless schema shim** — does PM's `Schema` actually accept
+   a "structural-only" schema for `Node.fromJSON` deserialization, or
+   does it need to validate against node spec? If validation is
+   mandatory, we need to construct Crepe's full schema server-side,
+   which would re-introduce the schema-sharing problem.
 
-3. **The CAS uses sha256 of the body string. Is this the right witness,
-   or should we use `atom.updatedAt` (a Convex-monotonic timestamp)?**
-   updatedAt is cheaper but doesn't distinguish "same body, touched"
-   from "different body" (e.g. a re-save with the same content).
+3. **The auto-rebuild path requires server-side markdown→PM JSON**:
+   if we can't run remark-parse server-side, the auto-rebuild signal
+   must round-trip through the client. UX: client receives
+   `needsRebootstrap: true`, tears down sync, re-bootstraps. Cost: ~1s
+   of editing pause. Is that acceptable, or should we invest in
+   server-side parser regardless?
 
-4. **`collabSessions` cleanup cron at 5min — is that frequent enough?**
-   Idle detection at 90s means a tab that hangs for >90s gets its
-   session reaped, then the user's next edit goes through a fresh
-   bootstrap. Acceptable; document the UX.
+4. **collabDocs lifetime**: when does the row get deleted? Options:
+   - Never (lives until atom is deleted) — simplest
+   - On idle (cleanup cron + 24h grace) — bounds storage
+   - On session-zero transition — racy
 
-5. **Schema extraction for the open-time bootstrap**: Crepe builds the
-   PM schema during `new Crepe(...)`. Can we extract the SAME schema
-   instance outside Crepe to use in `useCollabSync` BEFORE mount?
-   Or do we need to defer the schema-aware bootstrap until after Crepe
-   mounts (re-creating the "schema:null + late-install" problem)?
+5. **bootstrapSnapshotFromAtomBody under racing OOB writes** — client
+   reads body, parses, submits; if body changed during parse, retry
+   with new body. Bounded retries (~3). Is bounded-retry the right
+   pattern, or should we hold a brief "bootstrapping" lock on
+   collabDocs?
 
-6. **Should `replaceAtomBodyForCollabProjection` also fire the existing
-   `userLocked` / `systemLocked` checks?** v2 keeps them in (a
-   user-locked atom freezes even from collab). Is that the right
-   policy? Or does a live multiplayer session imply implicit unlock?
+6. **Lock policy verification**: v3 keeps `userLocked`/`systemLocked`
+   as freezes for collab projection. But: if a multiplayer session is
+   active and Alice locks the atom mid-session, does Bob's collab
+   session also freeze mid-edit? The answer "yes — lock means
+   lock" probably right but the UX needs design.
 
-7. **Bootstrap idempotency under racing inserts**: two clients open
-   the same fresh doc, both compute the SAME PM JSON (parser is
-   deterministic), both call `submitSnapshot(version:1, content)`.
-   The package silently accepts identical content. But what if the
-   parsers DIFFER by a single whitespace byte? Throws. Should the
-   server-side bootstrap re-normalize / canonicalize the PM JSON
-   before submitting?
+7. **Projection idempotency**: if `_projectSnapshotToBody` runs twice
+   for the same snapshotVersion (race in scheduling), the second
+   should be a no-op (`projectedVersion >= snapshotVersion` early
+   return). Verified — but pin a test.
 
 ---
 
-## Implementation plan (revised — depends on Step 1a outcome)
+## Implementation plan (revised)
 
-### Step 1a: Convex-runtime serializer DECIDER (~0.5 day)
+### Step 1: Markdown serializer feasibility (DECIDER, ~0.5 day)
+Convex dev deploy + push a tiny internalQuery that imports + runs
+`remark-stringify` on a fixture; verify bundling works. Plus the
+expanded fixture set Codex demanded (tables, escapes, wikilinks,
+inline atoms, formulas, etc.).
 
-Push a Convex dev deploy with the test fn. Determines whether we use
-remark or hand-roll. **This is the gate; nothing else proceeds until
-this is answered.**
+### Step 2: Schema sharing infrastructure (~1 day)
+Build `captureSchemaFromEditor` + `getCachedSchema` + the
+serverless schema shim. Test that `prosemirrorSync.getDoc` works with
+the shim for round-trip PM JSON deserialization.
 
-### Step 1b: Serializer + parser implementation (~2-3 days, depending on 1a)
+### Step 3: Tables + presence (~0.5 day)
+`collabDocs` + `collabSessions` schema. `recordCollabPresence`
+mutation. Cleanup cron (60s cadence; 90s expiry).
 
-Library path: 1 day. Hand-roll path: 2-3 days + ongoing maintenance.
+### Step 4: Shared body writer (~1 day)
+`replaceAtomBodyForCollabProjection` in `convex/atomWriter.ts`.
+Tests against `upsertAtomImpl`'s side-effect chain (assert the
+shared primitives fire identically).
 
-### Step 1c: Cross-runtime determinism test rig (~0.5 day)
+### Step 5: Bootstrap mutation (~1 day)
+`bootstrapSnapshotFromAtomBody({docId, pmJsonStr, clientBodyHash})`.
+Race-safe with bounded retries. `collabDocs` row created with initial
+baseBodyHash.
 
-### Step 2: collabSessions table + heartbeat (~1 day)
+### Step 6: Projection writer + onSnapshot integration (~1.5 days)
+`_projectSnapshotToBody` with version validation + CAS. Wire from
+`onSnapshot` callback with `ctx.scheduler.runAfter(1500, ...)`.
+Job-id cancellation on newer snapshots.
 
-### Step 3: Projection writer + CAS + shared helper (~1.5 days)
+### Step 7: Conflict handler + frontend banner (~1 day)
+`_handleCollabConflict` two-state policy. Frontend `useQuery` on
+collabDocs.frozen + needsRebootstrap; banner UI for freeze;
+auto-tear-down + rebootstrap for needsRebootstrap.
 
-### Step 4: Conflict policy + frontend banner (~1 day)
+### Step 8: AtomEditor bootstrap fix (~1 day)
+Gate editor render on bootstrap.ready. PM doc-direct mount (open
+question #1). Schema cache integration.
 
-### Step 5: AtomEditor bootstrap fix (~1 day, includes schema extraction
-investigation)
+### Step 9: End-to-end test rig (~1 day)
+Two simulated clients editing simultaneously. Assert markdown
+convergence within flush window. OOB write injection → assert
+auto-rebuild or freeze depending on PM edit state.
 
-### Step 6: End-to-end test rig (two simulated clients) (~1 day)
-
-**Total**: ~8-10 days with library path; ~10-13 days with hand-roll.
-
-This is significantly more than v1's 4-5 day estimate. The increase
-comes from:
-- Real Convex-runtime serializer proof (was hand-waved)
-- collabSessions table + heartbeat (was missing)
-- CAS-protected writer + shared helper (was unsafe ctx.db.patch)
-- Conflict handling UX (was missing)
-- Bootstrap fix (was inherited bug from M1 step 2)
+**Total**: ~8.5 days, matching v2's estimate. The work is comparable;
+v3 redistributes effort toward concrete contract verification + away
+from the speculative pieces v2 hand-waved.
 
 ---
 
 ## What's safe to ship today (unchanged)
 
-The current state (after dc2968f):
-- M1 foundation + adapter + AtomEditor wiring all landed
-- Multiplayer flag is UNSET on every callsite
+- M1 step 1+2 plumbing all landed; multiplayer flag UNSET on every
+  callsite
 - Single-user behavior is byte-identical to pre-M1
 - 1013 tests passing
 
 No user sees multiplayer behavior until someone passes `multiplayerDocId`
-to AtomEditor. The plumbing is dormant. **v2 of this architecture must
-pass another /codex review pass before anyone approves the build.**
+to AtomEditor. **v3 of this architecture must pass another /codex
+review pass before anyone approves the build.**
 
 ---
 
-## Changes from v1 (Codex finding → v2 response)
+## Changes from v2 (Codex finding → v3 response)
 
-| Codex finding | v2 response |
-|---|---|
-| 1. atoms.body canonical overstated | Reframed as "persistent projection"; snapshot is authoritative during active session |
-| 2. ctx.db.patch bypasses side effects | New shared helper `replaceAtomBodyForCollabProjection` fires the full `upsertAtomImpl` chain |
-| 3. Race vs concurrent atoms.upsert | New `collabSessions` table + CAS on body hash; conflict triggers freeze+reload, no silent overwrite |
-| 4. getDoc callable from internalMutation | Confirmed; no action needed |
-| 5. create() not broadly idempotent; version starts at 1 | Bootstrap handles `already-exists` with identical content as success; uses version 1 as initial |
-| 6. AtomEditor bootstrap accepts pre-snapshot edits | Editor render gated on `useCollabSync.bootstrap.ready`; schema passed in real (not null) |
-| 7. remark Convex-runtime feasibility hand-waved | Step 1a is a hard DECIDER gate: real Convex deploy test before anything else proceeds |
-| 8. On-close flush unreliable | Replaced with heartbeat presence (90s expiry); cron cleanup; tab close is NOT correctness path |
+| v2 finding | v2 status | v3 response |
+|---|---|---|
+| #1 terminology | RESOLVED | unchanged |
+| #2 helper bypasses side effects | PARTIAL | Concrete `replaceAtomBodyForCollabProjection` in atomWriter.ts mirrors `upsertAtomImpl:165-223` byte-for-byte (seed id, lock checks, trash, patch+searchFields, applyAtomCapture, reconcileAtomIdIndex with `{isRestore:false}`). Three documented behavior shifts (no user-overwrite refusal, uncoalesced trash, source='collab'). |
+| #3 baseBodyHash per-client | PARTIAL | Per-doc state in `collabDocs` table, server-computed. Per-client only tracks presence in `collabSessions`. |
+| #4 getDoc callable | RESOLVED | unchanged |
+| #5 create/version semantics | RESOLVED | unchanged |
+| #6 schema extraction speculative | PARTIAL | Concrete plan: `editor.action((ctx) => ctx.get(schemaCtx))` post-mount; cache globally; serverless schema shim for projection-time deserialization. Open question #2 verifies shim viability; fallback (b) is client-side projection. |
+| #7 single-fixture test weak | PARTIAL | Expanded fixture set: tables, escapes, wikilinks, inline atoms, formulas, query blocks, ASCII sketches, frontmatter, code fences, HTML atoms, live totals. Cross-runtime determinism test mandatory. |
+| #8 cron lag + missing `frozen` | PARTIAL | Cleanup cron at 60s (matches 90s expiry). `frozen` AND `needsRebootstrap` fields in collabDocs schema. |
+| NEW: collabSessions conflates roles | NEW | Split into collabDocs (per-doc CAS) + collabSessions (per-client presence) per Codex's exact recommendation. |
+| NEW: onSnapshot before commit | NEW | Projection validates snapshotVersion exists via `latestVersion(...)` before firing. |
+| NEW: getSteps 100-cap | NEW | Projection uses `prosemirrorSync.getDoc` (package handles compaction internally); architecture doesn't depend on arbitrary delta replay. |
+| NEW: freeze+reload too blunt | NEW | Two-state policy: gentle auto-rebuild via `needsRebootstrap` when PM has no unprojected edits; freeze+reload only on true two-sided conflict. |
 
 ---
 
@@ -457,40 +641,15 @@ pass another /codex review pass before anyone approves the build.**
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Review | `/codex` against v1 + v2 (same session) | Independent 2nd opinion | 2 | REVISE (twice) | v1: 8 findings; v2 follow-up: 3 RESOLVED, 5 PARTIAL, 4 NEW |
+| Codex Review | `/codex` against v1, v2, v3 (same session) | Independent 2nd opinion | 2 (v3 pending) | v1 REVISE, v2 REVISE | v1: 8 findings; v2: 3 RESOLVED + 5 PARTIAL + 4 NEW |
 
-**Session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8 (codex; resumed for v2)
+**Session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8 (codex; resumed across v2 + v3)
 
-**v2 review scoring (Codex's mapping)**:
-- **RESOLVED (3)**: v1 #1 terminology, v1 #4 getDoc callable, v1 #5 create/version semantics
-- **PARTIAL (5)**:
-  - v1 #2: helper still missing `seedAtomIdIntoBody`, trash snapshots, `isSafeAtomPath`, migration notice, `{isRestore:false}` arg
-  - v1 #3: baseBodyHash should be per-doc (server-computed), not per-client — false conflicts when clients open during out-of-band churn
-  - v1 #6: Crepe schema extraction is speculative — `Crepe.getSchema()` not in public types
-  - v1 #7: single-fixture roundtrip test too weak; must test bundling + dohc-specific shapes
-  - v1 #8: cron-5min + heartbeat-90s = ~6.5min lag; schema missing `frozen` field
-- **NEW issues (4)**:
-  - `collabSessions` conflates presence + projection state — split into `collabDocs` (per-doc CAS) + `collabSessions` (per-client presence)
-  - `syncApi.submitSnapshot` fires `onSnapshot` BEFORE committing — projection must validate snapshotVersion before firing
-  - `getSteps` caps at 100 delta rows — projection must work off persisted snapshot version, not arbitrary replay
-  - Freeze+reload is too blunt — auto-rebuild PM from atoms.body when no unprojected edits exist; freeze only on true two-sided conflict
+**v3 absorbs ALL 11 v2 critiques** — see "Changes from v2" table above for
+the explicit map. v3 is pending a third `/codex` pass.
 
-**Top 3 remaining concerns (Codex)**:
-1. `collabSessions` conflates per-client presence with per-doc CAS/projection state
-2. The "shared helper" still does not match the real `upsertAtomImpl` write contract
-3. Bootstrap/schema extraction is still speculative and currently contradicted by the code
+**UNRESOLVED (v3 questions for codex)**: 7 open design questions listed
+above. Critical items: schema-shim viability (Q2), auto-rebuild
+round-trip cost (Q3), Crepe doc-direct mount path (Q1).
 
-**Cross-model agreement**: Claude Code agrees with all 11 of Codex's v2 critiques (5 partial + 4 new + 2 implementation blockers). No disagreements to flag.
-
-**CODEX RECOMMENDATIONS on the 7 open questions** (verbatim):
-1. Heartbeat presence: yes, but split from doc projection state
-2. Freeze+reload: defensive v1 policy is OK; add auto-rebuild when PM has no unprojected edits
-3. CAS witness: use server-computed body hash, not `updatedAt`
-4. Cleanup cron: 5min too slow if 90s is the promise; either lower or stop promising
-5. Schema extraction: unresolved blocker; current Crepe types don't expose `getSchema()`
-6. Lock checks: keep them; lock should freeze projection
-7. Bootstrap idempotency: canonicalize PM JSON server-side before submitSnapshot
-
-**VERDICT**: v2 REVISE (second pass) — architecture v3 needed before build. The big-picture model is right; v3 must fix the table split, the shared-helper contract gap, and the schema-extraction blocker before any code lands.
-
-**UNRESOLVED**: 11 design decisions (3 critical from Codex's "Top 3") before this architecture is safe to implement.
+**VERDICT**: v3 PROPOSED — awaiting third codex review pass.
