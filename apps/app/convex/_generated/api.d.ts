@@ -9,6 +9,7 @@
  */
 
 import type * as agent from "../agent.js";
+import type * as atomAccess from "../atomAccess.js";
 import type * as atomCapture from "../atomCapture.js";
 import type * as atomId from "../atomId.js";
 import type * as atomLocks from "../atomLocks.js";
@@ -55,6 +56,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
+  atomAccess: typeof atomAccess;
   atomCapture: typeof atomCapture;
   atomId: typeof atomId;
   atomLocks: typeof atomLocks;

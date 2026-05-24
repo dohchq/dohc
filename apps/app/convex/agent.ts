@@ -42,6 +42,19 @@ async function activeWorkspaceFromTool(
   })) as string
 }
 
+// P1 (multiplayer-and-h-followups §6.5) — viewer subject for agent
+// tools that filter atoms by access. Same bridge shape as
+// `activeWorkspaceFromTool`: routes through `_viewerSubjectForCaller`
+// so the tool sees the AUTHENTICATED caller's subject (not the agent's
+// own identity). Atom-read tools then pass this to internal queries
+// that gate via `canReadAtom(ctx, atomId, viewerSubject)`.
+async function viewerSubjectFromTool(ctx: ToolCtx): Promise<string> {
+  return (await ctx.runQuery(
+    internal.agent._viewerSubjectForCaller,
+    {},
+  )) as string
+}
+
 // org-plan §6 + Jenny round-2 H-3 — privileged tools (install_plugin,
 // save_skill) are the "largest catastrophic surface" per the existing
 // install_plugin comment. In an ORG workspace they must require Owner;
@@ -610,8 +623,15 @@ export const dohcAgent = new Agent(components.agent, {
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        // P1 (multiplayer-and-h-followups §6.5) — pass viewerSubject
+        // so the listing filters out atoms the CALLING USER can't
+        // read. Without this, the agent could leak teammate private
+        // atom paths to the user's chat ("here's everything in your
+        // workspace: ... including alice/secret.md").
+        const viewerSubject = await viewerSubjectFromTool(ctx)
         const paths = (await ctx.runQuery(internal.atoms._listInternal, {
           workspaceId,
+          viewerSubject,
         })) as string[]
         return paths.length === 0
           ? '(empty vault)'
@@ -1276,9 +1296,15 @@ export const dohcAgent = new Agent(components.agent, {
       inputSchema: z.object({ path: z.string() }),
       execute: async (ctx, { path }: { path: string }, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        // P1 — viewerSubject gates the read. Non-allowed viewer
+        // (e.g. user without access to a teammate's private atom)
+        // gets the same `(not found)` shape as a non-existent atom —
+        // fail-closed without confirming existence.
+        const viewerSubject = await viewerSubjectFromTool(ctx)
         const body = (await ctx.runQuery(internal.atoms._getInternal, {
           workspaceId,
           path,
+          viewerSubject,
         })) as string | null
         if (body === null) return `(not found: ${path})`
         // §3.1 (Track-3 P2c) — skill/plugin bodies are ELEVATED
@@ -1758,6 +1784,21 @@ export const _resolveWorkspaceKindForCaller = internalQuery({
     const org = await ctx.db.get(orgId)
     if (!org) return { kind: 'personal' }
     return { kind: 'org', orgName: org.name }
+  },
+})
+
+// P1 (multiplayer-and-h-followups §6.5) — viewer subject resolver for
+// agent tools. Tools that READ atoms need to gate on the caller's
+// access — without this, the agent can read private atoms via tool
+// calls even when the calling user can't see them. Mirrors the
+// _resolveWorkspaceForCaller pattern: tools call this via runQuery
+// to get the authenticated subject (the internalQuery has ctx.auth).
+export const _viewerSubjectForCaller = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<string> => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    return identity.subject
   },
 })
 

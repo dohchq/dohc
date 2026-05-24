@@ -749,27 +749,58 @@ export const _listInternal = internalQuery({
   // to BOUND the query-block `docs.glob` read. Omitted ⇒ unbounded
   // (byte-identical for the agent callers); given ⇒ take limit+1 so
   // truncation is detectable + honestly disclosed.
-  args: { workspaceId: v.string(), limit: v.optional(v.number()) },
-  handler: async (ctx, { workspaceId, limit }) => {
+  //
+  // P1 (multiplayer-and-h-followups §6.5): optional `viewerSubject` —
+  // when provided, filter to atoms the viewer can READ (private +
+  // restricted atoms the viewer isn't allowed in are dropped). Agent
+  // tools that surface paths to the model MUST pass it so the agent
+  // can't read a teammate's private atom via list_atoms. Omitted
+  // (e.g. `regenerateMap` calling for the system view) ⇒ unfiltered,
+  // back-compat with the v0 surface.
+  args: {
+    workspaceId: v.string(),
+    limit: v.optional(v.number()),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, limit, viewerSubject }) => {
     const base = ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     const rows =
       limit === undefined ? await base.collect() : await base.take(limit + 1)
-    return rows.map((r) => r.path).sort()
+    if (!viewerSubject) return rows.map((r) => r.path).sort()
+    const visible: typeof rows = []
+    for (const r of rows) {
+      if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
+    }
+    return visible.map((r) => r.path).sort()
   },
 })
 
 export const _getInternal = internalQuery({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  // P1: optional `viewerSubject` — when provided, returns null if
+  // the viewer can't read this atom. Agent tools pass it; legacy /
+  // system callers omit (back-compat).
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
     const row = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
         q.eq('workspaceId', workspaceId).eq('path', path),
       )
       .unique()
-    return row ? row.body : null
+    if (!row) return null
+    if (
+      viewerSubject &&
+      !(await canReadAtom(ctx, row._id, viewerSubject))
+    ) {
+      return null
+    }
+    return row.body
   },
 })
 
