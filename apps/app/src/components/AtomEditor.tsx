@@ -41,6 +41,14 @@ import {
   applyRemoteSteps,
   getVersion,
 } from '@/lib/collab-sync'
+// M1 step 3 sub-commit 3.2 — schema cache populated from the first
+// mounted Crepe; useCollabSync's bootstrap reads it for snapshot
+// deserialization. See lib/crepe-schema-cache.ts for the rationale.
+import {
+  captureSchemaFromEditor,
+  getCachedSchema,
+} from '@/lib/crepe-schema-cache'
+import type { Schema } from '@milkdown/kit/prose/model'
 import type { Id } from '../../convex/_generated/dataModel'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
@@ -690,14 +698,27 @@ function CrepeEditor({
   // version 0. The remote-pull effect rebases on first divergence,
   // converging to server state in one cycle. The follow-up commit
   // hardens this with a loading gate.
+  // M1 step 3 sub-commit 3.2 — pull the schema from the global
+  // cache populated by the first mounted Crepe. On the very first
+  // multiplayer mount, the cache is empty (this component's own
+  // Crepe hasn't booted yet); useCollabSync handles a null schema
+  // by skipping the bootstrap parse path. After Crepe boots, the
+  // schema-capture effect fires + a re-render arms the bootstrap
+  // for any subsequent mounts. The render-tracking ref subscribes
+  // to schema arrival so the second pass picks it up.
+  const [cachedSchema, setCachedSchema] = useState<Schema | null>(
+    () => getCachedSchema(),
+  )
+  useEffect(() => {
+    // Re-check the cache on every render; once it's populated,
+    // setState pushes the schema to useCollabSync. Idempotent —
+    // setState with the same value is a no-op.
+    const s = getCachedSchema()
+    if (s && !cachedSchema) setCachedSchema(s)
+  })
   const collabSync = useCollabSync({
     docId: multiplayerDocId ?? null,
-    // Schema isn't known yet at this point (Crepe builds it on
-    // construction). Pass null → useCollabSync skips the bootstrap
-    // entirely; the editor mount path below initializes collab
-    // from version=0 after Crepe boots, then the remote-pull
-    // effect rebases against server state.
-    schema: null,
+    schema: cachedSchema,
     enabled: !!multiplayerDocId,
   })
   // The ref the editor closure reads when building its plugin
@@ -861,6 +882,31 @@ function CrepeEditor({
       crepeRef.current = null
     }
   }, [crepeRef])
+
+  // M1 step 3 sub-commit 3.2 — populate the global schema cache
+  // from the first mounted Crepe. Runs on every mount; idempotent
+  // (only the first call does work). Subsequent useCollabSync
+  // calls read the cached schema synchronously to deserialize a
+  // server snapshot into a PM Node. Live editors pay zero cost
+  // after the first mount.
+  //
+  // We use useEffect (not the useEditor closure) because
+  // useEditor's closure runs synchronously before Crepe.create()
+  // finishes; the schema isn't available until create()
+  // completes. The effect fires after the render cycle the
+  // useEditor mount triggers, which is after Crepe is ready.
+  useEffect(() => {
+    const crepe = crepeRef.current
+    if (!crepe) return
+    try {
+      captureSchemaFromEditor(crepe.editor)
+    } catch {
+      // captureSchemaFromEditor swallows subscriber errors itself;
+      // a throw here would mean editor.action threw, which only
+      // happens if Crepe isn't actually mounted yet. The next
+      // render's effect retries; eventually we get the schema.
+    }
+  })
 
   // M1 step 2 — late install of collab plugins. If useCollabSync's
   // bootstrap resolves AFTER the editor mounts, the plugins
