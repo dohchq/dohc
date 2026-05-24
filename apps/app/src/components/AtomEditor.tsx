@@ -43,6 +43,7 @@ import {
   applyRemoteSteps,
   getVersion,
 } from '@/lib/collab-sync'
+import { sendableSteps } from 'prosemirror-collab'
 // M1 step 3 sub-commit 3.2 — schema cache populated from the first
 // mounted Crepe; useCollabSync's bootstrap reads it for snapshot
 // deserialization. See lib/crepe-schema-cache.ts for the rationale.
@@ -1522,12 +1523,54 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // overlay fires again → reload again. The fix: skip the
   // rebootstrap overlay entirely if frozen is also set. Frozen
   // banner takes over; user sees the real terminal state.
+  //
+  // M1 step 3.8.1.5 — PENDING-STEPS GATE (codex 7th-pass [P1] #2
+  // CLIENT MIRROR). Server case B can race: needsRebootstrap=true
+  // gets set based on a stale snapshot view of PM. If the user
+  // has unsubmitted local edits (sendableSteps non-empty) or an
+  // in-flight submit, the auto-reload would nuke them. Server-side
+  // 3.8.1.5 defers case B when latestVersion > snapshotVersion;
+  // this client mirror is the second line of defense. If pending
+  // steps exist, don't fire reload. The collab plugin keeps
+  // submitting; once they ack (remoteVersion bumps via
+  // useRemoteVersion below), the effect re-runs with sendableSteps
+  // clear, and the reload proceeds.
+  //
+  // Trade-off: a user typing offline with needsRebootstrap=true
+  // sees the overlay indefinitely (steps never submit, reload
+  // never fires). v1 acceptable; future work adds a "save your
+  // work" escape hatch with copy-to-clipboard.
+  const remoteVersionForReload = useRemoteVersion(multiplayerDocId ?? null)
   useEffect(() => {
     if (!multiplayerDocId) return
     if (!collabDocState || collabDocState === null) return
     if (!('exists' in collabDocState) || !collabDocState.exists) return
     if (collabDocState.frozen) return // frozen dominates
     if (!collabDocState.needsRebootstrap) return
+    // 3.8.1.5 — peek inside the editor's collab plugin state for
+    // pending steps. If Crepe isn't mounted yet, no pending steps
+    // possible — proceed. If editor.action throws (mount-in-flight),
+    // defer to the next render's effect.
+    const crepe = crepeRef.current
+    if (crepe) {
+      try {
+        let pending = false
+        crepe.editor.action((ctx) => {
+          const view = ctx.get(editorViewCtx)
+          if (!view) return
+          const sendable = sendableSteps(view.state)
+          if (sendable && sendable.steps.length > 0) pending = true
+        })
+        if (pending) {
+          // Don't auto-reload; the next remoteVersion bump (which
+          // includes the ack of OUR submit) re-runs this effect.
+          return
+        }
+      } catch {
+        // Editor mid-mount; next render's effect retries.
+        return
+      }
+    }
     // Auto-reload after a brief delay so the overlay text is
     // visible. window.location.reload() drops us out of this
     // React tree entirely.
@@ -1538,6 +1581,11 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   }, [
     multiplayerDocId,
     collabDocState,
+    // 3.8.1.5 — remoteVersion is the heartbeat that lets the
+    // effect re-run after our pending steps ack (server received,
+    // version bumped). Without it, the gate above would stick on
+    // "pending" until something else triggers a re-render.
+    remoteVersionForReload,
   ])
 
   if (

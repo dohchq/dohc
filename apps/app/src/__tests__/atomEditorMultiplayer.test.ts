@@ -96,13 +96,21 @@ describe('AtomEditor — multiplayer wiring (structural)', () => {
     // enabled:!!multiplayerDocId; useRemoteVersion gates via
     // multiplayerDocId??null; useCollabDocState (3.8.1.0+) gates
     // via multiplayerDocId??null + the 'skip' idiom inside the hook.
-    // Each is called EXACTLY ONCE in the file (no duplicate
-    // subscriptions). Hook source pins are in collabSync.test.ts.
+    // Each gating callsite (one per component layer) passes null
+    // when multiplayer is off, so the Convex 'skip' idiom keeps
+    // the call free of network cost. Hook source pins are in
+    // collabSync.test.ts.
     const useCollabSyncCount = (SRC.match(/useCollabSync\(/g) ?? []).length
     expect(useCollabSyncCount).toBe(1)
+    // useRemoteVersion is called twice as of 3.8.1.5: once inside
+    // CrepeEditor for the remote-pull loop, once at the outer
+    // AtomEditor level as the heartbeat that lets the rebootstrap
+    // effect re-run after our pending steps ack (codex 7th-pass
+    // [P1] #2 client mirror). Convex's useQuery dedupes identical
+    // subscriptions internally — no extra network cost.
     const useRemoteVersionCount = (SRC.match(/useRemoteVersion\(/g) ?? [])
       .length
-    expect(useRemoteVersionCount).toBe(1)
+    expect(useRemoteVersionCount).toBe(2)
     const useCollabDocStateCount = (
       SRC.match(/useCollabDocState\(/g) ?? []
     ).length
@@ -340,5 +348,52 @@ describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
     // Installing at closure time would bypass the new mutation
     // gate. Removed = safe.
     expect(SRC).not.toMatch(/for \(const p of collabPluginsRef\.current\) extra\.push/)
+  })
+})
+
+// M1 step 3.8.1.5 — pending-steps gate on auto-reload.
+describe('AtomEditor — auto-reload pending-steps gate (3.8.1.5)', () => {
+  it('imports sendableSteps from prosemirror-collab', () => {
+    expect(SRC).toMatch(/import \{ sendableSteps \} from 'prosemirror-collab'/)
+  })
+
+  it('rebootstrap effect peeks inside collab plugin state via crepeRef', () => {
+    // Without this peek, the auto-reload would nuke any
+    // unsubmitted local edits (which live in the prosemirror-collab
+    // plugin's unconfirmed buffer). The check goes through
+    // editorViewCtx (same pattern as captureSchemaFromEditor and
+    // the bootstrap PM JSON extraction).
+    expect(SRC).toMatch(/PENDING-STEPS GATE[\s\S]+?codex 7th-pass \[P1\] #2/i)
+    // Effect body queries sendableSteps via the editor view.
+    const reloadEffect = SRC.split('REBOOTSTRAP AUTO-RELOAD')[1]?.split('// 3.8.1.5 — remoteVersion')[0] ?? ''
+    expect(reloadEffect).toMatch(/sendableSteps\(view\.state\)/)
+    // Pending → return without scheduling.
+    expect(reloadEffect).toMatch(/if \(pending\) \{[\s\S]+?return/)
+  })
+
+  it('remoteVersion is in the rebootstrap effect deps (heartbeat for re-run)', () => {
+    // Without remoteVersion in deps, the effect would only re-run
+    // on collabDocState change. A user with pending steps would
+    // never get the auto-reload to fire because nothing else
+    // triggers re-evaluation. Adding remoteVersion as the
+    // heartbeat: when our pending steps ack on the server, the
+    // version bumps, our useRemoteVersion fires, the effect
+    // re-runs with sendableSteps now empty → reload proceeds.
+    expect(SRC).toMatch(/remoteVersionForReload/)
+    expect(SRC).toMatch(/const remoteVersionForReload = useRemoteVersion\(/)
+    // Dep array contains it.
+    expect(SRC).toMatch(
+      /\[[\s\S]*?multiplayerDocId,[\s\S]*?collabDocState,[\s\S]*?remoteVersionForReload,?[\s\S]*?\]/,
+    )
+  })
+
+  it('mount-in-flight crepe (action throws) defers gracefully', () => {
+    // Crepe.create() is async; editor.action can throw if called
+    // before create resolves. The gate's try/catch deferss to the
+    // next render's effect rather than treating the throw as
+    // "no pending steps" (which would proceed with reload).
+    const reloadEffect = SRC.split('REBOOTSTRAP AUTO-RELOAD')[1]?.split('Auto-reload after a brief')[0] ?? ''
+    expect(reloadEffect).toMatch(/} catch \{[\s\S]+?return/)
+    expect(reloadEffect).toMatch(/Editor mid-mount/i)
   })
 })

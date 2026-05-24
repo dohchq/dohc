@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
 import { describe, it, expect } from 'vitest'
+import { register as registerProsemirrorComponent } from '@convex-dev/prosemirror-sync/test'
 import schema from './schema'
 import { api, internal } from './_generated/api'
 import { sha256Hex } from './atomWriter'
@@ -99,6 +100,13 @@ async function currentAtomBody(
 describe('M1 step 3.7 — Case B: AUTO-REBUILD', () => {
   it('OOB write (frontmatter preserved) + PM unchanged ⇒ needsRebootstrap=true; NOT frozen', async () => {
     const t = convexTest(schema, modules)
+    // M1 step 3.8.1.5 — case B now queries
+    // components.prosemirrorSync.lib.latestVersion to defer when
+    // the snapshot is stale. The query throws if the component
+    // isn't registered. Registering with no snapshots yields
+    // latestVersion=null → the gate skips → case B proceeds
+    // normally (which is what this test wants to verify).
+    registerProsemirrorComponent(t)
     const orgId = await seedOrg(t)
     const { atomId, docId } = await makeAtomAndCollabDoc(
       t,
