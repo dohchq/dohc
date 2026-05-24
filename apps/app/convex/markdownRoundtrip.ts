@@ -17,6 +17,7 @@ import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkStringify from 'remark-stringify'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
 import type { Root } from 'mdast'
 
 // M1 step 3.9.16 — WIKILINK ROUND-TRIP via sentinel pre/post-
@@ -68,6 +69,12 @@ function decodeWikilinks(md: string): string {
 const _markdownProcessor = unified()
   .use(remarkParse)
   .use(remarkGfm)
+  // M1 step 3.9.17 — remark-math: parses $...$ (inline) and
+  // $$...$$ (block) into mdast inlineMath/math nodes. Used by
+  // pmToMdast to round-trip Crepe Latex content losslessly.
+  // 3.8.1.6 made math nodes fail-loud (throw → freeze the
+  // multiplayer session); 3.9.17 restores proper support.
+  .use(remarkMath)
   .use(remarkStringify, {
     // Match Milkdown/Crepe's serializer output as closely as possible.
     // These options align with mdast-util-to-markdown defaults that

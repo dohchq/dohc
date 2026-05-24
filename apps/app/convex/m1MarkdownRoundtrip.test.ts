@@ -93,6 +93,21 @@ describe('markdownRoundtrip — dohc-specific shapes are preserved', () => {
     expect(out).not.toMatch(/\\\[/)
   })
 
+  it('inline math round-trips through remark-math (3.9.17)', () => {
+    const md = 'energy is $E = mc^2$.\n'
+    const out = roundtripMarkdown(md)
+    expect(out).toContain('$E = mc^2$')
+    expect(roundtripMarkdown(out)).toBe(out)
+  })
+
+  it('block math fence round-trips through remark-math (3.9.17)', () => {
+    const md = '$$\n\\int_0^1 x^2 dx\n$$\n'
+    const out = roundtripMarkdown(md)
+    expect(out).toContain('\\int_0^1 x^2 dx')
+    expect(out).toMatch(/\$\$/)
+    expect(roundtripMarkdown(out)).toBe(out)
+  })
+
   it('query blocks survive (code fence with `query` lang)', () => {
     const md = '```query\ndocs.glob("**/*.md")\n```\n'
     const out = roundtripMarkdown(md)
