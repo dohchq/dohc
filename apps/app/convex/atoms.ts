@@ -851,11 +851,24 @@ export const _upsertInternal = internalMutation({
     // write over user content THROWS unless explicitly allowed (the
     // write_atom tool only sets this after user confirmation).
     allowUserOverwrite: v.optional(v.boolean()),
+    // P1 (multiplayer-and-h-followups §6.5) — when present, gate the
+    // write through canWriteAtomPath against THIS user's access. The
+    // agent-tool callers (write_atom + capture etc.) pass the actor
+    // subject; system callers (regenerateMap, plugin install) call
+    // without it (allowed — the system surface is intentionally
+    // unconstrained, audit-by-grep enforces that).
+    viewerSubject: v.optional(v.string()),
   },
   handler: async (
     ctx,
-    { workspaceId, path, body, source, allowUserOverwrite },
+    { workspaceId, path, body, source, allowUserOverwrite, viewerSubject },
   ) => {
+    if (
+      viewerSubject &&
+      !(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to write at this path.')
+    }
     // Agent path: the guard + coalesced snapshot live in the single
     // shared impl (isUserEdit defaults false → user-content overwrite
     // refused unless allowUserOverwrite).
@@ -870,8 +883,20 @@ export const _upsertInternal = internalMutation({
 })
 
 export const _removeInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    // P1 — same pattern as _upsertInternal: agent callers pass
+    // viewerSubject; system callers omit it.
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    if (
+      viewerSubject &&
+      !(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to delete this atom.')
+    }
     await removeAtomImpl(ctx, workspaceId, path)
   },
 })
