@@ -18,6 +18,7 @@ import type * as atoms from "../atoms.js";
 import type * as auth from "../auth.js";
 import type * as captures from "../captures.js";
 import type * as catalog from "../catalog.js";
+import type * as collabPresence from "../collabPresence.js";
 import type * as confirmTier from "../confirmTier.js";
 import type * as crons from "../crons.js";
 import type * as devReset from "../devReset.js";
@@ -68,6 +69,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   captures: typeof captures;
   catalog: typeof catalog;
+  collabPresence: typeof collabPresence;
   confirmTier: typeof confirmTier;
   crons: typeof crons;
   devReset: typeof devReset;

@@ -606,4 +606,71 @@ export default defineSchema({
       'period',
       'identifier',
     ]),
+
+  // M1 step 3 sub-commit 3.3 (multiplayer-and-h-followups §8) —
+  // per-doc CAS + projection state for the collab markdown
+  // projection writer. Codex v2-v3 NEW issue: this MUST be
+  // per-doc (server-computed), not per-client. Per-client hash
+  // divergence during out-of-band-write churn was the v2 bug.
+  //
+  // baseBodyHash is the SHA-256 of atoms.body as of the last
+  // successful projection (or initial bootstrap). The projection
+  // writer compares atoms.body's current hash against this; mismatch
+  // = out-of-band write happened; route through the two-state
+  // conflict handler (auto-rebuild if PM has no unprojected edits;
+  // freeze + reload if both sides changed).
+  //
+  // Future-compat fields per Codex v3 "additional schema
+  // suggestions" (not blockers, useful for debug + UI):
+  //   - lastProjectedHash: hash AT the projection moment (for
+  //     debugging mismatches)
+  //   - lastConflictAt: UI can show "last conflict 3min ago"
+  //   - pruneAfter: explicit snapshot-prune trigger
+  collabDocs: defineTable({
+    docId: v.string(), // 'atom:<ws>:<atomId>' or 'share:<shareId>'
+    atomId: v.optional(v.id('atoms')), // null for share: docs
+    workspaceId: v.string(),
+    // CAS witness. SHA-256 hex of atoms.body after the most recent
+    // projection (or initial bootstrap). NEVER trusted from client.
+    baseBodyHash: v.string(),
+    // Last snapshot version we projected to atoms.body. Compared
+    // against snapshotVersion arriving in onSnapshot.
+    projectedVersion: v.number(),
+    // Two-state conflict policy (Codex v3 fix #4):
+    //   frozen=true ⇒ both sides changed; UI shows reload banner
+    //   needsRebootstrap=true ⇒ OOB write while PM had no unprojected
+    //     edits; client tears down + rebootstraps from new body
+    frozen: v.boolean(),
+    needsRebootstrap: v.boolean(),
+    // Currently scheduled projection job id (for cancel-on-newer).
+    scheduledJobId: v.optional(v.id('_scheduled_functions')),
+    // Codex v3 nice-to-haves (non-blocking):
+    lastProjectedHash: v.optional(v.string()),
+    lastConflictAt: v.optional(v.number()),
+    pruneAfter: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index('by_docId', ['docId'])
+    .index('by_atomId', ['atomId'])
+    .index('by_workspace_pruneAfter', ['workspaceId', 'pruneAfter']),
+
+  // M1 step 3 sub-commit 3.3 — per-client PRESENCE only. Codex
+  // v2 NEW issue #1: split presence from doc projection state.
+  // This table tracks "who's editing what right now" via
+  // heartbeat; the projection state lives in `collabDocs`.
+  //
+  // Lifecycle: each tab calls recordCollabPresence every ~30s.
+  // Rows with lastSeenAt < now - 90s are reaped by the
+  // _cleanupIdleSessions internal mutation (runs every 60s via
+  // cron — Codex v2 fix #8: cadence matches expiry, no 6.5min
+  // lag like v2's 5min cron).
+  collabSessions: defineTable({
+    docId: v.string(),
+    clientId: v.string(), // per-tab UUID
+    userId: v.string(), // identity.subject; for audit + UI labels
+    lastSeenAt: v.number(),
+  })
+    .index('by_docId', ['docId'])
+    .index('by_docId_clientId', ['docId', 'clientId'])
+    .index('by_lastSeenAt', ['lastSeenAt']),
 })
