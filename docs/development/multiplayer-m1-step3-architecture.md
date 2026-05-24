@@ -329,3 +329,50 @@ The current state (after dc2968f):
 No user sees multiplayer behavior until someone passes `multiplayerDocId`
 to AtomEditor. The plumbing is dormant. Whoever reviews this doc and
 agrees on the M1 step 3 architecture can then approve the build.
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Codex Review | `/codex` (consult, against this doc) | Independent 2nd opinion | 1 | REVISE | 8 findings (3 critical), 0 fixed yet |
+
+**CODEX VERDICT: REVISE** — directionally viable, not safe to implement as written.
+
+**Critical findings (must address before build):**
+
+1. **Race vs concurrent `atoms.upsert`** — periodic flush would clobber a concurrent agent / user write that lands during a live collab session. No conflict detection in the proposal.
+2. **Side-effect bypass** — proposed `ctx.db.patch(atomId, {body:...})` skips `atomCapture` (trash), `reconcileAtomIdIndex` (fileId), `deriveSearchFields` (FTS), and `scheduleMapRegen`. Must route through a shared helper that fires the full `upsertAtomImpl` chain.
+3. **Bootstrap + version semantics wrong** — `prosemirrorSync.create()` is NOT broadly idempotent (only on identical content); throws on divergent races. Initial snapshot version is `1`, not `0` as the proposal said.
+
+**Other findings:**
+
+4. `getDoc()` IS callable from internal mutation — proposal's caution unnecessary.
+5. Current `AtomEditor` bootstrap passes `schema: null` and late-installs collab plugins — first edits can happen before sync bootstrap. Step 3 must fix this before enabling multiplayer.
+6. `remark-parse`/`remark-stringify` Convex-runtime feasibility hand-waved — needs a real Convex-side import + roundtrip test.
+7. "On-close final flush" is unreliable — browser disconnect is not a dependable server signal without a heartbeat/presence model.
+8. Terminology fix: snapshot is authoritative during a live session; call atoms.body an "eventual markdown projection" not "canonical truth."
+
+**Codex's Option G (recommended):** introduce `atomBodyRevisions` / `collabSessions` table with `baseBodyHash` + `projectedVersion`. Flush only if `atoms.body` still matches the session base — else pause + surface conflict instead of overwriting.
+
+**Codex's answers on the 7 open questions:**
+1. Viability — yes IF snapshots treated as durable active-session projection (not disposable); needs explicit stale-session cleanup
+2. Determinism — must test cross-runtime (Convex V8), not just cross-browser
+3. Flush timing — debounced from `onSnapshot`, not cron; track `lastProjectedVersion`
+4. Option G as above (revisions table + body-hash compare-and-swap)
+5. Serializer — library only if Convex runtime test passes; hand-roll likely to miss table/escape/wikilink/frontmatter edge cases
+6. Grace period — heartbeat expiry (60-90s after last presence), not tab-close events
+7. Attribution — `source: 'collab'` (or preserve existing + `lastEditedVia: 'collab'`); multi-author audit belongs in a separate table
+
+**Cross-model agreement:** Claude Code agrees with all 8 of Codex's findings — no disagreements to flag. Three of the critical findings (race with concurrent writes, side-effect bypass, bootstrap version semantics) are gaps I missed; Codex's Option G is the right architectural fix.
+
+**VERDICT: REVISE before build.** Required next steps:
+- Add a shared internal body-replacement helper that fires the full `upsertAtomImpl` side-effect chain
+- Add conflict detection (body-hash compare-and-swap or revisions table)
+- Fix the bootstrap so the editor doesn't accept edits before sync bootstrap completes
+- Treat initial snapshot version as `1`
+- Write a Convex-runtime test for serializer/parser import + roundtrip
+- Define non-collab-write-during-collab policy (reject? pause collab? rebuild snapshot? surface conflict?) — anything except silent overwrite
+
+UNRESOLVED: 8 decisions (3 critical) before this architecture is safe to implement.
