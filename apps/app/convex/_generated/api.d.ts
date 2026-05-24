@@ -14,6 +14,7 @@ import type * as atomCapture from "../atomCapture.js";
 import type * as atomId from "../atomId.js";
 import type * as atomLocks from "../atomLocks.js";
 import type * as atomShares from "../atomShares.js";
+import type * as atomSuggestions from "../atomSuggestions.js";
 import type * as atomWriter from "../atomWriter.js";
 import type * as atoms from "../atoms.js";
 import type * as auth from "../auth.js";
@@ -70,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   atomId: typeof atomId;
   atomLocks: typeof atomLocks;
   atomShares: typeof atomShares;
+  atomSuggestions: typeof atomSuggestions;
   atomWriter: typeof atomWriter;
   atoms: typeof atoms;
   auth: typeof auth;

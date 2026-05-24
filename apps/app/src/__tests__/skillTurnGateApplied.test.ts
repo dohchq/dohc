@@ -299,6 +299,15 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   // UNAUTHORIZABLE tools trip the gate (BELT). Gating run_skill
   // itself would defeat the whole §2-A model.
   'run_skill',
+  // M1 step 3.9.0 (multiplayer-and-h-followups §3 PR M3) —
+  // suggest_in_doc writes to the atomSuggestions SIDECAR (not
+  // atoms.body). The user's accept click materializes the
+  // suggestion into the body via the acceptSuggestion mutation
+  // — a separate human-initiated mutation, not an agent tool.
+  // Structurally equivalent to create_entities/create_folder:
+  // additive sidecar; user explicitly materializes. Cost cap
+  // enforced server-side (5/min per atom per author).
+  'suggest_in_doc',
 ])
 
 describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches ADDITIONS too)', () => {
@@ -338,6 +347,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'onboarding_state', 'run_query', 'run_loop',
       'create_entities', 'create_folder',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
+      'suggest_in_doc', // M1 step 3.9.0 — sidecar only; user-materialized
     ])
     expect([...SAFE_NO_GATE_OPS].sort()).toEqual([...expectedSafe].sort())
   })

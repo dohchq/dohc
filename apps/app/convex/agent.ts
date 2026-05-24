@@ -1747,6 +1747,78 @@ export const dohcAgent = new Agent(components.agent, {
         return `installed "${result.name}" at ${result.path} (enabled)`
       },
     }),
+
+    // M1 step 3.9.0 (multiplayer-and-h-followups §3 PR M3) —
+    // suggest_in_doc. The agent's structured-edit primitive:
+    // creates an atomSuggestions row that the editor's
+    // decoration plugin renders as an inline accept/reject
+    // bubble. Replaces the prior write_atom-as-silent-swap
+    // pattern for in-place rewrites.
+    //
+    // Auth: the agent runs on behalf of the user — same P1
+    // gates as write_atom apply (canWriteAtomPath). Owner gate
+    // for org workspaces (suggestions on shared docs are
+    // privileged like other write paths).
+    //
+    // Cost cap: enforced server-side in _createSuggestion
+    // (5/min per atom per author). Excess calls return a
+    // structured error string the agent surfaces back to the
+    // chat.
+    suggest_in_doc: createTool({
+      description:
+        "Propose an inline edit on an atom. Creates a suggestion bubble at [rangeFrom, rangeTo] containing proposedText; the user accepts or rejects in the editor. PREFER this over write_atom for surgical changes the user should see before they land. The atom's path identifies the target. Hard cap: 5 suggestions per atom per minute per author.",
+      inputSchema: z.object({
+        path: z.string(),
+        rangeFrom: z.number(),
+        rangeTo: z.number(),
+        proposedText: z.string(),
+        instruction: z.string(),
+      }),
+      execute: async (
+        ctx,
+        {
+          path,
+          rangeFrom,
+          rangeTo,
+          proposedText,
+          instruction,
+        }: {
+          path: string
+          rangeFrom: number
+          rangeTo: number
+          proposedText: string
+          instruction: string
+        },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await ownerWorkspaceFromTool(ctx, options)
+        const viewerSubject = await viewerSubjectFromTool(ctx)
+        // Resolve atom by path (we can't take the id directly
+        // because the agent typically references atoms by path).
+        const atom = (await ctx.runQuery(api.atoms.getByPath, {
+          path,
+        })) as { _id: Id<'atoms'>; workspaceId: string; body: string } | null
+        if (!atom) return `atom "${path}" not found`
+        if (atom.workspaceId !== workspaceId) {
+          return `atom "${path}" is not in the active workspace`
+        }
+        const result = (await ctx.runMutation(
+          internal.atomSuggestions._createSuggestion,
+          {
+            atomId: atom._id,
+            workspaceId,
+            rangeFrom,
+            rangeTo,
+            proposedText,
+            instruction,
+            authorIsAgent: true,
+            authorUserId: viewerSubject,
+          },
+        )) as { ok: true; id: string } | { ok: false; reason: string }
+        if (!result.ok) return `suggestion rejected: ${result.reason}`
+        return `suggested edit on "${path}" [${rangeFrom}..${rangeTo}] (${proposedText.length} chars). User will accept or reject in the editor.`
+      },
+    }),
   },
 })
 

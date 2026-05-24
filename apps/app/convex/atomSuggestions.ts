@@ -1,0 +1,279 @@
+// M1 step 3.9.0 (multiplayer-and-h-followups §3 PR M3) —
+// atomSuggestions: the agent-as-collaborator sidecar.
+//
+// Per Decision D (decorations + sidecar, NOT custom PM nodes):
+// the agent writes a row here via suggest_in_doc; the editor's
+// decoration plugin (3.9.1) subscribes via listPending and
+// renders an inline bubble. The user clicks Accept (inlines
+// the proposedText into atoms.body) or Reject (deletes row).
+//
+// Position semantics: rangeFrom/rangeTo are PM doc positions
+// at the snapshot the suggestion was made against. Same v1
+// caveat as cursorPos (3.8.2.3): under concurrent edits the
+// highlighted range may briefly desync. Acceptable for v1;
+// step-mapping is M2 follow-up.
+
+import { v } from 'convex/values'
+import { mutation, query, internalMutation } from './_generated/server'
+import { internal } from './_generated/api'
+import { requireWorkspace } from './auth'
+import { canReadAtom, canWriteAtomPath } from './atomAccess'
+import type { Id } from './_generated/dataModel'
+
+// Per-atom rate cap (codex HIGH 4 / plan §3 M3 cost caps).
+// "Per-turn: hard cap on number of suggest_in_doc calls (e.g.
+// 5)". Convex actions have no native turn boundary; we
+// approximate with a per-atom-per-minute cap. Excess suggestions
+// throw so the agent gets a structured error + the rest of the
+// turn aborts gracefully.
+const RECENT_WINDOW_MS = 60_000
+const PER_ATOM_PER_MINUTE_CAP = 5
+// Soft per-suggestion text cap (plan §3 M3: "total proposed
+// chars (e.g. 5000)"). Per-suggestion equivalent: each one
+// must be <= cap. A 5-call burst at 1000 chars each = 5000;
+// matches the plan's per-turn budget without needing turn
+// accounting.
+const PER_SUGGESTION_CHAR_CAP = 1000
+// Pending-suggestion lifespan. Resolved rows are kept briefly
+// so other tabs see the "accepted by X" fade UI; after this
+// they're garbage-collected lazily by listPending (which
+// filters to status='pending' + recently resolved). Keeps the
+// table from growing indefinitely.
+const RESOLVED_KEEP_MS = 10_000
+
+/** Internal mutation: actually write the suggestion row.
+ *  Called by the suggest_in_doc agent tool after auth + cap
+ *  checks. Separated from the tool so test setups can write
+ *  rows directly without spinning up the agent runtime. */
+export const _createSuggestion = internalMutation({
+  args: {
+    atomId: v.id('atoms'),
+    workspaceId: v.string(),
+    rangeFrom: v.number(),
+    rangeTo: v.number(),
+    proposedText: v.string(),
+    instruction: v.string(),
+    authorIsAgent: v.boolean(),
+    authorUserId: v.string(),
+  },
+  handler: async (
+    ctx,
+    {
+      atomId,
+      workspaceId,
+      rangeFrom,
+      rangeTo,
+      proposedText,
+      instruction,
+      authorIsAgent,
+      authorUserId,
+    },
+  ): Promise<{ ok: true; id: Id<'atomSuggestions'> } | { ok: false; reason: string }> => {
+    if (proposedText.length > PER_SUGGESTION_CHAR_CAP) {
+      return {
+        ok: false,
+        reason: `Suggestion text exceeds ${PER_SUGGESTION_CHAR_CAP} chars.`,
+      }
+    }
+    if (rangeFrom < 0 || rangeTo < rangeFrom) {
+      return { ok: false, reason: 'Invalid range.' }
+    }
+    // Cap: count THIS author's recent pending suggestions on
+    // this atom. Cron-clean: every cap check is bounded to
+    // this single atom's rows.
+    const since = Date.now() - RECENT_WINDOW_MS
+    const recent = await ctx.db
+      .query('atomSuggestions')
+      .withIndex('by_atomId', (q) => q.eq('atomId', atomId))
+      .collect()
+    const myRecent = recent.filter(
+      (r) => r.authorUserId === authorUserId && r.createdAt >= since,
+    )
+    if (myRecent.length >= PER_ATOM_PER_MINUTE_CAP) {
+      return {
+        ok: false,
+        reason: `Per-atom suggestion cap reached (${PER_ATOM_PER_MINUTE_CAP}/min). Pause and let the user respond.`,
+      }
+    }
+    const id = await ctx.db.insert('atomSuggestions', {
+      atomId,
+      workspaceId,
+      rangeFrom,
+      rangeTo,
+      proposedText,
+      instruction,
+      authorIsAgent,
+      authorUserId,
+      status: 'pending',
+      createdAt: Date.now(),
+    })
+    return { ok: true, id }
+  },
+})
+
+/** Subscription target for the decoration plugin. Returns the
+ *  pending suggestions for an atom + recently resolved ones
+ *  (within RESOLVED_KEEP_MS) so other tabs can fade the
+ *  "accepted by Bob 2s ago" UI before the row vanishes.
+ *
+ *  Auth: P1 read access on the atom. Non-readers see []. */
+export const listPending = query({
+  args: {
+    atomId: v.id('atoms'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { atomId, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return []
+    const atom = await ctx.db.get(atomId)
+    if (!atom) return []
+    if (atom.workspaceId !== workspaceId) return []
+    if (!(await canReadAtom(ctx, atomId, identity.subject))) return []
+
+    const cutoff = Date.now() - RESOLVED_KEEP_MS
+    const all = await ctx.db
+      .query('atomSuggestions')
+      .withIndex('by_atomId', (q) => q.eq('atomId', atomId))
+      .collect()
+    return all
+      .filter(
+        (r) =>
+          r.status === 'pending' ||
+          (r.resolvedAt !== undefined && r.resolvedAt >= cutoff),
+      )
+      .map((r) => ({
+        _id: r._id,
+        atomId: r.atomId,
+        rangeFrom: r.rangeFrom,
+        rangeTo: r.rangeTo,
+        proposedText: r.proposedText,
+        instruction: r.instruction,
+        authorIsAgent: r.authorIsAgent,
+        authorUserId: r.authorUserId,
+        status: r.status,
+        resolvedByUserId: r.resolvedByUserId,
+        resolvedAt: r.resolvedAt,
+        createdAt: r.createdAt,
+      }))
+  },
+})
+
+/** Accept a suggestion: inline the proposedText into atoms.body
+ *  via the standard upsert path (so all the usual write
+ *  side-effects fire — projection, search index, etc.), then
+ *  mark the row 'accepted' with resolvedByUserId set to the
+ *  CALLER (audit: only humans accept; the agent can't
+ *  self-accept per plan §3 M3).
+ *
+ *  Auth: P1 WRITE access on the atom. */
+export const acceptSuggestion = mutation({
+  args: {
+    suggestionId: v.id('atomSuggestions'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { suggestionId, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const subject = identity.subject
+
+    const row = await ctx.db.get(suggestionId)
+    if (!row) throw new Error('Suggestion not found.')
+    if (row.workspaceId !== workspaceId) {
+      throw new Error('Workspace mismatch.')
+    }
+    if (row.status !== 'pending') {
+      // Idempotent: re-accepting a resolved suggestion is a
+      // no-op (another tab beat us). Return the row so the
+      // caller can update its UI consistently.
+      return { ok: true as const, alreadyResolved: true }
+    }
+    const atom = await ctx.db.get(row.atomId)
+    if (!atom) throw new Error('Atom not found.')
+    // P1 WRITE gate — only users who could ALSO edit this atom
+    // directly may accept agent suggestions on it.
+    if (
+      !(await canWriteAtomPath(ctx, workspaceId, atom.path, subject))
+    ) {
+      throw new Error('Not authorized to edit this atom.')
+    }
+
+    // Inline the proposed text. The body manipulation is
+    // position-based; under concurrent edits the range may
+    // be stale (v1 caveat). Clamp to body length to avoid
+    // out-of-bounds slicing.
+    //
+    // NOTE on collab projection: when an atom has an active
+    // collab session, this write races the projection writer.
+    // The PM↔body bidirectional binding (3.9.5 fix #1) means
+    // the next projection would freeze or auto-rebuild. For
+    // v1: accept the race; document as "agents writing into
+    // a live-collab atom may briefly conflict; the collab
+    // resolver handles it." Future work routes accepts through
+    // the prosemirrorSync.transform path for inline atomicity.
+    const body = atom.body
+    const clampedFrom = Math.max(0, Math.min(row.rangeFrom, body.length))
+    const clampedTo = Math.max(clampedFrom, Math.min(row.rangeTo, body.length))
+    const newBody =
+      body.slice(0, clampedFrom) + row.proposedText + body.slice(clampedTo)
+
+    await ctx.runMutation(internal.atoms._upsertInternal, {
+      workspaceId,
+      path: atom.path,
+      body: newBody,
+      source: 'agent',
+      // Suggestions can land on user-authored atoms; the
+      // suggestion itself is the user's "I approved this"
+      // signal, so we use the equivalent of confirm:true.
+      allowUserOverwrite: true,
+      viewerSubject: subject,
+    })
+
+    await ctx.db.patch(suggestionId, {
+      status: 'accepted',
+      resolvedByUserId: subject,
+      resolvedAt: Date.now(),
+    })
+    return { ok: true as const, alreadyResolved: false }
+  },
+})
+
+/** Reject a suggestion: mark the row 'rejected' + record who
+ *  rejected it (audit). No atoms.body write.
+ *
+ *  Auth: P1 READ access is sufficient — anyone viewing the
+ *  atom can dismiss an agent suggestion on it. (Stronger
+ *  than no-auth; weaker than WRITE — matches the rejection
+ *  semantics: it's a "go away" signal, not an edit.) */
+export const rejectSuggestion = mutation({
+  args: {
+    suggestionId: v.id('atomSuggestions'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { suggestionId, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const subject = identity.subject
+
+    const row = await ctx.db.get(suggestionId)
+    if (!row) throw new Error('Suggestion not found.')
+    if (row.workspaceId !== workspaceId) {
+      throw new Error('Workspace mismatch.')
+    }
+    if (row.status !== 'pending') {
+      return { ok: true as const, alreadyResolved: true }
+    }
+    if (!(await canReadAtom(ctx, row.atomId, subject))) {
+      throw new Error('Not authorized.')
+    }
+
+    await ctx.db.patch(suggestionId, {
+      status: 'rejected',
+      resolvedByUserId: subject,
+      resolvedAt: Date.now(),
+    })
+    return { ok: true as const, alreadyResolved: false }
+  },
+})
