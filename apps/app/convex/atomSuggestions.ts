@@ -365,6 +365,15 @@ export const acceptSuggestion = mutation({
     // atoms that have an active collab row; suggestions
     // accepted on docs without active multiplayer (the
     // common case today) skip this branch.
+    //
+    // M1 step 3.9.12 — codex 20th-pass [P1] FIX: hash the
+    // PERSISTED body, not `newBody`. _upsertInternal may
+    // mutate the body before write (seedAtomIdIntoBody adds
+    // a frontmatter `id:` if missing). Hashing our pre-write
+    // `newBody` produces a baseline that doesn't match what
+    // the row actually carries → next projection sees apparent
+    // drift → can freeze. Same bug class atomWriter already
+    // dodges by re-hashing post-write. Re-read here.
     const collabRow = await ctx.db
       .query('collabDocs')
       .withIndex('by_docId', (q) =>
@@ -372,14 +381,17 @@ export const acceptSuggestion = mutation({
       )
       .unique()
     if (collabRow) {
-      const newBodyHash = await sha256Hex(newBody)
-      await ctx.db.patch(collabRow._id, {
-        baseBodyHash: newBodyHash,
-        lastProjectedHash: newBodyHash,
-        needsRebootstrap: true,
-        lastConflictAt: Date.now(),
-        updatedAt: Date.now(),
-      })
+      const persisted = await ctx.db.get(atom._id)
+      if (persisted) {
+        const persistedBodyHash = await sha256Hex(persisted.body)
+        await ctx.db.patch(collabRow._id, {
+          baseBodyHash: persistedBodyHash,
+          lastProjectedHash: persistedBodyHash,
+          needsRebootstrap: true,
+          lastConflictAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+      }
     }
 
     await ctx.db.patch(suggestionId, {

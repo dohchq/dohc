@@ -760,6 +760,11 @@ function CrepeEditor({
   // call AFTER bootstrap mutation runs. Order is preserved.
   const activeWorkspaceIdForBootstrap = useActiveWorkspaceId()
   const [pmJsonStr, setPmJsonStr] = useState<string | null>(null)
+  // M1 step 3.9.12 — suppresses one markdownUpdated firing
+  // after the snapshot install dispatch. See the listener in
+  // the useEditor closure and the late-install effect for
+  // context.
+  const installingSnapshotRef = useRef(false)
   const bootstrapState = useCollabBootstrapMutation({
     docId: multiplayerDocId ?? null,
     body: multiplayerDocId ? defaultValue : null,
@@ -834,6 +839,23 @@ function CrepeEditor({
     })
     crepe.on((listener) => {
       listener.markdownUpdated((_ctx, markdown, prev) => {
+        // M1 step 3.9.12 — codex 20th-pass [P1] FIX. The
+        // snapshot install effect (3.9.9) dispatches a doc-
+        // replace transaction. That transaction fires
+        // markdownUpdated, which would call onChange, which
+        // would queue an autosave attributed to the user.
+        // Tab B "opening a doc" would thus write Tab A's
+        // unprojected snapshot back to atoms.body from Tab
+        // B's client — the dual-write pattern the whole
+        // multiplayer architecture is meant to AVOID.
+        //
+        // Suppress: snapshot install sets the ref before
+        // dispatch. First markdownUpdated after that consumes
+        // + clears the ref. Subsequent updates flow normally.
+        if (installingSnapshotRef.current) {
+          installingSnapshotRef.current = false
+          return
+        }
         if (markdown !== prev) onChangeRef.current(markdown)
       })
     })
@@ -1165,6 +1187,12 @@ function CrepeEditor({
           const currentJson = JSON.stringify(view.state.doc.toJSON())
           const snapshotJson = JSON.stringify(initial.toJSON())
           if (currentJson !== snapshotJson) {
+            // 3.9.12 — suppress the markdownUpdated that
+            // this dispatch will fire. Without this, Crepe's
+            // listener calls onChange → parent queues an
+            // autosave → Tab B writes the server snapshot
+            // back to atoms.body as a user-attributed edit.
+            installingSnapshotRef.current = true
             const tr = view.state.tr.replaceWith(
               0,
               view.state.doc.content.size,
