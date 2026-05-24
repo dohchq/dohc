@@ -18,7 +18,8 @@
 // client-supplied data is data, not authority.
 
 import { v } from 'convex/values'
-import { mutation } from './_generated/server'
+import { mutation, query } from './_generated/server'
+import { api } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
 import { parseDocId, prosemirrorSync } from './prosemirror'
@@ -94,19 +95,99 @@ export const bootstrapSnapshotFromAtomBody = mutation({
     }
 
     // Idempotency check: if a collabDocs row already exists for
-    // this docId, another client beat us to bootstrap. Return
-    // alreadyBootstrapped:true — the package's snapshot has been
-    // created; our local prosemirrorSync.create would either
-    // silently accept (identical content) or throw (divergent).
-    // Skip the call entirely; caller proceeds to its normal
-    // post-bootstrap flow (fetch snapshot, subscribe to deltas).
+    // this docId, two possibilities:
+    //
+    //   1. Normal: another client already bootstrapped; we no-op.
+    //   2. Rebootstrap (M1 step 3.8.0): the 3.7 conflict resolver
+    //      set needsRebootstrap=true after an OOB write. Client
+    //      tore down its sync + is calling us with the fresh body
+    //      JSON. We must:
+    //        - submit a NEW snapshot at latestVersion+1 (can't
+    //          reuse version 1; create() would throw)
+    //        - clear needsRebootstrap; adopt serverBodyHash as
+    //          the new baseline; reset projectedVersion to the
+    //          new snapshot version
+    //      Race: two clients rebootstrap simultaneously → submit
+    //      at the same new version → second client's
+    //      submitSnapshot throws "already exists with different
+    //      content". We treat that as body-changed (client
+    //      retries with fresh body).
     const existing = await ctx.db
       .query('collabDocs')
       .withIndex('by_docId', (q) => q.eq('docId', docId))
       .unique()
-    if (existing) {
+    if (existing && !existing.needsRebootstrap) {
       return { ok: true, alreadyBootstrapped: true, serverBodyHash }
     }
+
+    if (existing && existing.needsRebootstrap) {
+      // Parse the PM JSON now so we can pass it to submitSnapshot.
+      // (Defer JSON parse to right before we need it.)
+      let pmJsonRebootstrap: object
+      try {
+        const parsed = JSON.parse(pmJsonStr) as object
+        if (typeof parsed !== 'object' || parsed === null) {
+          return { ok: false, reason: 'invalid-pm-json' }
+        }
+        pmJsonRebootstrap = parsed
+      } catch {
+        return { ok: false, reason: 'invalid-pm-json' }
+      }
+
+      // Find the latest version + submit a fresh snapshot at
+      // version+1. Wrap the WHOLE block in try/catch so any
+      // failure (collision with concurrent rebootstrap; component
+      // unavailable; auth-revoked-mid-call) surfaces as
+      // body-changed → client retries with a fresh body read.
+      // Production semantics: retry with exponential backoff
+      // gives the system a chance to converge.
+      let newVersion: number
+      try {
+        const latestVersion = (await ctx.runQuery(
+          api.prosemirror.latestVersion,
+          { id: docId },
+        )) as number | null
+        newVersion = (latestVersion ?? 1) + 1
+
+        await ctx.runMutation(api.prosemirror.submitSnapshot, {
+          id: docId,
+          version: newVersion,
+          content: JSON.stringify(pmJsonRebootstrap),
+        })
+      } catch {
+        // Possible causes:
+        //   - Race with another rebootstrap (collision on the
+        //     same version with different content)
+        //   - prosemirror-sync component momentarily unavailable
+        //     (very rare; transient infra)
+        //   - Client closed mid-call (network teardown)
+        // All paths: client retries on the body-changed signal.
+        // If 3.7 already cleared baseBodyHash to serverBodyHash,
+        // the retry will hit the alreadyBootstrapped path on a
+        // subsequent attempt.
+        return { ok: false, reason: 'body-changed', serverBodyHash }
+      }
+
+      // Snapshot landed. Clear the rebootstrap signal + reset
+      // baseline. baseBodyHash was already updated by 3.7's
+      // auto-rebuild path to serverBodyHash; we re-assert it
+      // defensively (idempotent if equal).
+      await ctx.db.patch(existing._id, {
+        needsRebootstrap: false,
+        baseBodyHash: serverBodyHash,
+        projectedVersion: newVersion,
+        lastProjectedHash: serverBodyHash,
+        updatedAt: Date.now(),
+      })
+      return {
+        ok: true,
+        alreadyBootstrapped: false,
+        serverBodyHash,
+      }
+    }
+
+    // Below: existing fresh-bootstrap code path (no prior
+    // collabDocs row).
 
     // Parse the PM JSON the client built. Server doesn't trust
     // structure — we let prosemirrorSync.create attempt the insert;
@@ -147,5 +228,74 @@ export const bootstrapSnapshotFromAtomBody = mutation({
     })
 
     return { ok: true, alreadyBootstrapped: false, serverBodyHash }
+  },
+})
+
+// M1 step 3.8.0 — public query the client subscribes to so it
+// can react to conflict-resolver signals from 3.7:
+//   - frozen=true → show reload banner (real conflict)
+//   - needsRebootstrap=true → tear down + re-bootstrap from
+//     atoms.body (auto-rebuild after OOB write while PM was idle)
+//
+// The actual client-side rebootstrap UX wiring (useQuery +
+// useEffect chain in collab-sync.ts) is sub-commit 3.8.1, which
+// needs browser testing to land safely. This query is the SHAPE
+// the client subscribes to; the server-side rebootstrap
+// mutation handling (above) is what makes the client's
+// bootstrapSnapshotFromAtomBody retry succeed.
+//
+// Auth: same P1 gate as recordCollabPresence. Non-readers can't
+// observe collab state (defense-in-depth; they shouldn't have
+// the docId in the first place).
+export const getCollabDocState = query({
+  args: {
+    docId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { docId, activeWorkspaceId },
+  ): Promise<
+    | {
+        exists: false
+      }
+    | {
+        exists: true
+        frozen: boolean
+        needsRebootstrap: boolean
+        lastConflictAt: number | null
+        projectedVersion: number
+      }
+  > => {
+    const parsed = parseDocId(docId)
+    if (parsed.kind === 'invalid') return { exists: false }
+    // share: docs aren't supported in v1; report no state.
+    if (parsed.kind !== 'atom') return { exists: false }
+
+    // Workspace membership (canonical per authz tripwire)
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    if (workspaceId !== parsed.workspaceId) return { exists: false }
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return { exists: false }
+
+    // P1 access — caller must be allowed to READ the atom to
+    // observe its collab state.
+    if (!(await canReadAtom(ctx, parsed.atomId, identity.subject))) {
+      return { exists: false }
+    }
+
+    const doc = await ctx.db
+      .query('collabDocs')
+      .withIndex('by_docId', (q) => q.eq('docId', docId))
+      .unique()
+    if (!doc) return { exists: false }
+
+    return {
+      exists: true,
+      frozen: doc.frozen,
+      needsRebootstrap: doc.needsRebootstrap,
+      lastConflictAt: doc.lastConflictAt ?? null,
+      projectedVersion: doc.projectedVersion,
+    }
   },
 })
