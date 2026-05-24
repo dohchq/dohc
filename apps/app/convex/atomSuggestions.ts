@@ -55,6 +55,8 @@ export const _createSuggestion = internalMutation({
     instruction: v.string(),
     authorIsAgent: v.boolean(),
     authorUserId: v.string(),
+    // 3.9.2 — CAS witness (see schema comment).
+    expectedText: v.optional(v.string()),
   },
   handler: async (
     ctx,
@@ -67,6 +69,7 @@ export const _createSuggestion = internalMutation({
       instruction,
       authorIsAgent,
       authorUserId,
+      expectedText,
     },
   ): Promise<{ ok: true; id: Id<'atomSuggestions'> } | { ok: false; reason: string }> => {
     if (proposedText.length > PER_SUGGESTION_CHAR_CAP) {
@@ -78,13 +81,17 @@ export const _createSuggestion = internalMutation({
     if (rangeFrom < 0 || rangeTo < rangeFrom) {
       return { ok: false, reason: 'Invalid range.' }
     }
-    // Cap: count THIS author's recent pending suggestions on
-    // this atom. Cron-clean: every cap check is bounded to
-    // this single atom's rows.
+    // Cap: count THIS author's PENDING suggestions on this atom
+    // within the recent window. 3.9.2 [P2] — use the
+    // by_atomId_status index so the scan is bounded to pending
+    // rows only (resolved rows linger up to 10s for the fade UI
+    // but shouldn't count against the cap).
     const since = Date.now() - RECENT_WINDOW_MS
     const recent = await ctx.db
       .query('atomSuggestions')
-      .withIndex('by_atomId', (q) => q.eq('atomId', atomId))
+      .withIndex('by_atomId_status', (q) =>
+        q.eq('atomId', atomId).eq('status', 'pending'),
+      )
       .collect()
     const myRecent = recent.filter(
       (r) => r.authorUserId === authorUserId && r.createdAt >= since,
@@ -104,6 +111,7 @@ export const _createSuggestion = internalMutation({
       instruction,
       authorIsAgent,
       authorUserId,
+      expectedText,
       status: 'pending',
       createdAt: Date.now(),
     })
@@ -131,17 +139,29 @@ export const listPending = query({
     if (atom.workspaceId !== workspaceId) return []
     if (!(await canReadAtom(ctx, atomId, identity.subject))) return []
 
+    // 3.9.2 [P2] — split the read so PENDING uses the
+    // by_atomId_status index (hot path; common case is many
+    // resolved + few pending). Recently-resolved still needs a
+    // broader scan but the cutoff bounds it.
     const cutoff = Date.now() - RESOLVED_KEEP_MS
-    const all = await ctx.db
+    const pending = await ctx.db
       .query('atomSuggestions')
-      .withIndex('by_atomId', (q) => q.eq('atomId', atomId))
-      .collect()
-    return all
-      .filter(
-        (r) =>
-          r.status === 'pending' ||
-          (r.resolvedAt !== undefined && r.resolvedAt >= cutoff),
+      .withIndex('by_atomId_status', (q) =>
+        q.eq('atomId', atomId).eq('status', 'pending'),
       )
+      .collect()
+    const recentlyResolved = (
+      await ctx.db
+        .query('atomSuggestions')
+        .withIndex('by_atomId', (q) => q.eq('atomId', atomId))
+        .collect()
+    ).filter(
+      (r) =>
+        r.status !== 'pending' &&
+        r.resolvedAt !== undefined &&
+        r.resolvedAt >= cutoff,
+    )
+    return [...pending, ...recentlyResolved]
       .map((r) => ({
         _id: r._id,
         atomId: r.atomId,
@@ -199,24 +219,47 @@ export const acceptSuggestion = mutation({
       throw new Error('Not authorized to edit this atom.')
     }
 
-    // Inline the proposed text. The body manipulation is
-    // position-based; under concurrent edits the range may
-    // be stale (v1 caveat). Clamp to body length to avoid
-    // out-of-bounds slicing.
+    // M1 step 3.9.2 — codex 14th-pass [P1] #1 RANGE CAS.
     //
+    // The suggestion stores markdown-body offsets + the EXACT
+    // text the agent thought was there (expectedText). Before
+    // splicing, verify body.slice(from, to) === expectedText.
+    // If the doc drifted between suggest_in_doc and accept
+    // (user typed, another agent wrote, projection landed) we
+    // ABORT the accept rather than splice the wrong bytes.
+    //
+    // Pre-3.9.2 rows (no expectedText) bypass CAS for backward
+    // compatibility but should not exist in practice — the
+    // suggest_in_doc tool always populates it.
+    const body = atom.body
+    const clampedFrom = Math.max(0, Math.min(row.rangeFrom, body.length))
+    const clampedTo = Math.max(clampedFrom, Math.min(row.rangeTo, body.length))
+    if (row.expectedText !== undefined) {
+      const actual = body.slice(clampedFrom, clampedTo)
+      if (actual !== row.expectedText) {
+        // Don't write. Mark the suggestion 'rejected' with the
+        // caller as resolver — the doc moved on; the suggestion
+        // is no longer valid.
+        await ctx.db.patch(suggestionId, {
+          status: 'rejected',
+          resolvedByUserId: subject,
+          resolvedAt: Date.now(),
+        })
+        throw new Error(
+          'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
+        )
+      }
+    }
+    const newBody =
+      body.slice(0, clampedFrom) + row.proposedText + body.slice(clampedTo)
+
     // NOTE on collab projection: when an atom has an active
     // collab session, this write races the projection writer.
     // The PM↔body bidirectional binding (3.9.5 fix #1) means
     // the next projection would freeze or auto-rebuild. For
-    // v1: accept the race; document as "agents writing into
-    // a live-collab atom may briefly conflict; the collab
-    // resolver handles it." Future work routes accepts through
-    // the prosemirrorSync.transform path for inline atomicity.
-    const body = atom.body
-    const clampedFrom = Math.max(0, Math.min(row.rangeFrom, body.length))
-    const clampedTo = Math.max(clampedFrom, Math.min(row.rangeTo, body.length))
-    const newBody =
-      body.slice(0, clampedFrom) + row.proposedText + body.slice(clampedTo)
+    // v1: accept the race; the conflict resolver handles it.
+    // Future work routes accepts through prosemirrorSync.transform
+    // for atomicity.
 
     await ctx.runMutation(internal.atoms._upsertInternal, {
       workspaceId,

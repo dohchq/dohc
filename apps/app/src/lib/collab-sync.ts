@@ -870,9 +870,13 @@ export function makeRemoteCursorsPlugin(): Plugin {
         const docSize = state.doc.content.size
         const decos: Decoration[] = []
         for (const c of cursors) {
-          // Clamp positions defensively — a stale snapshot can
-          // produce a cursorPos past the current doc size.
-          if (c.cursorPos < 0 || c.cursorPos > docSize) continue
+          // M1 step 3.9.2 — codex 14th-pass [P2] — actually
+          // clamp (was: skip out-of-range, which made stale
+          // cursors disappear instead of rendering at doc
+          // boundary). Clamping is more useful UX — the user
+          // sees a remote cursor at end-of-doc rather than a
+          // gap where they expect a caret.
+          const pos = Math.max(0, Math.min(c.cursorPos, docSize))
           const hue = hueFromString(c.userId)
           const color = `hsl(${hue} 70% 45%)`
           const caret = document.createElement('span')
@@ -886,7 +890,7 @@ export function makeRemoteCursorsPlugin(): Plugin {
           label.title = c.userId
           caret.appendChild(label)
           decos.push(
-            Decoration.widget(c.cursorPos, caret, {
+            Decoration.widget(pos, caret, {
               key: `remote-cursor-${c.clientId}`,
               side: 1,
               ignoreSelection: true,
@@ -921,6 +925,21 @@ export function makeLocalCursorObserverPlugin({
 }): Plugin {
   return new Plugin({
     key: new PluginKey('dohcLocalCursor'),
+    // M1 step 3.9.2 — codex 14th-pass [P2] blur clearing.
+    // Without this, blurring the editor (alt-tab, click outside)
+    // leaves the last cursor position in collabSessions until
+    // the 90s expiry; other tabs show a "ghost" cursor for
+    // someone who isn't actually editing. blur fires → clear to
+    // null → server patches cursorPos=null → getCursorsForDoc
+    // filters it out.
+    props: {
+      handleDOMEvents: {
+        blur: (_view, _event) => {
+          onCursorChange(null)
+          return false // don't prevent default blur handling
+        },
+      },
+    },
     view() {
       let timer: ReturnType<typeof setTimeout> | null = null
       let lastReportedPos: number | null = null

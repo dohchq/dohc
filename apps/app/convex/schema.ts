@@ -693,14 +693,28 @@ export default defineSchema({
   atomSuggestions: defineTable({
     atomId: v.id('atoms'),
     workspaceId: v.string(),
-    // PM doc-position range the suggestion applies to (snapshot-
-    // relative; same v1 caveat as cursorPos — concurrent edits
-    // may briefly desync the highlighted range).
+    // MARKDOWN-BODY offsets the suggestion applies to. NOT PM
+    // doc positions — those are a separate coordinate system
+    // that doesn't map 1:1 to atoms.body string indices. The
+    // agent (which reads body via read_atom) reasons about
+    // markdown offsets natively; the editor decoration plugin
+    // renders the bubble at the approximate PM position (visual
+    // approximation; correctness comes from the CAS on accept).
     rangeFrom: v.number(),
     rangeTo: v.number(),
     // The text the agent wants to write. Replaces [from, to] on
     // accept.
     proposedText: v.string(),
+    // M1 step 3.9.2 — codex 14th-pass [P1] #1 CAS. The agent
+    // also passes the EXACT text it thinks lives at
+    // [rangeFrom, rangeTo] of atoms.body at suggestion time.
+    // acceptSuggestion validates: if body.slice(from,to) !==
+    // expectedText, the document drifted (user typed, agent
+    // wrote, projection ran) — abort with a clean error rather
+    // than splice the wrong bytes. Optional for backwards
+    // compatibility with any in-flight rows pre-3.9.2; missing
+    // value bypasses CAS (treated as "trust the offsets").
+    expectedText: v.optional(v.string()),
     // The original instruction that produced this suggestion
     // (e.g. "rewrite intro"). Surfaced in the bubble UI.
     instruction: v.string(),

@@ -1766,13 +1766,14 @@ export const dohcAgent = new Agent(components.agent, {
     // chat.
     suggest_in_doc: createTool({
       description:
-        "Propose an inline edit on an atom. Creates a suggestion bubble at [rangeFrom, rangeTo] containing proposedText; the user accepts or rejects in the editor. PREFER this over write_atom for surgical changes the user should see before they land. The atom's path identifies the target. Hard cap: 5 suggestions per atom per minute per author.",
+        "Propose an inline edit on an atom. Creates a suggestion bubble at MARKDOWN-BODY offsets [rangeFrom, rangeTo] containing proposedText; the user accepts or rejects in the editor. PREFER this over write_atom for surgical changes the user should see before they land. The atom's path identifies the target. MUST pass expectedText = the exact body slice between rangeFrom and rangeTo (CAS: if the body has changed since you read it, accept aborts cleanly instead of corrupting the doc). Hard cap: 5 suggestions per atom per minute per author.",
       inputSchema: z.object({
         path: z.string(),
         rangeFrom: z.number(),
         rangeTo: z.number(),
         proposedText: z.string(),
         instruction: z.string(),
+        expectedText: z.string(),
       }),
       execute: async (
         ctx,
@@ -1782,21 +1783,26 @@ export const dohcAgent = new Agent(components.agent, {
           rangeTo,
           proposedText,
           instruction,
+          expectedText,
         }: {
           path: string
           rangeFrom: number
           rangeTo: number
           proposedText: string
           instruction: string
+          expectedText: string
         },
         options,
       ): Promise<string> => {
         const workspaceId = await ownerWorkspaceFromTool(ctx, options)
         const viewerSubject = await viewerSubjectFromTool(ctx)
-        // Resolve atom by path (we can't take the id directly
-        // because the agent typically references atoms by path).
+        // M1 step 3.9.2 — codex 14th-pass [P1] #2 FIX. Pass
+        // activeWorkspaceId so getByPath resolves in the
+        // OWNER workspace (org) not the caller's personal
+        // workspace.
         const atom = (await ctx.runQuery(api.atoms.getByPath, {
           path,
+          activeWorkspaceId: workspaceId,
         })) as { _id: Id<'atoms'>; workspaceId: string; body: string } | null
         if (!atom) return `atom "${path}" not found`
         if (atom.workspaceId !== workspaceId) {
@@ -1811,12 +1817,13 @@ export const dohcAgent = new Agent(components.agent, {
             rangeTo,
             proposedText,
             instruction,
+            expectedText,
             authorIsAgent: true,
             authorUserId: viewerSubject,
           },
         )) as { ok: true; id: string } | { ok: false; reason: string }
         if (!result.ok) return `suggestion rejected: ${result.reason}`
-        return `suggested edit on "${path}" [${rangeFrom}..${rangeTo}] (${proposedText.length} chars). User will accept or reject in the editor.`
+        return `suggested edit on "${path}" [${rangeFrom}..${rangeTo}] (${proposedText.length} chars; CAS: ${expectedText.length} expected chars). User will accept or reject in the editor.`
       },
     }),
   },
