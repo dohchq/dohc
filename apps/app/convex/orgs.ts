@@ -8,6 +8,7 @@ import { v } from 'convex/values'
 import { query, mutation, internalMutation, internalQuery } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
+import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { countActiveOwners, requireRole } from './orgRoles'
 
@@ -318,6 +319,98 @@ export const myWorkspaces = query({
       })
     }
     return out
+  },
+})
+
+// H-2 (multiplayer-and-h-followups §4 A2) — seed a freshly-created org
+// with a starter `company.md` + dashboard + an `onboarding` row so the
+// agent's first turn in the new workspace has something to operate
+// against (instead of an empty void). Called from `createOrgWithBridge`
+// after the Convex insert + WorkOS sync. Internal (the bridge is the
+// only legitimate caller).
+//
+// The seeded content is intentionally STARTER text, NOT polished
+// final copy — the agent's first onboarding turn (kicked from the
+// dialog post-create) will refine it from the team's context. The
+// starter exists so:
+//  - `onboarding.progressOf` finds company.md and reports hasMe:true
+//    once the agent fills it in, satisfying the never-end-empty floor.
+//  - The user lands on a real page when navigated to /w/<orgId>/p/<companyMdFileId>
+//    instead of an empty workspace state.
+//  - The dashboard has a query block from day one (the live primitive
+//    the prompt requires before finish_onboarding).
+export const _seedNewOrg = internalMutation({
+  args: { orgId: v.id('orgs') },
+  handler: async (ctx, { orgId }) => {
+    const org = await ctx.db.get(orgId)
+    if (!org) throw new Error('Org not found for seeding.')
+    const name = org.name
+
+    // 1) onboarding row — the gate's source of truth for "is this
+    //    workspace NEW / IN_PROGRESS / DONE". Without it the gate
+    //    treats the workspace as NEW forever; the wedge UI would
+    //    re-fire on every visit.
+    const existing = await ctx.db
+      .query('onboarding')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', orgId as string))
+      .first()
+    if (!existing) {
+      await ctx.db.insert('onboarding', { workspaceId: orgId as string })
+    }
+
+    // 2) company.md — the team identity atom. Pre-fills the org name +
+    //    leaves clear seams the agent (and the team) edit on first
+    //    pass. Title via frontmatter (Notion-style per SYSTEM_PROMPT).
+    await ctx.runMutation(internal.atoms._upsertSystem, {
+      workspaceId: orgId as string,
+      path: 'company.md',
+      body: `---
+title: ${name}
+---
+
+_What ${name} does — edit this to describe the team's work, how you operate, and how dohc should help._
+
+## What we do
+
+[describe ${name}'s work in one paragraph]
+
+## How we work
+
+[describe rituals / cadences / where decisions happen]
+
+## How we'd like dohc to help
+
+[describe what you want dohc to keep on top of for the team]
+`,
+      source: 'agent',
+    })
+
+    // 3) dashboard.md — the live-primitive starter. The query block
+    //    is the minimum the prompt requires before `finish_onboarding`
+    //    (a real query, not wall-to-wall DSL). Lists the team's recent
+    //    files so the dashboard is non-empty even before the agent
+    //    populates structured data.
+    await ctx.runMutation(internal.atoms._upsertSystem, {
+      workspaceId: orgId as string,
+      path: 'dashboard.md',
+      body: `---
+title: Dashboard
+---
+
+_This is yours — edit anything here directly. For bigger changes, just ask me._
+
+## ${name}
+
+Live — recent files:
+
+\`\`\`query
+docs.glob("*.md")
+\`\`\`
+`,
+      source: 'agent',
+    })
+
+    return { ok: true as const }
   },
 })
 

@@ -113,6 +113,20 @@ export const createOrgWithBridge = action({
       console.error('[orgsBridge] WorkOS create/reconcile failed:', err)
     }
 
+    // 3. H-2 (A2) — seed the new org with company.md + dashboard +
+    // onboarding row. The agent's kindInfo (A1) now routes the
+    // workspace-kind prompt to ORG; the seed gives that prompt
+    // something real to work against. Best-effort: a seed failure
+    // shouldn't fail the create — log + move on; the user can
+    // ask the agent to seed it later.
+    try {
+      await ctx.runMutation(internal.orgs._seedNewOrg, {
+        orgId: created.orgId,
+      })
+    } catch (err) {
+      console.error('[orgsBridge] _seedNewOrg failed:', err)
+    }
+
     return { ...created, workosOrgId }
   },
 })

@@ -12,7 +12,7 @@
  * org for the per-org member list. All mutations are the Phase-A
  * Owner-gated ones (last-Owner protection happens server-side).
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAction, useMutation, useQuery } from 'convex/react'
 import { Plus, X, Copy, Trash2, UserCog, Building2, User as UserIcon } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
@@ -59,9 +59,12 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     setErr(null)
     try {
       const { orgId } = await createOrg({ name })
-      // Auto-switch to the new org so the user immediately sees their
-      // (empty) workspace.
+      // A2 (H-2): the bridge action seeds company.md + dashboard before
+      // returning. setActiveWorkspaceId navigates to /w/<orgId> (R1
+      // commit 3), so the user lands on the new workspace's home.
+      // Closing the dialog so they see the populated workspace cleanly.
       setActiveWorkspaceId(orgId)
+      onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -75,6 +78,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     try {
       const { orgId } = await joinOrg({ inviteCode: code.trim() })
       setActiveWorkspaceId(orgId)
+      onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -187,15 +191,29 @@ function CreateOrgForm({
   onSubmit: (name: string) => Promise<void>
 }) {
   const [name, setName] = useState('')
+  // F2 (ultrathink H4) — double-click ref lock. React's setState is
+  // async, so `busy` doesn't synchronously gate the second click. A
+  // rapid double-click could fire two `createOrgWithBridge` calls
+  // before the disabled state propagates — producing duplicate Convex
+  // orgs (each with a fresh unique invite code) + duplicate WorkOS
+  // orgs (the externalId idempotency in the bridge dedupes those but
+  // not the Convex side). The ref check is synchronous and wins.
+  const inFlight = useRef(false)
   return (
     <form
       className="flex items-center gap-2"
       onSubmit={async (e) => {
         e.preventDefault()
+        if (inFlight.current) return
         const clean = name.trim()
         if (!clean) return
-        await onSubmit(clean)
-        setName('')
+        inFlight.current = true
+        try {
+          await onSubmit(clean)
+          setName('')
+        } finally {
+          inFlight.current = false
+        }
       }}
     >
       <input

@@ -116,8 +116,11 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
   })
 
   it('auto-switches into a freshly-created org so the user sees their new workspace', () => {
+    // The window between `createOrg` and `setActiveWorkspaceId(orgId)`
+    // is wider now (post-A2 the dialog comments explain the seed flow
+    // before the navigation). 500 chars accommodates the comment block.
     expect(DIALOG_SRC).toMatch(
-      /createOrg\([\s\S]{0,200}setActiveWorkspaceId\(\s*orgId/,
+      /createOrg\([\s\S]{0,500}setActiveWorkspaceId\(\s*orgId/,
     )
   })
 
