@@ -718,9 +718,12 @@ export default defineSchema({
     // acceptSuggestion validates: if body.slice(from,to) !==
     // expectedText, the document drifted (user typed, agent
     // wrote, projection ran) — abort with a clean error rather
-    // than splice the wrong bytes. Optional for backwards
-    // compatibility with any in-flight rows pre-3.9.2; missing
-    // value bypasses CAS (treated as "trust the offsets").
+    // than splice the wrong bytes.
+    //
+    // 3.9.3 made expectedText REQUIRED on accept: a row missing
+    // it is rejected (return ok:false, reason:'missing-cas-witness'
+    // post-3.9.15). The schema field stays v.optional so legacy
+    // rows still LOAD, but they cannot accept successfully.
     expectedText: v.optional(v.string()),
     // The original instruction that produced this suggestion
     // (e.g. "rewrite intro"). Surfaced in the bubble UI.

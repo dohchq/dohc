@@ -108,6 +108,21 @@ describe('markdownRoundtrip — dohc-specific shapes are preserved', () => {
     expect(roundtripMarkdown(out)).toBe(out)
   })
 
+  it('raw BEL in user content survives encode/decode (3.9.20)', () => {
+    // 3.9.20 — codex 22nd-pass [P2] hardening: a user-typed
+    // BEL+"W:foo"+BEL would have been silently rewritten to
+    // "[[foo]]" before this fix. The BEL_SAFE escape layer
+    // protects raw BEL from collision with the wikilink
+    // sentinel.
+    const bel = String.fromCharCode(7)
+    const md = `Has ${bel} bel and ${bel}W:fake${bel} sentinel.\n`
+    const out = roundtripMarkdown(md)
+    expect(out).toContain(bel)
+    expect(out).not.toContain('[[fake]]')
+    // Idempotent on second pass
+    expect(roundtripMarkdown(out)).toBe(out)
+  })
+
   it('query blocks survive (code fence with `query` lang)', () => {
     const md = '```query\ndocs.glob("**/*.md")\n```\n'
     const out = roundtripMarkdown(md)

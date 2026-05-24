@@ -24,38 +24,60 @@ import type { Root } from 'mdast'
 // processing. Closes plan §3 M1 hard-blocker (round-trip
 // idempotency across the corpus).
 //
-// Why pre/post-process instead of a remark plugin:
-// remark-parse interprets `[[` as nested link syntax — by
-// the time a parse-phase plugin runs, the markdown has
-// already been tokenized into linkReference + text nodes,
-// not a clean text node containing `[[target]]`. A from-
-// markdown extension would solve this properly but adds
-// significant complexity. Pre/post-process is ~15 lines
-// and totally robust.
+// 3.9.20 — codex 22nd-pass [P2] hardening: handle raw BEL chars
+// in user content. Without the BEL_SAFE layer below, a user
+// who typed BEL+"W:foo"+BEL into their markdown would silently
+// have it rewritten to [[foo]] on round-trip. Pathological but
+// observable.
 //
-// Sentinel: U+0007 (bell). Picked because:
-//   · Never appears in user markdown (control character)
-//   · remark-parse passes it through as plain text
-//   · remark-stringify doesn't escape it
-// The token shape `W:target` is bracketed by
-// bells; the target carries no bells (we strip them
-// defensively below).
+// Two-layer escape:
+//   USER_BEL_SAFE = BEL+"BEL"+BEL — escapes raw BEL in user
+//     content BEFORE the wikilink encode below.
+//   WIKI sentinel = BEL+"W:target"+BEL — encodes [[target]].
+// Decode runs in inverse order: wikilinks first (so any BEL
+// inside the sentinel is OUR sentinel, not user content),
+// then BEL_SAFE back to raw BEL.
+//
+// BEL (U+0007) is the sentinel character: never appears in
+// normal markdown, remark-parse passes it through as plain
+// text, remark-stringify doesn't escape it.
+const BEL = String.fromCharCode(7)
+const BS = String.fromCharCode(8)
 const WIKI_RE = /\[\[([^\[\]\n]+)\]\]/g
-const WIKI_OPEN = 'W:'
-const WIKI_CLOSE = ''
-const WIKI_SENTINEL_RE = /W:([^\n]+)/g
+const WIKI_OPEN = `${BEL}W:`
+const WIKI_CLOSE = BEL
+const WIKI_SENTINEL_RE = new RegExp(`${BEL}W:([^\\n]+?)${BEL}`, 'g')
+// 3.9.20 — escape uses BS (U+0008) as delimiter so it can't
+// collide with the BEL-delimited wikilink sentinel. User
+// content containing raw BS is vanishingly rare (control
+// character; not produced by any keyboard or editor).
+const USER_BEL_SAFE = `${BS}BEL${BS}`
+const USER_BEL_SAFE_RE = new RegExp(`${BS}BEL${BS}`, 'g')
+const RAW_BEL_RE = new RegExp(BEL, 'g')
 
 function encodeWikilinks(md: string): string {
-  return md.replace(WIKI_RE, (_m, target) => {
-    // Strip any bells in the target (paranoid; users can't type
-    // them but a roundtrip-of-a-roundtrip shouldn't double-encode)
-    const clean = String(target).replace(//g, '')
-    return `${WIKI_OPEN}${clean}${WIKI_CLOSE}`
-  })
+  // 3.9.20 — escape raw BEL in user content first so it can't
+  // collide with our wikilink sentinel below. The regex matches
+  // BARE BEL chars; the BEL_SAFE replacement uses 3 BEL chars
+  // bracketed by "BEL", which doesn't itself trigger another
+  // BEL_SAFE substitution because the inner BEL is part of the
+  // escape sequence.
+  const safe = md.replace(RAW_BEL_RE, USER_BEL_SAFE)
+  return safe.replace(
+    WIKI_RE,
+    (_m, target) => `${WIKI_OPEN}${target}${WIKI_CLOSE}`,
+  )
 }
 
 function decodeWikilinks(md: string): string {
-  return md.replace(WIKI_SENTINEL_RE, (_m, target) => `[[${target}]]`)
+  // Restore wikilinks BEFORE BEL_SAFE so the sentinel BEL chars
+  // are consumed by the wikilink replace, not the BEL_SAFE
+  // replace.
+  const withLinks = md.replace(
+    WIKI_SENTINEL_RE,
+    (_m, target) => `[[${target}]]`,
+  )
+  return withLinks.replace(USER_BEL_SAFE_RE, BEL)
 }
 
 // Single shared processor instance. unified() is internally cached
