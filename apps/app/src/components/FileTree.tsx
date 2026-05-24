@@ -105,6 +105,15 @@ type Props = {
   }>
   activeShareId?: string | null
   onOpenShared?: (shareId: string) => void
+  // P1 (multiplayer-and-h-followups §6.5) — per-atom access overrides
+  // keyed by fileId. Tree renders a small Lock badge next to each
+  // file whose fileId appears here. Empty array ⇒ no badges (the
+  // overwhelming common case — most atoms are org-default).
+  accessStates?: Array<{
+    fileId: string
+    mode: 'private' | 'restricted'
+    ownerUserId: string
+  }>
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
 }
@@ -383,8 +392,24 @@ export function FileTree({
   sharedWithMe,
   activeShareId,
   onOpenShared,
+  accessStates,
   onOpenSearch,
 }: Props) {
+  // P1 — derive a path → mode lookup from the (fileId→mode) state
+  // and the file rows (which carry fileId). The leaf renderer reads
+  // by path in O(1). Empty array fast-paths to an empty Map (the
+  // overwhelming common case — most atoms are org-default).
+  const accessByPath = useMemo(() => {
+    const m = new Map<string, 'private' | 'restricted'>()
+    if (!accessStates || accessStates.length === 0) return m
+    const byFileId = new Map<string, 'private' | 'restricted'>()
+    for (const s of accessStates) byFileId.set(s.fileId, s.mode)
+    for (const f of files) {
+      const mode = f.fileId ? byFileId.get(f.fileId) : undefined
+      if (mode) m.set(f.path, mode)
+    }
+    return m
+  }, [accessStates, files])
   // Partition the flat lists into the three sidebar sections. Pure
   // presentation — no file moves. The main tree is built from the
   // Personal-workspace subset; Context surfaces the reserved files.
@@ -1206,6 +1231,7 @@ export function FileTree({
                 pendingKind={pending}
                 pendingTargetDir={targetDir}
                 onPendingCommit={commitPending}
+                accessByPath={accessByPath}
               />
             ))}
           </div>
@@ -1381,6 +1407,7 @@ function TreeRowNode({
   pendingKind,
   pendingTargetDir,
   onPendingCommit,
+  accessByPath,
 }: {
   node: TreeNode
   depth: number
@@ -1422,6 +1449,8 @@ function TreeRowNode({
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
   onPendingCommit: (value: string) => void
+  // P1 — path → access mode, threaded from FileTree's useMemo.
+  accessByPath: Map<string, 'private' | 'restricted'>
 }) {
   const isFolder = node.page === null
   const isExpanded = expanded.has(node.fullPath)
@@ -1540,6 +1569,26 @@ function TreeRowNode({
             aria-label={
               node.page!.systemLocked ? 'system-locked' : 'user-locked'
             }
+          />
+        )}
+        {/* P1 — per-atom access badge. Distinct from the system/user
+            lock above: this is a workspace-membership privacy
+            flag, not an editability lock. Color: amber for private
+            (visibility hidden from teammates), blue for restricted
+            (visibility scoped to an allowlist). Aria-label names it
+            so screen readers can distinguish from the locks above. */}
+        {accessByPath.get(node.page!.path) === 'private' && (
+          <Lock
+            className="size-3 shrink-0 text-amber-500"
+            strokeWidth={2}
+            aria-label="private — only you can see this"
+          />
+        )}
+        {accessByPath.get(node.page!.path) === 'restricted' && (
+          <Lock
+            className="size-3 shrink-0 text-sky-500"
+            strokeWidth={2}
+            aria-label="restricted — visible to a limited set"
           />
         )}
         {onToggleFileStar ? (
@@ -1745,6 +1794,7 @@ function TreeRowNode({
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
             onPendingCommit={onPendingCommit}
+            accessByPath={accessByPath}
           />
         ))}
     </Fragment>

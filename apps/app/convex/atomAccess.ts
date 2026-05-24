@@ -701,6 +701,66 @@ export const setAtomAccessByFileId = mutation({
   },
 })
 
+/** UI helper: list every atom in the active workspace that carries a
+ *  per-atom access override (private/restricted), keyed by fileId.
+ *  The file tree consumes this to render lock icons. Org-default
+ *  atoms are intentionally omitted — there's no row for them and
+ *  the tree treats absence as "no badge needed."
+ *
+ *  Returns the FULL set within the workspace (the tree wants to
+ *  badge every visible row). The set is bounded by #atoms with
+ *  overrides — small in practice (most atoms are org-default).
+ *
+ *  CRITICALLY: the response only includes atoms the caller can READ.
+ *  We don't return a private atom owned by a teammate even with
+ *  just its mode — that'd be an existence oracle. The tree won't
+ *  show that atom either (atoms.list already filters via canReadAtom
+ *  from 253a386), so the lack of a badge for unreadable atoms
+ *  doesn't matter — they don't appear in the tree at all. */
+export const listAccessStates = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (
+    ctx,
+    { activeWorkspaceId },
+  ): Promise<
+    Array<{ fileId: string; mode: 'private' | 'restricted'; ownerUserId: string }>
+  > => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return []
+    const subject = identity.subject
+
+    // Collect every atomAccess row, then per-row: fetch the atom,
+    // confirm same workspace + readable to viewer, then resolve its
+    // bound fileId via atomIds index.
+    const accessRows = await ctx.db.query('atomAccess').collect()
+    const out: Array<{
+      fileId: string
+      mode: 'private' | 'restricted'
+      ownerUserId: string
+    }> = []
+    for (const row of accessRows) {
+      const atom = await ctx.db.get(row.atomId)
+      if (!atom || atom.workspaceId !== workspaceId) continue
+      if (!(await canReadAtom(ctx, row.atomId, subject))) continue
+      // Resolve bound fileId for this atom's current path.
+      const idRow = await ctx.db
+        .query('atomIds')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', workspaceId).eq('path', atom.path),
+        )
+        .unique()
+      if (!idRow || idRow.state !== 'bound') continue
+      out.push({
+        fileId: idRow.fileId,
+        mode: row.mode,
+        ownerUserId: row.ownerUserId,
+      })
+    }
+    return out
+  },
+})
+
 // ── Internal helpers used by other phases (e.g. P1 cascade tombstone) ──
 
 /** Internal: tombstone all private atoms owned by a departing member.
