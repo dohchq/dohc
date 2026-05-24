@@ -22,15 +22,17 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
 // not the Convex row id; these spare it a two-step.
 
 async function fileIdOf(t: ReturnType<typeof convexTest>, orgId: string, path: string) {
-  const idRow = await t.run(async (ctx) =>
-    ctx.db
-      .query('atomIds')
-      .withIndex('by_workspace_fileId', (q) => q.eq('workspaceId', orgId))
-      .collect(),
+  // Use .collect() (no withIndex) — convex-test's typed db on the
+  // ad-hoc t.run ctx doesn't surface user-table indexes the same way
+  // the in-app QueryCtx does. Collecting + filtering is fine for a
+  // test fixture (small dataset).
+  const idRows = await t.run(async (ctx) => ctx.db.query('atomIds').collect())
+  const bound = idRows.find(
+    (r: { workspaceId: string; path: string | null }) =>
+      r.workspaceId === orgId && r.path === path,
   )
-  const bound = idRow.find((r: { path: string | null }) => r.path === path)
   if (!bound) throw new Error(`no atomIds binding for ${path}`)
-  return bound.fileId
+  return (bound as { fileId: string }).fileId
 }
 
 describe('P1 — getAtomAccessByFileId', () => {

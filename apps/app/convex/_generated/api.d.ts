@@ -37,6 +37,7 @@ import type * as orgs from "../orgs.js";
 import type * as orgsBridge from "../orgsBridge.js";
 import type * as pluginBridge from "../pluginBridge.js";
 import type * as plugins from "../plugins.js";
+import type * as prosemirror from "../prosemirror.js";
 import type * as queries from "../queries.js";
 import type * as resolveWindow from "../resolveWindow.js";
 import type * as search from "../search.js";
@@ -84,6 +85,7 @@ declare const fullApi: ApiFromModules<{
   orgsBridge: typeof orgsBridge;
   pluginBridge: typeof pluginBridge;
   plugins: typeof plugins;
+  prosemirror: typeof prosemirror;
   queries: typeof queries;
   resolveWindow: typeof resolveWindow;
   search: typeof search;
@@ -125,4 +127,5 @@ export declare const internal: FilterApi<
 export declare const components: {
   agent: import("@convex-dev/agent/_generated/component.js").ComponentApi<"agent">;
   workOSAuthKit: import("@convex-dev/workos-authkit/_generated/component.js").ComponentApi<"workOSAuthKit">;
+  prosemirrorSync: import("@convex-dev/prosemirror-sync/_generated/component.js").ComponentApi<"prosemirrorSync">;
 };
