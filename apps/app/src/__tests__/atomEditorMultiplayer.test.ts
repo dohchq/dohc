@@ -86,16 +86,69 @@ describe('AtomEditor — multiplayer wiring (structural)', () => {
   })
 
   it('does not touch the single-user fast path (no Convex calls for non-multiplayer)', () => {
-    // useCollabSync with enabled:false MUST early-return without
-    // calling Convex. The hook's source already pins this
-    // (collabSync.test.ts), but pin the AtomEditor side too:
-    // the hook call is the ONLY new Convex surface added for
-    // multiplayer in this file (modulo useRemoteVersion which is
-    // also gated by the docId pass-through).
+    // The collab hooks MUST be gated. useCollabSync gates via
+    // enabled:!!multiplayerDocId; useRemoteVersion gates via
+    // multiplayerDocId??null; useCollabDocState (3.8.1.0+) gates
+    // via multiplayerDocId??null + the 'skip' idiom inside the hook.
+    // Each is called EXACTLY ONCE in the file (no duplicate
+    // subscriptions). Hook source pins are in collabSync.test.ts.
     const useCollabSyncCount = (SRC.match(/useCollabSync\(/g) ?? []).length
     expect(useCollabSyncCount).toBe(1)
     const useRemoteVersionCount = (SRC.match(/useRemoteVersion\(/g) ?? [])
       .length
     expect(useRemoteVersionCount).toBe(1)
+    const useCollabDocStateCount = (
+      SRC.match(/useCollabDocState\(/g) ?? []
+    ).length
+    expect(useCollabDocStateCount).toBe(1)
+  })
+})
+
+// M1 step 3.8.1.1 — frozen banner. Renders in place of the
+// editor when collab-doc state says frozen=true (3.7 case A;
+// both sides changed unilaterally). Gated by multiplayerDocId
+// so single-user mounts never hit this path.
+describe('AtomEditor — frozen banner (M1 3.8.1.1)', () => {
+  it('imports useCollabDocState from collab-sync', () => {
+    expect(SRC).toMatch(
+      /import\s*\{[\s\S]*?useCollabDocState[\s\S]*?\}\s*from\s*'@\/lib\/collab-sync'/,
+    )
+  })
+
+  it('gates the banner on multiplayerDocId (single-user never sees it)', () => {
+    // The banner conditional MUST start with multiplayerDocId
+    // check — otherwise single-user editors could hit it if
+    // collabDocState ever ended up populated stray.
+    expect(SRC).toMatch(
+      /if\s*\(\s*multiplayerDocId\s*&&[\s\S]+?collabDocState[\s\S]+?\.frozen\s*\)/,
+    )
+  })
+
+  it('banner has accessible role + testid + reload button', () => {
+    // Accessibility: role="alert" so screen readers announce it
+    // when state flips. Testid for downstream UI tests. Reload
+    // triggers window.location.reload (v1 simplest — later can
+    // be more graceful via a fresh useCollabSync mount cycle).
+    expect(SRC).toMatch(/data-testid="collab-frozen-banner"/)
+    expect(SRC).toMatch(/role="alert"/)
+    expect(SRC).toMatch(/onClick=\{\(\) => window\.location\.reload\(\)\}/)
+  })
+
+  it('banner narrative names both warning + consequence (real conflict UX)', () => {
+    // The user copy needs to explain WHY (someone else edited)
+    // AND WHAT'S LOST (unsaved changes in this session). Without
+    // both, users will hit reload without understanding what
+    // they're losing.
+    expect(SRC).toMatch(/changed outside.*collaborative session/i)
+    expect(SRC).toMatch(/unsaved.*lost|lose.*unsaved|will be lost/i)
+  })
+
+  it('banner exists check uses the discriminated union correctly', () => {
+    // CollabDocState is `{exists:false} | {exists:true, frozen, ...}`
+    // — the frozen field only exists on the exists:true variant.
+    // The conditional must include the exists:true check so TS
+    // narrows + runtime doesn't crash on the false variant.
+    expect(SRC).toMatch(/'exists' in collabDocState[\s\S]+?collabDocState\.exists/)
+    expect(SRC).toMatch(/collabDocState\.frozen/)
   })
 })

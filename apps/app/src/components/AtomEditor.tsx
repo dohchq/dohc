@@ -37,6 +37,7 @@ import {
 import { WikilinkPicker } from './WikilinkPicker'
 import {
   useCollabSync,
+  useCollabDocState,
   useRemoteVersion,
   applyRemoteSteps,
   getVersion,
@@ -1100,6 +1101,22 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     onChangeRef.current = onChange
   }, [onChange])
 
+  // M1 step 3.8.1.1 — subscribe to collab-doc state so the frozen
+  // signal (3.7 case A; both sides changed unilaterally) can
+  // surface to the user. The query is `skip`-gated by docId
+  // presence, so single-user mounts (multiplayerDocId === undefined)
+  // genuinely don't subscribe — zero Convex cost, zero re-render.
+  //
+  // The needsRebootstrap signal (3.7 case B; auto-rebuild path)
+  // is also exposed via this hook but consumed in sub-commit
+  // 3.8.1.2 (which adds the actual tear-down + re-bootstrap loop).
+  // Today's commit only handles frozen + the render shape.
+  const activeWorkspaceIdForCollab = useActiveWorkspaceId()
+  const collabDocState = useCollabDocState(
+    multiplayerDocId ?? null,
+    activeWorkspaceIdForCollab,
+  )
+
   // Stash the ASCII-click handler in a ref so the ProseMirror plugin (built
   // once at editor creation) always sees the latest callback without
   // rebuilding the editor.
@@ -1293,6 +1310,43 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     }),
     [],
   )
+
+  // M1 step 3.8.1.1 — FROZEN BANNER. When the conflict resolver
+  // (3.7 case A) flags frozen=true, replace the editor with a
+  // reload prompt. User CAN'T continue editing the stale collab
+  // session — must reload to bootstrap fresh. Gated by
+  // multiplayerDocId so single-user editors never see this path.
+  if (
+    multiplayerDocId &&
+    collabDocState &&
+    collabDocState !== null &&
+    'exists' in collabDocState &&
+    collabDocState.exists &&
+    collabDocState.frozen
+  ) {
+    return (
+      <div
+        className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center"
+        data-testid="collab-frozen-banner"
+        role="alert"
+      >
+        <div className="text-[15px] font-medium text-ink-strong">
+          This document was changed outside of your collaborative session.
+        </div>
+        <div className="text-[13px] text-ink-dim">
+          To continue editing, reload to sync with the latest content.
+          Your unsaved changes in this session will be lost.
+        </div>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="mt-2 rounded-md bg-ink-strong px-3.5 py-1.5 text-[13px] font-medium text-surface hover:opacity-90"
+        >
+          Reload
+        </button>
+      </div>
+    )
+  }
 
   return (
     <MilkdownProvider>
