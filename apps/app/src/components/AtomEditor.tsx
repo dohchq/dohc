@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useConvex, useQuery } from 'convex/react'
+import { useConvex, useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
@@ -1192,6 +1192,60 @@ function CrepeEditor({
       cancelled = true
     }
   }, [multiplayerDocId, remoteVersion, convex, collabInstalled])
+
+  // M1 step 3.8.2.1 — PRESENCE HEARTBEAT.
+  //
+  // Each tab pings recordCollabPresence on mount + every 30s.
+  // The server table (collabSessions, sub-3.3) is the source
+  // of truth for the file-tree "Alex is editing" indicator
+  // (M1+M2 acceptance criterion #2) AND for the idle-flush
+  // path (sub-3.6.5 BLOCKER #2 fires _finalProjectIdleDoc
+  // when a doc's session count drops to zero).
+  //
+  // Cadence: 30s heartbeat + 90s server-side expiry = 3x
+  // margin for network jitter. Matches the constants in
+  // collabPresence.ts.
+  //
+  // Auth: server-side P1 read gate. The check requires the
+  // mutation to fire after multiplayer flag is on; if a user
+  // has access revoked mid-session, the next heartbeat throws
+  // and the session row stops being refreshed → the cleanup
+  // cron reaps it within 90s. Acceptable; no aggressive
+  // pull-the-plug needed.
+  //
+  // Gated on bootstrap success: presence shouldn't be claimed
+  // for a doc the user can't actually bootstrap (frozen, no
+  // access, network outage on bootstrap mutation, etc.).
+  const recordPresence = useMutation(api.collabPresence.recordCollabPresence)
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (bootstrapState.phase !== 'ok') return
+    let cancelled = false
+    const ping = () => {
+      if (cancelled) return
+      void recordPresence({
+        docId: multiplayerDocId,
+        clientId: collabSync.clientId,
+        activeWorkspaceId: activeWorkspaceIdForBootstrap,
+      }).catch(() => {
+        // Auth revoked / transient outage / row race — the
+        // cleanup cron handles the stale-session case. Don't
+        // crash the editor over a missed heartbeat.
+      })
+    }
+    ping()
+    const interval = setInterval(ping, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [
+    multiplayerDocId,
+    bootstrapState.phase,
+    collabSync.clientId,
+    activeWorkspaceIdForBootstrap,
+    recordPresence,
+  ])
 
   useEffect(() => {
     if (!autoFocus) return

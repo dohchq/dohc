@@ -11,12 +11,13 @@
 // 6.5min lag like v2's 5min cron. Codex v3 review confirmed this.
 
 import { v } from 'convex/values'
-import { mutation, internalMutation } from './_generated/server'
+import { mutation, internalMutation, query } from './_generated/server'
 import { components, internal } from './_generated/api'
 import { parseDocId } from './prosemirror'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
 import { resolveShareAccess } from './atomShares'
+import type { Id } from './_generated/dataModel'
 
 // Presence expiry: a session is considered idle if its lastSeenAt
 // is older than this. Tied to the client heartbeat cadence (30s)
@@ -214,5 +215,50 @@ export const _finalProjectIdleDoc = internalMutation({
       },
     )
     return { ok: true as const, scheduledFor: snap.version }
+  },
+})
+
+// M1 step 3.8.2.1 — file tree presence query. Closes M1+M2
+// acceptance criterion #2 ("File tree shows 'Alex is editing'
+// while Alex has the editor open; clears within 90s of close").
+//
+// Returns the SET of atomIds in the active workspace with at
+// least one un-expired collab session. The file tree subscribes
+// and renders a presence indicator (dot / "live" badge) next
+// to each atom.
+//
+// Shape: returns Array<Id<'atoms'>> (not Set; Convex's wire
+// format prefers arrays). The client wraps in `new Set(...)`
+// for O(1) lookups during render.
+//
+// Auth: workspace membership only. We DO NOT filter per-atom
+// P1 read access here — that would require an N-way canReadAtom
+// loop on every presence query, which is wasteful for the
+// file-tree-decoration use case (the tree already P1-filters
+// what it renders; an atomId only present in the result that
+// the tree wouldn't render is invisible anyway). This is a
+// deliberate cost/correctness trade-off; revisit if presence
+// becomes a stronger oracle for restricted-atom existence.
+export const getActiveAtomIds = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const cutoff = Date.now() - PRESENCE_EXPIRY_MS
+    // Pull recent sessions globally then filter to docs in this
+    // workspace. The by_lastSeenAt index is descending-friendly;
+    // we take a generous slice (most workspaces have <100 active
+    // collab sessions at peak) then in-memory filter.
+    const recent = await ctx.db
+      .query('collabSessions')
+      .withIndex('by_lastSeenAt', (q) => q.gte('lastSeenAt', cutoff))
+      .take(500)
+    const atomIds = new Set<Id<'atoms'>>()
+    for (const session of recent) {
+      const parsed = parseDocId(session.docId)
+      if (parsed.kind !== 'atom') continue
+      if (parsed.workspaceId !== workspaceId) continue
+      atomIds.add(parsed.atomId)
+    }
+    return Array.from(atomIds)
   },
 })

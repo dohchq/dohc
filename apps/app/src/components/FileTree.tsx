@@ -1,4 +1,16 @@
-import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import {
+  createContext,
+  Fragment,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+} from 'react'
+import { useQuery } from 'convex/react'
+import { api } from '../../convex/_generated/api'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
   ChevronDown,
   ChevronRight,
@@ -117,6 +129,18 @@ type Props = {
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
 }
+
+// M1 step 3.8.2.1 — presence context. FileTree subscribes to
+// the active-collab-sessions query once at the top, exposes
+// the Set of atomIds via context, so any TreeRowNode (and the
+// recursive children renderings) can render an indicator
+// without prop-drilling through all the rendering paths.
+//
+// Default value = empty set so the context works outside
+// FileTree (e.g. tests that mount a single TreeRowNode in
+// isolation; not a current use case but avoids hard-coded
+// undefined checks at every consumer).
+const PresenceContext = createContext<ReadonlySet<string>>(new Set())
 
 function readSectionOpen(key: string, dflt: boolean): boolean {
   if (typeof window === 'undefined') return dflt
@@ -395,6 +419,31 @@ export function FileTree({
   accessStates,
   onOpenSearch,
 }: Props) {
+  // M1 step 3.8.2.1 — file tree presence subscription.
+  // Single useQuery at FileTree's top — every TreeRowNode reads
+  // the resulting Set via context to render a presence
+  // indicator next to atoms with active sessions. Skipped
+  // when there's no active workspace (logged-out edge case).
+  // Returns Array<Id<'atoms'>>; we wrap in a Set keyed by
+  // path (resolved via files[]) so the TreeRowNode lookup —
+  // which has path, not _id — is O(1).
+  const activeWorkspaceIdForPresence = useActiveWorkspaceId()
+  const activeAtomIds = useQuery(
+    api.collabPresence.getActiveAtomIds,
+    activeWorkspaceIdForPresence
+      ? { activeWorkspaceId: activeWorkspaceIdForPresence }
+      : 'skip',
+  )
+  const presentPathSet = useMemo<ReadonlySet<string>>(() => {
+    if (!activeAtomIds || activeAtomIds.length === 0) return new Set()
+    const idSet = new Set<string>(activeAtomIds as unknown as string[])
+    const out = new Set<string>()
+    for (const f of files) {
+      if (idSet.has(f._id)) out.add(f.path)
+    }
+    return out
+  }, [activeAtomIds, files])
+
   // P1 — derive a path → mode lookup from the (fileId→mode) state
   // and the file rows (which carry fileId). The leaf renderer reads
   // by path in O(1). Empty array fast-paths to an empty Map (the
@@ -953,6 +1002,7 @@ export function FileTree({
   }
 
   return (
+    <PresenceContext.Provider value={presentPathSet}>
     <aside className="flex h-screen flex-col bg-panel border-r border-rule overflow-hidden">
       {/* file-org-v1 D4.4b — ARIA-live region for lock/star toggle
           announcements. Visually hidden (1px square, overflow-
@@ -1324,6 +1374,7 @@ export function FileTree({
         </div>
       </footer>
     </aside>
+    </PresenceContext.Provider>
   )
 }
 
@@ -1456,6 +1507,13 @@ function TreeRowNode({
   const isExpanded = expanded.has(node.fullPath)
   const label = nodeLabel(node)
   const indent = 8 + depth * 14
+  // M1 step 3.8.2.1 — presence indicator. Reads the SET from
+  // the FileTree-level subscription via context; renders a
+  // tiny dot next to the file name when another tab is in an
+  // active collab session for this atom. Folders never have
+  // presence (they're not docs); only leaf rows check.
+  const presentPathSet = useContext(PresenceContext)
+  const isPresent = !isFolder && presentPathSet.has(node.fullPath)
   // file-org-v1 D4.3 — roving tabIndex. The focused row carries
   // tabIndex=0; all others carry tabIndex=-1. The bootstrap-effect
   // at the top of FileTree guarantees focusedPath is non-null on
@@ -1554,6 +1612,20 @@ function TreeRowNode({
           <FileText className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         )}
         <span className="truncate text-[12.5px] font-medium">{label}</span>
+        {/* M1 step 3.8.2.1 — presence dot. A green dot next to
+            the file name when another tab has the atom open in
+            an active collab session (heartbeat within the last
+            90s; PRESENCE_EXPIRY_MS on the server). The dot
+            also appears for the LOCAL tab — that's intentional
+            ("you're editing this") and matches what other
+            collab UIs do (e.g. Notion / Figma's "you" cursor). */}
+        {isPresent && (
+          <span
+            className="ml-1 inline-block size-1.5 shrink-0 rounded-full bg-emerald-500"
+            aria-label="Someone is editing this page"
+            title="Live collab session active"
+          />
+        )}
         {/* file-org-v1 D4.4a — lock + star affordances. Lock icon
             color signals owner (violet=system, ink-dim=user); both
             present ⇒ system color wins (it's the stronger
