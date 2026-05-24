@@ -161,6 +161,13 @@ export const leaveOrg = mutation({
     // X on date" attribution; Phase B/D atom attribution
     // (lastEditedByUserId) will rely on the row surviving offboarding.
     await ctx.db.patch(row._id, { status: 'removed' })
+    // P1 (multiplayer-and-h-followups §6.5 decision P1-C) — tombstone
+    // the departing member's private atoms so they don't leak to other
+    // members on offboarding. Owner can `recoverTombstonedAtom` later.
+    await ctx.runMutation(
+      internal.atomAccess._tombstonePrivateAtomsForDepartingMember,
+      { workspaceId: orgId as string, departingSubject: caller },
+    )
     return { ok: true as const }
   },
 })
@@ -188,6 +195,12 @@ export const removeMember = mutation({
       throw new Error('Cannot remove the last Owner of this org.')
     }
     await ctx.db.patch(row._id, { status: 'removed' })
+    // P1 — tombstone the removed member's private atoms (same as
+    // leaveOrg). Mirrors decision P1-C: tombstone-with-Owner-recovery.
+    await ctx.runMutation(
+      internal.atomAccess._tombstonePrivateAtomsForDepartingMember,
+      { workspaceId: orgId as string, departingSubject: memberWorkspaceId },
+    )
     return { ok: true as const }
   },
 })

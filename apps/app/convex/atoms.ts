@@ -7,6 +7,7 @@ import {
 } from './_generated/server'
 import { requireWorkspace } from './auth'
 import { scheduleMapRegen } from './loop'
+import { canReadAtom } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
@@ -315,11 +316,22 @@ export const list = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    return rows
+    // P1 (multiplayer-and-h-followups §6.5) — filter atoms the viewer
+    // can't read. Per-row resolveAtomAccess: ~3 db lookups (atomAccess,
+    // atomTombstones, folderAccess walk) per atom. For typical workspaces
+    // (~hundreds of atoms, few access overrides) the cost is small;
+    // optimize via batch-preload if profiling shows a hot path.
+    const visible: typeof rows = []
+    for (const r of rows) {
+      if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
+    }
+    return visible
       .map((r) => ({
         _id: r._id,
         path: r.path,
@@ -368,12 +380,20 @@ export const getByPath = query({
   args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { path, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    return await ctx.db
+    const row = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
         q.eq('workspaceId', workspaceId).eq('path', path),
       )
       .unique()
+    if (!row) return null
+    // P1 — gate by access. Non-allowed viewers see null (consistent
+    // with "atom doesn't exist for me" — search/queries/etc. produce
+    // the same fail-closed shape).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, row._id, viewerSubject))) return null
+    return row
   },
 })
 
