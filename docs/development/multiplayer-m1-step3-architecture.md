@@ -641,15 +641,61 @@ review pass before anyone approves the build.**
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Review | `/codex` against v1, v2, v3 (same session) | Independent 2nd opinion | 2 (v3 pending) | v1 REVISE, v2 REVISE | v1: 8 findings; v2: 3 RESOLVED + 5 PARTIAL + 4 NEW |
+| Codex Review | `/codex` against v1, v2, v3 (same session) | Independent 2nd opinion | 3 | v1, v2, v3 all REVISE | v3 scored: 4 CLOSED + 4 PARTIAL + 1 NOT-CLOSED + 5 NEW |
 
-**Session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8 (codex; resumed across v2 + v3)
+**Session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8 (codex; 3 passes)
 
-**v3 absorbs ALL 11 v2 critiques** — see "Changes from v2" table above for
-the explicit map. v3 is pending a third `/codex` pass.
+**v3 codex pass scoring (per Codex's grading)**:
+- **CLOSED (4)**: baseBodyHash per-doc split; serializer test rig expanded; cron + `frozen` field; collabSessions/collabDocs split (scheduledJobId is valid Id type — verified)
+- **PARTIAL (4)**:
+  - Shared helper: 3 specific bugs — ignores `atomId` (queries by path; wrong row after rename); computes `newBodyHash` BEFORE seedAtomIdIntoBody (stale hash); uncoalesced recordTrash floods at ~1500ms cadence
+  - Schema extraction: `schemaCtx` IS exported but the deep import path I named (`@milkdown/core/internal-plugin/schema`) is NOT in package exports — use `@milkdown/kit/core` re-export
+  - onSnapshot before commit: `latestVersion` can advance by deltas not commits; must use `getSnapshot({id, version})` for exact validation
+  - Freeze+reload: TOCTOU window between version compare and `needsRebootstrap` patch — re-check inside the conflict mutation
+- **NOT CLOSED (1)**: `getSteps` 100-cap — v3 incorrectly claimed package handles compaction; it does not. Need aggressive snapshot submission OR explicit looped step fetching
+- **NEW issues (5)**:
+  - Deep import for schemaCtx is invalid under package exports
+  - Serverless schema shim is harder than claimed (`Node.fromJSON` validates specs)
+  - getDoc partial replay risk dismissed incorrectly
+  - Helper can write wrong atom (atomId not validated)
+  - Trash volume explodes during normal typing
 
-**UNRESOLVED (v3 questions for codex)**: 7 open design questions listed
-above. Critical items: schema-shim viability (Q2), auto-rebuild
-round-trip cost (Q3), Crepe doc-direct mount path (Q1).
+**Codex's better suggestion missed in v3**: Crepe supports `defaultValue: { type: 'json', value: pmJson }` directly — eliminates the post-mount doc replacement + first-mount cache complexity entirely.
 
-**VERDICT**: v3 PROPOSED — awaiting third codex review pass.
+**Top 3 remaining concerns (Codex)**:
+1. Helper must verify/write by `atomId`, and update `baseBodyHash` from the actual persisted `finalBody`
+2. Server schema/getDoc assumptions are unsound, especially the 100-delta replay cap
+3. Bootstrap/schema plan should switch to exported `schemaCtx` plus Milkdown JSON `defaultValue`; current first-cache design is too brittle
+
+**Codex answers on the 7 v3 open questions** (verbatim):
+1. PM doc mount: use Milkdown `defaultValue: { type: 'json', value }`. Cleaner than post-mount dispatch
+2. Serverless schema shim: risky; `Node.fromJSON` validates node and mark names/specs
+3. Auto-rebuild via client: acceptable for v1; prefer client round-trip over server parser
+4. `collabDocs` lifetime: keep rows until atom delete; prune snapshots/deltas separately
+5. Bootstrap racing OOB writes: bounded retry is fine; no lock unless retries prove noisy
+6. Lock policy: yes, lock freezes collab; needs explicit UI
+7. Projection idempotency: yes; test duplicate scheduled projection and stale version
+
+**Cross-model agreement**: Claude Code agrees with all 9 v3 critiques (4 PARTIAL + 1 NOT-CLOSED + 5 NEW). No disagreements.
+
+**Codex's additional schema suggestions (non-blocking)**: add `lastProjectedHash`, `lastConflictAt`, `pruneAfter`, `ownerUserId/activeClientCount` to `collabDocs` if UI needs them.
+
+**VERDICT**: v3 REVISE (third pass). Architecture v4 needed. Codex's three remaining concerns are all concrete + fixable, but a 4th iteration without a different signal is diminishing returns. See "Decision point" section below for the meta-question.
+
+**UNRESOLVED**: 10 design decisions across the 4 PARTIAL + 1 NOT-CLOSED + 5 NEW from v3.
+
+---
+
+## Decision point (third REVISE in a row)
+
+Three /codex passes, three REVISEs. Each pass surfaced 8-11 real findings. The arc:
+- v1 (8 findings) → v2 (3 RESOLVED, 5 PARTIAL, 4 NEW) → v3 (4 CLOSED, 4 PARTIAL, 1 NOT-CLOSED, 5 NEW)
+
+The trajectory shows convergence (more CLOSED each pass) but Codex keeps catching real bugs. The remaining v3 issues are concrete and fixable, but a v4 pass-without-prototyping won't necessarily catch the next class of bugs that only show up under real execution.
+
+At this point the meaningful options are:
+- **Iterate v4** (more design upfront, lower discovery cost per finding)
+- **Start prototyping** (real code under tests will surface execution-level bugs the design review can't see; accept some rework when those land)
+- **Defer M1 step 3 entirely** and ship the M1 step 1+2 plumbing as part of the PR with multiplayer flag staying unset
+
+Decision belongs to the human.
