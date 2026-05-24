@@ -557,6 +557,150 @@ export const getAtomAccess = query({
   },
 })
 
+/** UI helper: resolve an atom's access by its rename-proof fileId.
+ *  The Share dialog has a fileId in hand (not the Convex row id),
+ *  so it doesn't need to lift atomId out of a list query before
+ *  calling getAtomAccess. Mirrors the read gate of getAtomAccess. */
+export const getAtomAccessByFileId = query({
+  args: {
+    fileId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { fileId, activeWorkspaceId },
+  ): Promise<{
+    mode: 'org-default' | 'private' | 'restricted'
+    ownerUserId: string | null
+    allowedUserIds: string[]
+  } | null> => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return null
+
+    // fileId → bound atomIds row → atom._id. Same chain as
+    // htmlAtoms.getRenderable, with the same .take(2) defense.
+    const idRows = await ctx.db
+      .query('atomIds')
+      .withIndex('by_workspace_fileId', (q) =>
+        q.eq('workspaceId', workspaceId).eq('fileId', fileId),
+      )
+      .take(2)
+    if (idRows.length !== 1) return null
+    const idRow = idRows[0]
+    if (idRow.state !== 'bound' || idRow.path === null) return null
+    const atom = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', idRow.path as string),
+      )
+      .unique()
+    if (!atom) return null
+
+    // Same access-gated read as getAtomAccess — non-allowed callers
+    // see null (the dialog won't render its access section in that
+    // case, which is the right UX: you can't manage what you can't
+    // see).
+    const access = await resolveAtomAccess(ctx, atom._id, identity.subject)
+    if (!access.allowed) return null
+
+    const row = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q) => q.eq('atomId', atom._id))
+      .unique()
+    if (!row) {
+      return { mode: 'org-default', ownerUserId: null, allowedUserIds: [] }
+    }
+    return {
+      mode: row.mode,
+      ownerUserId: row.ownerUserId,
+      allowedUserIds: row.allowedUserIds,
+    }
+  },
+})
+
+/** UI helper: set access by fileId — thin wrapper that resolves
+ *  fileId → atomId and forwards to setAtomAccess. The auth /
+ *  owner / private-empty-allowlist checks all live in
+ *  setAtomAccess; this just spares the dialog a two-step. */
+export const setAtomAccessByFileId = mutation({
+  args: {
+    fileId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+    mode: v.union(v.literal('private'), v.literal('restricted'), v.null()),
+    allowedUserIds: v.optional(v.array(v.string())),
+  },
+  handler: async (
+    ctx,
+    { fileId, activeWorkspaceId, mode, allowedUserIds },
+  ) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const idRows = await ctx.db
+      .query('atomIds')
+      .withIndex('by_workspace_fileId', (q) =>
+        q.eq('workspaceId', workspaceId).eq('fileId', fileId),
+      )
+      .take(2)
+    if (idRows.length !== 1) throw new Error('File not found.')
+    const idRow = idRows[0]
+    if (idRow.state !== 'bound' || idRow.path === null) {
+      throw new Error('File not found.')
+    }
+    const atom = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', idRow.path as string),
+      )
+      .unique()
+    if (!atom) throw new Error('File not found.')
+
+    // Re-run the same access + owner checks setAtomAccess does, by
+    // calling the same code path. Authoritative source of truth is
+    // setAtomAccess — this wrapper only resolves the atomId.
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const subject = identity.subject
+    const existing = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q) => q.eq('atomId', atom._id))
+      .unique()
+    if (existing && existing.ownerUserId !== subject) {
+      throw new Error(
+        "Only the current access owner can change this atom's access.",
+      )
+    }
+    if (mode === null) {
+      if (existing) await ctx.db.delete(existing._id)
+      return { ok: true as const, cleared: true }
+    }
+    const allowed = allowedUserIds ?? []
+    if (mode === 'private' && allowed.length > 0) {
+      throw new Error(
+        'private mode must have an empty allowedUserIds — use restricted for a list.',
+      )
+    }
+    const now = Date.now()
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        mode,
+        allowedUserIds: allowed,
+        setAt: now,
+        setByUserId: subject,
+      })
+    } else {
+      await ctx.db.insert('atomAccess', {
+        atomId: atom._id,
+        mode,
+        ownerUserId: subject,
+        allowedUserIds: allowed,
+        setAt: now,
+        setByUserId: subject,
+      })
+    }
+    return { ok: true as const, cleared: false }
+  },
+})
+
 // ── Internal helpers used by other phases (e.g. P1 cascade tombstone) ──
 
 /** Internal: tombstone all private atoms owned by a departing member.

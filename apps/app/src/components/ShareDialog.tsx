@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
-import { X, Copy, Check } from 'lucide-react'
+import { X, Copy, Check, Lock, Users, Globe } from 'lucide-react'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 
 // sharing-v1 1a — share a file with another user. v1 addresses the
 // recipient by their workspace HANDLE (the WorkOS subject the other
@@ -18,12 +19,27 @@ export function ShareDialog({
   fileLabel: string
   onClose: () => void
 }) {
+  const activeWorkspaceId = useActiveWorkspaceId()
   const me = useQuery(api.auth.whoami)
   const myOrgs = useQuery(api.orgs.myOrgs)
   const myShares = useQuery(api.atomShares.listMyShares, {})
   const shareAtom = useMutation(api.atomShares.shareAtom)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)
+  // P1 (multiplayer-and-h-followups §6.5) — within-workspace
+  // access (private/restricted/org-default). Distinct from the
+  // cross-workspace share grants below: this hides the doc from
+  // teammates in the SAME workspace; the grants share it with
+  // someone OUTSIDE. Both can coexist on the same atom — an
+  // explicit cross-workspace share overrides the within-workspace
+  // private flag (the share IS the grant).
+  const atomAccess = useQuery(api.atomAccess.getAtomAccessByFileId, {
+    fileId,
+    activeWorkspaceId,
+  })
+  const setAtomAccess = useMutation(api.atomAccess.setAtomAccessByFileId)
+  const [accessBusy, setAccessBusy] = useState(false)
+  const [accessError, setAccessError] = useState<string | null>(null)
   const [mode, setMode] = useState<'person' | 'company'>('person')
   const [handle, setHandle] = useState('')
   const [orgId, setOrgId] = useState<string>('')
@@ -91,6 +107,93 @@ export function ShareDialog({
             <X className="size-4" />
           </button>
         </div>
+
+        {/*
+          P1 — within-workspace access (private/restricted/org-default).
+          Shown ONLY when getAtomAccessByFileId returned a row (i.e.
+          the caller can see this atom). For an org-default atom the
+          state is implicit; the toggle exposes the private switch.
+          Owner-only edit: if someone else owns the access record,
+          setAtomAccess throws and the error renders below.
+        */}
+        {atomAccess && (
+          <div className="mt-4 rounded-md border border-rule bg-page p-3">
+            <div className="flex items-start gap-2">
+              <div className="mt-0.5">
+                {atomAccess.mode === 'private' ? (
+                  <Lock className="size-4 text-ink-strong" />
+                ) : atomAccess.mode === 'restricted' ? (
+                  <Users className="size-4 text-ink-strong" />
+                ) : (
+                  <Globe className="size-4 text-ink-dim" />
+                )}
+              </div>
+              <div className="flex-1">
+                <p className="text-[12.5px] font-medium text-ink-strong">
+                  {atomAccess.mode === 'private'
+                    ? 'Only you can see this'
+                    : atomAccess.mode === 'restricted'
+                      ? `Restricted (${atomAccess.allowedUserIds.length + 1} ${
+                          atomAccess.allowedUserIds.length === 0
+                            ? 'person'
+                            : 'people'
+                        })`
+                      : 'Everyone in the company can see this'}
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-faint">
+                  {atomAccess.mode === 'private'
+                    ? 'Hidden from teammates in this workspace. Toggle off to make it visible to everyone.'
+                    : atomAccess.mode === 'restricted'
+                      ? 'Visible only to you and the people you listed.'
+                      : 'Default for new docs in a company workspace. Toggle on to make this one private to you.'}
+                </p>
+              </div>
+              <div className="ml-2">
+                <button
+                  type="button"
+                  disabled={accessBusy}
+                  onClick={async () => {
+                    if (accessBusy) return
+                    setAccessBusy(true)
+                    setAccessError(null)
+                    try {
+                      await setAtomAccess({
+                        fileId,
+                        activeWorkspaceId,
+                        // Simple toggle: org-default ↔ private. Restricted
+                        // is reachable via a future "add people" affordance
+                        // (the backend supports it today; the dialog
+                        // surfaces just the binary switch for v1 simplicity
+                        // per the design decision "MVP keep it small").
+                        mode: atomAccess.mode === 'private' ? null : 'private',
+                      })
+                    } catch (e) {
+                      setAccessError((e as Error).message)
+                    } finally {
+                      setAccessBusy(false)
+                    }
+                  }}
+                  className={`rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                    atomAccess.mode === 'private'
+                      ? 'border-ink-strong bg-ink-strong text-surface'
+                      : 'border-rule bg-surface text-ink-dim hover:text-ink-strong'
+                  } disabled:opacity-50`}
+                  aria-pressed={atomAccess.mode === 'private'}
+                >
+                  {atomAccess.mode === 'private' ? 'Private' : 'Make private'}
+                </button>
+              </div>
+            </div>
+            {accessError && (
+              <p
+                className="mt-2 text-[11.5px] text-danger"
+                role="alert"
+              >
+                {accessError}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* mode: a person, or the whole company */}
         <div className="mt-4 flex overflow-hidden rounded-md border border-rule w-fit">
