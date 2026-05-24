@@ -222,4 +222,22 @@ describe('AtomEditor — rebootstrap overlay (M1 3.8.1.2)', () => {
     expect(frozenIdx).toBeGreaterThan(-1)
     expect(rebootstrapIdx).toBeLessThan(frozenIdx)
   })
+
+  it('frozen dominates needsRebootstrap on client too (3.8.1.3 — prevents reload loop)', () => {
+    // Edge case: server can theoretically end up with BOTH flags
+    // simultaneously (case B fires → sets needsRebootstrap; later
+    // a freeze branch fires for the SAME doc). Server invariant
+    // from 3.9.5 fix #4 prevents bootstrap from clearing
+    // needsRebootstrap when frozen=true. Without the client-side
+    // frozen-dominates check, the rebootstrap overlay would fire,
+    // trigger reload, new mount sees both flags still true,
+    // rebootstrap overlay fires again, infinite loop.
+    //
+    // Fix: rebootstrap overlay condition includes !frozen; effect
+    // also early-returns if frozen=true.
+    expect(SRC).toMatch(/!collabDocState\.frozen[\s\S]+?collabDocState\.needsRebootstrap/)
+    expect(SRC).toMatch(
+      /if\s*\(collabDocState\.frozen\)\s*return[\s\S]+?frozen dominates/i,
+    )
+  })
 })

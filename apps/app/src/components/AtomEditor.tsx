@@ -1328,10 +1328,23 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // exists for context, not for action.
   //
   // Gated by multiplayerDocId so single-user mounts never trigger.
+  //
+  // M1 step 3.8.1.3 — frozen DOMINATES needsRebootstrap on the
+  // client too (mirror of 3.9.5 fix #4's server-side invariant).
+  // If both flags are simultaneously true (rare — case B fires,
+  // then a later freeze branch like serialize-failed or
+  // atom-deleted fires before client rebootstraps), the
+  // rebootstrap-induced reload would loop because the next mount's
+  // bootstrap would return reason:'frozen' (not running the
+  // rebootstrap clear), and needsRebootstrap would still be true →
+  // overlay fires again → reload again. The fix: skip the
+  // rebootstrap overlay entirely if frozen is also set. Frozen
+  // banner takes over; user sees the real terminal state.
   useEffect(() => {
     if (!multiplayerDocId) return
     if (!collabDocState || collabDocState === null) return
     if (!('exists' in collabDocState) || !collabDocState.exists) return
+    if (collabDocState.frozen) return // frozen dominates
     if (!collabDocState.needsRebootstrap) return
     // Auto-reload after a brief delay so the overlay text is
     // visible. window.location.reload() drops us out of this
@@ -1351,6 +1364,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     collabDocState !== null &&
     'exists' in collabDocState &&
     collabDocState.exists &&
+    !collabDocState.frozen && // 3.8.1.3 — frozen dominates
     collabDocState.needsRebootstrap
   ) {
     return (
