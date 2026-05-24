@@ -414,6 +414,103 @@ docs.glob("*.md")
   },
 })
 
+// W1 (multiplayer-and-h-followups §6 — H-7) — reconcile a single user's
+// Convex memberships against a list of WorkOS-active organizationIds.
+// Called by `orgsBridge.reconcileMembership` action after listing the
+// subject's WorkOS memberships. Internal — never called from the client.
+//
+// Idempotent. Safe to run on every sign-in + every 4h cron tick.
+//
+// Behavior:
+//  - WorkOS-active org we know about (`orgs.workosOrgId === wosOrgId`)
+//    AND no Convex membership for subject → INSERT membership 'active' / member
+//  - WorkOS-active org + existing Convex membership 'removed' / 'invited'
+//    → patch status:'active' + acceptedAt
+//  - WorkOS-active org + existing Convex membership 'active' → no-op (kept)
+//  - Convex membership for subject whose org has a workosOrgId that is
+//    NOT in the WorkOS-active list → soft-remove (status:'removed')
+//  - Convex membership for subject whose org has NO workosOrgId → leave
+//    alone (WorkOS isn't authoritative for orgs created without bridge)
+export const _reconcileMembershipRows = internalMutation({
+  args: {
+    subject: v.string(),
+    workosOrgIds: v.array(v.string()),
+  },
+  handler: async (
+    ctx,
+    { subject, workosOrgIds },
+  ): Promise<{ added: number; removed: number; kept: number }> => {
+    const wosSet = new Set(workosOrgIds)
+    let added = 0
+    let removed = 0
+    let kept = 0
+
+    // 1) For each WorkOS-active org id: find our Convex org with that
+    //    workosOrgId; upsert active membership for the subject.
+    for (const wosOrgId of workosOrgIds) {
+      const org = await ctx.db
+        .query('orgs')
+        .withIndex('by_workos_org', (q) => q.eq('workosOrgId', wosOrgId))
+        .first()
+      if (!org) continue // we don't have this org in Convex (created
+      //                    elsewhere; bridge will reconcile when used).
+      const existing = await ctx.db
+        .query('memberships')
+        .withIndex('by_org_workspace', (q) =>
+          q.eq('orgId', org._id).eq('workspaceId', subject),
+        )
+        .unique()
+      const now = Date.now()
+      if (!existing) {
+        await ctx.db.insert('memberships', {
+          orgId: org._id,
+          workspaceId: subject,
+          role: 'member',
+          status: 'active',
+          invitedBy: org.createdBy,
+          invitedAt: now,
+          acceptedAt: now,
+        })
+        added++
+      } else if (existing.status === 'removed' || existing.status === 'invited') {
+        // Re-activate; preserve original role for re-activated members
+        // (e.g. Owner who was wos-removed then re-added stays Owner —
+        // matches the existing `joinOrg` invite-rejoin behavior, except
+        // joinOrg resets `removed` to 'member' to prevent privilege
+        // escalation via public invite code. Here the reactivation is
+        // driven by WorkOS (authoritative), so the original role stands.)
+        await ctx.db.patch(existing._id, {
+          status: 'active',
+          acceptedAt: now,
+        })
+        added++
+      } else {
+        // Already active. No-op.
+        kept++
+      }
+    }
+
+    // 2) For each existing Convex membership for the subject whose org
+    //    HAS a workosOrgId and is NOT in the WorkOS list → soft-remove.
+    //    Memberships whose org has no workosOrgId are left alone.
+    const allMemberships = await ctx.db
+      .query('memberships')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', subject))
+      .collect()
+    for (const m of allMemberships) {
+      if (m.status === 'removed') continue
+      const org = await ctx.db.get(m.orgId as Id<'orgs'>)
+      if (!org) continue
+      if (!org.workosOrgId) continue // not bridge-linked → leave alone
+      if (wosSet.has(org.workosOrgId)) continue // still in WorkOS → kept
+      await ctx.db.patch(m._id, { status: 'removed' })
+      removed++
+    }
+
+    return { added, removed, kept }
+  },
+})
+
 // org-plan §10 Phase E — WorkOS bridge helpers (called only from
 // `convex/orgsBridge.ts` actions via ctx.runMutation / ctx.runQuery).
 

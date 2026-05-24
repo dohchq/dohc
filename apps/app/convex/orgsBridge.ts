@@ -131,6 +131,85 @@ export const createOrgWithBridge = action({
   },
 })
 
+/** W1 (H-7) — pull-on-sign-in membership reconcile.
+ *
+ *  Asks WorkOS for the caller's current organization memberships and
+ *  updates Convex memberships to match:
+ *    - WorkOS-active orgs we know about → upsert membership to 'active'
+ *    - Convex memberships whose org is linked to WorkOS but NOT in the
+ *      WorkOS-active list → soft-remove (status: 'removed')
+ *    - Convex orgs without a `workosOrgId` (created before bridge or
+ *      manually) → LEFT ALONE. WorkOS isn't authoritative for them.
+ *
+ *  Fail-eventually-closed:
+ *    - At earliest of: next sign-in / next periodic cron / next
+ *      org-write op, a member removed in WorkOS loses Convex access.
+ *
+ *  Graceful when unconfigured: `WORKOS_API_KEY` unset → no-op.
+ *  Errors are swallowed (logged) so sign-in never blocks on a WorkOS
+ *  outage. The user's last-known Convex memberships stay valid; the
+ *  next reconcile attempt re-tries.
+ */
+export const reconcileMembership = action({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<{
+    synced: boolean
+    reason?: string
+    added: number
+    removed: number
+    kept: number
+  }> => {
+    // The action's auth context: requireWorkspace(ctx) returns the
+    // caller's WorkOS subject (personal workspaceId === subject).
+    // No active-workspace arg here — reconcile is always for the
+    // signed-in subject's WorkOS memberships.
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) {
+      return { synced: false, reason: 'not-authenticated', added: 0, removed: 0, kept: 0 }
+    }
+    const subject = identity.subject
+
+    const workos = await getWorkOS()
+    if (!workos) {
+      return {
+        synced: false,
+        reason: 'no-api-key',
+        added: 0,
+        removed: 0,
+        kept: 0,
+      }
+    }
+
+    let workosOrgIds: string[]
+    try {
+      const list = await workos.userManagement.listOrganizationMemberships({
+        userId: subject,
+        statuses: ['active'],
+      })
+      workosOrgIds = list.data.map((m) => m.organizationId)
+    } catch (err) {
+      console.error('[orgsBridge] listOrganizationMemberships failed:', err)
+      return {
+        synced: false,
+        reason: 'workos-error',
+        added: 0,
+        removed: 0,
+        kept: 0,
+      }
+    }
+
+    const result: { added: number; removed: number; kept: number } =
+      await ctx.runMutation(internal.orgs._reconcileMembershipRows, {
+        subject,
+        workosOrgIds,
+      })
+
+    return { synced: true, ...result }
+  },
+})
+
 /** Rename an org in dohc AND (when configured + linked) in WorkOS. */
 export const renameOrgWithBridge = action({
   args: { orgId: v.id('orgs'), name: v.string() },

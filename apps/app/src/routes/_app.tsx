@@ -5,7 +5,7 @@ import {
   useLocation,
   Outlet,
 } from '@tanstack/react-router'
-import { useMutation, useQuery } from 'convex/react'
+import { useAction, useMutation, useQuery } from 'convex/react'
 import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import {
   MessageSquare,
@@ -101,6 +101,35 @@ function Gate() {
   // <Home />.
   const activeWorkspaceId = useActiveWorkspaceId()
   const state = useQuery(api.onboarding.state, { activeWorkspaceId })
+
+  // W1 (H-7) — fire WorkOS membership reconcile on first sign-in for
+  // each user.id + every 4h. Catches the "user removed in WorkOS but
+  // session is still valid" case without waiting for the periodic cron.
+  // Fire-and-forget: a WorkOS outage doesn't block the UI.
+  const { user } = useAuth()
+  const reconcileMembership = useAction(api.orgsBridge.reconcileMembership)
+  useEffect(() => {
+    if (!user?.id) return
+    const LAST_USER = 'dohc.lastReconcileFor'
+    const STAMP_KEY = 'dohc.lastReconcileAt'
+    const FOUR_HOURS_MS = 4 * 60 * 60 * 1000
+    try {
+      const lastUser = window.localStorage.getItem(LAST_USER)
+      const lastAtRaw = window.localStorage.getItem(STAMP_KEY)
+      const lastAt = lastAtRaw ? Number(lastAtRaw) : 0
+      const isNewUser = lastUser !== user.id
+      const isStale = Date.now() - lastAt > FOUR_HOURS_MS
+      if (isNewUser || isStale) {
+        void reconcileMembership({}).catch(() => {})
+        window.localStorage.setItem(LAST_USER, user.id)
+        window.localStorage.setItem(STAMP_KEY, String(Date.now()))
+      }
+    } catch {
+      // localStorage unavailable (private mode) — fire anyway, the
+      // server side is idempotent.
+      void reconcileMembership({}).catch(() => {})
+    }
+  }, [user?.id, reconcileMembership])
   if (state === undefined) {
     return (
       <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">
