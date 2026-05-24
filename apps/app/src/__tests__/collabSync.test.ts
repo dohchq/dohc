@@ -183,6 +183,19 @@ describe('collab-sync — orchestration invariants', () => {
     expect(SRC).toMatch(/useRef<string \| null>\(null\)/)
   })
 
+  it('firedForRef + state reset when bootstrap is disabled (3.8.1.8)', () => {
+    // Codex 9th-pass [P2]: without resetting firedForRef when
+    // enabled goes false or docId becomes null, re-enabling
+    // with the SAME docId would short-circuit on the stale
+    // firedForRef value and never refire bootstrap. Caller
+    // sees stuck phase. Fix: clear ref + collapse state to
+    // idle on disable.
+    expect(SRC).toMatch(/if \(!enabled \|\| !docId\)/)
+    expect(SRC).toMatch(
+      /if \(!enabled \|\| !docId\)[\s\S]+?firedForRef\.current = null[\s\S]+?setState\(\{ phase: 'idle' \}\)/,
+    )
+  })
+
   it('treats frozen + non-frozen errors separately (so UI routes correctly)', () => {
     // If result.reason === 'frozen', the hook surfaces phase:'frozen'
     // (NOT phase:'error') so AtomEditor can route to the existing

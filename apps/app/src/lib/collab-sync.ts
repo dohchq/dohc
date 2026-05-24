@@ -736,10 +736,28 @@ export function useCollabBootstrapMutation({
   const firedForRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!enabled || !docId || !pmJsonStr || body === null) {
-      // Not enough info yet (Crepe hasn't mounted, or multiplayer
-      // is off). Stay idle; the next render with all inputs
-      // present will fire.
+    if (!enabled || !docId) {
+      // Multiplayer disabled or docId cleared. Reset everything:
+      //
+      // - firedForRef: codex 9th-pass [P2]. If we don't clear,
+      //   then re-enabling with the SAME docId would skip the
+      //   bootstrap (firedForRef.current === docId early-return)
+      //   even though state was reset to idle. The hook would
+      //   look stuck in idle forever.
+      //
+      // - state: collapse to idle so any caller-side branches
+      //   (BootstrapErrorOverlay rendering, setReadonly gate)
+      //   see a coherent "not bootstrapping right now" signal
+      //   instead of leftover phase=='ok' from the prior atom.
+      firedForRef.current = null
+      setState({ phase: 'idle' })
+      return
+    }
+    if (!pmJsonStr || body === null) {
+      // Enabled but waiting for Crepe to mount + extract PM JSON.
+      // Don't reset firedForRef here — we may have already
+      // bootstrapped on a previous render where pmJsonStr was
+      // briefly null due to a parent re-render.
       return
     }
     // Already fired for this docId? Don't refire. body changes

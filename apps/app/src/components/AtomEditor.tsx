@@ -922,7 +922,16 @@ function CrepeEditor({
     // mounts fresh per atom), so setting it once at creation is
     // sufficient. The markdownUpdated listener still won't fire from
     // the user since editing is disabled.
-    if (readOnly) crepe.setReadonly(true)
+    // M1 step 3.8.1.8 — codex 9th-pass [P1] #1: Crepe defaults
+    // to editable=true. The async setReadonly effect below
+    // doesn't run until after React commits — that leaves a
+    // one-frame window where the editor is mounted + writable
+    // before the effect locks it down. User input or paste in
+    // that frame is untracked (collab plugins not installed
+    // yet). Fix: set readonly SYNCHRONOUSLY at construction
+    // for multiplayer. The unlock effect handles the
+    // transition back to writable once collab is installed.
+    if (readOnly || multiplayerDocId) crepe.setReadonly(true)
     crepeRef.current = crepe
     return crepe
   })
@@ -932,6 +941,23 @@ function CrepeEditor({
       crepeRef.current = null
     }
   }, [crepeRef])
+
+  // M1 step 3.8.1.8 — collabInstalled is the AUTHORITATIVE
+  // signal that the collab plugins are actually mounted in
+  // prosePluginsCtx. Codex 9th-pass [P1] #2: gating on
+  // `collabSync.plugins !== null` was a proxy for "plugins
+  // available" but did NOT guarantee they had been folded into
+  // the editor's plugin list. The remote-pull effect could
+  // then call getVersion(view.state) before the collab plugin
+  // existed → throws (prosemirror-collab's getVersion assumes
+  // the plugin is installed). Same risk for the setReadonly
+  // unlock: editor becomes writable before edits would be
+  // tracked.
+  //
+  // Set inside the late-install effect AFTER ctx.update
+  // succeeds. Reset to false when docId changes (switching
+  // atoms requires re-installation).
+  const [collabInstalled, setCollabInstalled] = useState(false)
 
   // M1 step 3.8.1.7 — codex 8th-pass [P1] #2 GATE.
   //
@@ -964,11 +990,14 @@ function CrepeEditor({
       crepe.setReadonly(false)
       return
     }
-    // Multiplayer: writable only after bootstrap + plugins.
-    const collabReady =
-      bootstrapState.phase === 'ok' && collabSync.plugins !== null
+    // Multiplayer: writable only after bootstrap + plugins
+    // ACTUALLY installed. 3.8.1.8: gate on collabInstalled
+    // (set true by the late-install effect after ctx.update
+    // succeeds), not on collabSync.plugins !== null which is
+    // a weaker signal that only means "plugins available".
+    const collabReady = bootstrapState.phase === 'ok' && collabInstalled
     crepe.setReadonly(!collabReady)
-  }, [readOnly, multiplayerDocId, bootstrapState.phase, collabSync.plugins])
+  }, [readOnly, multiplayerDocId, bootstrapState.phase, collabInstalled])
 
   // M1 step 3 sub-commit 3.2 — populate the global schema cache
   // from the first mounted Crepe. Runs on every mount; idempotent
@@ -1042,8 +1071,14 @@ function CrepeEditor({
   // server steps accumulate; atoms.body never updates; the user
   // thinks they're collaborating but they're silently desynced.
   // Gate prevents that.
+  //
+  // M1 step 3.8.1.8 — sets collabInstalled=true on success.
+  // Resets to false when docId changes.
   useEffect(() => {
-    if (!multiplayerDocId) return
+    if (!multiplayerDocId) {
+      setCollabInstalled(false)
+      return
+    }
     if (!collabSync.plugins) return
     if (bootstrapState.phase !== 'ok') return
     const crepe = crepeRef.current
@@ -1055,15 +1090,19 @@ function CrepeEditor({
         // path; idempotent on rerender).
         const setHas = new Set(current)
         const toAdd = collabSync.plugins!.filter((p) => !setHas.has(p))
-        if (toAdd.length === 0) return current
+        if (toAdd.length === 0) {
+          // Plugins were already installed (idempotent re-run).
+          installed = true
+          return current
+        }
         installed = true
         return [...current, ...toAdd]
       })
     })
+    if (installed) setCollabInstalled(true)
     // No cleanup: collab plugins live for the editor's lifetime.
     // Switching docs unmounts the whole CrepeEditor (parent
     // re-keys on path change).
-    void installed
   }, [multiplayerDocId, collabSync.plugins, bootstrapState.phase])
 
   // M1 step 2 — remote-pull loop. Convex's useQuery on
@@ -1080,6 +1119,16 @@ function CrepeEditor({
   const convex = useConvex()
   useEffect(() => {
     if (!multiplayerDocId) return
+    // M1 step 3.8.1.8 — codex 9th-pass [P1] #2 GATE.
+    // getVersion(view.state) throws if the prosemirror-collab
+    // plugin isn't installed. The remote-pull effect fires
+    // when remoteVersion bumps; if bootstrap-mutation just
+    // wrote snapshot v=1, remoteVersion fires to 1 BEFORE
+    // the late-install effect finishes installing plugins.
+    // Calling getVersion in that window crashes the effect.
+    // Gate on the same collabInstalled signal the unlock
+    // effect uses.
+    if (!collabInstalled) return
     if (remoteVersion === undefined) return
     const crepe = crepeRef.current
     if (!crepe) return
@@ -1119,7 +1168,7 @@ function CrepeEditor({
     return () => {
       cancelled = true
     }
-  }, [multiplayerDocId, remoteVersion, convex])
+  }, [multiplayerDocId, remoteVersion, convex, collabInstalled])
 
   useEffect(() => {
     if (!autoFocus) return
@@ -1498,6 +1547,12 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       insertCodeBlock(language: string, content: string) {
         const crepe = crepeRef.current
         if (!crepe) return
+        // M1 step 3.8.1.8 — codex 9th-pass [P2] #5: imperative
+        // dispatch bypasses ProseMirror's editable=false DOM
+        // gate. If a parent calls this during the multiplayer
+        // bootstrap read-only window, the edit lands untracked.
+        // Crepe exposes `readonly` as a getter; honor it.
+        if (crepe.readonly) return
         crepe.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx)
           const { state } = view
@@ -1516,6 +1571,8 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       replaceCodeBlockAt(pos: number, content: string, language?: string) {
         const crepe = crepeRef.current
         if (!crepe) return
+        // 3.8.1.8 — same gate as insertCodeBlock above.
+        if (crepe.readonly) return
         crepe.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx)
           const { state } = view

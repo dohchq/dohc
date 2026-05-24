@@ -370,8 +370,11 @@ describe('AtomEditor — read-only-until-collab-ready gate (3.8.1.7)', () => {
       /codex 8th-pass \[P1\] #2 GATE/,
     )
     expect(SRC).toMatch(/crepe\.setReadonly\(/)
-    // collabReady combines bootstrap success + plugins arrival.
-    expect(SRC).toMatch(/bootstrapState\.phase === 'ok'\s*&&\s*collabSync\.plugins !== null/)
+    // 3.8.1.8 [P1] #2: collabReady now requires confirmed
+    // installation (collabInstalled), not just "plugins
+    // available" (collabSync.plugins !== null). Latter was a
+    // weaker signal that didn't guarantee ctx.update ran.
+    expect(SRC).toMatch(/bootstrapState\.phase === 'ok' && collabInstalled/)
   })
 
   it('respects the readOnly prop (shared-atom view-only mode wins)', () => {
@@ -387,9 +390,51 @@ describe('AtomEditor — read-only-until-collab-ready gate (3.8.1.7)', () => {
   })
 
   it('effect deps include all four inputs to the readonly decision', () => {
+    // 3.8.1.8: deps swap collabSync.plugins → collabInstalled.
     expect(SRC).toMatch(
-      /\[readOnly, multiplayerDocId, bootstrapState\.phase, collabSync\.plugins\]/,
+      /\[readOnly, multiplayerDocId, bootstrapState\.phase, collabInstalled\]/,
     )
+  })
+})
+
+// M1 step 3.8.1.8 — close the synchronous mount-frame race +
+// add collabInstalled explicit state. Codex 9th-pass [P1]s.
+describe('AtomEditor — 3.8.1.8 mount-frame race + collabInstalled', () => {
+  it('Crepe constructed read-only for multiplayer (synchronous)', () => {
+    // [P1] #1: useEffect runs AFTER React commits, leaving a
+    // one-frame editable window between Crepe mount and the
+    // setReadonly effect. Paste / IME / programmatic dispatch
+    // in that frame is untracked. Fix: call setReadonly(true)
+    // at construction time for multiplayer.
+    expect(SRC).toMatch(
+      /if \(readOnly \|\| multiplayerDocId\) crepe\.setReadonly\(true\)/,
+    )
+  })
+
+  it('collabInstalled state is set true only after late-install succeeds', () => {
+    expect(SRC).toMatch(/const \[collabInstalled, setCollabInstalled\] = useState\(false\)/)
+    expect(SRC).toMatch(/if \(installed\) setCollabInstalled\(true\)/)
+    // Reset on docId change (multiplayer disabled).
+    expect(SRC).toMatch(/if \(!multiplayerDocId\) \{[\s\S]+?setCollabInstalled\(false\)/)
+  })
+
+  it('remote-pull effect gates on collabInstalled', () => {
+    // [P1] #2: getVersion throws if collab plugin not installed.
+    // Without this gate, the effect could fire on a remoteVersion
+    // bump that happens BEFORE the late-install completes (e.g.
+    // bootstrap mutation just wrote v=1 snapshot, useRemoteVersion
+    // fires, getVersion called → throw).
+    const remotePull = SRC.split('M1 step 3.8.1.8 — codex 9th-pass \\[P1\\] #2 GATE')[1]?.split('// Read the local version')[0] ?? ''
+    expect(SRC).toMatch(/if \(!collabInstalled\) return[\s\S]+?remoteVersion === undefined/)
+    expect(SRC).toMatch(/\[multiplayerDocId, remoteVersion, convex, collabInstalled\]/)
+  })
+
+  it('imperative methods (insertCodeBlock, replaceCodeBlockAt) guard on crepe.readonly', () => {
+    // [P2] #5: ProseMirror's editable=false only blocks DOM
+    // input. Programmatic dispatch via insertCodeBlock or
+    // replaceCodeBlockAt bypasses it. Honor crepe.readonly.
+    expect(SRC).toMatch(/insertCodeBlock[\s\S]{0,300}if \(crepe\.readonly\) return/)
+    expect(SRC).toMatch(/replaceCodeBlockAt[\s\S]{0,300}if \(crepe\.readonly\) return/)
   })
 })
 
