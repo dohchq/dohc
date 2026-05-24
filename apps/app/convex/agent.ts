@@ -99,6 +99,60 @@ export function pathDeriveLabel(path: string): string {
   return stripped || path || '(untitled)'
 }
 
+// H-1 (org-plan multiplayer-and-h-followups §4 A1) — the system prompt
+// is workspace-kind-aware. Personal workspaces use SYSTEM_PROMPT
+// verbatim (the v0 behavior); org workspaces get an ORG_PREAMBLE
+// prepended PLUS a `me.md` → `company.md` substitution applied to the
+// body. The substitution catches all the `me.md` literal references
+// (5+ in body + tool descriptions) so the agent's `write_atom` calls
+// land at `company.md` in an org workspace. The preamble tells the
+// model the framing (team context, possessives, identity-atom name)
+// so prose like "yours, edit it anytime" is read as "the team's."
+//
+// Why this shape (not a 5-substitution-points template):
+//  - Personal stays BYTE-IDENTICAL to today (zero regression risk).
+//  - Org gets a coherent override at the top + a literal-path fix.
+//  - The 444-line prompt body doesn't gain N placeholders to maintain.
+//  - LLMs follow top-level overrides reliably (Claude / GPT-5).
+//
+// If the framing proves insufficient (e.g. agent still says "the user"
+// when it should say "the team" in critical paths), iterate from the
+// preamble — the body stays the source of truth for the personal case.
+export function buildSystemPrompt(opts: {
+  kind: 'personal' | 'org'
+  orgName?: string
+}): string {
+  if (opts.kind === 'personal') return SYSTEM_PROMPT
+  const orgName = opts.orgName?.trim() || 'this team'
+  const orgPreamble = `\
+## ORG WORKSPACE CONTEXT (read BEFORE the rest of the prompt)
+
+You are operating in the **${orgName}** team workspace — NOT a personal vault.
+The body below was originally written for personal workspaces; apply these
+overrides as you read it:
+
+- The identity atom is \`company.md\` (about ${orgName} + how the team works),
+  NOT \`me.md\`. Every literal "me.md" below has been substituted to "company.md".
+- "The user" means the chat caller; they're acting on behalf of the team.
+- "yours" / "your vault" → read as "the team's" / "the ${orgName} workspace".
+- The starter setup (\`§ONBOARDING → 1\`) is for the TEAM: \`company.md\`
+  captures what ${orgName} does + how the team works, starter files cover
+  the team's domains (e.g. \`clients/\`, \`projects/\`, \`runbooks/\`), the
+  dashboard surfaces team-wide metrics from those files.
+- "Portable identity atom: who they are" → read as "Identity atom: what
+  ${orgName} does, how the team operates, and how the team wants dohc
+  to operate."
+- Plugins + skills are Owner-only in this workspace (the install/save
+  tool will fail for Members; if asked, route the user to ask an Owner).
+
+---
+
+`
+  // Substitute the literal me.md path so write_atom etc. land at
+  // company.md, not me.md. The preamble handles the framing.
+  return orgPreamble + SYSTEM_PROMPT.replaceAll('me.md', 'company.md')
+}
+
 const SYSTEM_PROMPT = `\
 You are dohc, a calm AI workspace for documents and real work. You
 build and maintain ONE user's workspace: a vault of plain-text atoms
@@ -1681,6 +1735,32 @@ export const _resolveWorkspaceForCaller = internalQuery({
   },
 })
 
+// H-1 (multiplayer-and-h-followups §4 A1) — workspace-kind resolver
+// used by sendMessage + startOnboarding to build the kind-aware system
+// prompt before streamText. Returns { kind, orgName? }. Personal-default
+// when workspaceId is undefined or matches the WorkOS subject; org if
+// `orgs._id` resolves. Auth: the underlying `requireWorkspace(ctx,
+// active)` rejects non-members, so a spoofed org id is denied here too.
+export const _resolveWorkspaceKindForCaller = internalQuery({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (
+    ctx,
+    { activeWorkspaceId },
+  ): Promise<
+    { kind: 'personal' } | { kind: 'org'; orgName: string }
+  > => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (workspaceId === identity?.subject) return { kind: 'personal' }
+    // Org workspace: look up the org row for the name.
+    const orgId = ctx.db.normalizeId('orgs', workspaceId)
+    if (orgId === null) return { kind: 'personal' } // shape mismatch fallback
+    const org = await ctx.db.get(orgId)
+    if (!org) return { kind: 'personal' }
+    return { kind: 'org', orgName: org.name }
+  },
+})
+
 // org-plan §6 + Jenny round-2 H-3 — Owner-aware variant for privileged
 // tools (install_plugin, save_skill). Personal workspace (workspaceId
 // === WorkOS subject) ⇒ implicit Owner, no extra check. Org workspace
@@ -1945,6 +2025,15 @@ export const sendMessage = action({
     })
     if (!ok) throw new Error('thread does not belong to this workspace')
 
+    // H-1 (A1) — resolve workspace KIND for the system-prompt builder.
+    // Personal ⇒ unchanged SYSTEM_PROMPT (byte-identical to v0).
+    // Org ⇒ ORG_PREAMBLE + me.md→company.md substitution.
+    const kindInfo = await ctx.runQuery(
+      internal.agent._resolveWorkspaceKindForCaller,
+      { activeWorkspaceId },
+    )
+    const systemPrompt = buildSystemPrompt(kindInfo)
+
     // P2b.4 LIFECYCLE: saveMessage → clear → streamText.
     //   1. saveMessage SYNCHRONOUSLY persists the user prompt and
     //      returns a stable messageId BEFORE streamText starts.
@@ -1981,6 +2070,12 @@ export const sendMessage = action({
       { threadId },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       {
+        // H-1 (A1): per-call system override. Personal callers get
+        // SYSTEM_PROMPT verbatim; org callers get ORG_PREAMBLE + the
+        // me.md→company.md substituted body. The Agent's static
+        // `instructions: SYSTEM_PROMPT` is the fallback when `system`
+        // isn't provided — kept for completeness.
+        system: systemPrompt,
         promptMessageId: messageId,
         prepareStep: buildPrepareStep(ctx, threadId, messageId, entry),
         // org-plan §5 + Jenny round-2 C-1 fix: thread activeWorkspaceId
@@ -2088,6 +2183,14 @@ export const startOnboarding = action({
       internal.agent._resolveWorkspaceForCaller,
       { activeWorkspaceId },
     )
+    // H-1 (A1) — workspace-kind-aware system prompt; org workspaces
+    // get ORG_PREAMBLE + me.md→company.md (so onboarding seeds + asks
+    // about the team, not a personal vault).
+    const kindInfo = await ctx.runQuery(
+      internal.agent._resolveWorkspaceKindForCaller,
+      { activeWorkspaceId },
+    )
+    const systemPrompt = buildSystemPrompt(kindInfo)
     // canonical thread (ensureThread converges any racing dups)
     const threadId: string = await ctx.runMutation(api.agent.ensureThread, {
       activeWorkspaceId,
@@ -2146,6 +2249,8 @@ export const startOnboarding = action({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (promptMessageId
         ? {
+            // H-1 (A1): per-call system override for onboarding too.
+            system: systemPrompt,
             promptMessageId,
             prepareStep: buildPrepareStep(
               ctx,
@@ -2163,6 +2268,7 @@ export const startOnboarding = action({
             onChunk: () => beat(),
           }
         : {
+            system: systemPrompt,
             prepareStep: buildPrepareStep(ctx, threadId, undefined, undefined),
             experimental_context: {
               entry: undefined,
