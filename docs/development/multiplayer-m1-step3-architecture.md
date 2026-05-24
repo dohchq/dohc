@@ -457,15 +457,40 @@ pass another /codex review pass before anyone approves the build.**
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Review (v1) | `/codex` against v1 of this doc | Independent 2nd opinion | 1 | REVISE | 8 findings (3 critical), all 8 absorbed in v2 |
+| Codex Review | `/codex` against v1 + v2 (same session) | Independent 2nd opinion | 2 | REVISE (twice) | v1: 8 findings; v2 follow-up: 3 RESOLVED, 5 PARTIAL, 4 NEW |
 
-**v1 review session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8
+**Session**: 019e59a4-4cc8-73e3-a38b-f8ac690422f8 (codex; resumed for v2)
 
-All 8 v1 findings have been addressed in this v2 (see "Changes from v1"
-table above for the explicit map). v2 is pending a second `/codex` pass.
+**v2 review scoring (Codex's mapping)**:
+- **RESOLVED (3)**: v1 #1 terminology, v1 #4 getDoc callable, v1 #5 create/version semantics
+- **PARTIAL (5)**:
+  - v1 #2: helper still missing `seedAtomIdIntoBody`, trash snapshots, `isSafeAtomPath`, migration notice, `{isRestore:false}` arg
+  - v1 #3: baseBodyHash should be per-doc (server-computed), not per-client — false conflicts when clients open during out-of-band churn
+  - v1 #6: Crepe schema extraction is speculative — `Crepe.getSchema()` not in public types
+  - v1 #7: single-fixture roundtrip test too weak; must test bundling + dohc-specific shapes
+  - v1 #8: cron-5min + heartbeat-90s = ~6.5min lag; schema missing `frozen` field
+- **NEW issues (4)**:
+  - `collabSessions` conflates presence + projection state — split into `collabDocs` (per-doc CAS) + `collabSessions` (per-client presence)
+  - `syncApi.submitSnapshot` fires `onSnapshot` BEFORE committing — projection must validate snapshotVersion before firing
+  - `getSteps` caps at 100 delta rows — projection must work off persisted snapshot version, not arbitrary replay
+  - Freeze+reload is too blunt — auto-rebuild PM from atoms.body when no unprojected edits exist; freeze only on true two-sided conflict
 
-**UNRESOLVED (v2 questions for codex)**: 7 open design questions listed
-above. Critical decision: Step 1a (Convex-runtime serializer feasibility)
-gates the entire implementation plan.
+**Top 3 remaining concerns (Codex)**:
+1. `collabSessions` conflates per-client presence with per-doc CAS/projection state
+2. The "shared helper" still does not match the real `upsertAtomImpl` write contract
+3. Bootstrap/schema extraction is still speculative and currently contradicted by the code
 
-**VERDICT**: v2 PROPOSED — awaiting second codex review pass before build.
+**Cross-model agreement**: Claude Code agrees with all 11 of Codex's v2 critiques (5 partial + 4 new + 2 implementation blockers). No disagreements to flag.
+
+**CODEX RECOMMENDATIONS on the 7 open questions** (verbatim):
+1. Heartbeat presence: yes, but split from doc projection state
+2. Freeze+reload: defensive v1 policy is OK; add auto-rebuild when PM has no unprojected edits
+3. CAS witness: use server-computed body hash, not `updatedAt`
+4. Cleanup cron: 5min too slow if 90s is the promise; either lower or stop promising
+5. Schema extraction: unresolved blocker; current Crepe types don't expose `getSchema()`
+6. Lock checks: keep them; lock should freeze projection
+7. Bootstrap idempotency: canonicalize PM JSON server-side before submitSnapshot
+
+**VERDICT**: v2 REVISE (second pass) — architecture v3 needed before build. The big-picture model is right; v3 must fix the table split, the shared-helper contract gap, and the schema-extraction blocker before any code lands.
+
+**UNRESOLVED**: 11 design decisions (3 critical from Codex's "Top 3") before this architecture is safe to implement.
