@@ -48,15 +48,21 @@ describe('AtomEditor — multiplayer wiring (structural)', () => {
     expect(SRC).toMatch(/docId:\s*multiplayerDocId \?\? null/)
   })
 
-  it('uses a ref to bridge collab plugins into the useEditor closure', () => {
-    // useEditor's closure runs ONCE at mount. Capturing the
-    // plugins via a ref lets the closure pick them up if they're
-    // ready, and the late-install effect handles the case where
-    // they arrive after.
+  it('captures plugins in a ref but DOES NOT install at closure time (3.8.1.4)', () => {
+    // The ref is still populated each render (the late-install
+    // effect reads it). The closure-time install was REMOVED in
+    // 3.8.1.4: useCollabBootstrapMutation needs PM JSON extracted
+    // from Crepe AFTER mount, so the bootstrap mutation cannot
+    // complete before the useEditor closure runs. The previous
+    // closure-time install path bypassed the new mutation gate
+    // and would race-install collab plugins before the collabDocs
+    // row existed. Removing it is the safe serialization.
     expect(SRC).toContain('collabPluginsRef.current = collabSync.plugins')
-    // The closure reads from the ref when building `extra`.
-    expect(SRC).toMatch(/if \(collabPluginsRef\.current\)/)
-    expect(SRC).toMatch(/for \(const p of collabPluginsRef\.current\)/)
+    // The closure must NOT iterate the ref to install plugins.
+    expect(SRC).not.toMatch(/for \(const p of collabPluginsRef\.current\)/)
+    // Comment explains the removal — pin so a refactor doesn't
+    // accidentally restore the broken pattern.
+    expect(SRC).toMatch(/DO NOT install collab plugins at closure[\s\S]+?time/i)
   })
 
   it('late-install effect adds collab plugins post-mount via prosePluginsCtx', () => {
@@ -239,5 +245,100 @@ describe('AtomEditor — rebootstrap overlay (M1 3.8.1.2)', () => {
     expect(SRC).toMatch(
       /if\s*\(collabDocState\.frozen\)\s*return[\s\S]+?frozen dominates/i,
     )
+  })
+})
+
+// M1 step 3.8.1.4 — wire the bootstrap mutation. Codex 7th-pass
+// caught that the prior client tier shipped UI for the frozen +
+// needsRebootstrap signals but NEVER called the mutation that
+// actually creates the collabDocs row + clears those flags. These
+// tests pin the wiring so a future refactor can't quietly remove
+// it again.
+describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
+  it('imports useCollabBootstrapMutation from collab-sync', () => {
+    expect(SRC).toMatch(
+      /useCollabBootstrapMutation[\s\S]*?from '@\/lib\/collab-sync'/,
+    )
+  })
+
+  it('extracts PM JSON from the mounted Crepe in an after-mount effect', () => {
+    // Same pattern as captureSchemaFromEditor: useEffect runs
+    // after every render, reads editorViewCtx, captures PM JSON
+    // via doc.toJSON(). Gated on multiplayerDocId + pmJsonStr
+    // not yet set, so it does zero work for single-user mounts
+    // and is idempotent on subsequent re-renders.
+    expect(SRC).toMatch(/capture PM JSON from the freshly-mounted/i)
+    expect(SRC).toMatch(/view\.state\.doc\.toJSON\(\)/)
+    expect(SRC).toMatch(/setPmJsonStr\(JSON\.stringify\(/)
+    // Short-circuit when already captured.
+    expect(SRC).toMatch(/if \(pmJsonStr !== null\) return/)
+  })
+
+  it('calls useCollabBootstrapMutation with body=defaultValue + the captured pmJsonStr', () => {
+    expect(SRC).toContain('useCollabBootstrapMutation({')
+    expect(SRC).toMatch(/body:\s*multiplayerDocId\s*\?\s*defaultValue\s*:\s*null/)
+    expect(SRC).toMatch(/pmJsonStr,/)
+    expect(SRC).toMatch(/enabled:\s*!!multiplayerDocId/)
+  })
+
+  it('late-install effect gates on bootstrapState.phase === "ok"', () => {
+    // The whole point of 3.8.1.4: don't let collab plugins
+    // install until the collabDocs row exists. Without this
+    // gate, submitSteps would fire deltas the projection writer
+    // can't bind to.
+    expect(SRC).toMatch(
+      /if \(bootstrapState\.phase !== 'ok'\) return/,
+    )
+    // Phase is in the dep array so the install fires when it
+    // transitions ok.
+    expect(SRC).toMatch(
+      /\[multiplayerDocId, collabSync\.plugins, bootstrapState\.phase\]/,
+    )
+  })
+
+  it('renders BootstrapErrorOverlay when phase === "error"', () => {
+    expect(SRC).toMatch(
+      /if \(multiplayerDocId && bootstrapState\.phase === 'error'\)/,
+    )
+    expect(SRC).toContain('<BootstrapErrorOverlay')
+    expect(SRC).toMatch(/reason=\{bootstrapState\.reason\}/)
+  })
+
+  it('renders null on phase === "frozen" (outer banner takes over)', () => {
+    // 'frozen' should NOT render the inner editor. The outer
+    // AtomEditor's frozen banner (driven by useCollabDocState)
+    // will mount within one Convex tick. Inner returns null to
+    // avoid a brief flash of the editor before the banner takes
+    // over.
+    expect(SRC).toMatch(
+      /if \(multiplayerDocId && bootstrapState\.phase === 'frozen'\)[\s\S]{0,400}?return null/,
+    )
+  })
+
+  it('BootstrapErrorOverlay auto-reloads after 4s + has reload button', () => {
+    expect(SRC).toContain('function BootstrapErrorOverlay')
+    expect(SRC).toMatch(/setTimeout\([\s\S]*?window\.location\.reload\(\)[\s\S]*?,\s*4000\)/)
+    expect(SRC).toMatch(/Reload now/)
+    expect(SRC).toContain('data-testid="collab-bootstrap-error"')
+    expect(SRC).toContain('role="alert"')
+  })
+
+  it('reason-specific copy covers every non-frozen failure reason', () => {
+    // body-changed | invalid-pm-json | atom-not-found | pm-body-mismatch | network
+    // 'frozen' is handled separately (returns null; outer banner).
+    expect(SRC).toMatch(/case 'body-changed'/)
+    expect(SRC).toMatch(/case 'atom-not-found'/)
+    expect(SRC).toMatch(/case 'pm-body-mismatch'/)
+    expect(SRC).toMatch(/case 'invalid-pm-json'/)
+    expect(SRC).toMatch(/case 'network'/)
+  })
+
+  it('closure-time install of collab plugins is REMOVED (3.8.1.4)', () => {
+    // The closure runs synchronously at mount, before the
+    // bootstrap mutation could possibly complete (the mutation
+    // needs PM JSON extracted FROM the just-mounted editor).
+    // Installing at closure time would bypass the new mutation
+    // gate. Removed = safe.
+    expect(SRC).not.toMatch(/for \(const p of collabPluginsRef\.current\) extra\.push/)
   })
 })

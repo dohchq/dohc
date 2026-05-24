@@ -38,6 +38,7 @@ import { WikilinkPicker } from './WikilinkPicker'
 import {
   useCollabSync,
   useCollabDocState,
+  useCollabBootstrapMutation,
   useRemoteVersion,
   applyRemoteSteps,
   getVersion,
@@ -734,6 +735,43 @@ function CrepeEditor({
   // effect below fetches the new steps + applies them.
   const remoteVersion = useRemoteVersion(multiplayerDocId ?? null)
 
+  // M1 step 3.8.1.4 — CLIENT BOOTSTRAP MUTATION WIRING.
+  //
+  // Codex 7th-pass [P1] #1: the UI tier shipped through 3.8.1.3
+  // assumed `bootstrapSnapshotFromAtomBody` would be called by
+  // something. Nothing called it. The collabDocs row was never
+  // created server-side; the rebootstrap auto-reload loop would
+  // never converge (the reload re-mounted, still didn't call the
+  // mutation, needsRebootstrap stayed true forever).
+  //
+  // The fix: after Crepe mounts + parses `defaultValue` (the
+  // atom.body markdown) into PM JSON, extract that JSON, call
+  // the mutation with {docId, pmJsonStr, clientBodyHash}, and
+  // gate the late-install of collab plugins on success.
+  //
+  // ORDERING:
+  //   1. Crepe mounts (closure runs synchronously)
+  //   2. captureSchemaFromEditor populates the schema cache (existing)
+  //   3. extractPmJsonFromEditor effect (NEW) captures the parsed
+  //      PM JSON into local state
+  //   4. useCollabBootstrapMutation fires when state has both docId
+  //      AND pmJsonStr (next render)
+  //   5. Late-install effect adds collab plugins only after the
+  //      mutation returns phase:'ok'
+  //
+  // Failure modes route to the bootstrap error overlay below; the
+  // editor stays mounted (so the user's keystrokes don't appear
+  // to vanish into a blank panel) but collab plugins never install.
+  const activeWorkspaceIdForBootstrap = useActiveWorkspaceId()
+  const [pmJsonStr, setPmJsonStr] = useState<string | null>(null)
+  const bootstrapState = useCollabBootstrapMutation({
+    docId: multiplayerDocId ?? null,
+    body: multiplayerDocId ? defaultValue : null,
+    pmJsonStr,
+    activeWorkspaceId: activeWorkspaceIdForBootstrap,
+    enabled: !!multiplayerDocId,
+  })
+
   const { get } = useEditor((root) => {
     const crepe = new Crepe({
       root,
@@ -846,16 +884,17 @@ function CrepeEditor({
         formulaClickPlugin,
         makeQueryBlockPlugin(queryResultsRef),
       ]
-      // M1 step 2 — fold in the multiplayer plugins WHEN they're
-      // ready at mount time. Bootstrap may resolve after the
-      // editor mounts; in that case the ctx.update path in the
-      // useEffect below adds them post-hoc. Both paths converge
-      // on the same prosePluginsCtx (the order doesn't matter for
-      // the collab plugin, which keys all its state by plugin
-      // instance).
-      if (collabPluginsRef.current) {
-        for (const p of collabPluginsRef.current) extra.push(p)
-      }
+      // M1 step 3.8.1.4 — DO NOT install collab plugins at closure
+      // time. The bootstrap mutation needs PM JSON extracted FROM
+      // Crepe, which by definition isn't available until Crepe
+      // mounts (this very closure runs). So bootstrap can never
+      // complete before mount. The late-install useEffect below
+      // installs them after both useCollabSync.plugins resolves
+      // AND useCollabBootstrapMutation.phase === 'ok'. The
+      // closure-time path was a pre-3.8.1.4 optimization that
+      // bypassed the new mutation gate; removing it is the safe
+      // serialization.
+      void collabPluginsRef.current
       // Phase 1b: inline-atom rendering, additive + flag-gated. The
       // live-total value chip only ANNOTATES a styled {identifier}
       // token — without that decoration it's an orphan number, so it
@@ -912,6 +951,38 @@ function CrepeEditor({
     }
   })
 
+  // M1 step 3.8.1.4 — capture PM JSON from the freshly-mounted
+  // Crepe so the bootstrap mutation has something to send. Crepe
+  // parses `defaultValue` (markdown) into a PM doc during create();
+  // we extract via editorViewCtx and stringify.
+  //
+  // Gated by multiplayerDocId so single-user mounts pay zero cost
+  // (no extraction, no JSON serialization). The state setter is
+  // idempotent — re-extracting the same JSON sets the same string,
+  // and React bails out (Object.is on strings). useEffect with no
+  // dep array runs on every render but the body short-circuits
+  // once pmJsonStr is populated.
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (pmJsonStr !== null) return
+    const crepe = crepeRef.current
+    if (!crepe) return
+    try {
+      crepe.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx)
+        if (!view) return
+        const json = view.state.doc.toJSON()
+        // Stringify here so the hook's idempotency key (which
+        // compares by reference for objects) gets a stable string.
+        setPmJsonStr(JSON.stringify(json))
+      })
+    } catch {
+      // editor.action throws if Crepe hasn't finished create() yet.
+      // Next render's effect retries; this is the same dance
+      // captureSchemaFromEditor does above.
+    }
+  })
+
   // M1 step 2 — late install of collab plugins. If useCollabSync's
   // bootstrap resolves AFTER the editor mounts, the plugins
   // weren't in extra at mount time; fold them in now via the same
@@ -919,9 +990,18 @@ function CrepeEditor({
   // plugins use at boot. Idempotent because Milkdown's plugin
   // matching is by instance and we only ever pass the same array
   // (collab-sync's pluginsRef stays stable per docId).
+  //
+  // M1 step 3.8.1.4 — ALSO gate on bootstrap mutation phase==='ok'.
+  // Installing collab plugins before the mutation creates the
+  // collabDocs row would let submitSteps write deltas the
+  // projection writer can't bind to (no baseline). The result:
+  // server steps accumulate; atoms.body never updates; the user
+  // thinks they're collaborating but they're silently desynced.
+  // Gate prevents that.
   useEffect(() => {
     if (!multiplayerDocId) return
     if (!collabSync.plugins) return
+    if (bootstrapState.phase !== 'ok') return
     const crepe = crepeRef.current
     if (!crepe) return
     let installed = false
@@ -940,7 +1020,7 @@ function CrepeEditor({
     // Switching docs unmounts the whole CrepeEditor (parent
     // re-keys on path change).
     void installed
-  }, [multiplayerDocId, collabSync.plugins])
+  }, [multiplayerDocId, collabSync.plugins, bootstrapState.phase])
 
   // M1 step 2 — remote-pull loop. Convex's useQuery on
   // latestVersion is the network heartbeat: when another tab/peer
@@ -1069,6 +1149,40 @@ function CrepeEditor({
     acState.active
       ? { open: true, from: acState.from, query: acState.query }
       : { open: false }
+
+  // M1 step 3.8.1.4 — BOOTSTRAP ERROR OVERLAY. When the bootstrap
+  // mutation fails for a non-frozen reason, the editor can't
+  // safely sync — collab plugins were never installed (gated
+  // above), so any keystroke would land in PM state with no
+  // delta-submission machinery wired up. The user would type into
+  // a doc that silently isn't collaborating; their work would be
+  // lost on close.
+  //
+  // The right UX: tell them, then give them a way out. Most
+  // failures (body-changed especially) recover automatically after
+  // a reload — the new mount sees the fresh body, Crepe re-parses,
+  // bootstrap fires with the new hash. Auto-reload after 4s so
+  // they're not stuck; immediate reload button for impatience.
+  //
+  // 'frozen' is NOT handled here — the outer AtomEditor's frozen
+  // banner (driven by useCollabDocState) catches up within one
+  // Convex tick. Returning null on frozen creates a brief blank
+  // window (≈100ms) before the outer banner mounts; acceptable.
+  if (multiplayerDocId && bootstrapState.phase === 'error') {
+    return (
+      <BootstrapErrorOverlay
+        reason={bootstrapState.reason}
+        message={bootstrapState.message}
+      />
+    )
+  }
+  if (multiplayerDocId && bootstrapState.phase === 'frozen') {
+    // Frozen banner lives at the outer AtomEditor level. Render
+    // nothing here so the editor doesn't briefly appear before
+    // the outer overlay catches up via useCollabDocState.
+    return null
+  }
+
   return (
     <>
       <Milkdown />
@@ -1079,6 +1193,74 @@ function CrepeEditor({
         onDismiss={() => setAcState({ active: false })}
       />
     </>
+  )
+}
+
+// M1 step 3.8.1.4 — bootstrap-mutation failure overlay. Covers
+// every non-frozen error reason from bootstrapSnapshotFromAtomBody:
+// body-changed, invalid-pm-json, atom-not-found, pm-body-mismatch,
+// and the catch-all 'network' (auth revocation, transient outage,
+// throw). The copy is reason-specific so the user understands
+// what's happening; the recovery in all cases is the same:
+// reload.
+//
+// Auto-reload after 4s — long enough for the user to read the
+// message, short enough that an idle reader doesn't get stuck.
+function BootstrapErrorOverlay({
+  reason,
+  message,
+}: {
+  reason:
+    | 'body-changed'
+    | 'invalid-pm-json'
+    | 'atom-not-found'
+    | 'pm-body-mismatch'
+    | 'network'
+  message?: string
+}) {
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (typeof window !== 'undefined') window.location.reload()
+    }, 4000)
+    return () => clearTimeout(t)
+  }, [])
+  const title = (() => {
+    switch (reason) {
+      case 'body-changed':
+        return 'The document changed while you were opening it.'
+      case 'atom-not-found':
+        return 'This document is no longer available.'
+      case 'pm-body-mismatch':
+      case 'invalid-pm-json':
+        return 'Editor state could not be synced.'
+      case 'network':
+      default:
+        return "Couldn't connect to the collaboration server."
+    }
+  })()
+  return (
+    <div
+      className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center"
+      data-testid="collab-bootstrap-error"
+      role="alert"
+    >
+      <div className="text-[15px] font-medium text-ink-strong">{title}</div>
+      <div className="text-[13px] text-ink-dim">
+        Reloading to recover. If this keeps happening, try again in a moment.
+      </div>
+      {message ? (
+        <div className="max-w-md text-[11px] text-ink-dim opacity-70">
+          {message}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        className="mt-2 rounded-md bg-ink-strong px-3.5 py-1.5 text-[13px] font-medium text-surface hover:opacity-90"
+      >
+        Reload now
+      </button>
+    </div>
   )
 }
 

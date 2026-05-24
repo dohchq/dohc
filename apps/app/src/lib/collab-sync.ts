@@ -22,7 +22,7 @@
 // the hook.
 
 import { useEffect, useRef, useState } from 'react'
-import { useConvex, useQuery } from 'convex/react'
+import { useConvex, useMutation, useQuery } from 'convex/react'
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state'
 import {
   collab,
@@ -612,6 +612,176 @@ export function useCollabDocState(
     api.collabBootstrap.getCollabDocState,
     docId ? { docId, activeWorkspaceId } : 'skip',
   )
+}
+
+// M1 step 3.8.1.4 — client-side SHA-256, used to compute the CAS
+// witness (`clientBodyHash`) that bootstrapSnapshotFromAtomBody
+// requires. The server runs the same algorithm via Convex's V8
+// crypto.subtle; browser support is universal in our targets.
+//
+// Why hex (not base64): matches server convention in
+// convex/atomWriter.ts:sha256Hex so client + server hashes compare
+// as strings. The whole point is bit-for-bit equality.
+async function sha256HexClient(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  const bytes = new Uint8Array(buf)
+  let hex = ''
+  for (const b of bytes) {
+    hex += b.toString(16).padStart(2, '0')
+  }
+  return hex
+}
+
+// M1 step 3.8.1.4 — client-side bootstrap mutation orchestration.
+// Codex 7th-pass [P1] #1: the prior client tier shipped UI for
+// frozen + needsRebootstrap signals but NEVER actually invoked
+// bootstrapSnapshotFromAtomBody. The collabDocs row was never
+// created server-side, projection writer had no baseline to bind
+// to, and needsRebootstrap could not be cleared — the
+// rebootstrap-overlay reload loop would never converge.
+//
+// FIX: actually call the mutation. Once per docId per mount.
+// The caller (AtomEditor) fires this AFTER Crepe mounts, when
+// `pmJsonStr` becomes available (Crepe parses the markdown body
+// → PM JSON internally; we extract via editorViewCtx).
+//
+// LIFECYCLE — exactly one in-flight call per docId:
+//   - phase:'idle'    → not enabled OR pmJsonStr not yet captured
+//   - phase:'pending' → mutation in flight
+//   - phase:'ok'      → server bootstrapped (or already had row);
+//                       caller is now safe to install collab
+//                       plugins. AtomEditor's late-install effect
+//                       MUST gate on this phase.
+//   - phase:'error'   → recovery is a manual reload (UI shows
+//                       overlay with a reload button + auto-reload
+//                       after a short delay). We intentionally do
+//                       not retry body-changed or pm-body-mismatch
+//                       from this hook: the PM JSON Crepe parsed
+//                       is fixed to the body it mounted with, and
+//                       re-bootstrap with mismatched JSON would
+//                       loop pm-body-mismatch. Reload re-parses.
+//                       'frozen' is a distinct phase below so the
+//                       caller can route to the frozen banner
+//                       instead of the generic error overlay.
+//   - phase:'frozen'  → server's collabDocs.frozen=true (3.9.5
+//                       FIX #4 made bootstrap return this reason
+//                       directly). UI shows frozen banner; user
+//                       reloads after resolving externally.
+//
+// IDEMPOTENCY: a ref tracks "have we fired for this (docId,
+// pmJsonStr) pair yet?" — re-renders don't re-fire. Switching
+// docId resets via the dep array; switching pmJsonStr (e.g. if
+// the caller re-extracted) also re-fires. In practice the caller
+// extracts pmJsonStr once at mount + holds it stable for the
+// lifetime of the editor, so a single firing is the norm.
+export type CollabBootstrapMutationState =
+  | { phase: 'idle' }
+  | { phase: 'pending' }
+  | { phase: 'ok'; alreadyBootstrapped: boolean }
+  | { phase: 'frozen' }
+  | {
+      phase: 'error'
+      reason:
+        | 'body-changed'
+        | 'invalid-pm-json'
+        | 'atom-not-found'
+        | 'pm-body-mismatch'
+        | 'network'
+      message?: string
+    }
+
+export function useCollabBootstrapMutation({
+  docId,
+  body,
+  pmJsonStr,
+  activeWorkspaceId,
+  enabled,
+}: {
+  docId: string | null
+  /** atoms.body (markdown). Hashed with SHA-256 → clientBodyHash. */
+  body: string | null
+  /** PM JSON the editor parsed from `body`. Caller extracts via
+   *  crepe.editor.action((ctx) => ctx.get(editorViewCtx).state.doc.toJSON())
+   *  in an after-mount effect. Stringified here to match the
+   *  mutation's wire format. Pass null until Crepe has mounted +
+   *  the JSON is captured. */
+  pmJsonStr: string | null
+  activeWorkspaceId: string | undefined
+  enabled: boolean
+}): CollabBootstrapMutationState {
+  const bootstrapMutation = useMutation(
+    api.collabBootstrap.bootstrapSnapshotFromAtomBody,
+  )
+  const [state, setState] = useState<CollabBootstrapMutationState>({
+    phase: 'idle',
+  })
+  // Idempotency key — refire only when (docId, pmJsonStr, body)
+  // changes, NOT on every render. Without this, every parent
+  // re-render would re-issue the mutation.
+  const firedForRef = useRef<{
+    docId: string
+    pmJsonStr: string
+    body: string
+  } | null>(null)
+
+  useEffect(() => {
+    if (!enabled || !docId || !pmJsonStr || body === null) {
+      // Not enough info yet (Crepe hasn't mounted, or multiplayer
+      // is off). Stay idle; the next render with all inputs
+      // present will fire.
+      return
+    }
+    // Have we already fired for this exact (docId, pmJson, body)?
+    // If so, the current state is the right answer; don't re-fire.
+    const key = firedForRef.current
+    if (
+      key &&
+      key.docId === docId &&
+      key.pmJsonStr === pmJsonStr &&
+      key.body === body
+    ) {
+      return
+    }
+    firedForRef.current = { docId, pmJsonStr, body }
+    let cancelled = false
+    setState({ phase: 'pending' })
+    ;(async () => {
+      try {
+        const clientBodyHash = await sha256HexClient(body)
+        if (cancelled) return
+        const result = await bootstrapMutation({
+          docId,
+          pmJsonStr,
+          clientBodyHash,
+          activeWorkspaceId,
+        })
+        if (cancelled) return
+        if (result.ok) {
+          setState({
+            phase: 'ok',
+            alreadyBootstrapped: result.alreadyBootstrapped,
+          })
+          return
+        }
+        // result.ok === false — surface the reason.
+        if (result.reason === 'frozen') {
+          setState({ phase: 'frozen' })
+          return
+        }
+        setState({ phase: 'error', reason: result.reason })
+      } catch (e) {
+        if (cancelled) return
+        const message = e instanceof Error ? e.message : String(e)
+        setState({ phase: 'error', reason: 'network', message })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [enabled, docId, pmJsonStr, body, activeWorkspaceId, bootstrapMutation])
+
+  return state
 }
 
 // Re-export getVersion so the integration can compare without

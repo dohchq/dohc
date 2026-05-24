@@ -134,6 +134,68 @@ describe('collab-sync — orchestration invariants', () => {
     expect(SRC).toMatch(/needsRebootstrap:\s*boolean/)
   })
 
+  it('exports useCollabBootstrapMutation — the actuator wire (M1 3.8.1.4)', () => {
+    // Codex 7th-pass [P1] #1 — without this hook the prior client
+    // tier was decorative. The mutation creates the collabDocs
+    // row (without which projection writer can't bind) and clears
+    // needsRebootstrap (without which the reload loop would never
+    // converge).
+    expect(SRC).toMatch(/export function useCollabBootstrapMutation/)
+    // Calls the canonical bootstrap mutation.
+    expect(SRC).toContain('api.collabBootstrap.bootstrapSnapshotFromAtomBody')
+    // Sends the CAS witness as clientBodyHash (server hashes body
+    // itself + compares — client hash is data, not authority).
+    expect(SRC).toContain('clientBodyHash')
+    // The PM JSON payload the server canonical-roundtrips against
+    // atom.body (3.9.5 fix #1).
+    expect(SRC).toContain('pmJsonStr')
+  })
+
+  it('CollabBootstrapMutationState discriminates idle/pending/ok/frozen/error', () => {
+    // Each phase routes to different UI: idle/pending → editor
+    // mounts but collab plugins don't install; ok → install; frozen
+    // → outer frozen banner; error → bootstrap-error overlay with
+    // a reload prompt. Pinning the union shape so a refactor
+    // doesn't quietly collapse the cases.
+    expect(SRC).toMatch(/export type CollabBootstrapMutationState/)
+    expect(SRC).toMatch(/\|\s*\{\s*phase:\s*'idle'\s*\}/)
+    expect(SRC).toMatch(/\|\s*\{\s*phase:\s*'pending'\s*\}/)
+    expect(SRC).toMatch(/phase:\s*'ok';\s*alreadyBootstrapped:\s*boolean/)
+    expect(SRC).toMatch(/\|\s*\{\s*phase:\s*'frozen'\s*\}/)
+    expect(SRC).toMatch(/phase:\s*'error'/)
+    expect(SRC).toMatch(/reason:[\s\S]+?'body-changed'/)
+    expect(SRC).toMatch(/reason:[\s\S]+?'pm-body-mismatch'/)
+    expect(SRC).toMatch(/reason:[\s\S]+?'network'/)
+  })
+
+  it('useCollabBootstrapMutation fires at most once per (docId, pmJsonStr, body)', () => {
+    // Idempotency ref — without it every re-render would re-fire
+    // the mutation. The Convex backend would reject duplicates as
+    // alreadyBootstrapped, but the chatter (one mutation per
+    // keystroke) would saturate the network.
+    expect(SRC).toMatch(/firedForRef/)
+    // Effect dep array changes refire when any input changes
+    // (new docId, fresh pmJson, body update).
+    expect(SRC).toMatch(/\[enabled, docId, pmJsonStr, body, activeWorkspaceId, bootstrapMutation\]/)
+  })
+
+  it('treats frozen + non-frozen errors separately (so UI routes correctly)', () => {
+    // If result.reason === 'frozen', the hook surfaces phase:'frozen'
+    // (NOT phase:'error') so AtomEditor can route to the existing
+    // frozen banner instead of a generic error overlay.
+    expect(SRC).toMatch(
+      /if \(result\.reason === 'frozen'\)[\s\S]+?phase:\s*'frozen'/,
+    )
+  })
+
+  it('uses crypto.subtle.digest("SHA-256") for clientBodyHash (matches server)', () => {
+    // The server (convex/atomWriter.ts:sha256Hex) hashes via the
+    // same algorithm. Matching client + server hash algorithms
+    // is THE CAS contract — if they diverge, bootstrap fails
+    // body-changed for every doc.
+    expect(SRC).toContain("crypto.subtle.digest('SHA-256'")
+  })
+
   it('bootstrap honors the `enabled` flag (off-switch for AtomEditor opt-in)', () => {
     expect(SRC).toMatch(/if \(!enabled \|\| !docId \|\| !schema\)/)
     // Plugins null when disabled so the editor mounts in
