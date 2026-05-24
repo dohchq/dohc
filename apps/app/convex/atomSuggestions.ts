@@ -24,6 +24,7 @@ import { mutation, query, internalMutation } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
+import { sha256Hex } from './atomWriter'
 import type { Id } from './_generated/dataModel'
 
 // Per-atom rate cap (codex HIGH 4 / plan §3 M3 cost caps).
@@ -317,13 +318,34 @@ export const acceptSuggestion = mutation({
     const newBody =
       body.slice(0, row.rangeFrom) + row.proposedText + body.slice(row.rangeTo)
 
-    // NOTE on collab projection: when an atom has an active
-    // collab session, this write races the projection writer.
-    // The PM↔body bidirectional binding (3.9.5 fix #1) means
-    // the next projection would freeze or auto-rebuild. For
-    // v1: accept the race; the conflict resolver handles it.
-    // Future work routes accepts through prosemirrorSync.transform
-    // for atomicity.
+    // M1 step 3.9.10 — ultrathink P1 #2 ACCEPT-FREEZE FIX.
+    //
+    // Pre-3.9.10 we wrote the new body via _upsertInternal but
+    // did NOT update collabDocs.baseBodyHash. Next snapshot's
+    // projection saw currentBodyHash(=newBody hash) !=
+    // baseBodyHash(=old body hash) → case A/B/C analysis ran
+    // → freeze. The user clicked Accept and the editor froze.
+    //
+    // Fix: after the body write, ALSO patch collabDocs to
+    // adopt the new body as the baseline. The conflict
+    // resolver sees the writes as already-reconciled — no
+    // freeze on next snapshot.
+    //
+    // Plus: set needsRebootstrap=true. The user's editor PM
+    // state is still at the OLD content; it doesn't know about
+    // the accepted suggestion. Without rebootstrap, their
+    // next snapshot would serialize OLD-PM, projection would
+    // see newDerivedHash(=OLD) != currentBodyHash(=NEW) !=
+    // baseBodyHash(=NEW) → freeze again. needsRebootstrap
+    // triggers the 3.8.1.2/3.8.1.5 rebootstrap overlay +
+    // pending-steps-gated reload; fresh mount → bootstrap →
+    // editor reads new atoms.body.
+    //
+    // The client-side onAccept handler ALSO blocks acceptance
+    // when sendableSteps is non-empty (3.9.10 client gate) —
+    // this prevents the case where pending local steps would
+    // race the new body write. So by the time we get here,
+    // the editor has no unsynced edits.
 
     await ctx.runMutation(internal.atoms._upsertInternal, {
       workspaceId,
@@ -336,6 +358,29 @@ export const acceptSuggestion = mutation({
       allowUserOverwrite: true,
       viewerSubject: subject,
     })
+
+    // 3.9.10 — adopt new body as the collab baseline + signal
+    // client rebootstrap. See the comment block above the
+    // _upsertInternal call for the rationale. Bounded to
+    // atoms that have an active collab row; suggestions
+    // accepted on docs without active multiplayer (the
+    // common case today) skip this branch.
+    const collabRow = await ctx.db
+      .query('collabDocs')
+      .withIndex('by_docId', (q) =>
+        q.eq('docId', `atom:${workspaceId}:${atom._id}`),
+      )
+      .unique()
+    if (collabRow) {
+      const newBodyHash = await sha256Hex(newBody)
+      await ctx.db.patch(collabRow._id, {
+        baseBodyHash: newBodyHash,
+        lastProjectedHash: newBodyHash,
+        needsRebootstrap: true,
+        lastConflictAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+    }
 
     await ctx.db.patch(suggestionId, {
       status: 'accepted',

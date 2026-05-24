@@ -307,9 +307,11 @@ describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
     )
     // 3.8.1.9 adds collabInstalledFor to deps so a docId
     // swap-in-place clears the stale install marker before
-    // a fresh install pass runs.
+    // a fresh install pass runs. 3.9.9 adds bootstrap.ready
+    // + bootstrap.initialDoc so the doc replace fires when
+    // the server snapshot resolves.
     expect(SRC).toMatch(
-      /\[\s*multiplayerDocId,\s*collabSync\.plugins,\s*bootstrapState\.phase,\s*collabInstalledFor,\s*\]/,
+      /\[\s*multiplayerDocId,\s*collabSync\.plugins,\s*collabSync\.bootstrap\.ready,\s*collabSync\.bootstrap\.initialDoc,\s*bootstrapState\.phase,\s*collabInstalledFor,\s*\]/,
     )
   })
 

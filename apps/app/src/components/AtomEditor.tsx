@@ -1132,10 +1132,49 @@ function CrepeEditor({
     }
     if (!collabSync.plugins) return
     if (bootstrapState.phase !== 'ok') return
+    if (!collabSync.bootstrap.ready) return
     const crepe = crepeRef.current
     if (!crepe) return
     let installed = false
     crepe.editor.action((ctx) => {
+      // M1 step 3.9.9 — codex 19th-pass holistic [P1]: install
+      // server snapshot doc BEFORE collab plugins. Without
+      // this, Crepe's mount-time defaultValue (markdown body)
+      // wins and the editor renders stale content while the
+      // collab plugin starts at the LATEST snapshot version.
+      // Tab B opens during Tab A's active editing → Tab B
+      // shows pre-edit content, submits its own edits against
+      // the latest version → divergence/corruption.
+      //
+      // Order matters: do this BEFORE installing collab plugins
+      // so the replace transaction doesn't generate steps the
+      // plugin would broadcast as user edits. addToHistory:
+      // false keeps the replace out of undo. We also dispatch
+      // BEFORE setCollabInstalledFor so setReadonly(false)
+      // hasn't fired yet — user can't have typed during the
+      // replace.
+      const initial = collabSync.bootstrap.initialDoc
+      if (initial !== null) {
+        const view = ctx.get(editorViewCtx)
+        if (view) {
+          // Cheap "are we already in sync?" check — JSON
+          // stringify each doc + compare. The serialize is
+          // bounded by doc size (typically <100KB). Avoids
+          // dispatching a no-op transaction that PM still
+          // costs to apply.
+          const currentJson = JSON.stringify(view.state.doc.toJSON())
+          const snapshotJson = JSON.stringify(initial.toJSON())
+          if (currentJson !== snapshotJson) {
+            const tr = view.state.tr.replaceWith(
+              0,
+              view.state.doc.content.size,
+              initial.content,
+            )
+            tr.setMeta('addToHistory', false)
+            view.dispatch(tr)
+          }
+        }
+      }
       ctx.update(prosePluginsCtx, (current) => {
         // Skip if already in (handles the closure-time install
         // path; idempotent on rerender).
@@ -1157,6 +1196,8 @@ function CrepeEditor({
   }, [
     multiplayerDocId,
     collabSync.plugins,
+    collabSync.bootstrap.ready,
+    collabSync.bootstrap.initialDoc,
     bootstrapState.phase,
     collabInstalledFor,
   ])
@@ -1374,6 +1415,39 @@ function CrepeEditor({
   useEffect(() => {
     suggestionHandlersRef.current = {
       onAccept: (id: string) => {
+        // M1 step 3.9.10 — ultrathink P1 #2 CLIENT GATE.
+        // Accepting while the user has unsynced local edits
+        // creates a freeze: the body changes (accept) but PM
+        // still has the user's pending edits at the old base.
+        // Next snapshot's projection sees PM ≠ body ≠ baseline
+        // → case A FREEZE. Block accept until pending steps
+        // submit. The 5s snapshot debounce + projection cycle
+        // typically clears this in <10s; the user can retry.
+        const crepe = crepeRef.current
+        if (crepe) {
+          try {
+            let hasPending = false
+            crepe.editor.action((ctx) => {
+              const view = ctx.get(editorViewCtx)
+              if (!view) return
+              const pending = sendableSteps(view.state)
+              if (pending && pending.steps.length > 0) hasPending = true
+            })
+            if (hasPending) {
+              if (typeof window !== 'undefined') {
+                // Lightweight inline notice — no toast infra
+                // in this codebase yet. Future improvement.
+                window.alert(
+                  'Save your edits first (they sync automatically in a few seconds), then click Accept again.',
+                )
+              }
+              return
+            }
+          } catch {
+            // Editor mid-mount; let the mutation proceed
+            // (the server-side gates will catch any real issue).
+          }
+        }
         void acceptSuggestionMut({
           suggestionId: id as Id<'atomSuggestions'>,
           activeWorkspaceId: activeWorkspaceIdForBootstrap,

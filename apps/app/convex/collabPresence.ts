@@ -89,8 +89,20 @@ export const recordCollabPresence = mutation({
         lastSeenAt: now,
       }
       if (cursorPos !== undefined) patch.cursorPos = cursorPos
-      await ctx.db.patch(existing._id, patch)
-      return { ok: true as const, session: existing._id }
+      // M1 step 3.9.11 — ultrathink P1 #3 HEARTBEAT/CLEANUP
+      // RACE. At t=89.9s heartbeat reads the row; at t=90.0s
+      // _cleanupIdleSessions cron deletes it; heartbeat patches
+      // a deleted row → throws. Convex OCC likely retries
+      // this transaction (the cleanup invalidates the read
+      // snapshot), but explicit handling closes any gap.
+      // On any patch failure, fall through to the insert path
+      // — the row is gone or stale; just create a fresh one.
+      try {
+        await ctx.db.patch(existing._id, patch)
+        return { ok: true as const, session: existing._id }
+      } catch {
+        // fall through to insert below
+      }
     }
     const sessionId = await ctx.db.insert('collabSessions', {
       docId,
