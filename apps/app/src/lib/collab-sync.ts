@@ -716,14 +716,24 @@ export function useCollabBootstrapMutation({
   const [state, setState] = useState<CollabBootstrapMutationState>({
     phase: 'idle',
   })
-  // Idempotency key — refire only when (docId, pmJsonStr, body)
-  // changes, NOT on every render. Without this, every parent
-  // re-render would re-issue the mutation.
-  const firedForRef = useRef<{
-    docId: string
-    pmJsonStr: string
-    body: string
-  } | null>(null)
+  // Idempotency key — refire ONLY when docId changes (switching
+  // atoms). Codex 8th-pass [P1] #3: keying on (pmJsonStr, body)
+  // too caused bootstrap to refire whenever the parent's `value`
+  // prop changed (e.g. when a projection write updated atom.body
+  // and Convex's reactive query pushed the new body). The refire
+  // would send the OLD pmJsonStr (Crepe didn't reparse) with the
+  // NEW body hash → server's PM↔body binding check rejects with
+  // pm-body-mismatch → BootstrapErrorOverlay shows on a happily-
+  // bootstrapped session. Wrong.
+  //
+  // Correct semantics: bootstrap is one-shot per docId per mount.
+  // Once it succeeds, never refire. If body changes happen later,
+  // they flow through the projection writer + (potentially)
+  // needsRebootstrap signal — the dedicated path for body drift,
+  // NOT the bootstrap mutation. Switching atoms unmounts the
+  // editor entirely (parent re-keys), giving us a fresh mount
+  // where the new docId triggers a fresh bootstrap.
+  const firedForRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!enabled || !docId || !pmJsonStr || body === null) {
@@ -732,18 +742,10 @@ export function useCollabBootstrapMutation({
       // present will fire.
       return
     }
-    // Have we already fired for this exact (docId, pmJson, body)?
-    // If so, the current state is the right answer; don't re-fire.
-    const key = firedForRef.current
-    if (
-      key &&
-      key.docId === docId &&
-      key.pmJsonStr === pmJsonStr &&
-      key.body === body
-    ) {
-      return
-    }
-    firedForRef.current = { docId, pmJsonStr, body }
+    // Already fired for this docId? Don't refire. body changes
+    // don't matter; pmJsonStr is captured ONCE per mount.
+    if (firedForRef.current === docId) return
+    firedForRef.current = docId
     let cancelled = false
     setState({ phase: 'pending' })
     ;(async () => {
@@ -779,6 +781,10 @@ export function useCollabBootstrapMutation({
     return () => {
       cancelled = true
     }
+    // deps: pmJsonStr is here so the effect fires the FIRST time
+    // it transitions from null → non-null (Crepe finished
+    // mounting). Once fired, firedForRef short-circuits further
+    // invocations for this docId.
   }, [enabled, docId, pmJsonStr, body, activeWorkspaceId, bootstrapMutation])
 
   return state

@@ -257,6 +257,30 @@ export const _projectSnapshotToBody = internalMutation({
     // rest). The re-baseline preserves Bob's frontmatter change.
     const currentBodyHash = await sha256Hex(atom.body)
     if (currentBodyHash !== doc.baseBodyHash) {
+      // M1 step 3.8.1.7 — codex 8th-pass [P2] #4 EXTENSION of the
+      // 3.8.1.5 stale-snapshot gate. The gate used to only wrap
+      // case B; codex pointed out that case A FREEZE can also
+      // fire spuriously when the snapshot is stale. Hoist the
+      // gate to the top of conflict classification so EVERY case
+      // (A freeze, B auto-rebuild, C re-baseline) sees fresh
+      // information before deciding. Stale → defer; the next
+      // snapshot's projection re-classifies.
+      const latest = (await ctx.runQuery(
+        components.prosemirrorSync.lib.latestVersion,
+        { id: docId },
+      )) as number | null
+      if (latest !== null && latest > snapshotVersion) {
+        await ctx.db.patch(doc._id, {
+          ...(await buildClearPatch()),
+          updatedAt: Date.now(),
+        })
+        return {
+          skipped: 'snapshot-stale' as const,
+          snapshotVersion,
+          latestVersion: latest,
+        }
+      }
+
       const newDerivedHash = await sha256Hex(ser.newBody)
 
       // Case C: PM-derived output happens to match the current body.
@@ -289,53 +313,12 @@ export const _projectSnapshotToBody = internalMutation({
       // (sub-3.5) currently no-ops when collabDocs row exists;
       // sub-3.8 will teach it to handle the rebootstrap path.
       //
-      // M1 step 3.8.1.5 — codex 7th-pass [P1] #2 GATE. Case B's
-      // newDerivedHash was computed from snapshotContent at
-      // snapshotVersion. If latestVersion > snapshotVersion,
-      // there are submitted deltas PAST this snapshot — the
-      // serialized body doesn't reflect them. newDerivedHash ===
-      // baseBodyHash spuriously matches because we're comparing
-      // a STALE PM state. Setting needsRebootstrap would tell
-      // the client to reload + drop those deltas → silent data
-      // loss.
-      //
-      // Defer: don't set needsRebootstrap, don't freeze, just
-      // wait. The next snapshot submission (5s editor idle, or
-      // the destroy-time flush from sub-commit 3.6.5 BLOCKER #2)
-      // fires onSnapshot, which schedules another projection
-      // with the FRESHER snapshotVersion. That projection sees
-      // up-to-date PM state and routes to the correct case
-      // (might still be B, might be A, might be C). Defer until
-      // information is complete.
+      // M1 step 3.8.1.5 + 3.8.1.7 — stale-snapshot gate was
+      // hoisted to the top of conflict classification above.
+      // By the time we reach here, snapshot reflects the latest
+      // committed PM state (latestVersion <= snapshotVersion).
+      // Case B is safe to fire.
       if (newDerivedHash === doc.baseBodyHash) {
-        const latest = (await ctx.runQuery(
-          components.prosemirrorSync.lib.latestVersion,
-          { id: docId },
-        )) as number | null
-        if (latest !== null && latest > snapshotVersion) {
-          // Stale-snapshot defer. The case B premise ("PM hasn't
-          // moved since baseline") was decided from snapshotContent
-          // at snapshotVersion; deltas past it mean that premise
-          // is unsound. Don't set needsRebootstrap; don't freeze;
-          // don't adopt the OOB body as new baseline. The next
-          // snapshot's projection re-evaluates with fresh data.
-          //
-          // The patch below clears scheduledJobId (via the
-          // ownership-conditional buildClearPatch helper — same
-          // pattern as every other patch site in this handler)
-          // so a later snapshot can schedule freely. updatedAt
-          // bumps as a side effect; harmless. No content fields
-          // touched — structural test pins this.
-          await ctx.db.patch(doc._id, {
-            ...(await buildClearPatch()),
-            updatedAt: Date.now(),
-          })
-          return {
-            skipped: 'snapshot-stale' as const,
-            snapshotVersion,
-            latestVersion: latest,
-          }
-        }
         await ctx.db.patch(doc._id, {
           needsRebootstrap: true,
           baseBodyHash: currentBodyHash, // adopt OOB body as new baseline

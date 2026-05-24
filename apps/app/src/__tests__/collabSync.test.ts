@@ -168,15 +168,19 @@ describe('collab-sync — orchestration invariants', () => {
     expect(SRC).toMatch(/reason:[\s\S]+?'network'/)
   })
 
-  it('useCollabBootstrapMutation fires at most once per (docId, pmJsonStr, body)', () => {
-    // Idempotency ref — without it every re-render would re-fire
-    // the mutation. The Convex backend would reject duplicates as
-    // alreadyBootstrapped, but the chatter (one mutation per
-    // keystroke) would saturate the network.
+  it('useCollabBootstrapMutation fires at most once per docId (3.8.1.7 fix)', () => {
+    // Idempotency ref keyed on docId ONLY (post-3.8.1.7). Codex
+    // 8th-pass [P1] #3: keying on (pmJsonStr, body) too let
+    // body-reactivity (projection writes pushing new atom.body)
+    // refire bootstrap with stale pmJsonStr → pm-body-mismatch
+    // on a happily-running session. Fix: bootstrap is one-shot
+    // per docId per mount. Switching atoms re-keys the parent +
+    // unmounts; fresh docId fires fresh bootstrap.
     expect(SRC).toMatch(/firedForRef/)
-    // Effect dep array changes refire when any input changes
-    // (new docId, fresh pmJson, body update).
-    expect(SRC).toMatch(/\[enabled, docId, pmJsonStr, body, activeWorkspaceId, bootstrapMutation\]/)
+    expect(SRC).toMatch(/firedForRef\.current === docId/)
+    // Ref type is now string | null (the docId), not the prior
+    // {docId, pmJsonStr, body} shape.
+    expect(SRC).toMatch(/useRef<string \| null>\(null\)/)
   })
 
   it('treats frozen + non-frozen errors separately (so UI routes correctly)', () => {

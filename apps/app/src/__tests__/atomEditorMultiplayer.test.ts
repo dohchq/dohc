@@ -39,12 +39,20 @@ describe('AtomEditor — multiplayer wiring (structural)', () => {
     expect(SRC).toMatch(/<CrepeEditor[\s\S]*?multiplayerDocId=\{multiplayerDocId\}/)
   })
 
-  it('calls useCollabSync inside CrepeEditor with enabled gated by multiplayerDocId', () => {
+  it('calls useCollabSync inside CrepeEditor gated on bootstrap success (3.8.1.7)', () => {
     // The hook is invoked with the right gating shape; passing
     // enabled:false (when the prop is unset) means useCollabSync
     // short-circuits the bootstrap + returns no plugins.
+    //
+    // 3.8.1.7 [P1] #1: enabled now ALSO requires bootstrap
+    // mutation phase==='ok'. Without that, useCollabSync fetches
+    // snapshot too early (sees null/v0), builds plugins at
+    // stale startVersion, races the server's bootstrap-mutation-
+    // created v=1 snapshot.
     expect(SRC).toContain('useCollabSync({')
-    expect(SRC).toMatch(/enabled:\s*!!multiplayerDocId/)
+    expect(SRC).toMatch(
+      /enabled:\s*!!multiplayerDocId\s*&&\s*bootstrapState\.phase === 'ok'/,
+    )
     expect(SRC).toMatch(/docId:\s*multiplayerDocId \?\? null/)
   })
 
@@ -348,6 +356,40 @@ describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
     // Installing at closure time would bypass the new mutation
     // gate. Removed = safe.
     expect(SRC).not.toMatch(/for \(const p of collabPluginsRef\.current\) extra\.push/)
+  })
+})
+
+// M1 step 3.8.1.7 — Crepe read-only until collab is ready.
+describe('AtomEditor — read-only-until-collab-ready gate (3.8.1.7)', () => {
+  it('effect calls crepe.setReadonly based on collabReady state', () => {
+    // [P1] #2: before this effect, the editor was writable from
+    // mount → user could type during the ~500ms bootstrap window,
+    // edits weren't tracked by prosemirror-collab, first
+    // remote-pull rebased past them = silent data loss.
+    expect(SRC).toMatch(
+      /codex 8th-pass \[P1\] #2 GATE/,
+    )
+    expect(SRC).toMatch(/crepe\.setReadonly\(/)
+    // collabReady combines bootstrap success + plugins arrival.
+    expect(SRC).toMatch(/bootstrapState\.phase === 'ok'\s*&&\s*collabSync\.plugins !== null/)
+  })
+
+  it('respects the readOnly prop (shared-atom view-only mode wins)', () => {
+    // The original readOnly prop must take precedence — a
+    // view-only shared atom stays read-only even after collab
+    // is "ready".
+    expect(SRC).toMatch(/if \(readOnly\) \{[\s\S]+?setReadonly\(true\)[\s\S]+?return[\s\S]+?\}/)
+  })
+
+  it('single-user mode (no multiplayerDocId) leaves Crepe writable', () => {
+    // No gate on single-user mounts — same as pre-3.8.1.7.
+    expect(SRC).toMatch(/if \(!multiplayerDocId\) \{[\s\S]+?setReadonly\(false\)[\s\S]+?return[\s\S]+?\}/)
+  })
+
+  it('effect deps include all four inputs to the readonly decision', () => {
+    expect(SRC).toMatch(
+      /\[readOnly, multiplayerDocId, bootstrapState\.phase, collabSync\.plugins\]/,
+    )
   })
 })
 

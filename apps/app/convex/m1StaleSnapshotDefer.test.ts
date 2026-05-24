@@ -41,17 +41,29 @@ describe('M1 step 3.8.1.5 — server-side stale-snapshot defer', () => {
     )
   })
 
-  it('case B queries components.prosemirrorSync.lib.latestVersion BEFORE patching', () => {
-    // The gate must run BEFORE ctx.db.patch in the case B branch.
-    // Otherwise the row mutation would land before we have the
-    // info needed to defer.
-    const caseB = SRC.split('// Case B:')[1]?.split('// Case A:')[0] ?? ''
-    expect(caseB).toMatch(/components\.prosemirrorSync\.lib\.latestVersion/)
-    // Patch comes AFTER the query in source order.
-    const queryIdx = caseB.indexOf('latestVersion')
-    const patchIdx = caseB.indexOf('ctx.db.patch')
-    expect(queryIdx).toBeGreaterThan(-1)
-    expect(patchIdx).toBeGreaterThan(queryIdx)
+  it('gate hoisted to top of conflict classification (3.8.1.7 P2 #4)', () => {
+    // 3.8.1.5 originally placed the latestVersion check inside
+    // case B only. Codex 8th-pass [P2] #4: case A FREEZE can
+    // ALSO fire spuriously on a stale snapshot — newDerivedHash
+    // (from stale snapshotContent) wouldn't match currentBodyHash
+    // even though the actual PM might. 3.8.1.7 hoists the gate
+    // ABOVE all case-A/B/C analysis: every classification sees
+    // fresh information or defers.
+    //
+    // Source position: gate runs BEFORE newDerivedHash is even
+    // computed (because none of the cases need to fire if
+    // snapshot is stale).
+    const conflict =
+      SRC.split('currentBodyHash !== doc.baseBodyHash')[1]?.split(
+        '// Case C:',
+      )[0] ?? ''
+    expect(conflict).toMatch(/components\.prosemirrorSync\.lib\.latestVersion/)
+    expect(conflict).toMatch(/codex 8th-pass \[P2\] #4/i)
+    // Gate fires BEFORE newDerivedHash computation.
+    const gateIdx = conflict.indexOf('latestVersion')
+    const derivedIdx = conflict.indexOf('newDerivedHash = await')
+    expect(gateIdx).toBeGreaterThan(-1)
+    expect(derivedIdx).toBeGreaterThan(gateIdx)
   })
 
   it('defers with skipped:snapshot-stale when latestVersion > snapshotVersion', () => {
@@ -65,41 +77,28 @@ describe('M1 step 3.8.1.5 — server-side stale-snapshot defer', () => {
     )
   })
 
-  it('defer path does NOT mutate baseBodyHash, needsRebootstrap, or frozen', () => {
-    // The defer's whole point: leave content state alone. The
-    // next snapshot will re-evaluate. If we patched baseBodyHash
-    // to currentBodyHash here, the next case B would be SKIPPED
-    // as already-handled — defeating the purpose. Only
-    // scheduledJobId (via buildClearPatch) and updatedAt are
-    // touched, both housekeeping.
-    const caseB = SRC.split('// Case B:')[1]?.split('// Case A:')[0] ?? ''
-    const defer =
-      caseB.split('Stale-snapshot defer')[1]?.split('await ctx.db.patch(doc._id, {\n          needsRebootstrap')[0] ?? ''
-    expect(defer).not.toMatch(/baseBodyHash:/)
+  it('defer path patches only housekeeping (no content fields)', () => {
+    // The defer's whole point: leave content state alone. Only
+    // scheduledJobId (via buildClearPatch) + updatedAt change.
+    // If we patched baseBodyHash to currentBodyHash here, the
+    // next case B would be SKIPPED as already-handled, defeating
+    // the purpose.
+    const conflict =
+      SRC.split('currentBodyHash !== doc.baseBodyHash')[1]?.split(
+        '// Case C:',
+      )[0] ?? ''
+    const defer = conflict.split('latest > snapshotVersion')[1]?.split('}')[0] ?? ''
+    expect(defer).not.toMatch(/baseBodyHash:\s*currentBodyHash/)
     expect(defer).not.toMatch(/needsRebootstrap:\s*true/)
     expect(defer).not.toMatch(/frozen:\s*true/)
+    expect(defer).toContain('buildClearPatch()')
   })
 
   it('treats latestVersion=null as "no info, proceed" (component empty / missing)', () => {
     // null check guards against the component returning null (no
     // snapshots exist yet) or being temporarily unavailable. We
-    // proceed with case B's old behavior in that case — the gate
-    // is a SAFETY net, not a required precondition.
+    // proceed with the case A/B/C analysis in that case — the
+    // gate is a SAFETY net, not a required precondition.
     expect(SRC).toMatch(/if \(latest !== null && latest > snapshotVersion\)/)
-  })
-
-  it('defer patch routes through buildClearPatch (ownership-conditional)', () => {
-    // Same pattern as every other ctx.db.patch site in this
-    // handler — spread buildClearPatch() inline. The structural
-    // test in m1FixPack365.test.ts pins this convention; defer
-    // path must follow it so a later refactor can't introduce a
-    // direct scheduledJobId:undefined write that bypasses the
-    // ownership check.
-    const caseB = SRC.split('// Case B:')[1]?.split('// Case A:')[0] ?? ''
-    const defer =
-      caseB.split('Stale-snapshot defer')[1]?.split('await ctx.db.patch(doc._id, {\n          needsRebootstrap')[0] ?? ''
-    expect(defer).toContain('buildClearPatch()')
-    // No direct scheduledJobId write outside buildClearPatch.
-    expect(defer).not.toMatch(/scheduledJobId:\s*undefined/)
   })
 })

@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
 import { describe, it, expect } from 'vitest'
+import { register as registerProsemirrorComponent } from '@convex-dev/prosemirror-sync/test'
 import schema from './schema'
 import { api, internal } from './_generated/api'
 import { sha256Hex } from './atomWriter'
@@ -309,7 +310,12 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
     // (Case B auto-rebuild + Case C re-baseline are tested
     // separately in the "M1 step 3.7 — two-state conflict
     // resolver" suite below.)
+    //
+    // 3.8.1.7 [P2] #4 hoisted the latestVersion gate to top of
+    // conflict classification — query needs the component
+    // registered or it throws.
     const t = convexTest(schema, modules)
+    registerProsemirrorComponent(t)
     const orgId = await seedOrg(t)
     const { atomId, docId } = await makeAtomAndCollabDoc(
       t,

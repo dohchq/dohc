@@ -722,47 +722,36 @@ function CrepeEditor({
     const unsub = subscribeSchema((s) => setCachedSchema(s))
     return unsub
   }, [])
-  const collabSync = useCollabSync({
-    docId: multiplayerDocId ?? null,
-    schema: cachedSchema,
-    enabled: !!multiplayerDocId,
-  })
-  // The ref the editor closure reads when building its plugin
-  // list. Captured because useEditor runs once; this lets the
-  // collab plugins arrive via the React render cycle.
-  const collabPluginsRef = useRef<typeof collabSync.plugins>(null)
-  collabPluginsRef.current = collabSync.plugins
-  // Subscribe to the live server version. When it bumps, the
-  // effect below fetches the new steps + applies them.
-  const remoteVersion = useRemoteVersion(multiplayerDocId ?? null)
-
-  // M1 step 3.8.1.4 — CLIENT BOOTSTRAP MUTATION WIRING.
+  // M1 step 3.8.1.7 — codex 8th-pass [P1] #1 GATE.
   //
-  // Codex 7th-pass [P1] #1: the UI tier shipped through 3.8.1.3
-  // assumed `bootstrapSnapshotFromAtomBody` would be called by
-  // something. Nothing called it. The collabDocs row was never
-  // created server-side; the rebootstrap auto-reload loop would
-  // never converge (the reload re-mounted, still didn't call the
-  // mutation, needsRebootstrap stayed true forever).
+  // useCollabSync was previously enabled as soon as multiplayer
+  // was on. On a fresh doc it would fetch snapshot → null →
+  // build plugins at startVersion=0. The bootstrap mutation
+  // (sub-3.5) then created snapshot at v=1. By the time the
+  // plugins installed, their local version (0) was behind the
+  // server (1). First submitSteps would race-needs-rebase; remote-
+  // pull would receive a snapshot and try to apply it via
+  // receiveTransaction — which is designed for steps, not full
+  // snapshots. The user's editor state could end up in an
+  // inconsistent place.
   //
-  // The fix: after Crepe mounts + parses `defaultValue` (the
-  // atom.body markdown) into PM JSON, extract that JSON, call
-  // the mutation with {docId, pmJsonStr, clientBodyHash}, and
-  // gate the late-install of collab plugins on success.
+  // FIX: gate useCollabSync.enabled on bootstrapState.phase ===
+  // 'ok'. The chain becomes:
   //
-  // ORDERING:
-  //   1. Crepe mounts (closure runs synchronously)
-  //   2. captureSchemaFromEditor populates the schema cache (existing)
-  //   3. extractPmJsonFromEditor effect (NEW) captures the parsed
-  //      PM JSON into local state
-  //   4. useCollabBootstrapMutation fires when state has both docId
-  //      AND pmJsonStr (next render)
-  //   5. Late-install effect adds collab plugins only after the
-  //      mutation returns phase:'ok'
+  //   1. Crepe mounts with markdown body (single-user mode)
+  //   2. PM JSON extraction effect captures pmJsonStr
+  //   3. useCollabBootstrapMutation fires — server creates
+  //      collabDocs row + writes snapshot at v=1
+  //   4. bootstrapState.phase = 'ok'
+  //   5. useCollabSync NOW enabled → fetches snapshot v=1 →
+  //      builds plugins with startVersion=1
+  //   6. Late-install effect installs plugins
+  //   7. Crepe becomes writable (3.8.1.7 read-only effect below)
   //
-  // Failure modes route to the bootstrap error overlay below; the
-  // editor stays mounted (so the user's keystrokes don't appear
-  // to vanish into a blank panel) but collab plugins never install.
+  // collabSync is referenced BEFORE bootstrapState — declared
+  // first, but with the gate referencing bootstrapState below.
+  // We forward-declare here by deferring to the actual hook
+  // call AFTER bootstrap mutation runs. Order is preserved.
   const activeWorkspaceIdForBootstrap = useActiveWorkspaceId()
   const [pmJsonStr, setPmJsonStr] = useState<string | null>(null)
   const bootstrapState = useCollabBootstrapMutation({
@@ -772,6 +761,23 @@ function CrepeEditor({
     activeWorkspaceId: activeWorkspaceIdForBootstrap,
     enabled: !!multiplayerDocId,
   })
+  const collabSync = useCollabSync({
+    docId: multiplayerDocId ?? null,
+    schema: cachedSchema,
+    // 3.8.1.7 [P1] #1: don't fetch snapshot / build plugins
+    // until bootstrap mutation succeeded. Otherwise plugins
+    // start at the pre-bootstrap version and race-rebase on
+    // first edit.
+    enabled: !!multiplayerDocId && bootstrapState.phase === 'ok',
+  })
+  // The ref the editor closure reads when building its plugin
+  // list. Captured because useEditor runs once; this lets the
+  // collab plugins arrive via the React render cycle.
+  const collabPluginsRef = useRef<typeof collabSync.plugins>(null)
+  collabPluginsRef.current = collabSync.plugins
+  // Subscribe to the live server version. When it bumps, the
+  // effect below fetches the new steps + applies them.
+  const remoteVersion = useRemoteVersion(multiplayerDocId ?? null)
 
   const { get } = useEditor((root) => {
     const crepe = new Crepe({
@@ -926,6 +932,43 @@ function CrepeEditor({
       crepeRef.current = null
     }
   }, [crepeRef])
+
+  // M1 step 3.8.1.7 — codex 8th-pass [P1] #2 GATE.
+  //
+  // Before this gate, the editor was writable from the moment
+  // Crepe mounted. That created a ~500ms window between mount
+  // and bootstrap mutation completing where the user could type;
+  // those edits landed in PM state but weren't tracked by
+  // prosemirror-collab (plugins not installed yet). The first
+  // remote-pull after install would rebase past them — silent
+  // data loss.
+  //
+  // FIX: Crepe is read-only until BOTH bootstrap mutation
+  // returns phase:'ok' AND collab plugins are installed. We
+  // detect "installed" indirectly: when collabSync.plugins is
+  // non-null (useCollabSync is now gated on phase==='ok' too,
+  // so plugins arriving means bootstrap succeeded AND snapshot
+  // was fetched). The readOnly prop (single-user shared-atom
+  // view-only mode) still wins.
+  //
+  // Single-user (multiplayerDocId unset): no gate; Crepe is
+  // writable from mount, same as pre-3.8.1.7.
+  useEffect(() => {
+    const crepe = crepeRef.current
+    if (!crepe) return
+    if (readOnly) {
+      crepe.setReadonly(true)
+      return
+    }
+    if (!multiplayerDocId) {
+      crepe.setReadonly(false)
+      return
+    }
+    // Multiplayer: writable only after bootstrap + plugins.
+    const collabReady =
+      bootstrapState.phase === 'ok' && collabSync.plugins !== null
+    crepe.setReadonly(!collabReady)
+  }, [readOnly, multiplayerDocId, bootstrapState.phase, collabSync.plugins])
 
   // M1 step 3 sub-commit 3.2 — populate the global schema cache
   // from the first mounted Crepe. Runs on every mount; idempotent
