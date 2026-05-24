@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
 import {
   extractFrontmatterId,
   isHtmlAtomBody,
@@ -76,6 +77,14 @@ export const getRenderable = query({
     // POSITIVE id mismatch is rejected.
     const fid = extractFrontmatterId(atom.body)
     if (fid !== null && fid !== atomId) return null
+
+    // P1 (multiplayer-and-h-followups §6.5) — access gate. Render
+    // route returns null for atoms the viewer can't read (the /r
+    // route maps this to 404, consistent with the M5 fix from the
+    // org-tenancy round-2 review — never confirms the atom exists).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, atom._id, viewerSubject))) return null
 
     const { rest } = splitFrontmatter(atom.body)
     return { html: rest, updatedAt: atom.updatedAt }

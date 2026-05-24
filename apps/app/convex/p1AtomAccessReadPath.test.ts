@@ -181,6 +181,125 @@ describe('P1 read-path filtering — atoms.list', () => {
   })
 })
 
+describe('P1 read-path filtering — search.run', () => {
+  it('full-text search excludes private atoms from non-allowed viewers', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await seedOrgWithMembers(t)
+    // Alice writes a private atom containing a unique keyword.
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'alice/secret.md',
+      body: 'uniquesecretkw_alice content',
+    })
+    const a = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'alice/secret.md'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: a!._id,
+      activeWorkspaceId: orgId,
+      mode: 'private',
+    })
+    // Alice finds it.
+    const aliceResults = await t
+      .withIdentity({ subject: ALICE })
+      .query(api.search.run, {
+        activeWorkspaceId: orgId,
+        query: 'uniquesecretkw_alice',
+      })
+    expect(aliceResults.map((r) => r.path)).toContain('alice/secret.md')
+    // Bob does NOT.
+    const bobResults = await t
+      .withIdentity({ subject: BOB })
+      .query(api.search.run, {
+        activeWorkspaceId: orgId,
+        query: 'uniquesecretkw_alice',
+      })
+    expect(bobResults.map((r) => r.path)).not.toContain('alice/secret.md')
+  })
+
+  it('recent-docs (empty query) also filters by access', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await seedOrgWithMembers(t)
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'alice/secret.md',
+      body: 'hi',
+    })
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'public.md',
+      body: 'hi',
+    })
+    const secret = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'alice/secret.md'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: secret!._id,
+      activeWorkspaceId: orgId,
+      mode: 'private',
+    })
+    // Bob's recent-docs (1-char query falls to recent path).
+    const bobRecent = await t
+      .withIdentity({ subject: BOB })
+      .query(api.search.run, { activeWorkspaceId: orgId, query: '' })
+    expect(bobRecent.map((r) => r.path)).not.toContain('alice/secret.md')
+    expect(bobRecent.map((r) => r.path)).toContain('public.md')
+  })
+})
+
+describe('P1 read-path filtering — htmlAtoms.getRenderable', () => {
+  it('returns null for non-allowed viewers (route → 404)', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await seedOrgWithMembers(t)
+    // Create an HTML atom with frontmatter id.
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'private-dash.html',
+      body: '---\nid: privatedash\n---\n<h1>Private Dashboard</h1>',
+    })
+    const html = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'private-dash.html'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: html!._id,
+      activeWorkspaceId: orgId,
+      mode: 'private',
+    })
+    // Alice gets the HTML.
+    const aliceHtml = await t
+      .withIdentity({ subject: ALICE })
+      .query(api.htmlAtoms.getRenderable, {
+        atomId: 'privatedash',
+        activeWorkspaceId: orgId,
+      })
+    expect(aliceHtml).not.toBeNull()
+    expect(aliceHtml?.html).toContain('Private Dashboard')
+    // Bob gets null (route maps to 404 per the M5 fail-closed pattern).
+    const bobHtml = await t
+      .withIdentity({ subject: BOB })
+      .query(api.htmlAtoms.getRenderable, {
+        atomId: 'privatedash',
+        activeWorkspaceId: orgId,
+      })
+    expect(bobHtml).toBeNull()
+  })
+})
+
 describe('P1 tombstone cascade — removeMember + leaveOrg', () => {
   it('removeMember tombstones the departing member private atoms', async () => {
     const t = convexTest(schema, modules)

@@ -3,6 +3,7 @@ import type { Doc } from './_generated/dataModel'
 import { mutation, query } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
 import {
   atomPlaintext,
   basename,
@@ -93,6 +94,8 @@ export const run = query({
   args: { query: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { query: raw, activeWorkspaceId }): Promise<SearchResult[]> => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const norm = normalizeQuery(raw)
 
     // Empty / 1-char / punctuation-only → recent searchable docs.
@@ -102,10 +105,16 @@ export const run = query({
         .withIndex('by_workspace_updated', (q) => q.eq('workspaceId', workspaceId))
         .order('desc')
         .take(RECENT * 3)
-      return recent
-        .filter((a) => a.searchable !== false && isAtomSearchable(a.path))
-        .slice(0, RECENT)
-        .map((a) => toResult(a, ''))
+      // P1 — filter access BEFORE the slice so the viewer sees their
+      // top N readable recent docs (not the top N where some are then
+      // dropped because they're private to someone else).
+      const visible: typeof recent = []
+      for (const a of recent) {
+        if (a.searchable === false || !isAtomSearchable(a.path)) continue
+        if (await canReadAtom(ctx, a._id, viewerSubject)) visible.push(a)
+        if (visible.length >= RECENT) break
+      }
+      return visible.map((a) => toResult(a, ''))
     }
 
     const rows = await ctx.db
@@ -117,7 +126,14 @@ export const run = query({
           .eq('searchable', true),
       )
       .take(SCAN)
-    return postRank(rows, raw)
+    // P1 — filter results by access. Apply BEFORE the LIMIT slice so
+    // the viewer doesn't see a truncated result set where their N
+    // best matches are masked by private atoms they can't read.
+    const allowed: typeof rows = []
+    for (const a of rows) {
+      if (await canReadAtom(ctx, a._id, viewerSubject)) allowed.push(a)
+    }
+    return postRank(allowed, raw)
       .slice(0, LIMIT)
       .map((a) => toResult(a, raw))
   },
