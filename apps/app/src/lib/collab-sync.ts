@@ -158,11 +158,20 @@ export function makeCollabPlugin({
 // This is a SEPARATE plugin from the prosemirror-collab plugin
 // itself — collab() owns the version state, this one owns the
 // network bridge. They cooperate through sendableSteps()/getVersion().
+//
+// M1 step 3 sub-commit 3.6.4 — also drives periodic snapshot
+// submission (codex 4th-pass concern #3). Without it, the editor
+// only calls submitSteps; the server's onSnapshot only fires at
+// bootstrap, so projections never happen during normal editing.
+// The snapshot debounce fires ~5s after the last edit (coalesces
+// bursts); each fire posts the current doc JSON via the
+// onSubmitSnapshot callback.
 export function makeSyncBridgePlugin({
   docId,
   clientId,
   onSubmit,
   onRebase,
+  onSubmitSnapshot,
 }: {
   docId: string
   clientId: string
@@ -175,12 +184,29 @@ export function makeSyncBridgePlugin({
     steps: object[]
   }) => Promise<{ status: 'synced' } | { status: 'needs-rebase' }>
   onRebase: () => Promise<void>
+  /** Optional snapshot-submit callback. When provided, the plugin
+   *  debounces ~5s after the last update + submits the current
+   *  doc JSON as a snapshot. Server-side onSnapshot then schedules
+   *  the projection. When undefined, snapshot submission is
+   *  disabled (back-compat for tests / unit usage). */
+  onSubmitSnapshot?: (args: {
+    version: number
+    content: string
+  }) => Promise<void>
 }): Plugin {
   return new Plugin({
     key: new PluginKey('dohcSyncBridge'),
     view(view: EditorView) {
       let inFlight = false
       let pendingNotify = false
+
+      // M1 step 3.6.4 — snapshot-submission debounce. Cleared on
+      // every update; re-armed by the same update. After 5000ms
+      // of editor idleness the snapshot fires.
+      const SNAPSHOT_DEBOUNCE_MS = 5000
+      let snapshotTimer: ReturnType<typeof setTimeout> | null = null
+      let snapshotInFlight = false
+      let lastSubmittedSnapshotVersion = -1
 
       async function trySubmit() {
         if (inFlight) {
@@ -220,13 +246,62 @@ export function makeSyncBridgePlugin({
         }
       }
 
+      // Snapshot submission. Idempotent on same-version (skip if
+      // we already submitted at this version). Serial: never two
+      // snapshot mutations in flight at once. Doc JSON is what
+      // the server's projection writer feeds through pmToMdast.
+      async function trySubmitSnapshot() {
+        if (!onSubmitSnapshot) return
+        if (snapshotInFlight) return
+        const currentVersion = getVersion(view.state)
+        if (currentVersion <= lastSubmittedSnapshotVersion) return
+        snapshotInFlight = true
+        try {
+          const docJson = view.state.doc.toJSON()
+          await onSubmitSnapshot({
+            version: currentVersion,
+            content: JSON.stringify(docJson),
+          })
+          lastSubmittedSnapshotVersion = currentVersion
+        } catch {
+          // Snapshot failures are non-fatal — the server keeps
+          // accepting our steps; the next snapshot retries. No
+          // user-visible disruption.
+        } finally {
+          snapshotInFlight = false
+        }
+      }
+
+      function armSnapshotDebounce() {
+        if (!onSubmitSnapshot) return
+        if (snapshotTimer !== null) clearTimeout(snapshotTimer)
+        snapshotTimer = setTimeout(() => {
+          snapshotTimer = null
+          void trySubmitSnapshot()
+        }, SNAPSHOT_DEBOUNCE_MS)
+      }
+
       // First pass: there may already be sendable steps (e.g. if
       // the user pasted before this plugin mounted).
       void trySubmit()
+      // Also arm snapshot debounce so an editor that boots with
+      // content (e.g. paste-on-open) eventually projects without
+      // requiring a user keystroke.
+      armSnapshotDebounce()
 
       return {
         update(_view, _prevState) {
           void trySubmit()
+          armSnapshotDebounce()
+        },
+        destroy() {
+          // Cleanup: a pending timer would otherwise fire after
+          // the editor unmounts, possibly hitting a torn-down
+          // convex client.
+          if (snapshotTimer !== null) {
+            clearTimeout(snapshotTimer)
+            snapshotTimer = null
+          }
         },
       }
     },
@@ -384,6 +459,19 @@ export function useCollabSync({
               // the next render's effect re-applies via
               // applyRemoteSteps. Keeping rebase pulling OUT of
               // the plugin keeps the plugin synchronous-safe.
+            },
+            // M1 step 3.6.4 — periodic snapshot submission
+            // (codex 4th-pass concern #3). The server's onSnapshot
+            // only fires when a snapshot is committed; without
+            // this the projection writer would only run at
+            // bootstrap. Plugin debounces ~5s of editor idleness
+            // then posts the current doc JSON.
+            onSubmitSnapshot: async ({ version, content }) => {
+              await convex.mutation(api.prosemirror.submitSnapshot, {
+                id: docId,
+                version,
+                content,
+              })
             },
           }),
         ],

@@ -83,6 +83,35 @@ describe('collab-sync — orchestration invariants', () => {
     expect(SRC).toMatch(/v == null \? undefined : v/)
   })
 
+  it('makeSyncBridgePlugin accepts onSubmitSnapshot (M1 3.6.4, codex 4th-pass concern #3)', () => {
+    // Without periodic snapshot submission, the server's
+    // onSnapshot only fires at bootstrap; projection writer
+    // never runs during normal editing. The plugin must take
+    // an optional onSubmitSnapshot callback.
+    expect(SRC).toMatch(/onSubmitSnapshot\?:\s*\(args:/)
+    // The call site passes a real submitSnapshot mutation
+    expect(SRC).toContain('api.prosemirror.submitSnapshot')
+  })
+
+  it('snapshot debounce fires after editor idleness; cleared on destroy', () => {
+    // armSnapshotDebounce + clearTimeout in destroy(); the
+    // pattern catches the "timer fires after editor unmounts"
+    // bug class.
+    expect(SRC).toContain('SNAPSHOT_DEBOUNCE_MS')
+    expect(SRC).toContain('armSnapshotDebounce')
+    expect(SRC).toContain('snapshotTimer')
+    expect(SRC).toMatch(/destroy\s*\(\s*\)/)
+    expect(SRC).toMatch(/clearTimeout\(snapshotTimer\)/)
+  })
+
+  it('snapshot submission is version-deduped + serialized (no double-submit at same version)', () => {
+    // lastSubmittedSnapshotVersion + snapshotInFlight guard
+    // against re-submitting at the same version + against
+    // overlapping calls when network is slow.
+    expect(SRC).toContain('lastSubmittedSnapshotVersion')
+    expect(SRC).toContain('snapshotInFlight')
+  })
+
   it('bootstrap honors the `enabled` flag (off-switch for AtomEditor opt-in)', () => {
     expect(SRC).toMatch(/if \(!enabled \|\| !docId \|\| !schema\)/)
     // Plugins null when disabled so the editor mounts in
