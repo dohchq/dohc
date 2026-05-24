@@ -16,13 +16,20 @@
 import { unified } from 'unified'
 import remarkParse from 'remark-parse'
 import remarkStringify from 'remark-stringify'
+import remarkGfm from 'remark-gfm'
 import type { Root } from 'mdast'
 
 // Single shared processor instance. unified() is internally cached
 // once compiled with .freeze(), so reuse is safe + cheaper than
 // constructing per-call.
+//
+// remark-gfm extension is mandatory for Crepe content: tables,
+// strikethrough (~delete~), task lists. Without it,
+// mdast-util-to-markdown throws "Cannot handle unknown node
+// `delete`/`table`" on serialize.
 const _markdownProcessor = unified()
   .use(remarkParse)
+  .use(remarkGfm)
   .use(remarkStringify, {
     // Match Milkdown/Crepe's serializer output as closely as possible.
     // These options align with mdast-util-to-markdown defaults that
