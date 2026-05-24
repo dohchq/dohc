@@ -24,6 +24,9 @@ import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
 import { parseDocId, prosemirrorSync } from './prosemirror'
 import { sha256Hex } from './atomWriter'
+import { serializeSnapshotToProjectedBody } from './collabProjectionSerializer'
+import { roundtripMarkdown } from './markdownRoundtrip'
+import { splitFrontmatter, joinFrontmatter } from './atomId'
 
 export const bootstrapSnapshotFromAtomBody = mutation({
   args: {
@@ -49,7 +52,19 @@ export const bootstrapSnapshotFromAtomBody = mutation({
       }
     | {
         ok: false
-        reason: 'body-changed' | 'invalid-pm-json' | 'atom-not-found'
+        reason:
+          | 'body-changed'
+          | 'invalid-pm-json'
+          | 'atom-not-found'
+          // 6th-pass FIX #1: client submitted PM JSON that
+          // doesn't round-trip to atom.body. Either client has
+          // stale PM state or parser-drift; in both cases the
+          // client should re-read atoms.body + re-parse before
+          // retrying. Do NOT retry blindly — would loop.
+          | 'pm-body-mismatch'
+          // 6th-pass FIX #4: collabDocs row is frozen=true.
+          // Client must show reload banner; not a retry signal.
+          | 'frozen'
         serverBodyHash?: string
       }
   > => {
@@ -94,28 +109,64 @@ export const bootstrapSnapshotFromAtomBody = mutation({
       return { ok: false, reason: 'body-changed', serverBodyHash }
     }
 
-    // Idempotency check: if a collabDocs row already exists for
-    // this docId, two possibilities:
+    // Codex 6th-pass BLOCKER #1: bind pmJsonStr to atom.body.
+    // clientBodyHash alone only proves the client SAW the current
+    // body; it doesn't prove the submitted PM JSON was DERIVED
+    // from that body. Without this check, a stale/buggy client
+    // can submit OLD pmJsonStr with the CURRENT hash; the server
+    // accepts; rebootstrap clears needsRebootstrap; the NEXT
+    // projection silently rolls back the OOB write. Auto-rebuild
+    // becomes silent-rollback.
     //
-    //   1. Normal: another client already bootstrapped; we no-op.
-    //   2. Rebootstrap (M1 step 3.8.0): the 3.7 conflict resolver
-    //      set needsRebootstrap=true after an OOB write. Client
-    //      tore down its sync + is calling us with the fresh body
-    //      JSON. We must:
-    //        - submit a NEW snapshot at latestVersion+1 (can't
-    //          reuse version 1; create() would throw)
-    //        - clear needsRebootstrap; adopt serverBodyHash as
-    //          the new baseline; reset projectedVersion to the
-    //          new snapshot version
-    //      Race: two clients rebootstrap simultaneously → submit
-    //      at the same new version → second client's
-    //      submitSnapshot throws "already exists with different
-    //      content". We treat that as body-changed (client
-    //      retries with fresh body).
+    // The fix: serialize the submitted PM JSON server-side; verify
+    // it canonicalize-roundtrips to atom.body. Hashes are compared
+    // against a CANONICAL form (atom.body run through the same
+    // remark pipeline) so trailing-newline drift doesn't false-
+    // reject.
+    const pmCheck = serializeSnapshotToProjectedBody(pmJsonStr, atom.body)
+    if (!pmCheck.ok) {
+      // Could be malformed JSON, unknown PM node, or remark crash.
+      // Surface the reason directly — same shape as the fresh-
+      // bootstrap path's invalid-pm-json handling below.
+      if (pmCheck.reason === 'invalid-pm-json') {
+        return { ok: false, reason: 'invalid-pm-json' }
+      }
+      // unknown-pm-node / serialize-failed → treat as PM mismatch
+      // (client should investigate; not a retry condition).
+      return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
+    }
+    const { fm, rest: atomRest } = splitFrontmatter(atom.body)
+    const canonicalAtomBody = joinFrontmatter(fm, roundtripMarkdown(atomRest))
+    const canonicalAtomHash = await sha256Hex(canonicalAtomBody)
+    const serHash = await sha256Hex(pmCheck.newBody)
+    if (serHash !== canonicalAtomHash) {
+      // Submitted PM JSON does NOT round-trip to atom.body.
+      // Reject loud — the client either has stale state or the
+      // parser drift (browser vs server) is real and needs fix.
+      return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
+    }
+
+    // Idempotency check: if a collabDocs row already exists for
+    // this docId, four possibilities (post 6th-pass FIX #4):
+    //
+    //   1. frozen=true → return ok:false (reason:'frozen'). Client
+    //      MUST show reload banner, not retry. Frozen-dominates
+    //      invariant: if frozen is set, no rebootstrap path
+    //      runs even if needsRebootstrap is also true.
+    //   2. needsRebootstrap=true (and NOT frozen) → REBOOTSTRAP
+    //      branch (3.8.0): submit at latestVersion+1, clear flag.
+    //   3. Otherwise → alreadyBootstrapped (normal idempotency).
+    //   4. No row → fresh bootstrap below.
     const existing = await ctx.db
       .query('collabDocs')
       .withIndex('by_docId', (q) => q.eq('docId', docId))
       .unique()
+    if (existing && existing.frozen) {
+      // Codex 6th-pass FIX #4: frozen dominates. Bootstrap returns
+      // a distinct reason so the client knows to show the reload
+      // banner instead of retrying (which would loop forever).
+      return { ok: false, reason: 'frozen', serverBodyHash }
+    }
     if (existing && !existing.needsRebootstrap) {
       return { ok: true, alreadyBootstrapped: true, serverBodyHash }
     }

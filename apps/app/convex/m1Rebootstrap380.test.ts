@@ -80,16 +80,25 @@ describe('M1 step 3.8.0 — bootstrapSnapshotFromAtomBody rebootstrap path', () 
     })
 
     // Client re-bootstraps with the new body (which it just read).
-    // Note: prosemirrorSync's component isn't registered in
-    // convex-test, so the inner submitSnapshot call throws.
-    // 3.8.0 catches that throw + returns body-changed (the
-    // client retries; on the retry the alreadyBootstrapped path
-    // fires since 3.7 already adopted the baseline).
+    // PM JSON must align with the body content (codex 6th-pass
+    // FIX #1: PM↔body binding). After alignment, the inner
+    // latestVersion/submitSnapshot calls throw because the
+    // prosemirror-sync component isn't registered in convex-test;
+    // 3.8.0 catches + returns body-changed.
+    const alignedPm = JSON.stringify({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'new content from agent' }],
+        },
+      ],
+    })
     const result = await t
       .withIdentity({ subject: ALICE })
       .mutation(api.collabBootstrap.bootstrapSnapshotFromAtomBody, {
         docId,
-        pmJsonStr: minimalPmJson(),
+        pmJsonStr: alignedPm,
         clientBodyHash: correctHash,
         activeWorkspaceId: orgId,
       })

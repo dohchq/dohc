@@ -113,6 +113,24 @@ function convertBlock(node: PmNode): BlockContent | RootContent {
       const title = (node.attrs?.title as string | undefined) ?? null
       return { type: 'image', url: src, alt, title }
     }
+    case 'image-block': {
+      // Codex 6th-pass BLOCKER #3: Milkdown @milkdown/components
+      // ImageBlock — Crepe Default feature (enabled by default).
+      // Was missing → normal Crepe content with a block image
+      // would freeze projection on every flush.
+      // attrs: { src, caption, ratio }
+      const src = (node.attrs?.src as string | undefined) ?? ''
+      const alt = (node.attrs?.caption as string | undefined) ?? null
+      return { type: 'image', url: src, alt, title: null }
+    }
+    case 'math_block': {
+      // Crepe Latex feature (block-level) — emit as fenced
+      // `math` code block. Round-trips through any standard
+      // remark pipeline; remark-math (if added later) would
+      // turn it into a proper math node.
+      const value = (node.attrs?.value as string | undefined) ?? ''
+      return { type: 'code', lang: 'math', meta: null, value }
+    }
     case 'table':
       return convertTable(node)
     case 'html':
@@ -167,7 +185,14 @@ function convertTable(node: PmNode): Table {
 }
 
 function convertTableRow(node: PmNode): TableRow {
-  if (node.type !== 'table_row') {
+  // Codex 6th-pass BLOCKER #3: Milkdown @milkdown/components
+  // TableBlock distinguishes 'table_row' (data rows) from
+  // 'table_header_row' (the header). Was previously only
+  // accepting 'table_row' → real tables with a header would
+  // freeze the projection. Accept both; mdast's tableRow doesn't
+  // need to distinguish (mdast Table marks the FIRST row as
+  // header via convention).
+  if (node.type !== 'table_row' && node.type !== 'table_header_row') {
     throw new UnknownPmNodeError(node.type)
   }
   const cells = (node.content ?? []).map((c) => convertTableCell(c))
@@ -211,6 +236,15 @@ function convertInline(node: PmNode): PhrasingContent[] {
       const alt = (node.attrs?.alt as string | undefined) ?? null
       const title = (node.attrs?.title as string | undefined) ?? null
       return [{ type: 'image', url: src, alt, title }]
+    }
+    case 'math_inline': {
+      // Codex 6th-pass BLOCKER #3: Crepe Latex feature
+      // (default-enabled). Was missing → inline math content
+      // would freeze projection. Emit as inline code with `$…$`
+      // syntax so the LaTeX source survives roundtrip through
+      // standard remark. attrs: { value }
+      const value = (node.attrs?.value as string | undefined) ?? ''
+      return [{ type: 'inlineCode', value: `$${value}$` }]
     }
     default:
       // Crepe sometimes wraps inline content (e.g. when the editor

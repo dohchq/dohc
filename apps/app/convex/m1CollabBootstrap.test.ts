@@ -46,6 +46,18 @@ async function makeAtomWithBody(
 // bootstrap-contract test we only need a parseable object that
 // prosemirrorSync.create accepts (the component validates shape
 // against the schema only on getDoc, not on create).
+//
+// Codex 6th-pass FIX #1 update: PM JSON must round-trip to
+// atom.body. Tests now use pmJsonForBody(bodyText) to ensure
+// the submitted PM matches the body content. Tests that
+// SPECIFICALLY exercise the mismatch path call minimalPmJson()
+// directly.
+function pmJsonForBody(text: string) {
+  return {
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  }
+}
 function minimalPmJson() {
   return {
     type: 'doc',
@@ -145,7 +157,9 @@ describe('M1 step 3.5 — bootstrap CAS contract', () => {
       .withIdentity({ subject: ALICE })
       .mutation(api.collabBootstrap.bootstrapSnapshotFromAtomBody, {
         docId,
-        pmJsonStr: JSON.stringify(minimalPmJson()),
+        // Codex 6th-pass FIX #1: PM JSON must match atoms.body
+        // (the "real content" we wrote above + frontmatter).
+        pmJsonStr: JSON.stringify(pmJsonForBody('real content')),
         clientBodyHash: correctHash,
         activeWorkspaceId: orgId,
       })
@@ -187,7 +201,7 @@ describe('M1 step 3.5 — bootstrap CAS contract', () => {
       .withIdentity({ subject: BOB })
       .mutation(api.collabBootstrap.bootstrapSnapshotFromAtomBody, {
         docId,
-        pmJsonStr: JSON.stringify(minimalPmJson()),
+        pmJsonStr: JSON.stringify(pmJsonForBody('real content')),
         clientBodyHash: correctHash,
         activeWorkspaceId: orgId,
       })

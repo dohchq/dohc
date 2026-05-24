@@ -12,7 +12,7 @@
 
 import { v } from 'convex/values'
 import { mutation, internalMutation } from './_generated/server'
-import { api, internal } from './_generated/api'
+import { components, internal } from './_generated/api'
 import { parseDocId } from './prosemirror'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
@@ -178,12 +178,23 @@ export const _finalProjectIdleDoc = internalMutation({
     if (!doc) return { skipped: 'no-collab-doc' as const }
     if (doc.frozen) return { skipped: 'frozen' as const }
 
-    // Use the package's getSnapshot via ctx.runQuery (we don't
-    // call getDoc — that's the 100-delta-replay path codex
-    // flagged). getSnapshot returns the EXACT stored snapshot.
-    const snap = (await ctx.runQuery(api.prosemirror.getSnapshot, {
-      id: docId,
-    })) as { content: string; version: number } | { content: null } | null
+    // Codex 6th-pass BLOCKER #2: use the COMPONENT primitive
+    // (components.prosemirrorSync.lib.getSnapshot), NOT the
+    // syncApi wrapper (api.prosemirror.getSnapshot). The wrapper
+    // runs checkRead which calls requireWorkspace; cron-scheduled
+    // mutations have NO user identity, so the syncApi path throws
+    // "Not authenticated" + crashes the whole final-flush. The
+    // primitive bypasses auth (we already authorized at the
+    // collabDocs row level — its existence + non-frozen state
+    // means a previously-authorized session created it).
+    //
+    // Same reason getDoc would be wrong even if it worked: it
+    // runs the 100-delta-replay path. getSnapshot returns the
+    // EXACT stored snapshot with no replay.
+    const snap = (await ctx.runQuery(
+      components.prosemirrorSync.lib.getSnapshot,
+      { id: docId },
+    )) as { content: string; version: number } | { content: null } | null
     if (!snap || snap.content === null) {
       return { skipped: 'no-snapshot' as const }
     }
