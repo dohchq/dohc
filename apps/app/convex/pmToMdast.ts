@@ -124,12 +124,26 @@ function convertBlock(node: PmNode): BlockContent | RootContent {
       return { type: 'image', url: src, alt, title: null }
     }
     case 'math_block': {
-      // Crepe Latex feature (block-level) — emit as fenced
-      // `math` code block. Round-trips through any standard
-      // remark pipeline; remark-math (if added later) would
-      // turn it into a proper math node.
-      const value = (node.attrs?.value as string | undefined) ?? ''
-      return { type: 'code', lang: 'math', meta: null, value }
+      // M1 step 3.8.1.6 — codex 7th-pass [P1] #3 FAIL-LOUD.
+      //
+      // The 3.9.5 fix #3 added support that emitted math_block
+      // as fenced `math` code blocks. That looked like it
+      // round-tripped, but: parsing the fenced math block back
+      // through remark (no remark-math plugin) produces a plain
+      // `code` mdast node with lang='math', NOT a math_block PM
+      // node. The bootstrap PM↔body binding check (3.9.5 fix #1)
+      // then rejects the doc as pm-body-mismatch because the
+      // server's canonical-roundtripped body doesn't match the
+      // client's PM JSON.
+      //
+      // Net: math atoms could never bootstrap into multiplayer
+      // anyway. The "support" was lossy AND functionally broken.
+      // Fail loud instead: pmToMdast throws → projection
+      // serialize-failed → atom freezes; bootstrap returns
+      // pm-body-mismatch → client shows BootstrapErrorOverlay.
+      // Honest signal that math content needs proper remark-math
+      // wiring before multiplayer can handle it.
+      throw new UnknownPmNodeError(node.type)
     }
     case 'table':
       return convertTable(node)
@@ -237,15 +251,15 @@ function convertInline(node: PmNode): PhrasingContent[] {
       const title = (node.attrs?.title as string | undefined) ?? null
       return [{ type: 'image', url: src, alt, title }]
     }
-    case 'math_inline': {
-      // Codex 6th-pass BLOCKER #3: Crepe Latex feature
-      // (default-enabled). Was missing → inline math content
-      // would freeze projection. Emit as inline code with `$…$`
-      // syntax so the LaTeX source survives roundtrip through
-      // standard remark. attrs: { value }
-      const value = (node.attrs?.value as string | undefined) ?? ''
-      return [{ type: 'inlineCode', value: `$${value}$` }]
-    }
+    case 'math_inline':
+      // M1 step 3.8.1.6 — codex 7th-pass [P1] #3 FAIL-LOUD.
+      // See math_block above for the full rationale. The 3.9.5
+      // partial fix here (emit as inline code with $…$) changed
+      // math SEMANTICS into code FORMATTING; round-tripping
+      // produced inline-code, not math_inline. Bootstrap PM↔body
+      // binding then rejected the doc. Fail loud is the honest
+      // signal until lossless remark-math support is wired.
+      throw new UnknownPmNodeError(node.type)
     default:
       // Crepe sometimes wraps inline content (e.g. when the editor
       // structurally nests a paragraph inside a table cell). Recurse

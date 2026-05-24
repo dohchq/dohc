@@ -288,8 +288,21 @@ describe('M1 3.9.5 fix #3 — pmToMdast covers Crepe default-feature nodes', () 
     expect(md).toContain('![a photo](https://example.com/photo.png)')
   })
 
-  it("'math_inline' (Crepe Latex default feature) emits inline $…$", () => {
-    const md = serializeMdastToMarkdown(
+  // M1 step 3.8.1.6 (codex 7th-pass [P1] #3) REVERSED the 3.9.5
+  // partial math support. The previous handling emitted inline
+  // code with `$…$` for math_inline and fenced ```math for
+  // math_block — looked like it round-tripped, but parsing the
+  // serialized markdown back through remark (no remark-math
+  // plugin) produced regular `inlineCode` / `code` mdast nodes,
+  // NOT math_*. Bootstrap PM↔body binding (3.9.5 fix #1) then
+  // rejected the doc as pm-body-mismatch. The "fix" was lossy
+  // AND functionally broken.
+  //
+  // 3.8.1.6 chose fail-loud: math nodes throw UnknownPmNodeError,
+  // freezing the collab session. Honest signal that math needs
+  // proper remark-math wiring before multiplayer can carry it.
+  it("'math_inline' THROWS UnknownPmNodeError (3.8.1.6 fail-loud)", () => {
+    expect(() =>
       pmDocToMdast(
         doc({
           type: 'paragraph',
@@ -300,21 +313,18 @@ describe('M1 3.9.5 fix #3 — pmToMdast covers Crepe default-feature nodes', () 
           ],
         }) as any,
       ),
-    )
-    expect(md).toContain('`$E = mc^2$`')
+    ).toThrow(UnknownPmNodeError)
   })
 
-  it("'math_block' emits fenced ```math code block", () => {
-    const md = serializeMdastToMarkdown(
+  it("'math_block' THROWS UnknownPmNodeError (3.8.1.6 fail-loud)", () => {
+    expect(() =>
       pmDocToMdast(
         doc({
           type: 'math_block',
           attrs: { value: '\\int_0^1 x^2 dx' },
         }) as any,
       ),
-    )
-    expect(md).toMatch(/^```math/m)
-    expect(md).toContain('\\int_0^1 x^2 dx')
+    ).toThrow(UnknownPmNodeError)
   })
 
   it("'table_header_row' (Crepe TableBlock) accepted as table row", () => {
