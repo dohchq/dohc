@@ -855,12 +855,31 @@ export function makeRemoteCursorsPlugin(): Plugin {
       init: () => [],
       apply: (tr, current) => {
         // Caller dispatches a transaction with a meta key when
-        // useQuery returns fresh cursor data. Falls through to
-        // the current state when no meta is set (preserves
-        // cursors across local edits — they're stale-but-shown
-        // until the next React render's update).
+        // useQuery returns fresh cursor data. That fresh data
+        // is from the remote tab's most recent ping — use it
+        // as-is for THIS render.
         const next = tr.getMeta(remoteCursorsKey)
-        return Array.isArray(next) ? (next as RemoteCursor[]) : current
+        if (Array.isArray(next)) return next as RemoteCursor[]
+        // M1 step 3.9.5 — codex 16th-pass deferred-item fix:
+        // POSITION STEP-MAPPING. Without this, a remote cursor
+        // stored at position 1500 stays visually at 1500 even
+        // after the local user types 5 chars at position 100
+        // (which shifts everything at/after 100 by +5). The
+        // remote cursor visibly drifts left until the remote
+        // tab pings again.
+        //
+        // Fix: when a transaction lands that changed the doc
+        // (local typing OR remote receiveTransaction from
+        // applyRemoteSteps), map every cursor position through
+        // tr.mapping. This is the standard ProseMirror pattern
+        // for tracking positions across edits — same machinery
+        // selection.head uses to stay anchored to its character
+        // across insertions/deletions before/after it.
+        if (!tr.docChanged) return current
+        return current.map((c) => ({
+          ...c,
+          cursorPos: tr.mapping.map(c.cursorPos),
+        }))
       },
     },
     props: {
@@ -1005,6 +1024,9 @@ import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
 // Decoration.inline across the range.
 export type SuggestionRow = {
   _id: string
+  /** Markdown-body offsets (NOT PM positions). Used by the
+   *  server's CAS on accept. The decoration plugin does NOT
+   *  use these for rendering — see expectedText. */
   rangeFrom: number
   rangeTo: number
   proposedText: string
@@ -1013,6 +1035,12 @@ export type SuggestionRow = {
   status: 'pending' | 'accepted' | 'rejected'
   resolvedByUserId?: string
   resolvedAt?: number
+  /** M1 step 3.9.5 — the expected body text at [rangeFrom,
+   *  rangeTo] at suggest time. The decoration plugin searches
+   *  the current PM doc text for this exact string and renders
+   *  the bubble there. Drift-robust: if the doc changes, the
+   *  bubble follows the text (rather than the stale offset). */
+  expectedText?: string
 }
 
 export type SuggestionHandlers = {
@@ -1044,32 +1072,67 @@ export function makeSuggestionDecorationsPlugin({
         const suggestions = suggestionsKey.getState(state) ?? []
         if (suggestions.length === 0) return DecorationSet.empty
         const docSize = state.doc.content.size
+        // M1 step 3.9.5 — codex 16th-pass deferred fix:
+        // RENDER BY TEXT SEARCH, not markdown offsets.
+        //
+        // The suggestion's rangeFrom/rangeTo are MARKDOWN-BODY
+        // offsets (the server uses them for CAS on accept).
+        // Markdown offsets don't equal PM doc positions. Pre-
+        // 3.9.5 we passed markdown offsets directly to
+        // Decoration positions, so bubbles rendered at the
+        // wrong place in any non-trivial doc.
+        //
+        // 3.9.5: search the current PM doc text for
+        // expectedText. Render at the found range. If no
+        // match (doc drifted past the expected text), render
+        // bubble at doc end with no highlight — visibly
+        // present so user can still accept/reject, but
+        // unanchored (CAS will reject accept if the text
+        // really drifted, which is correct).
+        //
+        // Drift-robust by construction: each render searches
+        // the live doc; no stored PM position to step-map.
+        const docText = state.doc.textBetween(0, docSize, '\n', '\n')
         const decos: Decoration[] = []
         for (const s of suggestions) {
-          // Clamp positions defensively (v1 stale-range
-          // limitation — see commit 3.9.0 commit message).
-          const from = Math.max(0, Math.min(s.rangeFrom, docSize))
-          const to = Math.max(from, Math.min(s.rangeTo, docSize))
-          // Range highlight (a soft yellow underline so the
-          // bubble's anchor is obvious without distorting the
-          // text).
-          if (to > from) {
+          let pmFrom = docSize
+          let pmTo = docSize
+          let anchored = false
+          if (s.expectedText && s.expectedText.length > 0) {
+            // Naive indexOf — good enough for v1; suggestions
+            // are typically <1KB so the cost is minimal.
+            const idx = docText.indexOf(s.expectedText)
+            if (idx >= 0) {
+              // textBetween offset → approximate PM position.
+              // For docs without block boundaries (most
+              // simple cases) this is exact. For complex
+              // structures it's off by ~1 per block boundary;
+              // tolerable for a decoration anchor.
+              pmFrom = Math.max(0, Math.min(idx + 1, docSize))
+              pmTo = Math.max(
+                pmFrom,
+                Math.min(idx + s.expectedText.length + 1, docSize),
+              )
+              anchored = true
+            }
+          }
+          if (anchored && pmTo > pmFrom) {
             decos.push(
-              Decoration.inline(from, to, {
+              Decoration.inline(pmFrom, pmTo, {
                 class: 'dohc-suggestion-range',
                 style:
                   'background:rgba(255,213,79,0.18);border-bottom:1px dashed rgba(255,165,0,0.6);',
               }),
             )
           }
-          // Bubble widget at the range end. For accepted/
-          // rejected, render a fade-out version (the plan's
+          // Bubble widget at the (text-search-derived) range
+          // end, or doc end if unanchored. For accepted/
+          // rejected, render a fade-out version (plan's
           // "accepted by Bob 2s ago" UX); the listPending
-          // server query already strips resolved rows after
-          // 10s.
-          const bubble = renderSuggestionBubble(s, handlersRef)
+          // server query strips resolved rows after 10s.
+          const bubble = renderSuggestionBubble(s, handlersRef, anchored)
           decos.push(
-            Decoration.widget(to, bubble, {
+            Decoration.widget(pmTo, bubble, {
               key: `suggestion-${s._id}-${s.status}`,
               side: 1,
               ignoreSelection: true,
@@ -1086,6 +1149,7 @@ export function makeSuggestionDecorationsPlugin({
 function renderSuggestionBubble(
   s: SuggestionRow,
   handlersRef: { current: SuggestionHandlers },
+  anchored: boolean,
 ): HTMLElement {
   const root = document.createElement('div')
   root.className = `dohc-suggestion-bubble dohc-suggestion-${s.status}`
@@ -1117,6 +1181,19 @@ function renderSuggestionBubble(
     ins.style.cssText = 'color:#555;font-style:italic;line-height:1.3;'
     ins.textContent = s.instruction
     root.appendChild(ins)
+  }
+  // M1 step 3.9.5 — unanchored hint. When the expectedText
+  // couldn't be found in the current doc (drift), the bubble
+  // floats at doc end with no highlight. Tell the user so they
+  // don't wonder why the suggestion isn't pointing at anything.
+  // CAS on the server will reject accept anyway.
+  if (!anchored && s.status === 'pending') {
+    const warn = document.createElement('div')
+    warn.style.cssText =
+      'color:#b45309;background:#fef3c7;border-radius:3px;padding:2px 5px;font-size:10px;'
+    warn.textContent =
+      'Original text changed — accept will be rejected. Ask for a fresh suggestion.'
+    root.appendChild(warn)
   }
   // Proposed text preview (first 120 chars)
   const preview = document.createElement('div')

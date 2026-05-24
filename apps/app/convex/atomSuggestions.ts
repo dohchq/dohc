@@ -181,6 +181,13 @@ export const listPending = query({
         resolvedByUserId: r.resolvedByUserId,
         resolvedAt: r.resolvedAt,
         createdAt: r.createdAt,
+        // M1 step 3.9.5 — client decoration plugin needs
+        // expectedText to text-search for the suggestion
+        // anchor in the current PM doc (drift-robust
+        // rendering). expectedText is required as of 3.9.3
+        // for accept CAS; here it doubles as the render
+        // anchor.
+        expectedText: r.expectedText,
       }))
   },
 })
