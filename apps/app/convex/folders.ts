@@ -188,7 +188,16 @@ export const move = mutation({
   },
   handler: async (ctx, { fromPath, toPath, activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const out = await moveImpl(ctx, workspaceId, fromPath, toPath)
+    // P1 (multiplayer-and-h-followups §6.5) — folder rename is two
+    // recursive write operations rolled into one: it touches every
+    // atom in the source subtree (so the viewer must be allowed to
+    // WRITE each of them) and it lands them under the destination
+    // (so the destination folder cascade must allow). Same all-or-
+    // nothing posture as folders.remove. Plumbed in via viewerSubject
+    // — undefined ⇒ no gate (system caller back-compat).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    const out = await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
     // Phase C — debounced _map.md regen (folder rename moves children).
     await scheduleMapRegen(ctx, workspaceId)
     return out
@@ -200,6 +209,8 @@ async function moveImpl(
   workspaceId: string,
   fromPath: string,
   toPath: string,
+  // P1 — undefined ⇒ system caller (no gate).
+  viewerSubject: string | undefined,
 ) {
   // file-org-v1 §2.3 — shared policy (the source need only normalize;
   // empty source is the older "source folder path required" error).
@@ -246,6 +257,30 @@ async function moveImpl(
   for (const a of movedAtoms) {
     if (a.systemLocked) throw new SystemLockError(a.path, 'rename')
     if (a.userLocked) throw new UserLockError(a.path, 'rename')
+    // P1 — same all-or-nothing posture as the lock check above:
+    // refuse the WHOLE move if ANY atom in the source subtree is
+    // unreadable to the viewer. A partial move (leave the private
+    // ones, move the rest) would split the subtree across two
+    // folders with no record of the split — confusing and unsafe.
+    if (
+      viewerSubject !== undefined &&
+      !(await canReadAtom(ctx, a._id, viewerSubject))
+    ) {
+      throw new Error(
+        'You do not have access to move this folder — it contains atoms you cannot read.',
+      )
+    }
+  }
+  // P1 — destination cascade: even if the source is fully writable,
+  // the destination folder might be a teammate's private folder.
+  // Check the destination root the same way create_folder does.
+  if (
+    viewerSubject !== undefined &&
+    !(await canWriteInFolder(ctx, workspaceId, to, viewerSubject))
+  ) {
+    throw new Error(
+      'You do not have access to move into this destination folder.',
+    )
   }
 
   // Atom destination conflicts.
