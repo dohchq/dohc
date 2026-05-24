@@ -31,6 +31,8 @@ import type * as inlineAtom from "../inlineAtom.js";
 import type * as liveTotal from "../liveTotal.js";
 import type * as liveTotals from "../liveTotals.js";
 import type * as loop from "../loop.js";
+import type * as markdownRoundtrip from "../markdownRoundtrip.js";
+import type * as markdownRoundtripDecider from "../markdownRoundtripDecider.js";
 import type * as onboarding from "../onboarding.js";
 import type * as orgRoles from "../orgRoles.js";
 import type * as orgs from "../orgs.js";
@@ -79,6 +81,8 @@ declare const fullApi: ApiFromModules<{
   liveTotal: typeof liveTotal;
   liveTotals: typeof liveTotals;
   loop: typeof loop;
+  markdownRoundtrip: typeof markdownRoundtrip;
+  markdownRoundtripDecider: typeof markdownRoundtripDecider;
   onboarding: typeof onboarding;
   orgRoles: typeof orgRoles;
   orgs: typeof orgs;
