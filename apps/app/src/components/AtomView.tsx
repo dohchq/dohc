@@ -9,6 +9,7 @@ import {
   setFrontmatterIcon,
 } from '../lib/frontmatter'
 import { EmojiPicker } from './EmojiPicker'
+import { featureEnabled } from '../lib/featureFlags'
 import { highlightSource } from '../lib/sourceHighlight'
 
 // react-simple-code-editor is CJS (`exports.default = Editor`) with no
@@ -285,6 +286,19 @@ export function AtomView({
           autoFocus={!!enterEdit}
           advisory={idAdvisory ?? null}
           migrationNotice={row?.migrationNotice ?? null}
+          /* M1 step 3.8.2.0 — multiplayer wiring.
+             Off by default. Turn on per-browser via:
+               localStorage.setItem('dohc:multiplayer', '1')
+             Then reload. The flag passes a multiplayerDocId to
+             AtomEditor, which engages the full bootstrap →
+             collab → presence pipeline shipped in 3.8.1.x.
+             Doc id format matches the server-side atomDocId
+             helper in convex/prosemirror.ts. */
+          multiplayerDocId={
+            featureEnabled('multiplayer') && row?._id && row?.workspaceId
+              ? `atom:${row.workspaceId}:${row._id}`
+              : undefined
+          }
           // D4.11b — the SERVER-saved id (from the row body, where
           // seedAtomIdIntoBody injected it on first write). The local
           // draft doesn't re-sync the injected id during editing, so
@@ -347,6 +361,7 @@ function AtomShell({
   path,
   onCommitSource,
   onShare,
+  multiplayerDocId,
 }: {
   draft: string
   onChange: (next: string) => void
@@ -376,6 +391,11 @@ function AtomShell({
   onCommitSource?: (next: string) => void
   // sharing-v1 1a — share this file (by its fileId).
   onShare?: (fileId: string) => void
+  // M1 step 3.8.2.0 — multiplayer doc id pass-through. When
+  // present, AtomEditor mounts the full prosemirror-sync
+  // bootstrap + collab pipeline (3.8.1.x). When undefined,
+  // single-user mode (existing behavior, byte-identical).
+  multiplayerDocId?: string
 }) {
   const editorRef = useRef<AtomEditorHandle | null>(null)
   // D4.8 — known-files list for the wikilink plugin's resolver +
@@ -780,6 +800,12 @@ function AtomShell({
             if (knownPaths.has(target)) onOpenAtom(target)
             else if (knownPaths.has(withMd)) onOpenAtom(withMd)
           }}
+          /* M1 step 3.8.2.0 — multiplayer pass-through. The
+             outer AtomView reads the feature flag + builds the
+             docId from row._id + row.workspaceId; AtomShell
+             threads it through unchanged. undefined here means
+             single-user (byte-identical to pre-3.8.2.0). */
+          multiplayerDocId={multiplayerDocId}
         />
       )}
       {subpages.length > 0 && (
