@@ -1808,6 +1808,13 @@ export const dohcAgent = new Agent(components.agent, {
         if (atom.workspaceId !== workspaceId) {
           return `atom "${path}" is not in the active workspace`
         }
+        // M1 step 3.9.6 — SIGNED AGENT TOKEN.
+        // Read the deployment-side secret. _createSuggestion
+        // ignores authorIsAgent unless agentSecret matches.
+        // In dev/test the env var is unset → suggestions get
+        // authorIsAgent:false. Set DOHC_AGENT_SECRET in your
+        // Convex deployment env to enable proper attribution.
+        const agentSecret = process.env.DOHC_AGENT_SECRET
         const result = (await ctx.runMutation(
           internal.atomSuggestions._createSuggestion,
           {
@@ -1820,6 +1827,7 @@ export const dohcAgent = new Agent(components.agent, {
             expectedText,
             authorIsAgent: true,
             authorUserId: viewerSubject,
+            agentSecret,
           },
         )) as { ok: true; id: string } | { ok: false; reason: string }
         if (!result.ok) return `suggestion rejected: ${result.reason}`

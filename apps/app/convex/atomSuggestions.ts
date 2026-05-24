@@ -59,8 +59,26 @@ export const _createSuggestion = internalMutation({
     rangeTo: v.number(),
     proposedText: v.string(),
     instruction: v.string(),
-    authorIsAgent: v.boolean(),
+    // M1 step 3.9.6 — SIGNED AGENT TOKEN (plan §3 M3 +
+    // codex HIGH 2). authorIsAgent is no longer trusted from
+    // the caller — it's DERIVED here from agentSecret
+    // matching process.env.DOHC_AGENT_SECRET. A caller without
+    // the env secret gets authorIsAgent=false regardless of
+    // what they claim. Defense-in-depth: _createSuggestion is
+    // an internalMutation (not exposed to clients), so the
+    // direct-forge attack requires writing new server code;
+    // the secret makes that attack require code review WITH
+    // the env var, which is more auditable than a silent
+    // flag toggle.
+    authorIsAgent: v.boolean(), // hint only; verified via agentSecret below
     authorUserId: v.string(),
+    /** Bearer token the caller claims as proof of agent runtime
+     *  origin. Compared to process.env.DOHC_AGENT_SECRET. When
+     *  missing or non-matching, authorIsAgent is forced to
+     *  false. The env var is set on the Convex deployment;
+     *  in dev/test (no env var) authorIsAgent is always false
+     *  unless the test sets the same env value. */
+    agentSecret: v.optional(v.string()),
     // 3.9.2 — CAS witness (see schema comment).
     expectedText: v.optional(v.string()),
   },
@@ -73,11 +91,23 @@ export const _createSuggestion = internalMutation({
       rangeTo,
       proposedText,
       instruction,
-      authorIsAgent,
+      authorIsAgent: _authorIsAgentClaim,
       authorUserId,
+      agentSecret,
       expectedText,
     },
   ): Promise<{ ok: true; id: Id<'atomSuggestions'> } | { ok: false; reason: string }> => {
+    // 3.9.6 — verify the agent secret. Both sides of the
+    // comparison must be non-empty for verification to
+    // succeed (so an unset env var doesn't mean "anyone
+    // can claim agent" — the secret has to BE set on the
+    // deployment for the flag to ever fire true).
+    const expectedSecret = process.env.DOHC_AGENT_SECRET
+    const verifiedAgent =
+      typeof expectedSecret === 'string' &&
+      expectedSecret.length > 0 &&
+      agentSecret === expectedSecret
+    const authorIsAgent = verifiedAgent
     if (proposedText.length > PER_SUGGESTION_CHAR_CAP) {
       return {
         ok: false,
