@@ -808,6 +808,156 @@ export function useCollabBootstrapMutation({
   return state
 }
 
+// M1 step 3.8.2.3 — REMOTE-CURSOR DECORATION PLUGIN.
+//
+// Renders other tabs' carets inside the editor, fulfilling
+// M1+M2 acceptance criterion #1 ("two browser sessions on
+// same atom: both cursors visible"). The plugin keeps a Set
+// of remote cursor positions in its state; AtomEditor refreshes
+// the state via dispatchTransaction when its useQuery returns
+// fresh data.
+//
+// Position interpretation: PM doc-relative offsets at the
+// snapshot version the remote tab last synced. Under concurrent
+// editing, positions may briefly desync until the next remote-
+// pull (when our local doc state advances + the remote tab's
+// cursor advances too). Documented v1 limitation; proper
+// step-mapping is M2 follow-up.
+//
+// Decoration: a 2px-wide inline widget at the cursor position
+// + an absolutely-positioned label below it carrying the
+// userId/displayName. Color is derived from userId via a stable
+// hash → HSL so the same user gets the same color across tabs.
+export type RemoteCursor = {
+  clientId: string
+  userId: string
+  cursorPos: number
+}
+
+const remoteCursorsKey = new PluginKey<RemoteCursor[]>('dohcRemoteCursors')
+
+// Hash a string to a stable hue 0-360. Doesn't need to be
+// cryptographic — just spread the keyspace so distinct users
+// get distinct colors. Simple FNV-1a-ish mix.
+function hueFromString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return Math.abs(h) % 360
+}
+
+export function makeRemoteCursorsPlugin(): Plugin {
+  return new Plugin<RemoteCursor[]>({
+    key: remoteCursorsKey,
+    state: {
+      init: () => [],
+      apply: (tr, current) => {
+        // Caller dispatches a transaction with a meta key when
+        // useQuery returns fresh cursor data. Falls through to
+        // the current state when no meta is set (preserves
+        // cursors across local edits — they're stale-but-shown
+        // until the next React render's update).
+        const next = tr.getMeta(remoteCursorsKey)
+        return Array.isArray(next) ? (next as RemoteCursor[]) : current
+      },
+    },
+    props: {
+      decorations: (state) => {
+        const cursors = remoteCursorsKey.getState(state) ?? []
+        if (cursors.length === 0) return DecorationSet.empty
+        const docSize = state.doc.content.size
+        const decos: Decoration[] = []
+        for (const c of cursors) {
+          // Clamp positions defensively — a stale snapshot can
+          // produce a cursorPos past the current doc size.
+          if (c.cursorPos < 0 || c.cursorPos > docSize) continue
+          const hue = hueFromString(c.userId)
+          const color = `hsl(${hue} 70% 45%)`
+          const caret = document.createElement('span')
+          caret.className = 'dohc-remote-caret'
+          caret.style.cssText = `display:inline-block;width:0;border-left:2px solid ${color};margin-left:-1px;height:1.1em;vertical-align:text-bottom;pointer-events:none;position:relative;`
+          // Label that floats below the caret with the userId.
+          // Truncated to keep the badge small; full id in title.
+          const label = document.createElement('span')
+          label.textContent = c.userId.slice(0, 8)
+          label.style.cssText = `position:absolute;top:1.2em;left:-1px;background:${color};color:white;padding:1px 4px;font-size:9px;line-height:1.2;border-radius:2px;white-space:nowrap;font-family:system-ui,sans-serif;`
+          label.title = c.userId
+          caret.appendChild(label)
+          decos.push(
+            Decoration.widget(c.cursorPos, caret, {
+              key: `remote-cursor-${c.clientId}`,
+              side: 1,
+              ignoreSelection: true,
+              stopEvent: () => false,
+            }),
+          )
+        }
+        return DecorationSet.create(state.doc, decos)
+      },
+    },
+  })
+}
+
+/** Dispatch fresh cursor data into a mounted editor's plugin
+ *  state. Call from AtomEditor when useQuery returns updates. */
+export function applyRemoteCursors(
+  view: EditorView,
+  cursors: RemoteCursor[],
+): void {
+  const tr = view.state.tr.setMeta(remoteCursorsKey, cursors)
+  view.dispatch(tr)
+}
+
+// M1 step 3.8.2.3 — local-selection observer plugin. Watches
+// the editor's selection; on change, debounces 150ms then fires
+// a callback with the new head position. AtomEditor wires the
+// callback to recordCollabPresence with cursorPos set.
+export function makeLocalCursorObserverPlugin({
+  onCursorChange,
+}: {
+  onCursorChange: (pos: number | null) => void
+}): Plugin {
+  return new Plugin({
+    key: new PluginKey('dohcLocalCursor'),
+    view() {
+      let timer: ReturnType<typeof setTimeout> | null = null
+      let lastReportedPos: number | null = null
+      return {
+        update(view, prevState) {
+          // Skip if selection didn't change (the editor fires
+          // update on every transaction; we only care when
+          // selection.head moved).
+          if (
+            view.state.selection.head === prevState.selection.head &&
+            view.state.selection.anchor === prevState.selection.anchor
+          ) {
+            return
+          }
+          if (timer !== null) clearTimeout(timer)
+          timer = setTimeout(() => {
+            timer = null
+            const pos = view.state.selection.head
+            if (pos === lastReportedPos) return
+            lastReportedPos = pos
+            onCursorChange(pos)
+          }, 150)
+        },
+        destroy() {
+          if (timer !== null) clearTimeout(timer)
+        },
+      }
+    },
+  })
+}
+
+// Re-imports of decoration types used above. Kept at the bottom
+// next to their consumer for locality; prosemirror-view types
+// are already pulled in via @milkdown/kit/prose/view (see top
+// of file).
+import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
+
 // Re-export getVersion so the integration can compare without
 // pulling prosemirror-collab directly.
 export { getVersion } from 'prosemirror-collab'

@@ -41,6 +41,9 @@ import {
   useCollabBootstrapMutation,
   useRemoteVersion,
   applyRemoteSteps,
+  applyRemoteCursors,
+  makeRemoteCursorsPlugin,
+  makeLocalCursorObserverPlugin,
   getVersion,
 } from '@/lib/collab-sync'
 import { sendableSteps } from 'prosemirror-collab'
@@ -902,6 +905,26 @@ function CrepeEditor({
       // bypassed the new mutation gate; removing it is the safe
       // serialization.
       void collabPluginsRef.current
+      // M1 step 3.8.2.3 — cursor presence plugins (multiplayer only).
+      // Install at closure time even though the bootstrap chain
+      // (3.8.1.x) waits for phase==='ok' before unlocking edits:
+      //   - makeLocalCursorObserverPlugin only reports when
+      //     selection MOVES, which requires user input — gated
+      //     by the read-only state until collab is ready
+      //   - makeRemoteCursorsPlugin's decorations are empty until
+      //     React dispatches applyRemoteCursors with data; safe
+      //     to mount with no cursors
+      // Both rely on the multiplayerDocId being stable for this
+      // mount (the AtomShell key in AtomView re-keys on flag
+      // toggle, so we always mount in the right mode).
+      if (multiplayerDocId) {
+        extra.push(
+          makeRemoteCursorsPlugin(),
+          makeLocalCursorObserverPlugin({
+            onCursorChange: (pos) => cursorReporterRef.current(pos),
+          }),
+        )
+      }
       // Phase 1b: inline-atom rendering, additive + flag-gated. The
       // live-total value chip only ANNOTATES a styled {identifier}
       // token — without that decoration it's an orphan number, so it
@@ -1246,6 +1269,76 @@ function CrepeEditor({
     activeWorkspaceIdForBootstrap,
     recordPresence,
   ])
+
+  // M1 step 3.8.2.3 — CURSOR PRESENCE WIRING.
+  //
+  // Three pieces glued together:
+  //   (1) cursorReporterRef: a function the local-cursor-observer
+  //       plugin (installed in useEditor closure) calls when
+  //       selection moves. The function is set by the effect
+  //       below so it always closes over the latest props +
+  //       mutation handle. Plugin gets a stable ref; React
+  //       freely re-renders without re-creating the plugin.
+  //
+  //   (2) remoteCursorsQuery: useQuery → server's
+  //       getCursorsForDoc. Returns Array<RemoteCursor> for
+  //       OTHER tabs (server filters out our clientId).
+  //
+  //   (3) dispatch effect: when remoteCursorsQuery changes,
+  //       call applyRemoteCursors(view, cursors) which dispatches
+  //       a meta-transaction so the remote-cursors plugin's state
+  //       updates + decorations re-render.
+  const cursorReporterRef = useRef<(pos: number | null) => void>(() => {})
+  useEffect(() => {
+    cursorReporterRef.current = (pos: number | null) => {
+      if (!multiplayerDocId) return
+      if (bootstrapState.phase !== 'ok') return
+      void recordPresence({
+        docId: multiplayerDocId,
+        clientId: collabSync.clientId,
+        activeWorkspaceId: activeWorkspaceIdForBootstrap,
+        cursorPos: pos,
+      }).catch(() => {
+        // Same swallow-and-rely-on-cron rationale as the
+        // heartbeat: one missed cursor update is harmless.
+      })
+    }
+  }, [
+    multiplayerDocId,
+    bootstrapState.phase,
+    collabSync.clientId,
+    activeWorkspaceIdForBootstrap,
+    recordPresence,
+  ])
+
+  const remoteCursors = useQuery(
+    api.collabPresence.getCursorsForDoc,
+    multiplayerDocId
+      ? {
+          docId: multiplayerDocId,
+          excludeClientId: collabSync.clientId,
+          activeWorkspaceId: activeWorkspaceIdForBootstrap,
+        }
+      : 'skip',
+  )
+
+  useEffect(() => {
+    if (!multiplayerDocId) return
+    if (!collabInstalled) return
+    if (!remoteCursors) return
+    const crepe = crepeRef.current
+    if (!crepe) return
+    try {
+      crepe.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx)
+        if (!view) return
+        applyRemoteCursors(view, remoteCursors)
+      })
+    } catch {
+      // editor.action throws if Crepe mid-mount; next render's
+      // effect retries.
+    }
+  }, [multiplayerDocId, collabInstalled, remoteCursors])
 
   useEffect(() => {
     if (!autoFocus) return

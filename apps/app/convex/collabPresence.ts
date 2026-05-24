@@ -36,8 +36,12 @@ export const recordCollabPresence = mutation({
     docId: v.string(),
     clientId: v.string(),
     activeWorkspaceId: v.optional(v.string()),
+    // M1 step 3.8.2.3 — cursor position (optional; passed by the
+    // PM selection-observer plugin debounced ~150ms). Caller may
+    // also pass null to explicitly clear (e.g. editor blurred).
+    cursorPos: v.optional(v.union(v.number(), v.null())),
   },
-  handler: async (ctx, { docId, clientId, activeWorkspaceId }) => {
+  handler: async (ctx, { docId, clientId, activeWorkspaceId, cursorPos }) => {
     const parsed = parseDocId(docId)
     if (parsed.kind === 'invalid') {
       throw new Error('Invalid document id.')
@@ -77,7 +81,15 @@ export const recordCollabPresence = mutation({
       )
       .unique()
     if (existing) {
-      await ctx.db.patch(existing._id, { lastSeenAt: now })
+      // 3.8.2.3 — only write cursorPos when caller passed it
+      // (undefined arg means "don't touch the existing value";
+      // null arg means "clear it"). Lets the heartbeat fire
+      // without overwriting cursor state every 30s.
+      const patch: { lastSeenAt: number; cursorPos?: number | null } = {
+        lastSeenAt: now,
+      }
+      if (cursorPos !== undefined) patch.cursorPos = cursorPos
+      await ctx.db.patch(existing._id, patch)
       return { ok: true as const, session: existing._id }
     }
     const sessionId = await ctx.db.insert('collabSessions', {
@@ -85,8 +97,72 @@ export const recordCollabPresence = mutation({
       clientId,
       userId: subject,
       lastSeenAt: now,
+      cursorPos: cursorPos ?? null,
     })
     return { ok: true as const, session: sessionId }
+  },
+})
+
+// M1 step 3.8.2.3 — cursor presence query. Closes M1+M2
+// acceptance criterion #1 ("two browser sessions on same atom:
+// both cursors visible, edits stream within ~100ms").
+//
+// Returns the live cursors for ONE doc: each row carries the
+// remote tab's clientId, userId, and cursorPos. The PM
+// decoration plugin renders a colored caret + name pill at
+// each remote position.
+//
+// Filters:
+//   - Same expiry as getActiveAtomIds (lastSeenAt > now - 90s)
+//   - cursorPos !== null (don't render carets for tabs that
+//     are blurred/no-selection)
+//   - Excludes own clientId (caller passes it; the local
+//     cursor is rendered by Crepe natively)
+//
+// Auth: P1 read access on the doc (same gate as
+// recordCollabPresence). A non-reader couldn't subscribe to
+// this doc anyway, but defense-in-depth.
+export const getCursorsForDoc = query({
+  args: {
+    docId: v.string(),
+    excludeClientId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { docId, excludeClientId, activeWorkspaceId }) => {
+    const parsed = parseDocId(docId)
+    if (parsed.kind === 'invalid') return []
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) return []
+
+    if (parsed.kind === 'share') {
+      const access = await resolveShareAccess(ctx, parsed.shareId)
+      if (!access) return []
+    } else {
+      if (workspaceId !== parsed.workspaceId) return []
+      if (!(await canReadAtom(ctx, parsed.atomId, identity.subject))) {
+        return []
+      }
+    }
+
+    const cutoff = Date.now() - PRESENCE_EXPIRY_MS
+    const rows = await ctx.db
+      .query('collabSessions')
+      .withIndex('by_docId', (q) => q.eq('docId', docId))
+      .collect()
+    return rows
+      .filter(
+        (r) =>
+          r.lastSeenAt >= cutoff &&
+          r.clientId !== excludeClientId &&
+          r.cursorPos !== null &&
+          r.cursorPos !== undefined,
+      )
+      .map((r) => ({
+        clientId: r.clientId,
+        userId: r.userId,
+        cursorPos: r.cursorPos as number,
+      }))
   },
 })
 

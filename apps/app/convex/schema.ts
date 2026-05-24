@@ -669,8 +669,62 @@ export default defineSchema({
     clientId: v.string(), // per-tab UUID
     userId: v.string(), // identity.subject; for audit + UI labels
     lastSeenAt: v.number(),
+    // M1 step 3.8.2.3 — cursor presence v1.
+    // The PM doc-relative cursor position (head of selection) for
+    // this tab. null when the tab has no active selection (e.g.
+    // editor blurred). Updated by recordCollabPresence with a
+    // debounced selection observer (~150ms) — not write-per-
+    // keystroke. Position interpretation: PM doc position at the
+    // snapshot version the tab last synced; under concurrent edits
+    // may briefly desync — documented v1 limitation. Proper step-
+    // mapping is M2-followup. Optional + nullable so existing rows
+    // (pre-3.8.2.3) load without migration.
+    cursorPos: v.optional(v.union(v.number(), v.null())),
   })
     .index('by_docId', ['docId'])
     .index('by_docId_clientId', ['docId', 'clientId'])
     .index('by_lastSeenAt', ['lastSeenAt']),
+
+  // M1 step 3.9.0 — atomSuggestions (M3 schema scaffold).
+  // Decorations sidecar per Decision D: the agent's `suggest_in_doc`
+  // tool writes here; the editor's decoration plugin subscribes and
+  // renders inline bubbles. Accept inlines the proposedText into
+  // atoms.body; reject deletes the row.
+  atomSuggestions: defineTable({
+    atomId: v.id('atoms'),
+    workspaceId: v.string(),
+    // PM doc-position range the suggestion applies to (snapshot-
+    // relative; same v1 caveat as cursorPos — concurrent edits
+    // may briefly desync the highlighted range).
+    rangeFrom: v.number(),
+    rangeTo: v.number(),
+    // The text the agent wants to write. Replaces [from, to] on
+    // accept.
+    proposedText: v.string(),
+    // The original instruction that produced this suggestion
+    // (e.g. "rewrite intro"). Surfaced in the bubble UI.
+    instruction: v.string(),
+    // True when the agent created this. v1 always true (only
+    // agent → suggestion path); reserved for future human-to-human
+    // suggestion threads.
+    authorIsAgent: v.boolean(),
+    // identity.subject of the agent or human author.
+    authorUserId: v.string(),
+    // Set when accepted; the human who clicked Accept.
+    resolvedByUserId: v.optional(v.string()),
+    resolvedAt: v.optional(v.number()),
+    // 'pending' until accept/reject; then 'accepted' or 'rejected'.
+    // We keep accepted/rejected rows briefly (see 3.9.1
+    // listPending filter) so other tabs can show the fade-out
+    // "accepted by Bob 2s ago" UI per the plan acceptance.
+    status: v.union(
+      v.literal('pending'),
+      v.literal('accepted'),
+      v.literal('rejected'),
+    ),
+    createdAt: v.number(),
+  })
+    .index('by_atomId_status', ['atomId', 'status'])
+    .index('by_atomId', ['atomId'])
+    .index('by_workspaceId', ['workspaceId']),
 })
