@@ -198,18 +198,129 @@ export const _projectSnapshotToBody = internalMutation({
     }
 
     // If the serialized markdown matches the current body byte-for-
-    // byte, nothing to write — just advance projectedVersion (so
-    // we don't re-fire on the same snapshot). Common case for
-    // idempotency under bursty typing.
+    // byte, no write needed — but we DO need to re-baseline
+    // collabDocs.baseBodyHash to match current. Two reasons it
+    // might be stale here:
+    //   1. Bursty typing: PM advanced; serialize round-tripped
+    //      back to same atoms.body. Just advance projectedVersion.
+    //   2. OOB write happens to produce exactly the same markdown
+    //      PM would emit (case C of the 3.7 conflict resolver —
+    //      coincidental match). Skip the conflict path; update
+    //      baseBodyHash to currentBodyHash so the next projection
+    //      doesn't spuriously trip the OOB-detection.
     if (ser.newBody === atom.body) {
+      const currentBodyHash = await sha256Hex(atom.body)
       await ctx.db.patch(doc._id, {
         projectedVersion: snapshotVersion,
+        baseBodyHash: currentBodyHash,
+        lastProjectedHash: currentBodyHash,
         ...(await buildClearPatch()),
         updatedAt: Date.now(),
       })
       return { skipped: 'no-change' as const }
     }
 
+    // M1 step 3.7 — TWO-STATE CONFLICT RESOLUTION (codex 4th-pass
+    // recommendation; replaces 3.6.3's "always freeze" placeholder).
+    //
+    // Three-state pre-write check based on three hashes:
+    //   - newDerivedHash  = sha256(ser.newBody) — what PM would emit
+    //   - currentBodyHash = sha256(atom.body)   — atoms.body NOW
+    //   - baseBodyHash    = doc.baseBodyHash    — atoms.body at last
+    //                       successful projection (or bootstrap)
+    //
+    // If currentBodyHash === baseBodyHash → no out-of-band write
+    // happened; standard projection write proceeds.
+    //
+    // If currentBodyHash !== baseBodyHash → an OOB write landed.
+    // Decide between three outcomes:
+    //   A. FREEZE       (newDerivedHash !== currentBody AND !== base)
+    //                   both PM AND atoms.body advanced differently
+    //   B. AUTO-REBUILD (newDerivedHash === baseBodyHash)
+    //                   PM didn't move since last projection; OOB
+    //                   write is the new truth; signal client to
+    //                   rebootstrap from new atoms.body without
+    //                   a freeze banner. Codex 4th-pass: "if there
+    //                   are no unprojected PM edits, rebuild PM
+    //                   from atoms.body automatically"
+    //   C. RE-BASELINE  (newDerivedHash === currentBodyHash)
+    //                   OOB write coincidentally produces the same
+    //                   markdown PM does; no real conflict; just
+    //                   update baseBodyHash to the new value
+    //
+    // Frontmatter handling subtlety (worked through carefully):
+    // ser.newBody = splitFrontmatter(atom.body).fm + serialize(PM).
+    // So a frontmatter-only OOB write where PM is unchanged falls
+    // into case C: newDerivedHash uses NEW fm + OLD-serialize-PM,
+    // which equals NEW-fm + NEW-rest (currentBody) when NEW-rest
+    // happens to equal OLD-serialize-PM (i.e. user didn't touch
+    // rest). The re-baseline preserves Bob's frontmatter change.
+    const currentBodyHash = await sha256Hex(atom.body)
+    if (currentBodyHash !== doc.baseBodyHash) {
+      const newDerivedHash = await sha256Hex(ser.newBody)
+
+      // Case C: PM-derived output happens to match the current body.
+      // No real conflict; just advance baseline + projectedVersion.
+      if (newDerivedHash === currentBodyHash) {
+        await ctx.db.patch(doc._id, {
+          baseBodyHash: currentBodyHash,
+          lastProjectedHash: currentBodyHash,
+          projectedVersion: snapshotVersion,
+          ...(await buildClearPatch()),
+          updatedAt: Date.now(),
+        })
+        return {
+          skipped: 'no-change-after-rebaseline' as const,
+          snapshotVersion,
+        }
+      }
+
+      // Case B: PM hasn't advanced since the baseBodyHash was set,
+      // but atoms.body did. Signal the client to rebootstrap PM
+      // from the new body. Adopt the new body as the baseline so
+      // subsequent projections (after the client rebootstraps)
+      // don't trip the CAS again on this OOB write.
+      //
+      // Client's responsibility: read collabDocs.needsRebootstrap
+      // via useQuery; tear down its sync session; re-call
+      // bootstrapSnapshotFromAtomBody with the new body. Sub-commit
+      // 3.8 wires the client-side rebootstrap loop; for now the
+      // server-side signal is in place. Bootstrap mutation itself
+      // (sub-3.5) currently no-ops when collabDocs row exists;
+      // sub-3.8 will teach it to handle the rebootstrap path.
+      if (newDerivedHash === doc.baseBodyHash) {
+        await ctx.db.patch(doc._id, {
+          needsRebootstrap: true,
+          baseBodyHash: currentBodyHash, // adopt OOB body as new baseline
+          lastConflictAt: Date.now(),
+          ...(await buildClearPatch()),
+          updatedAt: Date.now(),
+        })
+        return {
+          conflict: 'auto-rebuild' as const,
+          snapshotVersion,
+        }
+      }
+
+      // Case A: both PM AND atoms.body advanced, and differently.
+      // Real conflict — freeze + reload banner. Client sees
+      // collabDocs.frozen=true via useQuery; tear down + show
+      // banner. User chooses to reload (loses unprojected PM
+      // edits) or copy-paste their work elsewhere first.
+      await ctx.db.patch(doc._id, {
+        frozen: true,
+        lastConflictAt: Date.now(),
+        ...(await buildClearPatch()),
+        updatedAt: Date.now(),
+      })
+      return {
+        conflict: 'freeze' as const,
+        reason: 'both-sides-changed' as const,
+        snapshotVersion,
+      }
+    }
+
+    // No OOB write detected; standard projection write proceeds.
     // Route through the shared body writer. atomWriter does the
     // FULL upsertAtomImpl side-effect chain (Codex v3 critical
     // #1+#2 absorbed) + the CAS re-check internally.
@@ -221,9 +332,13 @@ export const _projectSnapshotToBody = internalMutation({
     })
 
     if (!result.ok) {
-      // hash-mismatch / atom-not-found / workspace-mismatch.
-      // Freeze for now; 3.7 splits hash-mismatch into auto-rebuild
-      // vs freeze based on whether PM has unprojected edits.
+      // After 3.7's pre-write resolution, this branch should be
+      // genuinely rare: hash-mismatch means an OOB write landed
+      // BETWEEN the handler's atom.body read AND atomWriter's
+      // own re-read. Convex mutations are transactional, so this
+      // happens only via OCC retry conflict — and even then, the
+      // retry would re-enter _projectSnapshotToBody from scratch
+      // with fresh reads. Treat as a defensive freeze.
       await ctx.db.patch(doc._id, {
         frozen: true,
         lastConflictAt: Date.now(),

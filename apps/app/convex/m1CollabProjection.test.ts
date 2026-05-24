@@ -302,7 +302,13 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
     expect(docs[0]?.projectedVersion).toBe(1) // NOT advanced on failure
   })
 
-  it('hash mismatch (OOB write) ⇒ freezes collab session', async () => {
+  it('hash mismatch (BOTH sides changed) ⇒ FREEZE (case A; sub-3.7 two-state)', async () => {
+    // Sub-commit 3.7 added the three-state pre-write conflict
+    // resolver. This scenario is case A: both PM and atoms.body
+    // moved, and differently. Verifies the FREEZE branch.
+    // (Case B auto-rebuild + Case C re-baseline are tested
+    // separately in the "M1 step 3.7 — two-state conflict
+    // resolver" suite below.)
     const t = convexTest(schema, modules)
     const orgId = await seedOrg(t)
     const { atomId, docId } = await makeAtomAndCollabDoc(
@@ -312,9 +318,9 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
       'starting body',
     )
 
-    // Simulate an OOB write: agent (or another tab) writes the
-    // atom body directly, bypassing collab. collabDocs.baseBodyHash
-    // is now stale.
+    // OOB write: agent writes the atom body directly. baseBodyHash
+    // is now stale (was sha256('starting body'); now atoms.body is
+    // 'agent-injected content').
     await t.run(async (ctx) => {
       await ctx.db.patch(atomId, {
         body: 'agent-injected content',
@@ -322,6 +328,8 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
       })
     })
 
+    // PM proposes a DIFFERENT third content. All three (base,
+    // current, PM-derived) differ pairwise → case A → freeze.
     const result = await t.mutation(
       internal.collabProjection._projectSnapshotToBody,
       {
@@ -331,9 +339,8 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
       },
     )
     expect(result).toMatchObject({
-      skipped: 'write-failed',
-      reason: 'hash-mismatch',
-      frozen: true,
+      conflict: 'freeze',
+      reason: 'both-sides-changed',
     })
 
     // atoms.body was NOT overwritten by collab (agent's write survives)
@@ -341,11 +348,13 @@ describe('M1 step 3.6.3 — freeze paths (placeholder for sub-commit 3.7)', () =
     expect(atom?.body).toContain('agent-injected content')
     expect(atom?.body).not.toContain('collab proposed content')
 
-    // collabDocs frozen + lastConflictAt set
+    // collabDocs frozen + lastConflictAt set; needsRebootstrap NOT set
+    // (auto-rebuild was rejected — this is real conflict)
     const docs = await t.run(async (ctx) =>
       ctx.db.query('collabDocs').collect(),
     )
     expect(docs[0]?.frozen).toBe(true)
+    expect(docs[0]?.needsRebootstrap).toBe(false)
     expect(docs[0]?.lastConflictAt).toBeDefined()
   })
 
