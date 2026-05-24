@@ -288,7 +288,7 @@ describe('atomSuggestions — listPending', () => {
 })
 
 describe('atomSuggestions — acceptSuggestion CAS', () => {
-  it('rejects when expectedText doesn\'t match current body (drift)', async () => {
+  it('returns ok:false reason="drift" when expectedText mismatches', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrg(t)
     const { atomId, finalBody } = await makeAtom(t, orgId, 'n.md', 'hello world')
@@ -302,39 +302,31 @@ describe('atomSuggestions — acceptSuggestion CAS', () => {
       expectedText: 'world',
     })
     if (!created.ok) throw new Error('create failed')
-
-    // Mutate the body OUT-OF-BAND so the CAS witness no longer
-    // matches. Preserve the original byte range by replacing
-    // [idx, idx+5] = 'world' with 'unive' (same length) — keeps
-    // the suggestion's offsets valid; only the CAS witness
-    // mismatches.
     const oobBody =
       finalBody.slice(0, idx) + 'unive' + finalBody.slice(idx + 5)
     await t.run(async (ctx) => {
       await ctx.db.patch(atomId, { body: oobBody, updatedAt: Date.now() })
     })
-
-    await expect(
-      t
-        .withIdentity({ subject: ALICE })
-        .mutation(api.atomSuggestions.acceptSuggestion, {
-          suggestionId: created.id,
-          activeWorkspaceId: orgId,
-        }),
-    ).rejects.toThrow(/Document drifted/)
-
-    // Body unchanged from the OOB write (the accept rejected)
+    const result = await t
+      .withIdentity({ subject: ALICE })
+      .mutation(api.atomSuggestions.acceptSuggestion, {
+        suggestionId: created.id,
+        activeWorkspaceId: orgId,
+      })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toBe('drift')
+      expect(result.message).toMatch(/drifted/)
+    }
+    // 3.9.15 — return-instead-of-throw means the row patch
+    // PERSISTS. status='rejected' visible to the client via
+    // listPending reactivity. Bubble transitions as designed.
+    const row = await t.run(async (ctx) => ctx.db.get(created.id))
+    expect(row?.status).toBe('rejected')
+    expect(row?.resolvedByUserId).toBe(ALICE)
+    // Body unchanged from the OOB write
     const after = await t.run(async (ctx) => ctx.db.get(atomId))
     expect(after?.body).toBe(oobBody)
-    // NOTE: 3.9.3 intended to mark the row 'rejected' on CAS
-    // failure, but throwing rolls back the patch in the same
-    // transaction (Convex transactional semantics). Row stays
-    // 'pending' after a CAS-fail throw. This is a real behavior
-    // gap (the bubble would still show in the UI); 3.9.15 (next
-    // sub-commit) restructures to return a clean ok:false
-    // result so the rejection patch survives.
-    const row = await t.run(async (ctx) => ctx.db.get(created.id))
-    expect(row?.status).toBe('pending')
   })
 
   it('rejects suggestion missing expectedText (3.9.3)', async () => {
@@ -357,14 +349,20 @@ describe('atomSuggestions — acceptSuggestion CAS', () => {
         // expectedText intentionally omitted
       }),
     )
-    await expect(
-      t
-        .withIdentity({ subject: ALICE })
-        .mutation(api.atomSuggestions.acceptSuggestion, {
-          suggestionId: sid as Id<'atomSuggestions'>,
-          activeWorkspaceId: orgId,
-        }),
-    ).rejects.toThrow(/missing the required expectedText/)
+    const result = await t
+      .withIdentity({ subject: ALICE })
+      .mutation(api.atomSuggestions.acceptSuggestion, {
+        suggestionId: sid as Id<'atomSuggestions'>,
+        activeWorkspaceId: orgId,
+      })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toBe('missing-cas-witness')
+      expect(result.message).toMatch(/expectedText/)
+    }
+    // Row patched to 'rejected' (3.9.15: return preserves patch)
+    const row = await t.run(async (ctx) => ctx.db.get(sid as Id<'atomSuggestions'>))
+    expect(row?.status).toBe('rejected')
   })
 
   it('rejects out-of-bounds range BEFORE CAS comparison (3.9.3 [P1])', async () => {
@@ -389,16 +387,22 @@ describe('atomSuggestions — acceptSuggestion CAS', () => {
         createdAt: Date.now(),
       }),
     )
-    await expect(
-      t
-        .withIdentity({ subject: ALICE })
-        .mutation(api.atomSuggestions.acceptSuggestion, {
-          suggestionId: sid as Id<'atomSuggestions'>,
-          activeWorkspaceId: orgId,
-        }),
-    ).rejects.toThrow(/out of bounds/)
+    const result = await t
+      .withIdentity({ subject: ALICE })
+      .mutation(api.atomSuggestions.acceptSuggestion, {
+        suggestionId: sid as Id<'atomSuggestions'>,
+        activeWorkspaceId: orgId,
+      })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toBe('oob')
+      expect(result.message).toMatch(/out of bounds/)
+    }
     const after = await t.run(async (ctx) => ctx.db.get(atomId))
     expect(after?.body).toBe(finalBody) // body unchanged
+    // Row patched to 'rejected' (3.9.15: return preserves patch)
+    const row = await t.run(async (ctx) => ctx.db.get(sid as Id<'atomSuggestions'>))
+    expect(row?.status).toBe('rejected')
   })
 
   it('happy path: splices proposedText at exact range when CAS passes', async () => {

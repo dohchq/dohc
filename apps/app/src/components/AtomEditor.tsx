@@ -1490,10 +1490,23 @@ function CrepeEditor({
         void acceptSuggestionMut({
           suggestionId: id as Id<'atomSuggestions'>,
           activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        }).catch(() => {
-          // Surface in a future toast; for v1, the bubble
-          // simply won't transition (and the user can retry).
         })
+          .then((result) => {
+            // 3.9.15 — server returns ok:false for validation
+            // failures (CAS drift / OOB / missing witness).
+            // The row is patched to 'rejected' (now sticks
+            // because we return instead of throw), so the
+            // bubble updates via listPending reactivity. We
+            // additionally surface the message so the user
+            // understands why their click didn't apply.
+            if (result && !result.ok && typeof window !== 'undefined') {
+              window.alert(result.message)
+            }
+          })
+          .catch(() => {
+            // Auth/setup errors still throw; v1 swallows
+            // silently. Future toast surface.
+          })
       },
       onReject: (id: string) => {
         void rejectSuggestionMut({

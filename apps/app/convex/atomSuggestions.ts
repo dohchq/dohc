@@ -238,7 +238,13 @@ export const acceptSuggestion = mutation({
     suggestionId: v.id('atomSuggestions'),
     activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { suggestionId, activeWorkspaceId }) => {
+  handler: async (
+    ctx,
+    { suggestionId, activeWorkspaceId },
+  ): Promise<
+    | { ok: true; alreadyResolved: boolean }
+    | { ok: false; reason: 'drift' | 'oob' | 'missing-cas-witness'; message: string }
+  > => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const identity = await ctx.auth.getUserIdentity()
     if (!identity) throw new Error('Not authenticated')
@@ -267,18 +273,16 @@ export const acceptSuggestion = mutation({
 
     // M1 step 3.9.2 + 3.9.3 — codex 14th + 15th-pass [P1] CAS.
     //
-    // 3.9.3 [P1]: validate the RAW range BEFORE any clamping.
-    // The 3.9.2 version clamped first then compared the slice —
-    // an out-of-bounds range with empty expectedText would
-    // collapse to EOF and pass the check, then append at the
-    // wrong position. The fix: any out-of-bounds range fails
-    // outright. Clamping is only for the (no-write) decoration
-    // plugin's rendering.
-    //
-    // Also 3.9.3: expectedText is now REQUIRED. A row missing
-    // it (pre-3.9.2 in-flight or test artifact) is rejected
-    // immediately. Removes the silent-bypass path codex 15th-
-    // pass [P2] flagged.
+    // 3.9.15 — codex 19th-pass holistic follow-up + 3.9.14
+    // test finding: validation failures used to patch row to
+    // 'rejected' then throw. Convex transactional semantics
+    // ROLL BACK the patch on throw → row stayed 'pending' →
+    // bubble stayed visible in the UI. Fix: return structured
+    // ok:false instead. The patch survives; client surfaces
+    // the error inline; bubble transitions to 'rejected'
+    // visually as designed. Only auth/setup errors still
+    // throw (those are truly exceptional and shouldn't have
+    // side-effects anyway).
     const body = atom.body
     if (row.expectedText === undefined) {
       await ctx.db.patch(suggestionId, {
@@ -286,9 +290,12 @@ export const acceptSuggestion = mutation({
         resolvedByUserId: subject,
         resolvedAt: Date.now(),
       })
-      throw new Error(
-        'Suggestion is missing the required expectedText CAS witness. Discarded.',
-      )
+      return {
+        ok: false,
+        reason: 'missing-cas-witness',
+        message:
+          'Suggestion is missing the required expectedText CAS witness. Discarded.',
+      }
     }
     if (
       row.rangeFrom < 0 ||
@@ -300,9 +307,12 @@ export const acceptSuggestion = mutation({
         resolvedByUserId: subject,
         resolvedAt: Date.now(),
       })
-      throw new Error(
-        'Suggestion range is out of bounds (document shrank or range was invalid). Discarded; ask again.',
-      )
+      return {
+        ok: false,
+        reason: 'oob',
+        message:
+          'Suggestion range is out of bounds (document shrank or range was invalid). Discarded; ask again.',
+      }
     }
     const actual = body.slice(row.rangeFrom, row.rangeTo)
     if (actual !== row.expectedText) {
@@ -311,9 +321,12 @@ export const acceptSuggestion = mutation({
         resolvedByUserId: subject,
         resolvedAt: Date.now(),
       })
-      throw new Error(
-        'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
-      )
+      return {
+        ok: false,
+        reason: 'drift',
+        message:
+          'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
+      }
     }
     const newBody =
       body.slice(0, row.rangeFrom) + row.proposedText + body.slice(row.rangeTo)
