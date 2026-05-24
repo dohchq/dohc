@@ -246,23 +246,59 @@ export function makeSyncBridgePlugin({
         }
       }
 
-      // Snapshot submission. Idempotent on same-version (skip if
-      // we already submitted at this version). Serial: never two
-      // snapshot mutations in flight at once. Doc JSON is what
-      // the server's projection writer feeds through pmToMdast.
+      // Snapshot submission. Three serial guards (M1 step 3.6.5
+      // codex 5th-pass BLOCKER #1):
+      //   - sendableSteps(view.state) === null
+      //     pending local steps means the doc contains state
+      //     PAST getVersion(view.state); submitting now would
+      //     send {version: N, content: doc-at-N+k} → server
+      //     stores a corrupt snapshot; the next client to
+      //     bootstrap deserializes content-at-N+k as version N
+      //     and diverges on the first edit
+      //   - inFlight === false (step submission in flight)
+      //     once submitSteps acks, view.state advances; same
+      //     desync as above if we snapshot between submit + ack
+      //   - snapshotInFlight === false
+      //     serializes; never two snapshot mutations racing
+      // If any guard fails, skip + re-arm (caller will fire
+      // another armSnapshotDebounce on the next update; if the
+      // editor is idle, the destroyFlush path below catches it).
       async function trySubmitSnapshot() {
         if (!onSubmitSnapshot) return
         if (snapshotInFlight) return
+        // Codex 5th-pass BLOCKER #1: refuse to submit while pending
+        // steps exist. Re-arm so the next idle period retries
+        // after submitSteps has acked.
+        if (sendableSteps(view.state)) {
+          armSnapshotDebounce()
+          return
+        }
+        if (inFlight) {
+          armSnapshotDebounce()
+          return
+        }
         const currentVersion = getVersion(view.state)
         if (currentVersion <= lastSubmittedSnapshotVersion) return
         snapshotInFlight = true
         try {
+          // Capture content + version IN THE SAME tick to prevent
+          // a transaction landing between toJSON + getVersion.
+          // (Both are sync reads of plugin state; same task tick
+          // gives an atomic view.)
           const docJson = view.state.doc.toJSON()
+          const versionAtSnapshot = getVersion(view.state)
+          // Double-check the guards held through the sync block.
+          // If sendableSteps appeared during a hypothetical
+          // re-entrant update, abort + re-arm.
+          if (sendableSteps(view.state)) {
+            armSnapshotDebounce()
+            return
+          }
           await onSubmitSnapshot({
-            version: currentVersion,
+            version: versionAtSnapshot,
             content: JSON.stringify(docJson),
           })
-          lastSubmittedSnapshotVersion = currentVersion
+          lastSubmittedSnapshotVersion = versionAtSnapshot
         } catch {
           // Snapshot failures are non-fatal — the server keeps
           // accepting our steps; the next snapshot retries. No
@@ -295,12 +331,25 @@ export function makeSyncBridgePlugin({
           armSnapshotDebounce()
         },
         destroy() {
-          // Cleanup: a pending timer would otherwise fire after
-          // the editor unmounts, possibly hitting a torn-down
-          // convex client.
+          // M1 step 3.6.5 codex 5th-pass BLOCKER #2: FLUSH the
+          // pending snapshot before tearing down (was: clear).
+          // Tab close, navigation away, doc switch all hit this
+          // path; without the flush, atoms.body stays stale at
+          // the last projected version even when there are
+          // unsubmitted snapshots pending.
+          //
+          // CAVEAT: we still can't await an async snapshot
+          // submission from a sync destroy callback. We fire-and-
+          // forget the submission; the page may unload before it
+          // completes (browser will best-effort POST in beforeunload).
+          // The server-side _cleanupIdleSessions path catches the
+          // residual case: when the doc's session count drops to
+          // zero, it schedules a final projection. See
+          // collabPresence.ts updates for that part.
           if (snapshotTimer !== null) {
             clearTimeout(snapshotTimer)
             snapshotTimer = null
+            void trySubmitSnapshot()
           }
         },
       }

@@ -103,6 +103,7 @@ function convertBlock(node: PmNode): BlockContent | RootContent {
         spread: false,
         children: (node.content ?? []).map((c) => convertListItem(c)),
       }
+    case 'hr':
     case 'horizontal_rule':
     case 'thematic_break':
       return { type: 'thematicBreak' }
@@ -125,12 +126,30 @@ function convertBlock(node: PmNode): BlockContent | RootContent {
 }
 
 function convertListItem(node: PmNode): ListItem {
+  // Milkdown commonmark uses 'list_item' for both regular AND
+  // task-list items. The GFM task-list-item preset PATCHES the
+  // same schema with `attrs.checked` (codex 5th-pass concern #3:
+  // I was previously dropping it). Surface as mdast listItem.checked
+  // so remark-gfm emits `- [ ]` / `- [x]` on serialize.
   if (node.type !== 'list_item') {
     throw new UnknownPmNodeError(node.type)
   }
+  const checkedAttr = node.attrs?.checked
+  // Milkdown stores `checked` as boolean OR null (untouched). Only
+  // emit listItem.checked when it's been explicitly set, so a
+  // plain bullet list doesn't become a task list on roundtrip.
+  const checked =
+    typeof checkedAttr === 'boolean'
+      ? checkedAttr
+      : checkedAttr === 'true'
+        ? true
+        : checkedAttr === 'false'
+          ? false
+          : null
   return {
     type: 'listItem',
     spread: false,
+    checked,
     children: (node.content ?? []).map(
       (c) => convertBlock(c) as BlockContent,
     ),
@@ -180,7 +199,12 @@ function convertInline(node: PmNode): PhrasingContent[] {
   switch (node.type) {
     case 'text':
       return [wrapMarks(node.text ?? '', node.marks ?? [])]
+    case 'hardbreak':
     case 'hard_break':
+      // Milkdown uses 'hardbreak' (single word); commonmark/
+      // typescript-mdast often uses 'hard_break'. Accept both.
+      // Codex 5th-pass concern #3: I had only the underscored
+      // form, missing real Milkdown output.
       return [{ type: 'break' }]
     case 'image': {
       const src = (node.attrs?.src as string | undefined) ?? ''
@@ -234,8 +258,13 @@ function wrapMarks(
         } as PhrasingContent
         break
       }
+      case 'strike_through':
       case 'strikethrough':
       case 'delete':
+        // Milkdown GFM names it 'strike_through' (underscore between
+        // strike + through). Codex 5th-pass concern #3: I had only
+        // 'strikethrough' + 'delete' — Crepe content with strike
+        // would have frozen projection on every flush.
         node = { type: 'delete', children: [node] } as PhrasingContent
         break
       default:

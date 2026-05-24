@@ -47,6 +47,7 @@ import {
 import {
   captureSchemaFromEditor,
   getCachedSchema,
+  subscribeSchema,
 } from '@/lib/crepe-schema-cache'
 import type { Schema } from '@milkdown/kit/prose/model'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -698,24 +699,26 @@ function CrepeEditor({
   // version 0. The remote-pull effect rebases on first divergence,
   // converging to server state in one cycle. The follow-up commit
   // hardens this with a loading gate.
-  // M1 step 3 sub-commit 3.2 — pull the schema from the global
-  // cache populated by the first mounted Crepe. On the very first
-  // multiplayer mount, the cache is empty (this component's own
-  // Crepe hasn't booted yet); useCollabSync handles a null schema
-  // by skipping the bootstrap parse path. After Crepe boots, the
-  // schema-capture effect fires + a re-render arms the bootstrap
-  // for any subsequent mounts. The render-tracking ref subscribes
-  // to schema arrival so the second pass picks it up.
+  // M1 step 3.2 + 3.6.5 codex BLOCKER #4 — pull schema via
+  // subscribeSchema (NOT polling getCachedSchema on every render).
+  //
+  // Why subscribe: captureSchemaFromEditor fires its subscribers
+  // after the editor mounts. Polling via "re-check on every
+  // render" only worked if SOMETHING ELSE re-rendered the
+  // component after schema capture. The first multiplayer mount
+  // had no such trigger → bootstrap/collab stayed unarmed until
+  // an unrelated state change (a Convex query update, a parent
+  // re-render, a user keystroke). subscribeSchema forces the
+  // re-render via setState — guaranteed.
   const [cachedSchema, setCachedSchema] = useState<Schema | null>(
     () => getCachedSchema(),
   )
   useEffect(() => {
-    // Re-check the cache on every render; once it's populated,
-    // setState pushes the schema to useCollabSync. Idempotent —
-    // setState with the same value is a no-op.
-    const s = getCachedSchema()
-    if (s && !cachedSchema) setCachedSchema(s)
-  })
+    // Fires sync if cache already warm; otherwise queues + fires
+    // on captureSchemaFromEditor.
+    const unsub = subscribeSchema((s) => setCachedSchema(s))
+    return unsub
+  }, [])
   const collabSync = useCollabSync({
     docId: multiplayerDocId ?? null,
     schema: cachedSchema,

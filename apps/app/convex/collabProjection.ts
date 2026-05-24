@@ -77,9 +77,20 @@ export async function schedulePostSnapshotProjection(
   // it before re-scheduling. Two writes is cheaper than letting
   // both fire (the second would early-return via the version
   // check, but burns scheduler slots).
-  if (doc.scheduledJobId) {
+  //
+  // Codex 5th-pass concern #5: cancel can fail because the job
+  // already started. The running handler will later patch
+  // scheduledJobId:undefined when it finishes. If we patch the
+  // NEWER jobId here in between, the older handler's clear
+  // would wipe our newer tracking. The atomic fix: capture the
+  // pre-existing jobId, then patch ONLY if scheduledJobId still
+  // equals it. The handler does the same check (patches only
+  // if its own jobId is the current one).
+  const previousJobId = doc.scheduledJobId
+
+  if (previousJobId) {
     try {
-      await ctx.scheduler.cancel(doc.scheduledJobId)
+      await ctx.scheduler.cancel(previousJobId)
     } catch {
       // Cancel can fail if the job already ran/completed — fine.
     }
@@ -90,10 +101,21 @@ export async function schedulePostSnapshotProjection(
     internal.collabProjection._projectSnapshotToBody,
     { docId, snapshotVersion, snapshotContent },
   )
-  await ctx.db.patch(doc._id, {
-    scheduledJobId: jobId,
-    updatedAt: Date.now(),
-  })
+  // Re-read the row to check ownership before patching: if a
+  // CONCURRENT scheduler scheduled a newer job (and patched its
+  // own id), we should NOT clobber that with our older job's id.
+  // Convex mutations are transactional, so this re-read sees the
+  // committed state at the start of OUR transaction; in practice
+  // this serializes ordering, but the explicit check documents
+  // the invariant + survives a hypothetical future change to
+  // mutation isolation semantics.
+  const fresh = await ctx.db.get(doc._id)
+  if (fresh && fresh.scheduledJobId === previousJobId) {
+    await ctx.db.patch(doc._id, {
+      scheduledJobId: jobId,
+      updatedAt: Date.now(),
+    })
+  }
 }
 
 export const _projectSnapshotToBody = internalMutation({
@@ -117,6 +139,28 @@ export const _projectSnapshotToBody = internalMutation({
     if (doc.frozen) return { skipped: 'frozen' as const }
     if (doc.needsRebootstrap) return { skipped: 'needs-rebootstrap' as const }
 
+    // Codex 5th-pass concern #5: capture the scheduledJobId we
+    // observed at the start of this handler. When we patch
+    // scheduledJobId:undefined below (clearing the schedule
+    // marker), we ONLY do it if the row still carries the same
+    // id we saw. If a newer schedule took ownership during our
+    // handler, leaving its id intact prevents this older
+    // handler from wiping out the newer schedule's tracking.
+    const ownedJobId = doc.scheduledJobId
+
+    // Tiny helper: clear scheduledJobId only if we OWN it. Caller
+    // computes the rest of the patch + we merge with the
+    // ownership-conditional clear.
+    const buildClearPatch = async (): Promise<{ scheduledJobId?: undefined }> => {
+      const fresh = await ctx.db.get(doc._id)
+      // Only clear if the row still carries our jobId; otherwise
+      // a newer schedule owns this slot — leave it alone.
+      if (fresh && fresh.scheduledJobId === ownedJobId) {
+        return { scheduledJobId: undefined }
+      }
+      return {}
+    }
+
     const atom = await ctx.db.get(parsed.atomId)
     if (!atom) {
       // Atom deleted while collab session was active. Mark frozen
@@ -126,7 +170,7 @@ export const _projectSnapshotToBody = internalMutation({
       await ctx.db.patch(doc._id, {
         frozen: true,
         lastConflictAt: Date.now(),
-        scheduledJobId: undefined,
+        ...(await buildClearPatch()),
         updatedAt: Date.now(),
       })
       return { skipped: 'atom-deleted' as const, frozen: true }
@@ -142,7 +186,7 @@ export const _projectSnapshotToBody = internalMutation({
       await ctx.db.patch(doc._id, {
         frozen: true,
         lastConflictAt: Date.now(),
-        scheduledJobId: undefined,
+        ...(await buildClearPatch()),
         updatedAt: Date.now(),
       })
       return {
@@ -160,7 +204,7 @@ export const _projectSnapshotToBody = internalMutation({
     if (ser.newBody === atom.body) {
       await ctx.db.patch(doc._id, {
         projectedVersion: snapshotVersion,
-        scheduledJobId: undefined,
+        ...(await buildClearPatch()),
         updatedAt: Date.now(),
       })
       return { skipped: 'no-change' as const }
@@ -183,7 +227,7 @@ export const _projectSnapshotToBody = internalMutation({
       await ctx.db.patch(doc._id, {
         frozen: true,
         lastConflictAt: Date.now(),
-        scheduledJobId: undefined,
+        ...(await buildClearPatch()),
         updatedAt: Date.now(),
       })
       return {
@@ -198,7 +242,7 @@ export const _projectSnapshotToBody = internalMutation({
       baseBodyHash: result.newBaseBodyHash,
       lastProjectedHash: result.newBaseBodyHash,
       projectedVersion: snapshotVersion,
-      scheduledJobId: undefined,
+      ...(await buildClearPatch()),
       updatedAt: Date.now(),
     })
 
