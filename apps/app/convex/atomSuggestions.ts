@@ -7,11 +7,17 @@
 // renders an inline bubble. The user clicks Accept (inlines
 // the proposedText into atoms.body) or Reject (deletes row).
 //
-// Position semantics: rangeFrom/rangeTo are PM doc positions
-// at the snapshot the suggestion was made against. Same v1
-// caveat as cursorPos (3.8.2.3): under concurrent edits the
-// highlighted range may briefly desync. Acceptable for v1;
-// step-mapping is M2 follow-up.
+// Position semantics: rangeFrom/rangeTo are MARKDOWN-BODY
+// offsets (NOT PM doc positions — those are a separate
+// coordinate system that doesn't map 1:1 to atoms.body string
+// indices). The agent reasons about markdown offsets natively
+// (it reads body via read_atom). The editor decoration plugin
+// renders the bubble at the approximate PM position; the bubble
+// location is visually approximate but accept correctness
+// comes from the expectedText CAS witness (3.9.3 — out-of-
+// bounds rejected; drift since suggest_in_doc rejected).
+// Under concurrent body edits the highlighted range may
+// briefly desync; the CAS catches any drift before splice.
 
 import { v } from 'convex/values'
 import { mutation, query, internalMutation } from './_generated/server'
