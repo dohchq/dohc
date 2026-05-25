@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.6 — Phase 1.2 import/export foundation complete; ready for Hocuspocus persistence spike
+**Status:** Plan v1.7 — Phase 1.3 Hocuspocus persistence spike foundation complete; ready for live provider crash test
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -318,8 +318,10 @@ Goal: Production-grade Hocuspocus before any client touches it.
    - Fetch atom ACL from Convex (or local cache keyed by `authzVersion`)
    - 403 if user can't read this atom
    - Load Y.Doc binary from Postgres (or initialize from `atoms.body` markdown if first load — uses Phase 1.2 import)
-6. Hocuspocus `beforeHandleMessage` (per codex O3):
-   - Recheck ACL on every document operation, not just on connect
+6. Hocuspocus `beforeSync` (per codex O3):
+   - Recheck ACL on every replayable Yjs sync payload, not just on connect
+   - Persist SyncStep2/YjsUpdate payload bytes before Hocuspocus applies them
+   - Do not use `beforeHandleMessage` as the update log boundary; it receives the raw Hocuspocus transport envelope
    - Disconnect on revocation event
 7. `onChange` hook: prepared for Phase 1.6's atoms.body projection (initially just logs)
 8. Hocuspocus admin API: `disconnect-by-{workspaceId, userId}` for revocation propagation (per O10)
@@ -662,7 +664,7 @@ My original 15min was too lenient. Codex:
 
 Correct design: JWT 5min TTL + JWT claim `authzVersion` (workspace-scoped int that bumps on any ACL change) + Hocuspocus recheck on EVERY document operation (not just connect). On version mismatch, Hocuspocus refetches ACL from Convex.
 
-Mid-session revocation paths: (a) Hocuspocus rechecks in `beforeHandleMessage`, (b) Convex publishes revocation event → Hocuspocus disconnects the affected socket, (c) presence/awareness cleared on disconnect.
+Mid-session revocation paths: (a) Hocuspocus rechecks in `beforeSync` before replayable Yjs payloads are applied, (b) Convex publishes revocation event → Hocuspocus disconnects the affected socket, (c) presence/awareness cleared on disconnect.
 
 JWT payload should be IDENTITY ONLY: `{ sub, ws, actorKind: 'user'|'agent', authzVersion, exp, sessionId? }`. **Never** embed allowed atomIds — doesn't scale, goes stale instantly.
 

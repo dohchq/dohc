@@ -1,0 +1,27 @@
+{
+  "name": "@dohc/hocuspocus",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hocuspocus/extension-database": "^4.1.0",
+    "@hocuspocus/provider": "^4.1.0",
+    "@hocuspocus/server": "^4.1.0",
+    "jose": "^6.2.3",
+    "pg": "^8.21.0",
+    "yjs": "^13.6.30"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
