@@ -69,15 +69,37 @@ function encodeWikilinks(md: string): string {
   )
 }
 
+// 3.9.23 — also recognize remark's bracket-escape form so the
+// PM→mdast serialization path produces the same canonical
+// output as the markdown→remark→stringify path.
+//
+// Why: pmDocToMdast (collab projection serializer) walks PM
+// JSON and emits text nodes containing literal `[[foo]]`
+// (Crepe doesn't have a custom wikilink node type). remark-
+// stringify escapes `[` as `\[` because brackets are link
+// syntax → output is `\[\[foo]]`. The BEL-sentinel encode
+// only runs on the markdown→remark side, so the PM→remark
+// side never inserts sentinels. Without this extra pattern,
+// the two canonical forms diverge and bootstrap pm-body-
+// mismatch fires on every atom with a wikilink — including
+// atoms that have NO real divergence.
+const WIKI_ESCAPED_BRACKETS_RE = /\\\[\\\[([^\[\]\n]+)]]/g
+
 function decodeWikilinks(md: string): string {
   // Restore wikilinks BEFORE BEL_SAFE so the sentinel BEL chars
   // are consumed by the wikilink replace, not the BEL_SAFE
   // replace.
-  const withLinks = md.replace(
+  const fromSentinels = md.replace(
     WIKI_SENTINEL_RE,
     (_m, target) => `[[${target}]]`,
   )
-  return withLinks.replace(USER_BEL_SAFE_RE, BEL)
+  // 3.9.23 — fold remark's escape form back to bare brackets.
+  // Idempotent: if input has bare `[[foo]]`, regex doesn't match.
+  const fromEscape = fromSentinels.replace(
+    WIKI_ESCAPED_BRACKETS_RE,
+    (_m, target) => `[[${target}]]`,
+  )
+  return fromEscape.replace(USER_BEL_SAFE_RE, BEL)
 }
 
 // Single shared processor instance. unified() is internally cached

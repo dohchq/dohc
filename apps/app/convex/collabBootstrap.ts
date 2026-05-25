@@ -129,10 +129,23 @@ export const bootstrapSnapshotFromAtomBody = mutation({
       // Surface the reason directly — same shape as the fresh-
       // bootstrap path's invalid-pm-json handling below.
       if (pmCheck.reason === 'invalid-pm-json') {
+        // 3.9.23 — diagnostic log so we can debug WHY parsing
+        // failed without asking the user to repro.
+        console.error('[bootstrap] invalid-pm-json', {
+          docId,
+          atomId: parsed.atomId,
+          pmJsonStrPreview: pmJsonStr.slice(0, 200),
+        })
         return { ok: false, reason: 'invalid-pm-json' }
       }
       // unknown-pm-node / serialize-failed → treat as PM mismatch
       // (client should investigate; not a retry condition).
+      console.error('[bootstrap] serializeSnapshotToProjectedBody failed', {
+        docId,
+        atomId: parsed.atomId,
+        reason: pmCheck.reason,
+        detail: 'detail' in pmCheck ? pmCheck.detail : undefined,
+      })
       return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
     }
     const { fm, rest: atomRest } = splitFrontmatter(atom.body)
@@ -143,6 +156,20 @@ export const bootstrapSnapshotFromAtomBody = mutation({
       // Submitted PM JSON does NOT round-trip to atom.body.
       // Reject loud — the client either has stale state or the
       // parser drift (browser vs server) is real and needs fix.
+      //
+      // 3.9.23 — diagnostic log shows BOTH canonical forms
+      // (first 400 chars + length) so the next time this fires,
+      // server logs reveal exactly where Crepe + remark diverge.
+      // Without this we have to guess from user-visible
+      // symptoms.
+      console.error('[bootstrap] pm-body-mismatch', {
+        docId,
+        atomId: parsed.atomId,
+        pmDerivedPreview: pmCheck.newBody.slice(0, 400),
+        pmDerivedLen: pmCheck.newBody.length,
+        canonicalAtomPreview: canonicalAtomBody.slice(0, 400),
+        canonicalAtomLen: canonicalAtomBody.length,
+      })
       return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
     }
 
