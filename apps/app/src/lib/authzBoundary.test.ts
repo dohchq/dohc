@@ -59,6 +59,21 @@ const SHARE_TARGET_ALLOW = new Set([
   'orgs.ts:changeRole',
 ])
 
+// REVIEWED server-to-server exception. Hocuspocus must ask Convex about an
+// OWNER workspace + atomId because the browser connects to a document room
+// named by owner workspace/fileId. This is not a client-trusted workspace arg:
+// the public query is unusable without HOCUSPOCUS_CONVEX_SERVER_TOKEN, and the
+// browser never calls it directly.
+const SERVER_TOKEN_ALLOW = new Set(['hocuspocusAuth.ts:checkAtomAccess'])
+
+// REVIEWED collab-token exception. The browser may ask Convex for a JWT scoped
+// to an owner workspace before opening a shared Hocuspocus room. That JWT is
+// identity-only; it grants no data by itself. Hocuspocus must still call the
+// server-token-gated ACL query before read/write. The suppression is void unless
+// the action is authenticated and signs only a collab token with the shared JWT
+// secret, without touching ctx.db.
+const COLLAB_TOKEN_ALLOW = new Set(['auth.ts:getCollabToken'])
+
 // crude export-block splitter: `export const NAME = (mutation|query|
 // action|internalMutation|…)({ … })` up to the args/handler region.
 // Also reports whether the fn body calls requireWorkspace (so an
@@ -78,8 +93,20 @@ const SHARE_TARGET_ALLOW = new Set([
 // other workspace-naming arg shape.
 function publicFnsTakingWorkspace(
   src: string,
-): Array<{ name: string; kind: string; authed: boolean }> {
-  const hits: Array<{ name: string; kind: string; authed: boolean }> = []
+): Array<{
+  name: string
+  kind: string
+  authed: boolean
+  serverTokenGated: boolean
+  collabTokenMint: boolean
+}> {
+  const hits: Array<{
+    name: string
+    kind: string
+    authed: boolean
+    serverTokenGated: boolean
+    collabTokenMint: boolean
+  }> = []
   const re =
     /export\s+const\s+(\w+)\s*=\s*(internalMutation|internalQuery|internalAction|mutation|query|action)\s*\(\{([\s\S]{0,600}?)handler/g
   let m: RegExpExecArray | null
@@ -127,6 +154,15 @@ function publicFnsTakingWorkspace(
         name,
         kind,
         authed: /\b(requireWorkspace|requireRole)\s*\(/.test(body),
+        serverTokenGated:
+          /\bserverToken\b/.test(head) &&
+          (/HOCUSPOCUS_CONVEX_SERVER_TOKEN/.test(body) ||
+            (/requireServerToken\s*\(/.test(body) &&
+              /HOCUSPOCUS_CONVEX_SERVER_TOKEN/.test(src))),
+        collabTokenMint:
+          /new\s+SignJWT\s*\(/.test(body) &&
+            /HOCUSPOCUS_JWT_SECRET/.test(body) &&
+          !/\bctx\.db\b/.test(body),
       })
     }
   }
@@ -142,7 +178,11 @@ describe('authz boundary (§6 tripwire — not a proof; see §6b contract)', () 
       const rel = f.split('/convex/')[1]
       for (const h of publicFnsTakingWorkspace(readFileSync(f, 'utf8'))) {
         const allowed =
-          SHARE_TARGET_ALLOW.has(`${rel}:${h.name}`) && h.authed
+          (SHARE_TARGET_ALLOW.has(`${rel}:${h.name}`) && h.authed) ||
+          (SERVER_TOKEN_ALLOW.has(`${rel}:${h.name}`) && h.serverTokenGated) ||
+          (COLLAB_TOKEN_ALLOW.has(`${rel}:${h.name}`) &&
+            h.authed &&
+            h.collabTokenMint)
         if (allowed) continue
         offenders.push(`${rel}: ${h.name} (${h.kind})`)
       }
@@ -177,6 +217,82 @@ export const grant = mutation({
     const [h2] = publicFnsTakingWorkspace(secure)
     expect(h2.authed).toBe(true)
     expect(SHARE_TARGET_ALLOW.has(`windows.ts:${h2.name}`) && h2.authed).toBe(true)
+  })
+
+  it('the Hocuspocus server-token allowlist is VOID without a server token gate (meta)', () => {
+    const insecure = `
+export const checkAtomAccess = query({
+  args: { workspaceId: v.string(), userId: v.string() },
+  handler: async (ctx, { workspaceId, userId }) => {
+    return { workspaceAuthzVersion: 1, canRead: true, canWrite: true }
+  },
+})`
+    const [h] = publicFnsTakingWorkspace(insecure)
+    expect(h).toMatchObject({
+      name: 'checkAtomAccess',
+      serverTokenGated: false,
+    })
+    expect(
+      SERVER_TOKEN_ALLOW.has(`hocuspocusAuth.ts:${h.name}`) &&
+        h.serverTokenGated,
+    ).toBe(false)
+
+    const secure = `
+export const checkAtomAccess = query({
+  args: { serverToken: v.string(), workspaceId: v.string(), userId: v.string() },
+  handler: async (ctx, { serverToken, workspaceId, userId }) => {
+    if (serverToken !== process.env.HOCUSPOCUS_CONVEX_SERVER_TOKEN) throw new Error('Invalid')
+    return { workspaceAuthzVersion: 1, canRead: true, canWrite: true }
+  },
+})`
+    const [h2] = publicFnsTakingWorkspace(secure)
+    expect(h2.serverTokenGated).toBe(true)
+    expect(
+      SERVER_TOKEN_ALLOW.has(`hocuspocusAuth.ts:${h2.name}`) &&
+        h2.serverTokenGated,
+    ).toBe(true)
+  })
+
+  it('the collab-token allowlist is VOID without auth and JWT-only minting (meta)', () => {
+    const insecure = `
+export const getCollabToken = action({
+  args: { workspaceId: v.optional(v.string()) },
+  handler: async (ctx, { workspaceId }) => {
+    await ctx.db.query('atoms').collect()
+    return 'token'
+  },
+})`
+    const [h] = publicFnsTakingWorkspace(insecure)
+    expect(h).toMatchObject({
+      name: 'getCollabToken',
+      authed: false,
+      collabTokenMint: false,
+    })
+    expect(
+      COLLAB_TOKEN_ALLOW.has(`auth.ts:${h.name}`) &&
+        h.authed &&
+        h.collabTokenMint,
+    ).toBe(false)
+
+    const secure = `
+export const getCollabToken = action({
+  args: { workspaceId: v.optional(v.string()) },
+  handler: async (ctx, { workspaceId }) => {
+    const caller = await requireWorkspace(ctx)
+    return await new SignJWT({ sub: caller, ws: workspaceId ?? caller })
+      .sign(secretKey(requiredEnv('HOCUSPOCUS_JWT_SECRET')))
+  },
+})`
+    const [h2] = publicFnsTakingWorkspace(secure)
+    expect(h2).toMatchObject({
+      authed: true,
+      collabTokenMint: true,
+    })
+    expect(
+      COLLAB_TOKEN_ALLOW.has(`auth.ts:${h2.name}`) &&
+        h2.authed &&
+        h2.collabTokenMint,
+    ).toBe(true)
   })
 
   it('resolveWindow is never called with a client-sourced viewer (direct-form tripwire)', () => {

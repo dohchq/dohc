@@ -27,12 +27,19 @@ export type AtomAccessInput = {
   atomId: string
   userId: string
   actorKind: CollabActorKind
+  authzVersion: number
+}
+
+export type WorkspaceAuthzVersionInput = {
+  workspaceId: string
+  atomId: string
+  userId: string
+  actorKind: CollabActorKind
+  authzVersion: number
 }
 
 export type HocuspocusAcl = {
-  getWorkspaceAuthzVersion(input: {
-    workspaceId: string
-  }): Promise<number>
+  getWorkspaceAuthzVersion(input: WorkspaceAuthzVersionInput): Promise<number>
   canReadAtom(input: AtomAccessInput): Promise<boolean>
   canWriteAtom(input: AtomAccessInput): Promise<boolean>
 }
@@ -79,7 +86,6 @@ export type HocuspocusRevocableConnection = {
 }
 
 export type HocuspocusRevocations = {
-  isRevoked(workspaceId: string, userId: string): boolean
   registerConnection?(input: {
     workspaceId: string
     userId: string
@@ -162,6 +168,7 @@ function accessInput(context: DohcHocuspocusContext): AtomAccessInput {
     atomId: context.atomId,
     userId: context.userId,
     actorKind: context.actorKind,
+    authzVersion: context.authzVersion,
   }
 }
 
@@ -190,15 +197,6 @@ function assertValidYjsUpdate(payload: Uint8Array): void {
   }
 }
 
-function assertNotRevoked(
-  revocations: HocuspocusRevocations | undefined,
-  context: DohcHocuspocusContext,
-): void {
-  if (revocations?.isRevoked(context.workspaceId, context.userId)) {
-    throw new Error('Workspace user access has been revoked')
-  }
-}
-
 export function createHocuspocusHooks({
   jwtSecret,
   acl,
@@ -219,6 +217,10 @@ export function createHocuspocusHooks({
 
       const currentVersion = await acl.getWorkspaceAuthzVersion({
         workspaceId: doc.workspaceId,
+        atomId: doc.atomId,
+        userId: token.sub,
+        actorKind: token.actorKind,
+        authzVersion: token.authzVersion,
       })
       if (currentVersion !== token.authzVersion) {
         throw new Error('Collab token authzVersion is stale')
@@ -231,7 +233,6 @@ export function createHocuspocusHooks({
         actorKind: token.actorKind,
         authzVersion: token.authzVersion,
       }
-      assertNotRevoked(revocations, context)
 
       const canRead = await acl.canReadAtom(accessInput(context))
       if (!canRead) {
@@ -247,7 +248,6 @@ export function createHocuspocusHooks({
     },
 
     async connected(data) {
-      assertNotRevoked(revocations, data.context)
       revocations?.registerConnection?.({
         workspaceId: data.context.workspaceId,
         userId: data.context.userId,
@@ -260,7 +260,6 @@ export function createHocuspocusHooks({
       if (!context) {
         throw new Error('Missing Hocuspocus context for document load')
       }
-      assertNotRevoked(revocations, context)
 
       const canRead = await acl.canReadAtom(accessInput(context))
       if (!canRead) {
@@ -283,7 +282,6 @@ export function createHocuspocusHooks({
       if (data.connection.readOnly) return
 
       const context = data.context
-      assertNotRevoked(revocations, context)
       const canWrite = await acl.canWriteAtom(accessInput(context))
       if (!canWrite) {
         throw new Error('Missing write access for document')

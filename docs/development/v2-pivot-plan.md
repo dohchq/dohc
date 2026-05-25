@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.9 — Phase 1.3 live provider crash gate passed locally; Docker Hocuspocus + Postgres dev stack boots; real Convex ACL adapter remains before production/client use
+**Status:** Plan v1.11 — Phase 1.3 live provider crash gate passed locally; Docker Hocuspocus + Postgres dev stack boots; Convex token + ACL bridge implemented with live disconnect scheduling for share/org revocation; browser editor integration remains before production/client use
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -310,6 +310,7 @@ Goal: Production-grade Hocuspocus before any client touches it.
    - Trade-off: minor write amplification vs ack'd-edit-loss-on-crash risk
 3. Convex action `auth.getCollabToken`:
    - Mints JWT with payload `{ sub, ws, actorKind: 'user'|'agent', authzVersion, exp }`
+   - For shared docs, `sub` stays the caller and `ws` can target the owner workspace; Hocuspocus still asks Convex ACL before granting read/write.
    - **5-minute TTL** (per O3); short refresh, but rotation must be cheap
    - Signed with shared secret in env (`HOCUSPOCUS_JWT_SECRET`)
 4. Hocuspocus `onAuthenticate`:
@@ -665,7 +666,7 @@ My original 15min was too lenient. Codex:
 
 Correct design: JWT 5min TTL + JWT claim `authzVersion` (workspace-scoped int that bumps on any ACL change) + Hocuspocus recheck on EVERY document operation (not just connect). On version mismatch, Hocuspocus refetches ACL from Convex.
 
-Mid-session revocation paths: (a) Hocuspocus rechecks in `beforeSync` before replayable Yjs payloads are applied, (b) Convex publishes revocation event → Hocuspocus disconnects the affected socket, (c) presence/awareness cleared on disconnect.
+Mid-session revocation paths: (a) Hocuspocus rechecks in `beforeSync` before replayable Yjs payloads are applied, (b) Convex schedules Hocuspocus admin disconnect for affected sockets on share/org revocation, (c) presence/awareness cleared on disconnect.
 
 JWT payload should be IDENTITY ONLY: `{ sub, ws, actorKind: 'user'|'agent', authzVersion, exp, sessionId? }`. **Never** embed allowed atomIds — doesn't scale, goes stale instantly.
 

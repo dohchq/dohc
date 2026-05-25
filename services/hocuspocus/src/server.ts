@@ -6,6 +6,7 @@ import {
   RevocationRegistry,
   writeNodeAdminResponse,
 } from './admin.js'
+import { createConvexAcl } from './convex-acl.js'
 import { createHocuspocusHooks, type HocuspocusAcl } from './hooks.js'
 import {
   PostgresYDocPersistenceBackend,
@@ -23,7 +24,7 @@ function requiredEnv(name: string): string {
 function createDevAllowAllAcl(): HocuspocusAcl {
   if (process.env.HOCUSPOCUS_ALLOW_DEV_ACL !== 'true') {
     throw new Error(
-      'HOCUSPOCUS_ALLOW_DEV_ACL=true is required until the Convex ACL adapter is wired',
+      'Configure HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN, or set HOCUSPOCUS_ALLOW_DEV_ACL=true for local development only',
     )
   }
 
@@ -38,6 +39,20 @@ function createDevAllowAllAcl(): HocuspocusAcl {
       return true
     },
   }
+}
+
+function createAclFromEnv(): HocuspocusAcl {
+  const convexUrl = process.env.HOCUSPOCUS_CONVEX_URL
+  const serverToken = process.env.HOCUSPOCUS_CONVEX_SERVER_TOKEN
+  if (convexUrl || serverToken) {
+    if (!convexUrl || !serverToken) {
+      throw new Error(
+        'Both HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN are required for Convex ACL',
+      )
+    }
+    return createConvexAcl({ convexUrl, serverToken })
+  }
+  return createDevAllowAllAcl()
 }
 
 export async function createServerFromEnv(): Promise<Server> {
@@ -56,7 +71,7 @@ export async function createServerFromEnv(): Promise<Server> {
 
   const hooks = createHocuspocusHooks({
     jwtSecret: requiredEnv('HOCUSPOCUS_JWT_SECRET'),
-    acl: createDevAllowAllAcl(),
+    acl: createAclFromEnv(),
     store,
     logger: console,
     revocations,

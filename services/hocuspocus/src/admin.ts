@@ -6,7 +6,6 @@ export type RevocableConnection = {
 }
 
 export class RevocationRegistry {
-  private readonly revokedWorkspaceUsers = new Set<string>()
   private readonly connectionsByWorkspaceUser = new Map<
     string,
     Map<string, RevocableConnection>
@@ -15,7 +14,6 @@ export class RevocationRegistry {
 
   revokeWorkspaceUser(workspaceId: string, userId: string): number {
     const key = this.key(workspaceId, userId)
-    this.revokedWorkspaceUsers.add(key)
 
     const connections = this.connectionsByWorkspaceUser.get(key)
     if (!connections) return 0
@@ -30,20 +28,12 @@ export class RevocationRegistry {
     return disconnected
   }
 
-  isRevoked(workspaceId: string, userId: string): boolean {
-    return this.revokedWorkspaceUsers.has(this.key(workspaceId, userId))
-  }
-
   registerConnection(input: {
     workspaceId: string
     userId: string
     connection: RevocableConnection
   }): void {
     const key = this.key(input.workspaceId, input.userId)
-    if (this.isRevoked(input.workspaceId, input.userId)) {
-      input.connection.close({ code: 4001, reason: 'access_revoked' })
-      return
-    }
 
     const connections = this.connectionsByWorkspaceUser.get(key) ?? new Map()
     connections.set(input.connection.socketId, input.connection)

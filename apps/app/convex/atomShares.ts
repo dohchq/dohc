@@ -21,6 +21,7 @@ import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { extractFrontmatterId, deriveTitle } from './atomId'
 import { isMember } from './orgs'
+import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 
 export type AccessContext = {
   viewerWorkspaceId: string
@@ -114,6 +115,37 @@ export async function ownerAtomByFileId(
   if (!atom) return null
   if (extractFrontmatterId(atom.body) !== fileId) return null // stale index
   return atom
+}
+
+async function scheduleShareAudienceDisconnect(
+  ctx: MutationCtx,
+  row: {
+    ownerWorkspaceId: string
+    granteeWorkspaceId?: string
+    granteeOrgId?: string
+  },
+): Promise<void> {
+  if (row.granteeWorkspaceId) {
+    await scheduleHocuspocusDisconnect(ctx, {
+      workspaceId: row.ownerWorkspaceId,
+      userId: row.granteeWorkspaceId,
+    })
+    return
+  }
+
+  const granteeOrgId = row.granteeOrgId
+  if (!granteeOrgId) return
+  const members = await ctx.db
+    .query('memberships')
+    .withIndex('by_org', (q) => q.eq('orgId', granteeOrgId))
+    .collect()
+  for (const member of members) {
+    if (member.workspaceId === row.ownerWorkspaceId) continue
+    await scheduleHocuspocusDisconnect(ctx, {
+      workspaceId: row.ownerWorkspaceId,
+      userId: member.workspaceId,
+    })
+  }
 }
 
 // ── Owner: share / revoke ───────────────────────────────────────────
@@ -226,6 +258,7 @@ export const unshareAtom = mutation({
     if (row.ownerWorkspaceId !== owner) {
       throw new Error('Only the owner can revoke a share.')
     }
+    await scheduleShareAudienceDisconnect(ctx, row)
     await ctx.db.delete(shareId)
     return { ok: true as const }
   },
@@ -246,7 +279,10 @@ export async function cascadeDeleteSharesForFileId(
       q.eq('ownerWorkspaceId', ownerWorkspaceId).eq('fileId', fileId),
     )
     .collect()
-  for (const r of rows) await ctx.db.delete(r._id)
+  for (const r of rows) {
+    await scheduleShareAudienceDisconnect(ctx, r)
+    await ctx.db.delete(r._id)
+  }
 }
 
 // ── Viewer: what's shared with me ───────────────────────────────────

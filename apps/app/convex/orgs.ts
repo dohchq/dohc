@@ -5,17 +5,45 @@
 // checks it. NO public function takes a workspaceId arg (the caller
 // is always requireWorkspace); orgId/inviteCode are not workspace ids.
 import { v } from 'convex/values'
-import { query, mutation, internalMutation, internalQuery } from './_generated/server'
+import {
+  query,
+  mutation,
+  internalMutation,
+  internalQuery,
+} from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { countActiveOwners, requireRole } from './orgRoles'
+import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
 const isActive = (m: { status?: string } | null | undefined): boolean =>
   !!m && (m.status === undefined || m.status === 'active')
+
+async function scheduleOrgShareDisconnects(
+  ctx: MutationCtx,
+  orgId: Id<'orgs'>,
+  departingWorkspaceId: string,
+): Promise<void> {
+  const orgShares = await ctx.db
+    .query('atomShares')
+    .withIndex('by_org', (q) => q.eq('granteeOrgId', orgId))
+    .collect()
+  const ownerWorkspaceIds = new Set(
+    orgShares
+      .map((share) => share.ownerWorkspaceId)
+      .filter((ownerWorkspaceId) => ownerWorkspaceId !== departingWorkspaceId),
+  )
+  for (const ownerWorkspaceId of ownerWorkspaceIds) {
+    await scheduleHocuspocusDisconnect(ctx, {
+      workspaceId: ownerWorkspaceId,
+      userId: departingWorkspaceId,
+    })
+  }
+}
 
 // The orgIds the given workspace belongs to (active memberships only).
 export async function viewerOrgIds(
@@ -154,6 +182,7 @@ export const leaveOrg = mutation({
     ) {
       throw new Error('Cannot leave: you are the last Owner of this org.')
     }
+    await scheduleOrgShareDisconnects(ctx, orgId, caller)
     // Soft-remove (status:'removed') instead of hard delete so re-joining
     // via the same invite code reactivates this row (joinOrg flips status
     // back to 'active' — see :112) rather than orphaning a duplicate.
@@ -194,6 +223,7 @@ export const removeMember = mutation({
     ) {
       throw new Error('Cannot remove the last Owner of this org.')
     }
+    await scheduleOrgShareDisconnects(ctx, orgId, memberWorkspaceId)
     await ctx.db.patch(row._id, { status: 'removed' })
     // P1 — tombstone the removed member's private atoms (same as
     // leaveOrg). Mirrors decision P1-C: tombstone-with-Owner-recovery.

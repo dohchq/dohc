@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createAdminHandler, RevocationRegistry } from './admin.js'
 
 describe('hocuspocus admin handler', () => {
@@ -17,8 +17,14 @@ describe('hocuspocus admin handler', () => {
     })
   })
 
-  it('records a workspace-user disconnect request', async () => {
+  it('disconnects registered workspace-user sockets without sticky denial', async () => {
     const revocations = new RevocationRegistry()
+    const connection = { socketId: 'socket_1', close: vi.fn() }
+    revocations.registerConnection({
+      workspaceId: 'workspace_1',
+      userId: 'user_1',
+      connection,
+    })
     const handler = createAdminHandler({
       adminToken: 'admin-token',
       revocations,
@@ -38,9 +44,20 @@ describe('hocuspocus admin handler', () => {
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
       ok: true,
-      disconnected: 0,
+      disconnected: 1,
     })
-    expect(revocations.isRevoked('workspace_1', 'user_1')).toBe(true)
+    expect(connection.close).toHaveBeenCalledWith({
+      code: 4001,
+      reason: 'access_revoked',
+    })
+
+    const reconnected = { socketId: 'socket_2', close: vi.fn() }
+    revocations.registerConnection({
+      workspaceId: 'workspace_1',
+      userId: 'user_1',
+      connection: reconnected,
+    })
+    expect(reconnected.close).not.toHaveBeenCalled()
   })
 
   it('rejects admin mutations without the admin token', async () => {

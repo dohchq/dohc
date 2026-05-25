@@ -81,16 +81,57 @@ The hook layer checks:
 - Workspace `authzVersion` is current.
 - User can read on auth and load.
 - User can write before each persisted sync payload.
-- Revoked workspace users are rejected on auth/load/write.
+- Revoked workspace users are disconnected from currently live sockets; reconnect
+  authorization is decided by Convex's current ACL state.
 
-The admin endpoint `POST /admin/disconnect-by-workspace-user` records the revocation and closes registered live sockets for that workspace/user pair.
+Convex mints user collab JWTs with `api.auth.getCollabToken`. The optional
+`workspaceId` arg scopes the token to an owner workspace for shared documents;
+the `sub` claim always remains the authenticated caller. Hocuspocus verifies
+the JWT locally, then asks Convex for per-document access through
+`api.hocuspocusAuth.checkAtomAccess`, including `actorKind` so user locks can
+block agent writes without blocking the human owner.
+
+Production/self-host Hocuspocus deployments need:
+
+- `HOCUSPOCUS_CONVEX_URL`: Convex deployment URL used by `ConvexHttpClient`.
+- `HOCUSPOCUS_CONVEX_SERVER_TOKEN`: shared server secret sent from Hocuspocus
+  to the Convex ACL query.
+- `HOCUSPOCUS_JWT_SECRET`: HS256 secret shared by Convex token minting and
+  Hocuspocus token verification.
+- `HOCUSPOCUS_ADMIN_TOKEN`: admin endpoint bearer token.
+- `HOCUSPOCUS_ADMIN_URL`: Hocuspocus base URL used by Convex to disconnect
+  live sockets after share/org revocation.
+- `HOCUSPOCUS_DATABASE_URL`: Postgres connection string for Y.Doc persistence.
+
+If `HOCUSPOCUS_CONVEX_URL` or `HOCUSPOCUS_CONVEX_SERVER_TOKEN` is present, both
+must be present. Without them, the server refuses to boot unless
+`HOCUSPOCUS_ALLOW_DEV_ACL=true` is set explicitly.
+
+On the Convex side, `HOCUSPOCUS_ADMIN_URL` and `HOCUSPOCUS_ADMIN_TOKEN` may both
+be absent only while collab token minting is not configured. Once
+`HOCUSPOCUS_JWT_SECRET` is set, missing admin disconnect env is a hard
+configuration error so revocation cannot silently fail open.
+
+The admin endpoint `POST /admin/disconnect-by-workspace-user` closes registered
+live sockets for that workspace/user pair.
+
+Convex schedules that admin disconnect when:
+
+- a person share is revoked
+- an org share is revoked
+- an atom delete cascades share deletion
+- an org member leaves an org that has shared atoms
+
+The disconnect registry is intentionally non-sticky. It closes currently live
+sockets; reconnect authorization is decided by Convex's current ACL state. This
+prevents a revoke-then-reshare from being blocked by stale in-memory state.
 
 ## Current Limits Before Phase 1.4
 
 This phase is a service foundation, not full client integration:
 
-- The Convex ACL adapter is not wired yet. The server entrypoint requires explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true` for the temporary allow-all development adapter.
-- The live raw `@hocuspocus/provider` crash test now passes against Docker Postgres, but the real Convex ACL adapter is still required before production use.
+- The Convex ACL adapter is wired and covered by unit tests, but the browser editor does not yet request `api.auth.getCollabToken` or connect to Hocuspocus.
+- The live raw `@hocuspocus/provider` crash test passes against Docker Postgres. The compose stack still uses explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true` because local Convex wiring is a separate client/dev-env step.
 - `@hocuspocus/extension-database` is installed for API reference only. dohc uses custom persistence because the default debounced store path is not the ack-safe update-log boundary this plan requires.
 - `@hocuspocus/provider` is installed for the raw provider smoke/crash integration tests.
 

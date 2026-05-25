@@ -9,7 +9,9 @@
 // Personal workspaces grant implicit Owner to the WorkOS subject; no
 // membership row is needed (workspaceId == subject ⇒ self-access).
 
-import { query } from './_generated/server'
+import { SignJWT } from 'jose'
+import { v } from 'convex/values'
+import { action, query } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 
 // Structural type for callers that pass NO `active` arg (the
@@ -65,6 +67,44 @@ export async function requireWorkspace(
   }
   return active
 }
+
+const COLLAB_TOKEN_TTL_SECONDS = 5 * 60
+
+function secretKey(secret: string): Uint8Array {
+  return new TextEncoder().encode(secret)
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]
+  if (!value) throw new Error(`${name} is required`)
+  return value
+}
+
+function secondsNow(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+export const getCollabToken = action({
+  args: {
+    workspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId: targetWorkspaceArg }) => {
+    const callerWorkspaceId = await requireWorkspace(ctx)
+    const targetWorkspaceId = targetWorkspaceArg ?? callerWorkspaceId
+    const issuedAt = secondsNow()
+
+    return await new SignJWT({
+      sub: callerWorkspaceId,
+      ws: targetWorkspaceId,
+      actorKind: 'user',
+      authzVersion: 1,
+    })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + COLLAB_TOKEN_TTL_SECONDS)
+      .sign(secretKey(requiredEnv('HOCUSPOCUS_JWT_SECRET')))
+  },
+})
 
 // Track-3 P4 — minimal "who am I" query for the UI's share-text
 // builder (skills-commands-v1 §2-B). Returns the caller's

@@ -32,6 +32,8 @@ import type * as entityId from "../entityId.js";
 import type * as folders from "../folders.js";
 import type * as formulaEval from "../formulaEval.js";
 import type * as graph from "../graph.js";
+import type * as hocuspocusAdmin from "../hocuspocusAdmin.js";
+import type * as hocuspocusAuth from "../hocuspocusAuth.js";
 import type * as htmlAtoms from "../htmlAtoms.js";
 import type * as inlineAtom from "../inlineAtom.js";
 import type * as liveTotal from "../liveTotal.js";
@@ -89,6 +91,8 @@ declare const fullApi: ApiFromModules<{
   folders: typeof folders;
   formulaEval: typeof formulaEval;
   graph: typeof graph;
+  hocuspocusAdmin: typeof hocuspocusAdmin;
+  hocuspocusAuth: typeof hocuspocusAuth;
   htmlAtoms: typeof htmlAtoms;
   inlineAtom: typeof inlineAtom;
   liveTotal: typeof liveTotal;

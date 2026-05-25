@@ -68,11 +68,19 @@ describe('hocuspocus hook factory', () => {
       authzVersion: 1,
     })
     expect(connection.readOnly).toBe(true)
+    expect(acl.getWorkspaceAuthzVersion).toHaveBeenCalledWith({
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      userId: 'user_1',
+      actorKind: 'user',
+      authzVersion: 1,
+    })
     expect(acl.canReadAtom).toHaveBeenCalledWith({
       workspaceId: 'workspace_1',
       atomId: 'atom_1',
       userId: 'user_1',
       actorKind: 'user',
+      authzVersion: 1,
     })
   })
 
@@ -278,7 +286,7 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
-  it('disconnects and rejects revoked workspace users', async () => {
+  it('disconnects registered workspace users through the revocation registry', async () => {
     const revocations = new RevocationRegistry()
     const { hooks } = makeHooks({
       canRead: true,
@@ -303,14 +311,5 @@ describe('hocuspocus hook factory', () => {
 
     expect(revocations.revokeWorkspaceUser('workspace_1', 'user_1')).toBe(1)
     expect(connection.close).toHaveBeenCalledOnce()
-    await expect(
-      hooks.beforeSync({
-        documentName,
-        type: messageYjsUpdate,
-        payload: new Uint8Array([1, 2, 3]),
-        connection,
-        context,
-      } as never),
-    ).rejects.toThrow(/revoked/)
   })
 })
