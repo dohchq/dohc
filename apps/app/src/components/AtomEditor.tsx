@@ -105,6 +105,17 @@ type Props = {
   // the editor directly from the server snapshot (waits for
   // useCollabSync.bootstrap.ready before mounting Crepe).
   multiplayerDocId?: string
+  /** M1 step 3.9.22 — full atom.body (frontmatter + rest) for
+   *  the bootstrap CAS hash. AtomView splits frontmatter
+   *  out of `value` so the editor doesn't render it; the
+   *  bootstrap mutation hashes the WHOLE atom.body though,
+   *  so the client needs the unsplit version to compute the
+   *  matching clientBodyHash. Without this, body-changed
+   *  fires unconditionally because hash(rest) !== hash(fm+rest)
+   *  → infinite reload loop on every open of every atom.
+   *  Falls back to `value` when not provided (legacy callers
+   *  that don't strip frontmatter). */
+  bootstrapBody?: string
   /** Fired when the user clicks an `language: ascii` code block. The
    *  position is the doc offset of the node — pass it back to
    *  replaceCodeBlockAt on commit. */
@@ -663,6 +674,9 @@ type CrepeEditorProps = {
   // into prosePluginsCtx alongside the existing inline-atom set.
   // UNSET ⇒ single-user editor, byte-identical to pre-M1 behavior.
   multiplayerDocId?: string
+  /** 3.9.22 — full atom.body for bootstrap CAS hashing. See
+   *  the outer Props comment. Falls back to defaultValue. */
+  bootstrapBody?: string
 }
 
 function CrepeEditor({
@@ -683,6 +697,7 @@ function CrepeEditor({
   fileIdMapRef,
   readOnly,
   multiplayerDocId,
+  bootstrapBody,
 }: CrepeEditorProps) {
   // D4.8b — autocomplete state from the wikilink plugin.
   const [acState, setAcState] = useState<AutocompleteState>({
@@ -767,7 +782,15 @@ function CrepeEditor({
   const installingSnapshotRef = useRef(false)
   const bootstrapState = useCollabBootstrapMutation({
     docId: multiplayerDocId ?? null,
-    body: multiplayerDocId ? defaultValue : null,
+    // 3.9.22 — hash the FULL atom.body (with frontmatter) for
+    // the bootstrap CAS check. AtomView splits frontmatter
+    // out of `defaultValue` before passing — without
+    // bootstrapBody, client hashes the stripped version,
+    // server hashes the full version, body-changed fires
+    // on every open, BootstrapErrorOverlay auto-reloads,
+    // infinite loop. The fallback to defaultValue keeps
+    // legacy callers (no frontmatter-aware parent) working.
+    body: multiplayerDocId ? (bootstrapBody ?? defaultValue) : null,
     pmJsonStr,
     activeWorkspaceId: activeWorkspaceIdForBootstrap,
     enabled: !!multiplayerDocId,
@@ -1653,6 +1676,7 @@ function CrepeEditor({
       <BootstrapErrorOverlay
         reason={bootstrapState.reason}
         message={bootstrapState.message}
+        docId={multiplayerDocId}
       />
     )
   }
@@ -1679,16 +1703,23 @@ function CrepeEditor({
 // M1 step 3.8.1.4 — bootstrap-mutation failure overlay. Covers
 // every non-frozen error reason from bootstrapSnapshotFromAtomBody:
 // body-changed, invalid-pm-json, atom-not-found, pm-body-mismatch,
-// and the catch-all 'network' (auth revocation, transient outage,
-// throw). The copy is reason-specific so the user understands
-// what's happening; the recovery in all cases is the same:
-// reload.
+// and the catch-all 'network'.
 //
-// Auto-reload after 4s — long enough for the user to read the
-// message, short enough that an idle reader doesn't get stuck.
+// 3.9.22 — codex consult fix: stop infinite auto-reload loops.
+// Pre-3.9.22 ALL reasons auto-reloaded after 4s; for deterministic
+// failures (pm-body-mismatch, invalid-pm-json, atom-not-found)
+// reload doesn't help → infinite loop. New policy:
+//
+//   body-changed → auto-reload ONCE (race may have resolved); a
+//     sessionStorage one-shot guard prevents the second attempt
+//     for the same docId. If it still fires after reload, manual.
+//   network → auto-reload ONCE (transient outage may have cleared).
+//   pm-body-mismatch / invalid-pm-json / atom-not-found → manual
+//     only. These are deterministic; another reload won't help.
 function BootstrapErrorOverlay({
   reason,
   message,
+  docId,
 }: {
   reason:
     | 'body-changed'
@@ -1697,13 +1728,22 @@ function BootstrapErrorOverlay({
     | 'pm-body-mismatch'
     | 'network'
   message?: string
+  docId: string
 }) {
+  const canAutoReload = reason === 'body-changed' || reason === 'network'
   useEffect(() => {
+    if (!canAutoReload) return
+    if (typeof window === 'undefined') return
+    // One-shot per (docId, reason). Prevents the body-changed
+    // loop the user reported in 3.9.22's debug.
+    const key = `dohc:bootstrap-error-reload:${docId}:${reason}`
+    if (window.sessionStorage.getItem(key) === '1') return
     const t = setTimeout(() => {
-      if (typeof window !== 'undefined') window.location.reload()
+      window.sessionStorage.setItem(key, '1')
+      window.location.reload()
     }, 4000)
     return () => clearTimeout(t)
-  }, [])
+  }, [canAutoReload, docId, reason])
   const title = (() => {
     switch (reason) {
       case 'body-changed':
@@ -1726,7 +1766,9 @@ function BootstrapErrorOverlay({
     >
       <div className="text-[15px] font-medium text-ink-strong">{title}</div>
       <div className="text-[13px] text-ink-dim">
-        Reloading to recover. If this keeps happening, try again in a moment.
+        {canAutoReload
+          ? 'Reloading to recover. If this keeps happening after the reload, click Reload now manually.'
+          : 'Click Reload to try again. (Auto-retry disabled because reloading wouldn’t change the outcome.)'}
       </div>
       {message ? (
         <div className="max-w-md text-[11px] text-ink-dim opacity-70">
@@ -1755,6 +1797,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     shareId,
     readOnly,
     multiplayerDocId,
+    bootstrapBody,
   },
   ref,
 ) {
@@ -2154,6 +2197,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
         queryResultsRef={queryResultsRef}
         queryTick={queryTick}
         multiplayerDocId={multiplayerDocId}
+        bootstrapBody={bootstrapBody}
         knownFilesRef={knownFilesRef}
         knownFilesArray={knownFiles ?? []}
         onOpenWikilinkRef={onOpenWikilinkRef}

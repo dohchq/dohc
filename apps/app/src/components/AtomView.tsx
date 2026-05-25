@@ -302,6 +302,17 @@ export function AtomView({
               ? `atom:${row.workspaceId}:${row._id}`
               : undefined
           }
+          /* 3.9.22 — full body (fm + rest) for the bootstrap
+             CAS hash. AtomView already has `draft` (which is
+             the unsplit body including frontmatter), so pass
+             it through. AtomEditor uses this for hashing
+             ONLY; Crepe still mounts from `value` (= rest,
+             frontmatter stripped — the editor never sees
+             frontmatter glyphs). Without this prop the client
+             hashes only the rest, the server hashes the full
+             body, body-changed fires unconditionally, and the
+             error overlay auto-reload loops forever. */
+          bootstrapBody={draft}
           // D4.11b — the SERVER-saved id (from the row body, where
           // seedAtomIdIntoBody injected it on first write). The local
           // draft doesn't re-sync the injected id during editing, so
@@ -365,6 +376,7 @@ function AtomShell({
   onCommitSource,
   onShare,
   multiplayerDocId,
+  bootstrapBody,
 }: {
   draft: string
   onChange: (next: string) => void
@@ -399,6 +411,10 @@ function AtomShell({
   // bootstrap + collab pipeline (3.8.1.x). When undefined,
   // single-user mode (existing behavior, byte-identical).
   multiplayerDocId?: string
+  /** 3.9.22 — full body (fm + rest) for bootstrap CAS hashing.
+   *  Threaded through to AtomEditor's bootstrap mutation
+   *  unchanged. See AtomEditor's prop doc. */
+  bootstrapBody?: string
 }) {
   const editorRef = useRef<AtomEditorHandle | null>(null)
   // D4.8 — known-files list for the wikilink plugin's resolver +
@@ -809,6 +825,9 @@ function AtomShell({
              threads it through unchanged. undefined here means
              single-user (byte-identical to pre-3.8.2.0). */
           multiplayerDocId={multiplayerDocId}
+          /* 3.9.22 — full body for bootstrap CAS hashing
+             (with frontmatter). See AtomEditor prop doc. */
+          bootstrapBody={bootstrapBody}
         />
       )}
       {subpages.length > 0 && (

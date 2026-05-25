@@ -290,9 +290,18 @@ describe('AtomEditor — bootstrap mutation wiring (3.8.1.4)', () => {
     expect(SRC).toMatch(/if \(pmJsonStr !== null\) return/)
   })
 
-  it('calls useCollabBootstrapMutation with body=defaultValue + the captured pmJsonStr', () => {
+  it('calls useCollabBootstrapMutation with body=bootstrapBody (fm+rest) + the captured pmJsonStr (3.9.22)', () => {
+    // 3.9.22 — body argument is now the FULL atom.body
+    // (frontmatter + rest), passed via the new bootstrapBody
+    // prop from the parent. Falls back to defaultValue when
+    // bootstrapBody isn't supplied (legacy callers). Without
+    // this, client hashes only the body-without-frontmatter
+    // and the server's full-body hash never matches →
+    // body-changed loops on every open.
     expect(SRC).toContain('useCollabBootstrapMutation({')
-    expect(SRC).toMatch(/body:\s*multiplayerDocId\s*\?\s*defaultValue\s*:\s*null/)
+    expect(SRC).toMatch(
+      /body:\s*multiplayerDocId\s*\?\s*\(bootstrapBody\s*\?\?\s*defaultValue\)\s*:\s*null/,
+    )
     expect(SRC).toMatch(/pmJsonStr,/)
     expect(SRC).toMatch(/enabled:\s*!!multiplayerDocId/)
   })
