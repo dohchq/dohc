@@ -151,24 +151,55 @@ export const bootstrapSnapshotFromAtomBody = mutation({
     const { fm, rest: atomRest } = splitFrontmatter(atom.body)
     const canonicalAtomBody = joinFrontmatter(fm, roundtripMarkdown(atomRest))
     const canonicalAtomHash = await sha256Hex(canonicalAtomBody)
-    const serHash = await sha256Hex(pmCheck.newBody)
-    if (serHash !== canonicalAtomHash) {
-      // Submitted PM JSON does NOT round-trip to atom.body.
-      // Reject loud — the client either has stale state or the
-      // parser drift (browser vs server) is real and needs fix.
+    // M1 step 3.9.24 — RELAXED CAS COMPARISON.
+    //
+    // Pre-3.9.24 the check was strict byte-equality:
+    //   sha256(pmCheck.newBody) === sha256(canonicalAtomBody)
+    //
+    // pmCheck.newBody = fm + (PM → mdast → stringify)
+    // canonicalAtomBody = fm + (rest → remark.parse → stringify)
+    //
+    // Two different parsers (Crepe + remark) → two different
+    // mdasts for the SAME semantic content → two different
+    // strings → spurious pm-body-mismatch on benign style
+    // variation (whitespace, bullet style, escape choices).
+    //
+    // Fix: re-canonicalize the PM side through ONE MORE
+    // roundtrip. roundtripMarkdown is idempotent for any input
+    // remark can parse, so a single re-run normalizes
+    // stylistic variants to the same fixed point. After the
+    // re-roundtrip both sides have gone through the SAME
+    // canonicalizer; byte-equality now means semantic
+    // equivalence.
+    //
+    // Still catches real drift: if Crepe's PM contains
+    // genuinely different content (user typed something
+    // else), the canonical forms still differ. CAS protection
+    // intact; just lenient about Crepe vs remark style.
+    const { rest: pmRest } = splitFrontmatter(pmCheck.newBody)
+    const pmCanonical = joinFrontmatter(fm, roundtripMarkdown(pmRest))
+    const pmCanonicalHash = await sha256Hex(pmCanonical)
+    if (pmCanonicalHash !== canonicalAtomHash) {
+      // Submitted PM JSON does NOT round-trip to atom.body
+      // even after re-canonicalization. Real content drift
+      // (or a parser bug we need to fix).
       //
       // 3.9.23 — diagnostic log shows BOTH canonical forms
-      // (first 400 chars + length) so the next time this fires,
-      // server logs reveal exactly where Crepe + remark diverge.
-      // Without this we have to guess from user-visible
-      // symptoms.
+      // (first 400 chars + length) so the next time this
+      // fires, server logs reveal exactly where Crepe + remark
+      // diverge. 3.9.24 — also logs the strict-comparison
+      // value so we can see if it was caught by re-canonicalize
+      // or genuinely different.
       console.error('[bootstrap] pm-body-mismatch', {
         docId,
         atomId: parsed.atomId,
-        pmDerivedPreview: pmCheck.newBody.slice(0, 400),
-        pmDerivedLen: pmCheck.newBody.length,
+        pmCanonicalPreview: pmCanonical.slice(0, 400),
+        pmCanonicalLen: pmCanonical.length,
         canonicalAtomPreview: canonicalAtomBody.slice(0, 400),
         canonicalAtomLen: canonicalAtomBody.length,
+        pmRawPreview: pmCheck.newBody.slice(0, 400),
+        wouldHaveFailedStrict:
+          (await sha256Hex(pmCheck.newBody)) !== canonicalAtomHash,
       })
       return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
     }
