@@ -9,15 +9,14 @@
 //   • import.meta.env.VITE_DOHC_<NAME> === '1'  (build-time)
 // Default OFF ⇒ zero user-facing change until explicitly enabled.
 
-// M1 step 3.8.2.0 — `multiplayer` graduates the prosemirror-sync
-// path from dead code to opt-in dev/test availability. Off by
-// default; turn on per-browser via:
-//   localStorage.setItem('dohc:multiplayer', '1')
-// or globally via VITE_DOHC_MULTIPLAYER=1 at build time. Same
-// scaffold as inline-atoms. Until codex-clean browser
-// verification + a wider rollout, default OFF protects every
-// existing single-user editor.
-export type FeatureFlag = 'inline-atoms' | 'multiplayer'
+// 3.9.21 — `multiplayer` GRADUATED to default-on (like
+// inline-atoms before it). The gate has been removed from
+// AtomView; the bootstrap → collab → presence pipeline now
+// engages for every markdown atom. If you ever need a
+// per-browser kill switch in dev, add it back to this union
+// and re-thread to AtomView; for now keeping the type
+// minimal.
+export type FeatureFlag = 'inline-atoms'
 
 export function featureEnabled(name: FeatureFlag): boolean {
   try {

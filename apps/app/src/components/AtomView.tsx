@@ -9,7 +9,6 @@ import {
   setFrontmatterIcon,
 } from '../lib/frontmatter'
 import { EmojiPicker } from './EmojiPicker'
-import { featureEnabled } from '../lib/featureFlags'
 import { highlightSource } from '../lib/sourceHighlight'
 
 // react-simple-code-editor is CJS (`exports.default = Editor`) with no
@@ -276,20 +275,11 @@ export function AtomView({
         <EmptyAtom path={effectivePath} />
       ) : (
         <AtomShell
-          /* M1 step 3.8.2.2 — key includes multiplayer suffix.
-             Pre-3.8.2.2 the key was just effectivePath. If a
-             user flipped the flag on without reloading, AtomShell
-             would NOT remount; its existing Crepe instance was
-             built in single-user mode and the 3.8.1.x bootstrap
-             pipeline assumes a fresh mount. Suffixing the key
-             with the multiplayerDocId ('single' when off) forces
-             a remount when the flag changes — same machinery
-             that already handles atom switches. */
-          key={`${effectivePath}:${
-            featureEnabled('multiplayer') && row?._id && row?.workspaceId
-              ? `mp:${row._id}`
-              : 'single'
-          }`}
+          /* 3.9.21 — multiplayer is default-on; the key
+             suffix that previously tracked the flag's on/off
+             state is no longer needed. Reverting to the
+             original effectivePath-only key. */
+          key={effectivePath}
           draft={draft}
           onChange={setDraft}
           onRunAction={onRunAction}
@@ -299,16 +289,16 @@ export function AtomView({
           autoFocus={!!enterEdit}
           advisory={idAdvisory ?? null}
           migrationNotice={row?.migrationNotice ?? null}
-          /* M1 step 3.8.2.0 — multiplayer wiring.
-             Off by default. Turn on per-browser via:
-               localStorage.setItem('dohc:multiplayer', '1')
-             Then reload. The flag passes a multiplayerDocId to
-             AtomEditor, which engages the full bootstrap →
-             collab → presence pipeline shipped in 3.8.1.x.
-             Doc id format matches the server-side atomDocId
-             helper in convex/prosemirror.ts. */
+          /* 3.9.21 — multiplayer default-on. multiplayerDocId
+             is set whenever the atom row + workspace are
+             resolvable; the bootstrap → collab → presence
+             pipeline (3.8.1.x) engages for every markdown
+             atom. The localStorage flag that previously gated
+             this is gone — graduated like inline-atoms before
+             it. Doc id format matches the server-side
+             atomDocId helper in convex/prosemirror.ts. */
           multiplayerDocId={
-            featureEnabled('multiplayer') && row?._id && row?.workspaceId
+            row?._id && row?.workspaceId
               ? `atom:${row.workspaceId}:${row._id}`
               : undefined
           }
