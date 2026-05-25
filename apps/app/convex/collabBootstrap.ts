@@ -123,85 +123,70 @@ export const bootstrapSnapshotFromAtomBody = mutation({
     // against a CANONICAL form (atom.body run through the same
     // remark pipeline) so trailing-newline drift doesn't false-
     // reject.
-    const pmCheck = serializeSnapshotToProjectedBody(pmJsonStr, atom.body)
-    if (!pmCheck.ok) {
-      // Could be malformed JSON, unknown PM node, or remark crash.
-      // Surface the reason directly — same shape as the fresh-
-      // bootstrap path's invalid-pm-json handling below.
-      if (pmCheck.reason === 'invalid-pm-json') {
-        // 3.9.23 — diagnostic log so we can debug WHY parsing
-        // failed without asking the user to repro.
-        console.error('[bootstrap] invalid-pm-json', {
+    // M1 step 3.9.25 — pm-body-mismatch DEMOTED to warning.
+    //
+    // The check was: serialize the submitted PM JSON, compare
+    // its canonical form to atom.body's canonical form, reject
+    // bootstrap if they differ. Origin: 3.9.5 fix #1 codex
+    // 6th-pass blocker (silent rollback during rebootstrap).
+    //
+    // In practice the check failed too often (parser style
+    // differences between Crepe + remark) AND was redundant
+    // with the projection writer's case A/B/C three-state
+    // resolver — which is the ACTUAL safety net for ongoing
+    // body drift. Bootstrap-time CAS just blocked users from
+    // opening atoms; projection-time CAS catches the real
+    // drift correctly.
+    //
+    // 3.9.25: run the serialize attempt + canonical compare
+    // for OBSERVABILITY (server logs show divergence patterns
+    // for future debugging) but ALWAYS PROCEED to the
+    // bootstrap path. The projection writer's three-state
+    // resolver (case A FREEZE / case B AUTO-REBUILD / case C
+    // RE-BASELINE) handles any real drift on the next snapshot
+    // submission. Bootstrap's job is just to get the user
+    // editing.
+    //
+    // No more pm-body-mismatch return. The client overlay
+    // will never see this reason from now on.
+    try {
+      const pmCheck = serializeSnapshotToProjectedBody(pmJsonStr, atom.body)
+      if (!pmCheck.ok) {
+        console.warn('[bootstrap] PM serialize warning (proceeding)', {
           docId,
           atomId: parsed.atomId,
-          pmJsonStrPreview: pmJsonStr.slice(0, 200),
+          reason: pmCheck.reason,
+          detail: 'detail' in pmCheck ? pmCheck.detail : undefined,
         })
-        return { ok: false, reason: 'invalid-pm-json' }
+      } else {
+        const { fm, rest: atomRest } = splitFrontmatter(atom.body)
+        const canonicalAtomBody = joinFrontmatter(
+          fm,
+          roundtripMarkdown(atomRest),
+        )
+        const { rest: pmRest } = splitFrontmatter(pmCheck.newBody)
+        const pmCanonical = joinFrontmatter(
+          fm,
+          roundtripMarkdown(pmRest),
+        )
+        if (pmCanonical !== canonicalAtomBody) {
+          console.warn(
+            '[bootstrap] PM↔body canonical drift (proceeding; projection resolver will catch real drift)',
+            {
+              docId,
+              atomId: parsed.atomId,
+              pmCanonicalPreview: pmCanonical.slice(0, 400),
+              canonicalAtomPreview: canonicalAtomBody.slice(0, 400),
+            },
+          )
+        }
       }
-      // unknown-pm-node / serialize-failed → treat as PM mismatch
-      // (client should investigate; not a retry condition).
-      console.error('[bootstrap] serializeSnapshotToProjectedBody failed', {
+    } catch (e) {
+      console.warn('[bootstrap] PM check threw (proceeding)', {
         docId,
         atomId: parsed.atomId,
-        reason: pmCheck.reason,
-        detail: 'detail' in pmCheck ? pmCheck.detail : undefined,
+        error: e instanceof Error ? e.message : String(e),
       })
-      return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
-    }
-    const { fm, rest: atomRest } = splitFrontmatter(atom.body)
-    const canonicalAtomBody = joinFrontmatter(fm, roundtripMarkdown(atomRest))
-    const canonicalAtomHash = await sha256Hex(canonicalAtomBody)
-    // M1 step 3.9.24 — RELAXED CAS COMPARISON.
-    //
-    // Pre-3.9.24 the check was strict byte-equality:
-    //   sha256(pmCheck.newBody) === sha256(canonicalAtomBody)
-    //
-    // pmCheck.newBody = fm + (PM → mdast → stringify)
-    // canonicalAtomBody = fm + (rest → remark.parse → stringify)
-    //
-    // Two different parsers (Crepe + remark) → two different
-    // mdasts for the SAME semantic content → two different
-    // strings → spurious pm-body-mismatch on benign style
-    // variation (whitespace, bullet style, escape choices).
-    //
-    // Fix: re-canonicalize the PM side through ONE MORE
-    // roundtrip. roundtripMarkdown is idempotent for any input
-    // remark can parse, so a single re-run normalizes
-    // stylistic variants to the same fixed point. After the
-    // re-roundtrip both sides have gone through the SAME
-    // canonicalizer; byte-equality now means semantic
-    // equivalence.
-    //
-    // Still catches real drift: if Crepe's PM contains
-    // genuinely different content (user typed something
-    // else), the canonical forms still differ. CAS protection
-    // intact; just lenient about Crepe vs remark style.
-    const { rest: pmRest } = splitFrontmatter(pmCheck.newBody)
-    const pmCanonical = joinFrontmatter(fm, roundtripMarkdown(pmRest))
-    const pmCanonicalHash = await sha256Hex(pmCanonical)
-    if (pmCanonicalHash !== canonicalAtomHash) {
-      // Submitted PM JSON does NOT round-trip to atom.body
-      // even after re-canonicalization. Real content drift
-      // (or a parser bug we need to fix).
-      //
-      // 3.9.23 — diagnostic log shows BOTH canonical forms
-      // (first 400 chars + length) so the next time this
-      // fires, server logs reveal exactly where Crepe + remark
-      // diverge. 3.9.24 — also logs the strict-comparison
-      // value so we can see if it was caught by re-canonicalize
-      // or genuinely different.
-      console.error('[bootstrap] pm-body-mismatch', {
-        docId,
-        atomId: parsed.atomId,
-        pmCanonicalPreview: pmCanonical.slice(0, 400),
-        pmCanonicalLen: pmCanonical.length,
-        canonicalAtomPreview: canonicalAtomBody.slice(0, 400),
-        canonicalAtomLen: canonicalAtomBody.length,
-        pmRawPreview: pmCheck.newBody.slice(0, 400),
-        wouldHaveFailedStrict:
-          (await sha256Hex(pmCheck.newBody)) !== canonicalAtomHash,
-      })
-      return { ok: false, reason: 'pm-body-mismatch', serverBodyHash }
     }
 
     // Idempotency check: if a collabDocs row already exists for

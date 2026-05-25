@@ -59,8 +59,16 @@ const pmJsonForBody = (text: string) =>
 // FIX #1 — bootstrap PM ↔ body binding (silent-rollback blocker)
 // ──────────────────────────────────────────────────────────────
 describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback blocker)', () => {
-  it('initial bootstrap REJECTS PM JSON that does not roundtrip to atoms.body', async () => {
+  // 3.9.25 — bootstrap pm-body-mismatch DEMOTED to warning.
+  // The check was producing false-positives on benign parser
+  // style drift (Crepe vs remark), blocking users from opening
+  // atoms. The projection writer's case A/B/C three-state
+  // resolver is the actual safety net for body drift; bootstrap
+  // just needs to get the user into the editor. Tests updated
+  // below to reflect the new permissive-proceed behavior.
+  it('initial bootstrap PROCEEDS even when PM JSON does not roundtrip (3.9.25 warning-only)', async () => {
     const t = convexTest(schema, modules)
+    registerProsemirrorComponent(t)
     const orgId = await seedOrg(t)
     const { finalBody, docId } = await makeAtomWithBody(
       t,
@@ -68,9 +76,6 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
       'team/notes.md',
       'starting body',
     )
-    // Client submits PM JSON for DIFFERENT content (stale or
-    // buggy client). The hash matches the current body — but the
-    // PM doesn't match.
     const staleButHashMatches = pmJsonForBody('something else entirely')
     const result = await t
       .withIdentity({ subject: ALICE })
@@ -80,14 +85,17 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
         clientBodyHash: await sha256Hex(finalBody),
         activeWorkspaceId: orgId,
       })
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe('pm-body-mismatch')
-
-    // No collabDocs row created on mismatch — bootstrap aborted
+    // 3.9.25 — bootstrap succeeds even with mismatched PM.
+    expect(result.ok).toBe(true)
+    // collabDocs row IS created (baseBodyHash = serverBodyHash
+    // of atom.body, NOT the client's PM content — so drift is
+    // captured at the source-of-truth level, not the client's
+    // claim).
     const docs = await t.run(async (ctx) =>
       ctx.db.query('collabDocs').collect(),
     )
-    expect(docs.length).toBe(0)
+    expect(docs.length).toBe(1)
+    expect(docs[0]?.baseBodyHash).toBe(await sha256Hex(finalBody))
   })
 
   it('aligned PM JSON passes the bind check (regression: happy path still works)', async () => {
@@ -111,8 +119,14 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
     expect(result.ok).toBe(true)
   })
 
-  it('rebootstrap path ALSO enforces PM↔body binding', async () => {
+  it('rebootstrap path PROCEEDS with mismatched PM (3.9.25 warning-only)', async () => {
+    // 3.9.25 — rebootstrap also no longer rejects on PM↔body
+    // mismatch. The submitted PM JSON gets written as the new
+    // snapshot; the projection writer's case A/B/C resolver
+    // catches real drift on the next snapshot cycle. Atom.body
+    // and baseBodyHash remain the source of truth.
     const t = convexTest(schema, modules)
+    registerProsemirrorComponent(t)
     const orgId = await seedOrg(t)
     const { atomId, finalBody, docId } = await makeAtomWithBody(
       t,
@@ -121,7 +135,6 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
       'agent-rewrote',
     )
     const correctHash = await sha256Hex(finalBody)
-    // Simulate post-3.7 state: needsRebootstrap=true
     await t.run(async (ctx) => {
       await ctx.db.insert('collabDocs', {
         docId,
@@ -134,9 +147,6 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
         updatedAt: Date.now(),
       })
     })
-    // Client submits STALE PM JSON. Without fix #1, server would
-    // accept + clear needsRebootstrap + next projection rolls
-    // back the OOB write. With fix #1, server rejects loud.
     const result = await t
       .withIdentity({ subject: ALICE })
       .mutation(api.collabBootstrap.bootstrapSnapshotFromAtomBody, {
@@ -145,25 +155,20 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
         clientBodyHash: correctHash,
         activeWorkspaceId: orgId,
       })
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe('pm-body-mismatch')
-
-    // needsRebootstrap UNTOUCHED — flag still set; client should
-    // re-read body + retry with aligned PM
+    expect(result.ok).toBe(true)
+    // Rebootstrap path cleared needsRebootstrap + advanced
+    // projectedVersion to N+1.
     const docs = await t.run(async (ctx) =>
       ctx.db.query('collabDocs').collect(),
     )
-    expect(docs[0]?.needsRebootstrap).toBe(true)
+    expect(docs[0]?.needsRebootstrap).toBe(false)
   })
 
-  it('PM-body-mismatch is reason-distinct from body-changed (so client retry policy differs)', async () => {
-    // body-changed = "I read stale body; retry with fresh body"
-    // pm-body-mismatch = "my PM doesn't match the body; re-read
-    //                    + re-parse PM from current body"
-    // Client retry behavior is different (just re-read vs
-    // re-read + re-parse via cached schema), so the labels
-    // MUST be distinct.
+  it('body-changed remains distinct from pm-body-mismatch is no longer returned (3.9.25)', async () => {
+    // 3.9.25 — pm-body-mismatch is no longer returned by bootstrap.
+    // body-changed remains for stale-hash retries.
     const t = convexTest(schema, modules)
+    registerProsemirrorComponent(t)
     const orgId = await seedOrg(t)
     const { finalBody, docId } = await makeAtomWithBody(t, orgId, 't.md', 'x')
 
@@ -180,7 +185,7 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
     expect(r1.ok).toBe(false)
     if (!r1.ok) expect(r1.reason).toBe('body-changed')
 
-    // pm-body-mismatch: hash matches, PM doesn't
+    // Previously pm-body-mismatch fired here; now bootstrap proceeds.
     const r2 = await t
       .withIdentity({ subject: ALICE })
       .mutation(api.collabBootstrap.bootstrapSnapshotFromAtomBody, {
@@ -189,8 +194,7 @@ describe('M1 3.9.5 fix #1 — bootstrap PM↔body binding (silent-rollback block
         clientBodyHash: await sha256Hex(finalBody),
         activeWorkspaceId: orgId,
       })
-    expect(r2.ok).toBe(false)
-    if (!r2.ok) expect(r2.reason).toBe('pm-body-mismatch')
+    expect(r2.ok).toBe(true)
   })
 })
 
