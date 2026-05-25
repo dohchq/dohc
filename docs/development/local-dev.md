@@ -2,8 +2,10 @@
 
 ## Prerequisites
 
-- Node 22+ and pnpm 10+ (`packageManager` is pinned in the root
-  `package.json`).
+- Node `24.14.0` recommended via `.node-version` / `.nvmrc` and pnpm
+  `10.24.0` (`packageManager` is pinned in the root `package.json`).
+  The sanitizer stack depends on packages that require Node `^20.19.0`,
+  `^22.13.0`, or `>=24.0.0`; Node 18 is not supported.
 - A Convex deployment and a WorkOS AuthKit app (for auth).
 
 ## Setup

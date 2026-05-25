@@ -2,6 +2,10 @@
   "name": "dohc",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0",
+    "pnpm": "10.24.0"
+  },
   "scripts": {
     "dev": "pnpm --filter @dohc/app --if-present run dev",
     "build": "pnpm --filter @dohc/app --if-present run build",
