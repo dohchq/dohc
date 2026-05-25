@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAdminHandler, RevocationRegistry } from './admin'
+import { createAdminHandler, RevocationRegistry } from './admin.js'
 
 describe('hocuspocus admin handler', () => {
   it('returns a health response', async () => {

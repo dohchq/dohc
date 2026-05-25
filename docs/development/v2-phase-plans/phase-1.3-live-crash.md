@@ -15,9 +15,13 @@
 - Create: `docker-compose.dev.yml` — local Postgres for v2 integration work.
 - Modify: `package.json` — root integration helper script.
 - Modify: `services/hocuspocus/package.json` — service integration script.
+- Create: `services/hocuspocus/vitest.integration.config.ts` — explicit `.integration.ts` discovery without adding the file to the normal unit suite.
 - Create: `services/hocuspocus/scripts/require-integration-env.mjs` — fail if no real Postgres URL is provided.
 - Create: `services/hocuspocus/src/integration/live-provider-crash.integration.ts` — raw provider integration tests.
+- Create: `services/hocuspocus/Dockerfile` — production container image for the Hocuspocus service.
+- Create: `.dockerignore` — keep local dependencies/build output out of Docker context.
 - Modify: `services/hocuspocus/src/server.ts` — close the Postgres pool on server destroy.
+- Modify: `docker-compose.dev.yml` — local Postgres plus Hocuspocus service wiring.
 - Modify: `docs/development/v2-hocuspocus-persistence.md` — document how to run the crash gate.
 
 ---
@@ -37,7 +41,7 @@ Expected: both commands require `HOCUSPOCUS_TEST_DATABASE_URL`.
 
 - [x] **Step 2: Add local Postgres compose file**
 
-Add `docker-compose.dev.yml` with a `dohc-postgres` service on host port `54329`.
+Add `docker-compose.dev.yml` with a `postgres` service using container name `dohc-v2-postgres` on host port `54329`.
 
 Expected URL:
 
@@ -78,7 +82,7 @@ pnpm --filter @dohc/hocuspocus build
 
 Expected: all pass without a database.
 
-- [ ] **Step 2: Run live integration gate**
+- [x] **Step 2: Run live integration gate**
 
 Run with a real Postgres URL:
 
@@ -88,4 +92,30 @@ HOCUSPOCUS_TEST_DATABASE_URL=postgres://dohc:dohc@127.0.0.1:54329/dohc_v2 pnpm t
 
 Expected: restart replay and fail-loud tests pass.
 
-Current local blocker: Docker is not installed in this WSL distro, and the local Postgres server requires a password for user `ice`, so this command needs Docker Desktop WSL integration or a supplied test database URL.
+Observed: passed locally against Docker Postgres after adding the integration-only Vitest config and making Hocuspocus pool shutdown idempotent.
+
+---
+
+### Task 4: Add Hocuspocus Container Wiring
+
+- [x] **Step 1: Add service Dockerfile**
+
+Add `services/hocuspocus/Dockerfile` using the root pnpm workspace lockfile, build the service, and run `node dist/server.js`.
+
+- [x] **Step 2: Wire local compose service**
+
+Extend `docker-compose.dev.yml` with a `hocuspocus` service that depends on healthy Postgres and exposes port `1234`.
+
+- [x] **Step 3: Verify image build and service boot**
+
+Run:
+
+```bash
+docker compose -f docker-compose.dev.yml build hocuspocus
+docker compose -f docker-compose.dev.yml up -d hocuspocus
+docker compose -f docker-compose.dev.yml ps
+```
+
+Expected: Postgres and Hocuspocus both healthy/running locally.
+
+Observed: Docker image builds, Hocuspocus boots, and `/healthz` reports healthy through the compose healthcheck.

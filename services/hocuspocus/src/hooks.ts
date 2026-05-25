@@ -10,9 +10,9 @@ import type {
   onStoreDocumentPayload,
 } from '@hocuspocus/server'
 import * as Y from 'yjs'
-import { decodeDocName } from './doc-name'
-import { verifyCollabToken, type CollabActorKind } from './auth'
-import type { PostgresYDocStore } from './persistence'
+import { decodeDocName } from './doc-name.js'
+import { verifyCollabToken, type CollabActorKind } from './auth.js'
+import type { PostgresYDocStore } from './persistence.js'
 
 export type DohcHocuspocusContext = {
   userId: string

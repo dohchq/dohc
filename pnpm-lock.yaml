@@ -220,6 +220,9 @@ importers:
         specifier: ^13.6.30
         version: 13.6.30
     devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0

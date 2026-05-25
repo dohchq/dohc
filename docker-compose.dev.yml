@@ -16,5 +16,32 @@ services:
     volumes:
       - dohc_v2_postgres:/var/lib/postgresql/data
 
+  hocuspocus:
+    build:
+      context: .
+      dockerfile: services/hocuspocus/Dockerfile
+    container_name: dohc-v2-hocuspocus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOCUSPOCUS_ADMIN_TOKEN: dev-admin-token-change-me
+      HOCUSPOCUS_ALLOW_DEV_ACL: "true"
+      HOCUSPOCUS_DATABASE_URL: postgres://dohc:dohc@postgres:5432/dohc_v2
+      HOCUSPOCUS_JWT_SECRET: dev-jwt-secret-change-me-with-at-least-32-bytes
+      HOCUSPOCUS_PORT: "1234"
+      HOCUSPOCUS_QUIET: "false"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:1234/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "1234:1234"
+
 volumes:
   dohc_v2_postgres:

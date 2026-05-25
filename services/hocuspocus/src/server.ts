@@ -5,12 +5,12 @@ import {
   createAdminHandler,
   RevocationRegistry,
   writeNodeAdminResponse,
-} from './admin'
-import { createHocuspocusHooks, type HocuspocusAcl } from './hooks'
+} from './admin.js'
+import { createHocuspocusHooks, type HocuspocusAcl } from './hooks.js'
 import {
   PostgresYDocPersistenceBackend,
   PostgresYDocStore,
-} from './persistence'
+} from './persistence.js'
 
 const { Pool } = pg
 
@@ -46,6 +46,7 @@ export async function createServerFromEnv(): Promise<Server> {
   })
   const store = new PostgresYDocStore(new PostgresYDocPersistenceBackend(pool))
   await store.ensureSchema()
+  let poolEndPromise: Promise<void> | undefined
 
   const revocations = new RevocationRegistry()
   const adminHandler = createAdminHandler({
@@ -75,7 +76,8 @@ export async function createServerFromEnv(): Promise<Server> {
       if (handled) return Promise.reject()
     },
     async onDestroy() {
-      await pool.end()
+      poolEndPromise ??= pool.end()
+      await poolEndPromise
     },
   })
 }

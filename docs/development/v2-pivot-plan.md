@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.8 — Phase 1.3 live provider crash harness added; real Postgres crash gate needs Docker or `HOCUSPOCUS_TEST_DATABASE_URL`
+**Status:** Plan v1.9 — Phase 1.3 live provider crash gate passed locally; Docker Hocuspocus + Postgres dev stack boots; real Convex ACL adapter remains before production/client use
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -301,6 +301,7 @@ Goal: Production-grade Hocuspocus before any client touches it.
 1. `services/hocuspocus/` Node.js server:
    - `@hocuspocus/server` + `@hocuspocus/extension-database` (Postgres)
    - Logging, health endpoint, graceful shutdown, env-driven config
+   - Production Dockerfile plus local compose service for Hocuspocus + Postgres
 2. **Crash-safety persistence** (codex critical risk R-new):
    - First write `docs/development/v2-hocuspocus-persistence.md` documenting the exact Hocuspocus hook/extension point used for durable update capture and what "ack" means in that path
    - Use a Postgres append-only update log (`docName`, monotonic `seq`, `updateBytes`, `actorId`, `receivedAt`, `snapshotId?`) plus periodic compacted snapshots

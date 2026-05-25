@@ -90,9 +90,9 @@ The admin endpoint `POST /admin/disconnect-by-workspace-user` records the revoca
 This phase is a service foundation, not full client integration:
 
 - The Convex ACL adapter is not wired yet. The server entrypoint requires explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true` for the temporary allow-all development adapter.
-- A live raw `@hocuspocus/provider` crash test with real Postgres still needs to pass before the Tiptap client uses this service.
+- The live raw `@hocuspocus/provider` crash test now passes against Docker Postgres, but the real Convex ACL adapter is still required before production use.
 - `@hocuspocus/extension-database` is installed for API reference only. dohc uses custom persistence because the default debounced store path is not the ack-safe update-log boundary this plan requires.
-- `@hocuspocus/provider` is installed for the upcoming raw provider smoke/crash scripts.
+- `@hocuspocus/provider` is installed for the raw provider smoke/crash integration tests.
 
 ## Live Crash Gate
 
@@ -115,4 +115,14 @@ The integration file `services/hocuspocus/src/integration/live-provider-crash.in
 - server destroy/restart and replay from the update log
 - fail-loud write refusal when the updates table is unavailable
 
-Current local run status: blocked in this WSL distro because Docker is unavailable and the local Postgres server requires credentials for user `ice`. Use Docker Desktop WSL integration or provide `HOCUSPOCUS_TEST_DATABASE_URL`.
+Current local run status: passed against Docker Postgres.
+
+## Local Docker Service
+
+The Hocuspocus service has a production Dockerfile at `services/hocuspocus/Dockerfile`. The development compose stack can run Postgres plus Hocuspocus:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d postgres hocuspocus
+```
+
+The compose Hocuspocus service uses `HOCUSPOCUS_ALLOW_DEV_ACL=true` and development secrets. That is only for local Phase 1.3 work; production deployment must wire the real Convex ACL adapter and real secrets before exposing the service.

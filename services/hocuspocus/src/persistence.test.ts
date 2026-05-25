@@ -4,7 +4,7 @@ import {
   MemoryYDocPersistenceBackend,
   PostgresYDocStore,
   PostgresYDocPersistenceBackend,
-} from './persistence'
+} from './persistence.js'
 
 function updateFromText(value: string, base?: Y.Doc): Uint8Array {
   const doc = base ?? new Y.Doc()

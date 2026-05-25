@@ -4,10 +4,10 @@ import type { Server } from '@hocuspocus/server'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { mintCollabToken } from '../auth'
-import { encodeDocName } from '../doc-name'
-import { ensureYDocPersistenceSchema } from '../persistence'
-import { createServerFromEnv } from '../server'
+import { mintCollabToken } from '../auth.js'
+import { encodeDocName } from '../doc-name.js'
+import { ensureYDocPersistenceSchema } from '../persistence.js'
+import { createServerFromEnv } from '../server.js'
 
 const { Pool } = pg
 
@@ -198,9 +198,11 @@ describe.sequential('live Hocuspocus provider persistence', () => {
     const token = await tokenFor(workspaceId)
     const doc = new Y.Doc()
     const provider = createProvider({ server, documentName, token, doc })
+    let baselineUpdateCount = 0
 
     try {
       await waitForProviderSynced(provider)
+      baselineUpdateCount = await countUpdates(pool, documentName)
       await pool.query(
         'ALTER TABLE hocuspocus_ydoc_updates RENAME TO hocuspocus_ydoc_updates_broken',
       )
@@ -215,7 +217,7 @@ describe.sequential('live Hocuspocus provider persistence', () => {
       await pool.query(
         'ALTER TABLE IF EXISTS hocuspocus_ydoc_updates_broken RENAME TO hocuspocus_ydoc_updates',
       )
-      expect(await countUpdates(pool, documentName)).toBe(0)
+      expect(await countUpdates(pool, documentName)).toBe(baselineUpdateCount)
       await server.destroy()
     }
   })

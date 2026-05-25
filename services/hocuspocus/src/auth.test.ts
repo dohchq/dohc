@@ -3,7 +3,7 @@ import {
   COLLAB_TOKEN_TTL_SECONDS,
   mintCollabToken,
   verifyCollabToken,
-} from './auth'
+} from './auth.js'
 
 const secret = 'test-secret-with-enough-entropy-for-hs256'
 const issuedAt = new Date('2026-05-25T12:00:00.000Z')

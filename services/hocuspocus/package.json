@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:integration": "node scripts/require-integration-env.mjs && vitest run src/integration/live-provider-crash.integration.ts",
+    "test:integration": "node scripts/require-integration-env.mjs && vitest run --config vitest.integration.config.ts",
     "lint": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -20,6 +20,7 @@
     "yjs": "^13.6.30"
   },
   "devDependencies": {
+    "@types/node": "^22.19.19",
     "@types/pg": "^8.20.0",
     "tsx": "^4.22.3",
     "typescript": "^5.9.3",

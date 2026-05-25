@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
-import { RevocationRegistry } from './admin'
-import { mintCollabToken } from './auth'
-import { encodeDocName } from './doc-name'
-import { createHocuspocusHooks } from './hooks'
-import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence'
+import { RevocationRegistry } from './admin.js'
+import { mintCollabToken } from './auth.js'
+import { encodeDocName } from './doc-name.js'
+import { createHocuspocusHooks } from './hooks.js'
+import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
 
 const secret = 'test-secret-with-enough-entropy-for-hs256'
 const documentName = encodeDocName({
