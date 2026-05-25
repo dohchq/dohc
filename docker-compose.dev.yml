@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: dohc-v2-postgres
+    environment:
+      POSTGRES_DB: dohc_v2
+      POSTGRES_USER: dohc
+      POSTGRES_PASSWORD: dohc
+    ports:
+      - "54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dohc -d dohc_v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - dohc_v2_postgres:/var/lib/postgresql/data
+
+volumes:
+  dohc_v2_postgres:

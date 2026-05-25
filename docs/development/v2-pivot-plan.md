@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.7 — Phase 1.3 Hocuspocus persistence spike foundation complete; ready for live provider crash test
+**Status:** Plan v1.8 — Phase 1.3 live provider crash harness added; real Postgres crash gate needs Docker or `HOCUSPOCUS_TEST_DATABASE_URL`
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`

@@ -74,6 +74,9 @@ export async function createServerFromEnv(): Promise<Server> {
       )
       if (handled) return Promise.reject()
     },
+    async onDestroy() {
+      await pool.end()
+    },
   })
 }
 
