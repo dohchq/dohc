@@ -99,7 +99,7 @@ export function AtomView({
   const remoteBodyRef = useRef<string | null>(null)
   // syncedPath = the path whose initial content we've loaded into draft.
   // Until this matches the current path, we render a loader instead of
-  // mounting the editor — Milkdown is uncontrolled and only reads its
+  // mounting the editor — Tiptap is uncontrolled and only reads its
   // initial value at mount time, so we must not mount it with stale or
   // empty content while the row is still in flight.
   const [syncedPath, setSyncedPath] = useState<string | null>(null)
@@ -289,30 +289,6 @@ export function AtomView({
           autoFocus={!!enterEdit}
           advisory={idAdvisory ?? null}
           migrationNotice={row?.migrationNotice ?? null}
-          /* 3.9.21 — multiplayer default-on. multiplayerDocId
-             is set whenever the atom row + workspace are
-             resolvable; the bootstrap → collab → presence
-             pipeline (3.8.1.x) engages for every markdown
-             atom. The localStorage flag that previously gated
-             this is gone — graduated like inline-atoms before
-             it. Doc id format matches the server-side
-             atomDocId helper in convex/prosemirror.ts. */
-          multiplayerDocId={
-            row?._id && row?.workspaceId
-              ? `atom:${row.workspaceId}:${row._id}`
-              : undefined
-          }
-          /* 3.9.22 — full body (fm + rest) for the bootstrap
-             CAS hash. AtomView already has `draft` (which is
-             the unsplit body including frontmatter), so pass
-             it through. AtomEditor uses this for hashing
-             ONLY; Crepe still mounts from `value` (= rest,
-             frontmatter stripped — the editor never sees
-             frontmatter glyphs). Without this prop the client
-             hashes only the rest, the server hashes the full
-             body, body-changed fires unconditionally, and the
-             error overlay auto-reload loops forever. */
-          bootstrapBody={draft}
           // D4.11b — the SERVER-saved id (from the row body, where
           // seedAtomIdIntoBody injected it on first write). The local
           // draft doesn't re-sync the injected id during editing, so
@@ -375,8 +351,6 @@ function AtomShell({
   path,
   onCommitSource,
   onShare,
-  multiplayerDocId,
-  bootstrapBody,
 }: {
   draft: string
   onChange: (next: string) => void
@@ -406,17 +380,9 @@ function AtomShell({
   onCommitSource?: (next: string) => void
   // sharing-v1 1a — share this file (by its fileId).
   onShare?: (fileId: string) => void
-  // M1 step 3.8.2.0 — multiplayer doc id pass-through. When
-  // present, AtomEditor mounts the full prosemirror-sync
-  // bootstrap + collab pipeline (3.8.1.x). When undefined,
-  // single-user mode (existing behavior, byte-identical).
-  multiplayerDocId?: string
-  /** 3.9.22 — full body (fm + rest) for bootstrap CAS hashing.
-   *  Threaded through to AtomEditor's bootstrap mutation
-   *  unchanged. See AtomEditor's prop doc. */
-  bootstrapBody?: string
 }) {
   const editorRef = useRef<AtomEditorHandle | null>(null)
+  const identity = useQuery(api.auth.whoami)
   // D4.8 — known-files list for the wikilink plugin's resolver +
   // autocomplete picker. Memoized so the editor's plugin reads a
   // stable identity until the file list actually changes. The
@@ -444,7 +410,7 @@ function AtomShell({
   // inserting a fresh fence at the cursor.
   const [editingBlock, setEditingBlock] = useState<{ pos: number; text: string; language: string } | null>(null)
   // atom-address-v1 §1.4 — (b1) the leading YAML frontmatter (incl.
-  // the rename-proof `id:`) is split off so Crepe never renders it as
+  // the rename-proof `id:`) is split off so Tiptap never renders it as
   // prose (zero frontmatter glyphs); the exact captured bytes are
   // reattached on every change, so it round-trips byte-identical.
   // (b2) `sourceMode` swaps the editor for a raw textarea over the
@@ -525,7 +491,7 @@ function AtomShell({
   const isAction = meta.type === 'action'
   const isPlugin = meta.type === 'plugin'
   // D4.13 — EXTENSION determines rendering: a `.html` path renders
-  // as a sandboxed HTML page (the §2-B route iframe), NEVER Crepe.
+  // as a sandboxed HTML page (the §2-B route iframe), NEVER Tiptap.
   // `type: html` frontmatter is kept as a backward-compat fallback
   // so existing agent-authored html atoms (.md + type: html) keep
   // working. The §2-B route + tree badge mirror this same OR.
@@ -674,7 +640,7 @@ function AtomShell({
           atom has no frontmatter, so the toggle was hidden, so you
           could never drop into raw mode to ADD frontmatter — making
           it impossible to hand-author an html / skill / plugin atom
-          (Crepe hides frontmatter, so typing `---\ntype: html\n---`
+          (Tiptap hides frontmatter, so typing `---\ntype: html\n---`
           in the formatted editor doesn't stick). Always-on unblocks
           manual creation of typed atoms + raw `id:` edits on a fresh
           file. Plain notes just gain a faint, ignorable "⟨⟩ source"
@@ -790,16 +756,18 @@ function AtomShell({
         />
       ) : isHtml ? (
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
-        // route iframe (Crepe is never used for an html body). The
+        // route iframe (Tiptap is never used for an html body). The
         // ⟨⟩ source toggle above still flips to the raw textarea.
         <HtmlAtomFrame atomId={atomId} body={rest} />
+      ) : identity === undefined ? (
+        <div className="py-8 text-sm text-ink-dim">loading…</div>
       ) : (
         <AtomEditor
           ref={editorRef}
-          // (b1) Crepe only ever sees the body WITHOUT frontmatter →
+          // (b1) Tiptap only ever sees the body WITHOUT frontmatter →
           // zero frontmatter glyphs. On change we reattach the exact
           // captured `fm` bytes, so the frontmatter round-trips
-          // byte-identical regardless of Crepe's content normalization.
+          // byte-identical regardless of Tiptap's content normalization.
           // D4.22 — title lives in frontmatter now, so the editor
           // gets the full content body again (no title extraction).
           value={rest}
@@ -810,6 +778,11 @@ function AtomShell({
             setSketcherOpen(true)
           }}
           knownFiles={knownFiles}
+          collab={
+            identity?.workspaceId && atomId
+              ? { workspaceId: identity.workspaceId, atomId }
+              : undefined
+          }
           onOpenWikilink={(target) => {
             // Resolution rule (matches the cascade): if the target
             // matches an existing file (with or without .md),
@@ -819,15 +792,6 @@ function AtomShell({
             if (knownPaths.has(target)) onOpenAtom(target)
             else if (knownPaths.has(withMd)) onOpenAtom(withMd)
           }}
-          /* M1 step 3.8.2.0 — multiplayer pass-through. The
-             outer AtomView reads the feature flag + builds the
-             docId from row._id + row.workspaceId; AtomShell
-             threads it through unchanged. undefined here means
-             single-user (byte-identical to pre-3.8.2.0). */
-          multiplayerDocId={multiplayerDocId}
-          /* 3.9.22 — full body for bootstrap CAS hashing
-             (with frontmatter). See AtomEditor prop doc. */
-          bootstrapBody={bootstrapBody}
         />
       )}
       {subpages.length > 0 && (

@@ -15,6 +15,36 @@ function updateFromText(value: string, base?: Y.Doc): Uint8Array {
 }
 
 describe('Y.Doc persistence', () => {
+  it('detects whether a document has any persisted state', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+    const documentName = 'workspace/ws/atom/a'
+
+    await expect(store.hasDocumentState(documentName)).resolves.toBe(false)
+
+    await store.appendUpdate({
+      documentName,
+      update: updateFromText('update state'),
+      actorId: 'user_1',
+      socketId: 'socket_1',
+    })
+
+    await expect(store.hasDocumentState(documentName)).resolves.toBe(true)
+  })
+
+  it('treats a sequence-zero snapshot as persisted document state', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+    const documentName = 'workspace/ws/atom/bootstrap'
+    const doc = new Y.Doc()
+    doc.getText('body').insert(0, 'bootstrapped')
+
+    await store.storeSnapshot(documentName, doc, { lastSeq: 0 })
+
+    await expect(store.latestSequence(documentName)).resolves.toBe(0)
+    await expect(store.hasDocumentState(documentName)).resolves.toBe(true)
+  })
+
   it('appends updates with monotonic per-document sequence numbers and metadata', async () => {
     const backend = new MemoryYDocPersistenceBackend()
     const store = new PostgresYDocStore(backend)

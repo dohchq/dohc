@@ -282,7 +282,7 @@ async function buildStore(
  * query side (from the markdown `value`) and the widget side (from
  * the unescaped ProseMirror doc text) derive via the SAME frozen
  * parser — fixing the Phase-3 dual-review BLOCKER where a raw-token
- * key mismatched after Crepe re-escaped `_`/`*`. Deduped, ≤64.
+ * key mismatched after a legacy editor re-escaped `_`/`*`. Deduped, ≤64.
  * Unknown / malformed ⇒ value:null. Never throws.
  */
 export const evalFormulas = query({

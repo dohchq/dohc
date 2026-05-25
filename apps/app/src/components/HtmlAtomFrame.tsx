@@ -6,7 +6,7 @@ import { ATOM_BODY_MAX_BYTES } from '../lib/inlineAtom'
 import { harvestFormulaSrcsFromDoc } from '../lib/htmlFormula'
 
 // html-atoms-v1 §2 / §2-C / §3 / §5 — the rendered view of a
-// `type: html` atom. Crepe is NEVER used for an html body (§5). The
+// `type: html` atom. Tiptap is NEVER used for an html body (§5). The
 // body is served by the auth-gated §2-B route (/r/<atomId>) which
 // sanitizes + sets the real header CSP.
 //

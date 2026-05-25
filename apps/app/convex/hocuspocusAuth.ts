@@ -11,6 +11,10 @@ type AtomAccessResult = {
   canWrite: boolean
 }
 
+type AtomBootstrapResult = {
+  markdown: string
+}
+
 type ActorKind = 'user' | 'agent'
 
 function deny(): AtomAccessResult {
@@ -117,5 +121,24 @@ export const checkAtomAccess = query({
       canRead: access.canRead,
       canWrite: access.canWrite,
     }
+  },
+})
+
+export const loadAtomBootstrap = query({
+  args: {
+    serverToken: v.string(),
+    workspaceId: v.string(),
+    atomId: v.string(),
+  },
+  handler: async (
+    ctx,
+    { serverToken, workspaceId, atomId },
+  ): Promise<AtomBootstrapResult | null> => {
+    requireServerToken(serverToken)
+
+    const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
+    if (!atom) return null
+
+    return { markdown: atom.body }
   },
 })

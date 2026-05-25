@@ -6,20 +6,23 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useConvex, useMutation, useQuery } from 'convex/react'
+import { useAction, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
   parseInlineAtoms,
   parseInlineAtomsFromMarkdown,
 } from '../lib/inlineAtom'
-import { QUERY_FENCE_RE } from '../lib/dslparse'
-import { Crepe } from '@milkdown/crepe'
-import { commandsCtx, editorViewCtx, prosePluginsCtx } from '@milkdown/kit/core'
-import { clearTextInCurrentBlockCommand } from '@milkdown/kit/preset/commonmark'
-import { Plugin, PluginKey, TextSelection } from '@milkdown/kit/prose/state'
-import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
-import { Milkdown, MilkdownProvider, useEditor } from '@milkdown/react'
+import { isQueryFenceLanguage, QUERY_FENCE_RE } from '../lib/dslparse'
+import { Extension, type Editor } from '@tiptap/core'
+import { EditorContent, useEditor } from '@tiptap/react'
+import { StarterKit } from '@tiptap/starter-kit'
+import { TableKit } from '@tiptap/extension-table'
+import { Markdown } from '@tiptap/markdown'
+import { Collaboration } from '@tiptap/extension-collaboration'
+import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import * as Y from 'yjs'
+import { IndexeddbPersistence } from 'y-indexeddb'
 import {
   hasAsciiSketchContentMetadata,
   isAsciiSketchLanguage,
@@ -35,43 +38,21 @@ import {
   type WikilinkFile,
 } from './wikilinkPlugin'
 import { WikilinkPicker } from './WikilinkPicker'
-import {
-  useCollabSync,
-  useCollabDocState,
-  useCollabBootstrapMutation,
-  useRemoteVersion,
-  applyRemoteSteps,
-  applyRemoteCursors,
-  applySuggestions,
-  makeRemoteCursorsPlugin,
-  makeLocalCursorObserverPlugin,
-  makeSuggestionDecorationsPlugin,
-  type SuggestionHandlers,
-} from '@/lib/collab-sync'
-import { getVersion } from '@/lib/collab-sync'
-import { sendableSteps } from 'prosemirror-collab'
-// M1 step 3 sub-commit 3.2 — schema cache populated from the first
-// mounted Crepe; useCollabSync's bootstrap reads it for snapshot
-// deserialization. See lib/crepe-schema-cache.ts for the rationale.
-import {
-  captureSchemaFromEditor,
-  getCachedSchema,
-  subscribeSchema,
-} from '@/lib/crepe-schema-cache'
-import type { Schema } from '@milkdown/kit/prose/model'
 import type { Id } from '../../convex/_generated/dataModel'
+import { dohcMarkdownExtensions } from '../editor-v2/dohc-markdown-extensions'
+import {
+  createDohcHocuspocusProvider,
+  encodeDohcHocuspocusDocumentName,
+  fetchHocuspocusCapabilities,
+  resolveHocuspocusUrl,
+  startHocuspocusTokenRefresh,
+} from '../editor-v2/hocuspocusProvider'
+import { canEditDohcEditor } from '../editor-v2/editorReadiness'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
 // the command palette's "Insert ASCII sketch" entry both fire this.
 export const OPEN_SKETCH_EVENT = 'dohc:open-sketch'
-
-const ASCII_SKETCH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>`
-// D4.8 — slash-menu icon for the /link command. lucide "link-2".
-const WIKILINK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`
-
-import '@milkdown/crepe/theme/common/style.css'
-import '@milkdown/crepe/theme/frame.css'
 
 export type AtomEditorHandle = {
   insertCodeBlock: (language: string, content: string) => void
@@ -87,35 +68,12 @@ type Props = {
   // shared set in the OWNER's workspace), and the own-workspace
   // live-total + query-block resolvers are disabled (v1).
   shareId?: Id<'atomShares'>
-  // sharing-v1 — view-only shared atom: Crepe is read-only.
+  // sharing-v1 — view-only shared atom: Tiptap is read-only.
   readOnly?: boolean
-  // M1 step 2 (multiplayer-and-h-followups §8) — opt-in collab
-  // mode. When set, the doc id (atom:<ws>:<atomId> or
-  // share:<shareId>) is used to mount the prosemirror-sync
-  // plugins via useCollabSync. UNSET by default — every existing
-  // call site stays single-user. The wiring is staged behind this
-  // flag so a regression is bounded to multiplayer callers only.
-  //
-  // V1 LIMITATION (documented for follow-up): when a snapshot
-  // exists server-side, the editor briefly mounts with the local
-  // `value` (markdown) before the first remote-pull rebases to
-  // the server state. The window is one rebase cycle (< 1s with
-  // a warm connection); acceptable for v1 since the first user
-  // input also triggers a rebase. A future commit will bootstrap
-  // the editor directly from the server snapshot (waits for
-  // useCollabSync.bootstrap.ready before mounting Crepe).
-  multiplayerDocId?: string
-  /** M1 step 3.9.22 — full atom.body (frontmatter + rest) for
-   *  the bootstrap CAS hash. AtomView splits frontmatter
-   *  out of `value` so the editor doesn't render it; the
-   *  bootstrap mutation hashes the WHOLE atom.body though,
-   *  so the client needs the unsplit version to compute the
-   *  matching clientBodyHash. Without this, body-changed
-   *  fires unconditionally because hash(rest) !== hash(fm+rest)
-   *  → infinite reload loop on every open of every atom.
-   *  Falls back to `value` when not provided (legacy callers
-   *  that don't strip frontmatter). */
-  bootstrapBody?: string
+  collab?: {
+    workspaceId: string
+    atomId: string
+  }
   /** Fired when the user clicks an `language: ascii` code block. The
    *  position is the doc offset of the node — pass it back to
    *  replaceCodeBlockAt on commit. */
@@ -129,7 +87,7 @@ type Props = {
 }
 
 // A ProseMirror plugin that (1) decorates `language: ascii` code blocks
-// with a marker class so CSS can strip the Crepe code-block chrome and
+// with a marker class so CSS can strip the Tiptap code-block chrome and
 // (2) intercepts clicks on those blocks to fire a callback. The callback
 // is held in a ref so callers can swap it without rebuilding the editor.
 const asciiBlockKey = new PluginKey('dohc-ascii-block')
@@ -177,7 +135,7 @@ function buildAsciiDecorations(
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
     if (
-      node.type.name === 'code_block' &&
+      (node.type.name === 'code_block' || node.type.name === 'codeBlock') &&
       isAsciiSketchLanguage(node.attrs.language)
     ) {
       decorations.push(
@@ -262,13 +220,13 @@ export function humanizeQuery(src: string): string {
 }
 
 // Mirror of the ascii-block plugin for `language: query`: tame the
-// glaring Crepe code-block chrome and prepend a calm human caption so
+// glaring Tiptap code-block chrome and prepend a calm human caption so
 // a query reads as an intentional "live data" element, not scary DSL
 // (impressions #17). The raw query stays an editable code block —
 // markdown is still the truth; a power user edits it directly.
 const queryBlockKey = new PluginKey('dohc-query-block')
 // atom-address-v1 §5.2 Phase-4 (4B-editor) — KILL THE SLOP BOX. The
-// query block kept showing its DSL *source* (`docs.find(…)`) and no
+// query block kept showing its DSL *source* (`vault.find(…)`) and no
 // data. Now the evaluated RESULT renders right after it (reactive via
 // evalQueryBlocks; the literal DSL stays the editable source/truth —
 // manifesto locked-#1, mirrors the Phase-3 formula widget). The
@@ -286,12 +244,11 @@ function buildQueryDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
-    if (
-      node.type.name === 'code_block' &&
-      String(node.attrs.language ?? '')
-        .trim()
-        .toLowerCase() === 'query'
-    ) {
+    const isCodeQueryBlock =
+      (node.type.name === 'code_block' || node.type.name === 'codeBlock') &&
+      isQueryFenceLanguage(node.attrs.language)
+    const isDohcQueryBlock = node.type.name === 'queryBlock'
+    if (isCodeQueryBlock || isDohcQueryBlock) {
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
           class: 'query-atom-block',
@@ -642,11 +599,11 @@ function makeAtomPillPlugin(
   })
 }
 
-type CrepeEditorProps = {
+type TiptapEditorProps = {
   defaultValue: string
   onChangeRef: React.RefObject<(next: string) => void>
   autoFocus: boolean
-  crepeRef: React.RefObject<Crepe | null>
+  editorRef: React.RefObject<Editor | null>
   onAsciiClickRef: React.RefObject<
     ((pos: number, content: string, language: string) => void) | null
   >
@@ -667,23 +624,16 @@ type CrepeEditorProps = {
   fileIdMapRef: React.RefObject<
     ReadonlyMap<string, { path: string; title?: string | null }>
   >
+  collab?: Props['collab']
+  fetchCollabToken: (workspaceId: string) => Promise<string>
   readOnly?: boolean
-  // M1 step 2 — multiplayer collab opt-in. When set, useCollabSync
-  // resolves the schema + bootstraps the snapshot + returns the two
-  // plugins (prosemirror-collab + sync bridge). Plugins are folded
-  // into prosePluginsCtx alongside the existing inline-atom set.
-  // UNSET ⇒ single-user editor, byte-identical to pre-M1 behavior.
-  multiplayerDocId?: string
-  /** 3.9.22 — full atom.body for bootstrap CAS hashing. See
-   *  the outer Props comment. Falls back to defaultValue. */
-  bootstrapBody?: string
 }
 
-function CrepeEditor({
+function TiptapAtomEditor({
   defaultValue,
   onChangeRef,
   autoFocus,
-  crepeRef,
+  editorRef,
   onAsciiClickRef,
   liveTotalsRef,
   liveTotalsTick,
@@ -695,10 +645,10 @@ function CrepeEditor({
   knownFilesArray,
   onOpenWikilinkRef,
   fileIdMapRef,
+  collab,
+  fetchCollabToken,
   readOnly,
-  multiplayerDocId,
-  bootstrapBody,
-}: CrepeEditorProps) {
+}: TiptapEditorProps) {
   // D4.8b — autocomplete state from the wikilink plugin.
   const [acState, setAcState] = useState<AutocompleteState>({
     active: false,
@@ -708,1080 +658,319 @@ function CrepeEditor({
     setAcStateRef.current = setAcState
   }, [])
 
-  // M1 step 2 — collab plugins (off by default). Schema is null
-  // until Crepe mounts (the bootstrap returns 'ready' without one
-  // when disabled). When `multiplayerDocId` is set, the hook
-  // bootstraps the snapshot + builds the prosemirror-collab +
-  // sync-bridge plugins; we capture them in a ref so the
-  // useEditor closure (which runs once at mount) can pick them
-  // up. V1 limitation: closure-once means the plugins must be
-  // ready before mount, OR they get attached late and lose their
-  // chance to gate the first user edits. We currently START the
-  // editor without waiting (defaultValue mode); when the bootstrap
-  // resolves AFTER mount, the plugins are still added (via the
-  // ctx.update path below) but the local clock is already past
-  // version 0. The remote-pull effect rebases on first divergence,
-  // converging to server state in one cycle. The follow-up commit
-  // hardens this with a loading gate.
-  // M1 step 3.2 + 3.6.5 codex BLOCKER #4 — pull schema via
-  // subscribeSchema (NOT polling getCachedSchema on every render).
-  //
-  // Why subscribe: captureSchemaFromEditor fires its subscribers
-  // after the editor mounts. Polling via "re-check on every
-  // render" only worked if SOMETHING ELSE re-rendered the
-  // component after schema capture. The first multiplayer mount
-  // had no such trigger → bootstrap/collab stayed unarmed until
-  // an unrelated state change (a Convex query update, a parent
-  // re-render, a user keystroke). subscribeSchema forces the
-  // re-render via setState — guaranteed.
-  const [cachedSchema, setCachedSchema] = useState<Schema | null>(
-    () => getCachedSchema(),
+  const documentName = useMemo(
+    () =>
+      collab
+        ? encodeDohcHocuspocusDocumentName({
+            workspaceId: collab.workspaceId,
+            atomId: collab.atomId,
+          })
+        : null,
+    [collab?.workspaceId, collab?.atomId],
   )
+  const hocuspocusUrl = useMemo(
+    () =>
+      documentName
+        ? resolveHocuspocusUrl({
+            envUrl: import.meta.env.VITE_HOCUSPOCUS_URL,
+          })
+        : null,
+    [documentName],
+  )
+  const collaborationRequested = !!documentName && !!hocuspocusUrl
+  const [collabCapabilities, setCollabCapabilities] = useState<{
+    atomBootstrap: boolean
+  } | null>(null)
+  const collaborationPending =
+    collaborationRequested && collabCapabilities === null
+  const collaborationEnabled =
+    collaborationRequested && collabCapabilities?.atomBootstrap === true
+  const ydoc = useMemo(() => new Y.Doc(), [documentName])
+  const [localReady, setLocalReady] = useState(!collaborationEnabled)
+  const [remoteReady, setRemoteReady] = useState(!collaborationEnabled)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const lastMarkdownRef = useRef<string | null>(null)
+  const fetchTokenRef = useRef(fetchCollabToken)
   useEffect(() => {
-    // Fires sync if cache already warm; otherwise queues + fires
-    // on captureSchemaFromEditor.
-    const unsub = subscribeSchema((s) => setCachedSchema(s))
-    return unsub
-  }, [])
-  // M1 step 3.8.1.7 — codex 8th-pass [P1] #1 GATE.
-  //
-  // useCollabSync was previously enabled as soon as multiplayer
-  // was on. On a fresh doc it would fetch snapshot → null →
-  // build plugins at startVersion=0. The bootstrap mutation
-  // (sub-3.5) then created snapshot at v=1. By the time the
-  // plugins installed, their local version (0) was behind the
-  // server (1). First submitSteps would race-needs-rebase; remote-
-  // pull would receive a snapshot and try to apply it via
-  // receiveTransaction — which is designed for steps, not full
-  // snapshots. The user's editor state could end up in an
-  // inconsistent place.
-  //
-  // FIX: gate useCollabSync.enabled on bootstrapState.phase ===
-  // 'ok'. The chain becomes:
-  //
-  //   1. Crepe mounts with markdown body (single-user mode)
-  //   2. PM JSON extraction effect captures pmJsonStr
-  //   3. useCollabBootstrapMutation fires — server creates
-  //      collabDocs row + writes snapshot at v=1
-  //   4. bootstrapState.phase = 'ok'
-  //   5. useCollabSync NOW enabled → fetches snapshot v=1 →
-  //      builds plugins with startVersion=1
-  //   6. Late-install effect installs plugins
-  //   7. Crepe becomes writable (3.8.1.7 read-only effect below)
-  //
-  // collabSync is referenced BEFORE bootstrapState — declared
-  // first, but with the gate referencing bootstrapState below.
-  // We forward-declare here by deferring to the actual hook
-  // call AFTER bootstrap mutation runs. Order is preserved.
-  const activeWorkspaceIdForBootstrap = useActiveWorkspaceId()
-  const [pmJsonStr, setPmJsonStr] = useState<string | null>(null)
-  // M1 step 3.9.12 — suppresses one markdownUpdated firing
-  // after the snapshot install dispatch. See the listener in
-  // the useEditor closure and the late-install effect for
-  // context.
-  const installingSnapshotRef = useRef(false)
-  const bootstrapState = useCollabBootstrapMutation({
-    docId: multiplayerDocId ?? null,
-    // 3.9.22 — hash the FULL atom.body (with frontmatter) for
-    // the bootstrap CAS check. AtomView splits frontmatter
-    // out of `defaultValue` before passing — without
-    // bootstrapBody, client hashes the stripped version,
-    // server hashes the full version, body-changed fires
-    // on every open, BootstrapErrorOverlay auto-reloads,
-    // infinite loop. The fallback to defaultValue keeps
-    // legacy callers (no frontmatter-aware parent) working.
-    body: multiplayerDocId ? (bootstrapBody ?? defaultValue) : null,
-    pmJsonStr,
-    activeWorkspaceId: activeWorkspaceIdForBootstrap,
-    enabled: !!multiplayerDocId,
-  })
-  const collabSync = useCollabSync({
-    docId: multiplayerDocId ?? null,
-    schema: cachedSchema,
-    // 3.8.1.7 [P1] #1: don't fetch snapshot / build plugins
-    // until bootstrap mutation succeeded. Otherwise plugins
-    // start at the pre-bootstrap version and race-rebase on
-    // first edit.
-    enabled: !!multiplayerDocId && bootstrapState.phase === 'ok',
-  })
-  // The ref the editor closure reads when building its plugin
-  // list. Captured because useEditor runs once; this lets the
-  // collab plugins arrive via the React render cycle.
-  const collabPluginsRef = useRef<typeof collabSync.plugins>(null)
-  collabPluginsRef.current = collabSync.plugins
-  // Subscribe to the live server version. When it bumps, the
-  // effect below fetches the new steps + applies them.
-  const remoteVersion = useRemoteVersion(multiplayerDocId ?? null)
+    fetchTokenRef.current = fetchCollabToken
+  }, [fetchCollabToken])
 
-  const { get } = useEditor((root) => {
-    const crepe = new Crepe({
-      root,
-      defaultValue,
-      featureConfigs: {
-        [Crepe.Feature.BlockEdit]: {
-          // Extend the slash menu with an "ASCII sketch" item under a custom
-          // group. We clear the "/" trigger first so it doesn't end up in
-          // the document, then fire a global event the AtomShell listens
-          // for to open the sketcher modal.
-          buildMenu: (builder) => {
-            builder
-              .addGroup('dohc', 'dohc')
-              .addItem('ascii-sketch', {
-                label: 'ASCII sketch',
-                icon: ASCII_SKETCH_ICON_SVG,
-                onRun: (ctx) => {
-                  const commands = ctx.get(commandsCtx)
-                  commands.call(clearTextInCurrentBlockCommand.key)
-                  window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
-                },
-              })
-              .addItem('wikilink', {
-                // D4.8 — /link command. Insert `[[]]` at the cursor
-                // with caret positioned between the brackets so the
-                // user can immediately start typing the target path.
-                label: 'Link',
-                icon: WIKILINK_ICON_SVG,
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                onRun: (ctx: any) => {
-                  const commands = ctx.get(commandsCtx)
-                  commands.call(clearTextInCurrentBlockCommand.key)
-                  const view = ctx.get(editorViewCtx)
-                  const { from } = view.state.selection
-                  const tr = view.state.tr.insertText('[[]]', from, from)
-                  // Place caret between the `[[` and `]]`.
-                  tr.setSelection(
-                    TextSelection.near(tr.doc.resolve(from + 2)),
-                  )
-                  view.dispatch(tr)
-                  view.focus()
-                },
-              })
-          },
-        },
+  useEffect(() => {
+    return () => ydoc.destroy()
+  }, [ydoc])
+
+  useEffect(() => {
+    setLocalReady(!collaborationEnabled)
+    setRemoteReady(!collaborationEnabled)
+    setSyncError(null)
+  }, [collaborationEnabled, documentName])
+
+  useEffect(() => {
+    if (!collaborationRequested || !hocuspocusUrl) {
+      setCollabCapabilities(null)
+      return
+    }
+
+    let cancelled = false
+    setCollabCapabilities(null)
+    fetchHocuspocusCapabilities(hocuspocusUrl)
+      .then((capabilities) => {
+        if (!cancelled) setCollabCapabilities(capabilities)
+      })
+      .catch(() => {
+        if (!cancelled) setCollabCapabilities({ atomBootstrap: false })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [collaborationRequested, hocuspocusUrl])
+
+  useEffect(() => {
+    if (!collaborationEnabled || !documentName) return
+    const persistence = new IndexeddbPersistence(documentName, ydoc)
+    const markSynced = () => setLocalReady(true)
+    persistence.on('synced', markSynced)
+    void persistence.whenSynced.then(markSynced)
+    return () => {
+      void persistence.destroy()
+    }
+  }, [collaborationEnabled, documentName, ydoc])
+
+  useEffect(() => {
+    if (
+      !collaborationEnabled ||
+      !localReady ||
+      !documentName ||
+      !hocuspocusUrl ||
+      !collab
+    )
+      return
+    const provider = createDohcHocuspocusProvider({
+      url: hocuspocusUrl,
+      documentName,
+      ydoc,
+      token: () => fetchTokenRef.current(collab.workspaceId),
+      onAuthenticated: () => setSyncError(null),
+      onAuthenticationFailed: ({ reason }) => setSyncError(reason),
+      onSynced: ({ state }) => setRemoteReady(state),
+      onStatus: ({ status }) => {
+        if (status === 'disconnected') setRemoteReady(false)
       },
     })
-    crepe.on((listener) => {
-      listener.markdownUpdated((_ctx, markdown, prev) => {
-        // M1 step 3.9.12 — codex 20th-pass [P1] FIX. The
-        // snapshot install effect (3.9.9) dispatches a doc-
-        // replace transaction. That transaction fires
-        // markdownUpdated, which would call onChange, which
-        // would queue an autosave attributed to the user.
-        // Tab B "opening a doc" would thus write Tab A's
-        // unprojected snapshot back to atoms.body from Tab
-        // B's client — the dual-write pattern the whole
-        // multiplayer architecture is meant to AVOID.
-        //
-        // Suppress: snapshot install sets the ref before
-        // dispatch. First markdownUpdated after that consumes
-        // + clears the ref. Subsequent updates flow normally.
-        if (installingSnapshotRef.current) {
-          installingSnapshotRef.current = false
-          return
-        }
-        if (markdown !== prev) onChangeRef.current(markdown)
-      })
-    })
-    crepe.editor.config((ctx) => {
-      const plugin = makeAsciiBlockPlugin(onAsciiClickRef)
-      const wikilinkPlugin = makeWikilinkPlugin(
-        () => knownFilesRef.current,
-        (s) => setAcStateRef.current(s),
-      )
-      // D4.8 — DOM-level click handler. Decorations carry the
-      // resolved target in `data-wikilink-target`; closest()
-      // climbs from the click target up to the decoration's span.
-      const wikilinkClickPlugin = new Plugin({
-        key: new PluginKey('dohc-wikilink-click'),
-        props: {
-          handleClick(view, _pos, event) {
-            const t = event.target as HTMLElement | null
-            const el = t?.closest('[data-wikilink-target]') as
-              | HTMLElement
-              | null
-            if (!el) return false
-            const target = el.getAttribute('data-wikilink-target')
-            if (!target) return false
-            event.preventDefault()
-            onOpenWikilinkRef.current?.(target)
-            return true
-          },
-        },
-      })
-      // D4.8h — clicks on ANY atom pill (value/liveTotal/formula)
-      // expand to source. The pill has contenteditable=false so PM
-      // doesn't move the cursor on click; this handler reads the
-      // pill's start position from `data-atom-pos` and explicitly
-      // sets the selection just inside the range, triggering the
-      // source-mode re-render via the selection-aware apply().
-      const formulaClickPlugin = new Plugin({
-        key: new PluginKey('dohc-atom-pill-click'),
-        props: {
-          handleClick(view, _pos, event) {
-            const t = event.target as HTMLElement | null
-            const el = t?.closest('.dohc-atom-pill') as HTMLElement | null
-            if (!el) return false
-            const posAttr = el.getAttribute('data-atom-pos')
-            if (!posAttr) return false
-            const pos = parseInt(posAttr, 10)
-            if (!Number.isFinite(pos)) return false
-            event.preventDefault()
-            const tr = view.state.tr.setSelection(
-              TextSelection.near(view.state.doc.resolve(pos + 1)),
-            )
-            view.dispatch(tr)
-            view.focus()
-            return true
-          },
-        },
-      })
-      const extra = [
-        plugin,
-        wikilinkPlugin,
-        wikilinkClickPlugin,
-        formulaClickPlugin,
-        makeQueryBlockPlugin(queryResultsRef),
-      ]
-      // M1 step 3.8.1.4 — DO NOT install collab plugins at closure
-      // time. The bootstrap mutation needs PM JSON extracted FROM
-      // Crepe, which by definition isn't available until Crepe
-      // mounts (this very closure runs). So bootstrap can never
-      // complete before mount. The late-install useEffect below
-      // installs them after both useCollabSync.plugins resolves
-      // AND useCollabBootstrapMutation.phase === 'ok'. The
-      // closure-time path was a pre-3.8.1.4 optimization that
-      // bypassed the new mutation gate; removing it is the safe
-      // serialization.
-      void collabPluginsRef.current
-      // M1 step 3.8.2.3 — cursor presence plugins (multiplayer only).
-      // Install at closure time even though the bootstrap chain
-      // (3.8.1.x) waits for phase==='ok' before unlocking edits:
-      //   - makeLocalCursorObserverPlugin only reports when
-      //     selection MOVES, which requires user input — gated
-      //     by the read-only state until collab is ready
-      //   - makeRemoteCursorsPlugin's decorations are empty until
-      //     React dispatches applyRemoteCursors with data; safe
-      //     to mount with no cursors
-      // Both rely on the multiplayerDocId being stable for this
-      // mount (the AtomShell key in AtomView re-keys on flag
-      // toggle, so we always mount in the right mode).
-      if (multiplayerDocId) {
-        extra.push(
-          makeRemoteCursorsPlugin(),
-          makeLocalCursorObserverPlugin({
-            onCursorChange: (pos) => cursorReporterRef.current(pos),
-          }),
-          // M1 step 3.9.1 (M3) — agent-suggestion decoration
-          // plugin. Handlers ref is stable for the plugin's
-          // lifetime; React updates it when the mutations
-          // change identity (rare, but defensive).
-          makeSuggestionDecorationsPlugin({
-            handlersRef: suggestionHandlersRef,
-          }),
-        )
-      }
-      // Phase 1b: inline-atom rendering, additive + flag-gated. The
-      // live-total value chip only ANNOTATES a styled {identifier}
-      // token — without that decoration it's an orphan number, so it
-      // rides the SAME kill-switch (never a chip with no token).
-      if (inlineAtomsEnabled()) {
-        extra.push(
-          makeInlineAtomPlugin(),
-          // D4.8h — single unified atom-pill plugin handles all 3
-          // kinds (value / liveTotal / formula). Replaces the
-          // older separate liveTotal + formula plugins.
-          makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
-        )
-      }
-      ctx.update(prosePluginsCtx, (plugins) => [...plugins, ...extra])
-    })
-    // sharing-v1 — view-only shared atom: make Crepe non-editable.
-    // readOnly is fixed for this editor instance (the shared viewer
-    // mounts fresh per atom), so setting it once at creation is
-    // sufficient. The markdownUpdated listener still won't fire from
-    // the user since editing is disabled.
-    // M1 step 3.8.1.8 — codex 9th-pass [P1] #1: Crepe defaults
-    // to editable=true. The async setReadonly effect below
-    // doesn't run until after React commits — that leaves a
-    // one-frame window where the editor is mounted + writable
-    // before the effect locks it down. User input or paste in
-    // that frame is untracked (collab plugins not installed
-    // yet). Fix: set readonly SYNCHRONOUSLY at construction
-    // for multiplayer. The unlock effect handles the
-    // transition back to writable once collab is installed.
-    if (readOnly || multiplayerDocId) crepe.setReadonly(true)
-    crepeRef.current = crepe
-    return crepe
-  })
-
-  useEffect(() => {
+    const stopRefresh = startHocuspocusTokenRefresh(provider)
     return () => {
-      crepeRef.current = null
-    }
-  }, [crepeRef])
-
-  // M1 step 3.8.1.8 — collabInstalled is the AUTHORITATIVE
-  // signal that the collab plugins are actually mounted in
-  // prosePluginsCtx. Codex 9th-pass [P1] #2: gating on
-  // `collabSync.plugins !== null` was a proxy for "plugins
-  // available" but did NOT guarantee they had been folded into
-  // the editor's plugin list. The remote-pull effect could
-  // then call getVersion(view.state) before the collab plugin
-  // existed → throws (prosemirror-collab's getVersion assumes
-  // the plugin is installed). Same risk for the setReadonly
-  // unlock: editor becomes writable before edits would be
-  // tracked.
-  //
-  // M1 step 3.8.1.9 — codex 10th-pass [P2] #1: track the docId
-  // installation belongs to, not just a boolean. If a parent
-  // ever swaps multiplayerDocId in-place (no re-key) the old
-  // installation would still register as "true" while the new
-  // doc's plugins aren't installed yet. Storing the installed
-  // docId + comparing to current makes the check correct under
-  // that scenario.
-  //
-  // Set inside the late-install effect AFTER ctx.update
-  // succeeds. Reset to null when docId changes / disables.
-  const [collabInstalledFor, setCollabInstalledFor] = useState<
-    string | null
-  >(null)
-  const collabInstalled =
-    !!multiplayerDocId && collabInstalledFor === multiplayerDocId
-
-  // M1 step 3.8.1.7 — codex 8th-pass [P1] #2 GATE.
-  //
-  // Before this gate, the editor was writable from the moment
-  // Crepe mounted. That created a ~500ms window between mount
-  // and bootstrap mutation completing where the user could type;
-  // those edits landed in PM state but weren't tracked by
-  // prosemirror-collab (plugins not installed yet). The first
-  // remote-pull after install would rebase past them — silent
-  // data loss.
-  //
-  // FIX: Crepe is read-only until BOTH bootstrap mutation
-  // returns phase:'ok' AND collab plugins are installed. We
-  // detect "installed" indirectly: when collabSync.plugins is
-  // non-null (useCollabSync is now gated on phase==='ok' too,
-  // so plugins arriving means bootstrap succeeded AND snapshot
-  // was fetched). The readOnly prop (single-user shared-atom
-  // view-only mode) still wins.
-  //
-  // Single-user (multiplayerDocId unset): no gate; Crepe is
-  // writable from mount, same as pre-3.8.1.7.
-  useEffect(() => {
-    const crepe = crepeRef.current
-    if (!crepe) return
-    if (readOnly) {
-      crepe.setReadonly(true)
-      return
-    }
-    if (!multiplayerDocId) {
-      crepe.setReadonly(false)
-      return
-    }
-    // Multiplayer: writable only after bootstrap + plugins
-    // ACTUALLY installed. 3.8.1.8: gate on collabInstalled
-    // (set true by the late-install effect after ctx.update
-    // succeeds), not on collabSync.plugins !== null which is
-    // a weaker signal that only means "plugins available".
-    const collabReady = bootstrapState.phase === 'ok' && collabInstalled
-    crepe.setReadonly(!collabReady)
-  }, [readOnly, multiplayerDocId, bootstrapState.phase, collabInstalled])
-
-  // M1 step 3 sub-commit 3.2 — populate the global schema cache
-  // from the first mounted Crepe. Runs on every mount; idempotent
-  // (only the first call does work). Subsequent useCollabSync
-  // calls read the cached schema synchronously to deserialize a
-  // server snapshot into a PM Node. Live editors pay zero cost
-  // after the first mount.
-  //
-  // We use useEffect (not the useEditor closure) because
-  // useEditor's closure runs synchronously before Crepe.create()
-  // finishes; the schema isn't available until create()
-  // completes. The effect fires after the render cycle the
-  // useEditor mount triggers, which is after Crepe is ready.
-  useEffect(() => {
-    const crepe = crepeRef.current
-    if (!crepe) return
-    try {
-      captureSchemaFromEditor(crepe.editor)
-    } catch {
-      // captureSchemaFromEditor swallows subscriber errors itself;
-      // a throw here would mean editor.action threw, which only
-      // happens if Crepe isn't actually mounted yet. The next
-      // render's effect retries; eventually we get the schema.
-    }
-  })
-
-  // M1 step 3.8.1.4 — capture PM JSON from the freshly-mounted
-  // Crepe so the bootstrap mutation has something to send. Crepe
-  // parses `defaultValue` (markdown) into a PM doc during create();
-  // we extract via editorViewCtx and stringify.
-  //
-  // Gated by multiplayerDocId so single-user mounts pay zero cost
-  // (no extraction, no JSON serialization). The state setter is
-  // idempotent — re-extracting the same JSON sets the same string,
-  // and React bails out (Object.is on strings). useEffect with no
-  // dep array runs on every render but the body short-circuits
-  // once pmJsonStr is populated.
-  useEffect(() => {
-    if (!multiplayerDocId) return
-    if (pmJsonStr !== null) return
-    const crepe = crepeRef.current
-    if (!crepe) return
-    try {
-      crepe.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        if (!view) return
-        const json = view.state.doc.toJSON()
-        // Stringify here so the hook's idempotency key (which
-        // compares by reference for objects) gets a stable string.
-        setPmJsonStr(JSON.stringify(json))
-      })
-    } catch {
-      // editor.action throws if Crepe hasn't finished create() yet.
-      // Next render's effect retries; this is the same dance
-      // captureSchemaFromEditor does above.
-    }
-  })
-
-  // M1 step 2 — late install of collab plugins. If useCollabSync's
-  // bootstrap resolves AFTER the editor mounts, the plugins
-  // weren't in extra at mount time; fold them in now via the same
-  // prosePluginsCtx update path the inline-atom + wikilink
-  // plugins use at boot. Idempotent because Milkdown's plugin
-  // matching is by instance and we only ever pass the same array
-  // (collab-sync's pluginsRef stays stable per docId).
-  //
-  // M1 step 3.8.1.4 — ALSO gate on bootstrap mutation phase==='ok'.
-  // Installing collab plugins before the mutation creates the
-  // collabDocs row would let submitSteps write deltas the
-  // projection writer can't bind to (no baseline). The result:
-  // server steps accumulate; atoms.body never updates; the user
-  // thinks they're collaborating but they're silently desynced.
-  // Gate prevents that.
-  //
-  // M1 step 3.8.1.8 — sets collabInstalled=true on success.
-  // Resets to false when docId changes.
-  useEffect(() => {
-    if (!multiplayerDocId) {
-      setCollabInstalledFor(null)
-      return
-    }
-    // 3.8.1.9: doc switched in-place without re-key. Clear the
-    // stale installation marker so the new doc gets its own
-    // install pass.
-    if (collabInstalledFor !== null && collabInstalledFor !== multiplayerDocId) {
-      setCollabInstalledFor(null)
-      return
-    }
-    if (!collabSync.plugins) return
-    if (bootstrapState.phase !== 'ok') return
-    if (!collabSync.bootstrap.ready) return
-    const crepe = crepeRef.current
-    if (!crepe) return
-    let installed = false
-    crepe.editor.action((ctx) => {
-      // M1 step 3.9.9 — codex 19th-pass holistic [P1]: install
-      // server snapshot doc BEFORE collab plugins. Without
-      // this, Crepe's mount-time defaultValue (markdown body)
-      // wins and the editor renders stale content while the
-      // collab plugin starts at the LATEST snapshot version.
-      // Tab B opens during Tab A's active editing → Tab B
-      // shows pre-edit content, submits its own edits against
-      // the latest version → divergence/corruption.
-      //
-      // Order matters: do this BEFORE installing collab plugins
-      // so the replace transaction doesn't generate steps the
-      // plugin would broadcast as user edits. addToHistory:
-      // false keeps the replace out of undo. We also dispatch
-      // BEFORE setCollabInstalledFor so setReadonly(false)
-      // hasn't fired yet — user can't have typed during the
-      // replace.
-      const initial = collabSync.bootstrap.initialDoc
-      if (initial !== null) {
-        const view = ctx.get(editorViewCtx)
-        if (view) {
-          // Cheap "are we already in sync?" check — JSON
-          // stringify each doc + compare. The serialize is
-          // bounded by doc size (typically <100KB). Avoids
-          // dispatching a no-op transaction that PM still
-          // costs to apply.
-          const currentJson = JSON.stringify(view.state.doc.toJSON())
-          const snapshotJson = JSON.stringify(initial.toJSON())
-          if (currentJson !== snapshotJson) {
-            // 3.9.12 — suppress the markdownUpdated that
-            // this dispatch will fire. Without this, Crepe's
-            // listener calls onChange → parent queues an
-            // autosave → Tab B writes the server snapshot
-            // back to atoms.body as a user-attributed edit.
-            installingSnapshotRef.current = true
-            const tr = view.state.tr.replaceWith(
-              0,
-              view.state.doc.content.size,
-              initial.content,
-            )
-            tr.setMeta('addToHistory', false)
-            view.dispatch(tr)
-            // 3.9.13 — codex 21st-pass [P2]: fallback clear.
-            // If Crepe doesn't fire markdownUpdated for this
-            // dispatch (e.g. PM doc differs but serializes
-            // to same markdown), the ref would stay set and
-            // swallow the next real edit. Microtask defer is
-            // after Milkdown's synchronous listener firing
-            // path, so this only clears if the listener
-            // didn't.
-            queueMicrotask(() => {
-              installingSnapshotRef.current = false
-            })
-          }
-        }
-      }
-      ctx.update(prosePluginsCtx, (current) => {
-        // Skip if already in (handles the closure-time install
-        // path; idempotent on rerender).
-        const setHas = new Set(current)
-        const toAdd = collabSync.plugins!.filter((p) => !setHas.has(p))
-        if (toAdd.length === 0) {
-          // Plugins were already installed (idempotent re-run).
-          installed = true
-          return current
-        }
-        installed = true
-        return [...current, ...toAdd]
-      })
-    })
-    if (installed) setCollabInstalledFor(multiplayerDocId)
-    // No cleanup: collab plugins live for the editor's lifetime.
-    // Switching docs unmounts the whole CrepeEditor (parent
-    // re-keys on path change).
-  }, [
-    multiplayerDocId,
-    collabSync.plugins,
-    collabSync.bootstrap.ready,
-    collabSync.bootstrap.initialDoc,
-    bootstrapState.phase,
-    collabInstalledFor,
-  ])
-
-  // M1 step 2 — remote-pull loop. Convex's useQuery on
-  // latestVersion is the network heartbeat: when another tab/peer
-  // submits steps, the server version bumps, our component re-
-  // renders, this effect runs. We compare against the editor's
-  // local version (read from the collab plugin via getVersion)
-  // and fetch + apply any missing steps via receiveTransaction.
-  //
-  // ORDER MATTERS: the fetch is deferred to a microtask so we
-  // never dispatch into the editor inside a render. ProseMirror
-  // disallows reentrant dispatches; a sync apply during render
-  // would corrupt state.
-  const convex = useConvex()
-  useEffect(() => {
-    if (!multiplayerDocId) return
-    // M1 step 3.8.1.8 — codex 9th-pass [P1] #2 GATE.
-    // getVersion(view.state) throws if the prosemirror-collab
-    // plugin isn't installed. The remote-pull effect fires
-    // when remoteVersion bumps; if bootstrap-mutation just
-    // wrote snapshot v=1, remoteVersion fires to 1 BEFORE
-    // the late-install effect finishes installing plugins.
-    // Calling getVersion in that window crashes the effect.
-    // Gate on the same collabInstalled signal the unlock
-    // effect uses.
-    if (!collabInstalled) return
-    if (remoteVersion === undefined) return
-    const crepe = crepeRef.current
-    if (!crepe) return
-    let cancelled = false
-    void (async () => {
-      // Read the local version from the collab plugin state
-      // (inside an action so we get the live EditorView ref).
-      let localVersion = -1
-      let view: import('@milkdown/kit/prose/view').EditorView | null = null
-      crepe.editor.action((ctx) => {
-        view = ctx.get(editorViewCtx)
-        localVersion = getVersion(view.state)
-      })
-      if (cancelled || !view || localVersion === -1) return
-      if (remoteVersion <= localVersion) return
-      // Behind — fetch the gap.
-      try {
-        const result = await convex.query(api.prosemirror.getSteps, {
-          id: multiplayerDocId,
-          version: localVersion,
-        })
-        if (cancelled) return
-        if (result.steps.length === 0) return
-        applyRemoteSteps({
-          view,
-          rawSteps: result.steps,
-          clientIds: result.clientIds,
-        })
-      } catch {
-        // Auth revocation or transient outage: leave the editor
-        // alone. The next bump (from the still-subscribed
-        // useQuery) will retry. User keeps editing locally; any
-        // pending local steps live in the collab plugin state
-        // and will eventually rebase against server.
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [multiplayerDocId, remoteVersion, convex, collabInstalled])
-
-  // M1 step 3.8.2.1 — PRESENCE HEARTBEAT.
-  //
-  // Each tab pings recordCollabPresence on mount + every 30s.
-  // The server table (collabSessions, sub-3.3) is the source
-  // of truth for the file-tree "Alex is editing" indicator
-  // (M1+M2 acceptance criterion #2) AND for the idle-flush
-  // path (sub-3.6.5 BLOCKER #2 fires _finalProjectIdleDoc
-  // when a doc's session count drops to zero).
-  //
-  // Cadence: 30s heartbeat + 90s server-side expiry = 3x
-  // margin for network jitter. Matches the constants in
-  // collabPresence.ts.
-  //
-  // Auth: server-side P1 read gate. The check requires the
-  // mutation to fire after multiplayer flag is on; if a user
-  // has access revoked mid-session, the next heartbeat throws
-  // and the session row stops being refreshed → the cleanup
-  // cron reaps it within 90s. Acceptable; no aggressive
-  // pull-the-plug needed.
-  //
-  // Gated on bootstrap success: presence shouldn't be claimed
-  // for a doc the user can't actually bootstrap (frozen, no
-  // access, network outage on bootstrap mutation, etc.).
-  const recordPresence = useMutation(api.collabPresence.recordCollabPresence)
-  useEffect(() => {
-    if (!multiplayerDocId) return
-    if (bootstrapState.phase !== 'ok') return
-    let cancelled = false
-    const ping = () => {
-      if (cancelled) return
-      void recordPresence({
-        docId: multiplayerDocId,
-        clientId: collabSync.clientId,
-        activeWorkspaceId: activeWorkspaceIdForBootstrap,
-      }).catch(() => {
-        // Auth revoked / transient outage / row race — the
-        // cleanup cron handles the stale-session case. Don't
-        // crash the editor over a missed heartbeat.
-      })
-    }
-    ping()
-    const interval = setInterval(ping, 30_000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
+      stopRefresh()
+      provider.destroy()
     }
   }, [
-    multiplayerDocId,
-    bootstrapState.phase,
-    collabSync.clientId,
-    activeWorkspaceIdForBootstrap,
-    recordPresence,
+    collaborationEnabled,
+    localReady,
+    documentName,
+    hocuspocusUrl,
+    ydoc,
+    collab?.workspaceId,
   ])
 
-  // M1 step 3.8.2.3 — CURSOR PRESENCE WIRING.
-  //
-  // Three pieces glued together:
-  //   (1) cursorReporterRef: a function the local-cursor-observer
-  //       plugin (installed in useEditor closure) calls when
-  //       selection moves. The function is set by the effect
-  //       below so it always closes over the latest props +
-  //       mutation handle. Plugin gets a stable ref; React
-  //       freely re-renders without re-creating the plugin.
-  //
-  //   (2) remoteCursorsQuery: useQuery → server's
-  //       getCursorsForDoc. Returns Array<RemoteCursor> for
-  //       OTHER tabs (server filters out our clientId).
-  //
-  //   (3) dispatch effect: when remoteCursorsQuery changes,
-  //       call applyRemoteCursors(view, cursors) which dispatches
-  //       a meta-transaction so the remote-cursors plugin's state
-  //       updates + decorations re-render.
-  const cursorReporterRef = useRef<(pos: number | null) => void>(() => {})
-  useEffect(() => {
-    cursorReporterRef.current = (pos: number | null) => {
-      if (!multiplayerDocId) return
-      if (bootstrapState.phase !== 'ok') return
-      void recordPresence({
-        docId: multiplayerDocId,
-        clientId: collabSync.clientId,
-        activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        cursorPos: pos,
-      }).catch(() => {
-        // Same swallow-and-rely-on-cron rationale as the
-        // heartbeat: one missed cursor update is harmless.
-      })
-    }
-  }, [
-    multiplayerDocId,
-    bootstrapState.phase,
-    collabSync.clientId,
-    activeWorkspaceIdForBootstrap,
-    recordPresence,
-  ])
-
-  const remoteCursors = useQuery(
-    api.collabPresence.getCursorsForDoc,
-    multiplayerDocId
-      ? {
-          docId: multiplayerDocId,
-          excludeClientId: collabSync.clientId,
-          activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        }
-      : 'skip',
-  )
-
-  useEffect(() => {
-    if (!multiplayerDocId) return
-    if (!collabInstalled) return
-    if (!remoteCursors) return
-    const crepe = crepeRef.current
-    if (!crepe) return
-    try {
-      crepe.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        if (!view) return
-        applyRemoteCursors(view, remoteCursors)
-      })
-    } catch {
-      // editor.action throws if Crepe mid-mount; next render's
-      // effect retries.
-    }
-  }, [multiplayerDocId, collabInstalled, remoteCursors])
-
-  // M1 step 3.9.1 (M3) — agent suggestion bubble wiring.
-  //
-  // Two parts symmetric to cursor presence:
-  //
-  //   (1) suggestionHandlersRef: stable ref the decoration
-  //       plugin reads when the user clicks Accept/Reject in
-  //       the bubble DOM. React updates the ref via effect to
-  //       always close over the latest mutations + active
-  //       workspace.
-  //
-  //   (2) suggestions useQuery → applySuggestions dispatch:
-  //       editor's plugin state stays in sync with the
-  //       atomSuggestions sidecar table. Triggers re-decoration
-  //       on every change (new suggestion arrives; user on
-  //       another tab accepts; fade-out window expires).
-  const acceptSuggestionMut = useMutation(api.atomSuggestions.acceptSuggestion)
-  const rejectSuggestionMut = useMutation(api.atomSuggestions.rejectSuggestion)
-  const suggestionHandlersRef = useRef<SuggestionHandlers>({
-    onAccept: () => {},
-    onReject: () => {},
-  })
-  useEffect(() => {
-    suggestionHandlersRef.current = {
-      onAccept: (id: string) => {
-        // M1 step 3.9.10 — ultrathink P1 #2 CLIENT GATE.
-        // Accepting while the user has unsynced local edits
-        // creates a freeze: the body changes (accept) but PM
-        // still has the user's pending edits at the old base.
-        // Next snapshot's projection sees PM ≠ body ≠ baseline
-        // → case A FREEZE. Block accept until pending steps
-        // submit. The 5s snapshot debounce + projection cycle
-        // typically clears this in <10s; the user can retry.
-        const crepe = crepeRef.current
-        if (crepe) {
-          try {
-            let hasPending = false
-            crepe.editor.action((ctx) => {
-              const view = ctx.get(editorViewCtx)
-              if (!view) return
-              const pending = sendableSteps(view.state)
-              if (pending && pending.steps.length > 0) hasPending = true
-            })
-            if (hasPending) {
-              if (typeof window !== 'undefined') {
-                // Lightweight inline notice — no toast infra
-                // in this codebase yet. Future improvement.
-                window.alert(
-                  'Save your edits first (they sync automatically in a few seconds), then click Accept again.',
+  const dohcPlugins = useMemo(
+    () =>
+      Extension.create({
+        name: 'dohcDecorations',
+        addProseMirrorPlugins() {
+          const wikilinkPlugin = makeWikilinkPlugin(
+            () => knownFilesRef.current,
+            (s) => setAcStateRef.current(s),
+          )
+          const wikilinkClickPlugin = new Plugin({
+            key: new PluginKey('dohc-wikilink-click'),
+            props: {
+              handleClick(_view, _pos, event) {
+                const t = event.target as HTMLElement | null
+                const el = t?.closest(
+                  '[data-wikilink-target], [data-dohc-wikilink]',
+                ) as HTMLElement | null
+                if (!el) return false
+                const target =
+                  el.getAttribute('data-wikilink-target') ??
+                  el.getAttribute('data-dohc-wikilink')
+                if (!target) return false
+                event.preventDefault()
+                onOpenWikilinkRef.current?.(target)
+                return true
+              },
+            },
+          })
+          const atomPillClickPlugin = new Plugin({
+            key: new PluginKey('dohc-atom-pill-click'),
+            props: {
+              handleClick(view, _pos, event) {
+                const t = event.target as HTMLElement | null
+                const el = t?.closest('.dohc-atom-pill') as HTMLElement | null
+                if (!el) return false
+                const posAttr = el.getAttribute('data-atom-pos')
+                if (!posAttr) return false
+                const pos = parseInt(posAttr, 10)
+                if (!Number.isFinite(pos)) return false
+                event.preventDefault()
+                const tr = view.state.tr.setSelection(
+                  TextSelection.near(view.state.doc.resolve(pos + 1)),
                 )
-              }
-              return
-            }
-          } catch {
-            // Editor mid-mount; let the mutation proceed
-            // (the server-side gates will catch any real issue).
+                view.dispatch(tr)
+                view.focus()
+                return true
+              },
+            },
+          })
+          const extra = [
+            makeAsciiBlockPlugin(onAsciiClickRef),
+            wikilinkPlugin,
+            wikilinkClickPlugin,
+            atomPillClickPlugin,
+            makeQueryBlockPlugin(queryResultsRef),
+          ]
+          if (inlineAtomsEnabled()) {
+            extra.push(
+              makeInlineAtomPlugin(),
+              makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
+            )
           }
-        }
-        void acceptSuggestionMut({
-          suggestionId: id as Id<'atomSuggestions'>,
-          activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        })
-          .then((result) => {
-            // 3.9.15 — server returns ok:false for validation
-            // failures (CAS drift / OOB / missing witness).
-            // The row is patched to 'rejected' (now sticks
-            // because we return instead of throw), so the
-            // bubble updates via listPending reactivity. We
-            // additionally surface the message so the user
-            // understands why their click didn't apply.
-            if (result && !result.ok && typeof window !== 'undefined') {
-              window.alert(result.message)
-            }
-          })
-          .catch(() => {
-            // Auth/setup errors still throw; v1 swallows
-            // silently. Future toast surface.
-          })
-      },
-      onReject: (id: string) => {
-        void rejectSuggestionMut({
-          suggestionId: id as Id<'atomSuggestions'>,
-          activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        }).catch(() => {})
-      },
-    }
-  }, [acceptSuggestionMut, rejectSuggestionMut, activeWorkspaceIdForBootstrap])
+          return extra
+        },
+      }),
+    [
+      fileIdMapRef,
+      formulaRef,
+      knownFilesRef,
+      liveTotalsRef,
+      onAsciiClickRef,
+      onOpenWikilinkRef,
+      queryResultsRef,
+    ],
+  )
 
-  // multiplayerDocId carries the atom id we need for listPending.
-  // Parse it (same shape as the server's atomDocId / parseDocId):
-  // 'atom:<workspaceId>:<atomDbId>' → take the suffix after the
-  // second colon. Defensive against shape drift; null when
-  // multiplayer is off OR the docId is malformed (shouldn't
-  // happen but cheap to guard).
-  const suggestionAtomId = useMemo<Id<'atoms'> | null>(() => {
-    if (!multiplayerDocId) return null
-    const parts = multiplayerDocId.split(':')
-    if (parts.length !== 3 || parts[0] !== 'atom') return null
-    return parts[2] as Id<'atoms'>
-  }, [multiplayerDocId])
+  const extensions = useMemo(
+    () => [
+      ...dohcMarkdownExtensions,
+      StarterKit.configure({ undoRedo: collaborationEnabled ? false : undefined }),
+      TableKit,
+      Markdown.configure({ indentation: { style: 'space', size: 2 } }),
+      ...(collaborationEnabled
+        ? [Collaboration.configure({ document: ydoc, field: 'body' })]
+        : []),
+      dohcPlugins,
+    ],
+    [collaborationEnabled, dohcPlugins, ydoc],
+  )
 
-  const suggestions = useQuery(
-    api.atomSuggestions.listPending,
-    suggestionAtomId
-      ? {
-          atomId: suggestionAtomId,
-          activeWorkspaceId: activeWorkspaceIdForBootstrap,
-        }
-      : 'skip',
+  const editor = useEditor(
+    {
+      extensions,
+      content: collaborationEnabled ? undefined : defaultValue,
+      contentType: collaborationEnabled ? undefined : 'markdown',
+      editable: canEditDohcEditor({
+        readOnly,
+        collaborationEnabled,
+        collaborationPending,
+        localReady,
+        syncError,
+      }),
+      immediatelyRender: false,
+      onUpdate({ editor }) {
+        const markdown = editor.getMarkdown()
+        if (markdown === lastMarkdownRef.current) return
+        lastMarkdownRef.current = markdown
+        onChangeRef.current(markdown)
+      },
+    },
+    [extensions, collaborationEnabled, documentName],
   )
 
   useEffect(() => {
-    if (!multiplayerDocId) return
-    if (!collabInstalled) return
-    if (!suggestions) return
-    const crepe = crepeRef.current
-    if (!crepe) return
-    try {
-      crepe.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        if (!view) return
-        applySuggestions(view, suggestions)
-      })
-    } catch {
-      // mid-mount; retry next render
+    editorRef.current = editor
+    return () => {
+      if (editorRef.current === editor) editorRef.current = null
     }
-  }, [multiplayerDocId, collabInstalled, suggestions])
+  }, [editor, editorRef])
+
+  const editable = canEditDohcEditor({
+    readOnly,
+    collaborationEnabled,
+    collaborationPending,
+    localReady,
+    syncError,
+  })
+  useEffect(() => {
+    editor?.setEditable(editable)
+  }, [editor, editable])
 
   useEffect(() => {
-    if (!autoFocus) return
+    if (!autoFocus || !editor) return
     const id = requestAnimationFrame(() => {
-      const editor = get()
-      if (!editor) return
-      const root = (editor as unknown as { root?: HTMLElement }).root
-      const focusable = root?.querySelector<HTMLElement>('.ProseMirror')
-      focusable?.focus()
+      editor.commands.focus('end')
     })
     return () => cancelAnimationFrame(id)
-  }, [autoFocus, get])
+  }, [autoFocus, editor])
 
   // Resolved live-totals changed (reactive query) → ask the plugin to
   // rebuild its value widgets from the fresh ref via a no-op meta
   // transaction. Best-effort: harmless if the editor isn't ready.
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(liveTotalKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(liveTotalKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [liveTotalsTick, crepeRef])
+  }, [liveTotalsTick, editor])
 
   // Parallel refresh for resolved formulas (same no-op meta-tr
   // mechanism; distinct key so it never disturbs the live-total set).
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(formulaKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(formulaKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [formulaTick, crepeRef])
+  }, [formulaTick, editor])
 
   // Parallel refresh for resolved query-block results (§5.2 4B).
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(queryBlockKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(queryBlockKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [queryTick, crepeRef])
+  }, [queryTick, editor])
 
-  // D4.8b — viewRef gives the picker access to coordsAtPos +
-  // dispatch. useEditor().get() returns the editor instance; we
-  // hop through to the underlying ProseMirror view via the milkdown
-  // ctx. Computed lazily on each render so it stays current.
-  const pickerView = (() => {
-    try {
-      const editor = get()
-      if (!editor) return null
-      let view: unknown = null
-      editor.action((ctx) => {
-        view = ctx.get(editorViewCtx)
-      })
-      return view as Parameters<typeof WikilinkPicker>[0]['view']
-    } catch {
-      return null
-    }
-  })()
+  // D4.8b — viewRef gives the picker access to coordsAtPos + dispatch.
+  const pickerView = editor
+    ? (editor.view as Parameters<typeof WikilinkPicker>[0]['view'])
+    : null
   const pickerState: Parameters<typeof WikilinkPicker>[0]['state'] =
     acState.active
       ? { open: true, from: acState.from, query: acState.query }
       : { open: false }
-
-  // M1 step 3.8.1.4 — BOOTSTRAP ERROR OVERLAY. When the bootstrap
-  // mutation fails for a non-frozen reason, the editor can't
-  // safely sync — collab plugins were never installed (gated
-  // above), so any keystroke would land in PM state with no
-  // delta-submission machinery wired up. The user would type into
-  // a doc that silently isn't collaborating; their work would be
-  // lost on close.
-  //
-  // The right UX: tell them, then give them a way out. Most
-  // failures (body-changed especially) recover automatically after
-  // a reload — the new mount sees the fresh body, Crepe re-parses,
-  // bootstrap fires with the new hash. Auto-reload after 4s so
-  // they're not stuck; immediate reload button for impatience.
-  //
-  // 'frozen' is NOT handled here — the outer AtomEditor's frozen
-  // banner (driven by useCollabDocState) catches up within one
-  // Convex tick. Returning null on frozen creates a brief blank
-  // window (≈100ms) before the outer banner mounts; acceptable.
-  if (multiplayerDocId && bootstrapState.phase === 'error') {
-    return (
-      <BootstrapErrorOverlay
-        reason={bootstrapState.reason}
-        message={bootstrapState.message}
-        docId={multiplayerDocId}
-      />
-    )
-  }
-  if (multiplayerDocId && bootstrapState.phase === 'frozen') {
-    // Frozen banner lives at the outer AtomEditor level. Render
-    // nothing here so the editor doesn't briefly appear before
-    // the outer overlay catches up via useCollabDocState.
-    return null
-  }
-
   return (
-    <>
-      <Milkdown />
+    <div className="dohc-tiptap-editor">
+      {collaborationRequested &&
+        (collaborationPending ||
+          !collabCapabilities?.atomBootstrap ||
+          (collaborationEnabled && (!localReady || !remoteReady || syncError))) && (
+        <div className="dohc-editor-sync-state" role="status">
+          {syncError || collabCapabilities?.atomBootstrap === false
+            ? 'Sync unavailable'
+            : 'Syncing…'}
+        </div>
+      )}
+      <EditorContent editor={editor} />
       <WikilinkPicker
         state={pickerState}
         files={knownFilesArray}
         view={pickerView}
         onDismiss={() => setAcState({ active: false })}
       />
-    </>
-  )
-}
-
-// M1 step 3.8.1.4 — bootstrap-mutation failure overlay. Covers
-// every non-frozen error reason from bootstrapSnapshotFromAtomBody:
-// body-changed, invalid-pm-json, atom-not-found, pm-body-mismatch,
-// and the catch-all 'network'.
-//
-// 3.9.22 — codex consult fix: stop infinite auto-reload loops.
-// Pre-3.9.22 ALL reasons auto-reloaded after 4s; for deterministic
-// failures (pm-body-mismatch, invalid-pm-json, atom-not-found)
-// reload doesn't help → infinite loop. New policy:
-//
-//   body-changed → auto-reload ONCE (race may have resolved); a
-//     sessionStorage one-shot guard prevents the second attempt
-//     for the same docId. If it still fires after reload, manual.
-//   network → auto-reload ONCE (transient outage may have cleared).
-//   pm-body-mismatch / invalid-pm-json / atom-not-found → manual
-//     only. These are deterministic; another reload won't help.
-function BootstrapErrorOverlay({
-  reason,
-  message,
-  docId,
-}: {
-  reason:
-    | 'body-changed'
-    | 'invalid-pm-json'
-    | 'atom-not-found'
-    | 'pm-body-mismatch'
-    | 'network'
-  message?: string
-  docId: string
-}) {
-  const canAutoReload = reason === 'body-changed' || reason === 'network'
-  useEffect(() => {
-    if (!canAutoReload) return
-    if (typeof window === 'undefined') return
-    // One-shot per (docId, reason). Prevents the body-changed
-    // loop the user reported in 3.9.22's debug.
-    const key = `dohc:bootstrap-error-reload:${docId}:${reason}`
-    if (window.sessionStorage.getItem(key) === '1') return
-    const t = setTimeout(() => {
-      window.sessionStorage.setItem(key, '1')
-      window.location.reload()
-    }, 4000)
-    return () => clearTimeout(t)
-  }, [canAutoReload, docId, reason])
-  const title = (() => {
-    switch (reason) {
-      case 'body-changed':
-        return 'The document changed while you were opening it.'
-      case 'atom-not-found':
-        return 'This document is no longer available.'
-      case 'pm-body-mismatch':
-      case 'invalid-pm-json':
-        return 'Editor state could not be synced.'
-      case 'network':
-      default:
-        return "Couldn't connect to the collaboration server."
-    }
-  })()
-  return (
-    <div
-      className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center"
-      data-testid="collab-bootstrap-error"
-      role="alert"
-    >
-      <div className="text-[15px] font-medium text-ink-strong">{title}</div>
-      <div className="text-[13px] text-ink-dim">
-        {canAutoReload
-          ? 'Reloading to recover. If this keeps happening after the reload, click Reload now manually.'
-          : 'Click Reload to try again. (Auto-retry disabled because reloading wouldn’t change the outcome.)'}
-      </div>
-      {message ? (
-        <div className="max-w-md text-[11px] text-ink-dim opacity-70">
-          {message}
-        </div>
-      ) : null}
-      <button
-        type="button"
-        onClick={() => window.location.reload()}
-        className="mt-2 rounded-md bg-ink-strong px-3.5 py-1.5 text-[13px] font-medium text-surface hover:opacity-90"
-      >
-        Reload now
-      </button>
     </div>
   )
 }
@@ -1796,31 +985,20 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     onOpenWikilink,
     shareId,
     readOnly,
-    multiplayerDocId,
-    bootstrapBody,
+    collab,
   },
   ref,
 ) {
+  const getCollabToken = useAction(api.auth.getCollabToken)
+  const fetchCollabToken = useMemo(
+    () => async (workspaceId: string) =>
+      await getCollabToken({ workspaceId }),
+    [getCollabToken],
+  )
   const onChangeRef = useRef(onChange)
   useEffect(() => {
     onChangeRef.current = onChange
   }, [onChange])
-
-  // M1 step 3.8.1.1 — subscribe to collab-doc state so the frozen
-  // signal (3.7 case A; both sides changed unilaterally) can
-  // surface to the user. The query is `skip`-gated by docId
-  // presence, so single-user mounts (multiplayerDocId === undefined)
-  // genuinely don't subscribe — zero Convex cost, zero re-render.
-  //
-  // The needsRebootstrap signal (3.7 case B; auto-rebuild path)
-  // is also exposed via this hook but consumed in sub-commit
-  // 3.8.1.2 (which adds the actual tear-down + re-bootstrap loop).
-  // Today's commit only handles frozen + the render shape.
-  const activeWorkspaceIdForCollab = useActiveWorkspaceId()
-  const collabDocState = useCollabDocState(
-    multiplayerDocId ?? null,
-    activeWorkspaceIdForCollab,
-  )
 
   // Stash the ASCII-click handler in a ref so the ProseMirror plugin (built
   // once at editor creation) always sees the latest callback without
@@ -1865,7 +1043,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     onOpenWikilinkRef.current = onOpenWikilink ?? null
   }, [onOpenWikilink])
 
-  const crepeRef = useRef<Crepe | null>(null)
+  const editorRef = useRef<Editor | null>(null)
 
   // The doc's {identifier} live-totals → one reactive batched query
   // so the editor renders their computed values inline (the doc is
@@ -1902,7 +1080,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // == the rendered set, exactly mirroring the live-total wiring.
   const formulaSrcs = useMemo(() => {
     // key by the parser-CANONICAL `.src` (already unescaped) — the
-    // SAME key the widget derives from the doc span, so Crepe's
+    // SAME key the widget derives from the doc span, so Tiptap's
     // markdown escaping of `_`/`*` can never desync them (BLOCKER).
     const ss = parseInlineAtomsFromMarkdown(value)
       .filter((a) => a.kind === 'formula')
@@ -1912,15 +1090,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // sharing-v1 — own-workspace resolution for my own atoms; SCOPED
   // resolution (evalFormulasShared) for a shared atom. Exactly one is
   // ever active; the other is 'skip'.
-  // org-plan §5 — non-defaultable: must pass activeWorkspaceId so the
-  // formula resolves against the workspace the user is *viewing*, not
-  // their personal default.
-  const activeWorkspaceId = useActiveWorkspaceId()
   const resolvedFormulasOwn = useQuery(
     api.formulaEval.evalFormulas,
-    !shareId && formulaSrcs.length
-      ? { srcs: formulaSrcs, activeWorkspaceId }
-      : 'skip',
+    !shareId && formulaSrcs.length ? { srcs: formulaSrcs } : 'skip',
   )
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
@@ -1956,11 +1128,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     // sharing-v1 — query blocks read the own-workspace vault; disabled
     // in a shared atom (v1) — they'd otherwise resolve in the viewer's
     // workspace, not the owner's, and scoping them is a later task.
-    // org-plan §5 non-defaultable: activeWorkspaceId routes the query
-    // through the workspace the user is viewing.
-    !shareId && querySrcs.length
-      ? { srcs: querySrcs, activeWorkspaceId }
-      : 'skip',
+    !shareId && querySrcs.length ? { srcs: querySrcs } : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
   const [queryTick, setQueryTick] = useState(0)
@@ -1975,235 +1143,70 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     ref,
     () => ({
       insertCodeBlock(language: string, content: string) {
-        const crepe = crepeRef.current
-        if (!crepe) return
-        // M1 step 3.8.1.8 — codex 9th-pass [P2] #5: imperative
-        // dispatch bypasses ProseMirror's editable=false DOM
-        // gate. If a parent calls this during the multiplayer
-        // bootstrap read-only window, the edit lands untracked.
-        // Crepe exposes `readonly` as a getter; honor it.
-        if (crepe.readonly) return
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx)
-          const { state } = view
-          const codeBlockType = state.schema.nodes.code_block
-          if (!codeBlockType) return
-          const textNode = content ? state.schema.text(content) : null
-          const node = codeBlockType.create(
-            { language },
-            textNode ? [textNode] : undefined,
-          )
-          const tr = state.tr.replaceSelectionWith(node).scrollIntoView()
-          view.dispatch(tr)
-          view.focus()
-        })
+        const editor = editorRef.current
+        if (!editor) return
+        const view = editor.view
+        const { state } = view
+        const codeBlockType =
+          state.schema.nodes.codeBlock ?? state.schema.nodes.code_block
+        if (!codeBlockType) return
+        const textNode = content ? state.schema.text(content) : null
+        const node = codeBlockType.create(
+          { language },
+          textNode ? [textNode] : undefined,
+        )
+        const tr = state.tr.replaceSelectionWith(node).scrollIntoView()
+        view.dispatch(tr)
+        view.focus()
       },
       replaceCodeBlockAt(pos: number, content: string, language?: string) {
-        const crepe = crepeRef.current
-        if (!crepe) return
-        // 3.8.1.8 — same gate as insertCodeBlock above.
-        if (crepe.readonly) return
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx)
-          const { state } = view
-          const node = state.doc.nodeAt(pos)
-          if (!node || node.type.name !== 'code_block') return
-          const codeBlockType = state.schema.nodes.code_block
-          const textNode = content ? state.schema.text(content) : null
-          const next = codeBlockType.create(
-            language ? { ...node.attrs, language } : node.attrs,
-            textNode ? [textNode] : undefined,
-          )
-          const tr = state.tr
-            .replaceWith(pos, pos + node.nodeSize, next)
-            .scrollIntoView()
-          view.dispatch(tr)
-        })
+        const editor = editorRef.current
+        if (!editor) return
+        const view = editor.view
+        const { state } = view
+        const node = state.doc.nodeAt(pos)
+        if (
+          !node ||
+          (node.type.name !== 'code_block' && node.type.name !== 'codeBlock')
+        )
+          return
+        const codeBlockType =
+          state.schema.nodes.codeBlock ?? state.schema.nodes.code_block
+        if (!codeBlockType) return
+        const textNode = content ? state.schema.text(content) : null
+        const next = codeBlockType.create(
+          language ? { ...node.attrs, language } : node.attrs,
+          textNode ? [textNode] : undefined,
+        )
+        const tr = state.tr
+          .replaceWith(pos, pos + node.nodeSize, next)
+          .scrollIntoView()
+        view.dispatch(tr)
       },
     }),
     [],
   )
 
-  // M1 step 3.8.1.2 — REBOOTSTRAP AUTO-RELOAD. When the conflict
-  // resolver (3.7 case B) flags needsRebootstrap=true (OOB write
-  // while PM had no unprojected edits), the user hasn't lost
-  // any unsubmitted work — PM is at the same state the server
-  // last projected. The cleanest UX: show a brief "Updating..."
-  // overlay + auto-reload after 1.5s. Reload triggers a fresh
-  // AtomEditor mount → fresh useCollabSync → bootstrap mutation
-  // fires → server's rebootstrap branch (3.8.0) clears the flag
-  // + adopts the new body as baseline.
-  //
-  // Why auto-reload (not manual): needsRebootstrap stays sticky
-  // until bootstrap runs. If the user ignores a manual banner,
-  // the next projection just re-fires the signal. Auto-reload
-  // breaks the loop within bounded latency. The brief warning
-  // exists for context, not for action.
-  //
-  // Gated by multiplayerDocId so single-user mounts never trigger.
-  //
-  // M1 step 3.8.1.3 — frozen DOMINATES needsRebootstrap on the
-  // client too (mirror of 3.9.5 fix #4's server-side invariant).
-  // If both flags are simultaneously true (rare — case B fires,
-  // then a later freeze branch like serialize-failed or
-  // atom-deleted fires before client rebootstraps), the
-  // rebootstrap-induced reload would loop because the next mount's
-  // bootstrap would return reason:'frozen' (not running the
-  // rebootstrap clear), and needsRebootstrap would still be true →
-  // overlay fires again → reload again. The fix: skip the
-  // rebootstrap overlay entirely if frozen is also set. Frozen
-  // banner takes over; user sees the real terminal state.
-  //
-  // M1 step 3.8.1.5 — PENDING-STEPS GATE (codex 7th-pass [P1] #2
-  // CLIENT MIRROR). Server case B can race: needsRebootstrap=true
-  // gets set based on a stale snapshot view of PM. If the user
-  // has unsubmitted local edits (sendableSteps non-empty) or an
-  // in-flight submit, the auto-reload would nuke them. Server-side
-  // 3.8.1.5 defers case B when latestVersion > snapshotVersion;
-  // this client mirror is the second line of defense. If pending
-  // steps exist, don't fire reload. The collab plugin keeps
-  // submitting; once they ack (remoteVersion bumps via
-  // useRemoteVersion below), the effect re-runs with sendableSteps
-  // clear, and the reload proceeds.
-  //
-  // Trade-off: a user typing offline with needsRebootstrap=true
-  // sees the overlay indefinitely (steps never submit, reload
-  // never fires). v1 acceptable; future work adds a "save your
-  // work" escape hatch with copy-to-clipboard.
-  const remoteVersionForReload = useRemoteVersion(multiplayerDocId ?? null)
-  useEffect(() => {
-    if (!multiplayerDocId) return
-    if (!collabDocState || collabDocState === null) return
-    if (!('exists' in collabDocState) || !collabDocState.exists) return
-    if (collabDocState.frozen) return // frozen dominates
-    if (!collabDocState.needsRebootstrap) return
-    // 3.8.1.5 — peek inside the editor's collab plugin state for
-    // pending steps. If Crepe isn't mounted yet, no pending steps
-    // possible — proceed. If editor.action throws (mount-in-flight),
-    // defer to the next render's effect.
-    const crepe = crepeRef.current
-    if (crepe) {
-      try {
-        let pending = false
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx)
-          if (!view) return
-          const sendable = sendableSteps(view.state)
-          if (sendable && sendable.steps.length > 0) pending = true
-        })
-        if (pending) {
-          // Don't auto-reload; the next remoteVersion bump (which
-          // includes the ack of OUR submit) re-runs this effect.
-          return
-        }
-      } catch {
-        // Editor mid-mount; next render's effect retries.
-        return
-      }
-    }
-    // Auto-reload after a brief delay so the overlay text is
-    // visible. window.location.reload() drops us out of this
-    // React tree entirely.
-    const t = setTimeout(() => {
-      if (typeof window !== 'undefined') window.location.reload()
-    }, 1500)
-    return () => clearTimeout(t)
-  }, [
-    multiplayerDocId,
-    collabDocState,
-    // 3.8.1.5 — remoteVersion is the heartbeat that lets the
-    // effect re-run after our pending steps ack (server received,
-    // version bumped). Without it, the gate above would stick on
-    // "pending" until something else triggers a re-render.
-    remoteVersionForReload,
-  ])
-
-  if (
-    multiplayerDocId &&
-    collabDocState &&
-    collabDocState !== null &&
-    'exists' in collabDocState &&
-    collabDocState.exists &&
-    !collabDocState.frozen && // 3.8.1.3 — frozen dominates
-    collabDocState.needsRebootstrap
-  ) {
-    return (
-      <div
-        className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center"
-        data-testid="collab-rebootstrap-overlay"
-        role="status"
-        aria-live="polite"
-      >
-        <div className="text-[15px] font-medium text-ink-strong">
-          Updating to latest content…
-        </div>
-        <div className="text-[12px] text-ink-dim">
-          The document was changed elsewhere while you were idle.
-          Reconnecting now.
-        </div>
-      </div>
-    )
-  }
-
-  // M1 step 3.8.1.1 — FROZEN BANNER. When the conflict resolver
-  // (3.7 case A) flags frozen=true, replace the editor with a
-  // reload prompt. User CAN'T continue editing the stale collab
-  // session — must reload to bootstrap fresh. Gated by
-  // multiplayerDocId so single-user editors never see this path.
-  if (
-    multiplayerDocId &&
-    collabDocState &&
-    collabDocState !== null &&
-    'exists' in collabDocState &&
-    collabDocState.exists &&
-    collabDocState.frozen
-  ) {
-    return (
-      <div
-        className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center"
-        data-testid="collab-frozen-banner"
-        role="alert"
-      >
-        <div className="text-[15px] font-medium text-ink-strong">
-          This document was changed outside of your collaborative session.
-        </div>
-        <div className="text-[13px] text-ink-dim">
-          To continue editing, reload to sync with the latest content.
-          Your unsaved changes in this session will be lost.
-        </div>
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          className="mt-2 rounded-md bg-ink-strong px-3.5 py-1.5 text-[13px] font-medium text-surface hover:opacity-90"
-        >
-          Reload
-        </button>
-      </div>
-    )
-  }
-
   return (
-    <MilkdownProvider>
-      <CrepeEditor
-        defaultValue={value}
-        onChangeRef={onChangeRef}
-        autoFocus={!!autoFocus}
-        crepeRef={crepeRef}
-        onAsciiClickRef={onAsciiClickRef}
-        liveTotalsRef={liveTotalsRef}
-        liveTotalsTick={liveTotalsTick}
-        formulaRef={formulaRef}
-        formulaTick={formulaTick}
-        queryResultsRef={queryResultsRef}
-        queryTick={queryTick}
-        multiplayerDocId={multiplayerDocId}
-        bootstrapBody={bootstrapBody}
-        knownFilesRef={knownFilesRef}
-        knownFilesArray={knownFiles ?? []}
-        onOpenWikilinkRef={onOpenWikilinkRef}
-        fileIdMapRef={fileIdMapRef}
-        readOnly={!!readOnly}
-      />
-    </MilkdownProvider>
+    <TiptapAtomEditor
+      defaultValue={value}
+      onChangeRef={onChangeRef}
+      autoFocus={!!autoFocus}
+      editorRef={editorRef}
+      onAsciiClickRef={onAsciiClickRef}
+      liveTotalsRef={liveTotalsRef}
+      liveTotalsTick={liveTotalsTick}
+      formulaRef={formulaRef}
+      formulaTick={formulaTick}
+      queryResultsRef={queryResultsRef}
+      queryTick={queryTick}
+      knownFilesRef={knownFilesRef}
+      knownFilesArray={knownFiles ?? []}
+      onOpenWikilinkRef={onOpenWikilinkRef}
+      fileIdMapRef={fileIdMapRef}
+      collab={collab}
+      fetchCollabToken={fetchCollabToken}
+      readOnly={!!readOnly}
+    />
   )
 })

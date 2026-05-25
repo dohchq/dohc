@@ -965,66 +965,66 @@
   cursor: text;
 }
 
-/* Milkdown editor — strip the default frame chrome so it inherits the
+/* Tiptap editor — strip the default frame chrome so it inherits the
  * doc column (.doc max-width + padding) and matches our font stack. */
-.doc-editing .milkdown {
+.doc-editing .dohc-tiptap-editor {
   background: transparent;
   font-family: var(--font-sans);
   color: var(--ink);
   font-size: 16px;
   line-height: 1.5;
-  /* Crepe applies its own --crepe-font-* vars (Noto Sans / Noto Serif /
+  /* Tiptap applies its own --tiptap-font-* vars (Noto Sans / Noto Serif /
    * Space Mono) inside the editor, which would otherwise override our
    * cascade. Map them to our chosen pair so headings, paragraphs, and
    * code in the markdown match the rest of the app. */
-  --crepe-font-default: var(--font-sans);
-  --crepe-font-title: var(--font-sans);
-  --crepe-font-code: var(--font-mono);
-  /* Crepe's frame theme hardcodes a LIGHT palette on `.milkdown`
+  --tiptap-font-default: var(--font-sans);
+  --tiptap-font-title: var(--font-sans);
+  --tiptap-font-code: var(--font-mono);
+  /* Tiptap's frame theme hardcodes a LIGHT palette on `.tiptap`
    * (surface #f7f7f7, background #fff, …), so code/query blocks and
    * the editor chrome rendered as a glaring white box in dark mode.
-   * Map every Crepe design token to our theme-aware --color-* tokens
+   * Map every Tiptap design token to our theme-aware --color-* tokens
    * (they already flip light/dark) — ONE source, so the whole editor
    * follows the palette in both modes. Neutral mappings (ink/panel/
-   * rule) keep contrast safe; accent only where Crepe means accent. */
-  --crepe-color-background: var(--color-page);
-  --crepe-color-on-background: var(--color-ink);
-  --crepe-color-surface: var(--color-panel);
-  --crepe-color-surface-low: color-mix(
+   * rule) keep contrast safe; accent only where Tiptap means accent. */
+  --tiptap-color-background: var(--color-page);
+  --tiptap-color-on-background: var(--color-ink);
+  --tiptap-color-surface: var(--color-panel);
+  --tiptap-color-surface-low: color-mix(
     in srgb,
     var(--color-ink) 7%,
     var(--color-panel)
   );
-  --crepe-color-on-surface: var(--color-ink);
-  --crepe-color-on-surface-variant: var(--color-ink-dim);
-  --crepe-color-outline: var(--color-rule-strong);
-  --crepe-color-primary: var(--color-ink-strong);
-  --crepe-color-secondary: var(--color-rule);
-  --crepe-color-on-secondary: var(--color-ink);
-  --crepe-color-inverse: var(--color-ink-strong);
-  --crepe-color-on-inverse: var(--color-surface);
-  --crepe-color-inline-code: var(--color-accent);
-  --crepe-color-error: var(--color-danger);
-  --crepe-color-hover: color-mix(
+  --tiptap-color-on-surface: var(--color-ink);
+  --tiptap-color-on-surface-variant: var(--color-ink-dim);
+  --tiptap-color-outline: var(--color-rule-strong);
+  --tiptap-color-primary: var(--color-ink-strong);
+  --tiptap-color-secondary: var(--color-rule);
+  --tiptap-color-on-secondary: var(--color-ink);
+  --tiptap-color-inverse: var(--color-ink-strong);
+  --tiptap-color-on-inverse: var(--color-surface);
+  --tiptap-color-inline-code: var(--color-accent);
+  --tiptap-color-error: var(--color-danger);
+  --tiptap-color-hover: color-mix(
     in srgb,
     var(--color-ink) 8%,
     transparent
   );
-  --crepe-color-selected: color-mix(
+  --tiptap-color-selected: color-mix(
     in srgb,
     var(--color-accent) 18%,
     transparent
   );
-  --crepe-color-inline-area: var(--color-rule);
+  --tiptap-color-inline-area: var(--color-rule);
 }
 
-/* Editor block rhythm — Notion/AppFlowy-style. Crepe ships much larger
+/* Editor block rhythm — Notion/AppFlowy-style. Tiptap ships much larger
  * defaults (h1 = 42px / mt 32px, etc.) so we override every heading,
  * paragraph, list, and blockquote rule with a 2-class selector to win
  * on specificity. Padding is the spacing primitive (not margin) so
  * adjacent blocks sit ~6px apart and headings can have generous top
  * breathing space while hugging the next block below them. */
-.doc-editing .milkdown h1 {
+.doc-editing .dohc-tiptap-editor h1 {
   font-size: 30px;
   line-height: 1.25;
   font-weight: 700;
@@ -1220,7 +1220,7 @@
 .dohc-source .token.italic {
   font-style: italic;
 }
-.doc-editing .milkdown h2 {
+.doc-editing .dohc-tiptap-editor h2 {
   font-size: 24px;
   line-height: 1.3;
   font-weight: 700;
@@ -1229,7 +1229,7 @@
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h3 {
+.doc-editing .dohc-tiptap-editor h3 {
   font-size: 20px;
   line-height: 1.3;
   font-weight: 600;
@@ -1238,7 +1238,7 @@
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h4 {
+.doc-editing .dohc-tiptap-editor h4 {
   font-size: 17px;
   line-height: 1.35;
   font-weight: 600;
@@ -1246,7 +1246,7 @@
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h5 {
+.doc-editing .dohc-tiptap-editor h5 {
   font-size: 15px;
   line-height: 1.4;
   font-weight: 600;
@@ -1254,7 +1254,7 @@
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h6 {
+.doc-editing .dohc-tiptap-editor h6 {
   font-size: 13px;
   line-height: 1.4;
   font-weight: 600;
@@ -1264,42 +1264,42 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
-.doc-editing .milkdown p {
+.doc-editing .dohc-tiptap-editor p {
   font-size: 16px;
   line-height: 1.5;
   padding: 3px 0;
   margin: 0;
 }
-.doc-editing .milkdown ul,
-.doc-editing .milkdown ol {
+.doc-editing .dohc-tiptap-editor ul,
+.doc-editing .dohc-tiptap-editor ol {
   margin: 0;
   padding: 2px 0;
 }
-.doc-editing .milkdown li {
+.doc-editing .dohc-tiptap-editor li {
   margin: 0;
   padding: 1px 0;
   font-size: 16px;
   line-height: 1.5;
 }
-.doc-editing .milkdown li p {
+.doc-editing .dohc-tiptap-editor li p {
   padding: 0;
 }
-.doc-editing .milkdown blockquote {
+.doc-editing .dohc-tiptap-editor blockquote {
   border-left: 3px solid var(--rule-strong);
   padding: 4px 0 4px 16px;
   margin: 6px 0;
   color: var(--ink-dim);
   font-style: italic;
 }
-.doc-editing .milkdown blockquote p {
+.doc-editing .dohc-tiptap-editor blockquote p {
   padding: 0;
 }
-.doc-editing .milkdown hr {
+.doc-editing .dohc-tiptap-editor hr {
   border: none;
   border-top: 1px solid var(--rule);
   margin: 16px 0;
 }
-.doc-editing .milkdown code {
+.doc-editing .dohc-tiptap-editor code {
   background: var(--bg-panel);
   padding: 1px 5px;
   border-radius: var(--radius-xs);
@@ -1307,40 +1307,77 @@
   font-family: var(--font-mono);
   color: var(--accent);
 }
-/* Crepe's "Please enter..." placeholder uses `color-mix(--crepe-color-on-background, transparent 60%)`
+.doc-editing .dohc-tiptap-editor pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0.7em 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+}
+.doc-editing .dohc-tiptap-editor pre code {
+  background: transparent;
+  border-radius: 0;
+  color: inherit;
+  display: block;
+  font-size: inherit;
+  padding: 0;
+  white-space: pre;
+}
+/* Tiptap's "Please enter..." placeholder uses `color-mix(--tiptap-color-on-background, transparent 60%)`
  * which lands near-black on dark backgrounds and is basically invisible.
  * Force it to our theme's dim ink so it stays readable in both modes. */
-.doc-editing .milkdown .crepe-placeholder::before {
+.doc-editing .dohc-tiptap-editor .tiptap-placeholder::before {
   color: var(--ink-faint) !important;
 }
-.doc-editing .milkdown .ProseMirror {
+.doc-editing .dohc-tiptap-editor .ProseMirror {
   outline: none;
   padding: 0;
   background: transparent;
   font-family: var(--font-sans);
 }
-.doc-editing .milkdown .ProseMirror:focus {
+.doc-editing .dohc-tiptap-editor .ProseMirror:focus {
   outline: none;
 }
+.dohc-editor-sync-state {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+.dohc-editor-sync-state::before {
+  background: currentColor;
+  border-radius: 999px;
+  content: '';
+  height: 6px;
+  opacity: 0.55;
+  width: 6px;
+}
 
-/* Crepe's default list layout pads the marker to a fixed 32px / 24px box
+/* Tiptap's default list layout pads the marker to a fixed 32px / 24px box
  * (height + padding tuned for their default body size). At our 15px /
  * 1.7 line-height the marker box is taller than the content paragraph
  * and `align-items: flex-start` pushes the marker above the text
  * baseline. Strip the fixed sizing and switch to baseline alignment so
  * marker and text share the same line. */
-.doc-editing .milkdown .milkdown-list-item-block > .list-item {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item > .list-item {
   align-items: baseline;
   gap: 0.5em;
 }
-.doc-editing .milkdown .milkdown-list-item-block .label-wrapper {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper {
   height: auto;
   width: auto;
   min-width: 1.4em;
   padding: 0;
   line-height: inherit;
 }
-.doc-editing .milkdown .milkdown-list-item-block .label-wrapper .label {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper .label {
   height: auto;
   width: auto;
   min-width: 1.4em;
@@ -1351,10 +1388,10 @@
 
 /* ---------- inline ASCII sketches ----------
  * A code-block decoration (.ascii-sketch-block) tags any `language: ascii`
- * fence; strip the Crepe code-block chrome so the art reads as a piece of
+ * fence; strip the Tiptap code-block chrome so the art reads as a piece of
  * the page rather than a syntax-highlighter widget. Click anywhere on the
  * block to re-open the sketcher with that content. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block {
   background: transparent;
   border: none;
   padding: 0;
@@ -1368,32 +1405,26 @@
   width: max-content;
   max-width: none;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .language-picker {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .language-picker {
   display: none;
 }
 /* The block's `.tools` row holds the language picker + a `.tools-button-group`
  * with the copy/preview-toggle buttons. The copy icon was overlapping with
  * the "click to edit" hint we add below — hide the whole row since none of
  * those affordances make sense for a sketch. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools-button-group {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools-button-group {
   display: none !important;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .milkdown-code-block-placeholder {
-  display: none;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-gutters {
-  display: none !important;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block code {
   background: transparent;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.25;
-  /* Crepe ships a CodeMirror theme that paints code text in a soft
+  /* Tiptap ships a CodeMirror theme that paints code text in a soft
    * mid-grey — fine for syntax-highlighted code, way too low-contrast for
    * plain ascii art. Force the page's primary ink color (and override the
-   * inner spans Crepe colors via cm-line :where()). */
+   * inner spans Tiptap colors via cm-line :where()). */
   color: var(--ink);
   /* Editor sizes to the longest line — no fixed width box, no scrollbar.
    * The block's parent (.ascii-sketch-block) decides whether to overflow
@@ -1401,50 +1432,19 @@
   width: max-content;
   max-width: none;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line * {
-  color: var(--ink);
-}
-/* CodeMirror's outer scroller would otherwise put a horizontal scrollbar
- * under the art for any sketch wider than the column. We don't want a
- * scrollbar in read view; the art is meant to be seen at once. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-scroller {
-  overflow: visible;
-  width: max-content;
-  max-width: none;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor .cm-content {
-  padding: 0;
-  width: max-content;
-  min-width: 0;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line {
-  padding: 0;
-  width: max-content;
-}
-.doc-editing .milkdown .ascii-sketch-block.ascii-sketch-block-has-metadata .cm-line:first-child {
-  display: none;
-}
-/* CodeMirror tints the row holding the cursor (`.cm-activeLine`) and its
- * gutter — appears as a horizontal bar across the block when the editor
- * has focus. We don't want it on display-style ASCII art. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLine,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLineGutter {
-  background: transparent !important;
-}
 /* Same idea for ProseMirror's "this code block is the selected node"
  * background tint when the user clicks the block. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block.ProseMirror-selectednode {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block.ProseMirror-selectednode {
   background: transparent !important;
   outline: none !important;
 }
 /* ── Query atom block (impressions #17) ───────────────────────────
  * A `language: query` fence is the LIVE-DATA primitive, but raw
- * `entities.list("project", {…})` reads as scary code. Tame Crepe's
+ * `entities.list("project", {…})` reads as scary code. Tame Tiptap's
  * code-block chrome (like ascii) and present it as a calm "live"
  * card with a human caption; the DSL stays an editable, but quiet
  * and SECONDARY, source line (markdown is still the truth). */
-.doc-editing .milkdown .query-atom-block.milkdown-code-block {
+.doc-editing .dohc-tiptap-editor .query-atom-block {
   background: color-mix(in srgb, var(--color-accent) 5%, var(--color-surface));
   border: 1px solid var(--rule);
   border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
@@ -1453,14 +1453,7 @@
   margin: 0.7em 0;
   position: relative;
 }
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .language-picker,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools-button-group,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .milkdown-code-block-placeholder,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-gutters {
-  display: none !important;
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-editor {
+.doc-editing .dohc-tiptap-editor .query-atom-block code {
   background: transparent;
   font-family: var(--font-mono);
   /* the source is secondary — small + muted, present for the power
@@ -1469,21 +1462,13 @@
   line-height: 1.5;
   color: var(--ink-faint);
 }
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line * {
-  color: var(--ink-faint);
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLine,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLineGutter {
-  background: transparent !important;
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block.ProseMirror-selectednode {
+.doc-editing .dohc-tiptap-editor .query-atom-block.ProseMirror-selectednode {
   outline: none !important;
 }
 /* The human caption widget rendered just before the block. Unlike
  * the ascii zero-size affordance this one TAKES layout space — it is
  * the primary, legible label that replaces "wtf is this code". */
-.doc-editing .milkdown .query-atom-caption {
+.doc-editing .dohc-tiptap-editor .query-atom-caption {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1491,21 +1476,21 @@
   font-size: 12px;
   user-select: none;
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-dot {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-dot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
   background: var(--color-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-live {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-live {
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-accent);
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-label {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-label {
   font-weight: 600;
   color: var(--ink-strong);
 }
@@ -1513,7 +1498,7 @@
  * (now-secondary) source. THIS is the prominent, legible thing the
  * eye lands on: the data, not the DSL. pre-wrap preserves ascii
  * heatmaps + line structure; text-only (no innerHTML — XSS-safe). */
-.doc-editing .milkdown .query-atom-result {
+.doc-editing .dohc-tiptap-editor .query-atom-result {
   white-space: pre-wrap;
   font-size: 13px;
   line-height: 1.55;
@@ -1527,7 +1512,7 @@
   background: color-mix(in srgb, var(--color-accent) 4%, var(--color-surface));
   user-select: none;
 }
-.doc-editing .milkdown .query-atom-empty {
+.doc-editing .dohc-tiptap-editor .query-atom-empty {
   margin: -0.2em 0 0.7em;
   padding: 6px 12px;
   font-size: 13px;
@@ -1538,7 +1523,7 @@
  * ascii block by the ProseMirror plugin; CSS positions the actual button
  * absolutely so it floats over the block's top-left corner. The widget
  * itself doesn't take layout space — the block above flows as normal. */
-.doc-editing .milkdown .ascii-sketch-edit-affordance {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance {
   position: relative;
   display: inline-block;
   width: 0;
@@ -1547,7 +1532,7 @@
    * select the preceding paragraph. */
   user-select: none;
 }
-.doc-editing .milkdown .ascii-sketch-edit-btn {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn {
   position: absolute;
   /* Sit just inside the top-left corner of the block that follows. The
    * widget is at the block's start position so (0, 0) of the button =
@@ -1572,15 +1557,15 @@
   z-index: 1;
   white-space: nowrap;
 }
-.doc-editing .milkdown .ascii-sketch-edit-btn:hover {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn:hover {
   color: var(--ink);
   border-color: var(--ink);
 }
 /* Reveal the button when the user hovers EITHER the button itself OR the
  * ascii block immediately following the affordance widget. :has lets us
  * react to hover on the sibling. */
-.doc-editing .milkdown .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
-.doc-editing .milkdown .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
   opacity: 1;
   pointer-events: auto;
 }

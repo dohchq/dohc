@@ -22,11 +22,28 @@ type ConvexAclResult = {
   canWrite: boolean
 }
 
+type ConvexBootstrapArgs = {
+  serverToken: string
+  workspaceId: string
+  atomId: string
+}
+
+type ConvexBootstrapResult = {
+  markdown: string
+} | null
+
 type ConvexAclClient = {
   query(
-    query: FunctionReference<'query', 'public', ConvexAclArgs, ConvexAclResult>,
-    args: ConvexAclArgs,
-  ): Promise<ConvexAclResult>
+    query:
+      | FunctionReference<'query', 'public', ConvexAclArgs, ConvexAclResult>
+      | FunctionReference<
+          'query',
+          'public',
+          ConvexBootstrapArgs,
+          ConvexBootstrapResult
+        >,
+    args: ConvexAclArgs | ConvexBootstrapArgs,
+  ): Promise<ConvexAclResult | ConvexBootstrapResult>
 }
 
 const checkAtomAccess = makeFunctionReference<
@@ -34,6 +51,12 @@ const checkAtomAccess = makeFunctionReference<
   ConvexAclArgs,
   ConvexAclResult
 >('hocuspocusAuth:checkAtomAccess')
+
+const loadAtomBootstrap = makeFunctionReference<
+  'query',
+  ConvexBootstrapArgs,
+  ConvexBootstrapResult
+>('hocuspocusAuth:loadAtomBootstrap')
 
 export function createConvexAcl(options: {
   convexUrl: string
@@ -50,14 +73,14 @@ export function createConvexAcl(options: {
   async function check(
     input: WorkspaceAuthzVersionInput | AtomAccessInput,
   ): Promise<ConvexAclResult> {
-    return await client.query(checkAtomAccess, {
+    return (await client.query(checkAtomAccess, {
       serverToken: options.serverToken,
       workspaceId: input.workspaceId,
       userId: input.userId,
       atomId: input.atomId,
       actorKind: input.actorKind,
       authzVersion: input.authzVersion,
-    })
+    })) as ConvexAclResult
   }
 
   return {
@@ -69,6 +92,13 @@ export function createConvexAcl(options: {
     },
     async canWriteAtom(input) {
       return (await check(input)).canWrite
+    },
+    async loadAtomBootstrap(input) {
+      return (await client.query(loadAtomBootstrap, {
+        serverToken: options.serverToken,
+        workspaceId: input.workspaceId,
+        atomId: input.atomId,
+      })) as ConvexBootstrapResult
     },
   }
 }

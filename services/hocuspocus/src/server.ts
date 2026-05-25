@@ -64,14 +64,18 @@ export async function createServerFromEnv(): Promise<Server> {
   let poolEndPromise: Promise<void> | undefined
 
   const revocations = new RevocationRegistry()
+  const acl = createAclFromEnv()
   const adminHandler = createAdminHandler({
     adminToken: requiredEnv('HOCUSPOCUS_ADMIN_TOKEN'),
     revocations,
+    capabilities: {
+      atomBootstrap: typeof acl.loadAtomBootstrap === 'function',
+    },
   })
 
   const hooks = createHocuspocusHooks({
     jwtSecret: requiredEnv('HOCUSPOCUS_JWT_SECRET'),
-    acl: createAclFromEnv(),
+    acl,
     store,
     logger: console,
     revocations,

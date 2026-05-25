@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { FileText } from 'lucide-react'
-import { TextSelection } from '@milkdown/kit/prose/state'
+import { TextSelection } from '@tiptap/pm/state'
 import type { WikilinkFile } from './wikilinkPlugin'
 
 // D4.8b — autocomplete popover for the `[[` trigger.

@@ -4,6 +4,11 @@ import { RevocationRegistry } from './admin.js'
 import { mintCollabToken } from './auth.js'
 import { encodeDocName } from './doc-name.js'
 import { createHocuspocusHooks } from './hooks.js'
+import {
+  getDohcYDocFrontmatter,
+  getDohcYDocMeta,
+  yDocToMarkdown,
+} from './import-export.js'
 import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
 
 const secret = 'test-secret-with-enough-entropy-for-hs256'
@@ -13,11 +18,23 @@ const documentName = encodeDocName({
 })
 const messageYjsUpdate = 2
 
-function makeAcl(options: { canRead: boolean; canWrite: boolean; version?: number }) {
+function makeAcl(options: {
+  canRead: boolean
+  canWrite: boolean
+  version?: number
+  bootstrapMarkdown?: string | null
+}) {
   return {
     getWorkspaceAuthzVersion: vi.fn(async () => options.version ?? 1),
     canReadAtom: vi.fn(async () => options.canRead),
     canWriteAtom: vi.fn(async () => options.canWrite),
+    loadAtomBootstrap: vi.fn(async () =>
+      options.bootstrapMarkdown === undefined
+        ? null
+        : options.bootstrapMarkdown === null
+          ? null
+          : { markdown: options.bootstrapMarkdown },
+    ),
   }
 }
 
@@ -25,6 +42,7 @@ function makeHooks(options: {
   canRead: boolean
   canWrite: boolean
   version?: number
+  bootstrapMarkdown?: string | null
   revocations?: RevocationRegistry
 }) {
   const backend = new MemoryYDocPersistenceBackend()
@@ -128,6 +146,68 @@ describe('hocuspocus hook factory', () => {
     } as never)
 
     expect(loaded.getText('body').toString()).toBe('persisted')
+  })
+
+  it('bootstraps missing Y.Docs from Convex markdown and stores a sequence-zero snapshot', async () => {
+    const markdown = '---\nid: atom_1\ntitle: Boot\n---\n# Bootstrapped\n\nBody'
+    const { acl, backend, hooks } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      bootstrapMarkdown: markdown,
+    })
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: {
+        userId: 'user_1',
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    } as never)
+
+    expect(acl.loadAtomBootstrap).toHaveBeenCalledWith({
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      userId: 'user_1',
+      actorKind: 'user',
+      authzVersion: 1,
+    })
+    expect(getDohcYDocFrontmatter(loaded)).toMatchObject({
+      id: 'atom_1',
+      title: 'Boot',
+    })
+    expect(getDohcYDocMeta(loaded).schemaVersion).toBe(1)
+    expect(yDocToMarkdown(loaded)).toContain('# Bootstrapped')
+    await expect(backend.getLatestSnapshot(documentName)).resolves.toMatchObject({
+      lastSeq: 0,
+    })
+  })
+
+  it('does not bootstrap when persisted state already exists', async () => {
+    const { acl, hooks, store } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      bootstrapMarkdown: '---\nid: atom_1\n---\n# From Convex',
+    })
+    const persisted = new Y.Doc()
+    persisted.getText('body').insert(0, 'already persisted')
+    await store.storeSnapshot(documentName, persisted, { lastSeq: 0 })
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: {
+        userId: 'user_1',
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    } as never)
+
+    expect(acl.loadAtomBootstrap).not.toHaveBeenCalled()
+    expect(loaded.getText('body').toString()).toBe('already persisted')
   })
 
   it('rejects document loads when context is missing', async () => {

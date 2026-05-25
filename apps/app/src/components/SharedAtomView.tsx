@@ -197,6 +197,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
           }}
           shareId={shareId}
           readOnly={!canEdit || conflict}
+          collab={{ workspaceId: shared.ownerWorkspaceId, atomId: shared.fileId }}
         />
       )}
     </div>

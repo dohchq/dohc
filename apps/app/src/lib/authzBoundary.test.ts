@@ -64,7 +64,14 @@ const SHARE_TARGET_ALLOW = new Set([
 // named by owner workspace/fileId. This is not a client-trusted workspace arg:
 // the public query is unusable without HOCUSPOCUS_CONVEX_SERVER_TOKEN, and the
 // browser never calls it directly.
-const SERVER_TOKEN_ALLOW = new Set(['hocuspocusAuth.ts:checkAtomAccess'])
+const SERVER_TOKEN_ALLOW = new Set([
+  'hocuspocusAuth.ts:checkAtomAccess',
+  // Phase 1.4 bootstrap is also server-to-server only: Hocuspocus supplies
+  // the owner workspace/fileId while lazily initializing a missing Y.Doc from
+  // the existing atoms.body cache. The query is useless without the same
+  // HOCUSPOCUS_CONVEX_SERVER_TOKEN gate.
+  'hocuspocusAuth.ts:loadAtomBootstrap',
+])
 
 // REVIEWED collab-token exception. The browser may ask Convex for a JWT scoped
 // to an owner workspace before opening a shared Hocuspocus room. That JWT is

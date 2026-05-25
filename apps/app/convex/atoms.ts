@@ -709,13 +709,13 @@ export const move = mutation({
     const toNoExt = toPath.replace(/\.md$/i, '')
     const escapedFrom = escapeRegex(fromPath)
     const escapedFromNoExt = escapeRegex(fromNoExt)
-    // D4.7d — Milkdown Crepe's markdown serializer escapes the
+    // D4.7d — legacy editor's markdown serializer escapes the
     // OPENING brackets on save: typing `[[playground/a]]` in the
     // editor produces `\[\[playground/a]]` in the stored body
     // (CommonMark only requires the opening `[`s to be escaped to
     // suppress link parsing; closing `]]` stays bare). The cascade
     // regex must match BOTH forms — `[[...]]` from seeded fixtures
-    // / agent writes + `\[\[...]]` from Crepe-typed bodies.
+    // / agent writes + `\[\[...]]` from legacy-editor-typed bodies.
     const linkRe = new RegExp(
       `\\\\?\\[\\\\?\\[(!?)(${escapedFrom}|${escapedFromNoExt})\\\\?\\]\\\\?\\]`,
       'g',

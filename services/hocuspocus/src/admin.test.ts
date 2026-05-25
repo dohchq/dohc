@@ -17,6 +17,23 @@ describe('hocuspocus admin handler', () => {
     })
   })
 
+  it('reports whether this server can bootstrap atoms from Convex', async () => {
+    const handler = createAdminHandler({
+      adminToken: 'admin-token',
+      revocations: new RevocationRegistry(),
+      capabilities: { atomBootstrap: true },
+    })
+
+    const response = await handler(new Request('http://localhost/capabilities'))
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('access-control-allow-origin')).toBe('*')
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      capabilities: { atomBootstrap: true },
+    })
+  })
+
   it('disconnects registered workspace-user sockets without sticky denial', async () => {
     const revocations = new RevocationRegistry()
     const connection = { socketId: 'socket_1', close: vi.fn() }

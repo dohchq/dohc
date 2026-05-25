@@ -93,7 +93,7 @@ describe('inline-atom v0 — round-trip + multiplicity', () => {
 
 describe('inline-atom v0 — round-trip survives serializer escaping (C2)', () => {
   it('unescapes \\_ in a live-total key (the marquee shape)', () => {
-    // what Milkdown/remark emits after a save of {billable_this_week}
+    // what Tiptap/remark emits after a save of {billable_this_week}
     const [a] = parseInlineAtoms('Team total: {billable\\_this\\_week}')
     expect(a).toMatchObject({ kind: 'liveTotal', key: 'billable_this_week' })
   })

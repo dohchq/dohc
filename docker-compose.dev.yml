@@ -26,7 +26,9 @@ services:
         condition: service_healthy
     environment:
       HOCUSPOCUS_ADMIN_TOKEN: dev-admin-token-change-me
-      HOCUSPOCUS_ALLOW_DEV_ACL: "true"
+      HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-true}
+      HOCUSPOCUS_CONVEX_SERVER_TOKEN: ${HOCUSPOCUS_CONVEX_SERVER_TOKEN:-}
+      HOCUSPOCUS_CONVEX_URL: ${HOCUSPOCUS_CONVEX_URL:-}
       HOCUSPOCUS_DATABASE_URL: postgres://dohc:dohc@postgres:5432/dohc_v2
       HOCUSPOCUS_JWT_SECRET: dev-jwt-secret-change-me-with-at-least-32-bytes
       HOCUSPOCUS_PORT: "1234"

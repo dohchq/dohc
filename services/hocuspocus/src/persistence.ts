@@ -41,6 +41,7 @@ export type InsertSnapshotInput = {
 
 export interface YDocPersistenceBackend {
   ensureSchema(): Promise<void>
+  hasDocumentState(documentName: string): Promise<boolean>
   getLatestSnapshot(documentName: string): Promise<PersistedSnapshot | null>
   listUpdatesAfter(documentName: string, seq: number): Promise<PersistedUpdate[]>
   latestSequence(documentName: string): Promise<number>
@@ -132,6 +133,21 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
 
   async ensureSchema(): Promise<void> {
     await ensureYDocPersistenceSchema(this.client)
+  }
+
+  async hasDocumentState(documentName: string): Promise<boolean> {
+    const result = await this.client.query<{ exists: boolean }>(
+      `
+        SELECT EXISTS (
+          SELECT 1 FROM hocuspocus_ydoc_snapshots WHERE doc_name = $1
+          UNION ALL
+          SELECT 1 FROM hocuspocus_ydoc_updates WHERE doc_name = $1
+          LIMIT 1
+        ) AS exists
+      `,
+      [documentName],
+    )
+    return result.rows[0]?.exists === true
   }
 
   async getLatestSnapshot(documentName: string): Promise<PersistedSnapshot | null> {
@@ -293,6 +309,10 @@ export class PostgresYDocStore {
     await this.backend.ensureSchema()
   }
 
+  async hasDocumentState(documentName: string): Promise<boolean> {
+    return this.backend.hasDocumentState(documentName)
+  }
+
   async loadDocument(documentName: string): Promise<Y.Doc> {
     const doc = new Y.Doc()
     const snapshot = await this.backend.getLatestSnapshot(documentName)
@@ -355,6 +375,13 @@ export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
   private snapshotCounter = 0
 
   async ensureSchema(): Promise<void> {}
+
+  async hasDocumentState(documentName: string): Promise<boolean> {
+    return (
+      (this.updates.get(documentName)?.length ?? 0) > 0 ||
+      (this.snapshots.get(documentName)?.length ?? 0) > 0
+    )
+  }
 
   updatesFor(documentName: string): PersistedUpdate[] {
     return this.updates.get(documentName) ?? []

@@ -1,6 +1,6 @@
 # v2 Hocuspocus Persistence Boundary
 
-**Status:** Phase 1.3 foundation note. This describes the durability contract used by `services/hocuspocus`.
+**Status:** Phase 1.4 bootstrap/editor note. This describes the durability contract used by `services/hocuspocus`.
 
 ## Sources Checked
 
@@ -60,12 +60,39 @@ The hook layer tracks the highest contiguous update sequence that has actually r
 
 On load:
 
-1. Load the latest snapshot, if any.
-2. Apply its snapshot bytes to a fresh `Y.Doc`.
-3. Replay update-log rows where `seq > snapshot.last_seq`, ordered by `seq`.
-4. Track the latest loaded sequence as the applied base for future snapshots.
+1. Check whether any persisted document state exists. This is not the same as
+   `latestSequence > 0`, because a first-load bootstrap snapshot intentionally
+   has `last_seq = 0`.
+2. If persisted state exists, load the latest snapshot, if any.
+3. Apply its snapshot bytes to a fresh `Y.Doc`.
+4. Replay update-log rows where `seq > snapshot.last_seq`, ordered by `seq`.
+5. Track the latest loaded sequence as the applied base for future snapshots.
 
 This gives crash recovery from the eager log and keeps snapshots an optimization, not the source of truth.
+
+## First-Load Bootstrap
+
+Phase 1.4 adds lazy migration from existing `atoms.body` markdown into Y.Doc:
+
+1. `onLoadDocument` rechecks read ACL through Convex.
+2. If Postgres already has a snapshot or update row for the document, Hocuspocus
+   never reads `atoms.body` again.
+3. If Postgres has no document state, Hocuspocus calls the server-token-gated
+   Convex query `api.hocuspocusAuth.loadAtomBootstrap`.
+4. Convex resolves the atom by owner workspace + rename-proof `fileId` and
+   returns `{ markdown }` or `null`.
+5. Hocuspocus converts that markdown to the Phase 1.2 Tiptap/Yjs shape and
+   stores the initialized document as a compact snapshot with `lastSeq: 0`.
+
+The sequence-zero snapshot is deliberate: bootstrap is migration state, not a
+user edit. Future accepted edits start in the append-only update log at seq 1.
+
+The HTTP `GET /capabilities` endpoint advertises whether the running
+Hocuspocus service has Convex bootstrap wired (`capabilities.atomBootstrap`).
+The browser editor only enters collaborative Y.Doc mode when that capability is
+true. If a local/dev Hocuspocus process is running with `HOCUSPOCUS_ALLOW_DEV_ACL`
+and no Convex bridge, existing atoms stay in local markdown fallback instead of
+opening as empty collaborative documents.
 
 ## Auth And Revocation
 
@@ -126,14 +153,23 @@ The disconnect registry is intentionally non-sticky. It closes currently live
 sockets; reconnect authorization is decided by Convex's current ACL state. This
 prevents a revoke-then-reshare from being blocked by stale in-memory state.
 
-## Current Limits Before Phase 1.4
+## Current Limits Before Phase 1.5
 
-This phase is a service foundation, not full client integration:
+Phase 1.4 wires the browser editor to the service, but presence/suggestions and
+projection-cache authority are still later phases:
 
-- The Convex ACL adapter is wired and covered by unit tests, but the browser editor does not yet request `api.auth.getCollabToken` or connect to Hocuspocus.
-- The live raw `@hocuspocus/provider` crash test passes against Docker Postgres. The compose stack still uses explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true` because local Convex wiring is a separate client/dev-env step.
+- The browser editor requests `api.auth.getCollabToken`, uses
+  `@hocuspocus/provider`, and stores local Y.Doc state in `y-indexeddb`.
+- The browser checks Hocuspocus `GET /capabilities` before enabling sync. It
+  waits for identity + capability resolution before allowing edits, and starts
+  the remote provider only after `y-indexeddb` has hydrated the local Y.Doc.
+- The live raw `@hocuspocus/provider` crash test passes against Docker Postgres.
+  The compose stack defaults to explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true`; set
+  `HOCUSPOCUS_CONVEX_URL` + `HOCUSPOCUS_CONVEX_SERVER_TOKEN` to test the full
+  Convex bootstrap path locally.
 - `@hocuspocus/extension-database` is installed for API reference only. dohc uses custom persistence because the default debounced store path is not the ack-safe update-log boundary this plan requires.
-- `@hocuspocus/provider` is installed for the raw provider smoke/crash integration tests.
+- `atoms.body` is still updated by the legacy autosave path until Phase 1.6 moves markdown projection writes to Hocuspocus `onChange`.
+- Y.Awareness presence and cursor rendering are intentionally not enabled until Phase 1.5.
 
 ## Live Crash Gate
 

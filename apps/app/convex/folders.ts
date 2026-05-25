@@ -362,7 +362,7 @@ async function moveImpl(
     const movedPaths = new Set(movedAtoms.map((a: any) => a.path))
     const movedReplacements = movedAtoms.map((a: any) => {
       const noExt = a.path.replace(/\.md$/i, '')
-      // D4.7d — match BOTH `[[...]]` and `\[\[...]]` (Crepe escapes
+      // D4.7d — match BOTH `[[...]]` and `\[\[...]]` (a legacy editor escaped
       // opening brackets on save). Same regex shape as the cascade
       // loop below; identical handling in atoms.move.
       return new RegExp(
@@ -468,7 +468,7 @@ async function moveImpl(
         const oldNoExt = oldPath.replace(/\.md$/i, '')
         const newNoExt = newPath.replace(/\.md$/i, '')
         // D4.7d — escape-tolerant wikilink match. See atoms.move for
-        // rationale: Crepe escapes opening `[`s.
+        // rationale: a legacy editor escaped opening `[`s.
         const re = new RegExp(
           `\\\\?\\[\\\\?\\[(!?)(${escapeRegex(oldPath)}|${escapeRegex(oldNoExt)})\\\\?\\]\\\\?\\]`,
           'g',

@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.11 — Phase 1.3 live provider crash gate passed locally; Docker Hocuspocus + Postgres dev stack boots; Convex token + ACL bridge implemented with live disconnect scheduling for share/org revocation; browser editor integration remains before production/client use
+**Status:** Plan v1.13 — Phase 1.4 Tiptap editor integration implemented on `codex/v2-offline-first-phase-0`: Milkdown/Crepe removed, browser editor uses Tiptap OSS + Hocuspocus provider + y-indexeddb when the sync server advertises bootstrap capability, and Hocuspocus can lazily bootstrap missing Y.Docs from existing Convex `atoms.body`
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`

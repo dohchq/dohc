@@ -66,6 +66,7 @@ export const DohcWikilink = Node.create({
         'data-dohc-wikilink': node.attrs.target,
         'data-dohc-wikilink-label': node.attrs.label,
       },
+      node.attrs.label || node.attrs.target,
     ]
   },
 
@@ -133,6 +134,7 @@ export const DohcInlineAtom = Node.create({
         'data-dohc-inline-atom': node.attrs.atomId,
         'data-dohc-inline-atom-params': node.attrs.params,
       },
+      `{{${node.attrs.source || `atom:${node.attrs.atomId ?? ''}`}}}`,
     ]
   },
 
@@ -187,7 +189,11 @@ export const DohcFormula = Node.create({
   },
 
   renderHTML({ node }) {
-    return ['span', { 'data-dohc-formula': node.attrs.expression }]
+    return [
+      'span',
+      { 'data-dohc-formula': node.attrs.expression },
+      `{{${node.attrs.source || `formula:${node.attrs.expression ?? ''}`}}}`,
+    ]
   },
 
   markdownTokenizer: {

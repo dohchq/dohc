@@ -59,7 +59,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/
 // punctuation char in PROSE so it never opens an atom.
 const ASCII_PUNCT = /[!-/:-@[-`{-~]/
 // Round-trip-escapable set: ASCII punctuation EXCLUDING `{` and `}`.
-// A markdown serializer (mdast-util-to-markdown, which Milkdown/remark
+// A markdown serializer (mdast-util-to-markdown, which markdown serializer
 // uses) escapes `_ * \` [ ] …` to avoid accidental emphasis/links — so
 // a saved `{billable_this_week}` comes back as `{billable\_this\_week}`.
 // Inside an atom body we unescape these so the atom survives the

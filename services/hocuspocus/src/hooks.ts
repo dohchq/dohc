@@ -13,6 +13,7 @@ import * as Y from 'yjs'
 import { decodeDocName } from './doc-name.js'
 import { verifyCollabToken, type CollabActorKind } from './auth.js'
 import type { PostgresYDocStore } from './persistence.js'
+import { markdownToYDoc } from './import-export.js'
 
 export type DohcHocuspocusContext = {
   userId: string
@@ -42,6 +43,9 @@ export type HocuspocusAcl = {
   getWorkspaceAuthzVersion(input: WorkspaceAuthzVersionInput): Promise<number>
   canReadAtom(input: AtomAccessInput): Promise<boolean>
   canWriteAtom(input: AtomAccessInput): Promise<boolean>
+  loadAtomBootstrap?(
+    input: AtomAccessInput,
+  ): Promise<{ markdown: string } | null>
 }
 
 export type HocuspocusLogger = {
@@ -264,6 +268,16 @@ export function createHocuspocusHooks({
       const canRead = await acl.canReadAtom(accessInput(context))
       if (!canRead) {
         throw new Error('Missing read access for document')
+      }
+
+      if (!(await store.hasDocumentState(data.documentName))) {
+        const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
+        if (bootstrap?.markdown !== undefined) {
+          const document = markdownToYDoc(bootstrap.markdown)
+          await store.storeSnapshot(data.documentName, document, { lastSeq: 0 })
+          sequences.setLoadedSequence(data.documentName, 0)
+          return document
+        }
       }
 
       const document = await store.loadDocument(data.documentName)

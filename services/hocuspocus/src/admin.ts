@@ -61,12 +61,16 @@ export class RevocationRegistry {
 export type AdminHandlerOptions = {
   adminToken: string
   revocations: RevocationRegistry
+  capabilities?: {
+    atomBootstrap?: boolean
+  }
 }
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
     ...init,
     headers: {
+      'access-control-allow-origin': '*',
       'content-type': 'application/json',
       ...(init?.headers ?? {}),
     },
@@ -80,12 +84,23 @@ function hasAdminToken(request: Request, adminToken: string): boolean {
 export function createAdminHandler({
   adminToken,
   revocations,
+  capabilities,
 }: AdminHandlerOptions): (request: Request) => Promise<Response> {
   return async (request: Request) => {
     const url = new URL(request.url)
 
     if (request.method === 'GET' && url.pathname === '/healthz') {
       return jsonResponse({ ok: true, service: 'dohc-hocuspocus' })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/capabilities') {
+      return jsonResponse({
+        ok: true,
+        service: 'dohc-hocuspocus',
+        capabilities: {
+          atomBootstrap: capabilities?.atomBootstrap === true,
+        },
+      })
     }
 
     if (
@@ -120,7 +135,11 @@ export async function writeNodeAdminResponse(
   response: ServerResponse,
   handler: (request: Request) => Promise<Response>,
 ): Promise<boolean> {
-  if (!request.url?.startsWith('/healthz') && !request.url?.startsWith('/admin/')) {
+  if (
+    !request.url?.startsWith('/healthz') &&
+    !request.url?.startsWith('/capabilities') &&
+    !request.url?.startsWith('/admin/')
+  ) {
     return false
   }
 

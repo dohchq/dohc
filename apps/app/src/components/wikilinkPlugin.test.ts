@@ -50,7 +50,7 @@ describe('computeWikilinkRanges — wikilink decoration scanner', () => {
     expect(r[0]?.target).toBe('playground/a')
   })
 
-  it('finds Crepe-escaped \\[\\[path]] form', () => {
+  it('finds Tiptap-escaped \\[\\[path]] form', () => {
     const doc = makeDoc([{ text: 'see \\[\\[playground/a]] here' }])
     const r = computeWikilinkRanges(doc)
     expect(r).toHaveLength(1)

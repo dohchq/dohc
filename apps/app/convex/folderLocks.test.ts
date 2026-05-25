@@ -348,17 +348,17 @@ describe('folders.remove — chokepoint #5', () => {
 // ────────────────────────────────────────────────────────────────
 
 describe('wikilink rewrite — SKIP-ON-LOCKED (§2.5)', () => {
-  // D4.7d — Milkdown Crepe escapes opening brackets when
+  // D4.7d — legacy editor escapes opening brackets when
   // serializing typed content to markdown: typing `[[a]]` in the
   // editor saves as `\[\[a]]` (CommonMark only requires the
   // opening `[`s to be escaped to suppress link parsing). The
   // cascade regex must match BOTH forms; this regression test
   // proves it.
-  it('D4.7d — cascade matches both [[path]] and Crepe-escaped \\[\\[path]] forms', async () => {
+  it('D4.7d — cascade matches both [[path]] and legacy-escaped \\[\\[path]] forms', async () => {
     const t = convexTest(schema, modules)
     await seedAtom(t, 'draft.md', { body: 'x' })
     // Two ref atoms — one with the bare form (agent-seeded /
-    // legacy), one with the Crepe-escaped form. Both should
+    // legacy), one with the legacy-escaped form. Both should
     // rewrite to the bare new form.
     await seedAtom(t, 'ref-bare.md', {
       source: 'user',

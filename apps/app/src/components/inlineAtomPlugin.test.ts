@@ -56,7 +56,7 @@ describe('computeAtomRanges — offsets', () => {
 })
 
 describe('computeAtomRanges — code is verbatim (the bug Codex flagged)', () => {
-  it('skips Milkdown inline-code mark (`inlineCode`)', () => {
+  it('skips Tiptap inline-code mark (`inlineCode`)', () => {
     expect(
       computeAtomRanges(fakeDoc([{ text: '{hours: 6}', pos: 1, mark: 'inlineCode' }])),
     ).toEqual([])

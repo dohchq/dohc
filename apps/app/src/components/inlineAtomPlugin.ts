@@ -7,14 +7,14 @@
 // offset-sensitive regime vs the ASCII-block plugin's node/widget
 // decorations, which is why the range math is a separately unit-tested
 // pure function (`computeAtomRanges`). Byte-level survival through
-// Crepe's markdown serializer is a distinct concern still tracked by
-// the deferred Crepe round-trip check.
+// Tiptap's markdown serializer is a distinct concern still tracked by
+// the deferred Tiptap round-trip check.
 //
 // Additive + flag-gated per the locked re-foundation principle: off by
 // default ⇒ no user-facing change until explicitly enabled.
 
-import { Plugin, PluginKey } from '@milkdown/kit/prose/state'
-import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { parseInlineAtoms } from '../lib/inlineAtom'
 
 // Flag lives in the central scaffold; re-exported so existing importers
@@ -49,7 +49,7 @@ export type AtomRange = {
 }
 
 /** A node is "code" (verbatim) if it is a code block or carries an
- *  inline-code mark. Milkdown's inline-code mark is `inlineCode`
+ *  inline-code mark. Tiptap's inline-code mark is `inlineCode`
  *  (NOT `code`); CommonMark presets may use `code`; some define
  *  `spec.code`. Check all three so atoms are never decorated inside
  *  code. */
