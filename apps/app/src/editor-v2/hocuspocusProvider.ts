@@ -148,18 +148,23 @@ export function createDohcHocuspocusProvider({
   onAwarenessUpdate,
   onAwarenessChange,
 }: CreateDohcHocuspocusProviderOptions): HocuspocusProvider {
+  const callbacks: Partial<HocuspocusProviderConfiguration> = {}
+  if (onStatus) callbacks.onStatus = onStatus
+  if (onSynced) callbacks.onSynced = onSynced
+  if (onAuthenticated) callbacks.onAuthenticated = onAuthenticated
+  if (onAuthenticationFailed) {
+    callbacks.onAuthenticationFailed = onAuthenticationFailed
+  }
+  if (onAwarenessUpdate) callbacks.onAwarenessUpdate = onAwarenessUpdate
+  if (onAwarenessChange) callbacks.onAwarenessChange = onAwarenessChange
+
   return new HocuspocusProvider({
     url,
     name: documentName,
     document: ydoc,
     token,
     awareness: awareness ?? null,
-    onStatus,
-    onSynced,
-    onAuthenticated,
-    onAuthenticationFailed,
-    onAwarenessUpdate,
-    onAwarenessChange,
+    ...callbacks,
   })
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  createDohcHocuspocusProvider,
   encodeDohcHocuspocusDocumentName,
   fetchHocuspocusDocumentState,
   resolveHocuspocusDocumentStateUrl,
@@ -7,6 +8,22 @@ import {
   resolveHocuspocusUrl,
   startHocuspocusTokenRefresh,
 } from './hocuspocusProvider'
+import * as Y from 'yjs'
+
+const hocuspocusProviderMock = vi.hoisted(() => ({
+  configs: [] as Array<Record<string, unknown>>,
+}))
+
+vi.mock('@hocuspocus/provider', () => ({
+  HocuspocusProvider: class {
+    constructor(config: Record<string, unknown>) {
+      hocuspocusProviderMock.configs.push(config)
+    }
+
+    destroy() {}
+    sendToken() {}
+  },
+}))
 
 describe('hocuspocus provider adapter', () => {
   it('encodes document names the same way as the service', () => {
@@ -90,6 +107,28 @@ describe('hocuspocus provider adapter', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('does not pass undefined optional callbacks to Hocuspocus', () => {
+    hocuspocusProviderMock.configs = []
+
+    createDohcHocuspocusProvider({
+      url: 'ws://127.0.0.1:1234',
+      documentName: 'workspace/workspace_1/atom/atom_1',
+      ydoc: new Y.Doc(),
+      token: 'token',
+      onStatus: vi.fn(),
+      onSynced: vi.fn(),
+    })
+
+    expect(hocuspocusProviderMock.configs).toHaveLength(1)
+    const config = hocuspocusProviderMock.configs[0] ?? {}
+    expect(config).not.toHaveProperty('onAwarenessUpdate')
+    expect(config).not.toHaveProperty('onAwarenessChange')
+    expect(config).not.toHaveProperty('onAuthenticated')
+    expect(config).not.toHaveProperty('onAuthenticationFailed')
+    expect(config).toHaveProperty('onStatus')
+    expect(config).toHaveProperty('onSynced')
   })
 
   it('refreshes provider tokens on an interval and cleans up', () => {
