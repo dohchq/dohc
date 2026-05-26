@@ -2,7 +2,9 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import type { QueryCtx } from './_generated/server'
 import { internal } from './_generated/api'
+import type { Id } from './_generated/dataModel'
 import { ownerAtomByFileId } from './atomShares'
+import { extractFrontmatterId } from './atomId'
 import { isMember } from './orgs'
 
 const WORKSPACE_AUTHZ_VERSION = 1
@@ -20,6 +22,17 @@ type AtomBootstrapResult = {
 type BodyCacheProjectionResult =
   | { ok: true }
   | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
+
+type AtomCreateResult =
+  | { ok: true; atomId: string; markdown: string }
+  | {
+      ok: false
+      reason:
+        | 'already-exists'
+        | 'forbidden'
+        | 'stale-authz'
+        | 'missing-frontmatter-id'
+    }
 
 type ActorKind = 'user' | 'agent'
 
@@ -223,5 +236,67 @@ export const setBodyCache = mutation({
       lastEditedByUserId,
       projectedAt,
     })
+  },
+})
+
+export const createAtom = mutation({
+  args: {
+    serverToken: v.string(),
+    workspaceId: v.string(),
+    path: v.string(),
+    content: v.string(),
+    userId: v.string(),
+    actorKind: v.union(v.literal('user'), v.literal('agent')),
+    authzVersion: v.number(),
+  },
+  handler: async (
+    ctx,
+    {
+      serverToken,
+      workspaceId,
+      path,
+      content,
+      userId,
+      actorKind,
+      authzVersion,
+    },
+  ): Promise<AtomCreateResult> => {
+    requireServerToken(serverToken)
+    if (authzVersion !== WORKSPACE_AUTHZ_VERSION) {
+      return { ok: false, reason: 'stale-authz' }
+    }
+
+    const existing = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', path),
+      )
+      .unique()
+    if (existing) {
+      return { ok: false, reason: 'already-exists' }
+    }
+
+    let id: Id<'atoms'>
+    try {
+      id = (await ctx.runMutation(internal.atoms._upsertInternal, {
+        workspaceId,
+        path,
+        body: content,
+        source: actorKind === 'agent' ? 'agent' : 'user',
+        viewerSubject: userId,
+      })) as Id<'atoms'>
+    } catch (error) {
+      if (/access to write/.test((error as Error).message)) {
+        return { ok: false, reason: 'forbidden' }
+      }
+      throw error
+    }
+
+    const atom = await ctx.db.get(id)
+    const atomId = atom ? extractFrontmatterId(atom.body) : null
+    if (!atom || !atomId) {
+      return { ok: false, reason: 'missing-frontmatter-id' }
+    }
+    return { ok: true, atomId, markdown: atom.body }
   },
 })

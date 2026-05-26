@@ -57,6 +57,7 @@ import {
   hasIndexeddbYDocState,
   markIndexeddbYDocState,
 } from '../editor-v2/indexeddbState'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
@@ -1191,6 +1192,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   },
   ref,
 ) {
+  const activeWorkspaceId = useActiveWorkspaceId()
   const getCollabToken = useAction(api.auth.getCollabToken)
   const fetchCollabToken = useMemo(
     () => async (workspaceId: string) =>
@@ -1300,7 +1302,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // ever active; the other is 'skip'.
   const resolvedFormulasOwn = useQuery(
     api.formulaEval.evalFormulas,
-    !shareId && formulaSrcs.length ? { srcs: formulaSrcs } : 'skip',
+    !shareId && formulaSrcs.length
+      ? { srcs: formulaSrcs, activeWorkspaceId }
+      : 'skip',
   )
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
@@ -1336,7 +1340,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     // sharing-v1 — query blocks read the own-workspace vault; disabled
     // in a shared atom (v1) — they'd otherwise resolve in the viewer's
     // workspace, not the owner's, and scoping them is a later task.
-    !shareId && querySrcs.length ? { srcs: querySrcs } : 'skip',
+    !shareId && querySrcs.length
+      ? { srcs: querySrcs, activeWorkspaceId }
+      : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
   const [queryTick, setQueryTick] = useState(0)

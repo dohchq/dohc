@@ -614,106 +614,17 @@ export default defineSchema({
       'identifier',
     ]),
 
-  // M1 step 3 sub-commit 3.3 (multiplayer-and-h-followups §8) —
-  // per-doc CAS + projection state for the collab markdown
-  // projection writer. Codex v2-v3 NEW issue: this MUST be
-  // per-doc (server-computed), not per-client. Per-client hash
-  // divergence during out-of-band-write churn was the v2 bug.
-  //
-  // baseBodyHash is the SHA-256 of atoms.body as of the last
-  // successful projection (or initial bootstrap). The projection
-  // writer compares atoms.body's current hash against this; mismatch
-  // = out-of-band write happened; route through the two-state
-  // conflict handler (auto-rebuild if PM has no unprojected edits;
-  // freeze + reload if both sides changed).
-  //
-  // Future-compat fields per Codex v3 "additional schema
-  // suggestions" (not blockers, useful for debug + UI):
-  //   - lastProjectedHash: hash AT the projection moment (for
-  //     debugging mismatches)
-  //   - lastConflictAt: UI can show "last conflict 3min ago"
-  //   - pruneAfter: explicit snapshot-prune trigger
-  collabDocs: defineTable({
-    docId: v.string(), // 'atom:<ws>:<atomId>' or 'share:<shareId>'
-    atomId: v.optional(v.id('atoms')), // null for share: docs
-    workspaceId: v.string(),
-    // CAS witness. SHA-256 hex of atoms.body after the most recent
-    // projection (or initial bootstrap). NEVER trusted from client.
-    baseBodyHash: v.string(),
-    // Last snapshot version we projected to atoms.body. Compared
-    // against snapshotVersion arriving in onSnapshot.
-    projectedVersion: v.number(),
-    // Two-state conflict policy (Codex v3 fix #4):
-    //   frozen=true ⇒ both sides changed; UI shows reload banner
-    //   needsRebootstrap=true ⇒ OOB write while PM had no unprojected
-    //     edits; client tears down + rebootstraps from new body
-    frozen: v.boolean(),
-    needsRebootstrap: v.boolean(),
-    // Currently scheduled projection job id (for cancel-on-newer).
-    scheduledJobId: v.optional(v.id('_scheduled_functions')),
-    // Codex v3 nice-to-haves (non-blocking):
-    lastProjectedHash: v.optional(v.string()),
-    lastConflictAt: v.optional(v.number()),
-    pruneAfter: v.optional(v.number()),
-    updatedAt: v.number(),
-  })
-    .index('by_docId', ['docId'])
-    .index('by_atomId', ['atomId'])
-    .index('by_workspace_pruneAfter', ['workspaceId', 'pruneAfter']),
-
-  // M1 step 3 sub-commit 3.3 — per-client PRESENCE only. Codex
-  // v2 NEW issue #1: split presence from doc projection state.
-  // This table tracks "who's editing what right now" via
-  // heartbeat; the projection state lives in `collabDocs`.
-  //
-  // Lifecycle: each tab calls recordCollabPresence every ~30s.
-  // Rows with lastSeenAt < now - 90s are reaped by the
-  // _cleanupIdleSessions internal mutation (runs every 60s via
-  // cron — Codex v2 fix #8: cadence matches expiry, no 6.5min
-  // lag like v2's 5min cron).
-  collabSessions: defineTable({
-    docId: v.string(),
-    clientId: v.string(), // per-tab UUID
-    userId: v.string(), // identity.subject; for audit + UI labels
-    // M1 step 3.9.18 — cached display name (identity.name from
-    // WorkOS/OIDC). Stored at heartbeat time so cursor labels
-    // can render "Alice" instead of "ws_alice_". Optional —
-    // older rows + IdPs that don't provide a name fall back to
-    // userId.slice(0,8) client-side. Cache can go stale when a
-    // user changes their name; acceptable for v1.
-    userName: v.optional(v.string()),
-    lastSeenAt: v.number(),
-    // M1 step 3.8.2.3 — cursor presence v1.
-    // The PM doc-relative cursor position (head of selection) for
-    // this tab. null when the tab has no active selection (e.g.
-    // editor blurred). Updated by recordCollabPresence with a
-    // debounced selection observer (~150ms) — not write-per-
-    // keystroke. Position interpretation: PM doc position at the
-    // snapshot version the tab last synced; under concurrent edits
-    // may briefly desync — documented v1 limitation. Proper step-
-    // mapping is M2-followup. Optional + nullable so existing rows
-    // (pre-3.8.2.3) load without migration.
-    cursorPos: v.optional(v.union(v.number(), v.null())),
-  })
-    .index('by_docId', ['docId'])
-    .index('by_docId_clientId', ['docId', 'clientId'])
-    .index('by_lastSeenAt', ['lastSeenAt']),
-
-  // M1 step 3.9.0 — atomSuggestions (M3 schema scaffold).
-  // Decorations sidecar per Decision D: the agent's `suggest_in_doc`
-  // tool writes here; the editor's decoration plugin subscribes and
-  // renders inline bubbles. Accept inlines the proposedText into
-  // atoms.body; reject deletes the row.
+  // v2 atomSuggestions sidecar. Semantic agent tools write proposed
+  // edits here; the editor subscribes and renders inline bubbles.
+  // Accept calls Hocuspocus to mutate canonical Y.Doc state; reject
+  // only resolves the sidecar row. Suggestions are not embedded in
+  // the markdown projection.
   atomSuggestions: defineTable({
     atomId: v.id('atoms'),
     workspaceId: v.string(),
-    // MARKDOWN-BODY offsets the suggestion applies to. NOT PM
-    // doc positions — those are a separate coordinate system
-    // that doesn't map 1:1 to atoms.body string indices. The
-    // agent (which reads body via read_atom) reasons about
-    // markdown offsets natively; the editor decoration plugin
-    // renders the bubble at the approximate PM position (visual
-    // approximation; correctness comes from the CAS on accept).
+    // Deprecated v1 markdown-body offsets. New suggestions must use
+    // anchorStart/anchorEnd. These remain optional only so old rows
+    // can load during the v2 cleanup window.
     rangeFrom: v.optional(v.number()),
     rangeTo: v.optional(v.number()),
     // v2 Phase 1.7: Y.RelativePosition anchors encoded as base64
@@ -722,21 +633,12 @@ export default defineSchema({
     // optional only for temporary v1 cleanup compatibility.
     anchorStart: v.optional(v.string()),
     anchorEnd: v.optional(v.string()),
-    // The text the agent wants to write. Replaces [from, to] on
-    // accept.
+    // The text the agent wants to write at the anchored range.
     proposedText: v.string(),
-    // M1 step 3.9.2 — codex 14th-pass [P1] #1 CAS. The agent
-    // also passes the EXACT text it thinks lives at
-    // [rangeFrom, rangeTo] of atoms.body at suggestion time.
-    // acceptSuggestion validates: if body.slice(from,to) !==
-    // expectedText, the document drifted (user typed, agent
-    // wrote, projection ran) — abort with a clean error rather
-    // than splice the wrong bytes.
-    //
-    // 3.9.3 made expectedText REQUIRED on accept: a row missing
-    // it is rejected (return ok:false, reason:'missing-cas-witness'
-    // post-3.9.15). The schema field stays v.optional so legacy
-    // rows still LOAD, but they cannot accept successfully.
+    // Semantic intent witness. Y.RelativePosition preserves location
+    // through CRDT edits; expectedText/prefix/suffix preserve meaning.
+    // Hocuspocus refuses or marks needs-review when the live text no
+    // longer matches the agent's witness.
     expectedText: v.optional(v.string()),
     expectedPrefix: v.optional(v.string()),
     expectedSuffix: v.optional(v.string()),

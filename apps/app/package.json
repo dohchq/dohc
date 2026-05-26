@@ -21,7 +21,6 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.77",
     "@convex-dev/agent": "0.6.1",
-    "@convex-dev/prosemirror-sync": "^0.2.4",
     "@convex-dev/workos-authkit": "^0.2.2",
     "@dohc/brand": "workspace:*",
     "@dohc/plugin-sdk": "workspace:*",

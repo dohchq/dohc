@@ -80,7 +80,7 @@ Accept should call the semantic operation introduced here/expanded in Phase 1.8,
 - [x] Hocuspocus suggestion tests pass.
 - [x] Convex v2 suggestion CRUD tests pass.
 - [x] Hocuspocus typecheck passes.
-- [x] App typecheck remains blocked only by Phase 1.9 legacy cleanup until those files are removed.
+- [x] App typecheck passes after Phase 1.9 legacy cleanup.
 
 ## Rollback Notes
 

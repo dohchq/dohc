@@ -54,6 +54,26 @@ export type AtomBodyCacheProjectionResult =
   | { ok: true }
   | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
 
+export type AtomCreateInput = {
+  workspaceId: string
+  path: string
+  content: string
+  userId: string
+  actorKind: CollabActorKind
+  authzVersion: number
+}
+
+export type AtomCreateResult =
+  | { ok: true; atomId: string; markdown: string }
+  | {
+      ok: false
+      reason:
+        | 'already-exists'
+        | 'forbidden'
+        | 'stale-authz'
+        | 'missing-frontmatter-id'
+    }
+
 export type WorkspaceAuthzVersionInput = {
   workspaceId: string
   atomId: string
@@ -72,6 +92,7 @@ export type HocuspocusAcl = {
   setAtomBodyCache?(
     input: AtomBodyCacheProjectionInput,
   ): Promise<AtomBodyCacheProjectionResult>
+  createAtom?(input: AtomCreateInput): Promise<AtomCreateResult>
 }
 
 export type HocuspocusLogger = {

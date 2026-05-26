@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.17 — Phase 1.7 anchor foundation implemented on `codex/v2-offline-first-on-multiplayer`: Y.Awareness presence gates are wired, Hocuspocus projects Y.Docs into a durable `atoms.body` cache, and suggestions now store Y.RelativePosition anchors plus semantic witnesses. Raw markdown-splice suggestion accept is disabled until Phase 1.8's Hocuspocus semantic API applies accepts directly to Y.Doc.
+**Status:** Plan v1.19 — Phase 1.8 semantic write path and Phase 1.9 v1 cleanup implemented on `codex/v2-offline-first-on-multiplayer`: Hocuspocus owns semantic Y.Doc mutation, suggestion accept routes through Hocuspocus, agent edit tools no longer overwrite full markdown bodies, and the old Milkdown/Crepe/prosemirror-sync collaboration stack has been removed. The remaining ship gate is production-equivalent QA plus the one-week dogfood window in §16.
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -135,7 +135,7 @@ Phase 0 started from `main` at `103a46ff9ef746bc4c82fbcb00bfd07a80c7bae8`. That 
 | Tiptap extension `parseMarkdown`/`renderMarkdown` for wikilinks | New extension wraps the wikilink encode/decode logic from `markdownRoundtrip.ts` |
 | `atomIds.ts` (rename-proof fileId) | Unchanged — Y.Doc room name = `fileId` |
 | `atomShares.ts`, `atomAccess.ts`, `folderAccess.ts` | Unchanged — Hocuspocus auth queries these |
-| `agent.ts` tool schemas (`suggest_in_doc`, `write_atom`, `read_atom`) | Tools rewritten to use Y.Doc client; schemas + behavior contracts unchanged |
+| `agent.ts` tool schemas | `read_atom` stays as cache read; `write_atom`/`suggest_in_doc` are retired; semantic tools call Hocuspocus |
 | `atomSuggestions.ts` CRUD shape | Schema field rename (`rangeFrom/rangeTo` → `relAnchorFrom/relAnchorTo` as Y.RelativePosition byte arrays); CRUD logic mostly preserved |
 | Display name caching (3.9.18) | Same approach in Y.Awareness user object |
 | Captures, trash, proposals, plugin settings, captures, file tree | Untouched |
@@ -801,5 +801,7 @@ AI-assisted (Claude Code) will compress per-phase implementation but NOT QA/inte
 2. [ ] Start Phase 1.5 presence/awareness only after the browser lifecycle tests above pass.
 3. [x] Start Phase 1.6 server-owned `atoms.body` projection so legacy client autosave can be fully removed from collaborative markdown paths.
 4. [x] Start Phase 1.7 RelativePosition-backed suggestions.
-5. [ ] Start Phase 1.8 Hocuspocus semantic API for suggestion accept and agent tools.
-4. [ ] Decide §14 product questions before Phase 2 starts: self-host auth choice, desktop wrapper, and local file sync scope.
+5. [x] Start Phase 1.8 Hocuspocus semantic API for suggestion accept and agent tools.
+6. [x] Start Phase 1.9 v1 collaboration cleanup and final verification pass.
+7. [ ] Decide §14 product questions before Phase 2 starts: self-host auth choice, desktop wrapper, and local file sync scope.
+8. [ ] Run the §16 one-week dogfood/staging ship gate before merging v2 to `main`.

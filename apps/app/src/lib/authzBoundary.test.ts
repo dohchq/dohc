@@ -74,6 +74,9 @@ const SERVER_TOKEN_ALLOW = new Set([
   // Phase 1.6 projection is server-to-server only: Hocuspocus owns the
   // Y.Doc->markdown cache update and writes through the same shared token.
   'hocuspocusAuth.ts:setBodyCache',
+  // Phase 1.8 semantic create is server-to-server only: Hocuspocus creates
+  // the Convex row and initializes canonical Y.Doc state through one token gate.
+  'hocuspocusAuth.ts:createAtom',
 ])
 
 // REVIEWED collab-token exception. The browser may ask Convex for a JWT scoped

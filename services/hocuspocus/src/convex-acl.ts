@@ -4,6 +4,8 @@ import type {
   AtomBodyCacheProjectionInput,
   AtomBodyCacheProjectionResult,
   AtomAccessInput,
+  AtomCreateInput,
+  AtomCreateResult,
   HocuspocusAcl,
   WorkspaceAuthzVersionInput,
 } from './hooks.js'
@@ -50,17 +52,28 @@ type ConvexAclClient = {
     args: ConvexAclArgs | ConvexBootstrapArgs,
   ): Promise<ConvexAclResult | ConvexBootstrapResult>
   mutation(
-    mutation: FunctionReference<
-      'mutation',
-      'public',
-      ConvexBodyCacheProjectionArgs,
-      AtomBodyCacheProjectionResult
-    >,
-    args: ConvexBodyCacheProjectionArgs,
-  ): Promise<AtomBodyCacheProjectionResult>
+    mutation:
+      | FunctionReference<
+          'mutation',
+          'public',
+          ConvexBodyCacheProjectionArgs,
+          AtomBodyCacheProjectionResult
+        >
+      | FunctionReference<
+          'mutation',
+          'public',
+          ConvexAtomCreateArgs,
+          AtomCreateResult
+        >,
+    args: ConvexBodyCacheProjectionArgs | ConvexAtomCreateArgs,
+  ): Promise<AtomBodyCacheProjectionResult | AtomCreateResult>
 }
 
 type ConvexBodyCacheProjectionArgs = AtomBodyCacheProjectionInput & {
+  serverToken: string
+}
+
+type ConvexAtomCreateArgs = AtomCreateInput & {
   serverToken: string
 }
 
@@ -81,6 +94,12 @@ const setBodyCache = makeFunctionReference<
   ConvexBodyCacheProjectionArgs,
   AtomBodyCacheProjectionResult
 >('hocuspocusAuth:setBodyCache')
+
+const createAtom = makeFunctionReference<
+  'mutation',
+  ConvexAtomCreateArgs,
+  AtomCreateResult
+>('hocuspocusAuth:createAtom')
 
 export function createConvexAcl(options: {
   convexUrl: string
@@ -128,7 +147,7 @@ export function createConvexAcl(options: {
       })) as ConvexBootstrapResult
     },
     async setAtomBodyCache(input) {
-      return await client.mutation(setBodyCache, {
+      return (await client.mutation(setBodyCache, {
         serverToken: options.serverToken,
         workspaceId: input.workspaceId,
         atomId: input.atomId,
@@ -138,7 +157,18 @@ export function createConvexAcl(options: {
         ydocStateVector: input.ydocStateVector,
         lastEditedByUserId: input.lastEditedByUserId ?? undefined,
         projectedAt: input.projectedAt,
-      })
+      })) as AtomBodyCacheProjectionResult
+    },
+    async createAtom(input) {
+      return (await client.mutation(createAtom, {
+        serverToken: options.serverToken,
+        workspaceId: input.workspaceId,
+        path: input.path,
+        content: input.content,
+        userId: input.userId,
+        actorKind: input.actorKind,
+        authzVersion: input.authzVersion,
+      })) as AtomCreateResult
     },
   }
 }

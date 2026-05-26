@@ -40,7 +40,7 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
       'delete_atom',
       'delete_entity',
       'delete_folder',
-      'write_atom',
+      'create_atom',
       'update_entity',
       'save_skill',
       'install_plugin',
@@ -65,8 +65,8 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     expect(SAFE_FOR_SKILL_TOOLS).not.toContain('run_skill')
   })
 
-  it('SAFE_FOR_SKILL_TOOLS overlaps UNAUTHORIZABLE only on CONDITIONAL tools (write_atom + capture)', () => {
-    // write_atom and capture are CONDITIONALLY unauthorizable —
+  it('SAFE_FOR_SKILL_TOOLS overlaps UNAUTHORIZABLE only on CONDITIONAL tools (create_atom + capture)', () => {
+    // create_atom and capture are CONDITIONALLY unauthorizable —
     // gated only on elevated inputs (confirm:true / skills/* /
     // plugins/* / type:skill / type:plugin / shared:true). At
     // depth>0 the SAFE_FOR_SKILL_TOOLS set still contains them
@@ -77,7 +77,7 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     const intersection = SAFE_FOR_SKILL_TOOLS.filter((t) =>
       (UNAUTHORIZABLE_TOOLS as readonly string[]).includes(t),
     )
-    expect(intersection.sort()).toEqual(['capture', 'write_atom'])
+    expect(intersection.sort()).toEqual(['capture', 'create_atom'])
   })
 
   it('USER_TURN_TOOLS_NO_RUN_SKILL does NOT contain run_skill (entry route is ⌘K/slash ONLY)', () => {

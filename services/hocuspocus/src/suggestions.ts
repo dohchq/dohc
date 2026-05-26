@@ -9,6 +9,7 @@ import * as Y from 'yjs'
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
+  markdownToYDoc,
 } from './import-export.js'
 
 export type EncodedSuggestionAnchors = {
@@ -23,6 +24,11 @@ export type ApplyAnchoredReplacementInput = EncodedSuggestionAnchors & {
   expectedSuffix?: string
 }
 
+export type ApplyInsertAfterHeadingInput = {
+  headingText: string
+  content: string
+}
+
 export type ApplyAnchoredReplacementResult =
   | { ok: true }
   | {
@@ -30,6 +36,10 @@ export type ApplyAnchoredReplacementResult =
       reason: 'unresolved-anchor' | 'invalid-range' | 'stale-intent' | 'needs-review'
       actualText?: string
     }
+
+export type ApplyInsertAfterHeadingResult =
+  | { ok: true }
+  | { ok: false; reason: 'heading-not-found' | 'invalid-content' }
 
 type TextSpan = {
   textStart: number
@@ -102,6 +112,50 @@ export function applyAnchoredReplacement(
     prosemirrorToYXmlFragment(updated, body)
   })
   return { ok: true }
+}
+
+export function applyInsertAfterHeading(
+  doc: Y.Doc,
+  input: ApplyInsertAfterHeadingInput,
+): ApplyInsertAfterHeadingResult {
+  const { body, pmDoc } = prosemirrorViewOf(doc)
+  let insertAt: number | null = null
+
+  pmDoc.descendants((node, pos) => {
+    if (
+      insertAt === null &&
+      node.type.name === 'heading' &&
+      node.textContent.trim() === input.headingText.trim()
+    ) {
+      insertAt = pos + node.nodeSize
+      return false
+    }
+    return true
+  })
+
+  if (insertAt === null) return { ok: false, reason: 'heading-not-found' }
+
+  let contentDoc: Y.Doc | null = null
+  try {
+    contentDoc = markdownToYDoc(input.content)
+    const { pmDoc: contentPmDoc } = prosemirrorViewOf(contentDoc)
+    if (contentPmDoc.childCount === 0) {
+      return { ok: false, reason: 'invalid-content' }
+    }
+    const updated = pmDoc.replace(
+      insertAt,
+      insertAt,
+      new Slice(contentPmDoc.content, 0, 0),
+    )
+    doc.transact(() => {
+      prosemirrorToYXmlFragment(updated, body)
+    })
+    return { ok: true }
+  } catch {
+    return { ok: false, reason: 'invalid-content' }
+  } finally {
+    contentDoc?.destroy()
+  }
 }
 
 function prosemirrorViewOf(doc: Y.Doc): {

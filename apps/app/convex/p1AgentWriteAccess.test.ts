@@ -28,7 +28,7 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
 // component registration which convex-test doesn't carry). The
 // tool→internal wiring is covered structurally (grep).
 
-describe('P1 — _upsertInternal gate (write_atom path)', () => {
+describe('P1 — _upsertInternal gate (legacy/system write path)', () => {
   it('without viewerSubject: writes unconditionally (system path back-compat)', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrgWithMembers(t)
@@ -212,25 +212,26 @@ describe('P1 — _removeInternal gate (delete_atom path)', () => {
 })
 
 describe('P1 — agent-tool wiring (structural)', () => {
-  it('write_atom passes viewerSubject + catches access-denied', async () => {
+  it('create_atom routes through semantic createAtom + reports access-denied', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve, dirname } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
     const __dirname = dirname(fileURLToPath(import.meta.url))
     const SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
 
-    // The write_atom execute body must (a) resolve viewerSubject,
-    // (b) pass it to _upsertInternal, (c) catch access-to-write and
-    // return a structured REFUSED message (so the agent can tell
-    // the user instead of throwing).
+    // The create_atom execute body must (a) resolve viewerSubject,
+    // (b) pass it as the semantic actor, (c) call Hocuspocus createAtom
+    // instead of writing atoms.body directly, and (d) return a structured
+    // REFUSED message for forbidden paths.
     const match = SRC.match(
-      /write_atom:\s*createTool\([\s\S]+?execute[\s\S]+?_upsertInternal[\s\S]+?\}\),/,
+      /create_atom:\s*createTool\([\s\S]+?execute[\s\S]+?callSemanticApply\('createAtom'[\s\S]+?\}\),/,
     )
     expect(match).not.toBeNull()
     const tool = match?.[0] ?? ''
     expect(tool).toContain('viewerSubjectFromTool(ctx)')
-    expect(tool).toMatch(/viewerSubject\s*,?\s*\}/)
-    expect(tool).toMatch(/access to write/)
+    expect(tool).toMatch(/userId:\s*viewerSubject/)
+    expect(tool).not.toContain('_upsertInternal')
+    expect(tool).toMatch(/forbidden/)
     expect(tool).toMatch(/REFUSED/)
   })
 

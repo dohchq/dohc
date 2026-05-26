@@ -64,6 +64,10 @@ vi.mock('convex/react', () => ({
   useQuery: () => undefined,
 }))
 
+vi.mock('../lib/active-workspace', () => ({
+  useActiveWorkspaceId: () => undefined,
+}))
+
 vi.mock('@tiptap/react', () => ({
   useEditor: (options: { editable?: boolean; extensions?: unknown[] }) => {
     const tr = { setMeta: vi.fn() }

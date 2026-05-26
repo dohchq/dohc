@@ -189,12 +189,13 @@ export async function writeNodeAdminResponse(
   if (
     !request.url?.startsWith('/healthz') &&
     !request.url?.startsWith('/capabilities') &&
-    !request.url?.startsWith('/admin/')
+    !request.url?.startsWith('/admin/') &&
+    !request.url?.startsWith('/apply/')
   ) {
     return false
   }
 
-  if (request.url?.startsWith('/admin/')) {
+  if (request.url?.startsWith('/admin/') || request.url?.startsWith('/apply/')) {
     const contentLength = Number(request.headers['content-length'] ?? 0)
     if (contentLength > MAX_ADMIN_BODY_BYTES) {
       response.writeHead(413, { 'content-type': 'application/json' })

@@ -62,6 +62,23 @@ export type PersistedProjectionJob = ProjectionJobInput & {
   updatedAt: Date
 }
 
+export type PersistedSemanticOperation = {
+  operationId: string
+  response: unknown
+  createdAt: Date
+}
+
+export type AppendUpdateAndRecordSemanticOperationInput = InsertUpdateInput & {
+  operationId: string
+  response: unknown
+}
+
+export type AppendUpdateAndRecordSemanticOperationResult = {
+  operation: PersistedSemanticOperation
+  update: PersistedUpdate | null
+  deduped: boolean
+}
+
 export interface YDocPersistenceBackend {
   ensureSchema(): Promise<void>
   hasDocumentState(documentName: string): Promise<boolean>
@@ -77,6 +94,14 @@ export interface YDocPersistenceBackend {
   listRetryableProjectionJobs(limit?: number): Promise<PersistedProjectionJob[]>
   markProjectionJobSucceeded(id: number): Promise<void>
   markProjectionJobFailed(id: number, error: string): Promise<void>
+  getSemanticOperation(operationId: string): Promise<PersistedSemanticOperation | null>
+  recordSemanticOperation(
+    operationId: string,
+    response: unknown,
+  ): Promise<PersistedSemanticOperation>
+  appendUpdateAndRecordSemanticOperation(
+    input: AppendUpdateAndRecordSemanticOperationInput,
+  ): Promise<AppendUpdateAndRecordSemanticOperationResult>
   deleteDocument(documentName: string): Promise<void>
 }
 
@@ -201,6 +226,111 @@ function persistedProjectionJobFromRow(row: {
   }
 }
 
+function persistedSemanticOperationFromRow(row: {
+  operation_id: string
+  response_json: unknown
+  created_at: Date
+}): PersistedSemanticOperation {
+  return {
+    operationId: row.operation_id,
+    response: row.response_json,
+    createdAt: row.created_at,
+  }
+}
+
+async function getSemanticOperationInTransaction(
+  client: SqlClient,
+  operationId: string,
+): Promise<PersistedSemanticOperation | null> {
+  const result = await client.query<{
+    operation_id: string
+    response_json: unknown
+    created_at: Date
+  }>(
+    `
+      SELECT operation_id, response_json, created_at
+      FROM hocuspocus_semantic_operations
+      WHERE operation_id = $1
+    `,
+    [operationId],
+  )
+  const row = result.rows[0]
+  return row ? persistedSemanticOperationFromRow(row) : null
+}
+
+async function recordSemanticOperationInTransaction(
+  client: SqlClient,
+  operationId: string,
+  response: unknown,
+): Promise<PersistedSemanticOperation> {
+  const result = await client.query<{
+    operation_id: string
+    response_json: unknown
+    created_at: Date
+  }>(
+    `
+      INSERT INTO hocuspocus_semantic_operations
+        (operation_id, response_json)
+      VALUES ($1, $2::jsonb)
+      ON CONFLICT (operation_id)
+      DO UPDATE SET response_json = hocuspocus_semantic_operations.response_json
+      RETURNING operation_id, response_json, created_at
+    `,
+    [operationId, JSON.stringify(response)],
+  )
+  return persistedSemanticOperationFromRow(result.rows[0])
+}
+
+async function insertUpdateInTransaction(
+  client: SqlClient,
+  input: InsertUpdateInput,
+): Promise<PersistedUpdate> {
+  await lockDocumentForTransaction(client, input.documentName)
+  const counter = await client.query<{ seq: number | string }>(
+    `
+      INSERT INTO hocuspocus_ydoc_counters (doc_name, last_seq)
+      VALUES ($1, 1)
+      ON CONFLICT (doc_name)
+      DO UPDATE SET last_seq = hocuspocus_ydoc_counters.last_seq + 1
+      RETURNING last_seq AS seq
+    `,
+    [input.documentName],
+  )
+  const seq = Number(counter.rows[0]?.seq)
+  const inserted = await client.query<{
+    doc_name: string
+    seq: number | string
+    update_bytes: Buffer
+    actor_id: string | null
+    socket_id: string | null
+    received_at: Date
+  }>(
+    `
+      INSERT INTO hocuspocus_ydoc_updates
+        (doc_name, seq, update_bytes, actor_id, socket_id)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING doc_name, seq, update_bytes, actor_id, socket_id, received_at
+    `,
+    [
+      input.documentName,
+      seq,
+      Buffer.from(input.updateBytes),
+      input.actorId,
+      input.socketId,
+    ],
+  )
+
+  const row = inserted.rows[0]
+  return {
+    documentName: row.doc_name,
+    seq: Number(row.seq),
+    updateBytes: new Uint8Array(row.update_bytes),
+    actorId: row.actor_id,
+    socketId: row.socket_id,
+    receivedAt: row.received_at,
+  }
+}
+
 export async function ensureYDocPersistenceSchema(client: SqlClient): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS hocuspocus_ydoc_counters (
@@ -264,6 +394,13 @@ export async function ensureYDocPersistenceSchema(client: SqlClient): Promise<vo
   await client.query(`
     CREATE INDEX IF NOT EXISTS hocuspocus_projection_jobs_doc_status_idx
       ON hocuspocus_projection_jobs (doc_name, status, id)
+  `)
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS hocuspocus_semantic_operations (
+      operation_id text PRIMARY KEY,
+      response_json jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )
   `)
 }
 
@@ -343,50 +480,7 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
 
   async insertUpdate(input: InsertUpdateInput): Promise<PersistedUpdate> {
     return withTransaction(this.client, async (client) => {
-      await lockDocumentForTransaction(client, input.documentName)
-      const counter = await client.query<{ seq: number | string }>(
-        `
-          INSERT INTO hocuspocus_ydoc_counters (doc_name, last_seq)
-          VALUES ($1, 1)
-          ON CONFLICT (doc_name)
-          DO UPDATE SET last_seq = hocuspocus_ydoc_counters.last_seq + 1
-          RETURNING last_seq AS seq
-        `,
-        [input.documentName],
-      )
-      const seq = Number(counter.rows[0]?.seq)
-      const inserted = await client.query<{
-        doc_name: string
-        seq: number | string
-        update_bytes: Buffer
-        actor_id: string | null
-        socket_id: string | null
-        received_at: Date
-      }>(
-        `
-          INSERT INTO hocuspocus_ydoc_updates
-            (doc_name, seq, update_bytes, actor_id, socket_id)
-          VALUES ($1, $2, $3, $4, $5)
-          RETURNING doc_name, seq, update_bytes, actor_id, socket_id, received_at
-        `,
-        [
-          input.documentName,
-          seq,
-          Buffer.from(input.updateBytes),
-          input.actorId,
-          input.socketId,
-        ],
-      )
-
-      const row = inserted.rows[0]
-      return {
-        documentName: row.doc_name,
-        seq: Number(row.seq),
-        updateBytes: new Uint8Array(row.update_bytes),
-        actorId: row.actor_id,
-        socketId: row.socket_id,
-        receivedAt: row.received_at,
-      }
+      return insertUpdateInTransaction(client, input)
     })
   }
 
@@ -565,6 +659,41 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
     )
   }
 
+  async getSemanticOperation(
+    operationId: string,
+  ): Promise<PersistedSemanticOperation | null> {
+    return getSemanticOperationInTransaction(this.client, operationId)
+  }
+
+  async recordSemanticOperation(
+    operationId: string,
+    response: unknown,
+  ): Promise<PersistedSemanticOperation> {
+    return recordSemanticOperationInTransaction(this.client, operationId, response)
+  }
+
+  async appendUpdateAndRecordSemanticOperation(
+    input: AppendUpdateAndRecordSemanticOperationInput,
+  ): Promise<AppendUpdateAndRecordSemanticOperationResult> {
+    return withTransaction(this.client, async (client) => {
+      await lockDocumentForTransaction(client, input.documentName)
+      const existing = await getSemanticOperationInTransaction(
+        client,
+        input.operationId,
+      )
+      if (existing) {
+        return { operation: existing, update: null, deduped: true }
+      }
+      const update = await insertUpdateInTransaction(client, input)
+      const operation = await recordSemanticOperationInTransaction(
+        client,
+        input.operationId,
+        input.response,
+      )
+      return { operation, update, deduped: false }
+    })
+  }
+
   async deleteDocument(documentName: string): Promise<void> {
     await withTransaction(this.client, async (client) => {
       await lockDocumentForTransaction(client, documentName)
@@ -689,6 +818,37 @@ export class PostgresYDocStore {
     await this.backend.markProjectionJobFailed(id, error)
   }
 
+  async getSemanticOperation(
+    operationId: string,
+  ): Promise<PersistedSemanticOperation | null> {
+    return await this.backend.getSemanticOperation(operationId)
+  }
+
+  async recordSemanticOperation(
+    operationId: string,
+    response: unknown,
+  ): Promise<PersistedSemanticOperation> {
+    return await this.backend.recordSemanticOperation(operationId, response)
+  }
+
+  async appendUpdateAndRecordSemanticOperation(input: {
+    documentName: string
+    update: Uint8Array
+    actorId: string | null
+    socketId: string | null
+    operationId: string
+    response: unknown
+  }): Promise<AppendUpdateAndRecordSemanticOperationResult> {
+    return await this.backend.appendUpdateAndRecordSemanticOperation({
+      documentName: input.documentName,
+      updateBytes: input.update,
+      actorId: input.actorId,
+      socketId: input.socketId,
+      operationId: input.operationId,
+      response: input.response,
+    })
+  }
+
   async deleteDocument(documentName: string): Promise<void> {
     await this.backend.deleteDocument(documentName)
   }
@@ -698,6 +858,7 @@ export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
   private readonly updates = new Map<string, PersistedUpdate[]>()
   private readonly snapshots = new Map<string, PersistedSnapshot[]>()
   private readonly projectionJobs: PersistedProjectionJob[] = []
+  private readonly semanticOperations = new Map<string, PersistedSemanticOperation>()
   private readonly counters = new Map<string, number>()
   private snapshotCounter = 0
   private projectionJobCounter = 0
@@ -829,6 +990,60 @@ export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
     job.attempts += 1
     job.lastError = error
     job.updatedAt = new Date()
+  }
+
+  async getSemanticOperation(
+    operationId: string,
+  ): Promise<PersistedSemanticOperation | null> {
+    const operation = this.semanticOperations.get(operationId)
+    return operation ? { ...operation } : null
+  }
+
+  async recordSemanticOperation(
+    operationId: string,
+    response: unknown,
+  ): Promise<PersistedSemanticOperation> {
+    const existing = this.semanticOperations.get(operationId)
+    if (existing) return { ...existing }
+
+    const operation = {
+      operationId,
+      response,
+      createdAt: new Date(),
+    }
+    this.semanticOperations.set(operationId, operation)
+    return { ...operation }
+  }
+
+  async appendUpdateAndRecordSemanticOperation(
+    input: AppendUpdateAndRecordSemanticOperationInput,
+  ): Promise<AppendUpdateAndRecordSemanticOperationResult> {
+    const existing = this.semanticOperations.get(input.operationId)
+    if (existing) {
+      return { operation: { ...existing }, update: null, deduped: true }
+    }
+
+    const seq = (this.counters.get(input.documentName) ?? 0) + 1
+    this.counters.set(input.documentName, seq)
+    const update: PersistedUpdate = {
+      documentName: input.documentName,
+      seq,
+      updateBytes: input.updateBytes,
+      actorId: input.actorId,
+      socketId: input.socketId,
+      receivedAt: new Date(),
+    }
+    this.updates.set(input.documentName, [
+      ...this.updatesFor(input.documentName),
+      update,
+    ])
+    const operation = {
+      operationId: input.operationId,
+      response: input.response,
+      createdAt: new Date(),
+    }
+    this.semanticOperations.set(input.operationId, operation)
+    return { operation, update, deduped: false }
   }
 
   async deleteDocument(documentName: string): Promise<void> {

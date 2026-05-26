@@ -1,32 +1,28 @@
-// M1 step 3.9.0 (multiplayer-and-h-followups §3 PR M3) —
-// atomSuggestions: the agent-as-collaborator sidecar.
+// v2 atomSuggestions: the agent-as-collaborator sidecar.
 //
-// Per Decision D (decorations + sidecar, NOT custom PM nodes):
-// the agent writes a row here via suggest_in_doc; the editor's
-// decoration plugin (3.9.1) subscribes via listPending and
-// renders an inline bubble. The user clicks Accept (inlines
-// the proposedText into atoms.body) or Reject (deletes row).
-//
-// Position semantics: rangeFrom/rangeTo are MARKDOWN-BODY
-// offsets (NOT PM doc positions — those are a separate
-// coordinate system that doesn't map 1:1 to atoms.body string
-// indices). The agent reasons about markdown offsets natively
-// (it reads body via read_atom). The editor decoration plugin
-// renders the bubble at the approximate PM position; the bubble
-// location is visually approximate but accept correctness
-// comes from the expectedText CAS witness (3.9.3 — out-of-
-// bounds rejected; drift since suggest_in_doc rejected).
-// Under concurrent body edits the highlighted range may
-// briefly desync; the CAS catches any drift before splice.
+// Suggestions are anchored by Y.RelativePosition bytes created from
+// the live Y.Doc. `expectedText` and optional prefix/suffix witnesses
+// guard semantic intent; the anchors guard location through concurrent
+// CRDT edits. Accepting a suggestion calls Hocuspocus' semantic API,
+// which mutates the canonical Y.Doc. This module never splices
+// `atoms.body`; that field is only the derived markdown projection.
 
 import { v } from 'convex/values'
-import { mutation, query, internalMutation } from './_generated/server'
+import {
+  action,
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from './_generated/server'
+import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
+import { extractFrontmatterId } from './atomId'
 import type { Id } from './_generated/dataModel'
 
 // Per-atom rate cap (codex HIGH 4 / plan §3 M3 cost caps).
-// "Per-turn: hard cap on number of suggest_in_doc calls (e.g.
+// "Per-turn: hard cap on number of propose_replace_text calls (e.g.
 // 5)". Convex actions have no native turn boundary; we
 // approximate with a per-atom-per-minute cap. Excess suggestions
 // throw so the agent gets a structured error + the rest of the
@@ -47,7 +43,7 @@ const PER_SUGGESTION_CHAR_CAP = 1000
 const RESOLVED_KEEP_MS = 10_000
 
 /** Internal mutation: actually write the suggestion row.
- *  Called by the suggest_in_doc agent tool after auth + cap
+ *  Called by semantic agent tools after auth + cap
  *  checks. Separated from the tool so test setups can write
  *  rows directly without spinning up the agent runtime. */
 export const _createSuggestion = internalMutation({
@@ -262,35 +258,37 @@ export const listPending = query({
   },
 })
 
-/** Accept a suggestion.
- *
- * v2 hard gate: suggestions must mutate the canonical Y.Doc through
- * Hocuspocus semantic operations. This mutation intentionally refuses
- * to splice the derived `atoms.body` cache. Phase 1.8 wires the HTTP
- * semantic apply path and then this function can patch the row based on
- * the Hocuspocus result.
- *
- * Auth: P1 WRITE access on the atom. */
-export const acceptSuggestion = mutation({
+function hocuspocusSemanticEnv(): { url: string; token: string } {
+  const url = process.env.HOCUSPOCUS_ADMIN_URL
+  const token = process.env.HOCUSPOCUS_ADMIN_TOKEN
+  if (!url || !token) {
+    throw new Error(
+      'HOCUSPOCUS_ADMIN_URL and HOCUSPOCUS_ADMIN_TOKEN required for semantic suggestion accept',
+    )
+  }
+  return { url, token }
+}
+
+export const _getSuggestionForSemanticAccept = internalQuery({
   args: {
     suggestionId: v.id('atomSuggestions'),
     activeWorkspaceId: v.optional(v.string()),
+    subject: v.string(),
   },
-  handler: async (
-    ctx,
-    { suggestionId, activeWorkspaceId },
-  ): Promise<
-    | { ok: true; alreadyResolved: boolean }
-    | {
-        ok: false
-        reason: 'semantic-api-required'
-        message: string
+  handler: async (ctx, { suggestionId, activeWorkspaceId, subject }) => {
+    const workspaceId = activeWorkspaceId ?? subject
+    if (workspaceId !== subject) {
+      const membership = await ctx.db
+        .query('memberships')
+        .withIndex('by_org_workspace', (q) =>
+          q.eq('orgId', workspaceId).eq('workspaceId', subject),
+        )
+        .unique()
+      if (!membership) throw new Error(`Not a member of workspace ${workspaceId}`)
+      if (membership.status !== undefined && membership.status !== 'active') {
+        throw new Error(`Membership not active (status=${membership.status})`)
       }
-  > => {
-    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const identity = await ctx.auth.getUserIdentity()
-    if (!identity) throw new Error('Not authenticated')
-    const subject = identity.subject
+    }
 
     const row = await ctx.db.get(suggestionId)
     if (!row) throw new Error('Suggestion not found.')
@@ -301,7 +299,7 @@ export const acceptSuggestion = mutation({
       // Idempotent: re-accepting a resolved suggestion is a
       // no-op (another tab beat us). Return the row so the
       // caller can update its UI consistently.
-      return { ok: true as const, alreadyResolved: true }
+      return { state: 'already-resolved' as const }
     }
     const atom = await ctx.db.get(row.atomId)
     if (!atom) throw new Error('Atom not found.')
@@ -312,13 +310,156 @@ export const acceptSuggestion = mutation({
     ) {
       throw new Error('Not authorized to edit this atom.')
     }
+    const atomId = extractFrontmatterId(atom.body)
+    if (!atomId) throw new Error('Atom is missing a frontmatter id.')
+    if (!row.anchorStart || !row.anchorEnd) {
+      throw new Error('Suggestion is missing Y.RelativePosition anchors.')
+    }
 
     return {
-      ok: false,
-      reason: 'semantic-api-required',
-      message:
-        'Suggestion accept must apply through the Hocuspocus semantic API.',
+      state: 'pending' as const,
+      workspaceId,
+      atomId,
+      anchorStart: row.anchorStart,
+      anchorEnd: row.anchorEnd,
+      proposedText: row.proposedText,
+      expectedText: row.expectedText,
+      expectedPrefix: row.expectedPrefix,
+      expectedSuffix: row.expectedSuffix,
     }
+  },
+})
+
+export const _markSuggestionApplyResult = internalMutation({
+  args: {
+    suggestionId: v.id('atomSuggestions'),
+    status: v.union(
+      v.literal('accepted'),
+      v.literal('stale'),
+      v.literal('needs-review'),
+    ),
+    resolvedByUserId: v.string(),
+    resolvedByUserName: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { suggestionId, status, resolvedByUserId, resolvedByUserName },
+  ) => {
+    const row = await ctx.db.get(suggestionId)
+    if (!row || row.status !== 'pending') {
+      return { ok: true as const, alreadyResolved: true }
+    }
+    await ctx.db.patch(suggestionId, {
+      status,
+      resolvedByUserId,
+      resolvedByUserName,
+      resolvedAt: Date.now(),
+    })
+    return { ok: true as const, alreadyResolved: false }
+  },
+})
+
+type AcceptSuggestionResult =
+  | { ok: true; alreadyResolved: boolean }
+  | { ok: false; reason: 'stale' | 'needs-review' }
+
+/** Accept a suggestion through the Hocuspocus semantic API.
+ *
+ * This never splices `atoms.body`. Hocuspocus mutates canonical Y.Doc
+ * state and the projection worker later refreshes the markdown cache.
+ *
+ * Auth: P1 WRITE access on the atom. */
+export const acceptSuggestion = action({
+  args: {
+    suggestionId: v.id('atomSuggestions'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    { suggestionId, activeWorkspaceId },
+  ): Promise<AcceptSuggestionResult> => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const subject = identity.subject
+    const resolverName =
+      typeof identity.name === 'string' && identity.name.length > 0
+        ? identity.name
+        : undefined
+    const workspaceId = (await ctx.runQuery(
+      internal.agent._resolveWorkspaceForCaller,
+      { activeWorkspaceId },
+    )) as string
+
+    const suggestion = await ctx.runQuery(
+      internal.atomSuggestions._getSuggestionForSemanticAccept,
+      { suggestionId, activeWorkspaceId: workspaceId, subject },
+    )
+    if (suggestion.state === 'already-resolved') {
+      return { ok: true as const, alreadyResolved: true }
+    }
+
+    const env = hocuspocusSemanticEnv()
+    const response = await fetch(
+      new URL('/apply/replaceRange', env.url).toString(),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          operationId: `acceptSuggestion:${suggestionId}`,
+          workspaceId: suggestion.workspaceId,
+          atomId: suggestion.atomId,
+          actor: {
+            userId: subject,
+            actorKind: 'user',
+            authzVersion: 1,
+          },
+          anchorStart: suggestion.anchorStart,
+          anchorEnd: suggestion.anchorEnd,
+          replacement: suggestion.proposedText,
+          expectedText: suggestion.expectedText,
+          expectedPrefix: suggestion.expectedPrefix,
+          expectedSuffix: suggestion.expectedSuffix,
+        }),
+      },
+    )
+    const payload = (await response.json().catch(() => null)) as
+      | { ok?: boolean; reason?: string }
+      | null
+    if (!response.ok || payload?.ok !== true) {
+      const status =
+        payload?.reason === 'needs-review'
+          ? 'needs-review'
+          : payload?.reason === 'stale-intent'
+            ? 'stale'
+            : null
+      if (status) {
+        await ctx.runMutation(internal.atomSuggestions._markSuggestionApplyResult, {
+          suggestionId,
+          status,
+          resolvedByUserId: subject,
+          resolvedByUserName: resolverName,
+        })
+        return { ok: false as const, reason: status }
+      }
+      throw new Error(
+        `Hocuspocus semantic accept failed: ${response.status}${
+          payload?.reason ? ` (${payload.reason})` : ''
+        }`,
+      )
+    }
+
+    return await ctx.runMutation(
+      internal.atomSuggestions._markSuggestionApplyResult,
+      {
+        suggestionId,
+        status: 'accepted',
+        resolvedByUserId: subject,
+        resolvedByUserName: resolverName,
+      },
+    )
   },
 })
 

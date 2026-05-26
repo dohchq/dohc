@@ -38,15 +38,4 @@ crons.interval(
   {},
 )
 
-// M1 step 3 sub-commit 3.3 — reap idle collab sessions. 60s
-// cadence matches the 90s presence-expiry contract. Codex v3
-// caught v2's 5min cron + 90s expiry as a ~6.5min lag between
-// promise + delivery; this closes it.
-crons.interval(
-  'reap idle collab sessions',
-  { seconds: 60 },
-  internal.collabPresence._cleanupIdleSessions,
-  {},
-)
-
 export default crons

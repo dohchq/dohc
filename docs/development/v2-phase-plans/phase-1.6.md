@@ -127,7 +127,7 @@ Expected after implementation: tests and Hocuspocus typecheck pass.
 - [x] Convex projection tests pass.
 - [x] Hocuspocus queue/bridge/hook tests pass.
 - [x] Hocuspocus typecheck passes.
-- [x] App typecheck still blocked only by Phase 1.9 legacy Milkdown files, until cleanup removes them.
+- [x] App typecheck passes after Phase 1.9 removed the legacy Milkdown/Crepe files.
 
 ## Rollback Notes
 

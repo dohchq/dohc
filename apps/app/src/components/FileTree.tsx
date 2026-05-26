@@ -8,9 +8,6 @@ import {
   useState,
   useCallback,
 } from 'react'
-import { useQuery } from 'convex/react'
-import { api } from '../../convex/_generated/api'
-import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
   ChevronDown,
   ChevronRight,
@@ -419,30 +416,7 @@ export function FileTree({
   accessStates,
   onOpenSearch,
 }: Props) {
-  // M1 step 3.8.2.1 — file tree presence subscription.
-  // Single useQuery at FileTree's top — every TreeRowNode reads
-  // the resulting Set via context to render a presence
-  // indicator next to atoms with active sessions. Skipped
-  // when there's no active workspace (logged-out edge case).
-  // Returns Array<Id<'atoms'>>; we wrap in a Set keyed by
-  // path (resolved via files[]) so the TreeRowNode lookup —
-  // which has path, not _id — is O(1).
-  const activeWorkspaceIdForPresence = useActiveWorkspaceId()
-  const activeAtomIds = useQuery(
-    api.collabPresence.getActiveAtomIds,
-    activeWorkspaceIdForPresence
-      ? { activeWorkspaceId: activeWorkspaceIdForPresence }
-      : 'skip',
-  )
-  const presentPathSet = useMemo<ReadonlySet<string>>(() => {
-    if (!activeAtomIds || activeAtomIds.length === 0) return new Set()
-    const idSet = new Set<string>(activeAtomIds as unknown as string[])
-    const out = new Set<string>()
-    for (const f of files) {
-      if (idSet.has(f._id)) out.add(f.path)
-    }
-    return out
-  }, [activeAtomIds, files])
+  const presentPathSet = useMemo<ReadonlySet<string>>(() => new Set(), [])
 
   // P1 — derive a path → mode lookup from the (fileId→mode) state
   // and the file rows (which carry fileId). The leaf renderer reads

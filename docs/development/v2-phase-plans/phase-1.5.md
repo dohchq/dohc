@@ -133,13 +133,13 @@ pnpm --filter @dohc/hocuspocus exec vitest run src/hooks.test.ts
 pnpm --filter @dohc/hocuspocus run typecheck
 ```
 
-- [ ] App typecheck:
+- [x] App typecheck:
 
 ```bash
 pnpm --filter @dohc/app run typecheck
 ```
 
-Current blocker: legacy Phase 1.9 files still import removed Milkdown packages (`apps/app/src/lib/collab-sync.ts`, `apps/app/src/lib/crepe-schema-cache.ts`). Phase 1.9 owns deleting or rewriting these v1 leftovers.
+Phase 1.9 removed the legacy Milkdown/Crepe files that previously blocked app typecheck.
 
 ## Rollback Notes
 

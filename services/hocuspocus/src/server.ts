@@ -13,6 +13,7 @@ import {
   PostgresYDocStore,
 } from './persistence.js'
 import { createProjectionWorker } from './projection.js'
+import { createSemanticApiHandler } from './semantic-api.js'
 
 const { Pool } = pg
 
@@ -84,6 +85,15 @@ export async function createServerFromEnv(): Promise<Server> {
       atomBootstrap: typeof acl.loadAtomBootstrap === 'function',
     },
   })
+  let server: Server | undefined
+  const semanticHandler = createSemanticApiHandler({
+    adminToken: requiredEnv('HOCUSPOCUS_ADMIN_TOKEN'),
+    acl,
+    store,
+    logger: console,
+    getLiveDocument: (documentName) =>
+      server?.hocuspocus.documents.get(documentName) ?? null,
+  })
 
   const hooks = createHocuspocusHooks({
     jwtSecret: requiredEnv('HOCUSPOCUS_JWT_SECRET'),
@@ -94,7 +104,7 @@ export async function createServerFromEnv(): Promise<Server> {
     projectionWorker,
   })
 
-  return new Server({
+  server = new Server({
     ...hooks,
     name: 'dohc-hocuspocus',
     port: Number(process.env.HOCUSPOCUS_PORT ?? '1234'),
@@ -103,7 +113,13 @@ export async function createServerFromEnv(): Promise<Server> {
       const handled = await writeNodeAdminResponse(
         data.request,
         data.response,
-        adminHandler,
+        (request) => {
+          const { pathname } = new URL(request.url)
+          if (pathname.startsWith('/apply/')) {
+            return semanticHandler(request)
+          }
+          return adminHandler(request)
+        },
       )
       if (handled) return Promise.reject()
     },
@@ -114,6 +130,7 @@ export async function createServerFromEnv(): Promise<Server> {
       await poolEndPromise
     },
   })
+  return server
 }
 
 export async function startServerFromEnv(): Promise<void> {

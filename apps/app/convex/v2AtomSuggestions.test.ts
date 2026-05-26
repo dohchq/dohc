@@ -8,9 +8,12 @@ import type { Id } from './_generated/dataModel'
 const modules = import.meta.glob('./**/*.ts')
 const OWNER = 'ws_owner'
 const SERVER_SECRET = 'test-agent-secret'
+const ADMIN_URL = 'http://hocuspocus.local:1234'
+const ADMIN_TOKEN = 'admin-token'
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
 })
 
 async function seedAtom(t: ReturnType<typeof convexTest>): Promise<Id<'atoms'>> {
@@ -126,8 +129,17 @@ describe('v2 atomSuggestions anchors', () => {
     })
   })
 
-  it('does not accept suggestions by splicing the markdown cache', async () => {
+  it('accepts suggestions through Hocuspocus without splicing the markdown cache', async () => {
     const t = convexTest(schema, modules)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', ADMIN_URL)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', ADMIN_TOKEN)
+    const fetch = vi.fn(async (_url: string, _init: RequestInit) =>
+      new Response(JSON.stringify({ ok: true, operationId: 'accept-suggestion' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetch)
     const atomId = await seedAtom(t)
     const result = await createSuggestion(t, atomId)
     const id = suggestionId(result)
@@ -135,19 +147,42 @@ describe('v2 atomSuggestions anchors', () => {
     await expect(
       t
         .withIdentity({ subject: OWNER, name: 'Ice' })
-        .mutation(api.atomSuggestions.acceptSuggestion, {
+        .action(api.atomSuggestions.acceptSuggestion, {
           suggestionId: id,
         }),
-    ).resolves.toEqual({
-      ok: false,
-      reason: 'semantic-api-required',
-      message:
-        'Suggestion accept must apply through the Hocuspocus semantic API.',
-    })
+    ).resolves.toEqual({ ok: true, alreadyResolved: false })
 
     const atom = await t.run(async (ctx) => ctx.db.get(atomId))
     const row = (await t.run(async (ctx) => ctx.db.get(id))) as any
     expect(atom?.body).toContain('Hello world.')
-    expect(row?.status).toBe('pending')
+    expect(row).toMatchObject({
+      status: 'accepted',
+      resolvedByUserId: OWNER,
+      resolvedByUserName: 'Ice',
+    })
+    expect(fetch).toHaveBeenCalledOnce()
+    const [url, init] = fetch.mock.calls[0]!
+    expect(url).toBe(`${ADMIN_URL}/apply/replaceRange`)
+    expect(init).toMatchObject({
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${ADMIN_TOKEN}`,
+        'content-type': 'application/json',
+      },
+    })
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      operationId: `acceptSuggestion:${id}`,
+      workspaceId: OWNER,
+      atomId: 'intro',
+      replacement: 'earth',
+      expectedText: 'world',
+      expectedPrefix: 'Hello ',
+      expectedSuffix: '.',
+      actor: {
+        userId: OWNER,
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    })
   })
 })

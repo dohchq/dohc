@@ -69,6 +69,29 @@ async function loadBootstrap(
   })
 }
 
+async function createAtom(
+  t: ReturnType<typeof convexTest>,
+  args: {
+    serverToken?: string
+    userId?: string
+    workspaceId?: string
+    path?: string
+    content?: string
+    actorKind?: 'user' | 'agent'
+    authzVersion?: number
+  } = {},
+) {
+  return await t.mutation(api.hocuspocusAuth.createAtom, {
+    serverToken: args.serverToken ?? SERVER_TOKEN,
+    userId: args.userId ?? OWNER,
+    workspaceId: args.workspaceId ?? OWNER,
+    path: args.path ?? 'created.md',
+    content: args.content ?? 'Created body.',
+    actorKind: args.actorKind ?? 'agent',
+    authzVersion: args.authzVersion ?? 1,
+  })
+}
+
 afterEach(() => {
   vi.unstubAllEnvs()
 })
@@ -243,5 +266,30 @@ describe('hocuspocus Convex ACL bridge', () => {
     stubServerToken()
 
     await expect(loadBootstrap(t, { atomId: 'missing' })).resolves.toBeNull()
+  })
+
+  it('creates a new atom through the Hocuspocus server-token bridge', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+
+    const result = await createAtom(t)
+
+    expect(result).toMatchObject({ ok: true, atomId: 'created' })
+    await expect(
+      loadBootstrap(t, { atomId: 'created' }),
+    ).resolves.toMatchObject({
+      markdown: expect.stringContaining('Created body.'),
+    })
+  })
+
+  it('refuses semantic create when the path already exists', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+    await seedOwnerAtom(t, 'created.md', '---\nid: created\n---\nExisting')
+
+    await expect(createAtom(t)).resolves.toEqual({
+      ok: false,
+      reason: 'already-exists',
+    })
   })
 })

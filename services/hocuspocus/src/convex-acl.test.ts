@@ -180,4 +180,46 @@ describe('Convex ACL adapter', () => {
       projectedAt: 1_778_888_000_000,
     })
   })
+
+  it('creates atoms through the secret-protected Convex mutation', async () => {
+    const client = {
+      query: vi.fn(),
+      mutation: vi.fn(async () => ({
+        ok: true as const,
+        atomId: 'created',
+        markdown: '---\nid: created\n---\nCreated',
+      })),
+    }
+    const acl = createConvexAcl({
+      convexUrl: 'https://example.convex.cloud',
+      serverToken: 'server-token',
+      client,
+    })
+
+    await expect(
+      acl.createAtom?.({
+        workspaceId: 'workspace_1',
+        path: 'created.md',
+        content: 'Created',
+        userId: 'agent_1',
+        actorKind: 'agent',
+        authzVersion: 1,
+      }),
+    ).resolves.toMatchObject({ ok: true, atomId: 'created' })
+
+    const [fn, args] = client.mutation.mock.calls[0] as unknown as [
+      FunctionReference<'mutation'>,
+      Record<string, unknown>,
+    ]
+    expect(getFunctionName(fn)).toBe('hocuspocusAuth:createAtom')
+    expect(args).toEqual({
+      serverToken: 'server-token',
+      workspaceId: 'workspace_1',
+      path: 'created.md',
+      content: 'Created',
+      userId: 'agent_1',
+      actorKind: 'agent',
+      authzVersion: 1,
+    })
+  })
 })
