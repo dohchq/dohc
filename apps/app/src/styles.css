@@ -453,7 +453,7 @@
 }
 .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
   font-weight: 700;
-  letter-spacing: -0.014em;
+  letter-spacing: 0;
   color: var(--ink-strong);
   line-height: 1.25;
   margin: 0;
@@ -1029,7 +1029,7 @@
   font-size: 30px;
   line-height: 1.25;
   font-weight: 700;
-  letter-spacing: -0.018em;
+  letter-spacing: 0;
   padding: 28px 0 4px;
   margin: 0;
   color: var(--ink-strong);
@@ -1150,7 +1150,7 @@
    * reads: this is THE page title, headings inside are sections. */
   font-size: 44px;
   font-weight: 800;
-  letter-spacing: -0.024em;
+  letter-spacing: 0;
   line-height: 1.15;
   color: var(--ink-strong);
   padding: 6px 0 8px;
@@ -1225,7 +1225,7 @@
   font-size: 24px;
   line-height: 1.3;
   font-weight: 700;
-  letter-spacing: -0.014em;
+  letter-spacing: 0;
   padding: 24px 0 3px;
   margin: 0;
   color: var(--ink-strong);
@@ -1234,7 +1234,7 @@
   font-size: 20px;
   line-height: 1.3;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   padding: 20px 0 2px;
   margin: 0;
   color: var(--ink-strong);
@@ -1329,6 +1329,46 @@
   padding: 0;
   white-space: pre;
 }
+.doc-editing .dohc-tiptap-editor table {
+  border-collapse: collapse;
+  font-size: 14px;
+  margin: 0.8em 0;
+  table-layout: fixed;
+  width: 100%;
+}
+.doc-editing .dohc-tiptap-editor th,
+.doc-editing .dohc-tiptap-editor td {
+  border: 1px solid var(--rule);
+  min-width: 92px;
+  padding: 6px 8px;
+  position: relative;
+  vertical-align: top;
+}
+.doc-editing .dohc-tiptap-editor th {
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+.doc-editing .dohc-tiptap-editor td {
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .selectedCell::after {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+.doc-editing .dohc-tiptap-editor .column-resize-handle {
+  background: var(--color-accent);
+  bottom: -1px;
+  pointer-events: none;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 3px;
+}
 /* Tiptap's "Please enter..." placeholder uses `color-mix(--tiptap-color-on-background, transparent 60%)`
  * which lands near-black on dark backgrounds and is basically invisible.
  * Force it to our theme's dim ink so it stays readable in both modes. */
@@ -1365,6 +1405,10 @@
   height: 0;
   opacity: 0.58;
   pointer-events: none;
+}
+.doc-editing .dohc-tiptap-editor th .is-empty::before,
+.doc-editing .dohc-tiptap-editor td .is-empty::before {
+  content: '' !important;
 }
 
 .doc-editing .dohc-tiptap-editor .dohc-block-affordance {
@@ -1408,7 +1452,7 @@
   font-size: 11px;
   font-weight: 600;
   left: -20px;
-  letter-spacing: -1px;
+  letter-spacing: 0;
 }
 .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:hover {
   background: color-mix(in srgb, var(--color-ink) 9%, transparent);

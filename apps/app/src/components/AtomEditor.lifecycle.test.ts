@@ -2,13 +2,14 @@
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AtomEditor } from './AtomEditor'
+import { AtomEditor, type AtomEditorHandle } from './AtomEditor'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true
 
 const tiptapState = vi.hoisted(() => ({
   editors: [] as Array<{
+    isEditable: boolean
     setEditable: ReturnType<typeof vi.fn>
     commands: { focus: ReturnType<typeof vi.fn> }
     view: {
@@ -22,7 +23,9 @@ const tiptapState = vi.hoisted(() => ({
 
 const hocuspocusState = vi.hoisted(() => ({
   resolvedUrl: 'ws://sync.test',
-  capabilities: { atomBootstrap: true },
+  capabilities: { atomBootstrap: true } as
+    | { atomBootstrap: boolean }
+    | Promise<{ atomBootstrap: boolean }>,
   documentState: { exists: true },
   providers: [] as Array<{
     url: string
@@ -74,7 +77,10 @@ vi.mock('@tiptap/react', () => ({
     const tr = { setMeta: vi.fn() }
     tr.setMeta.mockReturnValue(tr)
     const editor = {
-      setEditable: vi.fn(),
+      isEditable: options.editable !== false,
+      setEditable: vi.fn((editable: boolean) => {
+        editor.isEditable = editable
+      }),
       commands: { focus: vi.fn() },
       view: {
         state: { tr },
@@ -83,7 +89,7 @@ vi.mock('@tiptap/react', () => ({
       getMarkdown: vi.fn(() => ''),
       extensions: options.extensions ?? [],
     }
-    editor.setEditable(options.editable)
+    editor.setEditable(options.editable !== false)
     tiptapState.editors.push(editor)
     return editor
   },
@@ -214,7 +220,9 @@ vi.mock('../editor-v2/hocuspocusProvider', () => ({
     atomId: string
   }) => `workspace/${workspaceId}/atom/${atomId}`,
   resolveHocuspocusUrl: () => hocuspocusState.resolvedUrl,
-  fetchHocuspocusCapabilities: vi.fn(async () => hocuspocusState.capabilities),
+  fetchHocuspocusCapabilities: vi.fn(() =>
+    Promise.resolve(hocuspocusState.capabilities),
+  ),
   fetchHocuspocusDocumentState: vi.fn(async () => hocuspocusState.documentState),
   createDohcHocuspocusProvider: vi.fn((options) => {
     hocuspocusState.providers.push(options)
@@ -309,6 +317,7 @@ describe('AtomEditor collaborative browser lifecycle', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     for (const node of Array.from(document.body.children)) node.remove()
   })
 
@@ -360,6 +369,85 @@ describe('AtomEditor collaborative browser lifecycle', () => {
     expect(containerStatusText()).not.toContain('Syncing')
   })
 
+  it('continues to remote sync when IndexedDB hydration never responds', async () => {
+    vi.useFakeTimers()
+
+    await mountAtomEditor()
+
+    expect(indexeddbState.instances).toHaveLength(1)
+    expect(hocuspocusState.providers).toHaveLength(0)
+
+    await act(async () => {
+      vi.advanceTimersByTime(2500)
+      await Promise.resolve()
+    })
+    await flushReact()
+
+    expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
+    expect(hocuspocusState.providers[0]?.documentName).toBe(documentName())
+    expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
+  })
+
+  it('surfaces sync unavailable when Hocuspocus bootstrap never responds', async () => {
+    vi.useFakeTimers()
+    hocuspocusState.capabilities = new Promise(() => {})
+
+    await mountAtomEditor()
+
+    expect(containerStatusText()).toContain('Syncing')
+    expect(hocuspocusState.providers).toHaveLength(0)
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000)
+      await Promise.resolve()
+    })
+    await flushReact()
+
+    expect(containerStatusText()).toContain('Sync unavailable')
+    expect(hocuspocusState.providers).toHaveLength(0)
+    expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
+  })
+
+  it('surfaces sync unavailable instead of staying on Syncing forever', async () => {
+    vi.useFakeTimers()
+
+    await mountAtomEditor()
+    await fireIndexeddbSynced(0)
+
+    expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
+    expect(containerStatusText()).toContain('Syncing')
+
+    await act(async () => {
+      vi.advanceTimersByTime(12000)
+      await Promise.resolve()
+    })
+    await flushReact()
+
+    expect(containerStatusText()).toContain('Sync unavailable')
+    expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
+
+    await act(async () => {
+      hocuspocusState.providers[0]?.onSynced?.({ state: true })
+    })
+    await flushReact()
+
+    expect(containerStatusText()).not.toContain('Sync unavailable')
+    expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(true)
+  })
+
+  it('does not allow imperative code-block inserts while the collaborative editor is read-only', async () => {
+    const ref = React.createRef<AtomEditorHandle>()
+
+    await mountAtomEditor({ ref })
+    tiptapState.editors.at(-1)?.view.dispatch.mockClear()
+    await act(async () => {
+      ref.current?.insertCodeBlock('text', 'should not write yet')
+      ref.current?.replaceCodeBlockAt(0, 'should not write yet', 'text')
+    })
+
+    expect(tiptapState.editors.at(-1)?.view.dispatch).not.toHaveBeenCalled()
+  })
+
   it('allows offline resume after local cache is verified even before remote sync returns', async () => {
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -372,6 +460,8 @@ describe('AtomEditor collaborative browser lifecycle', () => {
 
     expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(true)
+    expect(containerStatusText()).not.toContain('Syncing')
+    expect(containerStatusText()).not.toContain('Sync unavailable')
   })
 
   it('wires safe Yjs awareness and collaboration carets for editable collaborators', async () => {
@@ -434,10 +524,42 @@ describe('AtomEditor collaborative browser lifecycle', () => {
         node: { type: { name: 'paragraph' } },
       }),
     ).toBe("Type '/' for commands")
+    expect(
+      placeholder.config?.placeholder?.({
+        node: { type: { name: 'tableCell' } },
+      }),
+    ).toBe('')
     expect(trailingNode.config).toEqual({
       node: 'paragraph',
       notAfter: ['paragraph'],
     })
+  })
+
+  it('does not mount client-only trailing nodes in collaborative editors', async () => {
+    await mountAtomEditor()
+
+    const extensions = tiptapState.editors.at(-1)?.extensions ?? []
+    expect(
+      extensions.some(
+        (extension) => (extension as { name?: string }).name === 'trailing-node',
+      ),
+    ).toBe(false)
+    expect(
+      (extensions.find(
+        (extension) => (extension as { name?: string }).name === 'starter-kit',
+      ) as { config?: { trailingNode?: unknown } })?.config,
+    ).toMatchObject({ trailingNode: false })
+  })
+
+  it('keeps StarterKit before custom block nodes so Enter creates paragraphs, not query blocks', async () => {
+    await mountAtomEditor({ collab: undefined })
+
+    const names = (tiptapState.editors.at(-1)?.extensions ?? []).map(
+      (extension) => (extension as { name?: string }).name,
+    )
+    expect(names.indexOf('starter-kit')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('queryBlock')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('starter-kit')).toBeLessThan(names.indexOf('queryBlock'))
   })
 
   it('mounts two collaborative editors into the same Hocuspocus document room', async () => {

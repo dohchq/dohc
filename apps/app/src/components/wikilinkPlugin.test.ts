@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeWikilinkRanges } from './wikilinkPlugin'
+import { computeWikilinkRanges, detectAutocomplete } from './wikilinkPlugin'
 import type { PMDocLike, PMNodeLike } from './inlineAtomPlugin'
 
 // D4.8 — wikilink decoration regex tests. Pure function; no DOM.
@@ -13,9 +13,15 @@ function textNode(text: string): PMNodeLike {
   }
 }
 
-function paragraph(children: PMNodeLike[]): PMNodeLike {
+function paragraph(): PMNodeLike {
   return {
     type: { name: 'paragraph' },
+  }
+}
+
+function codeBlock(): PMNodeLike {
+  return {
+    type: { name: 'code_block', spec: { code: true } },
   }
 }
 
@@ -38,6 +44,27 @@ function makeDoc(nodes: Array<{ text: string; isCode?: boolean }>): PMDocLike {
         cb(node, pos, null)
         pos += n.text.length
       }
+    },
+  }
+}
+
+function makeDocWithParent(
+  text: string,
+  parent: PMNodeLike | null,
+  marks: PMNodeLike['marks'] = [],
+): PMDocLike {
+  return {
+    descendants(cb) {
+      cb(
+        {
+          isText: true,
+          text,
+          marks,
+          type: { name: 'text' },
+        },
+        1,
+        parent,
+      )
     },
   }
 }
@@ -93,5 +120,32 @@ describe('computeWikilinkRanges — wikilink decoration scanner', () => {
   it('does not match across newlines (paths are single-segment-ish)', () => {
     const doc = makeDoc([{ text: '[[a\nb]]' }])
     expect(computeWikilinkRanges(doc)).toHaveLength(0)
+  })
+})
+
+describe('detectAutocomplete — wikilink picker trigger', () => {
+  it('opens for an incomplete wikilink in plain text', () => {
+    expect(detectAutocomplete(makeDocWithParent('see [[pla', paragraph()), 10)).toEqual({
+      active: true,
+      from: 5,
+      query: 'pla',
+    })
+  })
+
+  it('does not open inside fenced code blocks', () => {
+    expect(detectAutocomplete(makeDocWithParent('[[nope', codeBlock()), 7)).toEqual({
+      active: false,
+    })
+  })
+
+  it('does not open inside inline code marks', () => {
+    expect(
+      detectAutocomplete(
+        makeDocWithParent('[[nope', paragraph(), [
+          { type: { name: 'inlineCode' } },
+        ]),
+        7,
+      ),
+    ).toEqual({ active: false })
   })
 })

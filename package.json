@@ -16,8 +16,12 @@
     "preview": "pnpm --filter @dohc/app --if-present run preview",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
+    "test:e2e": "playwright test",
     "test:hocuspocus:integration": "pnpm --filter @dohc/hocuspocus run test:integration",
     "lint": "pnpm -r --if-present lint"
   },
-  "packageManager": "pnpm@10.24.0"
+  "packageManager": "pnpm@10.24.0",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
 }

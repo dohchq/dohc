@@ -12,10 +12,13 @@ describe('AtomEditor slash commands', () => {
       'wikilink',
       'heading-1',
       'heading-2',
+      'heading-3',
       'bulleted-list',
       'numbered-list',
       'quote',
       'code-block',
+      'divider',
+      'table',
       'query-block',
     ])
   })
@@ -24,8 +27,8 @@ describe('AtomEditor slash commands', () => {
     expect(filterSlashCommands('sketch').map((command) => command.id)).toEqual([
       'ascii-sketch',
     ])
-    expect(filterSlashCommands('todo').map((command) => command.id)).toEqual([
-      'query-block',
+    expect(filterSlashCommands('table').map((command) => command.id)).toEqual([
+      'table',
     ])
     expect(filterSlashCommands('wiki').map((command) => command.id)).toEqual([
       'wikilink',

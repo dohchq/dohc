@@ -117,8 +117,10 @@ export function detectAutocomplete(
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
-  doc.descendants((node, pos) => {
+  doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
+    if (isCodeBlock(parent)) return
+    if ((node.marks ?? []).some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return

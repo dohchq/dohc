@@ -1,39 +1,72 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AtomEditor } from '@/components/AtomEditor'
-
-// DEV-ONLY, NO-AUTH playground to verify Phase 1b inline atoms in a
-// real Tiptap editor (the WorkOS wall blocks the real app; this route
-// renders the editor in isolation — no useAuth, no Convex queries).
-// It exists to close the deferred Tiptap-serializer round-trip check:
-// the <pre> shows EXACTLY what Tiptap emits via markdownUpdated, so we
-// can see whether `{billable_this_week}` survives or gets escaped.
+import { PropertiesPanel } from '@/components/PropertiesPanel'
+import { ActiveWorkspaceProvider } from '@/lib/active-workspace'
+import {
+  applyFrontmatter,
+  fmString,
+  frontmatterEntries,
+  parseFrontmatter,
+  setFrontmatterTitle,
+} from '@/lib/frontmatter'
 
 export const Route = createFileRoute('/playground')({
   component: Playground,
 })
 
-const SAMPLE = [
-  '# Inline-atom playground',
+const SAMPLE_DOCUMENT = [
+  '---',
+  'id: tiptap-playground',
+  'title: Tiptap',
+  'status: testing',
+  '---',
+  'This is editable text in the page body.',
   '',
-  'Logged {hours: 6} on {client: Acme_Corp} today, rate {rate: 150}.',
+  'Link another page with [[ideas/tiptap-roadmap]].',
   '',
-  'Team total: {billable_this_week} — and a flag {billable: true}.',
+  '```ascii',
+  '   +-------------------+',
+  '   | dohc page body    |',
+  '   | text is the base  |',
+  '   +-------------------+',
+  '```',
   '',
-  'Due {due: 2026-06-01}. Some _emphasis_ and a code span `{x: 1}`.',
-  '',
-  'Not an atom: the set \\{1,2,3\\} and {tags: [a,b]}.',
+  'A final paragraph gives slash commands a plain-text place to start.',
 ].join('\n')
 
+const KNOWN_FILES = [
+  { path: 'ideas/tiptap-roadmap.md', title: 'Tiptap roadmap' },
+  { path: 'notes/editor-ux.md', title: 'Editor UX' },
+  { path: 'projects/dohc.md', title: 'dohc' },
+]
+
+function propsFromFrontmatter(body: string): Record<string, string> {
+  return Object.fromEntries(frontmatterEntries(body).map((e) => [e.key, e.value]))
+}
+
+function replaceMarkdownBody(fullBody: string, nextMarkdown: string): string {
+  return applyFrontmatter(nextMarkdown, propsFromFrontmatter(fullBody))
+}
+
 function Playground() {
+  return (
+    <ActiveWorkspaceProvider>
+      <PlaygroundEditor />
+    </ActiveWorkspaceProvider>
+  )
+}
+
+function PlaygroundEditor() {
   const [mounted, setMounted] = useState(false)
-  const [md, setMd] = useState(SAMPLE)
+  const [doc, setDoc] = useState(SAMPLE_DOCUMENT)
+  const parsed = useMemo(() => parseFrontmatter(doc), [doc])
+  const title = fmString(parsed.meta, 'title', '')
 
   useEffect(() => {
-    // Force the flag on for this page, then mount client-only (Tiptap
-    // needs the DOM; never SSR it).
     try {
       localStorage.setItem('dohc:inline-atoms', '1')
+      document.documentElement.setAttribute('data-theme', 'dark')
     } catch {
       /* ignore */
     }
@@ -41,25 +74,36 @@ function Playground() {
   }, [])
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', height: '100vh', fontFamily: 'system-ui' }}>
-      <div style={{ padding: 16, overflow: 'auto', borderRight: '1px solid #ddd' }}>
-        <div data-testid="editor">
-          {mounted ? (
-            <AtomEditor value={SAMPLE} onChange={setMd} autoFocus />
-          ) : (
-            <p>loading editor…</p>
-          )}
-        </div>
-      </div>
-      <div style={{ padding: 16, overflow: 'auto', background: '#0a0a0b', color: '#e8e2d6' }}>
-        <p style={{ opacity: 0.6, fontSize: 12 }}>
-          Tiptap markdownUpdated output (round-trip evidence — look for stray
-          backslashes before _ in billable_this_week / Acme_Corp):
-        </p>
-        <pre data-testid="roundtrip" style={{ whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, monospace', fontSize: 13 }}>
-          {md}
-        </pre>
-      </div>
-    </div>
+    <main className="min-h-screen bg-page text-ink">
+      <section className="doc doc-editing mx-auto w-full max-w-[760px] px-6 py-10">
+        <input
+          className="dohc-title-field"
+          value={title}
+          placeholder="Untitled"
+          spellCheck={false}
+          aria-label="Page title"
+          onChange={(event) =>
+            setDoc((current) =>
+              setFrontmatterTitle(current, event.currentTarget.value),
+            )
+          }
+        />
+        <PropertiesPanel body={doc} onChange={setDoc} />
+        {mounted ? (
+          <AtomEditor
+            value={parsed.body}
+            onChange={(next) =>
+              setDoc((current) => replaceMarkdownBody(current, next))
+            }
+            frontmatter={parsed.meta}
+            autoFocus
+            knownFiles={KNOWN_FILES}
+            disableReactiveResolvers
+          />
+        ) : (
+          <div className="py-8 text-sm text-ink-dim">loading...</div>
+        )}
+      </section>
+    </main>
   )
 }

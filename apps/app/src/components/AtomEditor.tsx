@@ -80,10 +80,13 @@ export type SlashCommandId =
   | 'wikilink'
   | 'heading-1'
   | 'heading-2'
+  | 'heading-3'
   | 'bulleted-list'
   | 'numbered-list'
   | 'quote'
   | 'code-block'
+  | 'divider'
+  | 'table'
   | 'query-block'
 
 export type SlashCommandItem = {
@@ -107,6 +110,9 @@ type SlashCommandState =
     }
 
 const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
+const LOCAL_SYNC_FALLBACK_MS = 2500
+const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
+const REMOTE_SYNC_STALL_MS = 12000
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   {
@@ -138,6 +144,13 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     aliases: ['h2', 'subheading', 'subtitle'],
   },
   {
+    id: 'heading-3',
+    label: 'Heading 3',
+    hint: 'Small section heading',
+    glyph: 'H3',
+    aliases: ['h3', 'heading', 'subheading'],
+  },
+  {
     id: 'bulleted-list',
     label: 'Bulleted list',
     hint: 'Start a simple list',
@@ -166,11 +179,25 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     aliases: ['code', 'fence', 'pre'],
   },
   {
+    id: 'divider',
+    label: 'Divider',
+    hint: 'Separate sections',
+    glyph: '—',
+    aliases: ['divider', 'line', 'rule', 'separator', 'hr'],
+  },
+  {
+    id: 'table',
+    label: 'Table',
+    hint: 'Insert a simple grid',
+    glyph: '▦',
+    aliases: ['table', 'grid', 'rows', 'columns'],
+  },
+  {
     id: 'query-block',
-    label: 'Live data',
+    label: 'Query block',
     hint: 'Embed a dohc query',
     glyph: '{}',
-    aliases: ['data', 'database', 'live', 'query', 'table', 'todo'],
+    aliases: ['data', 'database', 'live', 'query'],
   },
 ]
 
@@ -208,6 +235,9 @@ type Props = {
   // shared set in the OWNER's workspace), and the own-workspace
   // live-total + query-block resolvers are disabled (v1).
   shareId?: Id<'atomShares'>
+  // Dev/isolated surfaces can render the editor without authenticated
+  // Convex-backed live-total/formula/query resolvers.
+  disableReactiveResolvers?: boolean
   // sharing-v1 — view-only shared atom: Tiptap is read-only.
   readOnly?: boolean
   frontmatter?: Record<string, unknown>
@@ -551,7 +581,6 @@ function buildBlockControlDecorations(
           const wrap = document.createElement('span')
           wrap.className = 'dohc-block-affordance'
           wrap.setAttribute('contenteditable', 'false')
-          wrap.setAttribute('aria-hidden', 'true')
 
           const plus = document.createElement('button')
           plus.type = 'button'
@@ -570,7 +599,7 @@ function buildBlockControlDecorations(
           handle.className = 'dohc-block-gutter-btn dohc-block-handle'
           handle.title = 'select block'
           handle.setAttribute('aria-label', 'select block')
-          handle.textContent = '::'
+          handle.textContent = '⋮⋮'
           handle.addEventListener('mousedown', stopEditorMouseEvent)
           handle.addEventListener('click', (event) => {
             stopEditorMouseEvent(event)
@@ -602,6 +631,25 @@ function isBlockControlTarget(nodeName: string): boolean {
 function stopEditorMouseEvent(event: Event) {
   event.preventDefault()
   event.stopPropagation()
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof globalThis.setTimeout> | null = null
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = globalThis.setTimeout(() => {
+      reject(new Error('Timed out waiting for collaboration bootstrap'))
+    }, timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) globalThis.clearTimeout(timeout)
+  })
+}
+
+function isEditableEditor(editor: Editor | null | undefined): boolean {
+  if (!editor) return false
+  if ((editor as { isEditable?: boolean }).isEditable === false) return false
+  if ((editor.view as { editable?: boolean }).editable === false) return false
+  return true
 }
 
 function readSlashCommandState(
@@ -735,7 +783,7 @@ function buildQueryDecorations(
             wrap.className = 'query-atom-caption'
             wrap.setAttribute('contenteditable', 'false')
             wrap.innerHTML =
-              '<span class="query-atom-dot"></span><span class="query-atom-live">live</span>'
+              '<span class="query-atom-dot"></span><span class="query-atom-live">query</span>'
             const t = document.createElement('span')
             t.className = 'query-atom-label'
             t.textContent = label
@@ -1108,11 +1156,17 @@ type SlashCommandChain = {
   insertContent: (content: string) => SlashCommandChain
   setTextSelection: (position: number) => SlashCommandChain
   setParagraph: () => SlashCommandChain
-  toggleHeading: (attrs: { level: 1 | 2 }) => SlashCommandChain
+  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => SlashCommandChain
   toggleBulletList: () => SlashCommandChain
   toggleOrderedList: () => SlashCommandChain
   toggleBlockquote: () => SlashCommandChain
   setCodeBlock: (attrs?: { language: string }) => SlashCommandChain
+  setHorizontalRule: () => SlashCommandChain
+  insertTable: (attrs?: {
+    rows?: number
+    cols?: number
+    withHeaderRow?: boolean
+  }) => SlashCommandChain
   run: () => boolean
 }
 
@@ -1243,9 +1297,15 @@ function TiptapAtomEditor({
   const ydoc = useMemo(() => new Y.Doc(), [documentName])
   const [localSync, setLocalSync] = useState<{
     documentName: string | null
+    collaborationEnabled: boolean
     ready: boolean
     hasCache: boolean
-  }>({ documentName: null, ready: true, hasCache: false })
+  }>({
+    documentName: null,
+    collaborationEnabled: false,
+    ready: true,
+    hasCache: false,
+  })
   const [remoteSync, setRemoteSync] = useState<{
     documentName: string | null
     ready: boolean
@@ -1256,13 +1316,16 @@ function TiptapAtomEditor({
   const fetchTokenRef = useRef(fetchCollabToken)
   const localReady =
     !collaborationEnabled ||
-    (localSync.documentName === documentName && localSync.ready)
+    (localSync.documentName === documentName &&
+      localSync.collaborationEnabled === collaborationEnabled &&
+      localSync.ready)
   const remoteReady =
     !collaborationEnabled ||
     (remoteSync.documentName === documentName && remoteSync.ready)
   const hasLocalCache =
     collaborationEnabled &&
     localSync.documentName === documentName &&
+    localSync.collaborationEnabled === collaborationEnabled &&
     localSync.hasCache
   const frontmatterSnapshot = useMemo(
     () => (frontmatter ? JSON.stringify(frontmatter) : null),
@@ -1310,6 +1373,7 @@ function TiptapAtomEditor({
   useEffect(() => {
     setLocalSync({
       documentName,
+      collaborationEnabled,
       ready: !collaborationEnabled,
       hasCache: false,
     })
@@ -1326,15 +1390,17 @@ function TiptapAtomEditor({
 
     let cancelled = false
     setCollabBootstrap('pending')
-    fetchHocuspocusCapabilities(hocuspocusUrl)
-      .then(async (capabilities) => {
+    withTimeout(
+      fetchHocuspocusCapabilities(hocuspocusUrl).then(async (capabilities) => {
         if (capabilities.atomBootstrap) return 'server' as const
         const state = await fetchHocuspocusDocumentState(
           hocuspocusUrl,
           documentName,
         )
         return state.exists ? ('server' as const) : ('client' as const)
-      })
+      }),
+      COLLAB_BOOTSTRAP_TIMEOUT_MS,
+    )
       .then((bootstrap) => {
         if (!cancelled) setCollabBootstrap(bootstrap)
       })
@@ -1367,22 +1433,54 @@ function TiptapAtomEditor({
 
     let cancelled = false
     let persistence: IndexeddbPersistence | null = null
+    const fallbackTimer = globalThis.setTimeout(() => {
+      if (cancelled) return
+      setLocalSync((current) =>
+        current.documentName === documentName &&
+        current.collaborationEnabled === collaborationEnabled &&
+        !current.ready
+          ? {
+              documentName,
+              collaborationEnabled,
+              ready: true,
+              hasCache: false,
+            }
+          : current,
+      )
+    }, LOCAL_SYNC_FALLBACK_MS)
 
     if (readOnly) {
-      setLocalSync({ documentName, ready: true, hasCache: false })
+      globalThis.clearTimeout(fallbackTimer)
+      setLocalSync({
+        documentName,
+        collaborationEnabled,
+        ready: true,
+        hasCache: false,
+      })
       return () => {
         cancelled = true
       }
     }
 
-    setLocalSync({ documentName, ready: false, hasCache: false })
+    setLocalSync({
+      documentName,
+      collaborationEnabled,
+      ready: false,
+      hasCache: false,
+    })
     void hasIndexeddbYDocState(documentName)
       .catch(() => false)
       .then((hasCache) => {
         if (cancelled) return
         persistence = new IndexeddbPersistence(documentName, ydoc)
         const markSynced = () => {
-          setLocalSync({ documentName, ready: true, hasCache })
+          globalThis.clearTimeout(fallbackTimer)
+          setLocalSync({
+            documentName,
+            collaborationEnabled,
+            ready: true,
+            hasCache,
+          })
         }
         persistence.on('synced', markSynced)
         void persistence.whenSynced.then(markSynced)
@@ -1390,6 +1488,7 @@ function TiptapAtomEditor({
 
     return () => {
       cancelled = true
+      globalThis.clearTimeout(fallbackTimer)
       void persistence?.destroy()
     }
   }, [collaborationEnabled, documentName, readOnly, ydoc])
@@ -1414,6 +1513,7 @@ function TiptapAtomEditor({
       onSynced: ({ state }) => {
         setRemoteSync({ documentName, ready: state })
         if (state) {
+          setSyncError(null)
           markIndexeddbYDocState(documentName)
           setLocalSync((current) =>
             current.documentName === documentName
@@ -1441,6 +1541,32 @@ function TiptapAtomEditor({
     ydoc,
     collab?.workspaceId,
     awareness,
+  ])
+
+  useEffect(() => {
+    if (
+      !collaborationEnabled ||
+      !localReady ||
+      !documentName ||
+      remoteReady ||
+      hasLocalCache ||
+      syncError
+    ) {
+      return
+    }
+
+    const timer = globalThis.setTimeout(() => {
+      setSyncError('Sync unavailable')
+    }, REMOTE_SYNC_STALL_MS)
+
+    return () => globalThis.clearTimeout(timer)
+  }, [
+    collaborationEnabled,
+    documentName,
+    hasLocalCache,
+    localReady,
+    remoteReady,
+    syncError,
   ])
 
   useEffect(() => {
@@ -1548,22 +1674,31 @@ function TiptapAtomEditor({
 
   const extensions = useMemo(
     () => [
+      StarterKit.configure({
+        undoRedo: collaborationEnabled ? false : undefined,
+        trailingNode: false,
+      }),
       ...dohcMarkdownExtensions,
-      StarterKit.configure({ undoRedo: collaborationEnabled ? false : undefined }),
       TableKit,
       Markdown.configure({ indentation: { style: 'space', size: 2 } }),
       Placeholder.configure({
         includeChildren: true,
         showOnlyCurrent: false,
         placeholder: ({ node }) => {
+          if (node.type.name === 'tableCell' || node.type.name === 'tableHeader')
+            return ''
           if (node.type.name === 'heading') return 'Heading'
           return "Type '/' for commands"
         },
       }),
-      TrailingNode.configure({
-        node: 'paragraph',
-        notAfter: ['paragraph'],
-      }),
+      ...(collaborationRequired
+        ? []
+        : [
+            TrailingNode.configure({
+              node: 'paragraph',
+              notAfter: ['paragraph'],
+            }),
+          ]),
       ...(collaborationEnabled
         ? [Collaboration.configure({ document: ydoc, field: 'body' })]
         : []),
@@ -1581,6 +1716,7 @@ function TiptapAtomEditor({
       awarenessUser,
       caretProvider,
       collaborationEnabled,
+      collaborationRequired,
       dohcPlugins,
       readOnly,
       ydoc,
@@ -1654,7 +1790,7 @@ function TiptapAtomEditor({
   const insertBlockAfter = useCallback(
     (pos: number) => {
       const view = editor?.view
-      if (!view) return
+      if (!view || !isEditableEditor(editor)) return
 
       const { state } = view
       const node = state.doc.nodeAt(pos)
@@ -1704,6 +1840,7 @@ function TiptapAtomEditor({
     (id: SlashCommandId) => {
       const state = slashStateRef.current
       if (!state.open || !editor) return
+      if (!isEditableEditor(editor)) return
 
       const range = { from: state.from, to: state.to }
       const chain = editor
@@ -1726,6 +1863,9 @@ function TiptapAtomEditor({
         case 'heading-2':
           chain.toggleHeading({ level: 2 }).run()
           return
+        case 'heading-3':
+          chain.toggleHeading({ level: 3 }).run()
+          return
         case 'bulleted-list':
           chain.toggleBulletList().run()
           return
@@ -1737,6 +1877,12 @@ function TiptapAtomEditor({
           return
         case 'code-block':
           chain.setCodeBlock({ language: '' }).run()
+          return
+        case 'divider':
+          chain.setHorizontalRule().run()
+          return
+        case 'table':
+          chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
           return
         case 'query-block':
           chain
@@ -1829,7 +1975,8 @@ function TiptapAtomEditor({
         (collaborationPending ||
           !hocuspocusUrl ||
           collabBootstrap === 'unavailable' ||
-          (collaborationEnabled && (!localReady || !remoteReady || syncError))) && (
+          (collaborationEnabled &&
+            (!localReady || syncError || (!remoteReady && !hasLocalCache)))) && (
           <div className="dohc-editor-sync-state" role="status">
             {syncError || !hocuspocusUrl || collabBootstrap === 'unavailable'
               ? 'Sync unavailable'
@@ -1866,6 +2013,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     knownFiles,
     onOpenWikilink,
     shareId,
+    disableReactiveResolvers,
     readOnly,
     frontmatter,
     collab,
@@ -1955,7 +2103,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     api.liveTotals.resolveMany,
     // sharing-v1 — live totals are own-workspace; disabled in a
     // shared atom (v1) to avoid any cross-workspace resolution.
-    !shareId && liveIdents.length ? { identifiers: liveIdents } : 'skip',
+    !disableReactiveResolvers && !shareId && liveIdents.length
+      ? { identifiers: liveIdents }
+      : 'skip',
   )
   const liveTotalsRef = useRef<Record<string, number | null>>({})
   const [liveTotalsTick, setLiveTotalsTick] = useState(0)
@@ -1982,13 +2132,15 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // ever active; the other is 'skip'.
   const resolvedFormulasOwn = useQuery(
     api.formulaEval.evalFormulas,
-    !shareId && formulaSrcs.length
+    !disableReactiveResolvers && !shareId && formulaSrcs.length
       ? { srcs: formulaSrcs, activeWorkspaceId }
       : 'skip',
   )
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
-    shareId && formulaSrcs.length ? { shareId, srcs: formulaSrcs } : 'skip',
+    !disableReactiveResolvers && shareId && formulaSrcs.length
+      ? { shareId, srcs: formulaSrcs }
+      : 'skip',
   )
   const resolvedFormulas = shareId ? resolvedFormulasShared : resolvedFormulasOwn
   const formulaRef = useRef<FormulaMap>(new Map())
@@ -2020,7 +2172,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     // sharing-v1 — query blocks read the own-workspace vault; disabled
     // in a shared atom (v1) — they'd otherwise resolve in the viewer's
     // workspace, not the owner's, and scoping them is a later task.
-    !shareId && querySrcs.length
+    !disableReactiveResolvers && !shareId && querySrcs.length
       ? { srcs: querySrcs, activeWorkspaceId }
       : 'skip',
   )
@@ -2038,7 +2190,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     () => ({
       insertCodeBlock(language: string, content: string) {
         const editor = editorRef.current
-        if (!editor) return
+        if (!editor || !isEditableEditor(editor)) return
         const view = editor.view
         const { state } = view
         const codeBlockType =
@@ -2055,7 +2207,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       },
       replaceCodeBlockAt(pos: number, content: string, language?: string) {
         const editor = editorRef.current
-        if (!editor) return
+        if (!editor || !isEditableEditor(editor)) return
         const view = editor.view
         const { state } = view
         const node = state.doc.nodeAt(pos)
