@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
-import { query } from './_generated/server'
+import { mutation, query } from './_generated/server'
 import type { QueryCtx } from './_generated/server'
+import { internal } from './_generated/api'
 import { ownerAtomByFileId } from './atomShares'
 import { isMember } from './orgs'
 
@@ -15,6 +16,10 @@ type AtomAccessResult = {
 type AtomBootstrapResult = {
   markdown: string
 }
+
+type BodyCacheProjectionResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
 
 type ActorKind = 'user' | 'agent'
 
@@ -177,5 +182,46 @@ export const loadAtomBootstrap = query({
     if (!atom) return null
 
     return { markdown: atom.body }
+  },
+})
+
+export const setBodyCache = mutation({
+  args: {
+    serverToken: v.string(),
+    workspaceId: v.string(),
+    atomId: v.string(),
+    markdown: v.string(),
+    projectionHash: v.string(),
+    schemaVersion: v.number(),
+    ydocStateVector: v.string(),
+    lastEditedByUserId: v.optional(v.string()),
+    projectedAt: v.number(),
+  },
+  handler: async (
+    ctx,
+    {
+      serverToken,
+      workspaceId,
+      atomId,
+      markdown,
+      projectionHash,
+      schemaVersion,
+      ydocStateVector,
+      lastEditedByUserId,
+      projectedAt,
+    },
+  ): Promise<BodyCacheProjectionResult> => {
+    requireServerToken(serverToken)
+
+    return await ctx.runMutation(internal.atoms._setBodyCache, {
+      workspaceId,
+      atomId,
+      markdown,
+      projectionHash,
+      schemaVersion,
+      ydocStateVector,
+      lastEditedByUserId,
+      projectedAt,
+    })
   },
 })

@@ -17,6 +17,10 @@ import { decodeDocName } from './doc-name.js'
 import { verifyCollabToken, type CollabActorKind } from './auth.js'
 import type { PostgresYDocStore } from './persistence.js'
 import { markdownToYDoc } from './import-export.js'
+import {
+  createProjectionWorker,
+  type ProjectionWorker,
+} from './projection.js'
 
 export type DohcHocuspocusContext = {
   userId: string
@@ -35,6 +39,21 @@ export type AtomAccessInput = {
   authzVersion: number
 }
 
+export type AtomBodyCacheProjectionInput = {
+  workspaceId: string
+  atomId: string
+  markdown: string
+  projectionHash: string
+  schemaVersion: number
+  ydocStateVector: string
+  lastEditedByUserId?: string | null
+  projectedAt: number
+}
+
+export type AtomBodyCacheProjectionResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
+
 export type WorkspaceAuthzVersionInput = {
   workspaceId: string
   atomId: string
@@ -50,6 +69,9 @@ export type HocuspocusAcl = {
   loadAtomBootstrap?(
     input: AtomAccessInput,
   ): Promise<{ markdown: string } | null>
+  setAtomBodyCache?(
+    input: AtomBodyCacheProjectionInput,
+  ): Promise<AtomBodyCacheProjectionResult>
 }
 
 export type HocuspocusLogger = {
@@ -64,6 +86,8 @@ export type CreateHocuspocusHooksOptions = {
   store: PostgresYDocStore
   logger: HocuspocusLogger
   revocations?: HocuspocusRevocations
+  projectionWorker?: ProjectionWorker
+  projectionDebounceMs?: number
 }
 
 type DohcHocuspocusHooks = {
@@ -275,8 +299,18 @@ export function createHocuspocusHooks({
   store,
   logger,
   revocations,
+  projectionWorker,
+  projectionDebounceMs,
 }: CreateHocuspocusHooksOptions): DohcHocuspocusHooks {
   const sequences = new AppliedSequenceTracker()
+  const projections =
+    projectionWorker ??
+    createProjectionWorker({
+      store,
+      acl,
+      logger,
+      debounceMs: projectionDebounceMs,
+    })
 
   async function authenticateDocumentToken(
     documentName: string,
@@ -469,6 +503,17 @@ export function createHocuspocusHooks({
     async onChange(data) {
       if (data.socketId) {
         sequences.markApplied(data.documentName, data.socketId)
+      }
+      const document = (data as { document?: Y.Doc }).document
+      if (document) {
+        projections.schedule({
+          documentName: data.documentName,
+          document,
+          context: data.context,
+          ydocSeq:
+            sequences.latestContiguous(data.documentName) ??
+            (await store.latestSequence(data.documentName)),
+        })
       }
       logger.info('hocuspocus document changed', {
         documentName: data.documentName,

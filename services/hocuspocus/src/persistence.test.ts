@@ -4,6 +4,7 @@ import {
   MemoryYDocPersistenceBackend,
   PostgresYDocStore,
   PostgresYDocPersistenceBackend,
+  type ProjectionJobInput,
 } from './persistence.js'
 
 function updateFromText(value: string, base?: Y.Doc): Uint8Array {
@@ -12,6 +13,23 @@ function updateFromText(value: string, base?: Y.Doc): Uint8Array {
   text.delete(0, text.length)
   text.insert(0, value)
   return Y.encodeStateAsUpdate(doc, base ? Y.encodeStateVector(base) : undefined)
+}
+
+function projectionJob(
+  overrides: Partial<ProjectionJobInput> = {},
+): ProjectionJobInput {
+  return {
+    documentName: 'workspace/ws/atom/a',
+    workspaceId: 'ws',
+    atomId: 'a',
+    markdown: '---\nid: a\n---\n# A',
+    projectionHash: 'hash-a',
+    schemaVersion: 1,
+    ydocStateVector: 'AQID',
+    ydocSeq: 1,
+    lastEditedByUserId: 'user_1',
+    ...overrides,
+  }
 }
 
 describe('Y.Doc persistence', () => {
@@ -226,5 +244,60 @@ describe('Y.Doc persistence', () => {
     await expect(store.latestSequence(documentName)).resolves.toBe(0)
     await expect(backend.getLatestSnapshot(documentName)).resolves.toBeNull()
     expect(backend.updatesFor(documentName)).toEqual([])
+  })
+
+  it('persists projection jobs with monotonic ids', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+
+    const first = await store.enqueueProjectionJob(projectionJob())
+    const second = await store.enqueueProjectionJob(
+      projectionJob({ documentName: 'workspace/ws/atom/b', atomId: 'b' }),
+    )
+
+    expect(first.id).toBe(1)
+    expect(second.id).toBe(2)
+    await expect(store.listRetryableProjectionJobs()).resolves.toMatchObject([
+      { id: 1, documentName: 'workspace/ws/atom/a', status: 'pending' },
+      { id: 2, documentName: 'workspace/ws/atom/b', status: 'pending' },
+    ])
+  })
+
+  it('skips older retryable projection jobs for the same document', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+
+    const stale = await store.enqueueProjectionJob(projectionJob({ ydocSeq: 1 }))
+    const latest = await store.enqueueProjectionJob(
+      projectionJob({ markdown: '---\nid: a\n---\n# Latest', ydocSeq: 2 }),
+    )
+
+    expect(stale.status).toBe('pending')
+    expect(latest.id).toBe(2)
+    await expect(store.listRetryableProjectionJobs()).resolves.toMatchObject([
+      { id: 2, markdown: '---\nid: a\n---\n# Latest', status: 'pending' },
+    ])
+    expect(backend.projectionJobsFor('workspace/ws/atom/a')[0]?.status).toBe(
+      'skipped',
+    )
+  })
+
+  it('keeps failed projection jobs retryable until they succeed', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+    const job = await store.enqueueProjectionJob(projectionJob())
+
+    await store.markProjectionJobFailed(job.id, 'Convex unavailable')
+
+    await expect(store.listRetryableProjectionJobs()).resolves.toMatchObject([
+      { id: job.id, status: 'failed', attempts: 1, lastError: 'Convex unavailable' },
+    ])
+
+    await store.markProjectionJobSucceeded(job.id)
+
+    await expect(store.listRetryableProjectionJobs()).resolves.toEqual([])
+    expect(backend.projectionJobsFor('workspace/ws/atom/a')[0]?.status).toBe(
+      'succeeded',
+    )
   })
 })

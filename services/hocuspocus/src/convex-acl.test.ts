@@ -4,11 +4,15 @@ import { createConvexAcl } from './convex-acl.js'
 
 type FakeConvexClient = {
   query: ReturnType<typeof vi.fn>
+  mutation: ReturnType<typeof vi.fn>
 }
 
 function fakeClient(result: unknown): FakeConvexClient {
   return {
     query: vi.fn(async () => result),
+    mutation: vi.fn(async () => {
+      throw new Error('Unexpected mutation call')
+    }),
   }
 }
 
@@ -133,5 +137,47 @@ describe('Convex ACL adapter', () => {
         authzVersion: 1,
       }),
     ).resolves.toBeNull()
+  })
+
+  it('writes body cache projections through the secret-protected Convex mutation', async () => {
+    const client = {
+      query: vi.fn(),
+      mutation: vi.fn(async () => ({ ok: true as const })),
+    }
+    const acl = createConvexAcl({
+      convexUrl: 'https://example.convex.cloud',
+      serverToken: 'server-token',
+      client,
+    })
+
+    await expect(
+      acl.setAtomBodyCache?.({
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        markdown: '---\nid: atom_1\n---\n# Atom',
+        projectionHash: 'sha256:abc',
+        schemaVersion: 1,
+        ydocStateVector: 'AQID',
+        lastEditedByUserId: 'user_1',
+        projectedAt: 1_778_888_000_000,
+      }),
+    ).resolves.toEqual({ ok: true })
+
+    const [fn, args] = client.mutation.mock.calls[0] as unknown as [
+      FunctionReference<'mutation'>,
+      Record<string, unknown>,
+    ]
+    expect(getFunctionName(fn)).toBe('hocuspocusAuth:setBodyCache')
+    expect(args).toEqual({
+      serverToken: 'server-token',
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      markdown: '---\nid: atom_1\n---\n# Atom',
+      projectionHash: 'sha256:abc',
+      schemaVersion: 1,
+      ydocStateVector: 'AQID',
+      lastEditedByUserId: 'user_1',
+      projectedAt: 1_778_888_000_000,
+    })
   })
 })

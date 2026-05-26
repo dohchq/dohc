@@ -12,6 +12,7 @@ import {
   PostgresYDocPersistenceBackend,
   PostgresYDocStore,
 } from './persistence.js'
+import { createProjectionWorker } from './projection.js'
 
 const { Pool } = pg
 
@@ -65,6 +66,16 @@ export async function createServerFromEnv(): Promise<Server> {
 
   const revocations = new RevocationRegistry()
   const acl = createAclFromEnv()
+  const projectionWorker = createProjectionWorker({
+    store,
+    acl,
+    logger: console,
+  })
+  await projectionWorker.flushPending()
+  const projectionRetryInterval = setInterval(() => {
+    void projectionWorker.flushPending()
+  }, Number(process.env.HOCUSPOCUS_PROJECTION_RETRY_MS ?? '2000'))
+  projectionRetryInterval.unref?.()
   const adminHandler = createAdminHandler({
     adminToken: requiredEnv('HOCUSPOCUS_ADMIN_TOKEN'),
     revocations,
@@ -80,6 +91,7 @@ export async function createServerFromEnv(): Promise<Server> {
     store,
     logger: console,
     revocations,
+    projectionWorker,
   })
 
   return new Server({
@@ -96,6 +108,8 @@ export async function createServerFromEnv(): Promise<Server> {
       if (handled) return Promise.reject()
     },
     async onDestroy() {
+      clearInterval(projectionRetryInterval)
+      projectionWorker.stop()
       poolEndPromise ??= pool.end()
       await poolEndPromise
     },

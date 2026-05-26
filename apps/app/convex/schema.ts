@@ -67,6 +67,13 @@ export default defineSchema({
     // org-plan §4 — provenance. The pill shows "last writer," not the
     // original author (the name is precise: lastEdited, not author).
     lastEditedByUserId: v.optional(v.string()),
+    // v2 Phase 1.6 — `body` is a derived markdown cache projected from
+    // the canonical Y.Doc. These fields make cache freshness/drift
+    // observable without loading the Y.Doc for normal search/read paths.
+    bodyProjectionHash: v.optional(v.string()),
+    bodyProjectionVersion: v.optional(v.number()),
+    bodyProjectionStateVector: v.optional(v.string()),
+    bodyProjectedAt: v.optional(v.number()),
   })
     .index('by_workspace_path', ['workspaceId', 'path'])
     .index('by_workspace', ['workspaceId'])

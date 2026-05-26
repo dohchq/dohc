@@ -896,6 +896,62 @@ export const _upsertInternal = internalMutation({
   },
 })
 
+export const _setBodyCache = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    atomId: v.string(),
+    markdown: v.string(),
+    projectionHash: v.string(),
+    schemaVersion: v.number(),
+    ydocStateVector: v.string(),
+    lastEditedByUserId: v.optional(v.string()),
+    projectedAt: v.number(),
+  },
+  handler: async (
+    ctx,
+    {
+      workspaceId,
+      atomId,
+      markdown,
+      projectionHash,
+      schemaVersion,
+      ydocStateVector,
+      lastEditedByUserId,
+      projectedAt,
+    },
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
+  > => {
+    const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
+    if (!atom) {
+      return { ok: false, reason: 'missing-atom' }
+    }
+
+    if (extractFrontmatterId(markdown) !== atomId) {
+      return { ok: false, reason: 'frontmatter-id-mismatch' }
+    }
+
+    await ctx.db.patch(atom._id, {
+      body: markdown,
+      updatedAt: projectedAt,
+      ...(lastEditedByUserId ? { lastEditedByUserId } : {}),
+      bodyProjectionHash: projectionHash,
+      bodyProjectionVersion: schemaVersion,
+      bodyProjectionStateVector: ydocStateVector,
+      bodyProjectedAt: projectedAt,
+      ...deriveSearchFields(atom.path, markdown),
+    })
+    await applyAtomCapture(ctx, workspaceId, atom.path, atom.body, markdown)
+    await reconcileAtomIdIndex(ctx, workspaceId, atom.path, markdown, {
+      isRestore: false,
+    })
+    await scheduleMapRegen(ctx, workspaceId)
+
+    return { ok: true }
+  },
+})
+
 export const _removeInternal = internalMutation({
   args: {
     workspaceId: v.string(),

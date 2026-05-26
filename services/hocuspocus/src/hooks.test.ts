@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { RevocationRegistry } from './admin.js'
 import { mintCollabToken } from './auth.js'
@@ -7,6 +7,7 @@ import { createHocuspocusHooks } from './hooks.js'
 import {
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
+  markdownToYDoc,
   yDocToMarkdown,
 } from './import-export.js'
 import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
@@ -31,6 +32,7 @@ function makeAcl(options: {
   canWrite: boolean
   version?: number
   bootstrapMarkdown?: string | null
+  setAtomBodyCache?: ReturnType<typeof vi.fn>
 }) {
   return {
     getWorkspaceAuthzVersion: vi.fn(async () => options.version ?? 1),
@@ -43,6 +45,9 @@ function makeAcl(options: {
           ? null
           : { markdown: options.bootstrapMarkdown },
     ),
+    ...(options.setAtomBodyCache
+      ? { setAtomBodyCache: options.setAtomBodyCache }
+      : {}),
   }
 }
 
@@ -51,6 +56,8 @@ function makeHooks(options: {
   canWrite: boolean
   version?: number
   bootstrapMarkdown?: string | null
+  setAtomBodyCache?: ReturnType<typeof vi.fn>
+  projectionDebounceMs?: number
   revocations?: RevocationRegistry
 }) {
   const backend = new MemoryYDocPersistenceBackend()
@@ -62,9 +69,14 @@ function makeHooks(options: {
     store,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     revocations: options.revocations,
+    projectionDebounceMs: options.projectionDebounceMs,
   })
   return { backend, store, acl, hooks }
 }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('hocuspocus hook factory', () => {
   it('authenticates readable docs and marks denied writes as read-only', async () => {
@@ -590,6 +602,89 @@ describe('hocuspocus hook factory', () => {
     await expect(backend.getLatestSnapshot(documentName)).resolves.toMatchObject({
       lastSeq: 1,
     })
+  })
+
+  it('debounces Y.Doc projection jobs and writes the body cache through Convex', async () => {
+    vi.useFakeTimers()
+    const setAtomBodyCache = vi.fn(async () => ({ ok: true as const }))
+    const { backend, hooks } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      setAtomBodyCache,
+      projectionDebounceMs: 500,
+    })
+    const document = markdownToYDoc(
+      '---\nid: atom_1\n---\n# Projected\n\nFresh body',
+    )
+
+    await hooks.onChange({
+      documentName,
+      document,
+      update: new Uint8Array([1, 2, 3]),
+      socketId: 'socket_1',
+      context: baseContext,
+    } as never)
+
+    await vi.advanceTimersByTimeAsync(499)
+    expect(backend.projectionJobsFor(documentName)).toEqual([])
+    expect(setAtomBodyCache).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(backend.projectionJobsFor(documentName)).toMatchObject([
+      {
+        documentName,
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        markdown: expect.stringContaining('Fresh body'),
+        projectionHash: expect.stringMatching(/^sha256:/),
+        schemaVersion: 1,
+        status: 'succeeded',
+        lastEditedByUserId: 'user_1',
+      },
+    ])
+    expect(setAtomBodyCache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        markdown: expect.stringContaining('Fresh body'),
+        projectionHash: expect.stringMatching(/^sha256:/),
+        schemaVersion: 1,
+        ydocStateVector: expect.any(String),
+        lastEditedByUserId: 'user_1',
+      }),
+    )
+  })
+
+  it('keeps projection jobs retryable when Convex cache writes fail', async () => {
+    vi.useFakeTimers()
+    const setAtomBodyCache = vi.fn(async () => {
+      throw new Error('Convex unavailable')
+    })
+    const { backend, hooks } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      setAtomBodyCache,
+      projectionDebounceMs: 1,
+    })
+    const document = markdownToYDoc('---\nid: atom_1\n---\n# Projected')
+
+    await hooks.onChange({
+      documentName,
+      document,
+      update: new Uint8Array([1]),
+      socketId: 'socket_1',
+      context: baseContext,
+    } as never)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(backend.projectionJobsFor(documentName)).toMatchObject([
+      {
+        status: 'failed',
+        attempts: 1,
+        lastError: 'Convex unavailable',
+      },
+    ])
   })
 
   it('disconnects registered workspace users through the revocation registry', async () => {

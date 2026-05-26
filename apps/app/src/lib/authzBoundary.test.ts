@@ -71,6 +71,9 @@ const SERVER_TOKEN_ALLOW = new Set([
   // the existing atoms.body cache. The query is useless without the same
   // HOCUSPOCUS_CONVEX_SERVER_TOKEN gate.
   'hocuspocusAuth.ts:loadAtomBootstrap',
+  // Phase 1.6 projection is server-to-server only: Hocuspocus owns the
+  // Y.Doc->markdown cache update and writes through the same shared token.
+  'hocuspocusAuth.ts:setBodyCache',
 ])
 
 // REVIEWED collab-token exception. The browser may ask Convex for a JWT scoped

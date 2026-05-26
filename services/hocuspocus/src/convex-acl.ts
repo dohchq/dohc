@@ -1,6 +1,8 @@
 import { ConvexHttpClient } from 'convex/browser'
 import { makeFunctionReference, type FunctionReference } from 'convex/server'
 import type {
+  AtomBodyCacheProjectionInput,
+  AtomBodyCacheProjectionResult,
   AtomAccessInput,
   HocuspocusAcl,
   WorkspaceAuthzVersionInput,
@@ -47,6 +49,19 @@ type ConvexAclClient = {
         >,
     args: ConvexAclArgs | ConvexBootstrapArgs,
   ): Promise<ConvexAclResult | ConvexBootstrapResult>
+  mutation(
+    mutation: FunctionReference<
+      'mutation',
+      'public',
+      ConvexBodyCacheProjectionArgs,
+      AtomBodyCacheProjectionResult
+    >,
+    args: ConvexBodyCacheProjectionArgs,
+  ): Promise<AtomBodyCacheProjectionResult>
+}
+
+type ConvexBodyCacheProjectionArgs = AtomBodyCacheProjectionInput & {
+  serverToken: string
 }
 
 const checkAtomAccess = makeFunctionReference<
@@ -60,6 +75,12 @@ const loadAtomBootstrap = makeFunctionReference<
   ConvexBootstrapArgs,
   ConvexBootstrapResult
 >('hocuspocusAuth:loadAtomBootstrap')
+
+const setBodyCache = makeFunctionReference<
+  'mutation',
+  ConvexBodyCacheProjectionArgs,
+  AtomBodyCacheProjectionResult
+>('hocuspocusAuth:setBodyCache')
 
 export function createConvexAcl(options: {
   convexUrl: string
@@ -105,6 +126,19 @@ export function createConvexAcl(options: {
         actorKind: input.actorKind,
         authzVersion: input.authzVersion,
       })) as ConvexBootstrapResult
+    },
+    async setAtomBodyCache(input) {
+      return await client.mutation(setBodyCache, {
+        serverToken: options.serverToken,
+        workspaceId: input.workspaceId,
+        atomId: input.atomId,
+        markdown: input.markdown,
+        projectionHash: input.projectionHash,
+        schemaVersion: input.schemaVersion,
+        ydocStateVector: input.ydocStateVector,
+        lastEditedByUserId: input.lastEditedByUserId ?? undefined,
+        projectedAt: input.projectedAt,
+      })
     },
   }
 }

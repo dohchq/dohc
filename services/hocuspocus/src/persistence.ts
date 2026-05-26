@@ -39,6 +39,29 @@ export type InsertSnapshotInput = {
   lastSeq: number
 }
 
+export type ProjectionJobStatus = 'pending' | 'failed' | 'succeeded' | 'skipped'
+
+export type ProjectionJobInput = {
+  documentName: string
+  workspaceId: string
+  atomId: string
+  markdown: string
+  projectionHash: string
+  schemaVersion: number
+  ydocStateVector: string
+  ydocSeq: number
+  lastEditedByUserId?: string | null
+}
+
+export type PersistedProjectionJob = ProjectionJobInput & {
+  id: number
+  status: ProjectionJobStatus
+  attempts: number
+  lastError: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
 export interface YDocPersistenceBackend {
   ensureSchema(): Promise<void>
   hasDocumentState(documentName: string): Promise<boolean>
@@ -50,6 +73,10 @@ export interface YDocPersistenceBackend {
   insertSnapshotIfMissing(
     input: InsertSnapshotInput,
   ): Promise<PersistedSnapshot | null>
+  enqueueProjectionJob(input: ProjectionJobInput): Promise<PersistedProjectionJob>
+  listRetryableProjectionJobs(limit?: number): Promise<PersistedProjectionJob[]>
+  markProjectionJobSucceeded(id: number): Promise<void>
+  markProjectionJobFailed(id: number, error: string): Promise<void>
   deleteDocument(documentName: string): Promise<void>
 }
 
@@ -138,6 +165,42 @@ function persistedSnapshotFromRow(row: {
   }
 }
 
+function persistedProjectionJobFromRow(row: {
+  id: number | string
+  doc_name: string
+  workspace_id: string
+  atom_id: string
+  markdown: string
+  projection_hash: string
+  schema_version: number | string
+  ydoc_state_vector: string
+  ydoc_seq: number | string
+  last_edited_by_user_id: string | null
+  status: ProjectionJobStatus
+  attempts: number | string
+  last_error: string | null
+  created_at: Date
+  updated_at: Date
+}): PersistedProjectionJob {
+  return {
+    id: Number(row.id),
+    documentName: row.doc_name,
+    workspaceId: row.workspace_id,
+    atomId: row.atom_id,
+    markdown: row.markdown,
+    projectionHash: row.projection_hash,
+    schemaVersion: Number(row.schema_version),
+    ydocStateVector: row.ydoc_state_vector,
+    ydocSeq: Number(row.ydoc_seq),
+    lastEditedByUserId: row.last_edited_by_user_id,
+    status: row.status,
+    attempts: Number(row.attempts),
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 export async function ensureYDocPersistenceSchema(client: SqlClient): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS hocuspocus_ydoc_counters (
@@ -174,6 +237,33 @@ export async function ensureYDocPersistenceSchema(client: SqlClient): Promise<vo
   await client.query(`
     CREATE INDEX IF NOT EXISTS hocuspocus_ydoc_snapshots_doc_seq_idx
       ON hocuspocus_ydoc_snapshots (doc_name, last_seq DESC, id DESC)
+  `)
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS hocuspocus_projection_jobs (
+      id bigserial PRIMARY KEY,
+      doc_name text NOT NULL,
+      workspace_id text NOT NULL,
+      atom_id text NOT NULL,
+      markdown text NOT NULL,
+      projection_hash text NOT NULL,
+      schema_version integer NOT NULL,
+      ydoc_state_vector text NOT NULL,
+      ydoc_seq bigint NOT NULL,
+      last_edited_by_user_id text,
+      status text NOT NULL DEFAULT 'pending',
+      attempts integer NOT NULL DEFAULT 0,
+      last_error text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `)
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS hocuspocus_projection_jobs_retry_idx
+      ON hocuspocus_projection_jobs (status, id)
+  `)
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS hocuspocus_projection_jobs_doc_status_idx
+      ON hocuspocus_projection_jobs (doc_name, status, id)
   `)
 }
 
@@ -360,9 +450,128 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
     })
   }
 
+  async enqueueProjectionJob(
+    input: ProjectionJobInput,
+  ): Promise<PersistedProjectionJob> {
+    return withTransaction(this.client, async (client) => {
+      await lockDocumentForTransaction(client, input.documentName)
+      await client.query(
+        `
+          UPDATE hocuspocus_projection_jobs
+          SET status = 'skipped', updated_at = now()
+          WHERE doc_name = $1 AND status IN ('pending', 'failed')
+        `,
+        [input.documentName],
+      )
+      const result = await client.query<{
+        id: number | string
+        doc_name: string
+        workspace_id: string
+        atom_id: string
+        markdown: string
+        projection_hash: string
+        schema_version: number | string
+        ydoc_state_vector: string
+        ydoc_seq: number | string
+        last_edited_by_user_id: string | null
+        status: ProjectionJobStatus
+        attempts: number | string
+        last_error: string | null
+        created_at: Date
+        updated_at: Date
+      }>(
+        `
+          INSERT INTO hocuspocus_projection_jobs
+            (doc_name, workspace_id, atom_id, markdown, projection_hash,
+             schema_version, ydoc_state_vector, ydoc_seq, last_edited_by_user_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING id, doc_name, workspace_id, atom_id, markdown,
+            projection_hash, schema_version, ydoc_state_vector, ydoc_seq,
+            last_edited_by_user_id, status, attempts, last_error,
+            created_at, updated_at
+        `,
+        [
+          input.documentName,
+          input.workspaceId,
+          input.atomId,
+          input.markdown,
+          input.projectionHash,
+          input.schemaVersion,
+          input.ydocStateVector,
+          input.ydocSeq,
+          input.lastEditedByUserId ?? null,
+        ],
+      )
+      return persistedProjectionJobFromRow(result.rows[0])
+    })
+  }
+
+  async listRetryableProjectionJobs(
+    limit = 100,
+  ): Promise<PersistedProjectionJob[]> {
+    const result = await this.client.query<{
+      id: number | string
+      doc_name: string
+      workspace_id: string
+      atom_id: string
+      markdown: string
+      projection_hash: string
+      schema_version: number | string
+      ydoc_state_vector: string
+      ydoc_seq: number | string
+      last_edited_by_user_id: string | null
+      status: ProjectionJobStatus
+      attempts: number | string
+      last_error: string | null
+      created_at: Date
+      updated_at: Date
+    }>(
+      `
+        SELECT id, doc_name, workspace_id, atom_id, markdown, projection_hash,
+          schema_version, ydoc_state_vector, ydoc_seq, last_edited_by_user_id,
+          status, attempts, last_error, created_at, updated_at
+        FROM hocuspocus_projection_jobs
+        WHERE status IN ('pending', 'failed')
+        ORDER BY id ASC
+        LIMIT $1
+      `,
+      [limit],
+    )
+    return result.rows.map(persistedProjectionJobFromRow)
+  }
+
+  async markProjectionJobSucceeded(id: number): Promise<void> {
+    await this.client.query(
+      `
+        UPDATE hocuspocus_projection_jobs
+        SET status = 'succeeded', updated_at = now()
+        WHERE id = $1
+      `,
+      [id],
+    )
+  }
+
+  async markProjectionJobFailed(id: number, error: string): Promise<void> {
+    await this.client.query(
+      `
+        UPDATE hocuspocus_projection_jobs
+        SET status = 'failed',
+          attempts = attempts + 1,
+          last_error = $2,
+          updated_at = now()
+        WHERE id = $1
+      `,
+      [id, error],
+    )
+  }
+
   async deleteDocument(documentName: string): Promise<void> {
     await withTransaction(this.client, async (client) => {
       await lockDocumentForTransaction(client, documentName)
+      await client.query(
+        'DELETE FROM hocuspocus_projection_jobs WHERE doc_name = $1',
+        [documentName],
+      )
       await client.query('DELETE FROM hocuspocus_ydoc_updates WHERE doc_name = $1', [
         documentName,
       ])
@@ -460,6 +669,26 @@ export class PostgresYDocStore {
     return this.backend.latestSequence(documentName)
   }
 
+  async enqueueProjectionJob(
+    input: ProjectionJobInput,
+  ): Promise<PersistedProjectionJob> {
+    return this.backend.enqueueProjectionJob(input)
+  }
+
+  async listRetryableProjectionJobs(
+    limit?: number,
+  ): Promise<PersistedProjectionJob[]> {
+    return this.backend.listRetryableProjectionJobs(limit)
+  }
+
+  async markProjectionJobSucceeded(id: number): Promise<void> {
+    await this.backend.markProjectionJobSucceeded(id)
+  }
+
+  async markProjectionJobFailed(id: number, error: string): Promise<void> {
+    await this.backend.markProjectionJobFailed(id, error)
+  }
+
   async deleteDocument(documentName: string): Promise<void> {
     await this.backend.deleteDocument(documentName)
   }
@@ -468,8 +697,10 @@ export class PostgresYDocStore {
 export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
   private readonly updates = new Map<string, PersistedUpdate[]>()
   private readonly snapshots = new Map<string, PersistedSnapshot[]>()
+  private readonly projectionJobs: PersistedProjectionJob[] = []
   private readonly counters = new Map<string, number>()
   private snapshotCounter = 0
+  private projectionJobCounter = 0
 
   async ensureSchema(): Promise<void> {}
 
@@ -543,9 +774,71 @@ export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
     return this.insertSnapshot(input)
   }
 
+  projectionJobsFor(documentName: string): PersistedProjectionJob[] {
+    return this.projectionJobs.filter((job) => job.documentName === documentName)
+  }
+
+  async enqueueProjectionJob(
+    input: ProjectionJobInput,
+  ): Promise<PersistedProjectionJob> {
+    const now = new Date()
+    for (const job of this.projectionJobs) {
+      if (
+        job.documentName === input.documentName &&
+        (job.status === 'pending' || job.status === 'failed')
+      ) {
+        job.status = 'skipped'
+        job.updatedAt = now
+      }
+    }
+    const job: PersistedProjectionJob = {
+      ...input,
+      lastEditedByUserId: input.lastEditedByUserId ?? null,
+      id: ++this.projectionJobCounter,
+      status: 'pending',
+      attempts: 0,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.projectionJobs.push(job)
+    return { ...job }
+  }
+
+  async listRetryableProjectionJobs(
+    limit = 100,
+  ): Promise<PersistedProjectionJob[]> {
+    return this.projectionJobs
+      .filter((job) => job.status === 'pending' || job.status === 'failed')
+      .sort((left, right) => left.id - right.id)
+      .slice(0, limit)
+      .map((job) => ({ ...job }))
+  }
+
+  async markProjectionJobSucceeded(id: number): Promise<void> {
+    const job = this.projectionJobs.find((candidate) => candidate.id === id)
+    if (!job) return
+    job.status = 'succeeded'
+    job.updatedAt = new Date()
+  }
+
+  async markProjectionJobFailed(id: number, error: string): Promise<void> {
+    const job = this.projectionJobs.find((candidate) => candidate.id === id)
+    if (!job) return
+    job.status = 'failed'
+    job.attempts += 1
+    job.lastError = error
+    job.updatedAt = new Date()
+  }
+
   async deleteDocument(documentName: string): Promise<void> {
     this.updates.delete(documentName)
     this.snapshots.delete(documentName)
     this.counters.delete(documentName)
+    for (let i = this.projectionJobs.length - 1; i >= 0; i -= 1) {
+      if (this.projectionJobs[i]?.documentName === documentName) {
+        this.projectionJobs.splice(i, 1)
+      }
+    }
   }
 }
