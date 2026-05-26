@@ -3,6 +3,7 @@ import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomEditor } from './AtomEditor'
+import { encodeAsciiSketchContent } from '../lib/asciiSketchMetadata'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true
@@ -125,5 +126,24 @@ describe('AtomEditor real Tiptap mount', () => {
     await flush()
 
     expect(container.textContent).toContain('tiptap')
+  })
+
+  it('marks ascii sketch metadata so it can render as natural page content', () => {
+    const sketch = encodeAsciiSketchContent('+---+\n|   |\n+---+', {
+      shapes: [],
+    })
+
+    act(() => {
+      root.render(
+        React.createElement(AtomEditor, {
+          value: `\`\`\`ascii\n${sketch}\n\`\`\``,
+          onChange: () => {},
+          knownFiles: [],
+        }),
+      )
+    })
+
+    expect(container.querySelector('.ascii-sketch-block')).not.toBeNull()
+    expect(container.querySelector('.ascii-sketch-metadata-line')).not.toBeNull()
   })
 })

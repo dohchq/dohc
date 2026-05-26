@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -23,8 +24,13 @@ import {
   isChangeOrigin,
 } from '@tiptap/extension-collaboration'
 import { CollaborationCaret } from '@tiptap/extension-collaboration-caret'
-import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import {
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type EditorState,
+} from '@tiptap/pm/state'
+import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
@@ -65,6 +71,124 @@ import { useActiveWorkspaceId } from '../lib/active-workspace'
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
 // the command palette's "Insert ASCII sketch" entry both fire this.
 export const OPEN_SKETCH_EVENT = 'dohc:open-sketch'
+
+export type SlashCommandId =
+  | 'ascii-sketch'
+  | 'wikilink'
+  | 'heading-1'
+  | 'heading-2'
+  | 'bulleted-list'
+  | 'numbered-list'
+  | 'quote'
+  | 'code-block'
+  | 'query-block'
+
+export type SlashCommandItem = {
+  id: SlashCommandId
+  label: string
+  hint: string
+  glyph: string
+  aliases: string[]
+}
+
+type SlashCommandState =
+  | { open: false }
+  | {
+      open: true
+      from: number
+      to: number
+      query: string
+      selected: number
+      x: number
+      y: number
+    }
+
+const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
+
+const SLASH_COMMANDS: SlashCommandItem[] = [
+  {
+    id: 'ascii-sketch',
+    label: 'ASCII sketch',
+    hint: 'Draw a native text sketch',
+    glyph: 'A',
+    aliases: ['ascii', 'art', 'diagram', 'draw', 'sketch'],
+  },
+  {
+    id: 'wikilink',
+    label: 'Link',
+    hint: 'Link another page',
+    glyph: '[[',
+    aliases: ['link', 'page', 'wiki', 'wikilink'],
+  },
+  {
+    id: 'heading-1',
+    label: 'Heading 1',
+    hint: 'Large section heading',
+    glyph: 'H1',
+    aliases: ['h1', 'heading', 'title'],
+  },
+  {
+    id: 'heading-2',
+    label: 'Heading 2',
+    hint: 'Medium section heading',
+    glyph: 'H2',
+    aliases: ['h2', 'subheading', 'subtitle'],
+  },
+  {
+    id: 'bulleted-list',
+    label: 'Bulleted list',
+    hint: 'Start a simple list',
+    glyph: '-',
+    aliases: ['bullet', 'bulleted', 'list', 'ul'],
+  },
+  {
+    id: 'numbered-list',
+    label: 'Numbered list',
+    hint: 'Start an ordered list',
+    glyph: '1.',
+    aliases: ['number', 'numbered', 'ordered', 'ol'],
+  },
+  {
+    id: 'quote',
+    label: 'Quote',
+    hint: 'Call out a thought',
+    glyph: '>',
+    aliases: ['blockquote', 'quote'],
+  },
+  {
+    id: 'code-block',
+    label: 'Code block',
+    hint: 'Write code or raw text',
+    glyph: '</>',
+    aliases: ['code', 'fence', 'pre'],
+  },
+  {
+    id: 'query-block',
+    label: 'Live data',
+    hint: 'Embed a dohc query',
+    glyph: '{}',
+    aliases: ['data', 'database', 'live', 'query', 'table', 'todo'],
+  },
+]
+
+export function filterSlashCommands(query: string): SlashCommandItem[] {
+  const normalized = query.trim().toLowerCase()
+  if (!normalized) return SLASH_COMMANDS
+  return SLASH_COMMANDS.filter((command) => {
+    if (command.label.toLowerCase().includes(normalized)) return true
+    return command.aliases.some((alias) => alias.includes(normalized))
+  })
+}
+
+export function findSlashCommandMatch(
+  textBeforeCursor: string,
+): { slashOffset: number; query: string } | null {
+  const match = /(?:^|\s)\/([A-Za-z0-9_-]{0,40})$/.exec(textBeforeCursor)
+  if (!match) return null
+  const matchedText = match[0] ?? ''
+  const slashOffset = match.index + matchedText.lastIndexOf('/')
+  return { slashOffset, query: match[1]?.toLowerCase() ?? '' }
+}
 
 export type AtomEditorHandle = {
   insertCodeBlock: (language: string, content: string) => void
@@ -200,11 +324,24 @@ function buildAsciiDecorations(
       (node.type.name === 'code_block' || node.type.name === 'codeBlock') &&
       isAsciiSketchLanguage(node.attrs.language)
     ) {
+      const hasMetadata = hasAsciiSketchContentMetadata(node.textContent)
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
-          class: `ascii-sketch-block${hasAsciiSketchContentMetadata(node.textContent) ? ' ascii-sketch-block-has-metadata' : ''}`,
+          class: `ascii-sketch-block${hasMetadata ? ' ascii-sketch-block-has-metadata' : ''}`,
         }),
       )
+      if (hasMetadata) {
+        const firstLineEnd = node.textContent.indexOf('\n')
+        const metadataLength =
+          firstLineEnd === -1 ? node.textContent.length : firstLineEnd + 1
+        if (metadataLength > 0) {
+          decorations.push(
+            Decoration.inline(pos + 1, pos + 1 + metadataLength, {
+              class: 'ascii-sketch-metadata-line',
+            }),
+          )
+        }
+      }
       // An "edit" button rendered as a zero-width widget right before the
       // block. CSS positions the button absolutely so it floats over the
       // block's top-left corner and only fades in on hover. We use side:-1
@@ -247,6 +384,153 @@ function buildAsciiDecorations(
     }
   })
   return DecorationSet.create(doc as never, decorations)
+}
+
+const slashCommandKey = new PluginKey('dohc-slash-command')
+
+function makeSlashCommandPlugin({
+  wrapperRef,
+  stateRef,
+  setState,
+  runCommandRef,
+}: {
+  wrapperRef: React.RefObject<HTMLDivElement | null>
+  stateRef: React.RefObject<SlashCommandState>
+  setState: React.Dispatch<React.SetStateAction<SlashCommandState>>
+  runCommandRef: React.RefObject<(id: SlashCommandId) => void>
+}) {
+  const close = () => setState(CLOSED_SLASH_COMMAND_STATE)
+
+  const refresh = (view: EditorView) => {
+    const next = readSlashCommandState(
+      view,
+      stateRef.current,
+      wrapperRef.current,
+    )
+    setState(next)
+  }
+
+  return new Plugin({
+    key: slashCommandKey,
+    view(view) {
+      refresh(view)
+      return {
+        update(nextView) {
+          refresh(nextView)
+        },
+        destroy() {
+          close()
+        },
+      }
+    },
+    props: {
+      handleKeyDown(view, event) {
+        const slashState = stateRef.current
+        if (!slashState.open) return false
+
+        const items = filterSlashCommands(slashState.query)
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          setState((current) =>
+            current.open
+              ? {
+                  ...current,
+                  selected: items.length
+                    ? (current.selected + 1) % items.length
+                    : 0,
+                }
+              : current,
+          )
+          return true
+        }
+
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          setState((current) =>
+            current.open
+              ? {
+                  ...current,
+                  selected: items.length
+                    ? (current.selected - 1 + items.length) % items.length
+                    : 0,
+                }
+              : current,
+          )
+          return true
+        }
+
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          const command = items[slashState.selected] ?? items[0]
+          if (!command) return false
+          event.preventDefault()
+          runCommandRef.current(command.id)
+          return true
+        }
+
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          close()
+          view.focus()
+          return true
+        }
+
+        return false
+      },
+    },
+  })
+}
+
+function readSlashCommandState(
+  view: EditorView,
+  previous: SlashCommandState,
+  wrapper: HTMLDivElement | null,
+): SlashCommandState {
+  if ((view as { editable?: boolean }).editable === false) {
+    return CLOSED_SLASH_COMMAND_STATE
+  }
+
+  const state = view.state as EditorState
+  const { selection } = state
+  if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE
+
+  const $from = selection.$from
+  if (!$from.parent.isTextblock || $from.parent.type.spec.code) {
+    return CLOSED_SLASH_COMMAND_STATE
+  }
+
+  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset)
+  const match = findSlashCommandMatch(textBeforeCursor)
+  if (!match) return CLOSED_SLASH_COMMAND_STATE
+
+  const blockStart = $from.start()
+  const from = blockStart + match.slashOffset
+  const to = selection.from
+  const items = filterSlashCommands(match.query)
+  const selected = previous.open
+    ? Math.min(previous.selected, Math.max(items.length - 1, 0))
+    : 0
+
+  let x = 0
+  let y = 0
+  try {
+    const coords = view.coordsAtPos(from)
+    const wrapperRect = wrapper?.getBoundingClientRect()
+    x = Math.max(0, coords.left - (wrapperRect?.left ?? 0))
+    y = Math.max(0, coords.bottom - (wrapperRect?.top ?? 0) + 6)
+  } catch {
+    x = 0
+    y = 28
+  }
+
+  return {
+    open: true,
+    from,
+    to,
+    query: match.query,
+    selected,
+    x,
+    y,
+  }
 }
 
 // Humanize a query fence so the user sees WHAT it shows, not raw DSL.
@@ -694,6 +978,67 @@ type TiptapEditorProps = {
   frontmatter?: Props['frontmatter']
 }
 
+type SlashCommandChain = {
+  focus: () => SlashCommandChain
+  deleteRange: (range: { from: number; to: number }) => SlashCommandChain
+  insertContent: (content: string) => SlashCommandChain
+  setTextSelection: (position: number) => SlashCommandChain
+  setParagraph: () => SlashCommandChain
+  toggleHeading: (attrs: { level: 1 | 2 }) => SlashCommandChain
+  toggleBulletList: () => SlashCommandChain
+  toggleOrderedList: () => SlashCommandChain
+  toggleBlockquote: () => SlashCommandChain
+  setCodeBlock: (attrs?: { language: string }) => SlashCommandChain
+  run: () => boolean
+}
+
+function SlashCommandMenu({
+  state,
+  onSelect,
+  onHover,
+}: {
+  state: SlashCommandState
+  onSelect: (id: SlashCommandId) => void
+  onHover: (index: number) => void
+}) {
+  if (!state.open) return null
+  const items = filterSlashCommands(state.query)
+
+  return (
+    <div
+      className="dohc-slash-menu"
+      style={{ left: state.x, top: state.y }}
+      role="listbox"
+      aria-label="slash commands"
+      onMouseDown={(event) => event.preventDefault()}
+    >
+      {items.length ? (
+        items.map((item, index) => (
+          <button
+            key={item.id}
+            type="button"
+            role="option"
+            aria-selected={index === state.selected}
+            className={`dohc-slash-menu__item${
+              index === state.selected ? ' is-selected' : ''
+            }`}
+            onMouseEnter={() => onHover(index)}
+            onClick={() => onSelect(item.id)}
+          >
+            <span className="dohc-slash-menu__glyph">{item.glyph}</span>
+            <span className="dohc-slash-menu__copy">
+              <span className="dohc-slash-menu__label">{item.label}</span>
+              <span className="dohc-slash-menu__hint">{item.hint}</span>
+            </span>
+          </button>
+        ))
+      ) : (
+        <div className="dohc-slash-menu__empty">No commands</div>
+      )}
+    </div>
+  )
+}
+
 function TiptapAtomEditor({
   defaultValue,
   onChangeRef,
@@ -720,6 +1065,15 @@ function TiptapAtomEditor({
   const [acState, setAcState] = useState<AutocompleteState>({
     active: false,
   })
+  const editorWrapRef = useRef<HTMLDivElement | null>(null)
+  const [slashState, setSlashState] = useState<SlashCommandState>(
+    CLOSED_SLASH_COMMAND_STATE,
+  )
+  const slashStateRef = useRef<SlashCommandState>(slashState)
+  const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {})
+  useEffect(() => {
+    slashStateRef.current = slashState
+  }, [slashState])
   const setAcStateRef = useRef(setAcState)
   useEffect(() => {
     setAcStateRef.current = setAcState
@@ -1031,6 +1385,12 @@ function TiptapAtomEditor({
           })
           const extra = [
             makeAsciiBlockPlugin(onAsciiClickRef),
+            makeSlashCommandPlugin({
+              wrapperRef: editorWrapRef,
+              stateRef: slashStateRef,
+              setState: setSlashState,
+              runCommandRef: slashCommandRunnerRef,
+            }),
             wikilinkPlugin,
             wikilinkClickPlugin,
             atomPillClickPlugin,
@@ -1115,6 +1475,59 @@ function TiptapAtomEditor({
     [extensions, collaborationEnabled, documentName],
   )
 
+  const runSlashCommand = useCallback(
+    (id: SlashCommandId) => {
+      const state = slashStateRef.current
+      if (!state.open || !editor) return
+
+      const range = { from: state.from, to: state.to }
+      const chain = editor
+        .chain()
+        .focus()
+        .deleteRange(range) as unknown as SlashCommandChain
+      setSlashState(CLOSED_SLASH_COMMAND_STATE)
+
+      switch (id) {
+        case 'ascii-sketch':
+          chain.run()
+          window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
+          return
+        case 'wikilink':
+          chain.insertContent('[[]]').setTextSelection(state.from + 2).run()
+          return
+        case 'heading-1':
+          chain.toggleHeading({ level: 1 }).run()
+          return
+        case 'heading-2':
+          chain.toggleHeading({ level: 2 }).run()
+          return
+        case 'bulleted-list':
+          chain.toggleBulletList().run()
+          return
+        case 'numbered-list':
+          chain.toggleOrderedList().run()
+          return
+        case 'quote':
+          chain.toggleBlockquote().run()
+          return
+        case 'code-block':
+          chain.setCodeBlock({ language: '' }).run()
+          return
+        case 'query-block':
+          chain
+            .setCodeBlock({ language: 'query' })
+            .insertContent('entities.list("project")')
+            .run()
+          return
+      }
+    },
+    [editor],
+  )
+
+  useEffect(() => {
+    slashCommandRunnerRef.current = runSlashCommand
+  }, [runSlashCommand])
+
   useEffect(() => {
     editorRef.current = editor
     return () => {
@@ -1186,7 +1599,7 @@ function TiptapAtomEditor({
       ? { open: true, from: acState.from, query: acState.query }
       : { open: false }
   return (
-    <div className="dohc-tiptap-editor">
+    <div className="dohc-tiptap-editor" ref={editorWrapRef}>
       {collaborationRequired &&
         (collaborationPending ||
           !hocuspocusUrl ||
@@ -1199,6 +1612,15 @@ function TiptapAtomEditor({
           </div>
         )}
       <EditorContent editor={editor} />
+      <SlashCommandMenu
+        state={slashState}
+        onSelect={runSlashCommand}
+        onHover={(index) =>
+          setSlashState((current) =>
+            current.open ? { ...current, selected: index } : current,
+          )
+        }
+      />
       <WikilinkPicker
         state={pickerState}
         files={knownFilesArray}
