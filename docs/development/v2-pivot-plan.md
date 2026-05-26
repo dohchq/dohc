@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.16 — Phase 1.6 implemented on `codex/v2-offline-first-on-multiplayer`: Y.Awareness presence gates are wired, Hocuspocus now debounces Y.Doc changes into durable projection jobs, and a server-token-gated Convex bridge updates `atoms.body` plus projection metadata as a derived cache. App-wide typecheck is still blocked by Phase 1.9 legacy Milkdown/prosemirror-sync files until cleanup removes them.
+**Status:** Plan v1.17 — Phase 1.7 anchor foundation implemented on `codex/v2-offline-first-on-multiplayer`: Y.Awareness presence gates are wired, Hocuspocus projects Y.Docs into a durable `atoms.body` cache, and suggestions now store Y.RelativePosition anchors plus semantic witnesses. Raw markdown-splice suggestion accept is disabled until Phase 1.8's Hocuspocus semantic API applies accepts directly to Y.Doc.
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -800,5 +800,6 @@ AI-assisted (Claude Code) will compress per-phase implementation but NOT QA/inte
 1. [ ] Add mounted browser lifecycle tests for Phase 1.4: sync-unavailable read-only state, first remote bootstrap, local IndexedDB resume, and two-tab convergence.
 2. [ ] Start Phase 1.5 presence/awareness only after the browser lifecycle tests above pass.
 3. [x] Start Phase 1.6 server-owned `atoms.body` projection so legacy client autosave can be fully removed from collaborative markdown paths.
-4. [ ] Start Phase 1.7 RelativePosition-backed suggestions.
+4. [x] Start Phase 1.7 RelativePosition-backed suggestions.
+5. [ ] Start Phase 1.8 Hocuspocus semantic API for suggestion accept and agent tools.
 4. [ ] Decide §14 product questions before Phase 2 starts: self-host auth choice, desktop wrapper, and local file sync scope.

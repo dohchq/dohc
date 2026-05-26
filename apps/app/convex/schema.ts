@@ -714,8 +714,14 @@ export default defineSchema({
     // markdown offsets natively; the editor decoration plugin
     // renders the bubble at the approximate PM position (visual
     // approximation; correctness comes from the CAS on accept).
-    rangeFrom: v.number(),
-    rangeTo: v.number(),
+    rangeFrom: v.optional(v.number()),
+    rangeTo: v.optional(v.number()),
+    // v2 Phase 1.7: Y.RelativePosition anchors encoded as base64
+    // `Y.encodeRelativePosition(...)`. These are canonical for
+    // suggestions on Y.Doc-backed atoms; rangeFrom/rangeTo remain
+    // optional only for temporary v1 cleanup compatibility.
+    anchorStart: v.optional(v.string()),
+    anchorEnd: v.optional(v.string()),
     // The text the agent wants to write. Replaces [from, to] on
     // accept.
     proposedText: v.string(),
@@ -732,6 +738,9 @@ export default defineSchema({
     // post-3.9.15). The schema field stays v.optional so legacy
     // rows still LOAD, but they cannot accept successfully.
     expectedText: v.optional(v.string()),
+    expectedPrefix: v.optional(v.string()),
+    expectedSuffix: v.optional(v.string()),
+    createdFromProjectionHash: v.optional(v.string()),
     // The original instruction that produced this suggestion
     // (e.g. "rewrite intro"). Surfaced in the bubble UI.
     instruction: v.string(),
@@ -759,6 +768,8 @@ export default defineSchema({
       v.literal('pending'),
       v.literal('accepted'),
       v.literal('rejected'),
+      v.literal('stale'),
+      v.literal('needs-review'),
     ),
     createdAt: v.number(),
   })

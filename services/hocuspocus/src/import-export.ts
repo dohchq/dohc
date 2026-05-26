@@ -73,6 +73,14 @@ export function getDohcYDocMeta(doc: Y.Doc): DohcV2Meta {
   }
 }
 
+export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
+  return doc.getXmlFragment(BODY_FIELD)
+}
+
+export function getDohcProseMirrorSchema() {
+  return schema
+}
+
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   return markdownManager.serialize(yDocBodyToJSON(doc))
 }

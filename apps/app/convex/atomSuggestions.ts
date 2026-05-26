@@ -21,10 +21,8 @@
 
 import { v } from 'convex/values'
 import { mutation, query, internalMutation } from './_generated/server'
-import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
-import { sha256Hex } from './atomWriter'
 import type { Id } from './_generated/dataModel'
 
 // Per-atom rate cap (codex HIGH 4 / plan §3 M3 cost caps).
@@ -56,8 +54,10 @@ export const _createSuggestion = internalMutation({
   args: {
     atomId: v.id('atoms'),
     workspaceId: v.string(),
-    rangeFrom: v.number(),
-    rangeTo: v.number(),
+    rangeFrom: v.optional(v.number()),
+    rangeTo: v.optional(v.number()),
+    anchorStart: v.optional(v.string()),
+    anchorEnd: v.optional(v.string()),
     proposedText: v.string(),
     instruction: v.string(),
     // M1 step 3.9.6 — SIGNED AGENT TOKEN (plan §3 M3 +
@@ -91,6 +91,9 @@ export const _createSuggestion = internalMutation({
     agentSecret: v.optional(v.string()),
     // 3.9.2 — CAS witness (see schema comment).
     expectedText: v.optional(v.string()),
+    expectedPrefix: v.optional(v.string()),
+    expectedSuffix: v.optional(v.string()),
+    createdFromProjectionHash: v.optional(v.string()),
   },
   handler: async (
     ctx,
@@ -99,12 +102,17 @@ export const _createSuggestion = internalMutation({
       workspaceId,
       rangeFrom,
       rangeTo,
+      anchorStart,
+      anchorEnd,
       proposedText,
       instruction,
       authorUserId,
       authorUserName,
       agentSecret,
       expectedText,
+      expectedPrefix,
+      expectedSuffix,
+      createdFromProjectionHash,
     },
   ): Promise<{ ok: true; id: Id<'atomSuggestions'> } | { ok: false; reason: string }> => {
     // 3.9.6 — verify the agent secret. Both sides of the
@@ -124,7 +132,17 @@ export const _createSuggestion = internalMutation({
         reason: `Suggestion text exceeds ${PER_SUGGESTION_CHAR_CAP} chars.`,
       }
     }
-    if (rangeFrom < 0 || rangeTo < rangeFrom) {
+    const hasAnchors =
+      typeof anchorStart === 'string' && typeof anchorEnd === 'string'
+    const hasLegacyRange =
+      typeof rangeFrom === 'number' && typeof rangeTo === 'number'
+    if (!hasAnchors && !hasLegacyRange) {
+      return { ok: false, reason: 'Missing suggestion anchors.' }
+    }
+    if (
+      hasLegacyRange &&
+      (rangeFrom < 0 || rangeTo < rangeFrom)
+    ) {
       return { ok: false, reason: 'Invalid range.' }
     }
     // Cap: count THIS author's PENDING suggestions on this atom
@@ -151,14 +169,17 @@ export const _createSuggestion = internalMutation({
     const id = await ctx.db.insert('atomSuggestions', {
       atomId,
       workspaceId,
-      rangeFrom,
-      rangeTo,
+      ...(hasLegacyRange ? { rangeFrom, rangeTo } : {}),
+      ...(hasAnchors ? { anchorStart, anchorEnd } : {}),
       proposedText,
       instruction,
       authorIsAgent,
       authorUserId,
       authorUserName, // 3.9.18 — cached at insert time
       expectedText,
+      expectedPrefix,
+      expectedSuffix,
+      createdFromProjectionHash,
       status: 'pending',
       createdAt: Date.now(),
     })
@@ -214,6 +235,8 @@ export const listPending = query({
         atomId: r.atomId,
         rangeFrom: r.rangeFrom,
         rangeTo: r.rangeTo,
+        anchorStart: r.anchorStart,
+        anchorEnd: r.anchorEnd,
         proposedText: r.proposedText,
         instruction: r.instruction,
         authorIsAgent: r.authorIsAgent,
@@ -232,18 +255,22 @@ export const listPending = query({
         // for accept CAS; here it doubles as the render
         // anchor.
         expectedText: r.expectedText,
+        expectedPrefix: r.expectedPrefix,
+        expectedSuffix: r.expectedSuffix,
+        createdFromProjectionHash: r.createdFromProjectionHash,
       }))
   },
 })
 
-/** Accept a suggestion: inline the proposedText into atoms.body
- *  via the standard upsert path (so all the usual write
- *  side-effects fire — projection, search index, etc.), then
- *  mark the row 'accepted' with resolvedByUserId set to the
- *  CALLER (audit: only humans accept; the agent can't
- *  self-accept per plan §3 M3).
+/** Accept a suggestion.
  *
- *  Auth: P1 WRITE access on the atom. */
+ * v2 hard gate: suggestions must mutate the canonical Y.Doc through
+ * Hocuspocus semantic operations. This mutation intentionally refuses
+ * to splice the derived `atoms.body` cache. Phase 1.8 wires the HTTP
+ * semantic apply path and then this function can patch the row based on
+ * the Hocuspocus result.
+ *
+ * Auth: P1 WRITE access on the atom. */
 export const acceptSuggestion = mutation({
   args: {
     suggestionId: v.id('atomSuggestions'),
@@ -254,17 +281,16 @@ export const acceptSuggestion = mutation({
     { suggestionId, activeWorkspaceId },
   ): Promise<
     | { ok: true; alreadyResolved: boolean }
-    | { ok: false; reason: 'drift' | 'oob' | 'missing-cas-witness'; message: string }
+    | {
+        ok: false
+        reason: 'semantic-api-required'
+        message: string
+      }
   > => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const identity = await ctx.auth.getUserIdentity()
     if (!identity) throw new Error('Not authenticated')
     const subject = identity.subject
-    // 3.9.18 — cache resolver display name on every patch
-    const resolverName =
-      typeof identity.name === 'string' && identity.name.length > 0
-        ? identity.name
-        : undefined
 
     const row = await ctx.db.get(suggestionId)
     if (!row) throw new Error('Suggestion not found.')
@@ -287,152 +313,12 @@ export const acceptSuggestion = mutation({
       throw new Error('Not authorized to edit this atom.')
     }
 
-    // M1 step 3.9.2 + 3.9.3 — codex 14th + 15th-pass [P1] CAS.
-    //
-    // 3.9.15 — codex 19th-pass holistic follow-up + 3.9.14
-    // test finding: validation failures used to patch row to
-    // 'rejected' then throw. Convex transactional semantics
-    // ROLL BACK the patch on throw → row stayed 'pending' →
-    // bubble stayed visible in the UI. Fix: return structured
-    // ok:false instead. The patch survives; client surfaces
-    // the error inline; bubble transitions to 'rejected'
-    // visually as designed. Only auth/setup errors still
-    // throw (those are truly exceptional and shouldn't have
-    // side-effects anyway).
-    const body = atom.body
-    if (row.expectedText === undefined) {
-      await ctx.db.patch(suggestionId, {
-        status: 'rejected',
-        resolvedByUserId: subject,
-        resolvedByUserName: resolverName,
-        resolvedAt: Date.now(),
-      })
-      return {
-        ok: false,
-        reason: 'missing-cas-witness',
-        message:
-          'Suggestion is missing the required expectedText CAS witness. Discarded.',
-      }
+    return {
+      ok: false,
+      reason: 'semantic-api-required',
+      message:
+        'Suggestion accept must apply through the Hocuspocus semantic API.',
     }
-    if (
-      row.rangeFrom < 0 ||
-      row.rangeTo < row.rangeFrom ||
-      row.rangeTo > body.length
-    ) {
-      await ctx.db.patch(suggestionId, {
-        status: 'rejected',
-        resolvedByUserId: subject,
-        resolvedByUserName: resolverName,
-        resolvedAt: Date.now(),
-      })
-      return {
-        ok: false,
-        reason: 'oob',
-        message:
-          'Suggestion range is out of bounds (document shrank or range was invalid). Discarded; ask again.',
-      }
-    }
-    const actual = body.slice(row.rangeFrom, row.rangeTo)
-    if (actual !== row.expectedText) {
-      await ctx.db.patch(suggestionId, {
-        status: 'rejected',
-        resolvedByUserId: subject,
-        resolvedByUserName: resolverName,
-        resolvedAt: Date.now(),
-      })
-      return {
-        ok: false,
-        reason: 'drift',
-        message:
-          'Document drifted since this suggestion was made. The suggestion was discarded; ask again.',
-      }
-    }
-    const newBody =
-      body.slice(0, row.rangeFrom) + row.proposedText + body.slice(row.rangeTo)
-
-    // M1 step 3.9.10 — ultrathink P1 #2 ACCEPT-FREEZE FIX.
-    //
-    // Pre-3.9.10 we wrote the new body via _upsertInternal but
-    // did NOT update collabDocs.baseBodyHash. Next snapshot's
-    // projection saw currentBodyHash(=newBody hash) !=
-    // baseBodyHash(=old body hash) → case A/B/C analysis ran
-    // → freeze. The user clicked Accept and the editor froze.
-    //
-    // Fix: after the body write, ALSO patch collabDocs to
-    // adopt the new body as the baseline. The conflict
-    // resolver sees the writes as already-reconciled — no
-    // freeze on next snapshot.
-    //
-    // Plus: set needsRebootstrap=true. The user's editor PM
-    // state is still at the OLD content; it doesn't know about
-    // the accepted suggestion. Without rebootstrap, their
-    // next snapshot would serialize OLD-PM, projection would
-    // see newDerivedHash(=OLD) != currentBodyHash(=NEW) !=
-    // baseBodyHash(=NEW) → freeze again. needsRebootstrap
-    // triggers the 3.8.1.2/3.8.1.5 rebootstrap overlay +
-    // pending-steps-gated reload; fresh mount → bootstrap →
-    // editor reads new atoms.body.
-    //
-    // The client-side onAccept handler ALSO blocks acceptance
-    // when sendableSteps is non-empty (3.9.10 client gate) —
-    // this prevents the case where pending local steps would
-    // race the new body write. So by the time we get here,
-    // the editor has no unsynced edits.
-
-    await ctx.runMutation(internal.atoms._upsertInternal, {
-      workspaceId,
-      path: atom.path,
-      body: newBody,
-      source: 'agent',
-      // Suggestions can land on user-authored atoms; the
-      // suggestion itself is the user's "I approved this"
-      // signal, so we use the equivalent of confirm:true.
-      allowUserOverwrite: true,
-      viewerSubject: subject,
-    })
-
-    // 3.9.10 — adopt new body as the collab baseline + signal
-    // client rebootstrap. See the comment block above the
-    // _upsertInternal call for the rationale. Bounded to
-    // atoms that have an active collab row; suggestions
-    // accepted on docs without active multiplayer (the
-    // common case today) skip this branch.
-    //
-    // M1 step 3.9.12 — codex 20th-pass [P1] FIX: hash the
-    // PERSISTED body, not `newBody`. _upsertInternal may
-    // mutate the body before write (seedAtomIdIntoBody adds
-    // a frontmatter `id:` if missing). Hashing our pre-write
-    // `newBody` produces a baseline that doesn't match what
-    // the row actually carries → next projection sees apparent
-    // drift → can freeze. Same bug class atomWriter already
-    // dodges by re-hashing post-write. Re-read here.
-    const collabRow = await ctx.db
-      .query('collabDocs')
-      .withIndex('by_docId', (q) =>
-        q.eq('docId', `atom:${workspaceId}:${atom._id}`),
-      )
-      .unique()
-    if (collabRow) {
-      const persisted = await ctx.db.get(atom._id)
-      if (persisted) {
-        const persistedBodyHash = await sha256Hex(persisted.body)
-        await ctx.db.patch(collabRow._id, {
-          baseBodyHash: persistedBodyHash,
-          lastProjectedHash: persistedBodyHash,
-          needsRebootstrap: true,
-          lastConflictAt: Date.now(),
-          updatedAt: Date.now(),
-        })
-      }
-    }
-
-    await ctx.db.patch(suggestionId, {
-      status: 'accepted',
-      resolvedByUserId: subject,
-      resolvedByUserName: resolverName,
-      resolvedAt: Date.now(),
-    })
-    return { ok: true as const, alreadyResolved: false }
   },
 })
 
