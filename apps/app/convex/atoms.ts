@@ -44,6 +44,7 @@ import {
   resolveShareAccess,
   ownerAtomByFileId,
 } from './atomShares'
+import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
 import type { MutationCtx } from './_generated/server'
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
@@ -303,6 +304,10 @@ export async function removeAtomImpl(
   const deletedFileId = extractFrontmatterId(existing.body)
   if (deletedFileId) {
     await cascadeDeleteSharesForFileId(ctx, workspaceId, deletedFileId)
+    await scheduleHocuspocusDeleteDocument(ctx, {
+      workspaceId,
+      atomId: deletedFileId,
+    })
   }
 }
 

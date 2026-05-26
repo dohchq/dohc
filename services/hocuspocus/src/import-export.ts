@@ -100,7 +100,7 @@ function parseFrontmatter(src: string): {
       meta = parsed as Record<string, unknown>
     }
   } catch {
-    meta = {}
+    return { meta: {}, body: src }
   }
   return { meta, body: rest ?? '' }
 }

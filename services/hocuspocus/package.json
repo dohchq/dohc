@@ -12,7 +12,6 @@
     "lint": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@hocuspocus/extension-database": "^4.1.0",
     "@hocuspocus/provider": "^4.1.0",
     "@hocuspocus/server": "^4.1.0",
     "@tiptap/core": "^3.23.6",

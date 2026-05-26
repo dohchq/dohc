@@ -6,7 +6,7 @@
 
 **Architecture:** Hocuspocus v4 runs as a separate Node workspace package under `services/hocuspocus`. `beforeSync` writes replayable Yjs sync payloads to an append-only Postgres log before Hocuspocus applies them; `onStoreDocument` stores compact snapshots later. `beforeHandleMessage` is intentionally not used for durability because it sees the raw transport envelope, not a replayable Yjs update. Auth is a 5-minute HS256 JWT plus an injected ACL adapter so Convex can be wired in Phase 1.4+ without making Convex the document owner.
 
-**Tech Stack:** `@hocuspocus/server`, `@hocuspocus/provider` for later raw-client smoke scripts, `@hocuspocus/extension-database` for API reference, Yjs, Postgres via `pg`, `jose`, Vitest, TypeScript.
+**Tech Stack:** `@hocuspocus/server`, `@hocuspocus/provider` for later raw-client smoke scripts, Yjs, custom Postgres persistence via `pg`, `jose`, Vitest, TypeScript.
 
 ---
 
@@ -79,7 +79,7 @@ Expected: fail because `@dohc/hocuspocus` package and implementation files do no
 Run:
 
 ```bash
-pnpm add --filter @dohc/hocuspocus @hocuspocus/server @hocuspocus/provider @hocuspocus/extension-database yjs pg jose
+pnpm add --filter @dohc/hocuspocus @hocuspocus/server @hocuspocus/provider yjs pg jose
 pnpm add --filter @dohc/hocuspocus -D @types/pg tsx typescript vitest
 ```
 

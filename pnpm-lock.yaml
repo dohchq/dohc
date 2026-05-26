@@ -207,9 +207,6 @@ importers:
 
   services/hocuspocus:
     dependencies:
-      '@hocuspocus/extension-database':
-        specifier: ^4.1.0
-        version: 4.1.0(srvx@0.11.15)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       '@hocuspocus/provider':
         specifier: ^4.1.0
         version: 4.1.0(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
@@ -1145,11 +1142,6 @@ packages:
 
   '@hocuspocus/common@4.1.0':
     resolution: {integrity: sha512-SOBbu0GcBMbLo7IYRDZC6gvEcoATbEFIC5KqzvLanC6dZZLkv91pYEBli+Exs/G71ELL3iUjSwnaf+gksxcjFA==}
-
-  '@hocuspocus/extension-database@4.1.0':
-    resolution: {integrity: sha512-jH70FcWxIVcN++IYuSfS4JPAJgowEjFXWU/59yNlSYHEl0tWNqtR4/JBpVVAJQd1gV1kV/EXsrlnoNzV8SeCuw==}
-    peerDependencies:
-      yjs: ^13.6.8
 
   '@hocuspocus/provider@4.1.0':
     resolution: {integrity: sha512-K80V2yX4AMdpqgjIkexJioyI2Oq8pu8hjdFqY0INXKSpH8TQv9NMaDzJmlrZMYmUeKyRO2t7VhGyFK9jZQPnNw==}
@@ -4579,14 +4571,6 @@ snapshots:
   '@hocuspocus/common@4.1.0':
     dependencies:
       lib0: 0.2.117
-
-  '@hocuspocus/extension-database@4.1.0(srvx@0.11.15)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)':
-    dependencies:
-      '@hocuspocus/server': 4.1.0(srvx@0.11.15)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
-      yjs: 13.6.30
-    transitivePeerDependencies:
-      - srvx
-      - y-protocols
 
   '@hocuspocus/provider@4.1.0(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)':
     dependencies:

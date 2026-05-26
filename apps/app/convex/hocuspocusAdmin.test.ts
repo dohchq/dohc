@@ -92,6 +92,25 @@ describe('Hocuspocus admin disconnect bridge', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('posts document deletion to Hocuspocus admin', async () => {
+    const t = convexTest(schema, modules)
+    stubAdminEnv()
+    const fetch = makeFetch()
+    vi.stubGlobal('fetch', fetch)
+
+    await t.action(internal.hocuspocusAdmin.deleteDocument, {
+      workspaceId: OWNER,
+      atomId: 'doc',
+    })
+
+    const [url, init] = firstFetchCall(fetch)
+    expect(url).toBe(`${ADMIN_URL}/admin/delete-document`)
+    expect(JSON.parse(init.body as string)).toEqual({
+      workspaceId: OWNER,
+      atomId: 'doc',
+    })
+  })
+
   it('fails share revocation loudly when collab tokens are configured without admin disconnect env', async () => {
     const t = convexTest(schema, modules)
     vi.stubEnv('HOCUSPOCUS_JWT_SECRET', 'jwt-secret')
@@ -140,6 +159,25 @@ describe('Hocuspocus admin disconnect bridge', () => {
       workspaceId: OWNER,
       userId: GRANTEE,
     })
+  })
+
+  it('schedules persisted Y.Doc deletion when an atom is deleted', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    stubAdminEnv()
+    const fetch = makeFetch()
+    vi.stubGlobal('fetch', fetch)
+    await seedOwnerAtom(t)
+
+    await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atoms.remove, { path: 'doc.md' })
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers())
+
+    const bodies = fetch.mock.calls.map(([, init]) =>
+      JSON.parse(init.body as string),
+    )
+    expect(bodies).toContainEqual({ workspaceId: OWNER, atomId: 'doc' })
   })
 
   it('schedules org member disconnects when an org share is revoked, excluding the owner', async () => {

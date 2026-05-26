@@ -52,14 +52,20 @@ async function loadBootstrap(
   t: ReturnType<typeof convexTest>,
   args: {
     serverToken?: string
+    userId?: string
     workspaceId?: string
     atomId?: string
+    actorKind?: 'user' | 'agent'
+    authzVersion?: number
   } = {},
 ) {
   return await t.query(api.hocuspocusAuth.loadAtomBootstrap, {
     serverToken: args.serverToken ?? SERVER_TOKEN,
+    userId: args.userId ?? OWNER,
     workspaceId: args.workspaceId ?? OWNER,
     atomId: args.atomId ?? 'doc',
+    actorKind: args.actorKind ?? 'user',
+    authzVersion: args.authzVersion ?? 1,
   })
 }
 
@@ -222,6 +228,14 @@ describe('hocuspocus Convex ACL bridge', () => {
     await seedOwnerAtom(t, 'doc.md', body)
 
     await expect(loadBootstrap(t)).resolves.toEqual({ markdown: body })
+  })
+
+  it('denies bootstrap markdown when the actor cannot read the atom', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc')
+
+    await expect(loadBootstrap(t, { userId: STRANGER })).resolves.toBeNull()
   })
 
   it('returns null when bootstrap atom lookup misses', async () => {

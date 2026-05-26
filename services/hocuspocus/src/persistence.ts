@@ -47,6 +47,10 @@ export interface YDocPersistenceBackend {
   latestSequence(documentName: string): Promise<number>
   insertUpdate(input: InsertUpdateInput): Promise<PersistedUpdate>
   insertSnapshot(input: InsertSnapshotInput): Promise<PersistedSnapshot>
+  insertSnapshotIfMissing(
+    input: InsertSnapshotInput,
+  ): Promise<PersistedSnapshot | null>
+  deleteDocument(documentName: string): Promise<void>
 }
 
 function hasPoolConnect(client: SqlClient): client is SqlPool {
@@ -86,6 +90,51 @@ async function withTransaction<T>(
     if (hasRelease(transactionClient)) {
       transactionClient.release()
     }
+  }
+}
+
+async function lockDocumentForTransaction(
+  client: SqlClient,
+  documentName: string,
+): Promise<void> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+    documentName,
+  ])
+}
+
+async function hasDocumentStateInTransaction(
+  client: SqlClient,
+  documentName: string,
+): Promise<boolean> {
+  const result = await client.query<{ exists: boolean }>(
+    `
+      SELECT EXISTS (
+        SELECT 1 FROM hocuspocus_ydoc_snapshots WHERE doc_name = $1
+        UNION ALL
+        SELECT 1 FROM hocuspocus_ydoc_updates WHERE doc_name = $1
+        LIMIT 1
+      ) AS exists
+    `,
+    [documentName],
+  )
+  return result.rows[0]?.exists === true
+}
+
+function persistedSnapshotFromRow(row: {
+  id: number | string
+  doc_name: string
+  snapshot_bytes: Buffer
+  state_vector: Buffer
+  last_seq: number | string
+  created_at: Date
+}): PersistedSnapshot {
+  return {
+    snapshotId: Number(row.id),
+    documentName: row.doc_name,
+    snapshotBytes: new Uint8Array(row.snapshot_bytes),
+    stateVector: new Uint8Array(row.state_vector),
+    lastSeq: Number(row.last_seq),
+    createdAt: row.created_at,
   }
 }
 
@@ -136,18 +185,7 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
   }
 
   async hasDocumentState(documentName: string): Promise<boolean> {
-    const result = await this.client.query<{ exists: boolean }>(
-      `
-        SELECT EXISTS (
-          SELECT 1 FROM hocuspocus_ydoc_snapshots WHERE doc_name = $1
-          UNION ALL
-          SELECT 1 FROM hocuspocus_ydoc_updates WHERE doc_name = $1
-          LIMIT 1
-        ) AS exists
-      `,
-      [documentName],
-    )
-    return result.rows[0]?.exists === true
+    return hasDocumentStateInTransaction(this.client, documentName)
   }
 
   async getLatestSnapshot(documentName: string): Promise<PersistedSnapshot | null> {
@@ -171,14 +209,7 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
     const row = result.rows[0]
     if (!row) return null
 
-    return {
-      snapshotId: Number(row.id),
-      documentName: row.doc_name,
-      snapshotBytes: new Uint8Array(row.snapshot_bytes),
-      stateVector: new Uint8Array(row.state_vector),
-      lastSeq: Number(row.last_seq),
-      createdAt: row.created_at,
-    }
+    return persistedSnapshotFromRow(row)
   }
 
   async listUpdatesAfter(
@@ -222,6 +253,7 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
 
   async insertUpdate(input: InsertUpdateInput): Promise<PersistedUpdate> {
     return withTransaction(this.client, async (client) => {
+      await lockDocumentForTransaction(client, input.documentName)
       const counter = await client.query<{ seq: number | string }>(
         `
           INSERT INTO hocuspocus_ydoc_counters (doc_name, last_seq)
@@ -290,15 +322,57 @@ export class PostgresYDocPersistenceBackend implements YDocPersistenceBackend {
         input.lastSeq,
       ],
     )
-    const row = result.rows[0]
-    return {
-      snapshotId: Number(row.id),
-      documentName: row.doc_name,
-      snapshotBytes: new Uint8Array(row.snapshot_bytes),
-      stateVector: new Uint8Array(row.state_vector),
-      lastSeq: Number(row.last_seq),
-      createdAt: row.created_at,
-    }
+    return persistedSnapshotFromRow(result.rows[0])
+  }
+
+  async insertSnapshotIfMissing(
+    input: InsertSnapshotInput,
+  ): Promise<PersistedSnapshot | null> {
+    return withTransaction(this.client, async (client) => {
+      await lockDocumentForTransaction(client, input.documentName)
+
+      if (await hasDocumentStateInTransaction(client, input.documentName)) {
+        return null
+      }
+
+      const result = await client.query<{
+        id: number | string
+        doc_name: string
+        snapshot_bytes: Buffer
+        state_vector: Buffer
+        last_seq: number | string
+        created_at: Date
+      }>(
+        `
+          INSERT INTO hocuspocus_ydoc_snapshots
+            (doc_name, snapshot_bytes, state_vector, last_seq)
+          VALUES ($1, $2, $3, $4)
+          RETURNING id, doc_name, snapshot_bytes, state_vector, last_seq, created_at
+        `,
+        [
+          input.documentName,
+          Buffer.from(input.snapshotBytes),
+          Buffer.from(input.stateVector),
+          input.lastSeq,
+        ],
+      )
+      return persistedSnapshotFromRow(result.rows[0])
+    })
+  }
+
+  async deleteDocument(documentName: string): Promise<void> {
+    await withTransaction(this.client, async (client) => {
+      await lockDocumentForTransaction(client, documentName)
+      await client.query('DELETE FROM hocuspocus_ydoc_updates WHERE doc_name = $1', [
+        documentName,
+      ])
+      await client.query('DELETE FROM hocuspocus_ydoc_snapshots WHERE doc_name = $1', [
+        documentName,
+      ])
+      await client.query('DELETE FROM hocuspocus_ydoc_counters WHERE doc_name = $1', [
+        documentName,
+      ])
+    })
   }
 }
 
@@ -363,8 +437,31 @@ export class PostgresYDocStore {
     }
   }
 
+  async storeSnapshotIfMissing(
+    documentName: string,
+    doc: Y.Doc,
+    options?: { lastSeq?: number },
+  ): Promise<{ snapshotId: number; lastSeq: number } | null> {
+    const lastSeq = options?.lastSeq ?? (await this.backend.latestSequence(documentName))
+    const snapshot = await this.backend.insertSnapshotIfMissing({
+      documentName,
+      snapshotBytes: Y.encodeStateAsUpdate(doc),
+      stateVector: Y.encodeStateVector(doc),
+      lastSeq,
+    })
+    if (!snapshot) return null
+    return {
+      snapshotId: snapshot.snapshotId,
+      lastSeq: snapshot.lastSeq,
+    }
+  }
+
   async latestSequence(documentName: string): Promise<number> {
     return this.backend.latestSequence(documentName)
+  }
+
+  async deleteDocument(documentName: string): Promise<void> {
+    await this.backend.deleteDocument(documentName)
   }
 }
 
@@ -437,5 +534,18 @@ export class MemoryYDocPersistenceBackend implements YDocPersistenceBackend {
       snapshot,
     ])
     return snapshot
+  }
+
+  async insertSnapshotIfMissing(
+    input: InsertSnapshotInput,
+  ): Promise<PersistedSnapshot | null> {
+    if (await this.hasDocumentState(input.documentName)) return null
+    return this.insertSnapshot(input)
+  }
+
+  async deleteDocument(documentName: string): Promise<void> {
+    this.updates.delete(documentName)
+    this.snapshots.delete(documentName)
+    this.counters.delete(documentName)
   }
 }

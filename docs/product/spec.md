@@ -21,7 +21,7 @@ lives in `apps/app`.
 
 - **Workspace shell** — activity bar, file tree, document canvas, and an
   inspector/chat column (exactly one of chat / sharing / loop open).
-- **Editor** — Milkdown-based markdown editor with a raw source mode,
+- **Editor** — Tiptap/Yjs-backed markdown editor with a raw source mode,
   wikilink pills, inline-atom decorations, and ASCII sketches.
 - **HTML atoms** — `.html` atoms render in a sandboxed, server-built
   shell (zero-network, sanitized).
@@ -37,7 +37,8 @@ lives in `apps/app`.
 ## Stack
 
 TanStack Start + TanStack Router, React 19, Vite, Tailwind CSS v4,
-Convex (backend + agent), WorkOS AuthKit, Milkdown, Vitest, Nitro.
+Convex (backend + agent), WorkOS AuthKit, Tiptap, Yjs, Hocuspocus, Vitest,
+Nitro.
 
 ## Invariants
 

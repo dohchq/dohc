@@ -18,8 +18,8 @@
 - Modify: `apps/app/src/components/inlineAtomPlugin.ts` — swap Milkdown ProseMirror imports for Tiptap ProseMirror imports.
 - Modify: `apps/app/src/components/wikilinkPlugin.ts` — swap Milkdown ProseMirror imports for Tiptap ProseMirror imports.
 - Modify: `apps/app/src/components/WikilinkPicker.tsx` — swap `TextSelection` import for Tiptap ProseMirror import.
-- Modify: `apps/app/src/routes/AtomView.tsx` — pass owner workspace + atom id into the editor collaboration adapter.
-- Modify: `apps/app/src/routes/SharedAtomView.tsx` — pass shared owner workspace + file id into the editor collaboration adapter.
+- Modify: `apps/app/src/components/AtomView.tsx` — pass owner workspace + atom id into the editor collaboration adapter.
+- Modify: `apps/app/src/components/SharedAtomView.tsx` — pass shared owner workspace + file id into the editor collaboration adapter.
 - Modify: `apps/app/convex/hocuspocusAuth.ts` — add a server-token-gated bootstrap query for first-load markdown.
 - Modify: `apps/app/convex/hocuspocusAuth.test.ts` — cover bootstrap query authorization and atom lookup.
 - Modify: `services/hocuspocus/src/convex-acl.ts` — expose optional markdown bootstrap loading through the Convex ACL bridge.
@@ -28,7 +28,7 @@
 - Modify: `services/hocuspocus/src/hooks.test.ts` / `services/hocuspocus/src/convex-acl.test.ts` / `services/hocuspocus/src/persistence.test.ts` — prove bootstrap behavior.
 - Modify: `services/hocuspocus/package.json` — add Tiptap markdown import/export dependencies if the service needs to build Y.Docs from markdown.
 - Modify: `apps/app/package.json` / `pnpm-lock.yaml` — remove Milkdown packages after the editor is fully ported.
-- Modify: `.env.example` — document `VITE_HOCUSPOCUS_URL`.
+- Modify: `apps/app/.env.example` — document `VITE_HOCUSPOCUS_URL`.
 - Modify: `docs/development/v2-pivot-plan.md` and `docs/development/v2-hocuspocus-persistence.md` — record Phase 1.4 status and first-load bootstrap behavior.
 
 ## Task 1: Add Provider Adapter And Tests
@@ -208,12 +208,12 @@ Expected: no runtime/dependency references remain.
 
 - [x] **Step 2: Document Hocuspocus browser URL**
 
-Add `VITE_HOCUSPOCUS_URL=ws://127.0.0.1:1234` to `.env.example`.
+Add `VITE_HOCUSPOCUS_URL=ws://127.0.0.1:1234` to `apps/app/.env.example`.
 
 Run:
 
 ```bash
-rg -n "VITE_HOCUSPOCUS_URL|HOCUSPOCUS" .env.example docs/development/v2-hocuspocus-persistence.md docs/development/v2-pivot-plan.md
+rg -n "VITE_HOCUSPOCUS_URL|HOCUSPOCUS" apps/app/.env.example docs/development/v2-hocuspocus-persistence.md docs/development/v2-pivot-plan.md
 ```
 
 Expected: browser URL and first-load bootstrap are documented.
@@ -283,7 +283,7 @@ Run:
 
 ```bash
 git status --short
-git add apps/app services/hocuspocus docs/development/v2-pivot-plan.md docs/development/v2-hocuspocus-persistence.md docs/development/v2-phase-plans/phase-1.4.md .env.example package.json pnpm-lock.yaml
+git add apps/app services/hocuspocus docs/development/v2-pivot-plan.md docs/development/v2-hocuspocus-persistence.md docs/development/v2-phase-plans/phase-1.4.md apps/app/.env.example package.json pnpm-lock.yaml
 git commit --no-gpg-sign -m "feat: wire tiptap hocuspocus editor"
 ```
 

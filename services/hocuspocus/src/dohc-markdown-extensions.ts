@@ -15,6 +15,17 @@ function textContent(node: { content?: Array<{ text?: string }> }): string {
   return node.content?.map((child) => child.text ?? '').join('') ?? ''
 }
 
+function queryFenceInfo(lang: unknown): { isQuery: boolean; info: string } {
+  const normalized = String(lang ?? '').trim()
+  const [language = '', ...infoParts] = normalized.split(/\s+/)
+  return {
+    isQuery:
+      language.toLowerCase() === 'query' ||
+      language.toLowerCase() === 'dohc-query',
+    info: infoParts.join(' '),
+  }
+}
+
 function findClosingWikilink(src: string): number {
   for (let index = 2; index < src.length - 1; index += 1) {
     if (src[index] === '\\') {
@@ -59,6 +70,9 @@ export const DohcWikilink = Node.create({
     return [
       'span',
       {
+        class: 'dohc-wikilink-pill',
+        contenteditable: 'false',
+        'data-wikilink-target': node.attrs.target,
         'data-dohc-wikilink': node.attrs.target,
         'data-dohc-wikilink-label': node.attrs.label,
       },
@@ -216,6 +230,12 @@ export const DohcQueryBlock = Node.create({
   code: true,
   defining: true,
 
+  addAttributes() {
+    return {
+      info: { default: '' },
+    }
+  },
+
   parseHTML() {
     return [{ tag: 'pre[data-dohc-query-block]' }]
   },
@@ -227,20 +247,26 @@ export const DohcQueryBlock = Node.create({
   markdownTokenName: 'code',
 
   parseMarkdown: (token, helpers) => {
-    if (token.lang !== 'dohc-query') return []
+    const fence = queryFenceInfo(token.lang)
+    if (!fence.isQuery) return []
     return helpers.createNode(
       'queryBlock',
-      {},
+      { info: fence.info },
       token.text ? [helpers.createTextNode(token.text)] : [],
     )
   },
 
-  renderMarkdown: (node, helpers) =>
-    [
-      '```dohc-query',
+  renderMarkdown: (node, helpers) => {
+    const info =
+      typeof node.attrs?.info === 'string' && node.attrs.info.trim()
+        ? ` ${node.attrs.info.trim()}`
+        : ''
+    return [
+      `\`\`\`dohc-query${info}`,
       textContent(node) || helpers.renderChildren(node.content || []),
       '```',
-    ].join('\n'),
+    ].join('\n')
+  },
 })
 
 export const dohcMarkdownExtensions = [

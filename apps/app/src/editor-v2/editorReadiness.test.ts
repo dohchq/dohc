@@ -12,11 +12,47 @@ describe('editor readiness', () => {
     ).toBe(true)
   })
 
-  it('allows collaborative edits after IndexedDB is ready even before remote sync completes', () => {
+  it('blocks fallback edits when a collaborative document is required but sync is unavailable', () => {
+    expect(
+      canEditDohcEditor({
+        collaborationRequired: true,
+        collaborationEnabled: false,
+        localReady: true,
+        syncError: null,
+      }),
+    ).toBe(false)
+  })
+
+  it('blocks collaborative edits before first remote sync when there is no local cache', () => {
     expect(
       canEditDohcEditor({
         collaborationEnabled: true,
         localReady: true,
+        remoteReady: false,
+        hasLocalCache: false,
+        syncError: null,
+      }),
+    ).toBe(false)
+  })
+
+  it('allows collaborative edits from a verified local cache before remote reconnects', () => {
+    expect(
+      canEditDohcEditor({
+        collaborationEnabled: true,
+        localReady: true,
+        remoteReady: false,
+        hasLocalCache: true,
+        syncError: null,
+      }),
+    ).toBe(true)
+  })
+
+  it('allows collaborative edits after remote sync completes', () => {
+    expect(
+      canEditDohcEditor({
+        collaborationEnabled: true,
+        localReady: true,
+        remoteReady: true,
         syncError: null,
       }),
     ).toBe(true)
@@ -27,6 +63,7 @@ describe('editor readiness', () => {
       canEditDohcEditor({
         collaborationEnabled: true,
         localReady: false,
+        remoteReady: true,
         syncError: null,
       }),
     ).toBe(false)
@@ -49,6 +86,7 @@ describe('editor readiness', () => {
         readOnly: true,
         collaborationEnabled: true,
         localReady: true,
+        remoteReady: true,
         syncError: null,
       }),
     ).toBe(false)
@@ -56,6 +94,7 @@ describe('editor readiness', () => {
       canEditDohcEditor({
         collaborationEnabled: true,
         localReady: true,
+        remoteReady: true,
         syncError: 'bad token',
       }),
     ).toBe(false)

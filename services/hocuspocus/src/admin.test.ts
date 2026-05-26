@@ -92,4 +92,54 @@ describe('hocuspocus admin handler', () => {
 
     expect(response.status).toBe(401)
   })
+
+  it('returns a structured 400 for malformed admin JSON', async () => {
+    const handler = createAdminHandler({
+      adminToken: 'admin-token',
+      revocations: new RevocationRegistry(),
+    })
+
+    const response = await handler(
+      new Request('http://localhost/admin/disconnect-by-workspace-user', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-token',
+          'content-type': 'application/json',
+        },
+        body: '{',
+      }),
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: 'invalid request',
+    })
+  })
+
+  it('deletes persisted document state by workspace and atom id', async () => {
+    const store = { deleteDocument: vi.fn(async () => {}) }
+    const handler = createAdminHandler({
+      adminToken: 'admin-token',
+      revocations: new RevocationRegistry(),
+      store,
+    })
+
+    const response = await handler(
+      new Request('http://localhost/admin/delete-document', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ workspaceId: 'workspace_1', atomId: 'atom_1' }),
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ ok: true })
+    expect(store.deleteDocument).toHaveBeenCalledWith(
+      'workspace/workspace_1/atom/atom_1',
+    )
+  })
 })

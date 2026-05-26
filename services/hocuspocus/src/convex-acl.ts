@@ -25,7 +25,10 @@ type ConvexAclResult = {
 type ConvexBootstrapArgs = {
   serverToken: string
   workspaceId: string
+  userId: string
   atomId: string
+  actorKind: CollabActorKind
+  authzVersion: number
 }
 
 type ConvexBootstrapResult = {
@@ -97,7 +100,10 @@ export function createConvexAcl(options: {
       return (await client.query(loadAtomBootstrap, {
         serverToken: options.serverToken,
         workspaceId: input.workspaceId,
+        userId: input.userId,
         atomId: input.atomId,
+        actorKind: input.actorKind,
+        authzVersion: input.authzVersion,
       })) as ConvexBootstrapResult
     },
   }

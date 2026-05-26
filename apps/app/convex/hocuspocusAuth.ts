@@ -1,5 +1,6 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
+import type { QueryCtx } from './_generated/server'
 import { ownerAtomByFileId } from './atomShares'
 import { isMember } from './orgs'
 
@@ -59,6 +60,71 @@ function canOwnerWrite(
   return true
 }
 
+async function computeAtomAccess(
+  ctx: QueryCtx,
+  {
+    userId,
+    workspaceId,
+    atomId,
+    actorKind,
+    authzVersion,
+  }: {
+    userId: string
+    workspaceId: string
+    atomId: string
+    actorKind: ActorKind
+    authzVersion: number
+  },
+): Promise<AtomAccessResult> {
+  if (authzVersion !== WORKSPACE_AUTHZ_VERSION) {
+    return deny()
+  }
+
+  const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
+  if (!atom) return deny()
+
+  if (userId === workspaceId) {
+    return {
+      workspaceAuthzVersion: WORKSPACE_AUTHZ_VERSION,
+      canRead: true,
+      canWrite: canOwnerWrite(atom, actorKind),
+    }
+  }
+
+  let access = { canRead: false, canWrite: false }
+  const personGrant = await ctx.db
+    .query('atomShares')
+    .withIndex('by_owner_grantee_fileId', (q) =>
+      q
+        .eq('ownerWorkspaceId', workspaceId)
+        .eq('granteeWorkspaceId', userId)
+        .eq('fileId', atomId),
+    )
+    .first()
+  if (personGrant) {
+    access = mergeGrant(access, personGrant.permission, atom)
+  }
+
+  const ownerGrants = await ctx.db
+    .query('atomShares')
+    .withIndex('by_owner_fileId', (q) =>
+      q.eq('ownerWorkspaceId', workspaceId).eq('fileId', atomId),
+    )
+    .collect()
+  for (const grant of ownerGrants) {
+    if (!grant.granteeOrgId) continue
+    if (await isMember(ctx, grant.granteeOrgId, userId)) {
+      access = mergeGrant(access, grant.permission, atom)
+    }
+  }
+
+  return {
+    workspaceAuthzVersion: WORKSPACE_AUTHZ_VERSION,
+    canRead: access.canRead,
+    canWrite: access.canWrite,
+  }
+}
+
 export const checkAtomAccess = query({
   args: {
     serverToken: v.string(),
@@ -73,54 +139,13 @@ export const checkAtomAccess = query({
     { serverToken, userId, workspaceId, atomId, actorKind, authzVersion },
   ): Promise<AtomAccessResult> => {
     requireServerToken(serverToken)
-
-    if (authzVersion !== WORKSPACE_AUTHZ_VERSION) {
-      return deny()
-    }
-
-    const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
-    if (!atom) return deny()
-
-    if (userId === workspaceId) {
-      return {
-        workspaceAuthzVersion: WORKSPACE_AUTHZ_VERSION,
-        canRead: true,
-        canWrite: canOwnerWrite(atom, actorKind),
-      }
-    }
-
-    let access = { canRead: false, canWrite: false }
-    const personGrant = await ctx.db
-      .query('atomShares')
-      .withIndex('by_owner_grantee_fileId', (q) =>
-        q
-          .eq('ownerWorkspaceId', workspaceId)
-          .eq('granteeWorkspaceId', userId)
-          .eq('fileId', atomId),
-      )
-      .first()
-    if (personGrant) {
-      access = mergeGrant(access, personGrant.permission, atom)
-    }
-
-    const ownerGrants = await ctx.db
-      .query('atomShares')
-      .withIndex('by_owner_fileId', (q) =>
-        q.eq('ownerWorkspaceId', workspaceId).eq('fileId', atomId),
-      )
-      .collect()
-    for (const grant of ownerGrants) {
-      if (!grant.granteeOrgId) continue
-      if (await isMember(ctx, grant.granteeOrgId, userId)) {
-        access = mergeGrant(access, grant.permission, atom)
-      }
-    }
-
-    return {
-      workspaceAuthzVersion: WORKSPACE_AUTHZ_VERSION,
-      canRead: access.canRead,
-      canWrite: access.canWrite,
-    }
+    return computeAtomAccess(ctx, {
+      userId,
+      workspaceId,
+      atomId,
+      actorKind,
+      authzVersion,
+    })
   },
 })
 
@@ -128,13 +153,25 @@ export const loadAtomBootstrap = query({
   args: {
     serverToken: v.string(),
     workspaceId: v.string(),
+    userId: v.string(),
     atomId: v.string(),
+    actorKind: v.union(v.literal('user'), v.literal('agent')),
+    authzVersion: v.number(),
   },
   handler: async (
     ctx,
-    { serverToken, workspaceId, atomId },
+    { serverToken, workspaceId, userId, atomId, actorKind, authzVersion },
   ): Promise<AtomBootstrapResult | null> => {
     requireServerToken(serverToken)
+
+    const access = await computeAtomAccess(ctx, {
+      userId,
+      workspaceId,
+      atomId,
+      actorKind,
+      authzVersion,
+    })
+    if (!access.canRead) return null
 
     const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
     if (!atom) return null

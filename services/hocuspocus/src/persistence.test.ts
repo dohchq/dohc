@@ -134,6 +134,9 @@ describe('Y.Doc persistence', () => {
         if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
           return { rows: [] }
         }
+        if (sql.includes('pg_advisory_xact_lock')) {
+          return { rows: [] }
+        }
         if (sql.includes('INSERT INTO hocuspocus_ydoc_counters')) {
           return { rows: [{ seq: '1' }] }
         }
@@ -178,5 +181,50 @@ describe('Y.Doc persistence', () => {
     expect(transactionQueries[0]).toBe('BEGIN')
     expect(transactionQueries.at(-1)).toBe('COMMIT')
     expect(client.release).toHaveBeenCalledOnce()
+  })
+
+  it('stores bootstrap snapshots only if no state appears under the document lock', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+    const documentName = 'workspace/ws/atom/bootstrap-race'
+    const updateDoc = new Y.Doc()
+    updateDoc.getText('body').insert(0, 'already won')
+    await store.appendUpdate({
+      documentName,
+      update: Y.encodeStateAsUpdate(updateDoc),
+      actorId: 'user_1',
+      socketId: 'socket_1',
+    })
+
+    const bootstrapDoc = new Y.Doc()
+    bootstrapDoc.getText('body').insert(0, 'stale bootstrap')
+
+    await expect(
+      store.storeSnapshotIfMissing(documentName, bootstrapDoc, { lastSeq: 0 }),
+    ).resolves.toBeNull()
+    await expect(backend.getLatestSnapshot(documentName)).resolves.toBeNull()
+  })
+
+  it('deletes all persisted state for a document before file-id reuse', async () => {
+    const backend = new MemoryYDocPersistenceBackend()
+    const store = new PostgresYDocStore(backend)
+    const documentName = 'workspace/ws/atom/reused'
+    const doc = new Y.Doc()
+    doc.getText('body').insert(0, 'old document')
+
+    await store.appendUpdate({
+      documentName,
+      update: Y.encodeStateAsUpdate(doc),
+      actorId: 'user_1',
+      socketId: 'socket_1',
+    })
+    await store.storeSnapshot(documentName, doc)
+
+    await store.deleteDocument(documentName)
+
+    await expect(store.hasDocumentState(documentName)).resolves.toBe(false)
+    await expect(store.latestSequence(documentName)).resolves.toBe(0)
+    await expect(backend.getLatestSnapshot(documentName)).resolves.toBeNull()
+    expect(backend.updatesFor(documentName)).toEqual([])
   })
 })

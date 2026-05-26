@@ -10,7 +10,7 @@
 
 **Date:** 2026-05-25
 **Owner:** Ice
-**Status:** Plan v1.13 — Phase 1.4 Tiptap editor integration implemented on `codex/v2-offline-first-phase-0`: Milkdown/Crepe removed, browser editor uses Tiptap OSS + Hocuspocus provider + y-indexeddb when the sync server advertises bootstrap capability, and Hocuspocus can lazily bootstrap missing Y.Docs from existing Convex `atoms.body`
+**Status:** Plan v1.14 — Phase 1.4 Tiptap editor integration implemented and audit-hardened on `codex/v2-offline-first-phase-0`: Milkdown/Crepe removed, browser editor uses Tiptap OSS + Hocuspocus provider + y-indexeddb when the sync server advertises bootstrap capability, Hocuspocus lazily bootstraps missing Y.Docs from existing Convex `atoms.body`, and live sockets now re-auth/read-check through the Hocuspocus/Convex bridge.
 **Predecessor:** `docs/development/tiptap-hocuspocus-evaluation.md`
 **Estimated total scope:** ~6-8 months focused work (Phase 1: ~14-17 weeks, Phase 2: ~4-6 weeks, Phase 3: ~6-8 weeks)
 **Codex output archived at:** `/home/ice/dev/dohc/.context/codex-outputs/v2-pivot-consult-20260525-170821.md`
@@ -88,7 +88,7 @@ OPTIONAL (Phase 3)
 | D7 | **M3 suggestion anchors migrate to Y.RelativePosition.** | Character offsets in `atomSuggestions.rangeFrom/rangeTo` desync under concurrent edits. RelativePosition is the Y.js primitive for stable references that survive remote mutations. |
 | D8 | **Pivot now, not after multi-browser QA.** | User has no external users. Validation provides no signal that informs v2 design; every v1 commit is debt. |
 | D9 | **`atomIds` (fileId) survives unchanged.** | The rename-proof addressing model is orthogonal to the editor/transport. Y.Docs are keyed by `fileId`, not `path`. |
-| D10 | **Access control still enforced via Convex.** | Hocuspocus verifies Convex-minted identity, checks per-doc ACL on load/write, and uses `authzVersion` to invalidate cached authorization. Never embed allowed atom IDs in JWTs. |
+| D10 | **Access control still enforced via Convex.** | Hocuspocus verifies Convex-minted identity and checks per-doc ACL on auth/load/token refresh/sync. Phase 1.4 keeps `authzVersion` as constant `1`; bumped workspace versions are a later ACL-cache optimization. Never embed allowed atom IDs in JWTs. |
 | D11 | **Tiptap is allowed only as OSS editor infrastructure.** | Core v2 must not depend on Tiptap Cloud, Tiptap AI Toolkit, Comments, Tracked Changes, or any closed/pro paid extension. dohc's AI-native layer lives in our semantic tools, markdown/Y.Doc projection, and Hocuspocus server APIs. |
 | D12 | **Lexical is the escape hatch, not the default.** | Lexical is philosophically aligned with custom text-first AI surfaces, but switching now adds more glue risk. Phase 0/1.1 must prove Tiptap's OSS markdown and extension APIs are enough; if not, pause and switch before editor implementation starts. |
 
@@ -299,7 +299,7 @@ Goal: Production-grade Hocuspocus before any client touches it.
 
 **Sub-tasks:**
 1. `services/hocuspocus/` Node.js server:
-   - `@hocuspocus/server` + `@hocuspocus/extension-database` (Postgres)
+   - `@hocuspocus/server` + custom Postgres update-log/snapshot persistence
    - Logging, health endpoint, graceful shutdown, env-driven config
    - Production Dockerfile plus local compose service for Hocuspocus + Postgres
 2. **Crash-safety persistence** (codex critical risk R-new):
@@ -345,14 +345,14 @@ Goal: Replace Milkdown/Crepe with Tiptap as the editor. Y.Doc via Hocuspocus. NO
 2. New `AtomEditor.tsx` that:
    - Mounts Tiptap editor with `@tiptap/extension-collaboration` pointed at Y.XmlFragment from Hocuspocus provider
    - Provider config lives in a small adapter (`apps/app/src/editor-v2/hocuspocusProvider.ts`): WS URL + JWT from Convex action; auto-refresh JWT before 5min expiry
-   - Frontmatter UI bound to Y.Map (separate panel above editor)
+   - Frontmatter UI writes visible metadata changes into the canonical `frontmatter` Y.Map while collaborative editing is mounted; Phase 1.6 moves all projection/cache writes fully server-side
 3. Toolbar/menus port to Tiptap command API
 4. y-indexeddb local persistence (offline-first capability lands here)
-5. Loading states: show spinner until Hocuspocus sync complete; local IndexedDB content can render read-only before remote sync, but editing starts only after provider/auth/storage readiness is known (lesson from M1)
+5. Loading states: show spinner until Hocuspocus sync complete; local IndexedDB content can render before remote sync, but editing starts only after provider/auth/storage readiness is known, or a verified local cache exists for offline resume (lesson from M1)
 6. Remove Milkdown/Crepe imports
-7. Tests: open atom, type, refresh, see edits; open in 2 tabs, see real-time merge
+7. Tests: raw-provider crash/replay, unit/editor lifecycle guards, markdown corpus, and server auth/persistence tests are in place now; full mounted browser two-tab/offline E2E remains in the Phase 1.9 QA matrix unless added earlier
 
-**Definition of done:** type into Tiptap, Y.Doc syncs via Hocuspocus, edits persist locally + remotely. Offline edit + reconnect works. NO suggestion bubbles, NO cursors yet.
+**Definition of done:** type into Tiptap, Y.Doc syncs via Hocuspocus, edits persist locally + remotely, and raw-provider crash/restart recovery passes. Full browser two-tab/offline replay is still required before calling Phase 1 shipped. NO suggestion bubbles, NO cursors yet.
 
 **This is the first offline-first milestone.** Worth a small celebration.
 
@@ -664,7 +664,7 @@ My original 15min was too lenient. Codex:
 
 > Anything longer makes revocation fake.
 
-Correct design: JWT 5min TTL + JWT claim `authzVersion` (workspace-scoped int that bumps on any ACL change) + Hocuspocus recheck on EVERY document operation (not just connect). On version mismatch, Hocuspocus refetches ACL from Convex.
+Correct target design: JWT 5min TTL + JWT claim `authzVersion` (workspace-scoped int that bumps on any ACL change) + Hocuspocus recheck on EVERY document operation (not just connect). Phase 1.4 implements the TTL, token-refresh reauth, expiry rejection on later sync messages, and per-operation ACL rechecks; `authzVersion` is currently constant `1` until an ACL cache exists.
 
 Mid-session revocation paths: (a) Hocuspocus rechecks in `beforeSync` before replayable Yjs payloads are applied, (b) Convex schedules Hocuspocus admin disconnect for affected sockets on share/org revocation, (c) presence/awareness cleared on disconnect.
 
@@ -797,21 +797,7 @@ AI-assisted (Claude Code) will compress per-phase implementation but NOT QA/inte
 
 ## 18. Next concrete actions
 
-1. [ ] **User reviews this plan + decides on §14 open product questions** (Phase 2 + 3 confirmation, Tauri vs Electron, self-host auth choice)
-2. [x] **Use Superpowers worktree/branch isolation** to cut or verify `codex/v2-offline-first-phase-0` from main; lock main to v1 maintenance only
-3. [ ] **Create `docs/development/v2-phase-plans/phase-0.md`** with `superpowers:writing-plans`, including checkbox steps, commands, expected outputs, and the explorer-agent prompts for Phase 0/1.1 research
-4. [x] **Dispatch parallel explorer agents where useful** for independent Phase 0/1.1 questions: Hocuspocus durability, `atoms.body` writer inventory, Crepe deletion map, Tiptap markdown APIs, Convex self-host constraints
-5. [ ] **Phase 0 deliverables (1 week):**
-   - Export user's full atom corpus to disk as markdown (`tests/fixtures/user-corpus-backup/`)
-   - Record 10-20 nasty markdown fixtures (`tests/fixtures/markdown-corpus/`): wikilinks (escaped + bare), nested lists, tables, math inline+block, code fences, fenced query blocks, inline atoms, formulas, frontmatter edge cases, HTML passthrough, hardbreaks
-   - Document any Crepe-specific UX worth preserving (`docs/development/v2-ux-carry-forward.md`)
-   - Set up `services/hocuspocus/` directory placeholder (no code yet — Phase 1.3)
-   - Add `docker-compose.dev.yml` with Postgres for local dev
-6. [ ] **Start Phase 1.1 — schema design ONLY, no implementation:**
-   - Tiptap node schema for every dohc construct (paragraph, heading, lists, code, table, wikilink, inlineAtom, formula, queryBlock, math)
-   - Y.Doc shape specification per atom (body Y.XmlFragment, frontmatter Y.Map, meta Y.Map)
-   - Extension TypeScript interfaces for `parseMarkdown`/`renderMarkdown`/`toJSON`
-   - Schema versioning approach
-   - Output: `docs/development/v2-schema-spec.md`
-
-**Do NOT start implementing Tiptap extensions before Phase 1.1 spec is reviewed.** The schema is the foundation; getting it wrong costs weeks downstream.
+1. [ ] Add mounted browser lifecycle tests for Phase 1.4: sync-unavailable read-only state, first remote bootstrap, local IndexedDB resume, and two-tab convergence.
+2. [ ] Start Phase 1.5 presence/awareness only after the browser lifecycle tests above pass.
+3. [ ] Start Phase 1.6 server-owned `atoms.body` projection so legacy client autosave can be fully removed from collaborative markdown paths.
+4. [ ] Decide §14 product questions before Phase 2 starts: self-host auth choice, desktop wrapper, and local file sync scope.

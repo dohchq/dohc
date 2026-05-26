@@ -14,7 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "vitest run src/eval/live.test.ts",
-    "lint": "echo 'lint not configured yet'",
+    "lint": "tsc --noEmit",
     "reset:onboarding": "npx convex run internal.devReset.wipeWorkspace '{\"workspaceId\":\"user_01KQHA425W6TSH7CYBM0FAAZEH\",\"confirm\":\"WIPE\"}'",
     "migrate:skills": "npx convex run internal.skillsMigration._migrateLegacyPaths '{\"workspaceId\":\"user_01KQHA425W6TSH7CYBM0FAAZEH\"}'"
   },

@@ -68,6 +68,7 @@ export async function createServerFromEnv(): Promise<Server> {
   const adminHandler = createAdminHandler({
     adminToken: requiredEnv('HOCUSPOCUS_ADMIN_TOKEN'),
     revocations,
+    store,
     capabilities: {
       atomBootstrap: typeof acl.loadAtomBootstrap === 'function',
     },

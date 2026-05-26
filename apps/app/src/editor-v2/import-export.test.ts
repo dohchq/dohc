@@ -26,6 +26,7 @@ const readCorpus = (file: string) => readFileSync(join(corpusDir, file), 'utf8')
 
 type TiptapJsonNode = {
   type?: string
+  attrs?: Record<string, unknown>
   content?: TiptapJsonNode[]
 }
 
@@ -33,6 +34,18 @@ const collectNodeTypes = (node: TiptapJsonNode): string[] => [
   ...(node.type ? [node.type] : []),
   ...(node.content?.flatMap((child) => collectNodeTypes(child)) ?? []),
 ]
+
+const findNodeType = (
+  node: TiptapJsonNode,
+  type: string,
+): TiptapJsonNode | null => {
+  if (node.type === type) return node
+  for (const child of node.content ?? []) {
+    const match = findNodeType(child, type)
+    if (match) return match
+  }
+  return null
+}
 
 describe('v2 markdown import/export foundation', () => {
   it('stores frontmatter outside the editable body and exports it back', () => {
@@ -99,6 +112,47 @@ describe('v2 markdown import/export foundation', () => {
     expect(output).toContain('{{formula:sum revenue')
     expect(output).toContain('```dohc-query')
     expect(output).toContain('[[not a wikilink inside code]]')
+  })
+
+  it('keeps malformed frontmatter visible instead of dropping it', () => {
+    const input = [
+      '---',
+      'id: atom_1',
+      'bad: [unclosed',
+      '---',
+      '# Body',
+    ].join('\n')
+
+    const output = roundTripMarkdown(input)
+
+    expect(output).toContain('id: atom_1')
+    expect(output).toContain('bad: [unclosed')
+    expect(output).toContain('# Body')
+  })
+
+  it('imports query and dohc-query fences with info strings as query blocks', () => {
+    const doc = markdownToYDoc(
+      [
+        '```query render="text"',
+        'tasks.list("open")',
+        '```',
+        '',
+        '```dohc-query theme="dark"',
+        'tasks.list("closed")',
+        '```',
+      ].join('\n'),
+    )
+
+    const body = getDohcYDocBodyJSON(doc)
+    const output = yDocToMarkdown(doc)
+    const firstQuery = findNodeType(body, 'queryBlock')
+
+    expect(collectNodeTypes(body).filter((type) => type === 'queryBlock')).toHaveLength(
+      2,
+    )
+    expect(firstQuery?.attrs?.info).toBe('render="text"')
+    expect(output).toContain('```dohc-query render="text"')
+    expect(output).toContain('```dohc-query theme="dark"')
   })
 
   it('preserves escaped wikilink delimiters in targets and labels', () => {

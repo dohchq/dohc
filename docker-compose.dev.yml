@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: dohc
       POSTGRES_PASSWORD: dohc
     ports:
-      - "54329:5432"
+      - "127.0.0.1:54329:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dohc -d dohc_v2"]
       interval: 5s
@@ -25,12 +25,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      HOCUSPOCUS_ADMIN_TOKEN: dev-admin-token-change-me
+      HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN:-dev-admin-token-change-me}
       HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-true}
       HOCUSPOCUS_CONVEX_SERVER_TOKEN: ${HOCUSPOCUS_CONVEX_SERVER_TOKEN:-}
       HOCUSPOCUS_CONVEX_URL: ${HOCUSPOCUS_CONVEX_URL:-}
       HOCUSPOCUS_DATABASE_URL: postgres://dohc:dohc@postgres:5432/dohc_v2
-      HOCUSPOCUS_JWT_SECRET: dev-jwt-secret-change-me-with-at-least-32-bytes
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:-dev-jwt-secret-change-me-with-at-least-32-bytes}
       HOCUSPOCUS_PORT: "1234"
       HOCUSPOCUS_QUIET: "false"
     healthcheck:
@@ -43,7 +43,7 @@ services:
       timeout: 5s
       retries: 10
     ports:
-      - "1234:1234"
+      - "127.0.0.1:1234:1234"
 
 volumes:
   dohc_v2_postgres:

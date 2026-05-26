@@ -17,6 +17,7 @@ const documentName = encodeDocName({
   atomId: 'atom_1',
 })
 const messageYjsUpdate = 2
+const messageYjsSyncStep1 = 0
 
 function makeAcl(options: {
   canRead: boolean
@@ -185,6 +186,95 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
+  it('loads persisted state when concurrent writes win the bootstrap race', async () => {
+    const markdown = '---\nid: atom_1\n---\n# From Convex'
+    const { hooks, store } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      bootstrapMarkdown: markdown,
+    })
+    const persisted = new Y.Doc()
+    persisted.getText('body').insert(0, 'concurrent persisted')
+    await store.storeSnapshot(documentName, persisted, { lastSeq: 0 })
+    vi.spyOn(store, 'hasDocumentState').mockResolvedValueOnce(false)
+    vi.spyOn(store, 'storeSnapshotIfMissing').mockResolvedValueOnce(null)
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: {
+        userId: 'user_1',
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    } as never)
+
+    expect(loaded.getText('body').toString()).toBe('concurrent persisted')
+  })
+
+  it('re-authenticates refreshed tokens and can downgrade live sockets to read-only', async () => {
+    const { hooks } = makeHooks({ canRead: true, canWrite: false })
+    const token = await mintCollabToken(
+      {
+        sub: 'user_1',
+        ws: 'workspace_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+      secret,
+    )
+    const connection = { readOnly: false }
+    const connectionConfig = { readOnly: false, isAuthenticated: true }
+
+    const context = await hooks.onTokenSync({
+      documentName,
+      token,
+      context: {
+        userId: 'user_1',
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+      connection,
+      connectionConfig,
+    } as never)
+
+    expect(context).toMatchObject({ userId: 'user_1', atomId: 'atom_1' })
+    expect(connection.readOnly).toBe(true)
+    expect(connectionConfig.readOnly).toBe(true)
+  })
+
+  it('rejects refreshed tokens that change the live socket identity', async () => {
+    const { hooks } = makeHooks({ canRead: true, canWrite: true })
+    const token = await mintCollabToken(
+      {
+        sub: 'user_2',
+        ws: 'workspace_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+      secret,
+    )
+
+    await expect(
+      hooks.onTokenSync({
+        documentName,
+        token,
+        context: {
+          userId: 'user_1',
+          workspaceId: 'workspace_1',
+          atomId: 'atom_1',
+          actorKind: 'user',
+          authzVersion: 1,
+        },
+        connection: { readOnly: false },
+        connectionConfig: { readOnly: false, isAuthenticated: true },
+      } as never),
+    ).rejects.toThrow(/identity changed/)
+  })
+
   it('does not bootstrap when persisted state already exists', async () => {
     const { acl, hooks, store } = makeHooks({
       canRead: true,
@@ -262,6 +352,47 @@ describe('hocuspocus hook factory', () => {
       actorId: 'user_1',
       socketId: 'socket_1',
     })
+  })
+
+  it('rechecks read ACL before replying to initial sync requests', async () => {
+    const { hooks } = makeHooks({ canRead: false, canWrite: true })
+
+    await expect(
+      hooks.beforeSync({
+        documentName,
+        type: messageYjsSyncStep1,
+        payload: new Uint8Array([1, 2, 3]),
+        connection: { readOnly: false, socketId: 'socket_1' },
+        context: {
+          userId: 'user_1',
+          workspaceId: 'workspace_1',
+          atomId: 'atom_1',
+          actorKind: 'user',
+          authzVersion: 1,
+        },
+      } as never),
+    ).rejects.toThrow(/read access/)
+  })
+
+  it('rejects sync messages after the live connection token expires', async () => {
+    const { hooks } = makeHooks({ canRead: true, canWrite: true })
+
+    await expect(
+      hooks.beforeSync({
+        documentName,
+        type: messageYjsSyncStep1,
+        payload: new Uint8Array([1, 2, 3]),
+        connection: { readOnly: false, socketId: 'socket_1' },
+        context: {
+          userId: 'user_1',
+          workspaceId: 'workspace_1',
+          atomId: 'atom_1',
+          actorKind: 'user',
+          authzVersion: 1,
+          tokenExpiresAt: Math.floor(Date.now() / 1000) - 1,
+        },
+      } as never),
+    ).rejects.toThrow(/token expired/)
   })
 
   it('throws before applying updates when persistence fails', async () => {

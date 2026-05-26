@@ -50,6 +50,12 @@ The persistence tables are:
 
 When backed by a `pg.Pool`, update appends acquire one `PoolClient` and run `BEGIN`, counter increment, update insert, and `COMMIT` on that same client. Pool-level `query()` is not used inside a transaction.
 
+Update appends and first-load bootstrap snapshots both take a per-document
+Postgres advisory transaction lock. Bootstrap uses "insert snapshot if no state
+exists" under that lock. If a real update wins the race after the initial
+missing-state check, the bootstrap snapshot is skipped and Hocuspocus loads the
+already-persisted state instead of writing a stale sequence-zero snapshot.
+
 ## Snapshot Sequence Rule
 
 Snapshots must not claim a `last_seq` for an update that is logged but not yet represented in the encoded document. This can happen because dohc writes the update before Hocuspocus applies it.
@@ -79,10 +85,12 @@ Phase 1.4 adds lazy migration from existing `atoms.body` markdown into Y.Doc:
    never reads `atoms.body` again.
 3. If Postgres has no document state, Hocuspocus calls the server-token-gated
    Convex query `api.hocuspocusAuth.loadAtomBootstrap`.
-4. Convex resolves the atom by owner workspace + rename-proof `fileId` and
+4. Convex rechecks the requesting actor's read ACL inside that same bootstrap
+   query, then resolves the atom by owner workspace + rename-proof `fileId` and
    returns `{ markdown }` or `null`.
 5. Hocuspocus converts that markdown to the Phase 1.2 Tiptap/Yjs shape and
-   stores the initialized document as a compact snapshot with `lastSeq: 0`.
+   conditionally stores the initialized document as a compact snapshot with
+   `lastSeq: 0`.
 
 The sequence-zero snapshot is deliberate: bootstrap is migration state, not a
 user edit. Future accepted edits start in the append-only update log at seq 1.
@@ -105,9 +113,17 @@ The Hocuspocus service accepts only short-lived collab JWTs:
 The hook layer checks:
 
 - JWT workspace matches the encoded document name.
-- Workspace `authzVersion` is current.
-- User can read on auth and load.
+- Workspace `authzVersion` is current. Phase 1.4 uses constant version `1`
+  plus live ACL rechecks; a real bumped workspace version is a later cache
+  optimization, not the current revocation boundary.
+- User can read on auth, token refresh, load, and every sync message before the
+  server replies with document state.
 - User can write before each persisted sync payload.
+- Refreshed tokens cannot change the live socket identity. They may only renew
+  the same user/workspace/atom/actor connection, and can downgrade a socket to
+  read-only if the ACL changed.
+- Live sockets store the refreshed token expiry and reject later sync messages
+  once that expiry passes, so token refresh is required for long sessions.
 - Revoked workspace users are disconnected from currently live sockets; reconnect
   authorization is decided by Convex's current ACL state.
 
@@ -130,6 +146,23 @@ Production/self-host Hocuspocus deployments need:
   live sockets after share/org revocation.
 - `HOCUSPOCUS_DATABASE_URL`: Postgres connection string for Y.Doc persistence.
 
+Local Convex development setup normally looks like:
+
+```bash
+pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_JWT_SECRET '<32+ byte shared secret>'
+pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_CONVEX_SERVER_TOKEN '<server secret>'
+pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_ADMIN_URL 'http://127.0.0.1:1234'
+pnpm --filter @dohc/app exec convex env set HOCUSPOCUS_ADMIN_TOKEN '<admin secret>'
+```
+
+The Hocuspocus process must receive the matching `HOCUSPOCUS_JWT_SECRET`,
+`HOCUSPOCUS_CONVEX_SERVER_TOKEN`, and `HOCUSPOCUS_ADMIN_TOKEN`, plus
+`HOCUSPOCUS_CONVEX_URL` for the target Convex deployment.
+
+The development compose file reads these values from your shell when present and
+falls back to local-only literals. If you use generated local secrets in Convex,
+export the same values before starting compose.
+
 If `HOCUSPOCUS_CONVEX_URL` or `HOCUSPOCUS_CONVEX_SERVER_TOKEN` is present, both
 must be present. Without them, the server refuses to boot unless
 `HOCUSPOCUS_ALLOW_DEV_ACL=true` is set explicitly.
@@ -141,6 +174,10 @@ configuration error so revocation cannot silently fail open.
 
 The admin endpoint `POST /admin/disconnect-by-workspace-user` closes registered
 live sockets for that workspace/user pair.
+
+The admin endpoint `POST /admin/delete-document` deletes all persisted Y.Doc
+state for a workspace/atom pair. Convex schedules this when an atom is deleted
+so a later file-id reuse cannot resurrect stale CRDT state.
 
 Convex schedules that admin disconnect when:
 
@@ -163,11 +200,16 @@ projection-cache authority are still later phases:
 - The browser checks Hocuspocus `GET /capabilities` before enabling sync. It
   waits for identity + capability resolution before allowing edits, and starts
   the remote provider only after `y-indexeddb` has hydrated the local Y.Doc.
+  First edit is blocked until the remote sync completes unless a pre-existing
+  IndexedDB cache is verified for that document. Read-only shared views skip
+  local IndexedDB hydration to avoid rendering stale writable state.
 - The live raw `@hocuspocus/provider` crash test passes against Docker Postgres.
   The compose stack defaults to explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true`; set
-  `HOCUSPOCUS_CONVEX_URL` + `HOCUSPOCUS_CONVEX_SERVER_TOKEN` to test the full
-  Convex bootstrap path locally.
-- `@hocuspocus/extension-database` is installed for API reference only. dohc uses custom persistence because the default debounced store path is not the ack-safe update-log boundary this plan requires.
+  matching `HOCUSPOCUS_JWT_SECRET`, `HOCUSPOCUS_ADMIN_TOKEN`,
+  `HOCUSPOCUS_CONVEX_URL`, and `HOCUSPOCUS_CONVEX_SERVER_TOKEN` to test the
+  full Convex bootstrap path locally.
+- dohc uses custom persistence because the default debounced store path is not
+  the ack-safe update-log boundary this plan requires.
 - `atoms.body` is still updated by the legacy autosave path until Phase 1.6 moves markdown projection writes to Hocuspocus `onChange`.
 - Y.Awareness presence and cursor rendering are intentionally not enabled until Phase 1.5.
 
@@ -202,4 +244,8 @@ The Hocuspocus service has a production Dockerfile at `services/hocuspocus/Docke
 docker compose -f docker-compose.dev.yml up -d postgres hocuspocus
 ```
 
-The compose Hocuspocus service uses `HOCUSPOCUS_ALLOW_DEV_ACL=true` and development secrets. That is only for local Phase 1.3 work; production deployment must wire the real Convex ACL adapter and real secrets before exposing the service.
+The compose stack binds Postgres and Hocuspocus to `127.0.0.1` only. The
+Hocuspocus service uses `HOCUSPOCUS_ALLOW_DEV_ACL=true` and development secrets
+unless you override them. That is only for local Phase 1.3/1.4 work; production
+deployment must wire the real Convex ACL adapter and real secrets before
+exposing the service.

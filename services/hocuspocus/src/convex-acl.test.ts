@@ -109,7 +109,10 @@ describe('Convex ACL adapter', () => {
     expect(args).toEqual({
       serverToken: 'server-token',
       workspaceId: 'workspace_1',
+      userId: 'user_1',
       atomId: 'atom_1',
+      actorKind: 'user',
+      authzVersion: 1,
     })
   })
 

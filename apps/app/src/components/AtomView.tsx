@@ -156,6 +156,11 @@ export function AtomView({
     await upsert({ path: effectivePath, body: next, source: 'user' })
   }
 
+  function previewDraft(next: string) {
+    setDraft(next)
+    remoteBodyRef.current = next
+  }
+
   // D4.7c — flushPendingSave: synchronously dispatch any pending
   // debounced save before a sibling mutation runs (rename / move /
   // delete). Keeps body-in-DB up to date with the typed content so
@@ -282,6 +287,7 @@ export function AtomView({
           key={effectivePath}
           draft={draft}
           onChange={setDraft}
+          onPreviewChange={previewDraft}
           onRunAction={onRunAction}
           subpages={subpages}
           allFiles={files}
@@ -339,6 +345,7 @@ function NoFile() {
 function AtomShell({
   draft,
   onChange,
+  onPreviewChange,
   onRunAction,
   subpages,
   allFiles,
@@ -354,6 +361,7 @@ function AtomShell({
 }: {
   draft: string
   onChange: (next: string) => void
+  onPreviewChange?: (next: string) => void
   onRunAction: (prompt: string) => void
   subpages: FileRow[]
   // D4.8 — full vault file list (not just subpages) so the
@@ -772,6 +780,8 @@ function AtomShell({
           // gets the full content body again (no title extraction).
           value={rest}
           onChange={(next) => onChange(joinFrontmatter(fm, next))}
+          onPreviewChange={(next) => onPreviewChange?.(joinFrontmatter(fm, next))}
+          frontmatter={meta}
           autoFocus={autoFocus}
           onAsciiBlockClick={(pos, content, language) => {
             setEditingBlock({ pos, text: content, language })

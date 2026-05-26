@@ -8,6 +8,11 @@ type DisconnectArgs = {
   userId: string
 }
 
+type DeleteDocumentArgs = {
+  workspaceId: string
+  atomId: string
+}
+
 type SchedulerCtx = {
   scheduler: MutationCtx['scheduler']
 }
@@ -42,6 +47,14 @@ export async function scheduleHocuspocusDisconnect(
   await ctx.scheduler.runAfter(0, internal.hocuspocusAdmin.disconnectWorkspaceUser, args)
 }
 
+export async function scheduleHocuspocusDeleteDocument(
+  ctx: SchedulerCtx,
+  args: DeleteDocumentArgs,
+): Promise<void> {
+  if (!adminEnv()) return
+  await ctx.scheduler.runAfter(0, internal.hocuspocusAdmin.deleteDocument, args)
+}
+
 export const disconnectWorkspaceUser = internalAction({
   args: {
     workspaceId: v.string(),
@@ -68,5 +81,31 @@ export const disconnectWorkspaceUser = internalAction({
       throw new Error(`Hocuspocus admin disconnect failed: ${response.status}`)
     }
     return (await response.json()) as { ok: true; disconnected?: number }
+  },
+})
+
+export const deleteDocument = internalAction({
+  args: {
+    workspaceId: v.string(),
+    atomId: v.string(),
+  },
+  handler: async (_ctx, args) => {
+    const env = adminEnv()
+    if (!env) {
+      return { ok: false as const, skipped: 'missing-env' as const }
+    }
+
+    const response = await fetch(new URL('/admin/delete-document', env.url).toString(), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(args),
+    })
+    if (!response.ok) {
+      throw new Error(`Hocuspocus admin delete failed: ${response.status}`)
+    }
+    return (await response.json()) as { ok: true; deleted?: string }
   },
 })

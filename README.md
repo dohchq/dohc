@@ -44,7 +44,7 @@ pnpm build       # vite build (TanStack Start + Nitro)
 ## Stack
 
 TanStack Start + Router, React 19, Vite, Tailwind CSS v4, Convex, WorkOS
-AuthKit, Milkdown, Vitest, Nitro.
+AuthKit, Tiptap, Yjs, Hocuspocus, Vitest, Nitro.
 
 ## Deployment
 

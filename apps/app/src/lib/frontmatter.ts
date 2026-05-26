@@ -22,9 +22,9 @@ export function parseFrontmatter(src: string): {
       meta = parsed as Record<string, unknown>
     }
   } catch {
-    // Tolerate malformed YAML — return empty meta + the body so the
-    // user can see something and fix the atom.
-    meta = {}
+    // Keep the raw bytes visible/editable. Dropping the malformed block here
+    // would make first collaborative bootstrap a lossy import.
+    return { meta: {}, body: src }
   }
   return { meta, body: rest ?? '' }
 }

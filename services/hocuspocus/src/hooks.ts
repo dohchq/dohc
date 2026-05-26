@@ -7,6 +7,7 @@ import type {
   onChangePayload,
   onDisconnectPayload,
   onLoadDocumentPayload,
+  onTokenSyncPayload,
   onStoreDocumentPayload,
 } from '@hocuspocus/server'
 import * as Y from 'yjs'
@@ -21,6 +22,7 @@ export type DohcHocuspocusContext = {
   atomId: string
   actorKind: CollabActorKind
   authzVersion: number
+  tokenExpiresAt?: number
 }
 
 export type AtomAccessInput = {
@@ -69,6 +71,9 @@ type DohcHocuspocusHooks = {
   connected: NonNullable<Configuration<DohcHocuspocusContext>['connected']>
   onLoadDocument: NonNullable<
     Configuration<DohcHocuspocusContext>['onLoadDocument']
+  >
+  onTokenSync: NonNullable<
+    Configuration<DohcHocuspocusContext>['onTokenSync']
   >
   beforeHandleMessage: NonNullable<
     Configuration<DohcHocuspocusContext>['beforeHandleMessage']
@@ -176,14 +181,23 @@ function accessInput(context: DohcHocuspocusContext): AtomAccessInput {
   }
 }
 
-function setReadOnly(data: onAuthenticatePayload<DohcHocuspocusContext>): void {
+function setConnectionReadOnly(
+  data:
+    | onAuthenticatePayload<DohcHocuspocusContext>
+    | onTokenSyncPayload<DohcHocuspocusContext>,
+  readOnly: boolean,
+): void {
   const connection =
     data.connectionConfig ??
     (data as unknown as { connection?: { readOnly: boolean } }).connection
   if (!connection) {
     throw new Error('Missing Hocuspocus connection configuration')
   }
-  connection.readOnly = true
+  connection.readOnly = readOnly
+
+  const liveConnection = (data as onTokenSyncPayload<DohcHocuspocusContext>)
+    .connection
+  if (liveConnection) liveConnection.readOnly = readOnly
 }
 
 function isPersistableSyncPayload(type: number): boolean {
@@ -201,6 +215,15 @@ function assertValidYjsUpdate(payload: Uint8Array): void {
   }
 }
 
+function assertTokenFresh(context: DohcHocuspocusContext): void {
+  if (
+    typeof context.tokenExpiresAt === 'number' &&
+    context.tokenExpiresAt <= Math.floor(Date.now() / 1000)
+  ) {
+    throw new Error('Collab token expired')
+  }
+}
+
 export function createHocuspocusHooks({
   jwtSecret,
   acl,
@@ -210,44 +233,78 @@ export function createHocuspocusHooks({
 }: CreateHocuspocusHooksOptions): DohcHocuspocusHooks {
   const sequences = new AppliedSequenceTracker()
 
+  async function authenticateDocumentToken(
+    documentName: string,
+    tokenValue: string,
+  ): Promise<{ context: DohcHocuspocusContext; canWrite: boolean }> {
+    const token = await verifyCollabToken(tokenValue, jwtSecret)
+    const doc = decodeDocName(documentName)
+
+    if (token.ws !== doc.workspaceId) {
+      throw new Error('Collab token workspace does not match document')
+    }
+
+    const currentVersion = await acl.getWorkspaceAuthzVersion({
+      workspaceId: doc.workspaceId,
+      atomId: doc.atomId,
+      userId: token.sub,
+      actorKind: token.actorKind,
+      authzVersion: token.authzVersion,
+    })
+    if (currentVersion !== token.authzVersion) {
+      throw new Error('Collab token authzVersion is stale')
+    }
+
+    const context: DohcHocuspocusContext = {
+      userId: token.sub,
+      workspaceId: doc.workspaceId,
+      atomId: doc.atomId,
+      actorKind: token.actorKind,
+      authzVersion: token.authzVersion,
+      tokenExpiresAt: token.exp,
+    }
+
+    const canRead = await acl.canReadAtom(accessInput(context))
+    if (!canRead) {
+      throw new Error('Missing read access for document')
+    }
+
+    return {
+      context,
+      canWrite: await acl.canWriteAtom(accessInput(context)),
+    }
+  }
+
   return {
     async onAuthenticate(data) {
-      const token = await verifyCollabToken(data.token, jwtSecret)
-      const doc = decodeDocName(data.documentName)
-
-      if (token.ws !== doc.workspaceId) {
-        throw new Error('Collab token workspace does not match document')
-      }
-
-      const currentVersion = await acl.getWorkspaceAuthzVersion({
-        workspaceId: doc.workspaceId,
-        atomId: doc.atomId,
-        userId: token.sub,
-        actorKind: token.actorKind,
-        authzVersion: token.authzVersion,
-      })
-      if (currentVersion !== token.authzVersion) {
-        throw new Error('Collab token authzVersion is stale')
-      }
-
-      const context: DohcHocuspocusContext = {
-        userId: token.sub,
-        workspaceId: doc.workspaceId,
-        atomId: doc.atomId,
-        actorKind: token.actorKind,
-        authzVersion: token.authzVersion,
-      }
-
-      const canRead = await acl.canReadAtom(accessInput(context))
-      if (!canRead) {
-        throw new Error('Missing read access for document')
-      }
-
-      const canWrite = await acl.canWriteAtom(accessInput(context))
+      const { context, canWrite } = await authenticateDocumentToken(
+        data.documentName,
+        data.token,
+      )
       if (!canWrite) {
-        setReadOnly(data)
+        setConnectionReadOnly(data, true)
       }
 
+      return context
+    },
+
+    async onTokenSync(data) {
+      const previous = data.context
+      const { context, canWrite } = await authenticateDocumentToken(
+        data.documentName,
+        data.token,
+      )
+
+      if (
+        context.userId !== previous.userId ||
+        context.workspaceId !== previous.workspaceId ||
+        context.atomId !== previous.atomId ||
+        context.actorKind !== previous.actorKind
+      ) {
+        throw new Error('Collab token identity changed for live connection')
+      }
+
+      setConnectionReadOnly(data, !canWrite)
       return context
     },
 
@@ -264,6 +321,7 @@ export function createHocuspocusHooks({
       if (!context) {
         throw new Error('Missing Hocuspocus context for document load')
       }
+      assertTokenFresh(context)
 
       const canRead = await acl.canReadAtom(accessInput(context))
       if (!canRead) {
@@ -274,9 +332,13 @@ export function createHocuspocusHooks({
         const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
         if (bootstrap?.markdown !== undefined) {
           const document = markdownToYDoc(bootstrap.markdown)
-          await store.storeSnapshot(data.documentName, document, { lastSeq: 0 })
-          sequences.setLoadedSequence(data.documentName, 0)
-          return document
+          const stored = await store.storeSnapshotIfMissing(data.documentName, document, {
+            lastSeq: 0,
+          })
+          if (stored) {
+            sequences.setLoadedSequence(data.documentName, 0)
+            return document
+          }
         }
       }
 
@@ -291,11 +353,17 @@ export function createHocuspocusHooks({
     async beforeHandleMessage() {},
 
     async beforeSync(data) {
+      const context = data.context
+      assertTokenFresh(context)
+      const canRead = await acl.canReadAtom(accessInput(context))
+      if (!canRead) {
+        throw new Error('Missing read access for document')
+      }
+
       if (!isPersistableSyncPayload(data.type)) return
       if (!data.payload.byteLength) return
       if (data.connection.readOnly) return
 
-      const context = data.context
       const canWrite = await acl.canWriteAtom(accessInput(context))
       if (!canWrite) {
         throw new Error('Missing write access for document')
@@ -347,6 +415,7 @@ export function createHocuspocusHooks({
 export type DohcOnAuthenticatePayload = onAuthenticatePayload<DohcHocuspocusContext>
 export type DohcConnectedPayload = connectedPayload<DohcHocuspocusContext>
 export type DohcOnLoadDocumentPayload = onLoadDocumentPayload<DohcHocuspocusContext>
+export type DohcOnTokenSyncPayload = onTokenSyncPayload<DohcHocuspocusContext>
 export type DohcBeforeHandleMessagePayload =
   beforeHandleMessagePayload<DohcHocuspocusContext>
 export type DohcBeforeSyncPayload = beforeSyncPayload<DohcHocuspocusContext>

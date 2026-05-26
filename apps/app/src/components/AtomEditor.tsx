@@ -18,7 +18,10 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { Markdown } from '@tiptap/markdown'
-import { Collaboration } from '@tiptap/extension-collaboration'
+import {
+  Collaboration,
+  isChangeOrigin,
+} from '@tiptap/extension-collaboration'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import * as Y from 'yjs'
@@ -48,6 +51,10 @@ import {
   startHocuspocusTokenRefresh,
 } from '../editor-v2/hocuspocusProvider'
 import { canEditDohcEditor } from '../editor-v2/editorReadiness'
+import {
+  hasIndexeddbYDocState,
+  markIndexeddbYDocState,
+} from '../editor-v2/indexeddbState'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
@@ -62,6 +69,7 @@ export type AtomEditorHandle = {
 type Props = {
   value: string
   onChange: (next: string) => void
+  onPreviewChange?: (next: string) => void
   autoFocus?: boolean
   // sharing-v1 — when set, this atom is opened via a share grant:
   // formulas resolve through evalFormulasShared (scoped to the
@@ -70,6 +78,7 @@ type Props = {
   shareId?: Id<'atomShares'>
   // sharing-v1 — view-only shared atom: Tiptap is read-only.
   readOnly?: boolean
+  frontmatter?: Record<string, unknown>
   collab?: {
     workspaceId: string
     atomId: string
@@ -118,6 +127,54 @@ function makeAsciiBlockPlugin(
       // decoration next to the block (see buildAsciiDecorations).
     },
   })
+}
+
+function syncYMapFromRecord(
+  map: Y.Map<unknown>,
+  values: Record<string, unknown>,
+  previousValues: Record<string, unknown> | null,
+): void {
+  map.doc?.transact(() => {
+    for (const key of Object.keys(previousValues ?? {})) {
+      if (
+        !Object.hasOwn(values, key) &&
+        yMapValueEquals(map.get(key), previousValues?.[key])
+      ) {
+        map.delete(key)
+      }
+    }
+    for (const [key, value] of Object.entries(values)) {
+      const previousValue = previousValues?.[key]
+      if (previousValues && yMapValueEquals(value, previousValue)) continue
+      if (!yMapValueEquals(map.get(key), value)) map.set(key, value)
+    }
+  })
+}
+
+function yMapValueEquals(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false
+    if (left.length !== right.length) return false
+    return left.every((item, index) => yMapValueEquals(item, right[index]))
+  }
+
+  if (isJsonRecord(left) || isJsonRecord(right)) {
+    if (!isJsonRecord(left) || !isJsonRecord(right)) return false
+    const leftKeys = Object.keys(left)
+    const rightKeys = Object.keys(right)
+    if (leftKeys.length !== rightKeys.length) return false
+    return leftKeys.every(
+      (key) => Object.hasOwn(right, key) && yMapValueEquals(left[key], right[key]),
+    )
+  }
+
+  return false
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 type DocLike = {
@@ -602,6 +659,7 @@ function makeAtomPillPlugin(
 type TiptapEditorProps = {
   defaultValue: string
   onChangeRef: React.RefObject<(next: string) => void>
+  onPreviewChangeRef: React.RefObject<((next: string) => void) | null>
   autoFocus: boolean
   editorRef: React.RefObject<Editor | null>
   onAsciiClickRef: React.RefObject<
@@ -627,11 +685,13 @@ type TiptapEditorProps = {
   collab?: Props['collab']
   fetchCollabToken: (workspaceId: string) => Promise<string>
   readOnly?: boolean
+  frontmatter?: Props['frontmatter']
 }
 
 function TiptapAtomEditor({
   defaultValue,
   onChangeRef,
+  onPreviewChangeRef,
   autoFocus,
   editorRef,
   onAsciiClickRef,
@@ -648,6 +708,7 @@ function TiptapAtomEditor({
   collab,
   fetchCollabToken,
   readOnly,
+  frontmatter,
 }: TiptapEditorProps) {
   // D4.8b — autocomplete state from the wikilink plugin.
   const [acState, setAcState] = useState<AutocompleteState>({
@@ -678,6 +739,7 @@ function TiptapAtomEditor({
     [documentName],
   )
   const collaborationRequested = !!documentName && !!hocuspocusUrl
+  const collaborationRequired = !!documentName
   const [collabCapabilities, setCollabCapabilities] = useState<{
     atomBootstrap: boolean
   } | null>(null)
@@ -686,11 +748,39 @@ function TiptapAtomEditor({
   const collaborationEnabled =
     collaborationRequested && collabCapabilities?.atomBootstrap === true
   const ydoc = useMemo(() => new Y.Doc(), [documentName])
-  const [localReady, setLocalReady] = useState(!collaborationEnabled)
-  const [remoteReady, setRemoteReady] = useState(!collaborationEnabled)
+  const [localSync, setLocalSync] = useState<{
+    documentName: string | null
+    ready: boolean
+    hasCache: boolean
+  }>({ documentName: null, ready: true, hasCache: false })
+  const [remoteSync, setRemoteSync] = useState<{
+    documentName: string | null
+    ready: boolean
+  }>({ documentName: null, ready: true })
   const [syncError, setSyncError] = useState<string | null>(null)
   const lastMarkdownRef = useRef<string | null>(null)
+  const lastSyncedFrontmatterRef = useRef<Record<string, unknown> | null>(null)
   const fetchTokenRef = useRef(fetchCollabToken)
+  const localReady =
+    !collaborationEnabled ||
+    (localSync.documentName === documentName && localSync.ready)
+  const remoteReady =
+    !collaborationEnabled ||
+    (remoteSync.documentName === documentName && remoteSync.ready)
+  const hasLocalCache =
+    collaborationEnabled &&
+    localSync.documentName === documentName &&
+    localSync.hasCache
+  const frontmatterSnapshot = useMemo(
+    () => (frontmatter ? JSON.stringify(frontmatter) : null),
+    [frontmatter],
+  )
+  const canWriteYDocMetadata =
+    collaborationEnabled &&
+    !readOnly &&
+    localReady &&
+    !syncError &&
+    (remoteReady || hasLocalCache)
   useEffect(() => {
     fetchTokenRef.current = fetchCollabToken
   }, [fetchCollabToken])
@@ -700,9 +790,14 @@ function TiptapAtomEditor({
   }, [ydoc])
 
   useEffect(() => {
-    setLocalReady(!collaborationEnabled)
-    setRemoteReady(!collaborationEnabled)
+    setLocalSync({
+      documentName,
+      ready: !collaborationEnabled,
+      hasCache: false,
+    })
+    setRemoteSync({ documentName, ready: !collaborationEnabled })
     setSyncError(null)
+    lastSyncedFrontmatterRef.current = null
   }, [collaborationEnabled, documentName])
 
   useEffect(() => {
@@ -728,14 +823,35 @@ function TiptapAtomEditor({
 
   useEffect(() => {
     if (!collaborationEnabled || !documentName) return
-    const persistence = new IndexeddbPersistence(documentName, ydoc)
-    const markSynced = () => setLocalReady(true)
-    persistence.on('synced', markSynced)
-    void persistence.whenSynced.then(markSynced)
-    return () => {
-      void persistence.destroy()
+
+    let cancelled = false
+    let persistence: IndexeddbPersistence | null = null
+
+    if (readOnly) {
+      setLocalSync({ documentName, ready: true, hasCache: false })
+      return () => {
+        cancelled = true
+      }
     }
-  }, [collaborationEnabled, documentName, ydoc])
+
+    setLocalSync({ documentName, ready: false, hasCache: false })
+    void hasIndexeddbYDocState(documentName)
+      .catch(() => false)
+      .then((hasCache) => {
+        if (cancelled) return
+        persistence = new IndexeddbPersistence(documentName, ydoc)
+        const markSynced = () => {
+          setLocalSync({ documentName, ready: true, hasCache })
+        }
+        persistence.on('synced', markSynced)
+        void persistence.whenSynced.then(markSynced)
+      })
+
+    return () => {
+      cancelled = true
+      void persistence?.destroy()
+    }
+  }, [collaborationEnabled, documentName, readOnly, ydoc])
 
   useEffect(() => {
     if (
@@ -753,9 +869,21 @@ function TiptapAtomEditor({
       token: () => fetchTokenRef.current(collab.workspaceId),
       onAuthenticated: () => setSyncError(null),
       onAuthenticationFailed: ({ reason }) => setSyncError(reason),
-      onSynced: ({ state }) => setRemoteReady(state),
+      onSynced: ({ state }) => {
+        setRemoteSync({ documentName, ready: state })
+        if (state) {
+          markIndexeddbYDocState(documentName)
+          setLocalSync((current) =>
+            current.documentName === documentName
+              ? { ...current, hasCache: true }
+              : current,
+          )
+        }
+      },
       onStatus: ({ status }) => {
-        if (status === 'disconnected') setRemoteReady(false)
+        if (status === 'disconnected') {
+          setRemoteSync({ documentName, ready: false })
+        }
       },
     })
     const stopRefresh = startHocuspocusTokenRefresh(provider)
@@ -771,6 +899,23 @@ function TiptapAtomEditor({
     ydoc,
     collab?.workspaceId,
   ])
+
+  useEffect(() => {
+    if (!canWriteYDocMetadata || !frontmatterSnapshot) return
+
+    try {
+      syncYMapFromRecord(
+        ydoc.getMap('frontmatter'),
+        JSON.parse(frontmatterSnapshot) as Record<string, unknown>,
+        lastSyncedFrontmatterRef.current,
+      )
+      lastSyncedFrontmatterRef.current = JSON.parse(
+        frontmatterSnapshot,
+      ) as Record<string, unknown>
+    } catch {
+      /* malformed metadata cannot be represented as canonical Y.Map values */
+    }
+  }, [canWriteYDocMetadata, frontmatterSnapshot, ydoc])
 
   const dohcPlugins = useMemo(
     () =>
@@ -869,16 +1014,23 @@ function TiptapAtomEditor({
       contentType: collaborationEnabled ? undefined : 'markdown',
       editable: canEditDohcEditor({
         readOnly,
+        collaborationRequired,
         collaborationEnabled,
         collaborationPending,
         localReady,
+        remoteReady,
+        hasLocalCache,
         syncError,
       }),
       immediatelyRender: false,
-      onUpdate({ editor }) {
+      onUpdate({ editor, transaction }) {
         const markdown = editor.getMarkdown()
         if (markdown === lastMarkdownRef.current) return
         lastMarkdownRef.current = markdown
+        if (collaborationEnabled && isChangeOrigin(transaction)) {
+          onPreviewChangeRef.current?.(markdown)
+          return
+        }
         onChangeRef.current(markdown)
       },
     },
@@ -894,9 +1046,12 @@ function TiptapAtomEditor({
 
   const editable = canEditDohcEditor({
     readOnly,
+    collaborationRequired,
     collaborationEnabled,
     collaborationPending,
     localReady,
+    remoteReady,
+    hasLocalCache,
     syncError,
   })
   useEffect(() => {
@@ -954,16 +1109,17 @@ function TiptapAtomEditor({
       : { open: false }
   return (
     <div className="dohc-tiptap-editor">
-      {collaborationRequested &&
+      {collaborationRequired &&
         (collaborationPending ||
+          !hocuspocusUrl ||
           !collabCapabilities?.atomBootstrap ||
           (collaborationEnabled && (!localReady || !remoteReady || syncError))) && (
-        <div className="dohc-editor-sync-state" role="status">
-          {syncError || collabCapabilities?.atomBootstrap === false
-            ? 'Sync unavailable'
-            : 'Syncing…'}
-        </div>
-      )}
+          <div className="dohc-editor-sync-state" role="status">
+            {syncError || !hocuspocusUrl || collabCapabilities?.atomBootstrap === false
+              ? 'Sync unavailable'
+              : 'Syncing…'}
+          </div>
+        )}
       <EditorContent editor={editor} />
       <WikilinkPicker
         state={pickerState}
@@ -979,12 +1135,14 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   {
     value,
     onChange,
+    onPreviewChange,
     autoFocus,
     onAsciiBlockClick,
     knownFiles,
     onOpenWikilink,
     shareId,
     readOnly,
+    frontmatter,
     collab,
   },
   ref,
@@ -999,6 +1157,12 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   useEffect(() => {
     onChangeRef.current = onChange
   }, [onChange])
+  const onPreviewChangeRef = useRef<((next: string) => void) | null>(
+    onPreviewChange ?? null,
+  )
+  useEffect(() => {
+    onPreviewChangeRef.current = onPreviewChange ?? null
+  }, [onPreviewChange])
 
   // Stash the ASCII-click handler in a ref so the ProseMirror plugin (built
   // once at editor creation) always sees the latest callback without
@@ -1191,6 +1355,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     <TiptapAtomEditor
       defaultValue={value}
       onChangeRef={onChangeRef}
+      onPreviewChangeRef={onPreviewChangeRef}
       autoFocus={!!autoFocus}
       editorRef={editorRef}
       onAsciiClickRef={onAsciiClickRef}
@@ -1207,6 +1372,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       collab={collab}
       fetchCollabToken={fetchCollabToken}
       readOnly={!!readOnly}
+      frontmatter={frontmatter}
     />
   )
 })

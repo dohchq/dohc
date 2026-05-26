@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { encodeDocName } from './doc-name.js'
+import type { PostgresYDocStore } from './persistence.js'
 
 export type RevocableConnection = {
   socketId: string
@@ -61,10 +63,13 @@ export class RevocationRegistry {
 export type AdminHandlerOptions = {
   adminToken: string
   revocations: RevocationRegistry
+  store?: Pick<PostgresYDocStore, 'deleteDocument'>
   capabilities?: {
     atomBootstrap?: boolean
   }
 }
+
+const MAX_ADMIN_BODY_BYTES = 64 * 1024
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
@@ -81,9 +86,22 @@ function hasAdminToken(request: Request, adminToken: string): boolean {
   return request.headers.get('authorization') === `Bearer ${adminToken}`
 }
 
+async function readJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body = await request.json()
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return null
+    }
+    return body as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 export function createAdminHandler({
   adminToken,
   revocations,
+  store,
   capabilities,
 }: AdminHandlerOptions): (request: Request) => Promise<Response> {
   return async (request: Request) => {
@@ -111,11 +129,12 @@ export function createAdminHandler({
         return jsonResponse({ ok: false, error: 'unauthorized' }, { status: 401 })
       }
 
-      const body = (await request.json()) as {
-        workspaceId?: unknown
-        userId?: unknown
-      }
-      if (typeof body.workspaceId !== 'string' || typeof body.userId !== 'string') {
+      const body = await readJsonObject(request)
+      if (
+        !body ||
+        typeof body.workspaceId !== 'string' ||
+        typeof body.userId !== 'string'
+      ) {
         return jsonResponse({ ok: false, error: 'invalid request' }, { status: 400 })
       }
 
@@ -124,6 +143,38 @@ export function createAdminHandler({
         body.userId,
       )
       return jsonResponse({ ok: true, disconnected })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/delete-document') {
+      if (!hasAdminToken(request, adminToken)) {
+        return jsonResponse({ ok: false, error: 'unauthorized' }, { status: 401 })
+      }
+      if (!store) {
+        return jsonResponse(
+          { ok: false, error: 'store unavailable' },
+          { status: 503 },
+        )
+      }
+
+      const body = await readJsonObject(request)
+      if (
+        !body ||
+        typeof body.workspaceId !== 'string' ||
+        typeof body.atomId !== 'string'
+      ) {
+        return jsonResponse({ ok: false, error: 'invalid request' }, { status: 400 })
+      }
+
+      const documentName = encodeDocName({
+        workspaceId: body.workspaceId,
+        atomId: body.atomId,
+      })
+      await store.deleteDocument(documentName)
+      const disconnected = revocations.revokeWorkspaceUser(
+        body.workspaceId,
+        body.workspaceId,
+      )
+      return jsonResponse({ ok: true, deleted: documentName, disconnected })
     }
 
     return jsonResponse({ ok: false, error: 'not found' }, { status: 404 })
@@ -143,7 +194,26 @@ export async function writeNodeAdminResponse(
     return false
   }
 
-  const webRequest = await toWebRequest(request)
+  if (request.url?.startsWith('/admin/')) {
+    const contentLength = Number(request.headers['content-length'] ?? 0)
+    if (contentLength > MAX_ADMIN_BODY_BYTES) {
+      response.writeHead(413, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: false, error: 'request too large' }))
+      return true
+    }
+  }
+
+  let webRequest: Request
+  try {
+    webRequest = await toWebRequest(request)
+  } catch (error) {
+    if ((error as Error).message === 'request too large') {
+      response.writeHead(413, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: false, error: 'request too large' }))
+      return true
+    }
+    throw error
+  }
   const webResponse = await handler(webRequest)
   response.writeHead(
     webResponse.status,
@@ -182,7 +252,17 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
 function readBody(request: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
-    request.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+    let total = 0
+    request.on('data', (chunk) => {
+      const buffer = Buffer.from(chunk)
+      total += buffer.byteLength
+      if (total > MAX_ADMIN_BODY_BYTES) {
+        reject(new Error('request too large'))
+        request.destroy()
+        return
+      }
+      chunks.push(buffer)
+    })
     request.on('error', reject)
     request.on('end', () => resolve(Buffer.concat(chunks)))
   })
