@@ -63,10 +63,11 @@ export class RevocationRegistry {
 export type AdminHandlerOptions = {
   adminToken: string
   revocations: RevocationRegistry
-  store?: Pick<PostgresYDocStore, 'deleteDocument'>
+  store?: Pick<PostgresYDocStore, 'deleteDocument' | 'hasDocumentState'>
   capabilities?: {
     atomBootstrap?: boolean
   }
+  allowDocumentStateProbe?: boolean
 }
 
 const MAX_ADMIN_BODY_BYTES = 64 * 1024
@@ -103,6 +104,7 @@ export function createAdminHandler({
   revocations,
   store,
   capabilities,
+  allowDocumentStateProbe = false,
 }: AdminHandlerOptions): (request: Request) => Promise<Response> {
   return async (request: Request) => {
     const url = new URL(request.url)
@@ -118,6 +120,27 @@ export function createAdminHandler({
         capabilities: {
           atomBootstrap: capabilities?.atomBootstrap === true,
         },
+      })
+    }
+
+    if (
+      request.method === 'GET' &&
+      url.pathname === '/document-state' &&
+      allowDocumentStateProbe
+    ) {
+      if (!store) {
+        return jsonResponse(
+          { ok: false, error: 'store unavailable' },
+          { status: 503 },
+        )
+      }
+      const documentName = url.searchParams.get('documentName')
+      if (!documentName) {
+        return jsonResponse({ ok: false, error: 'invalid request' }, { status: 400 })
+      }
+      return jsonResponse({
+        ok: true,
+        exists: await store.hasDocumentState(documentName),
       })
     }
 
@@ -189,6 +212,7 @@ export async function writeNodeAdminResponse(
   if (
     !request.url?.startsWith('/healthz') &&
     !request.url?.startsWith('/capabilities') &&
+    !request.url?.startsWith('/document-state') &&
     !request.url?.startsWith('/admin/') &&
     !request.url?.startsWith('/apply/')
   ) {

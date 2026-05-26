@@ -7,7 +7,9 @@
     "pnpm": "10.24.0"
   },
   "scripts": {
-    "dev": "pnpm --filter @dohc/app --if-present run dev",
+    "dev": "node scripts/dev-sync.mjs && pnpm --filter @dohc/app --if-present run dev",
+    "dev:app": "pnpm --filter @dohc/app --if-present run dev",
+    "dev:sync": "node scripts/dev-sync.mjs",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
     "build": "pnpm -r --if-present build",
     "start": "pnpm --filter @dohc/app --if-present run start",

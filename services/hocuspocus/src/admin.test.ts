@@ -73,6 +73,56 @@ describe('hocuspocus admin handler', () => {
     })
   })
 
+  it('reports whether a document already has persisted Y.Doc state', async () => {
+    const store = {
+      hasDocumentState: vi.fn(async () => true),
+      deleteDocument: vi.fn(async () => {}),
+    }
+    const handler = createAdminHandler({
+      adminToken: 'admin-token',
+      revocations: new RevocationRegistry(),
+      store,
+      allowDocumentStateProbe: true,
+    })
+
+    const response = await handler(
+      new Request(
+        'http://localhost/document-state?documentName=workspace%2Fworkspace_1%2Fatom%2Fatom_1',
+      ),
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('access-control-allow-origin')).toBe('*')
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      exists: true,
+    })
+    expect(store.hasDocumentState).toHaveBeenCalledWith(
+      'workspace/workspace_1/atom/atom_1',
+    )
+  })
+
+  it('does not expose document-state unless explicitly enabled', async () => {
+    const store = {
+      hasDocumentState: vi.fn(async () => true),
+      deleteDocument: vi.fn(async () => {}),
+    }
+    const handler = createAdminHandler({
+      adminToken: 'admin-token',
+      revocations: new RevocationRegistry(),
+      store,
+    })
+
+    const response = await handler(
+      new Request(
+        'http://localhost/document-state?documentName=workspace%2Fworkspace_1%2Fatom%2Fatom_1',
+      ),
+    )
+
+    expect(response.status).toBe(404)
+    expect(store.hasDocumentState).not.toHaveBeenCalled()
+  })
+
   it('disconnects registered workspace-user sockets without sticky denial', async () => {
     const revocations = new RevocationRegistry()
     const connection = { socketId: 'socket_1', close: vi.fn() }
@@ -157,7 +207,10 @@ describe('hocuspocus admin handler', () => {
   })
 
   it('deletes persisted document state by workspace and atom id', async () => {
-    const store = { deleteDocument: vi.fn(async () => {}) }
+    const store = {
+      deleteDocument: vi.fn(async () => {}),
+      hasDocumentState: vi.fn(async () => false),
+    }
     const handler = createAdminHandler({
       adminToken: 'admin-token',
       revocations: new RevocationRegistry(),

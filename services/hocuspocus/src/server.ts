@@ -84,6 +84,9 @@ export async function createServerFromEnv(): Promise<Server> {
     capabilities: {
       atomBootstrap: typeof acl.loadAtomBootstrap === 'function',
     },
+    allowDocumentStateProbe:
+      process.env.HOCUSPOCUS_ALLOW_DEV_ACL === 'true' &&
+      typeof acl.loadAtomBootstrap !== 'function',
   })
   let server: Server | undefined
   const semanticHandler = createSemanticApiHandler({

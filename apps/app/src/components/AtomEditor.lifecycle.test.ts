@@ -23,6 +23,7 @@ const tiptapState = vi.hoisted(() => ({
 const hocuspocusState = vi.hoisted(() => ({
   resolvedUrl: 'ws://sync.test',
   capabilities: { atomBootstrap: true },
+  documentState: { exists: true },
   providers: [] as Array<{
     url: string
     documentName: string
@@ -130,6 +131,13 @@ vi.mock('@tiptap/extension-collaboration-caret', () => ({
   },
 }))
 
+vi.mock('yjs', () => ({
+  Doc: class {
+    destroy = vi.fn()
+  },
+  applyUpdate: vi.fn(),
+}))
+
 vi.mock('@tiptap/pm/state', () => ({
   Plugin: class {
     constructor(public config: unknown) {}
@@ -192,6 +200,7 @@ vi.mock('../editor-v2/hocuspocusProvider', () => ({
   }) => `workspace/${workspaceId}/atom/${atomId}`,
   resolveHocuspocusUrl: () => hocuspocusState.resolvedUrl,
   fetchHocuspocusCapabilities: vi.fn(async () => hocuspocusState.capabilities),
+  fetchHocuspocusDocumentState: vi.fn(async () => hocuspocusState.documentState),
   createDohcHocuspocusProvider: vi.fn((options) => {
     hocuspocusState.providers.push(options)
     return {
@@ -205,6 +214,23 @@ vi.mock('../editor-v2/hocuspocusProvider', () => ({
     return awareness
   }),
   startHocuspocusTokenRefresh: vi.fn(() => hocuspocusState.stopRefresh),
+}))
+
+const ydocSeedState = vi.hoisted(() => ({
+  markdownInputs: [] as string[],
+  appliedUpdates: [] as Uint8Array[],
+}))
+
+vi.mock('../editor-v2/import-export', () => ({
+  markdownToYDoc: vi.fn((markdown: string) => {
+    ydocSeedState.markdownInputs.push(markdown)
+    return { __dohcSeedMarkdown: markdown, destroy: vi.fn() }
+  }),
+  encodeDohcYDocUpdate: vi.fn((doc: { __dohcSeedMarkdown: string }) => {
+    const update = new TextEncoder().encode(doc.__dohcSeedMarkdown)
+    ydocSeedState.appliedUpdates.push(update)
+    return update
+  }),
 }))
 
 function documentName(workspaceId = 'workspace_1', atomId = 'atom_1') {
@@ -254,10 +280,13 @@ describe('AtomEditor collaborative browser lifecycle', () => {
     tiptapState.editors = []
     hocuspocusState.resolvedUrl = 'ws://sync.test'
     hocuspocusState.capabilities = { atomBootstrap: true }
+    hocuspocusState.documentState = { exists: true }
     hocuspocusState.providers = []
     hocuspocusState.awarenesses = []
     caretState.configs = []
     indexeddbState.instances = []
+    ydocSeedState.markdownInputs = []
+    ydocSeedState.appliedUpdates = []
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
       value: undefined,
@@ -276,6 +305,23 @@ describe('AtomEditor collaborative browser lifecycle', () => {
     expect(container.textContent).toContain('Sync unavailable')
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
     expect(hocuspocusState.providers).toHaveLength(0)
+  })
+
+  it('client-bootstraps from the current markdown when local Hocuspocus has no Convex bootstrap and no document state yet', async () => {
+    hocuspocusState.capabilities = { atomBootstrap: false }
+    hocuspocusState.documentState = { exists: false }
+
+    await mountAtomEditor({ value: '# Local body' })
+    await fireIndexeddbSynced(0)
+
+    expect(ydocSeedState.markdownInputs).toEqual(['# Local body'])
+    expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
+    await act(async () => {
+      hocuspocusState.providers[0]?.onSynced?.({ state: true })
+    })
+    await flushReact()
+    expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(true)
+    expect(containerStatusText()).not.toContain('Sync unavailable')
   })
 
   it('waits for local IndexedDB hydration and first remote sync before enabling edits', async () => {

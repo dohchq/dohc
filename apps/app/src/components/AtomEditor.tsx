@@ -48,10 +48,12 @@ import {
   createDohcAwareness,
   createDohcHocuspocusProvider,
   encodeDohcHocuspocusDocumentName,
+  fetchHocuspocusDocumentState,
   fetchHocuspocusCapabilities,
   resolveHocuspocusUrl,
   startHocuspocusTokenRefresh,
 } from '../editor-v2/hocuspocusProvider'
+import { encodeDohcYDocUpdate, markdownToYDoc } from '../editor-v2/import-export'
 import { canEditDohcEditor } from '../editor-v2/editorReadiness'
 import {
   hasIndexeddbYDocState,
@@ -251,7 +253,7 @@ function buildAsciiDecorations(
 // `entities.list("project", { "status": "in-progress" })`
 //   → "project · status: in-progress"
 // Defensive: any parse miss falls back to the first non-empty line.
-export function humanizeQuery(src: string): string {
+export function humanizeQuery(src: string): string | null {
   // This runs in buildQueryDecorations on EVERY keystroke (the query
   // block is a live editable code_block — a user can paste a JWT /
   // base64 / minified line into it). Hard-cap the scanned text AND
@@ -264,7 +266,7 @@ export function humanizeQuery(src: string): string {
   )
   if (!m) {
     const first = text.split('\n').find((l) => l.trim())
-    return first ? first.trim().slice(0, 80) : 'live data'
+    return first ? first.trim().slice(0, 80) : null
   }
   const resource = m[3]
   const filters: string[] = []
@@ -281,7 +283,7 @@ export function humanizeQuery(src: string): string {
 
 // Mirror of the ascii-block plugin for `language: query`: tame the
 // glaring Tiptap code-block chrome and prepend a calm human caption so
-// a query reads as an intentional "live data" element, not scary DSL
+// a query reads as an intentional live query element, not scary DSL
 // (impressions #17). The raw query stays an editable code block —
 // markdown is still the truth; a power user edits it directly.
 const queryBlockKey = new PluginKey('dohc-query-block')
@@ -309,12 +311,14 @@ function buildQueryDecorations(
       isQueryFenceLanguage(node.attrs.language)
     const isDohcQueryBlock = node.type.name === 'queryBlock'
     if (isCodeQueryBlock || isDohcQueryBlock) {
+      const src = node.textContent.trim()
+      const label = humanizeQuery(src)
+      if (!src || !label) return
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
           class: 'query-atom-block',
         }),
       )
-      const label = humanizeQuery(node.textContent)
       decorations.push(
         Decoration.widget(
           pos,
@@ -336,7 +340,6 @@ function buildQueryDecorations(
       // the RESULT — verbatim code-fence text is the key (code is not
       // markdown-escaped, so doc text === markdown fence === server
       // src; no Phase-3-style escape mismatch).
-      const src = node.textContent.trim()
       const entry = map.get(src)
       if (entry !== undefined) {
         const v = entry.value
@@ -743,13 +746,20 @@ function TiptapAtomEditor({
   )
   const collaborationRequested = !!documentName && !!hocuspocusUrl
   const collaborationRequired = !!documentName
-  const [collabCapabilities, setCollabCapabilities] = useState<{
-    atomBootstrap: boolean
-  } | null>(null)
+  const [collabBootstrap, setCollabBootstrap] = useState<
+    'pending' | 'server' | 'client' | 'unavailable'
+  >('pending')
+  const [clientSeededDocumentName, setClientSeededDocumentName] = useState<
+    string | null
+  >(null)
   const collaborationPending =
-    collaborationRequested && collabCapabilities === null
+    collaborationRequested &&
+    (collabBootstrap === 'pending' ||
+      (collabBootstrap === 'client' && clientSeededDocumentName !== documentName))
   const collaborationEnabled =
-    collaborationRequested && collabCapabilities?.atomBootstrap === true
+    collaborationRequested &&
+    (collabBootstrap === 'server' ||
+      (collabBootstrap === 'client' && clientSeededDocumentName === documentName))
   const ydoc = useMemo(() => new Y.Doc(), [documentName])
   const [localSync, setLocalSync] = useState<{
     documentName: string | null
@@ -829,25 +839,48 @@ function TiptapAtomEditor({
   }, [collaborationEnabled, documentName])
 
   useEffect(() => {
-    if (!collaborationRequested || !hocuspocusUrl) {
-      setCollabCapabilities(null)
+    if (!collaborationRequested || !hocuspocusUrl || !documentName) {
+      setCollabBootstrap('unavailable')
       return
     }
 
     let cancelled = false
-    setCollabCapabilities(null)
+    setCollabBootstrap('pending')
     fetchHocuspocusCapabilities(hocuspocusUrl)
-      .then((capabilities) => {
-        if (!cancelled) setCollabCapabilities(capabilities)
+      .then(async (capabilities) => {
+        if (capabilities.atomBootstrap) return 'server' as const
+        const state = await fetchHocuspocusDocumentState(
+          hocuspocusUrl,
+          documentName,
+        )
+        return state.exists ? ('server' as const) : ('client' as const)
+      })
+      .then((bootstrap) => {
+        if (!cancelled) setCollabBootstrap(bootstrap)
       })
       .catch(() => {
-        if (!cancelled) setCollabCapabilities({ atomBootstrap: false })
+        if (!cancelled) setCollabBootstrap('unavailable')
       })
 
     return () => {
       cancelled = true
     }
-  }, [collaborationRequested, hocuspocusUrl])
+  }, [collaborationRequested, documentName, hocuspocusUrl])
+
+  useEffect(() => {
+    if (collabBootstrap !== 'client' || !documentName) {
+      setClientSeededDocumentName((current) =>
+        current === null ? current : null,
+      )
+      return
+    }
+    if (clientSeededDocumentName === documentName) return
+
+    const source = markdownToYDoc(defaultValue)
+    Y.applyUpdate(ydoc, encodeDohcYDocUpdate(source))
+    source.destroy()
+    setClientSeededDocumentName(documentName)
+  }, [collabBootstrap, clientSeededDocumentName, defaultValue, documentName, ydoc])
 
   useEffect(() => {
     if (!collaborationEnabled || !documentName) return
@@ -1157,10 +1190,10 @@ function TiptapAtomEditor({
       {collaborationRequired &&
         (collaborationPending ||
           !hocuspocusUrl ||
-          !collabCapabilities?.atomBootstrap ||
+          collabBootstrap === 'unavailable' ||
           (collaborationEnabled && (!localReady || !remoteReady || syncError))) && (
           <div className="dohc-editor-sync-state" role="status">
-            {syncError || !hocuspocusUrl || collabCapabilities?.atomBootstrap === false
+            {syncError || !hocuspocusUrl || collabBootstrap === 'unavailable'
               ? 'Sync unavailable'
               : 'Syncing…'}
           </div>

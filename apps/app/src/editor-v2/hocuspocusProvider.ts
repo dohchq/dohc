@@ -81,6 +81,16 @@ export function resolveHocuspocusHttpUrl(wsUrl: string): string {
   return url.toString()
 }
 
+export function resolveHocuspocusDocumentStateUrl(
+  wsUrl: string,
+  documentName: string,
+): string {
+  const url = new URL(resolveHocuspocusHttpUrl(wsUrl))
+  url.pathname = '/document-state'
+  url.searchParams.set('documentName', documentName)
+  return url.toString()
+}
+
 export async function fetchHocuspocusCapabilities(
   wsUrl: string,
 ): Promise<DohcHocuspocusCapabilities> {
@@ -93,6 +103,18 @@ export async function fetchHocuspocusCapabilities(
   return {
     atomBootstrap: body.capabilities?.atomBootstrap === true,
   }
+}
+
+export async function fetchHocuspocusDocumentState(
+  wsUrl: string,
+  documentName: string,
+): Promise<{ exists: boolean }> {
+  const response = await fetch(
+    resolveHocuspocusDocumentStateUrl(wsUrl, documentName),
+  )
+  if (!response.ok) throw new Error('Unable to read Hocuspocus document state')
+  const body = (await response.json()) as { exists?: unknown }
+  return { exists: body.exists === true }
 }
 
 export function createDohcAwareness(

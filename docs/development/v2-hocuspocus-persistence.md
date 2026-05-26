@@ -197,12 +197,17 @@ projection-cache authority are still later phases:
 
 - The browser editor requests `api.auth.getCollabToken`, uses
   `@hocuspocus/provider`, and stores local Y.Doc state in `y-indexeddb`.
-- The browser checks Hocuspocus `GET /capabilities` before enabling sync. It
-  waits for identity + capability resolution before allowing edits, and starts
-  the remote provider only after `y-indexeddb` has hydrated the local Y.Doc.
-  First edit is blocked until the remote sync completes unless a pre-existing
-  IndexedDB cache is verified for that document. Read-only shared views skip
-  local IndexedDB hydration to avoid rendering stale writable state.
+- The browser checks Hocuspocus `GET /capabilities` before enabling sync. If
+  Convex bootstrap is unavailable in local dev, it asks
+  `GET /document-state?documentName=...`; existing Y.Doc state loads from
+  Postgres, while missing state is seeded once from the current `atoms.body`
+  markdown cache before the provider connects. This keeps `pnpm dev` usable
+  with the compose dev ACL without duplicating content on later opens.
+- The browser waits for identity + bootstrap resolution before allowing edits,
+  and starts the remote provider only after `y-indexeddb` has hydrated the
+  local Y.Doc. First edit is blocked until the remote sync completes unless a
+  pre-existing IndexedDB cache is verified for that document. Read-only shared
+  views skip local IndexedDB hydration to avoid rendering stale writable state.
 - The live raw `@hocuspocus/provider` crash test passes against Docker Postgres.
   The compose stack defaults to explicit `HOCUSPOCUS_ALLOW_DEV_ACL=true`; set
   matching `HOCUSPOCUS_JWT_SECRET`, `HOCUSPOCUS_ADMIN_TOKEN`,

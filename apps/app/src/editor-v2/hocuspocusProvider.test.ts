@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   encodeDohcHocuspocusDocumentName,
+  fetchHocuspocusDocumentState,
+  resolveHocuspocusDocumentStateUrl,
   resolveHocuspocusHttpUrl,
   resolveHocuspocusUrl,
   startHocuspocusTokenRefresh,
@@ -56,6 +58,38 @@ describe('hocuspocus provider adapter', () => {
     expect(resolveHocuspocusHttpUrl('wss://sync.example.test/ws')).toBe(
       'https://sync.example.test/capabilities',
     )
+  })
+
+  it('derives the document-state endpoint from the websocket URL', () => {
+    expect(
+      resolveHocuspocusDocumentStateUrl(
+        'ws://127.0.0.1:1234',
+        'workspace/workspace_1/atom/atom_1',
+      ),
+    ).toBe(
+      'http://127.0.0.1:1234/document-state?documentName=workspace%2Fworkspace_1%2Fatom%2Fatom_1',
+    )
+  })
+
+  it('fetches whether Hocuspocus already has document state', async () => {
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, exists: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    globalThis.fetch = fetchMock as typeof fetch
+    try {
+      await expect(
+        fetchHocuspocusDocumentState(
+          'ws://127.0.0.1:1234',
+          'workspace/workspace_1/atom/atom_1',
+        ),
+      ).resolves.toEqual({ exists: false })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('refreshes provider tokens on an interval and cleans up', () => {
