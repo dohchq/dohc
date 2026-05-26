@@ -218,6 +218,34 @@ rg -n "VITE_HOCUSPOCUS_URL|HOCUSPOCUS" apps/app/.env.example docs/development/v2
 
 Expected: browser URL and first-load bootstrap are documented.
 
+## Task 5: Add Mounted Editor Lifecycle Coverage
+
+- [x] **Step 1: Add a jsdom lifecycle test for collaborative readiness**
+
+Create `apps/app/src/components/AtomEditor.lifecycle.test.ts` covering:
+- sync-unavailable collaborative atoms render read-only and never create a provider.
+- IndexedDB hydration happens before the remote provider can enable editing.
+- verified local cache allows offline resume before remote sync returns.
+- two mounted editors target the same Hocuspocus document room and clean up providers on unmount.
+
+Run:
+
+```bash
+pnpm --filter @dohc/app exec vitest run src/components/AtomEditor.lifecycle.test.ts
+```
+
+Expected: four tests pass.
+
+- [x] **Step 2: Run app typecheck**
+
+Run:
+
+```bash
+pnpm --filter @dohc/app run typecheck
+```
+
+Expected: typecheck passes.
+
 ## Task 5: Integration Verification
 
 - [x] **Step 1: Build and boot Hocuspocus**
