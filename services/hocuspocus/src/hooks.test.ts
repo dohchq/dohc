@@ -18,6 +18,13 @@ const documentName = encodeDocName({
 })
 const messageYjsUpdate = 2
 const messageYjsSyncStep1 = 0
+const baseContext = {
+  userId: 'user_1',
+  workspaceId: 'workspace_1',
+  atomId: 'atom_1',
+  actorKind: 'user' as const,
+  authzVersion: 1,
+}
 
 function makeAcl(options: {
   canRead: boolean
@@ -393,6 +400,94 @@ describe('hocuspocus hook factory', () => {
         },
       } as never),
     ).rejects.toThrow(/token expired/)
+  })
+
+  it('sanitizes awareness payloads before broadcasting them', async () => {
+    const { hooks } = makeHooks({ canRead: true, canWrite: true })
+    const cursor = { anchor: 1, head: 2 }
+    const states = new Map<number, Record<string, unknown>>([
+      [
+        7,
+        {
+          user: {
+            id: 'user_1',
+            name: 'Alice',
+            color: '#4f46e5',
+            email: 'alice@example.test',
+          },
+          cursor,
+          privateNote: 'nope',
+        },
+      ],
+    ])
+
+    await hooks.beforeHandleAwareness({
+      documentName,
+      context: baseContext,
+      connection: { readOnly: false },
+      states,
+    } as never)
+
+    expect(states.get(7)).toEqual({
+      user: {
+        id: 'user_1',
+        name: 'Alice',
+        color: '#4f46e5',
+      },
+      cursor,
+    })
+  })
+
+  it('prevents read-only connections from publishing awareness', async () => {
+    const { acl, hooks } = makeHooks({ canRead: true, canWrite: false })
+    const states = new Map<number, Record<string, unknown>>([
+      [
+        7,
+        {
+          user: { id: 'user_1', name: 'Alice', color: '#4f46e5' },
+          cursor: { anchor: 1, head: 2 },
+        },
+      ],
+    ])
+
+    await hooks.beforeHandleAwareness({
+      documentName,
+      context: baseContext,
+      connection: { readOnly: true },
+      states,
+    } as never)
+
+    expect(states.size).toBe(0)
+    expect(acl.canWriteAtom).toHaveBeenCalledWith(baseContext)
+  })
+
+  it('rejects awareness after the live connection token expires', async () => {
+    const { hooks } = makeHooks({ canRead: true, canWrite: true })
+
+    await expect(
+      hooks.beforeHandleAwareness({
+        documentName,
+        context: {
+          ...baseContext,
+          tokenExpiresAt: Math.floor(Date.now() / 1000) - 1,
+        },
+        connection: { readOnly: false },
+        states: new Map([[7, { user: { id: 'user_1' } }]]),
+      } as never),
+    ).rejects.toThrow(/token expired/)
+  })
+
+  it('rejects awareness when read access has been revoked', async () => {
+    const { hooks } = makeHooks({ canRead: false, canWrite: true })
+
+    await expect(
+      hooks.beforeHandleAwareness({
+        documentName,
+        context: baseContext,
+        connection: { readOnly: false },
+        states: new Map([[7, { user: { id: 'user_1' } }]]),
+      } as never),
+    ).rejects.toThrow(/read access/)
   })
 
   it('throws before applying updates when persistence fails', async () => {

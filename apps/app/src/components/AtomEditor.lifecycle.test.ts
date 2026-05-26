@@ -16,6 +16,7 @@ const tiptapState = vi.hoisted(() => ({
       dispatch: ReturnType<typeof vi.fn>
     }
     getMarkdown: ReturnType<typeof vi.fn>
+    extensions: unknown[]
   }>,
 }))
 
@@ -27,13 +28,26 @@ const hocuspocusState = vi.hoisted(() => ({
     documentName: string
     ydoc: unknown
     token: unknown
+    awareness?: unknown
     onAuthenticated?: () => void
     onAuthenticationFailed?: (event: { reason: string }) => void
     onSynced?: (event: { state: boolean }) => void
     onStatus?: (event: { status: string }) => void
   }>,
+  awarenesses: [] as Array<{
+    ydoc: unknown
+    options: {
+      publish: boolean
+      user: { id: string; name?: string | null; color: string }
+    }
+    awareness: { marker: string }
+  }>,
   destroyProvider: vi.fn(),
   stopRefresh: vi.fn(),
+}))
+
+const caretState = vi.hoisted(() => ({
+  configs: [] as Array<Record<string, unknown>>,
 }))
 
 const indexeddbState = vi.hoisted(() => ({
@@ -51,7 +65,7 @@ vi.mock('convex/react', () => ({
 }))
 
 vi.mock('@tiptap/react', () => ({
-  useEditor: (options: { editable?: boolean }) => {
+  useEditor: (options: { editable?: boolean; extensions?: unknown[] }) => {
     const tr = { setMeta: vi.fn() }
     tr.setMeta.mockReturnValue(tr)
     const editor = {
@@ -62,6 +76,7 @@ vi.mock('@tiptap/react', () => ({
         dispatch: vi.fn(),
       },
       getMarkdown: vi.fn(() => ''),
+      extensions: options.extensions ?? [],
     }
     editor.setEditable(options.editable)
     tiptapState.editors.push(editor)
@@ -100,6 +115,15 @@ vi.mock('@tiptap/extension-collaboration', () => ({
     configure: (config: unknown) => ({ name: 'collaboration', config }),
   },
   isChangeOrigin: () => false,
+}))
+
+vi.mock('@tiptap/extension-collaboration-caret', () => ({
+  CollaborationCaret: {
+    configure: (config: Record<string, unknown>) => {
+      caretState.configs.push(config)
+      return { name: 'collaboration-caret', config }
+    },
+  },
 }))
 
 vi.mock('@tiptap/pm/state', () => ({
@@ -171,6 +195,11 @@ vi.mock('../editor-v2/hocuspocusProvider', () => ({
       sendToken: vi.fn(),
     }
   }),
+  createDohcAwareness: vi.fn((ydoc, options) => {
+    const awareness = { marker: `awareness-${hocuspocusState.awarenesses.length}` }
+    hocuspocusState.awarenesses.push({ ydoc, options, awareness })
+    return awareness
+  }),
   startHocuspocusTokenRefresh: vi.fn(() => hocuspocusState.stopRefresh),
 }))
 
@@ -222,6 +251,8 @@ describe('AtomEditor collaborative browser lifecycle', () => {
     hocuspocusState.resolvedUrl = 'ws://sync.test'
     hocuspocusState.capabilities = { atomBootstrap: true }
     hocuspocusState.providers = []
+    hocuspocusState.awarenesses = []
+    caretState.configs = []
     indexeddbState.instances = []
     Object.defineProperty(globalThis, 'indexedDB', {
       configurable: true,
@@ -276,6 +307,40 @@ describe('AtomEditor collaborative browser lifecycle', () => {
 
     expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(true)
+  })
+
+  it('wires safe Yjs awareness and collaboration carets for editable collaborators', async () => {
+    await mountAtomEditor()
+    await fireIndexeddbSynced(0)
+
+    expect(hocuspocusState.awarenesses).toHaveLength(1)
+    expect(hocuspocusState.awarenesses[0]?.options).toEqual({
+      publish: true,
+      user: {
+        id: 'workspace_1',
+        name: 'You',
+        color: '#4f46e5',
+      },
+    })
+    expect(hocuspocusState.providers[0]?.awareness).toBe(
+      hocuspocusState.awarenesses[0]?.awareness,
+    )
+    expect(caretState.configs.at(-1)).toMatchObject({
+      provider: { awareness: hocuspocusState.awarenesses[0]?.awareness },
+      user: {
+        id: 'workspace_1',
+        name: 'You',
+        color: '#4f46e5',
+      },
+    })
+    expect(
+      tiptapState.editors
+        .at(-1)
+        ?.extensions.some(
+          (extension) =>
+            (extension as { name?: string }).name === 'collaboration-caret',
+        ),
+    ).toBe(true)
   })
 
   it('mounts two collaborative editors into the same Hocuspocus document room', async () => {

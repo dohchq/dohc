@@ -1,10 +1,12 @@
 import type {
   Configuration,
+  beforeHandleAwarenessPayload,
   beforeHandleMessagePayload,
   beforeSyncPayload,
   connectedPayload,
   onAuthenticatePayload,
   onChangePayload,
+  onAwarenessUpdatePayload,
   onDisconnectPayload,
   onLoadDocumentPayload,
   onTokenSyncPayload,
@@ -78,11 +80,17 @@ type DohcHocuspocusHooks = {
   beforeHandleMessage: NonNullable<
     Configuration<DohcHocuspocusContext>['beforeHandleMessage']
   >
+  beforeHandleAwareness: NonNullable<
+    Configuration<DohcHocuspocusContext>['beforeHandleAwareness']
+  >
   beforeSync: NonNullable<Configuration<DohcHocuspocusContext>['beforeSync']>
   onStoreDocument: NonNullable<
     Configuration<DohcHocuspocusContext>['onStoreDocument']
   >
   onChange: NonNullable<Configuration<DohcHocuspocusContext>['onChange']>
+  onAwarenessUpdate: NonNullable<
+    Configuration<DohcHocuspocusContext>['onAwarenessUpdate']
+  >
   onDisconnect: NonNullable<Configuration<DohcHocuspocusContext>['onDisconnect']>
 }
 
@@ -224,6 +232,43 @@ function assertTokenFresh(context: DohcHocuspocusContext): void {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function cleanString(value: unknown, maxLength: number): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  return trimmed.slice(0, maxLength)
+}
+
+function sanitizeAwarenessState(
+  state: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const sanitized: Record<string, unknown> = {}
+  if (isRecord(state.user)) {
+    const id = cleanString(state.user.id, 128)
+    const color = cleanString(state.user.color, 32)
+    if (id && color) {
+      sanitized.user = {
+        id,
+        name: cleanString(state.user.name, 80) ?? 'You',
+        color,
+      }
+    }
+  }
+
+  if (isRecord(state.cursor)) {
+    sanitized.cursor = {
+      anchor: state.cursor.anchor,
+      head: state.cursor.head,
+    }
+  }
+
+  return Object.keys(sanitized).length ? sanitized : null
+}
+
 export function createHocuspocusHooks({
   jwtSecret,
   acl,
@@ -352,6 +397,32 @@ export function createHocuspocusHooks({
 
     async beforeHandleMessage() {},
 
+    async beforeHandleAwareness(data) {
+      const context = data.context
+      if (!context) {
+        throw new Error('Missing Hocuspocus context for awareness update')
+      }
+      assertTokenFresh(context)
+
+      const input = accessInput(context)
+      const canRead = await acl.canReadAtom(input)
+      if (!canRead) {
+        throw new Error('Missing read access for document')
+      }
+
+      const canWrite = await acl.canWriteAtom(input)
+      if (!canWrite || data.connection?.readOnly) {
+        data.states.clear()
+        return
+      }
+
+      for (const [clientId, state] of data.states) {
+        const clean = sanitizeAwarenessState(state)
+        if (clean) data.states.set(clientId, clean)
+        else data.states.delete(clientId)
+      }
+    },
+
     async beforeSync(data) {
       const context = data.context
       assertTokenFresh(context)
@@ -406,6 +477,15 @@ export function createHocuspocusHooks({
       })
     },
 
+    async onAwarenessUpdate(data) {
+      logger.info('hocuspocus awareness updated', {
+        documentName: data.documentName,
+        added: data.added.length,
+        updated: data.updated.length,
+        removed: data.removed.length,
+      })
+    },
+
     async onDisconnect(data) {
       revocations?.unregisterSocket?.(data.socketId)
     },
@@ -418,7 +498,11 @@ export type DohcOnLoadDocumentPayload = onLoadDocumentPayload<DohcHocuspocusCont
 export type DohcOnTokenSyncPayload = onTokenSyncPayload<DohcHocuspocusContext>
 export type DohcBeforeHandleMessagePayload =
   beforeHandleMessagePayload<DohcHocuspocusContext>
+export type DohcBeforeHandleAwarenessPayload =
+  beforeHandleAwarenessPayload<DohcHocuspocusContext>
 export type DohcBeforeSyncPayload = beforeSyncPayload<DohcHocuspocusContext>
 export type DohcOnStoreDocumentPayload = onStoreDocumentPayload<DohcHocuspocusContext>
 export type DohcOnChangePayload = onChangePayload<DohcHocuspocusContext>
+export type DohcOnAwarenessUpdatePayload =
+  onAwarenessUpdatePayload<DohcHocuspocusContext>
 export type DohcOnDisconnectPayload = onDisconnectPayload<DohcHocuspocusContext>

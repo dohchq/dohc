@@ -22,6 +22,7 @@ import {
   Collaboration,
   isChangeOrigin,
 } from '@tiptap/extension-collaboration'
+import { CollaborationCaret } from '@tiptap/extension-collaboration-caret'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import * as Y from 'yjs'
@@ -44,6 +45,7 @@ import { WikilinkPicker } from './WikilinkPicker'
 import type { Id } from '../../convex/_generated/dataModel'
 import { dohcMarkdownExtensions } from '../editor-v2/dohc-markdown-extensions'
 import {
+  createDohcAwareness,
   createDohcHocuspocusProvider,
   encodeDohcHocuspocusDocumentName,
   fetchHocuspocusCapabilities,
@@ -781,6 +783,31 @@ function TiptapAtomEditor({
     localReady &&
     !syncError &&
     (remoteReady || hasLocalCache)
+  const awarenessUser = useMemo(
+    () =>
+      collab
+        ? {
+            id: collab.workspaceId,
+            name: 'You',
+            color: '#4f46e5',
+          }
+        : null,
+    [collab?.workspaceId],
+  )
+  const awareness = useMemo(
+    () =>
+      collaborationEnabled && awarenessUser
+        ? createDohcAwareness(ydoc, {
+            publish: !readOnly,
+            user: awarenessUser,
+          })
+        : null,
+    [awarenessUser, collaborationEnabled, readOnly, ydoc],
+  )
+  const caretProvider = useMemo(
+    () => (awareness ? { awareness } : null),
+    [awareness],
+  )
   useEffect(() => {
     fetchTokenRef.current = fetchCollabToken
   }, [fetchCollabToken])
@@ -867,6 +894,7 @@ function TiptapAtomEditor({
       documentName,
       ydoc,
       token: () => fetchTokenRef.current(collab.workspaceId),
+      awareness,
       onAuthenticated: () => setSyncError(null),
       onAuthenticationFailed: ({ reason }) => setSyncError(reason),
       onSynced: ({ state }) => {
@@ -898,6 +926,7 @@ function TiptapAtomEditor({
     hocuspocusUrl,
     ydoc,
     collab?.workspaceId,
+    awareness,
   ])
 
   useEffect(() => {
@@ -1002,9 +1031,24 @@ function TiptapAtomEditor({
       ...(collaborationEnabled
         ? [Collaboration.configure({ document: ydoc, field: 'body' })]
         : []),
+      ...(collaborationEnabled && caretProvider && awarenessUser && !readOnly
+        ? [
+            CollaborationCaret.configure({
+              provider: caretProvider,
+              user: awarenessUser,
+            }),
+          ]
+        : []),
       dohcPlugins,
     ],
-    [collaborationEnabled, dohcPlugins, ydoc],
+    [
+      awarenessUser,
+      caretProvider,
+      collaborationEnabled,
+      dohcPlugins,
+      readOnly,
+      ydoc,
+    ],
   )
 
   const editor = useEditor(

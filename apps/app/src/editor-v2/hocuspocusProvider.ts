@@ -2,6 +2,7 @@ import {
   HocuspocusProvider,
   type HocuspocusProviderConfiguration,
 } from '@hocuspocus/provider'
+import { Awareness } from 'y-protocols/awareness'
 import type * as Y from 'yjs'
 
 export type DohcHocuspocusDocument = {
@@ -14,14 +15,28 @@ export type CreateDohcHocuspocusProviderOptions = {
   documentName: string
   ydoc: Y.Doc
   token: string | (() => string) | (() => Promise<string>)
+  awareness?: Awareness | null
   onStatus?: HocuspocusProviderConfiguration['onStatus']
   onSynced?: HocuspocusProviderConfiguration['onSynced']
   onAuthenticated?: HocuspocusProviderConfiguration['onAuthenticated']
   onAuthenticationFailed?: HocuspocusProviderConfiguration['onAuthenticationFailed']
+  onAwarenessUpdate?: HocuspocusProviderConfiguration['onAwarenessUpdate']
+  onAwarenessChange?: HocuspocusProviderConfiguration['onAwarenessChange']
 }
 
 export type DohcHocuspocusCapabilities = {
   atomBootstrap: boolean
+}
+
+export type DohcAwarenessUser = {
+  id: string
+  name?: string | null
+  color: string
+}
+
+type CreateDohcAwarenessOptions = {
+  publish: boolean
+  user: DohcAwarenessUser & Record<string, unknown>
 }
 
 type RefreshableProvider = Pick<HocuspocusProvider, 'sendToken'>
@@ -80,26 +95,49 @@ export async function fetchHocuspocusCapabilities(
   }
 }
 
+export function createDohcAwareness(
+  ydoc: Y.Doc,
+  { publish, user }: CreateDohcAwarenessOptions,
+): Awareness {
+  const awareness = new Awareness(ydoc)
+  if (!publish) {
+    awareness.setLocalState(null)
+    return awareness
+  }
+
+  awareness.setLocalStateField('user', {
+    id: user.id,
+    name: user.name?.trim() || 'You',
+    color: user.color,
+  })
+  return awareness
+}
+
 export function createDohcHocuspocusProvider({
   url,
   documentName,
   ydoc,
   token,
+  awareness,
   onStatus,
   onSynced,
   onAuthenticated,
   onAuthenticationFailed,
+  onAwarenessUpdate,
+  onAwarenessChange,
 }: CreateDohcHocuspocusProviderOptions): HocuspocusProvider {
   return new HocuspocusProvider({
     url,
     name: documentName,
     document: ydoc,
     token,
-    awareness: null,
+    awareness: awareness ?? null,
     onStatus,
     onSynced,
     onAuthenticated,
     onAuthenticationFailed,
+    onAwarenessUpdate,
+    onAwarenessChange,
   })
 }
 
