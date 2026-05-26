@@ -437,7 +437,7 @@ Goal: Convex agent tools call Hocuspocus semantic API. Drop direct markdown writ
 2. Convex agent tools rewritten as semantic tools (per O8):
    - `propose_replace_text(atomId, anchorText, surrounding, newText)` — creates suggestion
    - `insert_after_heading(atomId, heading, content)` — direct apply (no suggestion needed for additive edits)
-   - `rewrite_section(atomId, headingText, newContent)` — direct apply
+   - `rewrite_section(atomId, headingText, newContent)` — creates a reviewed replacement suggestion for substantial rewrites
    - `create_atom(path, content)` — direct apply
    - **NO** `write_atom(atomId, fullBody)` — this primitive is dropped; replace via semantic tools
 3. Tool descriptions updated; agent system prompt updated to use new tool surface
@@ -703,7 +703,7 @@ LLMs are bad at raw Y.js updates. Do NOT expose `applyUpdate` to the model. Sema
 
 - `propose_replace_text(atomId, anchorText, surrounding, newText)` → creates suggestion
 - `insert_after_heading(atomId, heading, content)` → direct apply
-- `rewrite_section(atomId, headingText, newContent)` → direct apply
+- `rewrite_section(atomId, headingText, newContent)` → reviewed replacement suggestion
 - `create_atom(path, content)` → direct apply
 
 `write_atom(atomId, fullBody)` as today's primitive is DROPPED. Replace via the semantic surface above.

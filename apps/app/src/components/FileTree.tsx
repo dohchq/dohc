@@ -127,11 +127,11 @@ type Props = {
   onOpenSearch?: () => void
 }
 
-// M1 step 3.8.2.1 — presence context. FileTree subscribes to
-// the active-collab-sessions query once at the top, exposes
-// the Set of atomIds via context, so any TreeRowNode (and the
-// recursive children renderings) can render an indicator
-// without prop-drilling through all the rendering paths.
+// Optional tree-level presence context. v2 live presence is owned by
+// Hocuspocus/Y.Awareness inside the editor; FileTree currently passes an
+// empty set after the v1 Convex presence table was removed. The context
+// keeps the row rendering path stable if we later project awareness into
+// the sidebar.
 //
 // Default value = empty set so the context works outside
 // FileTree (e.g. tests that mount a single TreeRowNode in
@@ -416,6 +416,9 @@ export function FileTree({
   accessStates,
   onOpenSearch,
 }: Props) {
+  // v2: sidebar presence is intentionally quiet for now. Editor carets are the
+  // primary live-collaboration UI, and removed v1 Convex presence rows should
+  // not be recreated just to light up sidebar dots.
   const presentPathSet = useMemo<ReadonlySet<string>>(() => new Set(), [])
 
   // P1 — derive a path → mode lookup from the (fileId→mode) state
@@ -1481,11 +1484,9 @@ function TreeRowNode({
   const isExpanded = expanded.has(node.fullPath)
   const label = nodeLabel(node)
   const indent = 8 + depth * 14
-  // M1 step 3.8.2.1 — presence indicator. Reads the SET from
-  // the FileTree-level subscription via context; renders a
-  // tiny dot next to the file name when another tab is in an
-  // active collab session for this atom. Folders never have
-  // presence (they're not docs); only leaf rows check.
+  // Optional presence indicator. With v2 the set is empty unless a future
+  // awareness projection feeds it, so the sidebar stays visually calm while
+  // live collaboration is represented by editor carets.
   const presentPathSet = useContext(PresenceContext)
   const isPresent = !isFolder && presentPathSet.has(node.fullPath)
   // file-org-v1 D4.3 — roving tabIndex. The focused row carries
@@ -1586,13 +1587,7 @@ function TreeRowNode({
           <FileText className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         )}
         <span className="truncate text-[12.5px] font-medium">{label}</span>
-        {/* M1 step 3.8.2.1 — presence dot. A green dot next to
-            the file name when another tab has the atom open in
-            an active collab session (heartbeat within the last
-            90s; PRESENCE_EXPIRY_MS on the server). The dot
-            also appears for the LOCAL tab — that's intentional
-            ("you're editing this") and matches what other
-            collab UIs do (e.g. Notion / Figma's "you" cursor). */}
+        {/* Optional sidebar presence dot. */}
         {isPresent && (
           <span
             className="ml-1 inline-block size-1.5 shrink-0 rounded-full bg-emerald-500"

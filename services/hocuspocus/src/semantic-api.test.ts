@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { encodeDocName } from './doc-name.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { createSemanticApiHandler } from './semantic-api.js'
+import { createSemanticApiHandler, semanticOperationKey } from './semantic-api.js'
 import { createAnchorsForText } from './suggestions.js'
 import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
 
@@ -135,8 +135,17 @@ describe('semantic apply API', () => {
     })
     expect(backend.updatesFor(documentName)).toHaveLength(0)
     await expect(
-      store.getSemanticOperation(`${documentName}\0op_stale`),
+      store.getSemanticOperation(semanticOperationKey(documentName, 'op_stale')),
     ).resolves.toBeNull()
+  })
+
+  it('uses Postgres-safe semantic operation keys', () => {
+    const key = semanticOperationKey('create:workspace_1:notes/new.md', 'op:1/2')
+
+    expect(key).not.toContain('\0')
+    expect(key).toBe(
+      'create%3Aworkspace_1%3Anotes%2Fnew.md::op%3A1%2F2',
+    )
   })
 
   it('serializes duplicate operationIds through the persistence layer', async () => {

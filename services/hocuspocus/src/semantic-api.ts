@@ -388,8 +388,8 @@ function applySemanticEdit(
   return applyInsertAfterHeading(doc, payload)
 }
 
-function semanticOperationKey(scope: string, operationId: string): string {
-  return `${scope}\0${operationId}`
+export function semanticOperationKey(scope: string, operationId: string): string {
+  return `${encodeURIComponent(scope)}::${encodeURIComponent(operationId)}`
 }
 
 function anchorSummaryForPayload(

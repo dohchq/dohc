@@ -23,7 +23,7 @@
   - `create_atom`
   - `propose_replace_text`
   - `insert_after_heading`
-  - `rewrite_section`
+  - `rewrite_section` (routes substantial rewrites through reviewed suggestions)
 - [x] Retire `write_atom` and `suggest_in_doc` as always-refusing v1 tools.
 - [x] Route brand-new atom creation and `save_skill` through Hocuspocus semantic create so canonical Y.Doc state is initialized.
 
