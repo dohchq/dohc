@@ -17,6 +17,18 @@ vi.mock('../lib/active-workspace', () => ({
   useActiveWorkspaceId: () => undefined,
 }))
 
+vi.mock('@tiptap/extensions/placeholder', () => ({
+  Placeholder: {
+    configure: (config: unknown) => ({ name: 'placeholder', config }),
+  },
+}))
+
+vi.mock('@tiptap/extensions/trailing-node', () => ({
+  TrailingNode: {
+    configure: (config: unknown) => ({ name: 'trailing-node', config }),
+  },
+}))
+
 vi.mock('y-indexeddb', () => ({
   IndexeddbPersistence: class {
     whenSynced = Promise.resolve()
@@ -145,5 +157,22 @@ describe('AtomEditor real Tiptap mount', () => {
 
     expect(container.querySelector('.ascii-sketch-block')).not.toBeNull()
     expect(container.querySelector('.ascii-sketch-metadata-line')).not.toBeNull()
+  })
+
+  it('renders Notion-style block controls for page blocks', () => {
+    act(() => {
+      root.render(
+        React.createElement(AtomEditor, {
+          value: 'First block\n\nSecond block',
+          onChange: () => {},
+          knownFiles: [],
+        }),
+      )
+    })
+
+    const controls = container.querySelectorAll('.dohc-block-affordance')
+    expect(controls.length).toBeGreaterThanOrEqual(2)
+    expect(container.querySelector('.dohc-block-plus')).not.toBeNull()
+    expect(container.querySelector('.dohc-block-handle')).not.toBeNull()
   })
 })

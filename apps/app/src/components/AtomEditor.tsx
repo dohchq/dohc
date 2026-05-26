@@ -19,12 +19,15 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { Markdown } from '@tiptap/markdown'
+import { Placeholder } from '@tiptap/extensions/placeholder'
+import { TrailingNode } from '@tiptap/extensions/trailing-node'
 import {
   Collaboration,
   isChangeOrigin,
 } from '@tiptap/extension-collaboration'
 import { CollaborationCaret } from '@tiptap/extension-collaboration-caret'
 import {
+  NodeSelection,
   Plugin,
   PluginKey,
   TextSelection,
@@ -387,6 +390,7 @@ function buildAsciiDecorations(
 }
 
 const slashCommandKey = new PluginKey('dohc-slash-command')
+const blockControlsKey = new PluginKey('dohc-block-controls')
 
 function makeSlashCommandPlugin({
   wrapperRef,
@@ -478,6 +482,126 @@ function makeSlashCommandPlugin({
       },
     },
   })
+}
+
+function makeBlockControlsPlugin({
+  onInsertRef,
+  onSelectRef,
+}: {
+  onInsertRef: React.RefObject<(pos: number) => void>
+  onSelectRef: React.RefObject<(pos: number) => void>
+}) {
+  return new Plugin({
+    key: blockControlsKey,
+    state: {
+      init(_, instance) {
+        return buildBlockControlDecorations(
+          instance.doc,
+          onInsertRef,
+          onSelectRef,
+        )
+      },
+      apply(tr, old) {
+        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
+        return buildBlockControlDecorations(tr.doc, onInsertRef, onSelectRef)
+      },
+    },
+    props: {
+      decorations(state) {
+        return blockControlsKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+type TopLevelDocLike = {
+  forEach: (
+    cb: (
+      node: {
+        type: { name: string }
+        nodeSize: number
+      },
+      offset: number,
+      index: number,
+    ) => void,
+  ) => void
+}
+
+function buildBlockControlDecorations(
+  doc: unknown,
+  onInsertRef: React.RefObject<(pos: number) => void>,
+  onSelectRef: React.RefObject<(pos: number) => void>,
+): DecorationSet {
+  const decorations: Decoration[] = []
+
+  ;(doc as TopLevelDocLike).forEach((node, offset, index) => {
+    if (!isBlockControlTarget(node.type.name)) return
+
+    const pos = offset
+    decorations.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        class: 'dohc-block-node',
+        'data-dohc-block-index': String(index),
+      }),
+    )
+    decorations.push(
+      Decoration.widget(
+        pos + 1,
+        () => {
+          const wrap = document.createElement('span')
+          wrap.className = 'dohc-block-affordance'
+          wrap.setAttribute('contenteditable', 'false')
+          wrap.setAttribute('aria-hidden', 'true')
+
+          const plus = document.createElement('button')
+          plus.type = 'button'
+          plus.className = 'dohc-block-gutter-btn dohc-block-plus'
+          plus.title = 'insert block'
+          plus.setAttribute('aria-label', 'insert block')
+          plus.textContent = '+'
+          plus.addEventListener('mousedown', stopEditorMouseEvent)
+          plus.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            onInsertRef.current(pos)
+          })
+
+          const handle = document.createElement('button')
+          handle.type = 'button'
+          handle.className = 'dohc-block-gutter-btn dohc-block-handle'
+          handle.title = 'select block'
+          handle.setAttribute('aria-label', 'select block')
+          handle.textContent = '::'
+          handle.addEventListener('mousedown', stopEditorMouseEvent)
+          handle.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            onSelectRef.current(pos)
+          })
+
+          wrap.append(plus, handle)
+          return wrap
+        },
+        { side: -1, key: `dohc-block-controls-${pos}` },
+      ),
+    )
+  })
+
+  return DecorationSet.create(doc as never, decorations)
+}
+
+function isBlockControlTarget(nodeName: string): boolean {
+  return [
+    'paragraph',
+    'heading',
+    'blockquote',
+    'codeBlock',
+    'code_block',
+    'queryBlock',
+  ].includes(nodeName)
+}
+
+function stopEditorMouseEvent(event: Event) {
+  event.preventDefault()
+  event.stopPropagation()
 }
 
 function readSlashCommandState(
@@ -1071,6 +1195,8 @@ function TiptapAtomEditor({
   )
   const slashStateRef = useRef<SlashCommandState>(slashState)
   const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {})
+  const blockInsertRef = useRef<(pos: number) => void>(() => {})
+  const blockSelectRef = useRef<(pos: number) => void>(() => {})
   useEffect(() => {
     slashStateRef.current = slashState
   }, [slashState])
@@ -1391,6 +1517,10 @@ function TiptapAtomEditor({
               setState: setSlashState,
               runCommandRef: slashCommandRunnerRef,
             }),
+            makeBlockControlsPlugin({
+              onInsertRef: blockInsertRef,
+              onSelectRef: blockSelectRef,
+            }),
             wikilinkPlugin,
             wikilinkClickPlugin,
             atomPillClickPlugin,
@@ -1422,6 +1552,18 @@ function TiptapAtomEditor({
       StarterKit.configure({ undoRedo: collaborationEnabled ? false : undefined }),
       TableKit,
       Markdown.configure({ indentation: { style: 'space', size: 2 } }),
+      Placeholder.configure({
+        includeChildren: true,
+        showOnlyCurrent: false,
+        placeholder: ({ node }) => {
+          if (node.type.name === 'heading') return 'Heading'
+          return "Type '/' for commands"
+        },
+      }),
+      TrailingNode.configure({
+        node: 'paragraph',
+        notAfter: ['paragraph'],
+      }),
       ...(collaborationEnabled
         ? [Collaboration.configure({ document: ydoc, field: 'body' })]
         : []),
@@ -1450,6 +1592,11 @@ function TiptapAtomEditor({
       extensions,
       content: collaborationEnabled ? undefined : defaultValue,
       contentType: collaborationEnabled ? undefined : 'markdown',
+      editorProps: {
+        attributes: {
+          class: 'dohc-notion-editor',
+        },
+      },
       editable: canEditDohcEditor({
         readOnly,
         collaborationRequired,
@@ -1474,6 +1621,84 @@ function TiptapAtomEditor({
     },
     [extensions, collaborationEnabled, documentName],
   )
+
+  const openSlashMenuAtPosition = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view) return
+
+      let x = 0
+      let y = 28
+      try {
+        const coords = view.coordsAtPos(pos)
+        const wrapperRect = editorWrapRef.current?.getBoundingClientRect()
+        x = Math.max(0, coords.left - (wrapperRect?.left ?? 0))
+        y = Math.max(0, coords.bottom - (wrapperRect?.top ?? 0) + 6)
+      } catch {
+        /* jsdom and offscreen editors cannot always resolve coordinates */
+      }
+
+      setSlashState({
+        open: true,
+        from: pos,
+        to: pos,
+        query: '',
+        selected: 0,
+        x,
+        y,
+      })
+    },
+    [editor],
+  )
+
+  const insertBlockAfter = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view) return
+
+      const { state } = view
+      const node = state.doc.nodeAt(pos)
+      const paragraph = state.schema.nodes.paragraph
+      if (!node || !paragraph) return
+
+      const canReuseEmptyParagraph =
+        node.type.name === 'paragraph' && node.textContent.length === 0
+      const selectionPos = canReuseEmptyParagraph
+        ? pos + 1
+        : pos + node.nodeSize + 1
+      const tr = canReuseEmptyParagraph
+        ? state.tr
+        : state.tr.insert(pos + node.nodeSize, paragraph.create())
+      tr
+        .setSelection(TextSelection.near(tr.doc.resolve(selectionPos)))
+        .scrollIntoView()
+      view.dispatch(tr)
+      view.focus()
+      openSlashMenuAtPosition(selectionPos)
+    },
+    [editor, openSlashMenuAtPosition],
+  )
+
+  const selectBlock = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view) return
+      const node = view.state.doc.nodeAt(pos)
+      if (!node) return
+      view.dispatch(
+        view.state.tr
+          .setSelection(NodeSelection.create(view.state.doc, pos))
+          .scrollIntoView(),
+      )
+      view.focus()
+    },
+    [editor],
+  )
+
+  useEffect(() => {
+    blockInsertRef.current = insertBlockAfter
+    blockSelectRef.current = selectBlock
+  }, [insertBlockAfter, selectBlock])
 
   const runSlashCommand = useCallback(
     (id: SlashCommandId) => {

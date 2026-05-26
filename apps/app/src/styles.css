@@ -1345,15 +1345,80 @@
   border-radius: 0 !important;
   min-height: 48vh;
 }
+.doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+  margin-left: -42px;
+  padding-left: 42px !important;
+}
 .doc-editing .dohc-tiptap-editor .tiptap {
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
   border-radius: 0 !important;
-  padding: 0 !important;
 }
 .doc-editing .dohc-tiptap-editor .ProseMirror:focus {
   outline: none;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror .is-empty::before {
+  color: var(--ink-faint);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  opacity: 0.58;
+  pointer-events: none;
+}
+
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+  display: inline-block;
+  height: 0;
+  position: relative;
+  user-select: none;
+  width: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  height: 22px;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 2px;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    opacity var(--t-fast);
+  width: 22px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus {
+  left: -42px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle {
+  cursor: grab;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  left: -20px;
+  letter-spacing: -1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:hover {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--ink-dim);
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node.ProseMirror-selectednode .dohc-block-gutter-btn {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .doc-editing .dohc-tiptap-editor .dohc-slash-menu {

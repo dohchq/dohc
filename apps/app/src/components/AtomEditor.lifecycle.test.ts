@@ -115,6 +115,18 @@ vi.mock('@tiptap/markdown', () => ({
   },
 }))
 
+vi.mock('@tiptap/extensions/placeholder', () => ({
+  Placeholder: {
+    configure: (config: unknown) => ({ name: 'placeholder', config }),
+  },
+}))
+
+vi.mock('@tiptap/extensions/trailing-node', () => ({
+  TrailingNode: {
+    configure: (config: unknown) => ({ name: 'trailing-node', config }),
+  },
+}))
+
 vi.mock('@tiptap/extension-collaboration', () => ({
   Collaboration: {
     configure: (config: unknown) => ({ name: 'collaboration', config }),
@@ -150,6 +162,9 @@ vi.mock('@tiptap/pm/state', () => ({
   },
   TextSelection: {
     near: () => ({}),
+  },
+  NodeSelection: {
+    create: () => ({}),
   },
 }))
 
@@ -391,6 +406,38 @@ describe('AtomEditor collaborative browser lifecycle', () => {
             (extension as { name?: string }).name === 'collaboration-caret',
         ),
     ).toBe(true)
+  })
+
+  it('configures Tiptap with Notion-style empty block affordances', async () => {
+    await mountAtomEditor({ collab: undefined })
+
+    const extensions = tiptapState.editors.at(-1)?.extensions ?? []
+    const placeholder = extensions.find(
+      (extension) => (extension as { name?: string }).name === 'placeholder',
+    ) as {
+      config?: {
+        includeChildren?: boolean
+        showOnlyCurrent?: boolean
+        placeholder?: (args: { node: { type: { name: string } } }) => string
+      }
+    }
+    const trailingNode = extensions.find(
+      (extension) => (extension as { name?: string }).name === 'trailing-node',
+    ) as { config?: { node?: string; notAfter?: string[] } }
+
+    expect(placeholder.config).toMatchObject({
+      includeChildren: true,
+      showOnlyCurrent: false,
+    })
+    expect(
+      placeholder.config?.placeholder?.({
+        node: { type: { name: 'paragraph' } },
+      }),
+    ).toBe("Type '/' for commands")
+    expect(trailingNode.config).toEqual({
+      node: 'paragraph',
+      notAfter: ['paragraph'],
+    })
   })
 
   it('mounts two collaborative editors into the same Hocuspocus document room', async () => {
