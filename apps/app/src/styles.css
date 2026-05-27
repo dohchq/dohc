@@ -1404,10 +1404,11 @@
 }
 .doc-editing .dohc-tiptap-editor .dohc-code-language-select {
   appearance: none;
-  background-color: transparent;
+  background-color: var(--color-surface);
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--ink-dim);
+  color-scheme: light;
   cursor: pointer;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1428,6 +1429,14 @@
     4px 4px,
     4px 4px;
   background-repeat: no-repeat;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option {
+  background-color: var(--color-surface);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option:checked {
+  background-color: var(--color-panel);
+  color: var(--ink-strong);
 }
 .doc-editing .dohc-tiptap-editor .dohc-code-language-select:focus {
   background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
@@ -1463,11 +1472,26 @@
   padding: 0 8px;
 }
 .doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:hover,
-.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:focus-visible,
-.doc-editing .dohc-tiptap-editor .dohc-code-language-select:hover {
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:focus-visible {
   background: color-mix(in srgb, var(--color-ink) 7%, transparent);
   border-color: var(--rule);
   color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:hover {
+  background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+[data-theme='dark'] .doc-editing .dohc-tiptap-editor .dohc-code-language-select {
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark'])
+    .doc-editing
+    .dohc-tiptap-editor
+    .dohc-code-language-select {
+    color-scheme: dark;
+  }
 }
 .doc-editing .dohc-tiptap-editor table {
   border-collapse: collapse;

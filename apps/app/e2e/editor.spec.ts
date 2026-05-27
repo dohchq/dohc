@@ -1,5 +1,46 @@
 import { expect, test } from '@playwright/test'
 
+type RgbColor = {
+  b: number
+  g: number
+  r: number
+}
+
+function parseRgbColor(value: string): RgbColor {
+  const match = value.match(
+    /^rgba?\(\s*([.\d]+)\s*,\s*([.\d]+)\s*,\s*([.\d]+)(?:\s*,\s*([.\d]+)\s*)?\)$/,
+  )
+  if (!match || match[4] === '0') {
+    throw new Error(`Expected an opaque rgb color, received "${value}"`)
+  }
+
+  return {
+    r: Number(match[1]),
+    g: Number(match[2]),
+    b: Number(match[3]),
+  }
+}
+
+function relativeLuminance({ b, g, r }: RgbColor): number {
+  const toLinear = (channel: number) => {
+    const normalized = channel / 255
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4
+  }
+
+  return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b)
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const foregroundLuminance = relativeLuminance(parseRgbColor(foreground))
+  const backgroundLuminance = relativeLuminance(parseRgbColor(background))
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance)
+  const darker = Math.min(foregroundLuminance, backgroundLuminance)
+
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
 test('playground editor is editable and keeps the Notion-style affordances', async ({
   page,
 }) => {
@@ -294,6 +335,36 @@ test('playground code blocks expose a language syntax dropdown', async ({
   await expect(toolbar.getByRole('button', { name: 'copy code' })).toBeVisible()
   await expect(languageSelect).toBeVisible()
   await expect(languageSelect).toContainText('TypeScript')
+
+  const languageSelectColors = await languageSelect.evaluate((node) => {
+    const selectStyle = getComputedStyle(node)
+    const option = (node as HTMLSelectElement).querySelector('option')
+    if (!option) {
+      throw new Error('Expected code language select to render menu options')
+    }
+
+    const optionStyle = getComputedStyle(option)
+
+    return {
+      optionBackground: optionStyle.backgroundColor,
+      optionColor: optionStyle.color,
+      selectBackground: selectStyle.backgroundColor,
+      selectColor: selectStyle.color,
+    }
+  })
+  expect(
+    contrastRatio(
+      languageSelectColors.selectColor,
+      languageSelectColors.selectBackground,
+    ),
+  ).toBeGreaterThanOrEqual(4.5)
+  expect(
+    contrastRatio(
+      languageSelectColors.optionColor,
+      languageSelectColors.optionBackground,
+    ),
+  ).toBeGreaterThanOrEqual(4.5)
+
   await languageSelect.selectOption('typescript')
 
   await expect(
