@@ -248,7 +248,7 @@ test('playground markdown shortcuts create visible lists and smooth headings', a
   await expect(bodyParagraph).toBeVisible()
 })
 
-test('playground code blocks expose an editable language field', async ({
+test('playground code blocks expose a language syntax dropdown', async ({
   page,
 }) => {
   await page.goto('/playground')
@@ -261,10 +261,10 @@ test('playground code blocks expose an editable language field', async ({
   await page.keyboard.type('/code')
   await page.getByRole('option', { name: /code block/i }).click()
 
-  const languageInput = page.getByRole('textbox', { name: 'code language' })
-  await expect(languageInput).toBeVisible()
-  await languageInput.fill('typescript')
-  await languageInput.press('Enter')
+  const languageSelect = page.getByRole('combobox', { name: 'code language' })
+  await expect(languageSelect).toBeVisible()
+  await expect(languageSelect).toContainText('TypeScript')
+  await languageSelect.selectOption('typescript')
 
   await expect(
     page.locator('.dohc-tiptap-editor pre code.language-typescript'),

@@ -1351,12 +1351,13 @@
   position: relative;
   z-index: 6;
 }
-.doc-editing .dohc-tiptap-editor .dohc-code-language-input {
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select {
   appearance: none;
   background: color-mix(in srgb, var(--color-page) 82%, var(--color-ink) 4%);
   border: 1px solid var(--rule);
   border-radius: 5px;
   color: var(--ink-dim);
+  cursor: pointer;
   font-family: var(--font-mono);
   font-size: 11px;
   height: 24px;
@@ -1364,18 +1365,35 @@
   max-width: 136px;
   min-width: 94px;
   outline: none;
-  padding: 0 8px;
+  padding: 0 23px 0 8px;
   pointer-events: auto;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
 }
-.doc-editing .dohc-tiptap-editor .dohc-code-language-input::placeholder {
-  color: var(--ink-faint);
-}
-.doc-editing .dohc-tiptap-editor .dohc-code-language-input:focus {
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:focus {
   background: var(--color-page);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
   border-color: var(--rule-strong);
   color: var(--ink);
 }
-.doc-editing .dohc-tiptap-editor .dohc-code-language-input:disabled {
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:disabled {
   cursor: default;
   opacity: 0.7;
 }

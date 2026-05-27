@@ -852,6 +852,24 @@ function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
 
 const codeLanguageKey = new PluginKey('dohc-code-language')
 
+const CODE_LANGUAGE_OPTIONS = [
+  { value: '', label: 'Plain text' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'tsx', label: 'TSX' },
+  { value: 'jsx', label: 'JSX' },
+  { value: 'python', label: 'Python' },
+  { value: 'bash', label: 'Shell' },
+  { value: 'json', label: 'JSON' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'sql', label: 'SQL' },
+  { value: 'yaml', label: 'YAML' },
+  { value: 'go', label: 'Go' },
+  { value: 'rust', label: 'Rust' },
+] as const
+
 function cleanCodeLanguage(value: string): string {
   return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? '').slice(
     0,
@@ -881,15 +899,24 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
           wrap.className = 'dohc-code-language-affordance'
           wrap.setAttribute('contenteditable', 'false')
 
-          const input = document.createElement('input')
-          input.type = 'text'
-          input.className = 'dohc-code-language-input'
-          input.setAttribute('aria-label', 'code language')
-          input.setAttribute('autocomplete', 'off')
-          input.setAttribute('spellcheck', 'false')
-          input.placeholder = 'language'
-          input.value = language
-          input.disabled = view.editable === false
+          const select = document.createElement('select')
+          select.className = 'dohc-code-language-select'
+          select.setAttribute('aria-label', 'code language')
+          select.disabled = view.editable === false
+
+          const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
+            (option) => option.value === language,
+          )
+          const options = hasKnownLanguage
+            ? CODE_LANGUAGE_OPTIONS
+            : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS]
+          for (const option of options) {
+            const el = document.createElement('option')
+            el.value = option.value
+            el.textContent = option.label
+            select.appendChild(el)
+          }
+          select.value = language
 
           const commit = () => {
             const blockPos = getPos()
@@ -897,11 +924,11 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
             const current = view.state.doc.nodeAt(blockPos)
             if (!current || !isCodeBlockNode(current)) return
 
-            const nextLanguage = cleanCodeLanguage(input.value)
+            const nextLanguage = cleanCodeLanguage(select.value)
             const currentLanguage = cleanCodeLanguage(
               String(current.attrs.language ?? ''),
             )
-            input.value = nextLanguage
+            select.value = nextLanguage
             if (nextLanguage === currentLanguage) return
 
             view.dispatch(
@@ -914,27 +941,21 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
             )
           }
 
-          input.addEventListener('mousedown', (event) =>
+          select.addEventListener('mousedown', (event) =>
             event.stopPropagation(),
           )
-          input.addEventListener('click', (event) => event.stopPropagation())
-          input.addEventListener('keydown', (event) => {
+          select.addEventListener('click', (event) => event.stopPropagation())
+          select.addEventListener('keydown', (event) => {
             event.stopPropagation()
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              commit()
-              view.focus()
-            }
             if (event.key === 'Escape') {
               event.preventDefault()
-              input.value = language
+              select.value = language
               view.focus()
             }
           })
-          input.addEventListener('change', commit)
-          input.addEventListener('blur', commit)
+          select.addEventListener('change', commit)
 
-          wrap.appendChild(input)
+          wrap.appendChild(select)
           return wrap
         },
         {
