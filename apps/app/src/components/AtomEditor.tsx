@@ -54,6 +54,12 @@ import {
   type WikilinkFile,
 } from './wikilinkPlugin'
 import { WikilinkPicker } from './WikilinkPicker'
+import {
+  FLOATING_MENU_MAX_HEIGHT,
+  FLOATING_MENU_VIEWPORT_MARGIN,
+  resolveFloatingMenuPosition,
+  type FloatingMenuPlacement,
+} from './floatingMenuPosition'
 import type { Id } from '../../convex/_generated/dataModel'
 import { dohcMarkdownExtensions } from '../editor-v2/dohc-markdown-extensions'
 import {
@@ -111,21 +117,13 @@ type SlashCommandState =
       x: number
       y: number
       maxHeight: number
-      placement: 'above' | 'below'
+      placement: FloatingMenuPlacement
     }
-type SlashCommandMenuPosition = Pick<
-  Extract<SlashCommandState, { open: true }>,
-  'x' | 'y' | 'maxHeight' | 'placement'
->
 
 const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
 const LOCAL_SYNC_FALLBACK_MS = 2500
 const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
 const REMOTE_SYNC_STALL_MS = 12000
-const SLASH_MENU_VIEWPORT_MARGIN = 12
-const SLASH_MENU_CURSOR_GAP = 6
-const SLASH_MENU_WIDTH = 320
-const SLASH_MENU_MAX_HEIGHT = 320
 const lowlight = createLowlight(common)
 const COLLABORATOR_COLORS = [
   '#1a73e8',
@@ -241,45 +239,6 @@ export function findSlashCommandMatch(
   const matchedText = match[0] ?? ''
   const slashOffset = match.index + matchedText.lastIndexOf('/')
   return { slashOffset, query: match[1]?.toLowerCase() ?? '' }
-}
-
-type SlashCommandMenuPositionInput = {
-  cursorRect: { left: number; top: number; bottom: number }
-  viewportWidth?: number
-  viewportHeight?: number
-  menuWidth?: number
-  menuMaxHeight?: number
-  margin?: number
-  gap?: number
-}
-
-export function resolveSlashCommandMenuPosition({
-  cursorRect,
-  viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth,
-  viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight,
-  menuWidth = SLASH_MENU_WIDTH,
-  menuMaxHeight = SLASH_MENU_MAX_HEIGHT,
-  margin = SLASH_MENU_VIEWPORT_MARGIN,
-  gap = SLASH_MENU_CURSOR_GAP,
-}: SlashCommandMenuPositionInput): SlashCommandMenuPosition {
-  const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin)
-  const x = Math.min(Math.max(cursorRect.left, margin), maxLeft)
-  const availableBelow = Math.max(
-    0,
-    viewportHeight - cursorRect.bottom - gap - margin,
-  )
-  const availableAbove = Math.max(0, cursorRect.top - gap - margin)
-  const belowHeight = Math.min(menuMaxHeight, availableBelow)
-  const aboveHeight = Math.min(menuMaxHeight, availableAbove)
-  const placement =
-    belowHeight >= menuMaxHeight || belowHeight >= aboveHeight ? 'below' : 'above'
-  const maxHeight = placement === 'above' ? aboveHeight : belowHeight
-  const y =
-    placement === 'above'
-      ? Math.max(margin, cursorRect.top - gap - maxHeight)
-      : Math.min(cursorRect.bottom + gap, viewportHeight - margin)
-
-  return { x, y, maxHeight, placement }
 }
 
 export type AtomEditorHandle = {
@@ -877,17 +836,17 @@ function readSlashCommandState(
 
   let x = 0
   let y = 0
-  let maxHeight = SLASH_MENU_MAX_HEIGHT
-  let placement: 'above' | 'below' = 'below'
+  let maxHeight = FLOATING_MENU_MAX_HEIGHT
+  let placement: FloatingMenuPlacement = 'below'
   try {
     const coords = view.coordsAtPos(from)
-    const position = resolveSlashCommandMenuPosition({ cursorRect: coords })
+    const position = resolveFloatingMenuPosition({ cursorRect: coords })
     x = position.x
     y = position.y
     maxHeight = position.maxHeight
     placement = position.placement
   } catch {
-    x = SLASH_MENU_VIEWPORT_MARGIN
+    x = FLOATING_MENU_VIEWPORT_MARGIN
     y = 28
   }
 
@@ -2279,11 +2238,11 @@ function TiptapAtomEditor({
 
       let x = 0
       let y = 28
-      let maxHeight = SLASH_MENU_MAX_HEIGHT
-      let placement: 'above' | 'below' = 'below'
+      let maxHeight = FLOATING_MENU_MAX_HEIGHT
+      let placement: FloatingMenuPlacement = 'below'
       try {
         const coords = view.coordsAtPos(pos)
-        const position = resolveSlashCommandMenuPosition({ cursorRect: coords })
+        const position = resolveFloatingMenuPosition({ cursorRect: coords })
         x = position.x
         y = position.y
         maxHeight = position.maxHeight

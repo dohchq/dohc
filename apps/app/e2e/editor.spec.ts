@@ -100,6 +100,37 @@ test('playground slash menu stays visible at the viewport bottom', async ({
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(viewport.height)
 })
 
+test('playground wikilink picker stays visible at the viewport bottom', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/playground')
+
+  await page
+    .getByText('A final paragraph gives slash commands a plain-text place to start.')
+    .click()
+  await page.keyboard.press('End')
+  for (let index = 0; index < 18; index += 1) {
+    await page.keyboard.press('Enter')
+    await page.keyboard.type(`link picker filler ${index}`)
+  }
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('[[')
+
+  const picker = page.locator('.dohc-wikilink-picker')
+  await expect(picker).toBeVisible()
+  await expect(picker).toHaveAttribute('data-placement', 'above')
+
+  const pickerBox = await picker.boundingBox()
+  const viewport = page.viewportSize()
+  if (!pickerBox || !viewport) {
+    throw new Error('Expected wikilink picker and viewport dimensions')
+  }
+
+  expect(pickerBox.y).toBeGreaterThanOrEqual(0)
+  expect(pickerBox.y + pickerBox.height).toBeLessThanOrEqual(viewport.height)
+})
+
 test('playground block controls stay in a stable Notion-like gutter', async ({
   page,
 }) => {

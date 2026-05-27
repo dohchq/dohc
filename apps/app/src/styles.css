@@ -628,15 +628,15 @@
 }
 
 /* D4.8b — autocomplete picker (the popover that appears when the
- * user types `[[`). Positioned absolutely just below the cursor by
- * the React component. */
+ * user types `[[`). Positioned by viewport-aware floating menu math
+ * in the React component. */
 .dohc-wikilink-picker {
   background: var(--color-elevated);
   border: 1px solid var(--color-rule);
   border-radius: 6px;
+  box-sizing: border-box;
   padding: 4px 0;
-  min-width: 240px;
-  max-width: 360px;
+  width: min(360px, calc(100vw - 24px));
   max-height: 260px;
   overflow-y: auto;
   box-shadow: var(--shadow-md);

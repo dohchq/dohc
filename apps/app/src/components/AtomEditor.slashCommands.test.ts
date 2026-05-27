@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   filterSlashCommands,
   findSlashCommandMatch,
-  resolveSlashCommandMenuPosition,
 } from './AtomEditor'
+import { resolveFloatingMenuPosition } from './floatingMenuPosition'
 
 describe('AtomEditor slash commands', () => {
   it('restores the core Notion-style command set', () => {
@@ -46,7 +46,7 @@ describe('AtomEditor slash commands', () => {
   })
 
   it('positions the slash menu above the cursor near the viewport bottom', () => {
-    const position = resolveSlashCommandMenuPosition({
+    const position = resolveFloatingMenuPosition({
       cursorRect: { left: 520, top: 728, bottom: 752 },
       viewportWidth: 1280,
       viewportHeight: 800,
@@ -59,7 +59,7 @@ describe('AtomEditor slash commands', () => {
   })
 
   it('keeps the slash menu inside the horizontal viewport', () => {
-    const position = resolveSlashCommandMenuPosition({
+    const position = resolveFloatingMenuPosition({
       cursorRect: { left: 1260, top: 120, bottom: 144 },
       viewportWidth: 1280,
       viewportHeight: 900,

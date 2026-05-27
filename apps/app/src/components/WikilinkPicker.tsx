@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { FileText } from 'lucide-react'
 import { TextSelection } from '@tiptap/pm/state'
 import type { WikilinkFile } from './wikilinkPlugin'
+import { resolveFloatingMenuPosition } from './floatingMenuPosition'
 
 // D4.8b — autocomplete popover for the `[[` trigger.
 //
@@ -13,9 +14,9 @@ import type { WikilinkFile } from './wikilinkPlugin'
 // nav, and dispatches a transaction back into the editor on
 // selection.
 //
-// Positioning: relies on the editor view's `coordsAtPos` to place
-// the popover just below the cursor. The view is passed in via
-// ref; the popover re-reads coords on every state change.
+// Positioning: relies on the editor view's `coordsAtPos` and shared
+// viewport-aware floating menu math. The view is passed in via ref;
+// the popover re-reads coords on every state change.
 
 export type WikilinkPickerState =
   | { open: false }
@@ -165,16 +166,26 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
     : null
 
   if (!state.open || !coords) return null
+  const position = resolveFloatingMenuPosition({
+    cursorRect: coords,
+    menuWidth: 360,
+    menuMaxHeight: 260,
+    gap: 4,
+  })
 
   return (
     <div
       className="dohc-wikilink-picker"
+      data-placement={position.placement}
       style={{
         position: 'fixed',
-        left: coords.left,
-        top: coords.bottom + 4,
+        left: position.x,
+        top: position.y,
+        maxHeight: position.maxHeight,
         zIndex: 60,
       }}
+      role="listbox"
+      aria-label="page links"
       // Prevent click-through from stealing focus from the editor.
       onMouseDown={(e) => e.preventDefault()}
     >
@@ -196,6 +207,8 @@ export function WikilinkPicker({ state, files, view, onDismiss }: Props) {
                   itemRefs.current[i] = el
                 }}
                 type="button"
+                role="option"
+                aria-selected={i === activeIdx}
                 className={
                   'dohc-wikilink-picker__item' +
                   (i === activeIdx ? ' is-active' : '')
