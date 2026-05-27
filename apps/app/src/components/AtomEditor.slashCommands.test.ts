@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   filterSlashCommands,
   findSlashCommandMatch,
+  resolveSlashCommandMenuPosition,
 } from './AtomEditor'
 
 describe('AtomEditor slash commands', () => {
@@ -42,5 +43,29 @@ describe('AtomEditor slash commands', () => {
       query: 'link',
     })
     expect(findSlashCommandMatch('hello /link now')).toBeNull()
+  })
+
+  it('positions the slash menu above the cursor near the viewport bottom', () => {
+    const position = resolveSlashCommandMenuPosition({
+      cursorRect: { left: 520, top: 728, bottom: 752 },
+      viewportWidth: 1280,
+      viewportHeight: 800,
+    })
+
+    expect(position.placement).toBe('above')
+    expect(position.y).toBeGreaterThanOrEqual(12)
+    expect(position.y + position.maxHeight).toBeLessThanOrEqual(722)
+    expect(position.maxHeight).toBeLessThanOrEqual(320)
+  })
+
+  it('keeps the slash menu inside the horizontal viewport', () => {
+    const position = resolveSlashCommandMenuPosition({
+      cursorRect: { left: 1260, top: 120, bottom: 144 },
+      viewportWidth: 1280,
+      viewportHeight: 900,
+    })
+
+    expect(position.x).toBeLessThanOrEqual(948)
+    expect(position.x).toBeGreaterThanOrEqual(12)
   })
 })

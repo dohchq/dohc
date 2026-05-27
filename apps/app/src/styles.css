@@ -1887,7 +1887,7 @@
 }
 
 .doc-editing .dohc-tiptap-editor .dohc-slash-menu {
-  position: absolute;
+  position: fixed;
   z-index: 30;
   width: min(320px, calc(100vw - 32px));
   max-height: 320px;

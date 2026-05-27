@@ -69,6 +69,37 @@ test('playground editor is editable and keeps the Notion-style affordances', asy
   await expect(page.locator('.dohc-tiptap-editor table')).toBeVisible()
 })
 
+test('playground slash menu stays visible at the viewport bottom', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/playground')
+
+  await page
+    .getByText('A final paragraph gives slash commands a plain-text place to start.')
+    .click()
+  await page.keyboard.press('End')
+  for (let index = 0; index < 18; index += 1) {
+    await page.keyboard.press('Enter')
+    await page.keyboard.type(`bottom filler ${index}`)
+  }
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('/')
+
+  const menu = page.getByRole('listbox', { name: 'slash commands' })
+  await expect(menu).toBeVisible()
+  await expect(menu).toHaveAttribute('data-placement', 'above')
+
+  const menuBox = await menu.boundingBox()
+  const viewport = page.viewportSize()
+  if (!menuBox || !viewport) {
+    throw new Error('Expected slash menu and viewport dimensions')
+  }
+
+  expect(menuBox.y).toBeGreaterThanOrEqual(0)
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(viewport.height)
+})
+
 test('playground block controls stay in a stable Notion-like gutter', async ({
   page,
 }) => {

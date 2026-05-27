@@ -110,12 +110,22 @@ type SlashCommandState =
       selected: number
       x: number
       y: number
+      maxHeight: number
+      placement: 'above' | 'below'
     }
+type SlashCommandMenuPosition = Pick<
+  Extract<SlashCommandState, { open: true }>,
+  'x' | 'y' | 'maxHeight' | 'placement'
+>
 
 const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
 const LOCAL_SYNC_FALLBACK_MS = 2500
 const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
 const REMOTE_SYNC_STALL_MS = 12000
+const SLASH_MENU_VIEWPORT_MARGIN = 12
+const SLASH_MENU_CURSOR_GAP = 6
+const SLASH_MENU_WIDTH = 320
+const SLASH_MENU_MAX_HEIGHT = 320
 const lowlight = createLowlight(common)
 const COLLABORATOR_COLORS = [
   '#1a73e8',
@@ -231,6 +241,45 @@ export function findSlashCommandMatch(
   const matchedText = match[0] ?? ''
   const slashOffset = match.index + matchedText.lastIndexOf('/')
   return { slashOffset, query: match[1]?.toLowerCase() ?? '' }
+}
+
+type SlashCommandMenuPositionInput = {
+  cursorRect: { left: number; top: number; bottom: number }
+  viewportWidth?: number
+  viewportHeight?: number
+  menuWidth?: number
+  menuMaxHeight?: number
+  margin?: number
+  gap?: number
+}
+
+export function resolveSlashCommandMenuPosition({
+  cursorRect,
+  viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth,
+  viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight,
+  menuWidth = SLASH_MENU_WIDTH,
+  menuMaxHeight = SLASH_MENU_MAX_HEIGHT,
+  margin = SLASH_MENU_VIEWPORT_MARGIN,
+  gap = SLASH_MENU_CURSOR_GAP,
+}: SlashCommandMenuPositionInput): SlashCommandMenuPosition {
+  const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin)
+  const x = Math.min(Math.max(cursorRect.left, margin), maxLeft)
+  const availableBelow = Math.max(
+    0,
+    viewportHeight - cursorRect.bottom - gap - margin,
+  )
+  const availableAbove = Math.max(0, cursorRect.top - gap - margin)
+  const belowHeight = Math.min(menuMaxHeight, availableBelow)
+  const aboveHeight = Math.min(menuMaxHeight, availableAbove)
+  const placement =
+    belowHeight >= menuMaxHeight || belowHeight >= aboveHeight ? 'below' : 'above'
+  const maxHeight = placement === 'above' ? aboveHeight : belowHeight
+  const y =
+    placement === 'above'
+      ? Math.max(margin, cursorRect.top - gap - maxHeight)
+      : Math.min(cursorRect.bottom + gap, viewportHeight - margin)
+
+  return { x, y, maxHeight, placement }
 }
 
 export type AtomEditorHandle = {
@@ -575,12 +624,10 @@ const slashCommandKey = new PluginKey('dohc-slash-command')
 const blockControlsKey = new PluginKey('dohc-block-controls')
 
 function makeSlashCommandPlugin({
-  wrapperRef,
   stateRef,
   setState,
   runCommandRef,
 }: {
-  wrapperRef: React.RefObject<HTMLDivElement | null>
   stateRef: React.RefObject<SlashCommandState>
   setState: React.Dispatch<React.SetStateAction<SlashCommandState>>
   runCommandRef: React.RefObject<(id: SlashCommandId) => void>
@@ -588,11 +635,7 @@ function makeSlashCommandPlugin({
   const close = () => setState(CLOSED_SLASH_COMMAND_STATE)
 
   const refresh = (view: EditorView) => {
-    const next = readSlashCommandState(
-      view,
-      stateRef.current,
-      wrapperRef.current,
-    )
+    const next = readSlashCommandState(view, stateRef.current)
     setState(next)
   }
 
@@ -806,7 +849,6 @@ function isEditableEditor(editor: Editor | null | undefined): boolean {
 function readSlashCommandState(
   view: EditorView,
   previous: SlashCommandState,
-  wrapper: HTMLDivElement | null,
 ): SlashCommandState {
   if ((view as { editable?: boolean }).editable === false) {
     return CLOSED_SLASH_COMMAND_STATE
@@ -835,13 +877,17 @@ function readSlashCommandState(
 
   let x = 0
   let y = 0
+  let maxHeight = SLASH_MENU_MAX_HEIGHT
+  let placement: 'above' | 'below' = 'below'
   try {
     const coords = view.coordsAtPos(from)
-    const wrapperRect = wrapper?.getBoundingClientRect()
-    x = Math.max(0, coords.left - (wrapperRect?.left ?? 0))
-    y = Math.max(0, coords.bottom - (wrapperRect?.top ?? 0) + 6)
+    const position = resolveSlashCommandMenuPosition({ cursorRect: coords })
+    x = position.x
+    y = position.y
+    maxHeight = position.maxHeight
+    placement = position.placement
   } catch {
-    x = 0
+    x = SLASH_MENU_VIEWPORT_MARGIN
     y = 28
   }
 
@@ -853,6 +899,8 @@ function readSlashCommandState(
     selected,
     x,
     y,
+    maxHeight,
+    placement,
   }
 }
 
@@ -1615,7 +1663,8 @@ function SlashCommandMenu({
   return (
     <div
       className="dohc-slash-menu"
-      style={{ left: state.x, top: state.y }}
+      data-placement={state.placement}
+      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight }}
       role="listbox"
       aria-label="slash commands"
       onMouseDown={(event) => event.preventDefault()}
@@ -2095,7 +2144,6 @@ function TiptapAtomEditor({
           const extra = [
             makeAsciiBlockPlugin(onAsciiClickRef),
             makeSlashCommandPlugin({
-              wrapperRef: editorWrapRef,
               stateRef: slashStateRef,
               setState: setSlashState,
               runCommandRef: slashCommandRunnerRef,
@@ -2231,11 +2279,15 @@ function TiptapAtomEditor({
 
       let x = 0
       let y = 28
+      let maxHeight = SLASH_MENU_MAX_HEIGHT
+      let placement: 'above' | 'below' = 'below'
       try {
         const coords = view.coordsAtPos(pos)
-        const wrapperRect = editorWrapRef.current?.getBoundingClientRect()
-        x = Math.max(0, coords.left - (wrapperRect?.left ?? 0))
-        y = Math.max(0, coords.bottom - (wrapperRect?.top ?? 0) + 6)
+        const position = resolveSlashCommandMenuPosition({ cursorRect: coords })
+        x = position.x
+        y = position.y
+        maxHeight = position.maxHeight
+        placement = position.placement
       } catch {
         /* jsdom and offscreen editors cannot always resolve coordinates */
       }
@@ -2248,6 +2300,8 @@ function TiptapAtomEditor({
         selected: 0,
         x,
         y,
+        maxHeight,
+        placement,
       })
     },
     [editor],
