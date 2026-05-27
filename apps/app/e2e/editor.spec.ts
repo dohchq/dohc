@@ -248,6 +248,29 @@ test('playground markdown shortcuts create visible lists and smooth headings', a
   await expect(bodyParagraph).toBeVisible()
 })
 
+test('playground code blocks expose an editable language field', async ({
+  page,
+}) => {
+  await page.goto('/playground')
+
+  await page
+    .getByText('A final paragraph gives slash commands a plain-text place to start.')
+    .click()
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('/code')
+  await page.getByRole('option', { name: /code block/i }).click()
+
+  const languageInput = page.getByRole('textbox', { name: 'code language' })
+  await expect(languageInput).toBeVisible()
+  await languageInput.fill('typescript')
+  await languageInput.press('Enter')
+
+  await expect(
+    page.locator('.dohc-tiptap-editor pre code.language-typescript'),
+  ).toBeVisible()
+})
+
 test('playground query blocks do not call authenticated live resolvers', async ({
   page,
 }) => {

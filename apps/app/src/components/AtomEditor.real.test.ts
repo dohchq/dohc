@@ -2,7 +2,7 @@
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AtomEditor } from './AtomEditor'
+import { AtomEditor, type AtomEditorHandle } from './AtomEditor'
 import { encodeAsciiSketchContent } from '../lib/asciiSketchMetadata'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -174,5 +174,30 @@ describe('AtomEditor real Tiptap mount', () => {
     expect(controls.length).toBeGreaterThanOrEqual(2)
     expect(container.querySelector('.dohc-block-plus')).not.toBeNull()
     expect(container.querySelector('.dohc-block-handle')).not.toBeNull()
+  })
+
+  it('inserts a writable paragraph after a new ascii sketch block', async () => {
+    const ref = React.createRef<AtomEditorHandle>()
+
+    act(() => {
+      root.render(
+        React.createElement(AtomEditor, {
+          ref,
+          value: '',
+          onChange: () => {},
+          knownFiles: [],
+        }),
+      )
+    })
+
+    await flush()
+
+    act(() => {
+      ref.current?.insertCodeBlock('ascii', '+---+\n|   |\n+---+')
+    })
+
+    const sketch = container.querySelector('.ascii-sketch-block')
+    expect(sketch).not.toBeNull()
+    expect(sketch?.nextElementSibling?.tagName).toBe('P')
   })
 })

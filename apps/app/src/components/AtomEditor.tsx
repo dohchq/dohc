@@ -339,10 +339,21 @@ function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+type DocDescendantNode = {
+  type: { name: string }
+  attrs: Record<string, unknown>
+  textContent: string
+  nodeSize: number
+}
+
 type DocLike = {
   descendants: (
-    cb: (node: { type: { name: string }; attrs: Record<string, unknown>; textContent: string; nodeSize: number }, pos: number) => boolean | void,
+    cb: (node: DocDescendantNode, pos: number) => boolean | void,
   ) => void
+}
+
+function isCodeBlockNode(node: { type: { name: string } }): boolean {
+  return node.type.name === 'code_block' || node.type.name === 'codeBlock'
 }
 
 function buildAsciiDecorations(
@@ -353,10 +364,7 @@ function buildAsciiDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
-    if (
-      (node.type.name === 'code_block' || node.type.name === 'codeBlock') &&
-      isAsciiSketchLanguage(node.attrs.language)
-    ) {
+    if (isCodeBlockNode(node) && isAsciiSketchLanguage(node.attrs.language)) {
       const hasMetadata = hasAsciiSketchContentMetadata(node.textContent)
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
@@ -761,8 +769,7 @@ function buildQueryDecorations(
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
     const isCodeQueryBlock =
-      (node.type.name === 'code_block' || node.type.name === 'codeBlock') &&
-      isQueryFenceLanguage(node.attrs.language)
+      isCodeBlockNode(node) && isQueryFenceLanguage(node.attrs.language)
     const isDohcQueryBlock = node.type.name === 'queryBlock'
     if (isCodeQueryBlock || isDohcQueryBlock) {
       const src = node.textContent.trim()
@@ -838,6 +845,126 @@ function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
     props: {
       decorations(state) {
         return queryBlockKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+const codeLanguageKey = new PluginKey('dohc-code-language')
+
+function cleanCodeLanguage(value: string): string {
+  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? '').slice(
+    0,
+    48,
+  )
+}
+
+function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
+  const decorations: Decoration[] = []
+
+  ;(doc as DocLike).descendants((node, pos) => {
+    if (!isCodeBlockNode(node)) return
+    if (isAsciiSketchLanguage(node.attrs.language)) return
+    if (isQueryFenceLanguage(node.attrs.language)) return
+
+    const language = cleanCodeLanguage(String(node.attrs.language ?? ''))
+    decorations.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        class: 'dohc-code-block',
+      }),
+    )
+    decorations.push(
+      Decoration.widget(
+        pos,
+        (view, getPos) => {
+          const wrap = document.createElement('div')
+          wrap.className = 'dohc-code-language-affordance'
+          wrap.setAttribute('contenteditable', 'false')
+
+          const input = document.createElement('input')
+          input.type = 'text'
+          input.className = 'dohc-code-language-input'
+          input.setAttribute('aria-label', 'code language')
+          input.setAttribute('autocomplete', 'off')
+          input.setAttribute('spellcheck', 'false')
+          input.placeholder = 'language'
+          input.value = language
+          input.disabled = view.editable === false
+
+          const commit = () => {
+            const blockPos = getPos()
+            if (blockPos === undefined) return
+            const current = view.state.doc.nodeAt(blockPos)
+            if (!current || !isCodeBlockNode(current)) return
+
+            const nextLanguage = cleanCodeLanguage(input.value)
+            const currentLanguage = cleanCodeLanguage(
+              String(current.attrs.language ?? ''),
+            )
+            input.value = nextLanguage
+            if (nextLanguage === currentLanguage) return
+
+            view.dispatch(
+              view.state.tr
+                .setNodeMarkup(blockPos, undefined, {
+                  ...current.attrs,
+                  language: nextLanguage,
+                })
+                .scrollIntoView(),
+            )
+          }
+
+          input.addEventListener('mousedown', (event) =>
+            event.stopPropagation(),
+          )
+          input.addEventListener('click', (event) => event.stopPropagation())
+          input.addEventListener('keydown', (event) => {
+            event.stopPropagation()
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit()
+              view.focus()
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              input.value = language
+              view.focus()
+            }
+          })
+          input.addEventListener('change', commit)
+          input.addEventListener('blur', commit)
+
+          wrap.appendChild(input)
+          return wrap
+        },
+        {
+          side: -1,
+          key: `code-lang-${pos}-${language}`,
+          ignoreSelection: true,
+          stopEvent: () => true,
+        },
+      ),
+    )
+  })
+
+  return DecorationSet.create(doc as never, decorations)
+}
+
+function makeCodeLanguagePlugin() {
+  return new Plugin({
+    key: codeLanguageKey,
+    state: {
+      init(_, instance) {
+        return buildCodeLanguageDecorations(instance.doc)
+      },
+      apply(tr, old) {
+        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
+        return buildCodeLanguageDecorations(tr.doc)
+      },
+    },
+    props: {
+      decorations(state) {
+        return codeLanguageKey.getState(state) as DecorationSet | undefined
       },
     },
   })
@@ -1649,6 +1776,7 @@ function TiptapAtomEditor({
             wikilinkClickPlugin,
             atomPillClickPlugin,
             makeQueryBlockPlugin(queryResultsRef),
+            makeCodeLanguagePlugin(),
           ]
           if (inlineAtomsEnabled()) {
             extra.push(
@@ -2193,12 +2321,34 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
         const { state } = view
         const codeBlockType =
           state.schema.nodes.codeBlock ?? state.schema.nodes.code_block
+        const paragraphType = state.schema.nodes.paragraph
         if (!codeBlockType) return
         const textNode = content ? state.schema.text(content) : null
         const node = codeBlockType.create(
           { language },
           textNode ? [textNode] : undefined,
         )
+
+        if (
+          paragraphType &&
+          isAsciiSketchLanguage(language) &&
+          state.selection.empty &&
+          state.selection.$from.parent.isTextblock &&
+          state.selection.$from.parent.textContent.trim() === ''
+        ) {
+          const blockStart = state.selection.$from.before()
+          const blockEnd = state.selection.$from.after()
+          const afterSketchPos = blockStart + node.nodeSize
+          let tr = state.tr.replaceWith(blockStart, blockEnd, node)
+          tr = tr.insert(afterSketchPos, paragraphType.create())
+          tr = tr
+            .setSelection(TextSelection.create(tr.doc, afterSketchPos + 1))
+            .scrollIntoView()
+          view.dispatch(tr)
+          view.focus()
+          return
+        }
+
         const tr = state.tr.replaceSelectionWith(node).scrollIntoView()
         view.dispatch(tr)
         view.focus()
