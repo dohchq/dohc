@@ -1815,6 +1815,10 @@ function TiptapAtomEditor({
       awareness.off('change', updatePresence)
     }
   }, [awareness, collaborationEnabled, ydoc])
+  const remotePresenceUsers = useMemo(
+    () => presenceUsers.filter((user) => !user.isLocal),
+    [presenceUsers],
+  )
   useEffect(() => {
     fetchTokenRef.current = fetchCollabToken
   }, [fetchCollabToken])
@@ -2449,12 +2453,12 @@ function TiptapAtomEditor({
         <div className="dohc-editor-presence" role="status" aria-live="polite">
           <span className="dohc-editor-presence-dot" aria-hidden="true" />
           <span className="dohc-editor-presence-text">Synced</span>
-          {presenceUsers.length > 0 && (
+          {remotePresenceUsers.length > 0 && (
             <div
               className="dohc-collab-avatars"
               aria-label="Collaborators in this document"
             >
-              {presenceUsers.slice(0, 5).map((user) => (
+              {remotePresenceUsers.slice(0, 5).map((user) => (
                 <span
                   key={user.clientId}
                   className={`dohc-collab-avatar${
@@ -2467,9 +2471,9 @@ function TiptapAtomEditor({
                   {user.initials}
                 </span>
               ))}
-              {presenceUsers.length > 5 && (
+              {remotePresenceUsers.length > 5 && (
                 <span className="dohc-collab-avatar is-count">
-                  +{presenceUsers.length - 5}
+                  +{remotePresenceUsers.length - 5}
                 </span>
               )}
             </div>

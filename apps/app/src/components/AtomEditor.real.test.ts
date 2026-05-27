@@ -140,7 +140,7 @@ describe('AtomEditor real Tiptap mount', () => {
     expect(container.textContent).toContain('tiptap')
   })
 
-  it('renders collaborative presence chrome for synced documents', async () => {
+  it('renders synced presence without a local-only collaborator avatar', async () => {
     act(() => {
       root.render(
         React.createElement(AtomEditor, {
@@ -160,7 +160,10 @@ describe('AtomEditor real Tiptap mount', () => {
     await flush()
 
     expect(container.querySelector('.dohc-editor-presence')).not.toBeNull()
-    expect(container.querySelector('.dohc-collab-avatar')?.textContent).toBe('I')
+    expect(container.querySelector('.dohc-editor-presence')?.textContent).toContain(
+      'Synced',
+    )
+    expect(container.querySelector('.dohc-collab-avatar')).toBeNull()
   })
 
   it('marks ascii sketch metadata so it can render as natural page content', () => {
