@@ -365,6 +365,7 @@ type DocLike = {
   descendants: (
     cb: (node: DocDescendantNode, pos: number) => boolean | void,
   ) => void
+  nodeAt: (pos: number) => DocDescendantNode | null
 }
 
 function isCodeBlockNode(node: { type: { name: string } }): boolean {
@@ -1194,37 +1195,40 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
         },
       ),
     )
-    decorations.push(
-      Decoration.widget(
-        pos + node.nodeSize,
-        (view) => {
-          const wrap = document.createElement('div')
-          wrap.className = 'dohc-code-block-continuation'
-          wrap.setAttribute('contenteditable', 'false')
+    const nextNode = (doc as DocLike).nodeAt(pos + node.nodeSize)
+    if (!nextNode || !isCodeBlockNode(nextNode)) {
+      decorations.push(
+        Decoration.widget(
+          pos + node.nodeSize,
+          (view) => {
+            const wrap = document.createElement('div')
+            wrap.className = 'dohc-code-block-continuation'
+            wrap.setAttribute('contenteditable', 'false')
 
-          const button = document.createElement('button')
-          button.type = 'button'
-          button.className = 'dohc-code-block-continue-btn'
-          button.setAttribute('aria-label', 'add paragraph below code block')
-          button.disabled = view.editable === false
-          button.textContent = '+'
-          button.addEventListener('mousedown', stopEditorMouseEvent)
-          button.addEventListener('click', (event) => {
-            stopEditorMouseEvent(event)
-            insertParagraphAfterBlock(view, pos)
-          })
+            const button = document.createElement('button')
+            button.type = 'button'
+            button.className = 'dohc-code-block-continue-btn'
+            button.setAttribute('aria-label', 'add paragraph below code block')
+            button.disabled = view.editable === false
+            button.textContent = '+'
+            button.addEventListener('mousedown', stopEditorMouseEvent)
+            button.addEventListener('click', (event) => {
+              stopEditorMouseEvent(event)
+              insertParagraphAfterBlock(view, pos)
+            })
 
-          wrap.append(button)
-          return wrap
-        },
-        {
-          side: 1,
-          key: `code-continue-${pos}`,
-          ignoreSelection: true,
-          stopEvent: () => true,
-        },
-      ),
-    )
+            wrap.append(button)
+            return wrap
+          },
+          {
+            side: 1,
+            key: `code-continue-${pos}`,
+            ignoreSelection: true,
+            stopEvent: () => true,
+          },
+        ),
+      )
+    }
   })
 
   return DecorationSet.create(doc as never, decorations)

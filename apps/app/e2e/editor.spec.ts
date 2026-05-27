@@ -416,6 +416,51 @@ test('playground code blocks expose a language syntax dropdown', async ({
   expect(String(continuationPosition.previousClass)).toContain('dohc-code-block')
 })
 
+test('playground adjacent code blocks keep clean block chrome', async ({
+  page,
+}) => {
+  await page.goto('/playground')
+
+  await page
+    .getByText('A final paragraph gives slash commands a plain-text place to start.')
+    .click()
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('/code')
+  await page.getByRole('option', { name: /code block/i }).click()
+
+  await page
+    .getByRole('button', { name: 'add paragraph below code block' })
+    .last()
+    .click()
+  await page.keyboard.type('/code')
+  await page.getByRole('option', { name: /code block/i }).click()
+
+  const codeBlocks = page.locator('.dohc-tiptap-editor pre.dohc-code-block')
+  await expect(codeBlocks).toHaveCount(2)
+  await expect(
+    page.getByRole('button', { name: 'add paragraph below code block' }),
+  ).toHaveCount(1)
+
+  const secondToolbarLayout = await page
+    .locator('.dohc-code-block-toolbar')
+    .nth(1)
+    .evaluate((toolbar) => {
+      const previous = toolbar.previousElementSibling
+      const toolbarBox = toolbar.getBoundingClientRect()
+      const previousBox = previous?.getBoundingClientRect()
+      return {
+        gap: previousBox ? toolbarBox.top - previousBox.bottom : null,
+        previousClass: previous?.className,
+        previousTag: previous?.tagName,
+      }
+    })
+  expect(secondToolbarLayout.previousTag).toBe('PRE')
+  expect(String(secondToolbarLayout.previousClass)).toContain('dohc-code-block')
+  expect(secondToolbarLayout.gap).not.toBeNull()
+  expect(secondToolbarLayout.gap ?? 0).toBeLessThanOrEqual(18)
+})
+
 test('playground query blocks do not call authenticated live resolvers', async ({
   page,
 }) => {

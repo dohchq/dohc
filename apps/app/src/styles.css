@@ -1471,6 +1471,9 @@
   margin: 0 0 0.85em;
   padding: 12px 14px 13px;
 }
+.doc-editing .dohc-tiptap-editor pre.dohc-code-block + .dohc-code-block-toolbar {
+  margin-top: 0.45em;
+}
 .doc-editing .dohc-tiptap-editor .dohc-code-block-toolbar {
   align-items: center;
   display: flex;
