@@ -28,6 +28,122 @@ test('playground editor is editable and keeps the Notion-style affordances', asy
   await expect(page.locator('.dohc-tiptap-editor table')).toBeVisible()
 })
 
+test('playground block controls stay in a stable Notion-like gutter', async ({
+  page,
+}) => {
+  async function firstLineControlOffset(
+    block: ReturnType<typeof page.locator>,
+    control: ReturnType<typeof page.locator>,
+  ) {
+    const box = await block.boundingBox()
+    const controlBox = await control.boundingBox()
+    const metrics = await block.evaluate((node) => {
+      const lineSource = node.querySelector('code') ?? node
+      const blockRect = node.getBoundingClientRect()
+      const lineRect = lineSource.getBoundingClientRect()
+      const style = getComputedStyle(lineSource)
+      return {
+        firstLineTop:
+          lineRect.top -
+          blockRect.top +
+          Number.parseFloat(style.paddingTop || '0'),
+        lineHeight: Number.parseFloat(style.lineHeight),
+      }
+    })
+    if (!box || !controlBox) {
+      throw new Error('Expected block controls to have layout boxes')
+    }
+
+    return Math.abs(
+      controlBox.y +
+        controlBox.height / 2 -
+        (box.y + metrics.firstLineTop + metrics.lineHeight / 2),
+    )
+  }
+
+  await page.goto('/playground')
+
+  const paragraph = page
+    .locator('.dohc-block-node')
+    .filter({ hasText: 'This is editable text in the page body.' })
+    .first()
+  const sketch = page.locator('.ascii-sketch-block').first()
+  await expect(paragraph).toBeVisible()
+  await expect(sketch).toBeVisible()
+
+  const paragraphPlus = paragraph.getByRole('button', { name: 'insert block' })
+  const paragraphHandle = paragraph.getByRole('button', {
+    name: 'select block',
+  })
+  const sketchPlus = sketch.getByRole('button', { name: 'insert block' })
+
+  await paragraph.hover()
+  await expect(paragraphPlus).toBeVisible()
+  await expect(paragraphHandle).toBeVisible()
+  await expect(paragraphPlus).toHaveCSS('opacity', '1')
+  await expect(paragraphHandle).toHaveCSS('opacity', '1')
+
+  const paragraphBox = await paragraph.boundingBox()
+  const paragraphPlusBox = await paragraphPlus.boundingBox()
+  const paragraphHandleBox = await paragraphHandle.boundingBox()
+  if (!paragraphBox || !paragraphPlusBox || !paragraphHandleBox) {
+    throw new Error('Expected paragraph block controls to have layout boxes')
+  }
+
+  expect(paragraphPlusBox.x).toBeLessThan(paragraphBox.x)
+  expect(paragraphHandleBox.x).toBeGreaterThan(paragraphPlusBox.x)
+  expect(await firstLineControlOffset(paragraph, paragraphPlus)).toBeLessThanOrEqual(2)
+  expect(Math.abs(paragraphPlusBox.y - paragraphHandleBox.y)).toBeLessThanOrEqual(
+    1,
+  )
+
+  await sketch.hover()
+  await expect(sketchPlus).toBeVisible()
+  await expect(sketchPlus).toHaveCSS('opacity', '1')
+
+  const sketchPlusBox = await sketchPlus.boundingBox()
+  if (!sketchPlusBox) {
+    throw new Error('Expected sketch block control to have a layout box')
+  }
+
+  expect(Math.abs(sketchPlusBox.x - paragraphPlusBox.x)).toBeLessThanOrEqual(2)
+  expect(await firstLineControlOffset(sketch, sketchPlus)).toBeLessThanOrEqual(2)
+
+  await page.mouse.move(0, 0)
+  await expect(paragraphPlus).toHaveCSS('opacity', '0')
+  await paragraphPlus.focus()
+  await expect(paragraphPlus).toHaveCSS('opacity', '1')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const wrappedParagraph = page
+    .locator('.dohc-block-node')
+    .filter({ hasText: 'This is editable text in the page body.' })
+    .first()
+  const wrappedPlus = wrappedParagraph.getByRole('button', {
+    name: 'insert block',
+  })
+  await wrappedParagraph.hover()
+  await expect(wrappedPlus).toHaveCSS('opacity', '1')
+
+  const wrappedBox = await wrappedParagraph.boundingBox()
+  const wrappedPlusBox = await wrappedPlus.boundingBox()
+  if (!wrappedBox || !wrappedPlusBox) {
+    throw new Error('Expected wrapped paragraph controls to have layout boxes')
+  }
+
+  expect(wrappedBox.height).toBeGreaterThan(paragraphBox.height)
+  expect(wrappedPlusBox.x).toBeGreaterThanOrEqual(0)
+  expect(await firstLineControlOffset(wrappedParagraph, wrappedPlus)).toBeLessThanOrEqual(
+    2,
+  )
+
+  await page.mouse.move(
+    wrappedBox.x - 12,
+    wrappedPlusBox.y + wrappedPlusBox.height / 2,
+  )
+  await expect(wrappedPlus).toHaveCSS('opacity', '1')
+})
+
 test('playground query blocks do not call authenticated live resolvers', async ({
   page,
 }) => {

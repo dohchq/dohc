@@ -1411,58 +1411,145 @@
   content: '' !important;
 }
 
-.doc-editing .dohc-tiptap-editor .dohc-block-affordance {
-  display: inline-block;
-  height: 0;
+.doc-editing .dohc-tiptap-editor .dohc-block-node {
   position: relative;
+  --dohc-block-control-top: 3px;
+}
+.doc-editing .dohc-tiptap-editor h1.dohc-block-node {
+  --dohc-block-control-top: 35px;
+}
+.doc-editing .dohc-tiptap-editor h2.dohc-block-node {
+  --dohc-block-control-top: 27px;
+}
+.doc-editing .dohc-tiptap-editor h3.dohc-block-node {
+  --dohc-block-control-top: 22px;
+}
+.doc-editing .dohc-tiptap-editor h4.dohc-block-node {
+  --dohc-block-control-top: 17px;
+}
+.doc-editing .dohc-tiptap-editor h5.dohc-block-node {
+  --dohc-block-control-top: 13px;
+}
+.doc-editing .dohc-tiptap-editor h6.dohc-block-node {
+  --dohc-block-control-top: 10px;
+}
+.doc-editing .dohc-tiptap-editor blockquote.dohc-block-node {
+  --dohc-block-control-top: 4px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  height: 28px;
+  justify-content: flex-end;
+  left: -50px;
+  padding-right: 3px;
+  pointer-events: auto;
+  position: absolute;
+  top: calc(var(--dohc-block-control-top) - 2px);
   user-select: none;
-  width: 0;
+  width: 48px;
+  z-index: 5;
 }
 .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
   align-items: center;
+  appearance: none;
   background: transparent;
   border: none;
   border-radius: 4px;
   color: var(--ink-faint);
   cursor: pointer;
+  flex: 0 0 23px;
   display: inline-flex;
   font-family: var(--font-sans);
   font-size: 15px;
   font-weight: 600;
-  height: 22px;
+  height: 24px;
   justify-content: center;
   line-height: 1;
   opacity: 0;
   padding: 0;
-  pointer-events: none;
-  position: absolute;
-  top: 2px;
+  pointer-events: auto;
+  position: relative;
   transition:
     background var(--t-fast),
     color var(--t-fast),
-    opacity var(--t-fast);
-  width: 22px;
+    opacity var(--t-fast),
+    transform var(--t-fast);
+  transform: scale(0.96);
+  width: 23px;
 }
 .doc-editing .dohc-tiptap-editor .dohc-block-plus {
-  left: -42px;
+  font-size: 18px;
+  font-weight: 400;
+  padding-bottom: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus::before {
+  content: '+';
 }
 .doc-editing .dohc-tiptap-editor .dohc-block-handle {
   cursor: grab;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  left: -20px;
-  letter-spacing: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle::before {
+  background-image: radial-gradient(
+    circle,
+    currentColor 1.15px,
+    transparent 1.25px
+  );
+  background-position: 0 0;
+  background-size: 5px 5px;
+  content: '';
+  display: block;
+  height: 15px;
+  opacity: 0.8;
+  width: 10px;
 }
 .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:hover {
   background: color-mix(in srgb, var(--color-ink) 9%, transparent);
   color: var(--ink-dim);
 }
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:focus-visible {
+  color: var(--ink-strong);
+  outline: 1px solid var(--rule-strong);
+  outline-offset: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:active {
+  cursor: grabbing;
+  transform: scale(0.92);
+}
 .doc-editing .dohc-tiptap-editor .dohc-block-affordance:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:focus-within .dohc-block-gutter-btn,
 .doc-editing .dohc-tiptap-editor .dohc-block-node:hover .dohc-block-gutter-btn,
 .doc-editing .dohc-tiptap-editor .dohc-block-node.ProseMirror-selectednode .dohc-block-gutter-btn {
+  color: var(--ink-dim);
   opacity: 1;
   pointer-events: auto;
+  transform: scale(1);
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-block-node .dohc-block-affordance {
+  top: 5px;
+}
+.doc-editing .dohc-tiptap-editor pre.ascii-sketch-block.dohc-block-node .dohc-block-affordance {
+  top: -6px;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-block.dohc-block-node .dohc-block-affordance {
+  top: 2px;
+}
+
+@media (max-width: 720px) {
+  .doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+    margin-left: -36px;
+    padding-left: 36px !important;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+    gap: 0;
+    left: -40px;
+    width: 38px;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+    flex-basis: 19px;
+    width: 19px;
+  }
 }
 
 .doc-editing .dohc-tiptap-editor .dohc-slash-menu {
@@ -1582,6 +1669,7 @@
 .doc-editing .dohc-tiptap-editor .ascii-sketch-block {
   background: transparent;
   border: none;
+  overflow: visible;
   padding: 0;
   margin: 0.6em 0;
   cursor: text;

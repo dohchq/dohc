@@ -587,7 +587,6 @@ function buildBlockControlDecorations(
           plus.className = 'dohc-block-gutter-btn dohc-block-plus'
           plus.title = 'insert block'
           plus.setAttribute('aria-label', 'insert block')
-          plus.textContent = '+'
           plus.addEventListener('mousedown', stopEditorMouseEvent)
           plus.addEventListener('click', (event) => {
             stopEditorMouseEvent(event)
@@ -599,7 +598,6 @@ function buildBlockControlDecorations(
           handle.className = 'dohc-block-gutter-btn dohc-block-handle'
           handle.title = 'select block'
           handle.setAttribute('aria-label', 'select block')
-          handle.textContent = '⋮⋮'
           handle.addEventListener('mousedown', stopEditorMouseEvent)
           handle.addEventListener('click', (event) => {
             stopEditorMouseEvent(event)
