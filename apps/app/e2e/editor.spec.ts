@@ -255,13 +255,43 @@ test('playground code blocks expose a language syntax dropdown', async ({
 
   await page
     .getByText('A final paragraph gives slash commands a plain-text place to start.')
-    .click()
-  await page.keyboard.press('End')
+    .waitFor()
+  await page.evaluate(() => {
+    const editor = document.querySelector('.ProseMirror')
+    const paragraph = [...document.querySelectorAll('.ProseMirror p')].find(
+      (node) =>
+        node.textContent?.includes(
+          'A final paragraph gives slash commands a plain-text place to start.',
+        ),
+    )
+    if (!editor || !paragraph) {
+      throw new Error('Expected playground paragraph to place the cursor')
+    }
+    const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT)
+    let text: Text | null = null
+    let next = walker.nextNode()
+    while (next) {
+      text = next as Text
+      next = walker.nextNode()
+    }
+    if (!text) throw new Error('Expected paragraph text node')
+
+    const range = document.createRange()
+    range.setStart(text, text.data.length)
+    range.collapse(true)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    ;(editor as HTMLElement).focus()
+  })
   await page.keyboard.press('Enter')
   await page.keyboard.type('/code')
   await page.getByRole('option', { name: /code block/i }).click()
 
   const languageSelect = page.getByRole('combobox', { name: 'code language' })
+  const toolbar = page.locator('.dohc-code-block-toolbar').last()
+  await expect(toolbar).toBeVisible()
+  await expect(toolbar.getByRole('button', { name: 'copy code' })).toBeVisible()
   await expect(languageSelect).toBeVisible()
   await expect(languageSelect).toContainText('TypeScript')
   await languageSelect.selectOption('typescript')
@@ -272,9 +302,23 @@ test('playground code blocks expose a language syntax dropdown', async ({
 
   await page.locator('.dohc-tiptap-editor pre').last().click()
   await page.keyboard.type('const answer = 42')
+  await expect(page.locator('.dohc-tiptap-editor pre code').last()).toContainText(
+    'const answer = 42',
+  )
   await expect(
     page.locator('.dohc-tiptap-editor pre code .hljs-keyword').last(),
   ).toContainText('const')
+
+  const toolbarBox = await toolbar.boundingBox()
+  const codeBox = await page.locator('.dohc-tiptap-editor pre').last().boundingBox()
+  if (!toolbarBox || !codeBox) {
+    throw new Error('Expected code toolbar and code body to have layout boxes')
+  }
+  expect(Math.abs(toolbarBox.x - codeBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(toolbarBox.width - codeBox.width)).toBeLessThanOrEqual(1)
+  expect(Math.abs(toolbarBox.y + toolbarBox.height - codeBox.y)).toBeLessThanOrEqual(
+    1,
+  )
 })
 
 test('playground query blocks do not call authenticated live resolvers', async ({

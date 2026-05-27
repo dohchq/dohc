@@ -560,6 +560,7 @@ type TopLevelDocLike = {
     cb: (
       node: {
         type: { name: string }
+        attrs?: Record<string, unknown>
         nodeSize: number
       },
       offset: number,
@@ -576,7 +577,9 @@ function buildBlockControlDecorations(
   const decorations: Decoration[] = []
 
   ;(doc as TopLevelDocLike).forEach((node, offset, index) => {
-    if (!isBlockControlTarget(node.type.name)) return
+    const isAsciiCodeBlock =
+      isCodeBlockNode(node) && isAsciiSketchLanguage(node.attrs?.language)
+    if (!isBlockControlTarget(node.type.name) && !isAsciiCodeBlock) return
 
     const pos = offset
     decorations.push(
@@ -631,8 +634,6 @@ function isBlockControlTarget(nodeName: string): boolean {
     'paragraph',
     'heading',
     'blockquote',
-    'codeBlock',
-    'code_block',
     'queryBlock',
   ].includes(nodeName)
 }
@@ -898,9 +899,16 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
       Decoration.widget(
         pos,
         (view, getPos) => {
-          const wrap = document.createElement('div')
-          wrap.className = 'dohc-code-language-affordance'
-          wrap.setAttribute('contenteditable', 'false')
+          const toolbar = document.createElement('div')
+          toolbar.className = 'dohc-code-block-toolbar'
+          toolbar.setAttribute('contenteditable', 'false')
+
+          const left = document.createElement('div')
+          left.className = 'dohc-code-block-toolbar-left'
+
+          const dot = document.createElement('span')
+          dot.className = 'dohc-code-block-dot'
+          dot.setAttribute('aria-hidden', 'true')
 
           const select = document.createElement('select')
           select.className = 'dohc-code-language-select'
@@ -958,8 +966,27 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
           })
           select.addEventListener('change', commit)
 
-          wrap.appendChild(select)
-          return wrap
+          const copy = document.createElement('button')
+          copy.type = 'button'
+          copy.className = 'dohc-code-copy-btn'
+          copy.setAttribute('aria-label', 'copy code')
+          copy.textContent = 'copy'
+          copy.addEventListener('mousedown', stopEditorMouseEvent)
+          copy.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            const write = navigator.clipboard?.writeText(node.textContent)
+            if (!write) return
+            void write.then(() => {
+              copy.textContent = 'copied'
+              window.setTimeout(() => {
+                copy.textContent = 'copy'
+              }, 1200)
+            })
+          })
+
+          left.append(dot, select)
+          toolbar.append(left, copy)
+          return toolbar
         },
         {
           side: -1,
