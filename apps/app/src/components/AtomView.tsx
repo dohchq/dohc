@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import { Share2, Smile } from 'lucide-react'
 import RSCE from 'react-simple-code-editor'
 import { api } from '../../convex/_generated/api'
@@ -389,8 +390,11 @@ function AtomShell({
   // sharing-v1 1a — share this file (by its fileId).
   onShare?: (fileId: string) => void
 }) {
+  const { user } = useAuth()
   const editorRef = useRef<AtomEditorHandle | null>(null)
   const identity = useQuery(api.auth.whoami)
+  const collabUserName =
+    user?.firstName || user?.email?.split('@')[0] || 'You'
   // D4.8 — known-files list for the wikilink plugin's resolver +
   // autocomplete picker. Memoized so the editor's plugin reads a
   // stable identity until the file list actually changes. The
@@ -790,7 +794,12 @@ function AtomShell({
           knownFiles={knownFiles}
           collab={
             identity?.workspaceId && atomId
-              ? { workspaceId: identity.workspaceId, atomId }
+              ? {
+                  workspaceId: identity.workspaceId,
+                  atomId,
+                  userId: user?.id,
+                  userName: collabUserName,
+                }
               : undefined
           }
           onOpenWikilink={(target) => {

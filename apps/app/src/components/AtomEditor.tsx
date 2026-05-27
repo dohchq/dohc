@@ -38,6 +38,7 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import { common, createLowlight } from 'lowlight'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
+import type { Awareness } from 'y-protocols/awareness'
 import {
   hasAsciiSketchContentMetadata,
   isAsciiSketchLanguage,
@@ -116,6 +117,15 @@ const LOCAL_SYNC_FALLBACK_MS = 2500
 const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
 const REMOTE_SYNC_STALL_MS = 12000
 const lowlight = createLowlight(common)
+const COLLABORATOR_COLORS = [
+  '#1a73e8',
+  '#188038',
+  '#d93025',
+  '#9334e6',
+  '#e8710a',
+  '#00796b',
+  '#c5221f',
+] as const
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   {
@@ -247,6 +257,8 @@ type Props = {
   collab?: {
     workspaceId: string
     atomId: string
+    userId?: string | null
+    userName?: string | null
   }
   /** Fired when the user clicks an `language: ascii` code block. The
    *  position is the doc offset of the node — pass it back to
@@ -357,6 +369,134 @@ type DocLike = {
 
 function isCodeBlockNode(node: { type: { name: string } }): boolean {
   return node.type.name === 'code_block' || node.type.name === 'codeBlock'
+}
+
+type CollaborationPresenceUser = {
+  clientId: number
+  color: string
+  id: string
+  initials: string
+  isLocal: boolean
+  name: string
+}
+
+type AwarenessPresenceApi = Awareness & {
+  getStates: () => Map<number, Record<string, unknown>>
+  off: (event: 'update' | 'change', listener: () => void) => void
+  on: (event: 'update' | 'change', listener: () => void) => void
+}
+
+function hasAwarenessPresenceApi(
+  awareness: Awareness,
+): awareness is AwarenessPresenceApi {
+  const candidate = awareness as Partial<AwarenessPresenceApi>
+  return (
+    typeof candidate.getStates === 'function' &&
+    typeof candidate.on === 'function' &&
+    typeof candidate.off === 'function'
+  )
+}
+
+function cleanCollaboratorName(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : 'You'
+}
+
+function collaboratorInitials(name: string): string {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const initials =
+    parts.length > 1
+      ? `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? ''}`
+      : name.slice(0, 1)
+  return initials.toUpperCase() || 'Y'
+}
+
+function collabColorForId(id: string): string {
+  let hash = 0
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return COLLABORATOR_COLORS[hash % COLLABORATOR_COLORS.length]
+}
+
+function normalizeCollabColor(value: unknown, fallbackId = ''): string {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value)
+    ? value
+    : collabColorForId(fallbackId || 'local')
+}
+
+function collabColorAlpha(hex: string, alpha: number): string {
+  const r = Number.parseInt(hex.slice(1, 3), 16)
+  const g = Number.parseInt(hex.slice(3, 5), 16)
+  const b = Number.parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+function readCollaborationPresence(
+  awareness: AwarenessPresenceApi,
+  localClientId: number,
+): CollaborationPresenceUser[] {
+  return Array.from(awareness.getStates().entries())
+    .map(([clientId, state]) => {
+      const user = isJsonRecord(state.user) ? state.user : null
+      if (!user) return null
+
+      const id =
+        typeof user.id === 'string' && user.id.trim()
+          ? user.id.trim()
+          : `client-${clientId}`
+      const name = cleanCollaboratorName(user.name)
+      const color = normalizeCollabColor(user.color, id)
+      return {
+        clientId,
+        color,
+        id,
+        initials: collaboratorInitials(name),
+        isLocal: clientId === localClientId,
+        name,
+      }
+    })
+    .filter((user): user is CollaborationPresenceUser => user !== null)
+    .sort((left, right) => {
+      if (left.isLocal !== right.isLocal) return left.isLocal ? -1 : 1
+      return left.name.localeCompare(right.name)
+    })
+}
+
+function renderCollaborationCaret(user: Record<string, unknown>): HTMLElement {
+  const name = cleanCollaboratorName(user.name)
+  const id = typeof user.id === 'string' ? user.id : name
+  const color = normalizeCollabColor(user.color, id)
+
+  const caret = document.createElement('span')
+  caret.className = 'dohc-collab-caret'
+  caret.style.setProperty('--dohc-collab-color', color)
+  caret.setAttribute('data-collaborator', name)
+
+  const label = document.createElement('span')
+  label.className = 'dohc-collab-label'
+  label.textContent = name
+
+  caret.append(label)
+  return caret
+}
+
+function renderCollaborationSelection(user: Record<string, unknown>) {
+  const name = cleanCollaboratorName(user.name)
+  const id = typeof user.id === 'string' ? user.id : name
+  const color = normalizeCollabColor(user.color, id)
+
+  return {
+    nodeName: 'span',
+    class: 'dohc-collab-selection',
+    style: `--dohc-collab-color: ${color}; background-color: ${collabColorAlpha(
+      color,
+      0.2,
+    )}; border-bottom-color: ${color};`,
+    'data-collaborator': name,
+  }
 }
 
 function buildAsciiDecorations(
@@ -855,6 +995,7 @@ function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
 }
 
 const codeLanguageKey = new PluginKey('dohc-code-language')
+const codeBlockContinuationKey = new PluginKey('dohc-code-block-continuation')
 
 const CODE_LANGUAGE_OPTIONS = [
   { value: '', label: 'Plain text' },
@@ -879,6 +1020,63 @@ function cleanCodeLanguage(value: string): string {
     0,
     48,
   )
+}
+
+function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean {
+  if (view.editable === false) return false
+
+  const { state } = view
+  const node = state.doc.nodeAt(blockPos)
+  const paragraphType = state.schema.nodes.paragraph
+  if (!node || !paragraphType) return false
+
+  const insertPos = blockPos + node.nodeSize
+  const $insert = state.doc.resolve(insertPos)
+  let tr = state.tr
+
+  if (
+    !(
+      $insert.nodeAfter?.type === paragraphType &&
+      $insert.nodeAfter.content.size === 0
+    )
+  ) {
+    if (
+      !$insert.parent.canReplaceWith(
+        $insert.index(),
+        $insert.index(),
+        paragraphType,
+      )
+    ) {
+      return false
+    }
+    tr = tr.insert(insertPos, paragraphType.create())
+  }
+
+  const selectionPos = Math.min(insertPos + 1, tr.doc.content.size)
+  tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos)).scrollIntoView()
+  view.dispatch(tr)
+  view.focus()
+  return true
+}
+
+function codeBlockAtSelection(state: EditorState): {
+  node: DocDescendantNode
+  pos: number
+} | null {
+  const { $from } = state.selection
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth)
+    if (!isCodeBlockNode(node)) continue
+    return { node: node as unknown as DocDescendantNode, pos: $from.before(depth) }
+  }
+  return null
+}
+
+function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
+  if (!state.selection.empty) return false
+  const block = codeBlockAtSelection(state)
+  if (!block) return false
+  return state.selection.$from.parentOffset >= block.node.textContent.length
 }
 
 function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
@@ -996,12 +1194,43 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
         },
       ),
     )
+    decorations.push(
+      Decoration.widget(
+        pos + node.nodeSize,
+        (view) => {
+          const wrap = document.createElement('div')
+          wrap.className = 'dohc-code-block-continuation'
+          wrap.setAttribute('contenteditable', 'false')
+
+          const button = document.createElement('button')
+          button.type = 'button'
+          button.className = 'dohc-code-block-continue-btn'
+          button.setAttribute('aria-label', 'add paragraph below code block')
+          button.disabled = view.editable === false
+          button.textContent = '+'
+          button.addEventListener('mousedown', stopEditorMouseEvent)
+          button.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            insertParagraphAfterBlock(view, pos)
+          })
+
+          wrap.append(button)
+          return wrap
+        },
+        {
+          side: 1,
+          key: `code-continue-${pos}`,
+          ignoreSelection: true,
+          stopEvent: () => true,
+        },
+      ),
+    )
   })
 
   return DecorationSet.create(doc as never, decorations)
 }
 
-function makeCodeLanguagePlugin() {
+function makeCodeBlockChromePlugin() {
   return new Plugin({
     key: codeLanguageKey,
     state: {
@@ -1016,6 +1245,27 @@ function makeCodeLanguagePlugin() {
     props: {
       decorations(state) {
         return codeLanguageKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+function makeCodeBlockContinuationPlugin() {
+  return new Plugin({
+    key: codeBlockContinuationKey,
+    props: {
+      handleKeyDown(view, event) {
+        const block = codeBlockAtSelection(view.state)
+        if (!block) return false
+
+        const explicitExit =
+          event.key === 'Enter' && (event.metaKey || event.ctrlKey)
+        const arrowExit =
+          event.key === 'ArrowDown' && isSelectionAtEndOfCodeBlock(view.state)
+        if (!explicitExit && !arrowExit) return false
+
+        event.preventDefault()
+        return insertParagraphAfterBlock(view, block.pos)
       },
     },
   })
@@ -1517,12 +1767,14 @@ function TiptapAtomEditor({
     () =>
       collab
         ? {
-            id: collab.workspaceId,
-            name: 'You',
-            color: '#4f46e5',
+            id: collab.userId?.trim() || collab.workspaceId,
+            name: cleanCollaboratorName(collab.userName),
+            color: collab.userId?.trim()
+              ? collabColorForId(collab.userId.trim())
+              : '#4f46e5',
           }
         : null,
-    [collab?.workspaceId],
+    [collab?.userId, collab?.userName, collab?.workspaceId],
   )
   const awareness = useMemo(
     () =>
@@ -1538,6 +1790,27 @@ function TiptapAtomEditor({
     () => (awareness ? { awareness } : null),
     [awareness],
   )
+  const [presenceUsers, setPresenceUsers] = useState<CollaborationPresenceUser[]>(
+    [],
+  )
+  useEffect(() => {
+    if (!collaborationEnabled || !awareness || !hasAwarenessPresenceApi(awareness)) {
+      setPresenceUsers([])
+      return
+    }
+
+    const updatePresence = () => {
+      setPresenceUsers(readCollaborationPresence(awareness, ydoc.clientID))
+    }
+
+    updatePresence()
+    awareness.on('update', updatePresence)
+    awareness.on('change', updatePresence)
+    return () => {
+      awareness.off('update', updatePresence)
+      awareness.off('change', updatePresence)
+    }
+  }, [awareness, collaborationEnabled, ydoc])
   useEffect(() => {
     fetchTokenRef.current = fetchCollabToken
   }, [fetchCollabToken])
@@ -1827,7 +2100,8 @@ function TiptapAtomEditor({
             wikilinkClickPlugin,
             atomPillClickPlugin,
             makeQueryBlockPlugin(queryResultsRef),
-            makeCodeLanguagePlugin(),
+            makeCodeBlockChromePlugin(),
+            makeCodeBlockContinuationPlugin(),
           ]
           if (inlineAtomsEnabled()) {
             extra.push(
@@ -1889,6 +2163,8 @@ function TiptapAtomEditor({
             CollaborationCaret.configure({
               provider: caretProvider,
               user: awarenessUser,
+              render: renderCollaborationCaret,
+              selectionRender: renderCollaborationSelection,
             }),
           ]
         : []),
@@ -2165,6 +2441,37 @@ function TiptapAtomEditor({
               : 'Syncing…'}
           </div>
         )}
+      {collaborationEnabled && (
+        <div className="dohc-editor-presence" role="status" aria-live="polite">
+          <span className="dohc-editor-presence-dot" aria-hidden="true" />
+          <span className="dohc-editor-presence-text">Synced</span>
+          {presenceUsers.length > 0 && (
+            <div
+              className="dohc-collab-avatars"
+              aria-label="Collaborators in this document"
+            >
+              {presenceUsers.slice(0, 5).map((user) => (
+                <span
+                  key={user.clientId}
+                  className={`dohc-collab-avatar${
+                    user.isLocal ? ' is-local' : ''
+                  }`}
+                  style={{ '--dohc-collab-color': user.color } as React.CSSProperties}
+                  title={`${user.name}${user.isLocal ? ' (you)' : ''}`}
+                  aria-label={`${user.name}${user.isLocal ? ' (you)' : ''}`}
+                >
+                  {user.initials}
+                </span>
+              ))}
+              {presenceUsers.length > 5 && (
+                <span className="dohc-collab-avatar is-count">
+                  +{presenceUsers.length - 5}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       <EditorContent editor={editor} />
       <SlashCommandMenu
         state={slashState}

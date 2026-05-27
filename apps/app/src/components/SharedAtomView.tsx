@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import { parseFrontmatter } from '../lib/frontmatter'
@@ -13,6 +14,7 @@ import { AtomEditor } from './AtomEditor'
 // Hocuspocus/Yjs document. The legacy whole-body CAS save path stays disabled
 // for collaborative markdown so a CRDT merge cannot become a false conflict.
 export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
+  const { user } = useAuth()
   const shared = useQuery(api.atomShares.getSharedAtom, { shareId })
   const save = useMutation(api.atoms.upsertSharedAtom)
   const legacyAutosaveEnabled = false
@@ -30,6 +32,8 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const canEdit = shared?.permission === 'edit'
+  const collabUserName =
+    user?.firstName || user?.email?.split('@')[0] || 'You'
 
   // First load seeds the buffer + base body. We do NOT clobber an
   // in-progress local edit on a reactive refetch (LWW v1) — a stale
@@ -224,7 +228,12 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
           shareId={shareId}
           readOnly={!canEdit || conflict}
           frontmatter={frontmatter}
-          collab={{ workspaceId: shared.ownerWorkspaceId, atomId: shared.fileId }}
+          collab={{
+            workspaceId: shared.ownerWorkspaceId,
+            atomId: shared.fileId,
+            userId: user?.id,
+            userName: collabUserName,
+          }}
         />
       )}
     </div>

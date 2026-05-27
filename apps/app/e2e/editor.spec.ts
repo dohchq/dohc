@@ -390,6 +390,30 @@ test('playground code blocks expose a language syntax dropdown', async ({
   expect(Math.abs(toolbarBox.y + toolbarBox.height - codeBox.y)).toBeLessThanOrEqual(
     1,
   )
+
+  const continueButton = page
+    .getByRole('button', { name: 'add paragraph below code block' })
+    .last()
+  await expect(continueButton).toBeVisible()
+  await continueButton.click()
+  await page.keyboard.type('Back to normal text')
+
+  const continuation = page.locator('.dohc-tiptap-editor p', {
+    hasText: 'Back to normal text',
+  })
+  await expect(continuation).toBeVisible()
+  const continuationPosition = await continuation.evaluate((node) => {
+    let previous = node.previousElementSibling
+    while (previous?.classList.contains('dohc-code-block-continuation')) {
+      previous = previous.previousElementSibling
+    }
+    return {
+      previousClass: previous?.className,
+      previousTag: previous?.tagName,
+    }
+  })
+  expect(continuationPosition.previousTag).toBe('PRE')
+  expect(String(continuationPosition.previousClass)).toContain('dohc-code-block')
 })
 
 test('playground query blocks do not call authenticated live resolvers', async ({

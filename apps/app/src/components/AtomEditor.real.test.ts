@@ -140,6 +140,29 @@ describe('AtomEditor real Tiptap mount', () => {
     expect(container.textContent).toContain('tiptap')
   })
 
+  it('renders collaborative presence chrome for synced documents', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AtomEditor, {
+          value: '# tiptap\n\nhello',
+          onChange: () => {},
+          knownFiles: [],
+          collab: {
+            workspaceId: 'workspace_1',
+            atomId: 'atom_1',
+            userId: 'user_1',
+            userName: 'Ice',
+          },
+        }),
+      )
+    })
+
+    await flush()
+
+    expect(container.querySelector('.dohc-editor-presence')).not.toBeNull()
+    expect(container.querySelector('.dohc-collab-avatar')?.textContent).toBe('I')
+  })
+
   it('marks ascii sketch metadata so it can render as natural page content', () => {
     const sketch = encodeAsciiSketchContent('+---+\n|   |\n+---+', {
       shapes: [],
