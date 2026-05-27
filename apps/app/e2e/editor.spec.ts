@@ -144,6 +144,110 @@ test('playground block controls stay in a stable Notion-like gutter', async ({
   await expect(wrappedPlus).toHaveCSS('opacity', '1')
 })
 
+test('playground markdown shortcuts create visible lists and smooth headings', async ({
+  page,
+}) => {
+  async function placeCursorInFreshBlock() {
+    await page.goto('/playground')
+    await expect(
+      page.getByText(
+        'A final paragraph gives slash commands a plain-text place to start.',
+      ),
+    ).toBeVisible()
+    await page.evaluate(() => {
+      const editor = document.querySelector('.ProseMirror')
+      const paragraph = [...document.querySelectorAll('.ProseMirror p')].find(
+        (node) =>
+          node.textContent?.includes(
+            'A final paragraph gives slash commands a plain-text place to start.',
+          ),
+      )
+      if (!editor || !paragraph) {
+        throw new Error('Expected playground paragraph to place the cursor')
+      }
+
+      const walker = document.createTreeWalker(
+        paragraph,
+        NodeFilter.SHOW_TEXT,
+      )
+      let text: Text | null = null
+      let next = walker.nextNode()
+      while (next) {
+        text = next as Text
+        next = walker.nextNode()
+      }
+      if (!text) throw new Error('Expected paragraph text node')
+
+      const range = document.createRange()
+      range.setStart(text, text.data.length)
+      range.collapse(true)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      ;(editor as HTMLElement).focus()
+    })
+    await page.keyboard.press('Enter')
+  }
+
+  await placeCursorInFreshBlock()
+  await page.keyboard.type('- bullet item')
+
+  const bulletList = page.locator('.dohc-tiptap-editor ul').last()
+  await expect(bulletList.locator('li')).toContainText('bullet item')
+  const bulletStyles = await bulletList.evaluate((node) => {
+    const style = getComputedStyle(node)
+    return {
+      marker: style.listStyleType,
+      padding: Number.parseFloat(style.paddingInlineStart),
+    }
+  })
+  expect(bulletStyles.marker).toBe('disc')
+  expect(bulletStyles.padding).toBeGreaterThanOrEqual(20)
+
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('after bullet')
+  const afterBullet = page.locator('.dohc-tiptap-editor p', {
+    hasText: 'after bullet',
+  })
+  await expect(afterBullet).toBeVisible()
+  await expect(bulletList.locator('li')).toHaveCount(1)
+
+  await placeCursorInFreshBlock()
+  await page.keyboard.type('1. ordered item')
+
+  const orderedList = page.locator('.dohc-tiptap-editor ol').last()
+  await expect(orderedList.locator('li')).toContainText('ordered item')
+  const orderedStyles = await orderedList.evaluate((node) => {
+    const style = getComputedStyle(node)
+    return {
+      marker: style.listStyleType,
+      padding: Number.parseFloat(style.paddingInlineStart),
+    }
+  })
+  expect(orderedStyles.marker).toBe('decimal')
+  expect(orderedStyles.padding).toBeGreaterThanOrEqual(20)
+
+  await placeCursorInFreshBlock()
+  await page.keyboard.type('## Roadmap')
+
+  const heading = page.locator('.dohc-tiptap-editor h2', {
+    hasText: 'Roadmap',
+  })
+  await expect(heading).toBeVisible()
+  const headingPaddingTop = await heading.evaluate((node) =>
+    Number.parseFloat(getComputedStyle(node).paddingTop),
+  )
+  expect(headingPaddingTop).toBeLessThanOrEqual(16)
+
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('body text')
+  const bodyParagraph = page.locator('.dohc-tiptap-editor p', {
+    hasText: 'body text',
+  })
+  await expect(bodyParagraph).toBeVisible()
+})
+
 test('playground query blocks do not call authenticated live resolvers', async ({
   page,
 }) => {
