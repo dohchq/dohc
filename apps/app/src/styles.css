@@ -1341,6 +1341,28 @@
   padding: 0;
   white-space: pre;
 }
+.doc-editing .dohc-tiptap-editor pre code .hljs-keyword,
+.doc-editing .dohc-tiptap-editor pre code .hljs-selector-tag,
+.doc-editing .dohc-tiptap-editor pre code .hljs-built_in {
+  color: #c792ea;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-string,
+.doc-editing .dohc-tiptap-editor pre code .hljs-attr,
+.doc-editing .dohc-tiptap-editor pre code .hljs-symbol {
+  color: #a8cc8c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-number,
+.doc-editing .dohc-tiptap-editor pre code .hljs-literal {
+  color: #f78c6c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-title,
+.doc-editing .dohc-tiptap-editor pre code .hljs-function {
+  color: #82aaff;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-comment {
+  color: var(--ink-faint);
+  font-style: italic;
+}
 .doc-editing .dohc-tiptap-editor .dohc-code-language-affordance {
   align-items: center;
   display: flex;

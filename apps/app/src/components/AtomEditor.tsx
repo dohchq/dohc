@@ -17,6 +17,7 @@ import { isQueryFenceLanguage, QUERY_FENCE_RE } from '../lib/dslparse'
 import { Extension, type Editor } from '@tiptap/core'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { StarterKit } from '@tiptap/starter-kit'
+import { CodeBlockLowlight } from '@tiptap/extension-code-block-lowlight'
 import { TableKit } from '@tiptap/extension-table'
 import { Markdown } from '@tiptap/markdown'
 import { Placeholder } from '@tiptap/extensions/placeholder'
@@ -34,6 +35,7 @@ import {
   type EditorState,
 } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
+import { common, createLowlight } from 'lowlight'
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import {
@@ -113,6 +115,7 @@ const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
 const LOCAL_SYNC_FALLBACK_MS = 2500
 const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
 const REMOTE_SYNC_STALL_MS = 12000
+const lowlight = createLowlight(common)
 
 const SLASH_COMMANDS: SlashCommandItem[] = [
   {
@@ -1822,8 +1825,13 @@ function TiptapAtomEditor({
   const extensions = useMemo(
     () => [
       StarterKit.configure({
+        codeBlock: false,
         undoRedo: collaborationEnabled ? false : undefined,
         trailingNode: false,
+      }),
+      CodeBlockLowlight.configure({
+        lowlight,
+        defaultLanguage: null,
       }),
       ...dohcMarkdownExtensions,
       TableKit,

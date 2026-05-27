@@ -269,6 +269,12 @@ test('playground code blocks expose a language syntax dropdown', async ({
   await expect(
     page.locator('.dohc-tiptap-editor pre code.language-typescript'),
   ).toBeVisible()
+
+  await page.locator('.dohc-tiptap-editor pre').last().click()
+  await page.keyboard.type('const answer = 42')
+  await expect(
+    page.locator('.dohc-tiptap-editor pre code .hljs-keyword').last(),
+  ).toContainText('const')
 })
 
 test('playground query blocks do not call authenticated live resolvers', async ({
