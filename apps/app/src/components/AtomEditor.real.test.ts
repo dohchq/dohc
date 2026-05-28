@@ -140,6 +140,27 @@ describe('AtomEditor real Tiptap mount', () => {
     expect(container.textContent).toContain('tiptap')
   })
 
+  it('enables continuation controls for saved collaborative code blocks after sync', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AtomEditor, {
+          value: '```typescript\nconst saved = true\n```',
+          onChange: () => {},
+          knownFiles: [],
+          collab: { workspaceId: 'workspace_1', atomId: 'atom_1' },
+        }),
+      )
+    })
+
+    await flush()
+
+    const continueButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="add paragraph below code block"]',
+    )
+    expect(continueButton).not.toBeNull()
+    expect(continueButton?.disabled).toBe(false)
+  })
+
   it('renders synced presence without a local-only collaborator avatar', async () => {
     act(() => {
       root.render(

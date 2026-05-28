@@ -1067,6 +1067,25 @@ function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean 
   return true
 }
 
+function syncCodeBlockWidgetEditability(
+  view: EditorView,
+  editable: boolean,
+): void {
+  const dom = view.dom
+  if (!dom) return
+
+  dom
+    .querySelectorAll<HTMLSelectElement>('.dohc-code-language-select')
+    .forEach((select) => {
+      select.disabled = !editable
+    })
+  dom
+    .querySelectorAll<HTMLButtonElement>('.dohc-code-block-continue-btn')
+    .forEach((button) => {
+      button.disabled = !editable
+    })
+}
+
 function codeBlockAtSelection(state: EditorState): {
   node: DocDescendantNode
   pos: number
@@ -1249,7 +1268,9 @@ function makeCodeBlockChromePlugin() {
         return buildCodeLanguageDecorations(instance.doc)
       },
       apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
+        if (!tr.docChanged && !tr.getMeta(codeLanguageKey)) {
+          return old.map(tr.mapping, tr.doc)
+        }
         return buildCodeLanguageDecorations(tr.doc)
       },
     },
@@ -2397,6 +2418,13 @@ function TiptapAtomEditor({
   })
   useEffect(() => {
     editor?.setEditable(editable)
+    const view = editor?.view
+    try {
+      view?.dispatch(view.state.tr.setMeta(codeLanguageKey, true))
+    } catch {
+      /* code-block widgets are rebuilt on mount; this refreshes editable flips */
+    }
+    if (view) syncCodeBlockWidgetEditability(view, editable)
   }, [editor, editable])
 
   useEffect(() => {
