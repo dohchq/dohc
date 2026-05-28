@@ -477,6 +477,21 @@ export const listMyShares = query({
   },
 })
 
+// Lightweight owner projection for persistent UI chrome. The Share dialog
+// needs audience labels; the sidebar only needs to know whether a file has
+// at least one active grant.
+export const listSharedFileIds = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))
+      .collect()
+    return [...new Set(rows.map((r) => r.fileId))].sort()
+  },
+})
+
 // Read a shared atom's RAW body (the editor resolves formulas
 // separately via evalFormulasShared, which is scoped). Gated.
 export const getSharedAtom = query({

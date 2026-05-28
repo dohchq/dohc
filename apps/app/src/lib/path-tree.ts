@@ -41,6 +41,9 @@ export type TreePage = {
   starred?: boolean
   // emoji-icons — user-chosen icon emoji (null/absent ⇒ default icon)
   icon?: string | null
+  // D4.8e — rename-proof fileId, passed through for share indicators
+  // and URL-stable page routing.
+  fileId?: string | null
 }
 
 export type TreeNode = {
@@ -125,6 +128,7 @@ export function buildTree(
           userLocked: f.userLocked,
           starred: f.starred,
           icon: f.icon ?? null,
+          fileId: f.fileId ?? null,
         }
       } else {
         cursor = child

@@ -154,6 +154,44 @@ describe('sharing-v1 1a — share grant + gated read', () => {
     })
   })
 
+  it('lists only the file ids the caller has shared', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Public Doc')
+    await seedOwnerAtom(t, 'other.md', '---\nid: other\n---\n# Other Doc')
+
+    const docShareId = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomPublic, {
+        fileId: 'doc',
+        permission: 'view',
+      })
+    await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomPublic, {
+        fileId: 'other',
+        permission: 'edit',
+      })
+
+    const ownerSharedFileIds = await t
+      .withIdentity({ subject: OWNER })
+      .query(api.atomShares.listSharedFileIds, {})
+    expect([...ownerSharedFileIds].sort()).toEqual(['doc', 'other'])
+
+    const granteeSharedFileIds = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedFileIds, {})
+    expect(granteeSharedFileIds).toEqual([])
+
+    await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.unshareAtom, { shareId: docShareId })
+
+    const afterRevoke = await t
+      .withIdentity({ subject: OWNER })
+      .query(api.atomShares.listSharedFileIds, {})
+    expect(afterRevoke).toEqual(['other'])
+  })
+
   it('public link re-share is idempotent and revoke cuts it off', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\nx')

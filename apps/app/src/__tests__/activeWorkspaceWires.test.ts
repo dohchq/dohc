@@ -81,6 +81,13 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     expect(ONBOARDING).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)
   })
 
+  it('FileTree share indicators come from owner share ids scoped to the active workspace', () => {
+    expect(APP).toMatch(
+      /api\.atomShares\.listSharedFileIds,\s*\{\s*activeWorkspaceId\s*,?\s*\}/,
+    )
+    expect(APP).toMatch(/sharedByMeFileIds=\{sharedByMeFileIds\s*\?\?\s*\[\]\}/)
+  })
+
   it('/r/<atomId> route reads ?w= and forwards to getRenderable + evalFormulas', () => {
     expect(R_ROUTE).toMatch(/searchParams\.get\(['"]w['"]\)/)
     // Both server-side queries receive the URL-derived activeWorkspaceId.

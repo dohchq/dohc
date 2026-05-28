@@ -220,6 +220,9 @@ function App() {
   const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
     activeWorkspaceId,
   })
+  const sharedByMeFileIds = useQuery(api.atomShares.listSharedFileIds, {
+    activeWorkspaceId,
+  })
   // The fileId currently being shared (drives the ShareDialog).
   const [sharePromptFor, setSharePromptFor] = useState<string | null>(null)
   const ensureThread = useMutation(api.agent.ensureThread)
@@ -768,6 +771,7 @@ function App() {
         onOpenSearch={() => setSearchOpen(true)}
         user={user}
         sharedWithMe={sharedWithMe ?? []}
+        sharedByMeFileIds={sharedByMeFileIds ?? []}
         activeShareId={urlShareId}
         onOpenShared={openShared}
         onOpen={(p) => openAtom(p)}

@@ -112,6 +112,7 @@ type Props = {
     permission: 'view' | 'edit'
     available: boolean
   }>
+  sharedByMeFileIds?: string[]
   activeShareId?: string | null
   onOpenShared?: (shareId: string) => void
   // Opens the full-content search overlay (⌘⇧F).
@@ -402,6 +403,7 @@ export function FileTree({
   onMoveFolder,
   onSetFileIcon,
   sharedWithMe,
+  sharedByMeFileIds,
   activeShareId,
   onOpenShared,
   onOpenSearch,
@@ -410,6 +412,10 @@ export function FileTree({
   // primary live-collaboration UI, and removed v1 Convex presence rows should
   // not be recreated just to light up sidebar dots.
   const presentPathSet = useMemo<ReadonlySet<string>>(() => new Set(), [])
+  const sharedByMeIds = useMemo(
+    () => new Set(sharedByMeFileIds ?? []),
+    [sharedByMeFileIds],
+  )
 
   // Partition the flat lists into the three sidebar sections. Pure
   // presentation — no file moves. The main tree is built from the
@@ -1233,6 +1239,7 @@ export function FileTree({
                 pendingKind={pending}
                 pendingTargetDir={targetDir}
                 onPendingCommit={commitPending}
+                sharedByMeIds={sharedByMeIds}
               />
             ))}
           </div>
@@ -1409,6 +1416,7 @@ function TreeRowNode({
   pendingKind,
   pendingTargetDir,
   onPendingCommit,
+  sharedByMeIds,
 }: {
   node: TreeNode
   depth: number
@@ -1450,6 +1458,7 @@ function TreeRowNode({
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
   onPendingCommit: (value: string) => void
+  sharedByMeIds: ReadonlySet<string>
 }) {
   const isFolder = node.page === null
   const isExpanded = expanded.has(node.fullPath)
@@ -1472,6 +1481,7 @@ function TreeRowNode({
   if (!isFolder) {
     const isActive = viewIsAtom && activePath === node.page!.path
     const filePath = node.page!.path
+    const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
     // D4.7 — DnD: leaf row is BOTH draggable (the file itself) AND
     // droppable (drop INTO file = drop into file's parent folder).
     const leafParent = filePath.includes('/')
@@ -1581,6 +1591,13 @@ function TreeRowNode({
             aria-label={
               node.page!.systemLocked ? 'system-locked' : 'user-locked'
             }
+          />
+        )}
+        {isSharedByMe && (
+          <Share2
+            className="size-3 shrink-0 text-accent opacity-80"
+            strokeWidth={2}
+            aria-label="shared"
           />
         )}
         {onToggleFileStar ? (
@@ -1786,6 +1803,7 @@ function TreeRowNode({
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
             onPendingCommit={onPendingCommit}
+            sharedByMeIds={sharedByMeIds}
           />
         ))}
     </Fragment>

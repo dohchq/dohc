@@ -35,6 +35,15 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(/<Star\b[^>]*aria-label="starred"/)
   })
 
+  it('renders a Share2 indicator only for files the owner has shared', () => {
+    expect(SRC).toMatch(/sharedByMeFileIds\?: string\[\]/)
+    expect(SRC).toMatch(
+      /const\s+sharedByMeIds\s*=\s*useMemo\(\s*\(\)\s*=>\s*new\s+Set\(sharedByMeFileIds\s*\?\?\s*\[\]\)/,
+    )
+    expect(SRC).toMatch(/sharedByMeIds\.has\(node\.page!\.fileId\s*\?\?\s*['"]['"]\)/)
+    expect(SRC).toMatch(/<Share2\b[^>]*aria-label="shared"/)
+  })
+
   it('Shift+L (lower OR upper) toggles lock (R3 fold — bare L reserved for future typeahead)', () => {
     // R3 fold of convergent FAIL-B — APG tree pattern reserves
     // printable letters for typeahead. Lock/star moved to Shift+.
