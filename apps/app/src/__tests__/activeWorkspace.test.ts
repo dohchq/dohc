@@ -109,6 +109,7 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
     // stay in sync. The bridge is graceful when WORKOS_API_KEY is unset.
     expect(DIALOG_SRC).toMatch(/api\.orgsBridge\.createOrgWithBridge/)
     expect(DIALOG_SRC).toMatch(/api\.orgsBridge\.renameOrgWithBridge/)
+    expect(DIALOG_SRC).toMatch(/api\.orgs\.deleteOrg/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.removeMember/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.changeRole/)
     expect(DIALOG_SRC).toMatch(/api\.orgs\.leaveOrg/)
@@ -126,6 +127,12 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
 
   it('confirms before destructive leave (no silent offboarding)', () => {
     expect(DIALOG_SRC).toMatch(/window\.confirm/)
+  })
+
+  it('uses delete workspace for owner-level workspace deletion instead of removing yourself', () => {
+    expect(DIALOG_SRC).toMatch(/delete workspace/)
+    expect(DIALOG_SRC).toMatch(/onDelete/)
+    expect(DIALOG_SRC).toMatch(/m\.workspaceId\s*===\s*currentWorkspaceId/)
   })
 
   it('keeps shared-workspace creation behind an explicit secondary action', () => {

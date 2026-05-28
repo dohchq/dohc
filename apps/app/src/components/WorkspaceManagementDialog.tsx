@@ -5,7 +5,7 @@
  *   - Create a new org (any signed-in user).
  *   - For every org I'm a member of: rename (Owner-only), invite code
  *     (Owner-only — the link to invite teammates), member list with
- *     Owner controls (removeMember, changeRole).
+ *     Owner controls (deleteOrg, removeMember, changeRole).
  *
  * Deliberately one dialog (not a routed page): every operation reads
  * `api.orgs.myWorkspaces` for the list, then `api.orgs.orgMembers` per
@@ -41,6 +41,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   // the WorkOS Organization stays in sync (graceful when key unset).
   const createOrg = useAction(api.orgsBridge.createOrgWithBridge)
   const renameOrg = useAction(api.orgsBridge.renameOrgWithBridge)
+  const deleteOrg = useMutation(api.orgs.deleteOrg)
   const removeMember = useMutation(api.orgs.removeMember)
   const changeRole = useMutation(api.orgs.changeRole)
   const leaveOrg = useMutation(api.orgs.leaveOrg)
@@ -63,6 +64,8 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   if (!open) return null
 
   const orgWorkspaces = (workspaces ?? []).filter((w) => w.kind === 'org')
+  const currentWorkspaceId = workspaces?.find((w) => w.kind === 'personal')
+    ?.workspaceId
 
   async function onCreate(name: string) {
     setBusy(true)
@@ -173,12 +176,19 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                     isActive={activeWorkspaceId === w.workspaceId}
                     isOwner={w.role === 'owner'}
                     inviteCode={w.inviteCode}
+                    currentWorkspaceId={currentWorkspaceId}
                     onRename={async (name) => {
                       await renameOrg({ orgId: w.workspaceId as Id<'orgs'>, name })
                     }}
                     onLeave={async () => {
                       await leaveOrg({ orgId: w.workspaceId as Id<'orgs'> })
                       setActiveWorkspaceId(undefined) // drop the now-gone active id
+                    }}
+                    onDelete={async () => {
+                      await deleteOrg({ orgId: w.workspaceId as Id<'orgs'> })
+                      if (activeWorkspaceId === w.workspaceId) {
+                        setActiveWorkspaceId(undefined)
+                      }
                     }}
                     onRemove={async (memberWorkspaceId) => {
                       await removeMember({
@@ -388,8 +398,10 @@ function OrgCard({
   isActive,
   isOwner,
   inviteCode,
+  currentWorkspaceId,
   onRename,
   onLeave,
+  onDelete,
   onRemove,
   onChangeRole,
 }: {
@@ -398,8 +410,10 @@ function OrgCard({
   isActive: boolean
   isOwner: boolean
   inviteCode: string | null
+  currentWorkspaceId?: string
   onRename: (name: string) => Promise<void>
   onLeave: () => Promise<void>
+  onDelete: () => Promise<void>
   onRemove: (memberWorkspaceId: string) => Promise<void>
   onChangeRole: (
     memberWorkspaceId: string,
@@ -536,77 +550,106 @@ function OrgCard({
           <div className="text-[11.5px] text-ink-dim italic">no access</div>
         ) : (
           <ul className="space-y-1">
-            {members.map((m) => (
-              <li
-                key={m.workspaceId}
-                className="flex items-center gap-2 text-[12px]"
-              >
-                <UserIcon className="size-3 text-ink-dim shrink-0" strokeWidth={2} />
-                <code className="truncate font-mono text-[11px] text-ink">
-                  {m.workspaceId}
-                </code>
-                <span className="text-ink-faint">{m.role}</span>
-                {isOwner && (
-                  <div className="ml-auto flex items-center gap-1">
-                    {m.role === 'member' ? (
+            {members.map((m) => {
+              const isSelf = m.workspaceId === currentWorkspaceId
+              return (
+                <li
+                  key={m.workspaceId}
+                  className="flex items-center gap-2 text-[12px]"
+                >
+                  <UserIcon className="size-3 text-ink-dim shrink-0" strokeWidth={2} />
+                  <code className="truncate font-mono text-[11px] text-ink">
+                    {m.workspaceId}
+                  </code>
+                  <span className="text-ink-faint">{m.role}</span>
+                  {isSelf && (
+                    <span className="rounded bg-hover px-1.5 py-px text-[9px] uppercase tracking-wider text-ink-faint">
+                      you
+                    </span>
+                  )}
+                  {isOwner && !isSelf && (
+                    <div className="ml-auto flex items-center gap-1">
+                      {m.role === 'member' ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            safe(() => onChangeRole(m.workspaceId, 'owner'))
+                          }
+                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+                          title="promote to owner"
+                        >
+                          <UserCog className="size-3" strokeWidth={2} />
+                          promote
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            safe(() => onChangeRole(m.workspaceId, 'member'))
+                          }
+                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+                          title="demote to member"
+                        >
+                          demote
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() =>
-                          safe(() => onChangeRole(m.workspaceId, 'owner'))
-                        }
-                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
-                        title="promote to owner"
+                        onClick={() => safe(() => onRemove(m.workspaceId))}
+                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-red-500 hover:bg-hover transition-colors"
+                        title="remove from workspace"
+                        aria-label="remove member"
                       >
-                        <UserCog className="size-3" strokeWidth={2} />
-                        promote
+                        <Trash2 className="size-3" strokeWidth={2} />
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          safe(() => onChangeRole(m.workspaceId, 'member'))
-                        }
-                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
-                        title="demote to member"
-                      >
-                        demote
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => safe(() => onRemove(m.workspaceId))}
-                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-red-500 hover:bg-hover transition-colors"
-                      title="remove from workspace"
-                      aria-label="remove member"
-                    >
-                      <Trash2 className="size-3" strokeWidth={2} />
-                    </button>
-                  </div>
-                )}
-              </li>
-            ))}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
       </div>
 
       <div className="mt-3 pt-2 border-t border-rule/50 flex justify-end">
-        <button
-          type="button"
-          onClick={() =>
-            safe(async () => {
-              if (
-                !window.confirm(
-                  `Leave ${name}? You'll need a fresh invite to rejoin.`,
+        {isOwner ? (
+          <button
+            type="button"
+            onClick={() =>
+              safe(async () => {
+                if (
+                  !window.confirm(
+                    `Delete ${name}? This archives the workspace and removes it for every member.`,
+                  )
                 )
-              )
-                return
-              await onLeave()
-            })
-          }
-          className="text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
-        >
-          leave workspace
-        </button>
+                  return
+                await onDelete()
+              })
+            }
+            className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+          >
+            <Trash2 className="size-3" strokeWidth={2} />
+            delete workspace
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() =>
+              safe(async () => {
+                if (
+                  !window.confirm(
+                    `Leave ${name}? You'll need a fresh invite to rejoin.`,
+                  )
+                )
+                  return
+                await onLeave()
+              })
+            }
+            className="text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+          >
+            leave workspace
+          </button>
+        )}
       </div>
     </li>
   )

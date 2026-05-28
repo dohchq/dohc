@@ -11,6 +11,7 @@
 // privilege gap emerges.
 
 import type { QueryCtx, MutationCtx } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 
 export type Role = 'owner' | 'member'
 
@@ -32,6 +33,8 @@ export async function readRole(
     .unique()
   if (!m) return null
   if (m.status !== undefined && m.status !== 'active') return null
+  const org = await ctx.db.get(workspaceId as Id<'orgs'>)
+  if (!org || org.status === 'archived') return null
   return m.role
 }
 

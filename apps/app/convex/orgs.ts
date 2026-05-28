@@ -23,6 +23,10 @@ import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 const isActive = (m: { status?: string } | null | undefined): boolean =>
   !!m && (m.status === undefined || m.status === 'active')
 
+const isOrgActive = <T extends { status?: string }>(
+  org: T | null | undefined,
+): org is T => !!org && (org.status === undefined || org.status === 'active')
+
 async function scheduleOrgShareDisconnects(
   ctx: MutationCtx,
   orgId: Id<'orgs'>,
@@ -54,7 +58,13 @@ export async function viewerOrgIds(
     .query('memberships')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .collect()
-  return new Set(rows.filter(isActive).map((r) => r.orgId))
+  const out = new Set<string>()
+  for (const r of rows) {
+    if (!isActive(r)) continue
+    const org = await ctx.db.get(r.orgId as Id<'orgs'>)
+    if (isOrgActive(org)) out.add(r.orgId)
+  }
+  return out
 }
 
 export async function isMember(
@@ -68,7 +78,9 @@ export async function isMember(
       q.eq('orgId', orgId).eq('workspaceId', workspaceId),
     )
     .unique()
-  return isActive(row)
+  if (!isActive(row)) return false
+  const org = await ctx.db.get(orgId as Id<'orgs'>)
+  return isOrgActive(org)
 }
 
 export const createOrg = mutation({
@@ -119,7 +131,10 @@ export const joinOrg = mutation({
       .query('orgs')
       .withIndex('by_inviteCode', (q) => q.eq('inviteCode', code))
       .first()
-    if (!org) throw new Error('No company found for that invite code.')
+    if (!org) throw new Error('No workspace found for that invite code.')
+    if (!isOrgActive(org)) {
+      throw new Error('That workspace has been archived.')
+    }
     const existing = await ctx.db
       .query('memberships')
       .withIndex('by_org_workspace', (q) =>
@@ -235,6 +250,65 @@ export const removeMember = mutation({
   },
 })
 
+// Owner-only: archive a shared workspace and remove every active member.
+// This is the real "delete workspace" path; it is separate from
+// removeMember/leaveOrg so a sole Owner can delete an
+// accidentally-created workspace without violating the last-Owner
+// invariant for still-active orgs.
+export const deleteOrg = mutation({
+  args: { orgId: v.id('orgs') },
+  handler: async (ctx, { orgId }) => {
+    await requireRole(ctx, orgId, 'owner')
+    const org = await ctx.db.get(orgId)
+    if (!org) throw new Error('Workspace not found.')
+    if (!isOrgActive(org)) return { ok: true as const, archived: false }
+
+    const orgWorkspaceId = orgId as string
+    const rows = await ctx.db
+      .query('memberships')
+      .withIndex('by_org', (q) => q.eq('orgId', orgWorkspaceId))
+      .collect()
+    const activeRows = rows.filter(isActive)
+
+    for (const row of activeRows) {
+      await scheduleHocuspocusDisconnect(ctx, {
+        workspaceId: orgWorkspaceId,
+        userId: row.workspaceId,
+      })
+      await scheduleOrgShareDisconnects(ctx, orgId, row.workspaceId)
+    }
+
+    for (const row of rows) {
+      if (row.status !== 'removed') {
+        await ctx.db.patch(row._id, { status: 'removed' })
+      }
+    }
+
+    const ownedShares = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) =>
+        q.eq('ownerWorkspaceId', orgWorkspaceId),
+      )
+      .collect()
+    const incomingOrgShares = await ctx.db
+      .query('atomShares')
+      .withIndex('by_org', (q) => q.eq('granteeOrgId', orgWorkspaceId))
+      .collect()
+    const shareIds = new Set(
+      ownedShares.concat(incomingOrgShares).map((s) => s._id),
+    )
+    for (const shareId of shareIds) {
+      await ctx.db.delete(shareId)
+    }
+
+    await ctx.db.patch(orgId, {
+      status: 'archived',
+      inviteCode: `archived-${orgWorkspaceId}-${Date.now()}`,
+    })
+    return { ok: true as const, archived: true }
+  },
+})
+
 // Owner-only: rename the org (decisions.md §3). Trims + falls back to
 // the prior name if the new one is whitespace-only (renaming an org
 // to "" would brick the switcher). Idempotent.
@@ -300,7 +374,7 @@ export const myOrgs = query({
     for (const r of rows) {
       if (!isActive(r)) continue
       const org = await ctx.db.get(r.orgId as Id<'orgs'>)
-      if (!org) continue
+      if (!isOrgActive(org)) continue
       out.push({
         orgId: r.orgId,
         name: org.name,
@@ -349,7 +423,7 @@ export const myWorkspaces = query({
     for (const r of rows) {
       if (!isActive(r)) continue
       const org = await ctx.db.get(r.orgId as Id<'orgs'>)
-      if (!org) continue
+      if (!isOrgActive(org)) continue
       out.push({
         workspaceId: r.orgId, // org's workspaceId IS orgs._id (string)
         kind: 'org',
@@ -497,6 +571,7 @@ export const _reconcileMembershipRows = internalMutation({
         .first()
       if (!org) continue // we don't have this org in Convex (created
       //                    elsewhere; bridge will reconcile when used).
+      if (!isOrgActive(org)) continue
       const existing = await ctx.db
         .query('memberships')
         .withIndex('by_org_workspace', (q) =>
@@ -544,6 +619,11 @@ export const _reconcileMembershipRows = internalMutation({
       if (m.status === 'removed') continue
       const org = await ctx.db.get(m.orgId as Id<'orgs'>)
       if (!org) continue
+      if (!isOrgActive(org)) {
+        await ctx.db.patch(m._id, { status: 'removed' })
+        removed++
+        continue
+      }
       if (!org.workosOrgId) continue // not bridge-linked → leave alone
       if (wosSet.has(org.workosOrgId)) continue // still in WorkOS → kept
       await ctx.db.patch(m._id, { status: 'removed' })
@@ -583,6 +663,8 @@ export const _getWorkosOrgIdForCaller = internalQuery({
 export const orgMembers = query({
   args: { orgId: v.id('orgs') },
   handler: async (ctx, { orgId }) => {
+    const org = await ctx.db.get(orgId)
+    if (!isOrgActive(org)) return null
     const caller = await requireWorkspace(ctx)
     if (!(await isMember(ctx, orgId, caller))) return null
     const rows = await ctx.db

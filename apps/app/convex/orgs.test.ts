@@ -43,7 +43,7 @@ describe('orgs 1c — create / join / membership', () => {
     const t = convexTest(schema, modules)
     await expect(
       t.withIdentity({ subject: B }).mutation(api.orgs.joinOrg, { inviteCode: 'nope' }),
-    ).rejects.toThrow(/no company/i)
+    ).rejects.toThrow(/no workspace/i)
   })
 })
 
@@ -208,6 +208,47 @@ describe('org workspace lifecycle (Phase 3)', () => {
     // Re-joining via the invite re-activates the removed row.
     await asB.mutation(api.orgs.joinOrg, { inviteCode })
     expect((await asB.query(api.orgs.myWorkspaces, {})).length).toBe(2)
+  })
+
+  it('deleteOrg archives a workspace so the sole Owner can delete it safely', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const { orgId, inviteCode } = await asA.mutation(api.orgs.createOrg, {
+      name: 'Draft Workspace',
+    })
+
+    await expect(
+      asA.mutation(api.orgs.removeMember, {
+        orgId,
+        memberWorkspaceId: A,
+      }),
+    ).rejects.toThrow(/last Owner/)
+
+    await asA.mutation(api.orgs.deleteOrg, { orgId })
+
+    expect(
+      (await asA.query(api.orgs.myWorkspaces, {})).map((w) => w.workspaceId),
+    ).not.toContain(orgId)
+    expect(await asA.query(api.orgs.orgMembers, { orgId })).toBeNull()
+    await expect(
+      t.withIdentity({ subject: B }).mutation(api.orgs.joinOrg, { inviteCode }),
+    ).rejects.toThrow(/workspace/i)
+  })
+
+  it('deleteOrg removes a shared workspace from every active member', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asB = t.withIdentity({ subject: B })
+    const { orgId } = await makeOrgWithMember(t)
+
+    await asA.mutation(api.orgs.deleteOrg, { orgId })
+
+    expect(
+      (await asA.query(api.orgs.myWorkspaces, {})).map((w) => w.workspaceId),
+    ).not.toContain(orgId)
+    expect(
+      (await asB.query(api.orgs.myWorkspaces, {})).map((w) => w.workspaceId),
+    ).not.toContain(orgId)
   })
 
   it('renameOrg (decisions.md §3): Owner-only, trims, rejects empty/over-long, idempotent', async () => {

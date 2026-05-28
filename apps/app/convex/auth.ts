@@ -13,6 +13,7 @@ import { SignJWT } from 'jose'
 import { v } from 'convex/values'
 import { action, mutation, query } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 
 type AuthIdentity = {
   subject: string
@@ -74,6 +75,10 @@ export async function requireWorkspace(
   if (!m) throw new Error(`Not a member of workspace ${active}`)
   if (m.status !== undefined && m.status !== 'active') {
     throw new Error(`Membership not active (status=${m.status})`)
+  }
+  const org = await dbCtx.db.get(active as Id<'orgs'>)
+  if (!org || org.status === 'archived') {
+    throw new Error(`Workspace ${active} has been archived`)
   }
   return active
 }
