@@ -305,7 +305,7 @@ function CreateOrgForm({
         </div>
       </div>
 
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
         <input
           type="text"
           value={name}
@@ -313,20 +313,22 @@ function CreateOrgForm({
           placeholder="Workspace name"
           disabled={busy}
           autoFocus
-          className="min-w-0 flex-1 rounded-md border border-rule bg-panel px-3 py-2 text-[12.5px] text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent"
+          className="h-10 min-w-0 rounded-md border border-rule bg-panel px-3 text-[12.5px] text-ink placeholder:text-ink-faint transition-colors focus:border-rule-strong focus:outline-none disabled:cursor-not-allowed disabled:text-ink-faint"
         />
         <button
           type="submit"
           disabled={busy || !name.trim()}
-          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md bg-accent px-3 py-2 text-[12.5px] font-medium text-ink-on-accent hover:opacity-90 disabled:opacity-50 transition-opacity"
+          aria-busy={busy}
+          className="inline-flex h-10 w-full shrink-0 items-center justify-center gap-1.5 rounded-[7px] bg-ink-strong px-3.5 text-[12.5px] font-semibold text-surface shadow-sm transition-colors hover:bg-ink focus:outline-none focus:ring-2 focus:ring-accent-soft disabled:cursor-not-allowed disabled:bg-hover disabled:text-ink-faint disabled:shadow-none sm:w-auto"
         >
           <Plus className="size-3.5" strokeWidth={2.5} />
-          Create
+          {busy ? 'Creating' : 'Create'}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-md px-2.5 py-2 text-[12.5px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+          disabled={busy}
+          className="inline-flex h-10 w-full items-center justify-center rounded-[7px] px-3 text-[12.5px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink focus:outline-none focus:ring-2 focus:ring-accent-soft disabled:cursor-not-allowed disabled:text-ink-faint sm:w-auto"
         >
           Cancel
         </button>
