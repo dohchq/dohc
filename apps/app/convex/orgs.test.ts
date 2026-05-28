@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { internal, api } from './_generated/api'
 
@@ -23,6 +23,10 @@ async function makeOrgWithMember(t: ReturnType<typeof convexTest>) {
   await t.withIdentity({ subject: B }).mutation(api.orgs.joinOrg, { inviteCode })
   return { orgId, inviteCode }
 }
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 describe('orgs 1c — create / join / membership', () => {
   it('create makes the creator an owner; join by code adds a member', async () => {
@@ -248,6 +252,19 @@ describe('org workspace lifecycle (Phase 3)', () => {
     ).not.toContain(orgId)
     expect(
       (await asB.query(api.orgs.myWorkspaces, {})).map((w) => w.workspaceId),
+    ).not.toContain(orgId)
+  })
+
+  it('deleteOrg still archives when live disconnect admin env is missing', async () => {
+    vi.stubEnv('HOCUSPOCUS_JWT_SECRET', 'jwt-secret')
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const { orgId } = await makeOrgWithMember(t)
+
+    await asA.mutation(api.orgs.deleteOrg, { orgId })
+
+    expect(
+      (await asA.query(api.orgs.myWorkspaces, {})).map((w) => w.workspaceId),
     ).not.toContain(orgId)
   })
 

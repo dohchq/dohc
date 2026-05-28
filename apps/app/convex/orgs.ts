@@ -49,6 +49,33 @@ async function scheduleOrgShareDisconnects(
   }
 }
 
+async function tryScheduleArchiveDisconnect(
+  ctx: MutationCtx,
+  args: { workspaceId: string; userId: string },
+): Promise<void> {
+  try {
+    await scheduleHocuspocusDisconnect(ctx, args)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[orgs.deleteOrg] skipped live member disconnect: ${message}`)
+  }
+}
+
+async function tryScheduleArchiveOrgShareDisconnects(
+  ctx: MutationCtx,
+  orgId: Id<'orgs'>,
+  departingWorkspaceId: string,
+): Promise<void> {
+  try {
+    await scheduleOrgShareDisconnects(ctx, orgId, departingWorkspaceId)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(
+      `[orgs.deleteOrg] skipped live shared-doc disconnect: ${message}`,
+    )
+  }
+}
+
 // The orgIds the given workspace belongs to (active memberships only).
 export async function viewerOrgIds(
   ctx: QueryCtx | MutationCtx,
@@ -271,11 +298,11 @@ export const deleteOrg = mutation({
     const activeRows = rows.filter(isActive)
 
     for (const row of activeRows) {
-      await scheduleHocuspocusDisconnect(ctx, {
+      await tryScheduleArchiveDisconnect(ctx, {
         workspaceId: orgWorkspaceId,
         userId: row.workspaceId,
       })
-      await scheduleOrgShareDisconnects(ctx, orgId, row.workspaceId)
+      await tryScheduleArchiveOrgShareDisconnects(ctx, orgId, row.workspaceId)
     }
 
     for (const row of rows) {
