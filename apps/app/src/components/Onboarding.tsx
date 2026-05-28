@@ -174,6 +174,7 @@ export function Onboarding({ state }: Props) {
   const ensureThread = useMutation(api.agent.ensureThread)
   const startOnboarding = useAction(api.agent.startOnboarding)
   const defer = useMutation(api.onboarding.defer)
+  const completeIfReady = useMutation(api.onboarding.completeIfReady)
   const sendMessage = useAction(api.agent.sendMessage)
   const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
 
@@ -313,12 +314,15 @@ export function Onboarding({ state }: Props) {
   const upsertAtom = useMutation(api.atoms.upsert)
   const meAtom = useQuery(
     api.atoms.getByPath,
-    progress?.mePath ? { path: progress.mePath } : 'skip',
+    progress?.mePath ? { path: progress.mePath, activeWorkspaceId } : 'skip',
   )
   const heroAtom = useQuery(
     api.atoms.getByPath,
-    progress?.dashboardPath ? { path: progress.dashboardPath } : 'skip',
+    progress?.dashboardPath
+      ? { path: progress.dashboardPath, activeWorkspaceId }
+      : 'skip',
   )
+  const completingReadyRef = useRef(false)
   useEffect(() => {
     if (
       workspaceReady &&
@@ -333,8 +337,19 @@ export function Onboarding({ state }: Props) {
       } catch {
         /* private-mode / quota — App shows its normal default */
       }
+      if (!completingReadyRef.current) {
+        completingReadyRef.current = true
+        completeIfReady({ activeWorkspaceId }).catch(() => {
+          completingReadyRef.current = false
+        })
+      }
     }
-  }, [workspaceReady, progress?.dashboardPath])
+  }, [
+    workspaceReady,
+    progress?.dashboardPath,
+    completeIfReady,
+    activeWorkspaceId,
+  ])
 
   // ── Intro — exactly two choices ────────────────────────────────
   if (phase === 'intro') {
@@ -486,9 +501,11 @@ export function Onboarding({ state }: Props) {
               path={meAtom.path}
               body={meAtom.body}
               onSave={(next) =>
-                upsertAtom({ path: meAtom.path, body: next }).then(
-                  () => undefined,
-                )
+                upsertAtom({
+                  path: meAtom.path,
+                  body: next,
+                  activeWorkspaceId,
+                }).then(() => undefined)
               }
             />
           )}

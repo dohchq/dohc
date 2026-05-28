@@ -28,6 +28,7 @@ import {
   isSkillAtomBody,
 } from '../lib/atomId'
 import { buildShareText } from '../lib/shareText'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { PropertiesPanel } from './PropertiesPanel'
 import { HtmlAtomFrame } from './HtmlAtomFrame'
 import { usePlugins } from '../plugins/usePlugins'
@@ -74,9 +75,10 @@ export function AtomView({
   // No path → no atom is open. We skip the Convex query and render an
   // empty placeholder below. Don't fall back to a "default" atom path.
   const effectivePath = path
+  const activeWorkspaceId = useActiveWorkspaceId()
   const row = useQuery(
     api.atoms.getByPath,
-    effectivePath ? { path: effectivePath } : 'skip',
+    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
   )
   const upsert = useMutation(api.atoms.upsert)
   // atom-address-v1 §1.4 — proactively learn if THIS file's address
@@ -84,7 +86,7 @@ export function AtomView({
   // unexplained). Rendered as a calm inline line by AtomShell.
   const idAdvisory = useQuery(
     api.atoms.idAdvisory,
-    effectivePath ? { path: effectivePath } : 'skip',
+    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
   )
 
   // Always-editor: the rendered doc IS the editor. There's no separate read
@@ -137,10 +139,11 @@ export function AtomView({
         path: effectivePath,
         body: toSave,
         source: 'user',
+        activeWorkspaceId,
       })
     }, 500)
     return () => clearTimeout(t)
-  }, [draft, row, upsert, effectivePath])
+  }, [draft, row, upsert, effectivePath, activeWorkspaceId])
 
   // D4.28 — immediate commit (no debounce) for the raw-source
   // textarea. Editing the frontmatter `id:` per-keystroke on the
@@ -154,7 +157,7 @@ export function AtomView({
     if (!effectivePath) return
     if (next === remoteBodyRef.current) return
     remoteBodyRef.current = next
-    await upsert({ path: effectivePath, body: next, source: 'user' })
+    await upsert({ path: effectivePath, body: next, source: 'user', activeWorkspaceId })
   }
 
   function previewDraft(next: string) {
@@ -186,12 +189,13 @@ export function AtomView({
         path: effectivePath,
         body: toSave,
         source: 'user',
+        activeWorkspaceId,
       })
     }
     return () => {
       if (pendingSaveRef.current) pendingSaveRef.current = null
     }
-  }, [effectivePath, upsert, pendingSaveRef])
+  }, [effectivePath, upsert, pendingSaveRef, activeWorkspaceId])
 
   // enterEdit signals "focus the editor on arrival" — used by new-page
   // creation and marketplace's "edit atom" jump. Clear the flag upstream
@@ -310,6 +314,7 @@ export function AtomView({
           // backward-compat fallback inside AtomShell.)
           pathIsHtml={effectivePath ? isHtmlPath(effectivePath) : false}
           path={effectivePath}
+          activeWorkspaceId={activeWorkspaceId}
           // D4.28 — immediate-commit for the raw-source textarea
           // (avoids per-keystroke id reconcile).
           onCommitSource={commitDraft}
@@ -357,6 +362,7 @@ function AtomShell({
   savedAtomId,
   pathIsHtml,
   path,
+  activeWorkspaceId,
   onCommitSource,
   onShare,
 }: {
@@ -384,6 +390,7 @@ function AtomShell({
   pathIsHtml?: boolean
   // the atom's current path (for the html title default = filename)
   path?: string | null
+  activeWorkspaceId?: string
   // D4.28 — immediately persist the raw-source buffer (one save +
   // one id-reconcile) on blur/done.
   onCommitSource?: (next: string) => void
@@ -795,7 +802,7 @@ function AtomShell({
           collab={
             identity?.workspaceId && atomId
               ? {
-                  workspaceId: identity.workspaceId,
+                  workspaceId: activeWorkspaceId ?? identity.workspaceId,
                   atomId,
                   userId: user?.id,
                   userName: collabUserName,

@@ -20,6 +20,7 @@ const read = (rel: string) =>
 
 const EDITOR = read('components/AtomEditor.tsx')
 const HTML_FRAME = read('components/HtmlAtomFrame.tsx')
+const ATOM_VIEW = read('components/AtomView.tsx')
 const CHAT = read('components/Chat.tsx')
 const ONBOARDING = read('components/Onboarding.tsx')
 const APP = read('routes/_app.tsx')
@@ -50,6 +51,20 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     // SSR-rendered HTML would silently resolve formulas against the
     // caller's personal workspace even in an org context.
     expect(HTML_FRAME).toMatch(/\?v=\$\{nonce\}\$\{wParam\}/)
+  })
+
+  it('AtomView reads and writes the open path in the active workspace', () => {
+    expect(ATOM_VIEW).toMatch(
+      /useActiveWorkspaceId[\s\S]{0,200}from\s+['"](?:@\/lib|\.\.\/lib)\/active-workspace['"]/,
+    )
+    expect(ATOM_VIEW).toMatch(
+      /api\.atoms\.getByPath,\s*[\s\S]{0,120}activeWorkspaceId/,
+    )
+    expect(ATOM_VIEW).toMatch(
+      /api\.atoms\.idAdvisory,\s*[\s\S]{0,120}activeWorkspaceId/,
+    )
+    expect(ATOM_VIEW).toMatch(/upsert\(\{[\s\S]{0,160}activeWorkspaceId/)
+    expect(ATOM_VIEW).toMatch(/workspaceId:\s*activeWorkspaceId\s*\?\?\s*identity\.workspaceId/)
   })
 
   it('Chat + Onboarding pass activeWorkspaceId to listMessages', () => {

@@ -135,6 +135,45 @@ export async function progressOf(
   }
 }
 
+async function completeWorkspaceOnboarding(
+  ctx: MutationCtx,
+  workspaceId: string,
+) {
+  const row = await onboardingRow(ctx, workspaceId)
+  if (row?.completedAt) return null
+
+  const p = await progressOf(ctx, workspaceId)
+  if (!p.hasMe || !p.hasDashboardWithQuery) {
+    throw new Error(
+      `cannot finish onboarding: vault not populated yet ` +
+        `(me.md=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
+        `Write a populated dashboard and me.md first.`,
+    )
+  }
+  // ai-os-ideas #1 (the Map): a finished onboarding gets a living
+  // navigable index, server-guaranteed (not prompt-hope), reusing
+  // the loop's deterministic builder. regenerateMap handles its
+  // KNOWN conditions (dup/overflow/not-owned) but its upsert (+ the
+  // capture pipeline it triggers) can still throw for other
+  // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
+  // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
+  // on any failure, degrade silently (the weekly loop regenerates
+  // _map.md anyway). Catching internally does NOT roll back this
+  // mutation's transaction in Convex (only a thrown handler does).
+  try {
+    await regenerateMap(ctx, workspaceId)
+  } catch {
+    /* never block finish on the optional Map */
+  }
+  if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
+  else
+    await ctx.db.insert('onboarding', {
+      workspaceId,
+      completedAt: Date.now(),
+    })
+  return null
+}
+
 // ── internal (agent-driven) ─────────────────────────────────────────
 
 export const _state = internalQuery({
@@ -162,37 +201,7 @@ export const _begin = internalMutation({
 export const _complete = internalMutation({
   args: { workspaceId: v.string() },
   handler: async (ctx, { workspaceId }) => {
-    const p = await progressOf(ctx, workspaceId)
-    if (!p.hasMe || !p.hasDashboardWithQuery) {
-      throw new Error(
-        `cannot finish onboarding: vault not populated yet ` +
-          `(me.md=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-          `Write a populated dashboard and me.md first.`,
-      )
-    }
-    // ai-os-ideas #1 (the Map): a finished onboarding gets a living
-    // navigable index, server-guaranteed (not prompt-hope), reusing
-    // the loop's deterministic builder. regenerateMap handles its
-    // KNOWN conditions (dup/overflow/not-owned) but its upsert (+ the
-    // capture pipeline it triggers) can still throw for other
-    // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
-    // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
-    // on any failure, degrade silently (the weekly loop regenerates
-    // _map.md anyway). Catching internally does NOT roll back this
-    // mutation's transaction in Convex (only a thrown handler does).
-    try {
-      await regenerateMap(ctx, workspaceId)
-    } catch {
-      /* never block finish on the optional Map */
-    }
-    const row = await onboardingRow(ctx, workspaceId)
-    if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
-    else
-      await ctx.db.insert('onboarding', {
-        workspaceId,
-        completedAt: Date.now(),
-      })
-    return null
+    return completeWorkspaceOnboarding(ctx, workspaceId)
   },
 })
 
@@ -297,5 +306,20 @@ export const defer = mutation({
       await ctx.db.patch(row._id, { deferredAt: Date.now() })
     }
     return null
+  },
+})
+
+/** Client recovery for a ready-but-still-IN_PROGRESS workspace.
+ *  Fresh shared workspaces are seeded with the identity atom +
+ *  dashboard before the client opens them. If the public progress
+ *  invariant is already satisfied, the ready handoff can complete
+ *  without waiting for an agent tool call. This reuses the exact same
+ *  server floor as `_complete`; an empty workspace still cannot fake
+ *  DONE. */
+export const completeIfReady = mutation({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
+    return completeWorkspaceOnboarding(ctx, ws)
   },
 })
