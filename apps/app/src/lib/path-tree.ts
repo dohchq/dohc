@@ -7,8 +7,7 @@ export type FileRow = {
   path: string
   title?: string | null
   source: string
-  // Last-write timestamp (projected by api.atoms.list). Drives the
-  // "recent" ordering in the Quick access section. Absent on callers
+  // Last-write timestamp (projected by api.atoms.list). Absent on callers
   // that don't project it.
   updatedAt?: number
   // html-atoms-v1 §5 — 'html' ⇒ tree badges it as a page (no `.html`

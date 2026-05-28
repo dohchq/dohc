@@ -44,6 +44,12 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(/<Share2\b[^>]*aria-label="shared"/)
   })
 
+  it('does not render a Quick access sidebar section', () => {
+    expect(SRC).not.toMatch(/Quick access/)
+    expect(SRC).not.toMatch(/filetree-quick/)
+    expect(SRC).not.toMatch(/selectQuickAccess/)
+  })
+
   it('Shift+L (lower OR upper) toggles lock (R3 fold — bare L reserved for future typeahead)', () => {
     // R3 fold of convergent FAIL-B — APG tree pattern reserves
     // printable letters for typeahead. Lock/star moved to Shift+.

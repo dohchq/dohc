@@ -51,11 +51,7 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
-import {
-  partitionTree,
-  selectQuickAccess,
-  type QuickItem,
-} from '@/lib/file-tree-sections'
+import { partitionTree } from '@/lib/file-tree-sections'
 
 type Props = {
   files: FileRow[]
@@ -226,82 +222,6 @@ const CONTEXT_META: Record<
   'company.md': { label: 'Company', Icon: Building2 },
   'intent.md': { label: 'Intent', Icon: Target },
 }
-// Quick access — a blended, read-only shortcut list (starred pages
-// first, each badged with a star, then recently-edited pages). Opens on
-// click like the Context rows; not a drag/rename surface.
-function QuickRow({
-  item,
-  active,
-  onClick,
-}: {
-  item: QuickItem
-  active: boolean
-  onClick: () => void
-}) {
-  const label =
-    item.title ||
-    item.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ||
-    item.path
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={item.path}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
-        active
-          ? 'bg-hover text-ink-strong font-medium'
-          : 'text-ink-dim hover:text-ink hover:bg-hover'
-      }`}
-    >
-      <span
-        className="flex size-3.5 shrink-0 items-center justify-center"
-        aria-hidden
-      >
-        {item.icon ? (
-          <span className="text-[12px] leading-none">{item.icon}</span>
-        ) : item.type === 'html' ? (
-          <Globe className="size-3.5" strokeWidth={2} />
-        ) : item.type === 'skill' ? (
-          <Sparkles className="size-3.5" strokeWidth={2} />
-        ) : (
-          <FileText className="size-3.5" strokeWidth={2} />
-        )}
-      </span>
-      <span className="truncate">{label}</span>
-      {item.starred && (
-        <Star
-          className="ml-auto size-3 shrink-0 fill-current text-ink-faint"
-          strokeWidth={2}
-          aria-hidden
-        />
-      )}
-    </button>
-  )
-}
-
-function QuickAccessList({
-  items,
-  activePath,
-  onOpen,
-}: {
-  items: QuickItem[]
-  activePath: string | null
-  onOpen: (path: string) => void
-}) {
-  return (
-    <div className="px-1.5 pb-1">
-      {items.map((item) => (
-        <QuickRow
-          key={item.path}
-          item={item}
-          active={activePath === item.path}
-          onClick={() => onOpen(item.path)}
-        />
-      ))}
-    </div>
-  )
-}
-
 function ContextRow({
   icon: Icon,
   label,
@@ -433,10 +353,6 @@ export function FileTree({
   // Collapsible-section open state, persisted per section (mirrors the
   // chat-open localStorage pattern in _app.tsx). Personal + Context +
   // Shared all default open.
-  const [openQuick, setOpenQuick] = usePersistedSectionToggle(
-    'dohc-section-quick',
-    true,
-  )
   const [openPersonal, setOpenPersonal] = usePersistedSectionToggle(
     'dohc-section-personal',
     true,
@@ -568,26 +484,11 @@ export function FileTree({
   const pendingStars = useRef(new Map<string, boolean>())
   const pendingFolderStars = useRef(new Map<string, boolean>())
 
-  // Trigger a render when the optimistic maps mutate so the row
-  // re-evaluates its current state. The ref is the source of truth;
-  // this counter is just a tickle.
-  const [pendingTick, setPendingTick] = useState(0)
+  // Trigger a render when the optimistic maps mutate so row affordances
+  // re-evaluate immediately. The ref is the source of truth; this
+  // counter is just a tickle.
+  const [, setPendingTick] = useState(0)
   const bumpPending = useCallback(() => setPendingTick((n) => n + 1), [])
-
-  // Quick access overlay (starred + recent). A shortcut layer over the
-  // same files — items here also appear in their real section. We apply
-  // the optimistic `pendingStars` overlay (the same one the tree rows
-  // read) so a Shift+S reorders Quick access INSTANTLY, not after the
-  // server round-trip; `pendingTick` forces the recompute when that ref
-  // mutates (the ref itself can't be a dependency).
-  const quickItems = useMemo(() => {
-    const overlaid = files.map((f) => {
-      const opt = pendingStars.current.get(f.path)
-      return opt === undefined ? f : { ...f, starred: opt }
-    })
-    return selectQuickAccess(overlaid)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files, pendingTick])
 
   // Reconcile: when the projection finally matches the optimistic
   // intent, drop the entry. Defends against the race where a
@@ -1099,30 +1000,11 @@ export function FileTree({
       {/* Sections — VSCode-explorer style: collapsible groups over the
           same flat file list (a pure presentation partition). */}
       <div className="flex-1 overflow-y-auto pb-3">
-        {/* Quick access — starred + recent, blended into one list. A
-            shortcut overlay (not part of the partition); hidden when
-            there's nothing to surface (e.g. a fresh workspace). */}
-        {quickItems.length > 0 && (
-          <TreeSection
-            id="filetree-quick"
-            label="Quick access"
-            open={openQuick}
-            onToggle={() => setOpenQuick((v) => !v)}
-          >
-            <QuickAccessList
-              items={quickItems}
-              activePath={activePath}
-              onOpen={onOpen}
-            />
-          </TreeSection>
-        )}
-
         <TreeSection
           id="filetree-personal"
           label="Personal workspace"
           open={openPersonal}
           onToggle={() => setOpenPersonal((v) => !v)}
-          divider={quickItems.length > 0}
         >
           {/* pt-1 so the topmost row's focus ring isn't clipped. */}
           <div className="px-1.5 pt-1">
