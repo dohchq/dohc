@@ -10,8 +10,8 @@ import { StrictCreateConflictError } from './entities'
 // capture ref ambiguous → recordCapture's first-'/' split misses the
 // lookup → NO reviewed-by-default withhold row → a granted window
 // leaks the unconfirmed value. Enforced at every write chokepoint
-// (covers the agent AND the public plugin bridge, which route through
-// _upsertMany / _patch).
+// (covers the agent and internal callers that route through _upsertMany
+// / _patch).
 
 const modules = import.meta.glob('./**/*.ts')
 const W = 'ws_ent'
@@ -223,7 +223,7 @@ describe('Track-3 P2b.2 — _upsertMany({mode:"strictCreate"})', () => {
     expect(alice?.data).toEqual({ hours: 999 })
   })
 
-  it('mode:"upsert" explicit is byte-identical to omitted (no regression for plugin-bridge callers)', async () => {
+  it('mode:"upsert" explicit is byte-identical to omitted', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.entities._upsertMany, {
       workspaceId: W,

@@ -2,16 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, Sparkles } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { usePlugins } from '../plugins/usePlugins'
 import { OPEN_SKETCH_EVENT } from './AtomEditor'
 
 type Command = {
   id: string
   title: string
   hint?: string
-  // P3.2 — when set, an icon (Sparkles) renders alongside the
-  // title. Currently used for SKILL entries to distinguish them
-  // from plugin commands at a glance.
+  // P3.2 — when set, an icon (Sparkles) renders alongside the title.
   kind?: 'skill' | undefined
   run: () => void
 }
@@ -19,35 +16,23 @@ type Command = {
 type Props = {
   open: boolean
   onClose: () => void
-  onFirePrompt: (prompt: string) => void
   // P3+P4 fold (Codex F3) — dedicated channel for skill-fire.
-  // STRUCTURALLY separates skill dispatch from generic prompt
-  // dispatch so a plugin command whose text starts with `/<path>`
-  // cannot accidentally become a skill-fire. The callsite in
-  // index.tsx pipes onFireSkill ⇒ pendingSkillFire ⇒ Chat's
-  // direct sendMessage({entry:'skill-fire', prompt: path}) —
-  // never through detectSkillFire.
+  // STRUCTURALLY separates skill dispatch from generic prompt dispatch.
+  // The callsite pipes onFireSkill ⇒ pendingSkillFire ⇒ Chat's direct
+  // sendMessage({entry:'skill-fire', prompt: path}) — never through
+  // detectSkillFire.
   onFireSkill: (path: string) => void
-  onOpenAtom: (path: string) => void
-  onOpenPlugins: () => void
 }
 
 export function CommandPalette({
   open,
   onClose,
-  onFirePrompt,
   onFireSkill,
-  onOpenAtom,
-  onOpenPlugins,
 }: Props) {
-  const { plugins, enabled } = usePlugins()
   // Track-3 P3.2 — surface the user's saved skills here so the
   // ⌘K palette IS the design's "⌘K palette / slash-command"
-  // entry surface (skills-commands-v1 §3.3). Each skill entry,
-  // when picked, fires `onFirePrompt('/' + path)` — the LEADING
-  // SLASH triggers Chat's `detectSkillFire` (P3.1), which sees
-  // an EXACT path match and dispatches `sendMessage({entry:
-  // 'skill-fire', prompt: path})`. The prepareStep BRACE
+  // entry surface (skills-commands-v1 §3.3). Each skill entry
+  // fires the dedicated onFireSkill channel directly. The prepareStep BRACE
   // (P2b.4 + P2c fold) then forces step 0 into
   // {activeTools:['run_skill'], toolChoice: forced, providerOpts:
   // disableParallelToolUse} — the model can only call run_skill.
@@ -61,8 +46,7 @@ export function CommandPalette({
   const commands: Command[] = useMemo(() => {
     const out: Command[] = []
     // Skills first (they're the user's OWN saved processes; most
-    // relevant for daily use). Plugin commands and system items
-    // follow.
+    // relevant for daily use). System items follow.
     for (const s of skills) {
       out.push({
         id: `skill.${s.path}`,
@@ -72,29 +56,12 @@ export function CommandPalette({
         run: () => {
           onClose()
           // P3+P4 Codex fold F3: dedicated channel — skill
-          // dispatch routes through onFireSkill (NOT
-          // onFirePrompt). A plugin command's text that
-          // happens to start with `/<path>` can NEVER become
-          // a skill-fire by accident: only this callsite
-          // (and only with a real skill path) reaches the
-          // skill-fire dispatch.
+          // dispatch routes through onFireSkill. Only this
+          // callsite (and only with a real skill path) reaches
+          // the skill-fire dispatch.
           onFireSkill(s.path)
         },
       })
-    }
-    for (const p of plugins) {
-      if (!enabled.has(p.id)) continue
-      for (const c of p.commands) {
-        out.push({
-          id: `${p.id}.${c.id}`,
-          title: c.title,
-          hint: `${p.name}${c.keybind ? ' · ' + c.keybind : ''}`,
-          run: () => {
-            onClose()
-            onFirePrompt(c.prompt)
-          },
-        })
-      }
     }
     out.push({
       id: 'sys.insert-ascii-sketch',
@@ -105,25 +72,11 @@ export function CommandPalette({
         window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
       },
     })
-    out.push({
-      id: 'sys.open-marketplace',
-      title: 'Open plugin marketplace',
-      hint: 'system',
-      run: () => {
-        onClose()
-        onOpenPlugins()
-      },
-    })
     return out
   }, [
     skills,
-    plugins,
-    enabled,
     onClose,
-    onFirePrompt,
     onFireSkill,
-    onOpenAtom,
-    onOpenPlugins,
   ])
 
   const filtered = useMemo(() => {

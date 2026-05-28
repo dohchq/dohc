@@ -114,12 +114,6 @@ describe('brand no-legacy gate', () => {
   })
 
   it('enforces the new dohc namespaces are present where expected', () => {
-    const customKernel = readFileSync(
-      join(ROOT, 'src/plugins/kernels/CustomKernel.tsx'),
-      'utf8',
-    )
-    expect(customKernel).toContain('window.dohc')
-
     const fileTree = readFileSync(join(ROOT, 'src/components/FileTree.tsx'), 'utf8')
     expect(fileTree).toContain('application/dohc-tree-row')
 

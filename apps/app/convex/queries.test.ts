@@ -41,7 +41,7 @@ describe('Phase-4 precondition 1 — bounded internal list reads', () => {
     await ent(t, 'person', 'a', { name: 'A' })
     await ent(t, 'person', 'b', { name: 'B' })
     await ent(t, 'person', 'c', { name: 'C' })
-    // unbounded (every existing caller: agent / pluginBridge)
+    // unbounded (existing agent callers)
     const all = await t.query(internal.entities._listByType, {
       workspaceId: W,
       type: 'person',

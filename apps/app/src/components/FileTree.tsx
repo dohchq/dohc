@@ -59,7 +59,7 @@ type Props = {
   // the rich shape returned by api.folders.list.
   folders: FolderInput[]
   activePath: string | null
-  view: 'atom' | 'plugins'
+  view: 'atom'
   user: { email?: string | null; firstName?: string | null } | null
   onOpen: (path: string) => void
   onCreatePage: (name: string) => Promise<void>
@@ -1078,7 +1078,7 @@ export function FileTree({
         </TreeSection>
       </div>
 
-      {/* Footer — Plugins lives in the activity bar now. */}
+      {/* Footer */}
       <footer className="border-t border-rule px-3 py-2.5 flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <div

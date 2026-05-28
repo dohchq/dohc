@@ -26,7 +26,7 @@ the codebase. **Round-2 corrections (folded in):**
 > need a workspace-kind branch; `mapEntries` deferred to V2 (debounced
 > regen achieves the user's "feels in sync" goal with no new table);
 > roles trimmed to Owner/Member; editing drops heartbeat; revision
-> check uses `baseBody` not `updatedAt`; plugin execution gets explicit
+> check uses `baseBody` not `updatedAt`; skill execution gets explicit
 > scope.
 
 Decisions locked (see `decisions.md`):
@@ -38,7 +38,7 @@ Decisions locked (see `decisions.md`):
   org chat via copy-paste — a user-initiated, visible action.
 - **V1 scope:** workspace switcher, create/join org via WorkOS, two
   roles (**Owner / Member**, multiple Owners allowed; rename = Owner
-  only — see §6), org atoms/folders/plugins/skills, org `company.md`
+  only — see §6), org atoms/folders/skills, org `company.md`
   + org `_map.md`, **org-scoped agent with provenance**, presence +
   revision-check editing (no heartbeat), **debounced (2s coalesced)
   regen of `_map.md` on atom writes** (the simpler answer to "feels in
@@ -60,7 +60,7 @@ Decisions locked (see `decisions.md`):
 - An **active-workspace switcher** in the UI; the URL reflects the
   active workspace.
 - **Roles** in an org: **Owner / Member** (multiple Owners allowed).
-- Org workspaces have their own **atoms, folders, plugins, skills,
+- Org workspaces have their own **atoms, folders, skills,
   `company.md`, `_map.md`** — disjoint from personal data.
 - The **agent runs in the active workspace's scope** only. In an org,
   it has org atoms/skills/`company.md`/`_map.md` in context; it does
@@ -89,7 +89,7 @@ Decisions locked (see `decisions.md`):
   query/mutation calls `requireWorkspace(ctx)` (`convex/auth.ts:20`),
   which returns the **WorkOS user subject** as `workspaceId`. So
   today, `workspaceId == one human`. Atoms, folders, `atomShares`,
-  captures, plugins, skills, the agent, the loop — all keyed by it.
+  captures, skills, the agent, the loop — all keyed by it.
 - **Sharing today:** `atomShares` supports both **person-to-person**
   (`granteeWorkspaceId`) *and* **org-wide** (`granteeOrgId`), with the
   org-share branch backed by an existing `orgs` + `memberships` pair
@@ -340,7 +340,7 @@ Owner and Admin differed on exactly one row, and "multiple Owners
 allowed" already covers shared admin work). Add Admin in V2 if a real
 Admin-but-not-Owner gap emerges.
 
-| Role | Read | Write atoms/folders | Install plugins / edit skills | Edit `company.md` / rename org | Invite / remove / change role | Delete workspace |
+| Role | Read | Write atoms/folders | Save/edit skills | Edit `company.md` / rename org | Invite / remove / change role | Delete workspace |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
 | Owner | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Member | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -354,7 +354,7 @@ async function requireRole(ctx, workspaceId, atLeast: 'member' | 'owner')
 ```
 
 Used at the head of every privileged mutation. **Agent tools that map
-to privileged ops** (`install_plugin`, `save_skill`, `delete_folder`
+to privileged ops** (`save_skill`, `delete_folder`
 where it'd touch shared content, etc. — `agent.ts:1657-1675`
 `UNAUTHORIZABLE_TOOLS`) also pass through `requireRole` in org context.
 
@@ -423,22 +423,16 @@ the active workspace, not the user's personal id. A thread started in
 personal stays personal forever, even after a switch — the row binds to
 that workspaceId at creation.
 
-**Plugin / skill execution scope (round-2 addition).** Codex P1: "Do
-not let installed code inherit org-wide power from the installer."
+**Skill execution scope (round-2 addition).** Codex P1: "Do
+not let saved execution surfaces inherit org-wide power from the author."
 Concretely:
-- Only **Owners** install plugins or save skills in an org workspace
-  (§6).
-- Plugin/skill **execution** runs under the *invoking member's* session
-  but its writes go through the org workspace's `requireWorkspace` +
-  `requireRole` check — a member-invoked plugin cannot perform
+- Only **Owners** save skills in an org workspace (§6).
+- Skill **execution** runs under the *invoking member's* session but its
+  writes go through the org workspace's `requireWorkspace` +
+  `requireRole` check — a member-invoked skill cannot perform
   Owner-only writes.
 - The `agent.ts:1657-1675` `UNAUTHORIZABLE_TOOLS` list extends with
   `requireRole` for org context.
-- Network/filesystem access from custom plugin HTML/JS stays gated by
-  the existing iframe sandbox + CSP; no v1 change.
-- Plugin-driven atom writes record `lastEditedByUserId = invokingUser`
-  so provenance reflects who *ran* the plugin, not just who installed
-  it.
 
 **Onboarding mirror (workspace-kind branch).** Per §15.5, org creation
 seeds `company.md` + a starter dashboard. Implementation specifics
@@ -599,8 +593,8 @@ switcher only after you create one or accept an invite."
   throughout the codebase that say this. They get updated in the same
   PR that introduces the new `requireWorkspace` semantics; an
   audit-by-grep test catches new ones.
-- **Plugin/skill execution scope** (§8 has the policy) — Owner-installed
-  code running under a Member's session must not inherit org-wide power.
+- **Skill execution scope** (§8 has the policy) — Owner-saved code
+  running under a Member's session must not inherit org-wide power.
 - **Member offboarding** — removed user's authored atoms stay in the
   org (team memory shouldn't evaporate); their agent threads stay
   attributed to them (now-inactive); their access is revoked.
@@ -625,7 +619,7 @@ switcher only after you create one or accept an invite."
   agent (and every retrieval surface) cannot return workspace B's
   atoms or snippets. Coverage: `atoms.list`, `search.run`,
   `queries.evalQueryBlocks`, `formulaEval.evalFormulas`,
-  `htmlAtoms.getRenderable`, every agent tool, plugin execution.
+  `htmlAtoms.getRenderable`, every agent tool, skill execution.
 - **Role enforcement**: each role × each privileged mutation.
 - **`requireRole` audit-by-grep** (mirrors `searchWriteAudit.test.ts`):
   every privileged mutation calls `requireRole` before any write; new
@@ -701,7 +695,7 @@ swap the implementation for a simpler one:
    `org.removeMember`, `org.changeRole`, `org.list` (for the switcher).
 5. WorkOS Organizations wiring (server) + invite callback route.
 6. Per-mutation refactor: thread `activeWorkspaceId` arg through the
-   public surface (atoms, folders, plugins, skills, agent send, etc.).
+   public surface (atoms, folders, skills, agent send, etc.).
 7. Router: `/w/<workspaceId>/p/<atomId>` shape; `_app` layout reads it.
 8. UI: workspace switcher, Members admin page, provenance pill in
    agent responses.

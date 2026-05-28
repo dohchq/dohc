@@ -913,7 +913,7 @@ export const _upsertInternal = internalMutation({
     // P1 (multiplayer-and-h-followups §6.5) — when present, gate the
     // write through canWriteAtomPath against THIS user's access. The
     // agent-tool callers (write_atom + capture etc.) pass the actor
-    // subject; system callers (regenerateMap, plugin install) call
+    // subject; system callers (regenerateMap, seed flows) call
     // without it (allowed — the system surface is intentionally
     // unconstrained, audit-by-grep enforces that).
     viewerSubject: v.optional(v.string()),
@@ -1236,7 +1236,7 @@ export const verifyAndRepairAtomIds = internalMutation({
 // the H1 in the content. This lifts the leading `# H1` into the
 // `title:` frontmatter property and strips it from the body (and
 // de-dups a page that already has both). Only touches plain doc
-// atoms — never html (extension/filename-titled), skill, plugin, or
+// atoms — never html (extension/filename-titled), skill, or
 // action atoms (their frontmatter is functional config). One body
 // wins; idempotent (a page already title:'d with no body H1 is
 // untouched). internalMutation: run via `npx convex run`.
@@ -1252,7 +1252,7 @@ export const migrateBodyTitlesToFrontmatter = internalMutation({
     for (const a of atoms) {
       const { fm, rest } = splitFrontmatter(a.body)
       // Skip functional atoms: html (by extension OR type), skill,
-      // plugin, action — any frontmatter `type:` line means "not a
+      // action — any frontmatter `type:` line means "not a
       // plain doc".
       if (isHtmlPath(a.path) || (fm && countTypeLines(fm) > 0)) continue
       const h1 = extractLeadingH1(rest)

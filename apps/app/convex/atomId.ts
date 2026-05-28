@@ -104,7 +104,7 @@ export function joinFrontmatter(fm: string, rest: string): string {
 // discipline, exactly paralleling `MAP_PATH`): an html atom is a
 // VISUAL VIEW, never a value-atom data source, so every value-atom
 // scanner skips it. Frontmatter `type: html` (the existing
-// action/plugin meta pattern). Reuses the AUDITED, Phase-4
+// action/html meta pattern). Reuses the AUDITED, Phase-4
 // ReDoS-guarded `splitFrontmatter` (single source — no second
 // frontmatter scan to ReDoS); the per-line anchored bounded test
 // over the already-bounded `fm` is linear/catastrophe-free. v1
@@ -116,16 +116,6 @@ const FM_TYPE_HTML_RE = /^type:[ \t]*['"]?html['"]?[ \t]*\r?$/m
 // line-anchored, case-sensitive lowercase, bare OR single-/double-
 // quoted, optional surrounding spaces. NO trailing comments/arrays.
 const FM_TYPE_SKILL_RE = /^type:[ \t]*['"]?skill['"]?[ \t]*\r?$/m
-// Track-3 P2b.3 fold (Codex F1) — same exact grammar for
-// `type: plugin`. The design §2-A.1 line 397 lists `type: skill`
-// AND `type: plugin` as BOTH-elevated-capability persists; both
-// MUST be gated identically when a skill turn tries to call
-// `write_atom`. (Plugin atoms are the LARGEST catastrophic
-// surface — install_plugin's kernel/overlay runs on every atom
-// view; if a skill body could persist a `type: plugin` body
-// via write_atom, save_skill's authorization gate is fully
-// bypassed.)
-const FM_TYPE_PLUGIN_RE = /^type:[ \t]*['"]?plugin['"]?[ \t]*\r?$/m
 
 // Count `type:` line declarations in a frontmatter `fm` block. O(n)
 // over the already-bounded `fm` (splitFrontmatter has the Phase-4
@@ -187,17 +177,6 @@ export function isSkillAtomBody(body: string): boolean {
   return FM_TYPE_SKILL_RE.test(fm)
 }
 
-// Track-3 P2b.3 fold (Codex F1) — parity helper for `type: plugin`.
-// Used in `convex/agent.ts`:`write_atom` to gate persisting a
-// plugin body from a skill turn (the §2-A.1 "elevated capability
-// bypasses save_skill/install_plugin" closure).
-export function isPluginAtomBody(body: string): boolean {
-  const { fm } = splitFrontmatter(body ?? '')
-  if (!fm) return false
-  if (countTypeLines(fm) !== 1) return false // §1.2 strict-reject
-  return FM_TYPE_PLUGIN_RE.test(fm)
-}
-
 // Track-3 P2c fold (indep F3) — extractors for STRUCTURALLY-
 // BOUNDED enum frontmatter fields exposed via read_atom's INERT
 // preview (§3.1 design lines 467-481). NEVER user-authored prose;
@@ -222,22 +201,6 @@ export function extractSkillCommandFlag(body: string): boolean {
   const { fm } = splitFrontmatter(body ?? '')
   if (!fm) return false
   return extractBoolFmField(fm, 'command')
-}
-
-/** Plugins declare `kernel: true` if they own the rendered query
- *  output deterministically. Default false. */
-export function extractPluginKernelFlag(body: string): boolean {
-  const { fm } = splitFrontmatter(body ?? '')
-  if (!fm) return false
-  return extractBoolFmField(fm, 'kernel')
-}
-
-/** Plugins declare `handles: true` if they declare event handlers
- *  (vs. a pure-rendered plugin). Default false. */
-export function extractPluginHandlesFlag(body: string): boolean {
-  const { fm } = splitFrontmatter(body ?? '')
-  if (!fm) return false
-  return extractBoolFmField(fm, 'handles')
 }
 
 // skills-commands-v1 §6.4 — TEMPORARY OR-compat term in

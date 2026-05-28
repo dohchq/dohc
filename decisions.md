@@ -79,7 +79,6 @@ structural fixes folded directly into the plan)
 - **Editing: drop the 10s heartbeat.** Open + save + focus-regain lease
   writes only; `baseBody` (not `updatedAt`) is the revision-check
   primitive (the codebase already learned this — `atoms.ts:454`).
-- **Plugin/skill execution scope** is explicit in §8: Admin (now
-  Owner)-installed code runs under the invoking member's session but
-  its writes pass through `requireRole`, recording the *invoking*
-  user's id for provenance.
+- **Skill execution scope** is explicit in §8: Owner-installed code
+  runs under the invoking member's session but its writes pass through
+  `requireRole`, recording the *invoking* user's id for provenance.

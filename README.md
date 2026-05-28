@@ -8,7 +8,6 @@ clear, traceable, and ready. Spoken "dock"; always written lowercase.
 ```text
 apps/app              TanStack Start + Convex product app
 packages/brand        dohc mark, lockups, CSS tokens, brand constants
-packages/plugin-sdk   window.dohc SDK types + postMessage protocol
 packages/config       shared TypeScript config
 docs                  product, brand, development, qa, security
 ```
@@ -38,8 +37,7 @@ pnpm dev:app     # start only Vite + Convex dev
   [`docs/product/ai-native-positioning.md`](docs/product/ai-native-positioning.md)
 - Brand: [`docs/brand/design-system.md`](docs/brand/design-system.md)
 - Development: [`docs/development/local-dev.md`](docs/development/local-dev.md),
-  [`testing.md`](docs/development/testing.md),
-  [`plugin-sdk.md`](docs/development/plugin-sdk.md)
+  [`testing.md`](docs/development/testing.md)
 - QA: [`docs/qa/playwright-checklist.md`](docs/qa/playwright-checklist.md)
 - Security: [`docs/security/authz-boundaries.md`](docs/security/authz-boundaries.md)
 

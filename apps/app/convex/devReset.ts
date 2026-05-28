@@ -80,7 +80,6 @@ export const wipeWorkspace = internalMutation({
       ['onboarding', 'by_workspace'],
       ['trash', 'by_workspace'],
       ['captures', 'by_workspace'],
-      ['pluginSettings', 'by_workspace'],
       ['sourceAtoms', 'by_workspace_path'],
       ['workspaceSettings', 'by_workspace'],
       ['memberships', 'by_workspace'],

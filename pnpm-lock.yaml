@@ -26,9 +26,6 @@ importers:
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand
-      '@dohc/plugin-sdk':
-        specifier: workspace:*
-        version: link:../../packages/plugin-sdk
       '@emoji-mart/data':
         specifier: ^1.2.1
         version: 1.2.1
@@ -218,8 +215,6 @@ importers:
         version: 19.2.6
 
   packages/config: {}
-
-  packages/plugin-sdk: {}
 
   services/hocuspocus:
     dependencies:

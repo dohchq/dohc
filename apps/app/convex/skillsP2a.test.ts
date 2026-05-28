@@ -55,8 +55,8 @@ describe('injectTypeSkillIntoBody — pure function', () => {
     expect(isHtmlAtomBody(out.body)).toBe(true) // still html
   })
 
-  it('frontmatter WITH type: plugin ⇒ unchanged', () => {
-    const before = '---\ntype: plugin\nid: gantt\nkernel: heatmap\n---\n'
+  it('frontmatter WITH another type ⇒ unchanged', () => {
+    const before = '---\ntype: action\nid: review\n---\n'
     const out = injectTypeSkillIntoBody(before)
     expect(out.changed).toBe(false)
   })

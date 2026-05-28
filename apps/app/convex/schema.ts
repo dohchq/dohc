@@ -386,17 +386,6 @@ export default defineSchema({
     ])
     .index('by_createdAt', ['createdAt']),
 
-  // Opt-in plugins. Plugin IDs are defined in src/plugins/registry.ts.
-  // A row's presence + `enabled: true` means the plugin is active for
-  // this workspace. The renderer consults this on every query render.
-  pluginSettings: defineTable({
-    workspaceId: v.string(),
-    pluginId: v.string(),
-    enabled: v.boolean(),
-  })
-    .index('by_workspace', ['workspaceId'])
-    .index('by_workspace_plugin', ['workspaceId', 'pluginId']),
-
   // --- Carried over but unused in this iteration (kept so Convex doesn't
   // reject the schema push while old rows exist; safe to drop later). ---
 

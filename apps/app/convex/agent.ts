@@ -55,12 +55,11 @@ async function viewerSubjectFromTool(ctx: ToolCtx): Promise<string> {
   )) as string
 }
 
-// org-plan §6 + Jenny round-2 H-3 — privileged tools (install_plugin,
-// save_skill) are the "largest catastrophic surface" per the existing
-// install_plugin comment. In an ORG workspace they must require Owner;
-// in personal they're always self (no extra check). Same bridge shape
-// as `activeWorkspaceFromTool` but routes through the Owner-aware
-// resolver `_resolveOwnerWorkspaceForCaller` (defined below).
+// org-plan §6 + Jenny round-2 H-3 — privileged tools such as
+// save_skill require Owner in an org workspace; in personal they're
+// always self (no extra check). Same bridge shape as
+// `activeWorkspaceFromTool` but routes through the Owner-aware resolver
+// `_resolveOwnerWorkspaceForCaller` (defined below).
 async function ownerWorkspaceFromTool(
   ctx: ToolCtx,
   options?: { experimental_context?: unknown },
@@ -75,11 +74,8 @@ async function ownerWorkspaceFromTool(
 import { requireDirectUserAuthorization } from './skillTurnGate'
 import {
   isSkillAtomBody,
-  isPluginAtomBody,
   extractFrontmatterId,
   extractSkillCommandFlag,
-  extractPluginKernelFlag,
-  extractPluginHandlesFlag,
 } from './atomId'
 
 // skills-commands-v1 §1.1 — tighter cap for ELEVATED prompt text.
@@ -324,8 +320,8 @@ overrides as you read it:
 - "Portable identity atom: who they are" → read as "Identity atom: what
   ${orgName} does, how the team operates, and how the team wants dohc
   to operate."
-- Plugins + skills are Owner-only in this workspace (the install/save
-  tool will fail for Members; if asked, route the user to ask an Owner).
+- Skills are Owner-only in this workspace (the save tool will fail for
+  Members; if asked, route the user to ask an Owner).
 
 ---
 
@@ -584,32 +580,6 @@ Namespaces + verbs available:
 - capacity.heatmap({ window: "next-8w" }) — ASCII heatmap
 - capacity.risks()                        — overbook risks
 
-## PLUGINS
-
-Plugins are atoms in plugins/. Each binds a built-in kernel (heatmap,
-list with layouts cards/kanban/template, table, or custom) to a query
-pattern. Custom kernels are HTML+JS in a sandboxed iframe with
-window.dohc.{onUpdate, upsert, patch, delete, fetchEntities}.
-
-You have two ways to add plugins:
-
-1. **From the catalog** — call list_available_plugins to see options,
-   then install_plugin with an id. Use this when the user asks for
-   something the catalog already provides (e.g., "give me a Gantt
-   chart for projects" → install_plugin "project-gantt"). Prefer this
-   over writing custom plugin atoms from scratch.
-
-2. **Custom** — for shapes not in the catalog, call create_atom with a
-   plugins/<id>.md path and a complete plugin frontmatter. Tell the
-   user to enable it in the marketplace, or — if you want it on
-   immediately — write a one-line "go enable plugin X in the
-   marketplace" follow-up.
-
-A plugin can ALSO declare:
-- **commands** — appear in the ⌘K command palette; each fires a prompt
-  to the chat agent.
-- **overlay: true** — renders above every atom. Use sparingly.
-
 ## HTML ATOMS (a polished VIEW of data, never data themselves)
 
 When the user wants a REPORT, DASHBOARD, PRESENTATION, or any
@@ -627,9 +597,10 @@ live.
   anything new — it is what the user sees + controls.)
 - **NO JavaScript.** The iframe sandbox is empty (no \`<script>\`,
   no event handlers, no top-nav, no popups, no forms, no network).
-  HTML + inline CSS + inline SVG only. If you need INTERACTIVITY
-  (clicks that do things, forms, drag-and-drop) → write a
-  **plugin** instead (see "PLUGINS" above).
+  HTML + inline CSS + inline SVG only. If the user needs interactivity
+  (clicks that do things, forms, drag-and-drop), model the underlying
+  workflow in md atoms / actions / skills and tell them the interactive
+  view itself is not supported yet.
 - An html atom NEVER stores data — it is a render of data living
   in md atoms. Use \`{= sum(logs.*.billable)}\`,
   \`{= count(projects.*)}\`, \`{= clients.acme.owed}\`, etc. — formulas
@@ -694,8 +665,8 @@ Substitution rules:
   | Mixed prose + a few live numbers            | md atom (pills)    |
   | A polished dashboard / one-pager / report   | html atom          |
   | A printable / branded / designed view       | html atom          |
-  | Interactivity (clicks, forms, drag-drop)    | plugin             |
-  | A custom data view (kanban, gantt, …)       | plugin             |
+  | Interactivity (clicks, forms, drag-drop)    | not supported yet  |
+  | A custom read-only data view                | html atom          |
 
 ### Workflow
 
@@ -1480,7 +1451,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     read_atom: createTool({
       description:
-        'Read the body of one atom by path. For type:skill / type:plugin atoms returns an INERT preview only (label + size) — the actual body becomes available ONLY through run_skill (skills) or ⌘K command-fire (plugins). The user can open the atom in the editor to view it directly.',
+        'Read the body of one atom by path. For type:skill atoms returns an INERT preview only (label + size) — the actual body becomes available ONLY through run_skill. The user can open the atom in the editor to view it directly.',
       inputSchema: z.object({ path: z.string() }),
       execute: async (ctx, { path }: { path: string }, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
@@ -1495,12 +1466,12 @@ export const dohcAgent = new Agent(components.agent, {
           viewerSubject,
         })) as string | null
         if (body === null) return `(not found: ${path})`
-        // §3.1 (Track-3 P2c) — skill/plugin bodies are ELEVATED
-        // capability text. The model must not be able to launder a
-        // skill author's instructions (or a plugin's command prompt)
-        // by READING the body bytes; the LITERAL run_skill / ⌘K
-        // entry is the only authorized surface. INERT preview is
-        // structurally-bounded ({kind, path, label, size, hint});
+        // §3.1 (Track-3 P2c) — skill bodies are ELEVATED capability
+        // text. The model must not be able to launder a skill
+        // author's instructions by READING the body bytes; the
+        // LITERAL run_skill / ⌘K entry is the only authorized
+        // surface. INERT preview is structurally-bounded
+        // ({kind, path, label, size, hint});
         // NO body bytes, NO user-authored frontmatter prose
         // (name/description) — round-4 Codex F2 closure.
         if (isSkillAtomBody(body)) {
@@ -1517,18 +1488,6 @@ export const dohcAgent = new Agent(components.agent, {
             command: extractSkillCommandFlag(body),
             hint:
               '(skill body not readable here — call run_skill to execute, or the user can open the atom in the editor to view it).',
-          })
-        }
-        if (isPluginAtomBody(body)) {
-          return JSON.stringify({
-            kind: 'plugin-preview',
-            path,
-            label: pathDeriveLabel(path),
-            size: skillBodyBytes(body),
-            kernel: extractPluginKernelFlag(body),
-            handles: extractPluginHandlesFlag(body),
-            hint:
-              '(plugin body not readable here — a plugin runs when the user fires it via ⌘K or its declared commands).',
           })
         }
         return body
@@ -1548,10 +1507,7 @@ export const dohcAgent = new Agent(components.agent, {
         options,
       ): Promise<string> => {
         const isElevatedCapability =
-          path.startsWith('skills/') ||
-          path.startsWith('plugins/') ||
-          isSkillAtomBody(content) ||
-          isPluginAtomBody(content)
+          path.startsWith('skills/') || isSkillAtomBody(content)
         if (isElevatedCapability) {
           await requireDirectUserAuthorization(ctx, 'create_atom')
         }
@@ -1976,50 +1932,6 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
-    list_available_plugins: createTool({
-      description:
-        "List plugins available in the catalog. Returns id, name, category, and short description for each. Use this before install_plugin so you know what's offered.",
-      inputSchema: z.object({}),
-      execute: async (ctx, _input, options): Promise<string> => {
-        const data = (await ctx.runQuery(api.catalog.list)) as {
-          entries: Array<{
-            id: string
-            name: string
-            description: string
-            category: string
-          }>
-        }
-        if (data.entries.length === 0) return '(catalog empty)'
-        return data.entries
-          .map(
-            (p) =>
-              `- ${p.id} (${p.category}) — ${p.name}: ${p.description}`,
-          )
-          .join('\n')
-      },
-    }),
-
-    install_plugin: createTool({
-      description:
-        'Install a plugin from the catalog by id. Writes plugins/<id>.md and enables it. Run list_available_plugins first if you need to see what is offered.',
-      inputSchema: z.object({ id: z.string() }),
-      execute: async (ctx, { id }: { id: string }, options): Promise<string> => {
-        // §2-A.1 UNAUTHORIZABLE: the LARGEST catastrophic surface —
-        // installs + enables a plugin whose kernel/overlay then runs
-        // on every atom view. A skill body authoring this would
-        // self-elevate to RCE on the user's vault.
-        await requireDirectUserAuthorization(ctx, 'install_plugin')
-        // org-plan §6 + Jenny round-2 H-3: in an org workspace ONLY
-        // Owners may install plugins (the kernel runs across every
-        // member's view). Personal is implicit Owner — no extra check.
-        await ownerWorkspaceFromTool(ctx, options)
-        const result = (await ctx.runAction(api.catalog.install, {
-          id,
-        })) as { name: string; path: string }
-        return `installed "${result.name}" at ${result.path} (enabled)`
-      },
-    }),
-
     suggest_in_doc: createTool({
       description:
         'Retired v1 markdown-offset suggestion tool. Always refuses; use propose_replace_text so Hocuspocus creates Y.RelativePosition anchors from live Y.Doc state.',
@@ -2156,9 +2068,9 @@ export const _viewerSubjectForCaller = internalQuery({
 })
 
 // org-plan §6 + Jenny round-2 H-3 — Owner-aware variant for privileged
-// tools (install_plugin, save_skill). Personal workspace (workspaceId
-// === WorkOS subject) ⇒ implicit Owner, no extra check. Org workspace
-// ⇒ `requireRole(ctx, workspaceId, 'owner')` throws on Members.
+// tools such as save_skill. Personal workspace (workspaceId === WorkOS
+// subject) ⇒ implicit Owner, no extra check. Org workspace ⇒
+// `requireRole(ctx, workspaceId, 'owner')` throws on Members.
 export const _resolveOwnerWorkspaceForCaller = internalQuery({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
@@ -2244,7 +2156,6 @@ const UNAUTHORIZABLE_TOOLS = [
   'create_atom', // gated CONDITIONALLY in the handler too (BELT); absent at depth>0 (BRACE)
   'update_entity',
   'save_skill',
-  'install_plugin',
   'define_rollup',
   'restore',
   'restore_folder',
@@ -2264,7 +2175,6 @@ const SAFE_FOR_SKILL_TOOLS = [
   'list_entities',
   'find_entity',
   'list_skills',
-  'list_available_plugins',
   'pending_proposals',
   'pending_captures',
   'review_window_sharing',
@@ -2274,7 +2184,7 @@ const SAFE_FOR_SKILL_TOOLS = [
   'create_entities', // strictCreate-only when depth>0 (P2b.3 wire-up)
   'create_folder',
   'capture', // structurally safe at depth>0 — the handler refuses shared:true via the gate
-  'create_atom', // structurally safe at depth>0 — the handler refuses skills/* and plugins/* via the gate
+  'create_atom', // structurally safe at depth>0 — the handler refuses skills/* via the gate
   'propose_replace_text',
   'insert_after_heading',
   'rewrite_section',

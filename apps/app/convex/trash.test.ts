@@ -337,7 +337,7 @@ describe('large recursive delete is batched + completes via scheduler (item 3)',
 })
 
 describe('re-review holes closed', () => {
-  it('entities._patch (public plugin-bridge + agent) snapshots prior data', async () => {
+  it('entities._patch snapshots prior data', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
       await ctx.db.insert('entities', { workspaceId: W, type: 'client', slug: 'acme', data: { rate: 150, terms: 'net-30' }, updatedAt: 1 })
@@ -353,7 +353,7 @@ describe('re-review holes closed', () => {
     expect(tr[0].payload).toMatchObject({ data: { rate: 150, terms: 'net-30' } })
   })
 
-  it('entity snapshot path coalesces (no unbounded-trash plugin loop)', async () => {
+  it('entity snapshot path coalesces rapid overwrites', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
       await ctx.db.insert('entities', { workspaceId: W, type: 'e', slug: 's', data: { n: 0 }, updatedAt: 1 })

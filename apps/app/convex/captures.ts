@@ -409,7 +409,7 @@ export const _reject = internalMutation({
 
 // ── R2 — STRICT reviewed-by-default: capture is a byproduct of the
 // WRITE, structural, not prompt-hope. The holistic review (C2) found
-// entity writes (agent + the PUBLIC pluginBridge) created no capture,
+      // entity writes created no capture,
 // so resolveWindow shared them unreviewed. These run inside the
 // shared entity-write chokepoints (entities._upsertMany/_patch/
 // _delete) so every entity mutation, from any caller, is gated.

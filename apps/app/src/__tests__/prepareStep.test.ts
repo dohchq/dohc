@@ -30,7 +30,7 @@ const AGENT_SRC = readFileSync(
 )
 
 describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive modes)', () => {
-  it('UNAUTHORIZABLE_TOOLS is exactly the §2-A.1 list (17 ops after Track-4 D4.1b ATOMIC)', () => {
+  it('UNAUTHORIZABLE_TOOLS is exactly the §2-A.1 list (16 ops after plugin removal)', () => {
     const expected = new Set([
       'finish_onboarding',
       'confirm_window_sharing',
@@ -43,7 +43,6 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
       'create_atom',
       'update_entity',
       'save_skill',
-      'install_plugin',
       'define_rollup',
       'restore',
       'restore_folder',
@@ -68,7 +67,7 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
   it('SAFE_FOR_SKILL_TOOLS overlaps UNAUTHORIZABLE only on CONDITIONAL tools (create_atom + capture)', () => {
     // create_atom and capture are CONDITIONALLY unauthorizable —
     // gated only on elevated inputs (confirm:true / skills/* /
-    // plugins/* / type:skill / type:plugin / shared:true). At
+    // type:skill / shared:true). At
     // depth>0 the SAFE_FOR_SKILL_TOOLS set still contains them
     // because the BELT in the handler refuses elevated calls
     // (any non-elevated call is genuinely safe). This narrow

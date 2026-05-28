@@ -1,8 +1,8 @@
 import yaml from 'js-yaml'
 
-// Frontmatter parser. Uses js-yaml so plugin atoms can have nested
-// config (arrays of objects, multiline templates via the `|` block
-// scalar, etc.).
+// Frontmatter parser. Uses js-yaml so atoms can have nested config
+// (arrays of objects, multiline templates via the `|` block scalar,
+// etc.).
 //
 // Returns the parsed meta object plus the body after the closing ---.
 

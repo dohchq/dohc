@@ -15,7 +15,6 @@ Phase 0 is running from `main`, not the multiplayer branch. Active code has Milk
 - `apps/app/convex/agent.ts` — AI `write_atom` and `save_skill` write markdown bodies.
 - `apps/app/src/components/AtomView.tsx` — main editor draft state, debounced autosave, source-mode commit, and frontmatter edits call Convex body writes.
 - `apps/app/src/components/SharedAtomView.tsx` — shared edits save full body with `baseBody` compare-and-swap.
-- `apps/app/src/components/PluginPanel.tsx` — plugin atom creation writes full markdown body.
 
 ### Reads And Transforms
 
@@ -29,17 +28,16 @@ Phase 0 is running from `main`, not the multiplayer branch. Active code has Milk
 - `apps/app/convex/loop.ts` — reads bodies for goals, summaries, wikilinks, duplicate detection, and generated maps.
 - `apps/app/convex/htmlAtoms.ts` — validates HTML atom identity, strips frontmatter, and returns raw HTML rest.
 - `apps/app/convex/atomShares.ts` — validates body ID and returns raw body for shared editor.
-- `apps/app/src/plugins/parsePlugin.ts`, `apps/app/convex/plugins.ts`, `apps/app/src/plugins/usePlugins.ts` — plugin discovery parses body/frontmatter.
 
 ### Render, Search, Export, AI Context
 
 - `apps/app/src/components/AtomEditor.tsx` — Crepe/Milkdown editor receives markdown rest, emits markdown updates, and owns inline decorations.
 - `apps/app/src/components/AtomView.tsx` — routes body to source editor, HTML iframe, or formatted editor; strips/rejoins frontmatter.
 - `apps/app/src/components/HtmlAtomFrame.tsx` and `apps/app/src/routes/r/$atomId.tsx` — render sanitized HTML atom bodies and resolve formulas in DOM text.
-- `apps/app/src/components/Markdown.tsx`, `Chat.tsx`, `Onboarding.tsx`, and plugin kernels — render markdown strings.
+- `apps/app/src/components/Markdown.tsx`, `Chat.tsx`, and `Onboarding.tsx` — render markdown strings.
 - `apps/app/convex/queries.ts` — `vault.find` strips frontmatter and returns capped body digests; query blocks evaluate from markdown.
 - `apps/app/src/lib/shareText.ts` — exports skill body as share text.
-- `apps/app/convex/agent.ts` — `read_atom` returns raw body for normal atoms, inert previews for skills/plugins; `run_skill` passes skill body as model instructions.
+- `apps/app/convex/agent.ts` — `read_atom` returns raw body for normal atoms, inert previews for skills; `run_skill` passes skill body as model instructions.
 
 ## Editor And Collaboration Stack
 
@@ -67,12 +65,12 @@ Phase 0 is running from `main`, not the multiplayer branch. Active code has Milk
 - `apps/app/convex/atomId.ts` and `apps/app/src/lib/frontmatter.ts` — frontmatter behavior is load-bearing and must be characterized before migrating.
 - Atom metadata, `atomIds`, `atomShares`, WorkOS/Convex auth scaffolding — survive the editor/transport pivot.
 - Formula/live-total/query evaluators — remain projection consumers with lag-aware semantics.
-- `apps/app/src/components/Markdown.tsx` and plugin markdown renderers — still render projected markdown outside the editor.
+- `apps/app/src/components/Markdown.tsx` — still renders projected markdown outside the editor.
 - Source highlighting/raw source editor — preserve as import/export/admin projection UI, not primary document authority.
 
 ## Phase 1.1 Inputs
 
-- Frontmatter is currently load-bearing for IDs, titles, icons, skill/plugin/html classification, and share provenance.
+- Frontmatter is currently load-bearing for IDs, titles, icons, skill/html classification, and share provenance.
 - HTML atoms bypass markdown editing and must not be forced through a normal markdown/Y.Doc body model without an explicit schema rule.
 - Capture/window logic treats markdown parser behavior as a security boundary; projection drift can leak or hide values.
 - Shared editing CAS needs a replacement conflict/auth model under Y.Doc.

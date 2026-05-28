@@ -19,7 +19,7 @@ pnpm --filter @dohc/app exec playwright screenshot \
 
 unauthenticated sign-in · signed-out route · loading · onboarding (new) ·
 onboarding (in-progress) · post-onboarding workspace · no file selected ·
-markdown document · source mode · HTML atom · plugin view · graph view ·
+markdown document · source mode · HTML atom · graph view ·
 chat open · chat closed · share dialog · properties panel · command
 palette · folder picker · dark mode · system-prefers-dark (no explicit
 theme).

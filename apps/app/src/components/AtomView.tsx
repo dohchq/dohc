@@ -31,9 +31,6 @@ import { buildShareText } from '../lib/shareText'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { PropertiesPanel } from './PropertiesPanel'
 import { HtmlAtomFrame } from './HtmlAtomFrame'
-import { usePlugins } from '../plugins/usePlugins'
-import { KERNELS } from '../plugins/kernels'
-import { QueryErrorBoundary } from './QueryErrorBoundary'
 import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEditor'
 import { DohcBrandBlock } from './DohcLogo'
 import { AsciiSketchModal } from './AsciiSketchModal'
@@ -197,8 +194,8 @@ export function AtomView({
     }
   }, [effectivePath, upsert, pendingSaveRef, activeWorkspaceId])
 
-  // enterEdit signals "focus the editor on arrival" — used by new-page
-  // creation and marketplace's "edit atom" jump. Clear the flag upstream
+  // enterEdit signals "focus the editor on arrival" for new-page flows.
+  // Clear the flag upstream
   // after a tick so the autoFocus rAF inside AtomEditor has time to fire.
   useEffect(() => {
     if (!enterEdit) return
@@ -508,7 +505,6 @@ function AtomShell({
   const { meta } = parseFrontmatter(draft)
   const { fm, rest } = useMemo(() => splitFrontmatter(draft), [draft])
   const isAction = meta.type === 'action'
-  const isPlugin = meta.type === 'plugin'
   // D4.13 — EXTENSION determines rendering: a `.html` path renders
   // as a sandboxed HTML page (the §2-B route iframe), NEVER Tiptap.
   // `type: html` frontmatter is kept as a backward-compat fallback
@@ -532,11 +528,10 @@ function AtomShell({
   // D4.22 — Notion-style title field, backed by the frontmatter
   // `title:` property (NOT the body). The editor shows the full
   // content; the title lives in metadata next to `id`. Not shown
-  // for html (filename is the title) / plugin / action / skill.
+  // for html (filename is the title) / action / skill.
   // html files DO support a title now — the filename, shown above the
   // page + stored in frontmatter (like markdown pages).
-  const supportsTitle =
-    !isPlugin && !isAction && !isSkillAtomBody(draft)
+  const supportsTitle = !isAction && !isSkillAtomBody(draft)
   // the file name (leaf, sans extension) — the default title for html.
   const leafName = useMemo(
     () =>
@@ -561,41 +556,13 @@ function AtomShell({
   const pageIcon = typeof meta.icon === 'string' ? meta.icon : ''
   const [iconPickerOpen, setIconPickerOpen] = useState(false)
 
-  const { plugins, enabled } = usePlugins()
-  const overlays = plugins.filter((p) => enabled.has(p.id) && p.overlay)
-
   return (
     <div className="doc doc-editing">
-      {overlays.map((p) => {
-        const Kernel = KERNELS[p.kernel]
-        if (!Kernel) return null
-        const fakeQuery = {
-          namespace: 'overlay',
-          verb: 'global',
-          resource: '',
-          filters: {},
-        }
-        return (
-          <div key={p.id} className="atom-overlay">
-            <QueryErrorBoundary source={`overlay:${p.id}`}>
-              <Kernel plugin={p} query={fakeQuery} />
-            </QueryErrorBoundary>
-          </div>
-        )
-      })}
       {isAction && typeof meta.prompt === 'string' && (
         <ActionHeader
           title={typeof meta.title === 'string' ? meta.title : '(untitled)'}
           prompt={meta.prompt}
           onRunAction={onRunAction}
-        />
-      )}
-      {isPlugin && (
-        <PluginHeader
-          id={typeof meta.id === 'string' ? meta.id : '?'}
-          name={typeof meta.name === 'string' ? meta.name : '?'}
-          handles={typeof meta.handles === 'string' ? meta.handles : '?'}
-          kernel={typeof meta.kernel === 'string' ? meta.kernel : '?'}
         />
       )}
       {advisory && advisory.kind === 'collision' && (
@@ -658,7 +625,7 @@ function AtomShell({
           `fm !== ''`). The gate created a chicken-and-egg: a new
           atom has no frontmatter, so the toggle was hidden, so you
           could never drop into raw mode to ADD frontmatter — making
-          it impossible to hand-author an html / skill / plugin atom
+          it impossible to hand-author an html / skill atom
           (Tiptap hides frontmatter, so typing `---\ntype: html\n---`
           in the formatted editor doesn't stick). Always-on unblocks
           manual creation of typed atoms + raw `id:` edits on a fresh
@@ -745,11 +712,10 @@ function AtomShell({
         />
       )}
       {/* D4.19 — Notion-style page properties (frontmatter editor),
-          BELOW the title. Hidden for plugin / action / skill atoms
+          BELOW the title. Hidden for action / skill atoms
           (their frontmatter is functional config) and in raw-source
           mode. */}
       {!sourceMode &&
-        !isPlugin &&
         !isAction &&
         !isSkillAtomBody(draft) && (
           <PropertiesPanel body={draft} onChange={onChange} />
@@ -963,43 +929,6 @@ function ActionHeader({
       >
         Run
       </button>
-    </div>
-  )
-}
-
-function PluginHeader({
-  id,
-  name,
-  handles,
-  kernel,
-}: {
-  id: string
-  name: string
-  handles: string
-  kernel: string
-}) {
-  return (
-    <div className="mb-6 rounded-lg border border-rule bg-panel px-4 py-3">
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-ink-faint font-semibold">
-          plugin
-        </span>
-        <span className="text-[13.5px] text-ink-strong font-medium">{name}</span>
-      </div>
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11.5px] text-ink-dim">
-        <span>
-          <span className="text-ink-faint">id </span>
-          <code className="font-mono text-ink">{id}</code>
-        </span>
-        <span>
-          <span className="text-ink-faint">handles </span>
-          <code className="font-mono text-ink">{handles}</code>
-        </span>
-        <span>
-          <span className="text-ink-faint">kernel </span>
-          <code className="font-mono text-ink">{kernel}</code>
-        </span>
-      </div>
     </div>
   )
 }

@@ -9,7 +9,7 @@ import {
 } from '../../convex/agent'
 
 // Track-3 P2c — `run_skill` tool implementation + `read_atom`
-// skill/plugin body INERT preview (§3.1) + SKILL_MAX_BYTES +
+// skill body INERT preview (§3.1) + SKILL_MAX_BYTES +
 // pathDeriveLabel. Behavioral tests of run_skill require driving
 // the agent's tool surface end-to-end (P3-level integration); v1
 // locks the pure-helper + structural surface here. The gate
@@ -174,15 +174,11 @@ describe('Track-3 P2c — `run_skill` tool surface (structural)', () => {
   })
 })
 
-describe('Track-3 P2c — `read_atom` skill/plugin body INERT preview (§3.1)', () => {
+describe('Track-3 P2c — `read_atom` skill body INERT preview (§3.1)', () => {
   const readAtomBody = TOOL_BODIES['read_atom']
 
   it('read_atom checks isSkillAtomBody on the resolved body', () => {
     expect(readAtomBody).toMatch(/isSkillAtomBody\(body\)/)
-  })
-
-  it('read_atom checks isPluginAtomBody on the resolved body', () => {
-    expect(readAtomBody).toMatch(/isPluginAtomBody\(body\)/)
   })
 
   it('read_atom returns INERT skill-preview shape — kind/path/label/size/command (P2c indep fold F3)', () => {
@@ -196,14 +192,8 @@ describe('Track-3 P2c — `read_atom` skill/plugin body INERT preview (§3.1)', 
     expect(readAtomBody).toMatch(/run_skill/)
   })
 
-  it('read_atom returns INERT plugin-preview shape — kind/path/label/size/kernel/handles (P2c indep fold F3)', () => {
-    expect(readAtomBody).toMatch(/kind:\s*['"]plugin-preview['"]/)
-    expect(readAtomBody).toMatch(/kernel:\s*extractPluginKernelFlag\(body\)/)
-    expect(readAtomBody).toMatch(/handles:\s*extractPluginHandlesFlag\(body\)/)
-  })
-
-  it('read_atom returns the body for normal (non-skill, non-plugin) atoms', () => {
-    // The fallthrough after both preview branches.
+  it('read_atom returns the body for normal non-skill atoms', () => {
+    // The fallthrough after the preview branch.
     expect(readAtomBody).toMatch(/return body/)
   })
 
@@ -213,7 +203,7 @@ describe('Track-3 P2c — `read_atom` skill/plugin body INERT preview (§3.1)', 
     const previewLines = readAtomBody
       .split('\n')
       .filter((l) =>
-        /skill-preview|plugin-preview|kind:\s*['"]skill|kind:\s*['"]plugin/.test(l) ||
+        /skill-preview|kind:\s*['"]skill/.test(l) ||
         /JSON\.stringify/.test(l),
       )
     // No `body:` field, no `body.slice`, no `body.substring` in

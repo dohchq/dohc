@@ -1,6 +1,5 @@
 // Client-side DSL parser. Mirrors convex/queries.ts:parseQuery so the
-// renderer can decide which plugin (if any) claims a query block, before
-// it runs.
+// renderer can understand query blocks before it runs them.
 
 export type ParsedQueryLite = {
   namespace: string

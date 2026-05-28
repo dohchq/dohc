@@ -60,7 +60,6 @@ set `HOCUSPOCUS_CONVEX_URL` for Hocuspocus.
 ```text
 apps/app              TanStack Start + Convex product app
 packages/brand        dohc mark, lockups, tokens, brand constants
-packages/plugin-sdk   window.dohc types + postMessage protocol
 packages/config       shared TypeScript config
 docs                  product, brand, development, qa, security
 ```

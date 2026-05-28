@@ -52,10 +52,9 @@ type Props = {
   onPendingHandled?: () => void
   // P3+P4 Codex fold F2+F3: dedicated channel for programmatic
   // skill-fire (from CommandPalette skill rows). Bypasses
-  // detectSkillFire (no slash-parsing on this channel) so a
-  // plugin command's text cannot accidentally become a skill-
-  // fire. The state is parent-owned (index.tsx); Chat consumes
-  // ONCE then signals onPendingSkillFireHandled.
+  // detectSkillFire (no slash-parsing on this channel). The state is
+  // parent-owned (index.tsx); Chat consumes ONCE then signals
+  // onPendingSkillFireHandled.
   pendingSkillFire?: string | null
   onPendingSkillFireHandled?: () => void
 }

@@ -41,9 +41,6 @@ Two add-ons the survey caught: `sendMessage` + `listMessages` + `startOnboarding
 ### skills.ts
 - `list:33` (R)
 
-### catalog.ts
-- `list:501` (R)
-
 ### queries.ts
 - `run:201` (action — legacy back-compat)
 
@@ -52,7 +49,6 @@ Two add-ons the survey caught: `sendMessage` + `listMessages` + `startOnboarding
 - `graph.personalGraph:60`, `graph.sharedGraph:138`, `graph.companyGraph:229`
 - `liveTotals.resolve:120`, `liveTotals.resolveMany:140`
 - `onboarding.state:226`, `onboarding.progress:237`, `onboarding.defer:250`
-- `plugins.discover:9`, `plugins.listEnabled:23`, `plugins.setEnabled:35`
 - All `windows.*` (window-grant sharing already cross-workspace by design)
 
 ## D. Frontend callers (need `useActiveWorkspaceId()`)

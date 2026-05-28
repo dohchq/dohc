@@ -37,12 +37,6 @@ be weakened by rebrand or UI work.
   invariants. The supporting tests (`skillTurnGate`, `strictKeystone`,
   `r3InlineWindow`, `windows`, `atomShares`) must keep passing.
 
-## Plugins
-
-- Custom plugins run in `sandbox="allow-scripts"` iframes: no cookies, no
-  parent DOM, no top-navigation. Writes via `window.dohc` are routed
-  through the host and subject to the same authz gates as any write.
-
 ## HTML atoms
 
 - Author HTML is sanitized before interpolation into a trusted,

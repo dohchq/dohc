@@ -50,7 +50,6 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'update_entity',
   // Self-modifying / sharing class
   'save_skill',
-  'install_plugin',
   'define_rollup',
   // Resurrection class
   'restore',
@@ -147,7 +146,6 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
   'restore',
   'restore_folder',
   'save_skill',
-  'install_plugin',
   'update_entity',
   // file-org-v1 D4.1b ATOMIC — set_lock gate is at the top of the
   // handler (no early-return branch; no conditional input).
@@ -230,30 +228,6 @@ describe('Track-3 P2b.3 fold (Codex F2/F3) — gate PLACEMENT, not just presence
   }
 })
 
-// P2b.3 fold (Codex F1) — create_atom's elevated-capability
-// predicate MUST include `type: plugin` body + `plugins/*` path
-// (the design §2-A.1 line 397 explicit list). Lock that the
-// helper module exports `isPluginAtomBody` AND that create_atom's
-// condition references both `plugins/` and `isPluginAtomBody`.
-describe('Track-3 P2b.3 fold (Codex F1) — create_atom gates plugin atoms', () => {
-  it('agent.ts imports isPluginAtomBody from ./atomId', () => {
-    expect(AGENT_SRC).toMatch(
-      /import\s+\{[^}]*isPluginAtomBody[^}]*\}\s+from\s+['"]\.\/atomId['"]/,
-    )
-  })
-
-  it('create_atom condition includes path.startsWith("plugins/") + isPluginAtomBody(content)', () => {
-    const body = TOOL_BODIES['create_atom']
-    expect(body).toBeTruthy()
-    expect(body).toMatch(/path\.startsWith\(['"]plugins\//)
-    expect(body).toMatch(/isPluginAtomBody\(content\)/)
-    // And the skill-shape predicates are still in place (no
-    // regression on the existing checks).
-    expect(body).toMatch(/path\.startsWith\(['"]skills\//)
-    expect(body).toMatch(/isSkillAtomBody\(content\)/)
-  })
-})
-
 // P2b.3 fold (indep F2) — the static UNAUTHORIZABLE_OPS allowlist
 // catches REMOVALS of any of the 16 gates, but it fails-OPEN
 // against ADDITIONS: a future PR introducing a `nuke_workspace`
@@ -274,12 +248,11 @@ describe('Track-3 P2b.3 fold (Codex F1) — create_atom gates plugin atoms', () 
 const SAFE_NO_GATE_OPS = new Set<string>([
   // pure reads
   'list_atoms',
-  'read_atom', // post-P2c: returns INERT preview for skill/plugin bodies (§3.1 structural refusal)
+  'read_atom', // post-P2c: returns INERT preview for skill bodies (§3.1 structural refusal)
   'list_trash',
   'list_entities',
   'find_entity',
   'list_skills',
-  'list_available_plugins',
   'pending_proposals',
   'pending_captures',
   'review_window_sharing',
@@ -338,7 +311,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
     // test pass) is itself flagged here.
     const expectedSafe = new Set([
       'list_atoms', 'read_atom', 'list_trash', 'list_entities',
-      'find_entity', 'list_skills', 'list_available_plugins',
+      'find_entity', 'list_skills',
       'pending_proposals', 'pending_captures', 'review_window_sharing',
       'onboarding_state', 'run_query', 'run_loop',
       'create_entities', 'create_folder',

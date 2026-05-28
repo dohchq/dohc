@@ -7,7 +7,7 @@ import type { Id } from './_generated/dataModel'
 
 // R2 — STRICT reviewed-by-default (holistic review C2/C3/M6).
 // Capture is a byproduct of the WRITE (structural, not prompt-hope):
-// every entity write — agent AND the PUBLIC pluginBridge — is
+// every entity write is
 // withheld from shared windows until the owner EXPLICITLY confirms.
 
 const modules = import.meta.glob('./**/*.ts')
@@ -116,18 +116,6 @@ describe('R2/C2 — every entity write is withheld until explicit confirm', () =
     expect(await hoursVisible(t, w)).toBe(true)
   })
 
-  it('the PUBLIC pluginBridge write is ALSO structurally withheld (the C2 exploit path)', async () => {
-    const t = convexTest(schema, modules)
-    await asOwner(t).action(api.pluginBridge.mutate, {
-      op: 'upsert', type: 'person', slug: 'anna', data: { hours: 999 },
-    })
-    const caps = await capsFor(t, OWNER, 'person/anna')
-    expect(caps.length).toBe(1)
-    expect(caps[0].status).toBe('auto') // withheld, not shareable
-    const w = await windowOverHours(t)
-    await asOwner(t).mutation(api.windows.grant, { windowId: w, viewerWorkspaceId: VIEWER })
-    expect(await hoursVisible(t, w)).toBe(false) // 999 does NOT leak
-  })
 })
 
 describe('R2/C3 — auto is confirmable / rejectable (no permanent dark-hole)', () => {
