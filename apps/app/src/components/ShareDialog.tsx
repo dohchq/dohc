@@ -534,7 +534,7 @@ export function ShareDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full bg-accent px-6 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+            className="rounded-[7px] bg-ink-strong px-4 py-2 text-[13px] font-semibold text-surface shadow-sm transition-colors hover:bg-accent-hover hover:text-accent-foreground focus:outline-none focus:ring-2 focus:ring-accent-soft"
           >
             Done
           </button>
