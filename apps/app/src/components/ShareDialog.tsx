@@ -373,7 +373,7 @@ export function ShareDialog({
                   type="button"
                   disabled={!canChangeGeneralAccess || generalAccessBusy}
                   onClick={() => setGeneralAccessOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 rounded-[5px] px-1 py-0.5 text-[13.5px] font-semibold text-ink-strong transition-colors enabled:hover:bg-page disabled:cursor-default"
+                  className="inline-flex items-center gap-1 rounded-[5px] py-0.5 pl-0 pr-1 text-[13.5px] font-semibold text-ink-strong transition-colors enabled:hover:bg-page disabled:cursor-default"
                   aria-haspopup={canChangeGeneralAccess ? 'menu' : undefined}
                   aria-expanded={
                     canChangeGeneralAccess ? generalAccessOpen : undefined
