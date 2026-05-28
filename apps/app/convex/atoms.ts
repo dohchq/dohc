@@ -5,6 +5,7 @@ import {
   internalQuery,
   internalMutation,
 } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { scheduleMapRegen } from './loop'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
@@ -98,8 +99,11 @@ export async function upsertAtomImpl(
      *  doesn't fire on the freshly-locked state). Only `_upsertSystem`
      *  sets it. */
     writeSystemLocked?: boolean
+    /** When set on a brand-new atom, create it as private to this
+     *  user. Used for user/agent-created docs in org workspaces. */
+    defaultPrivateOwnerUserId?: string
   },
-): Promise<string> {
+): Promise<Id<'atoms'>> {
   const {
     workspaceId,
     path,
@@ -109,6 +113,7 @@ export async function upsertAtomImpl(
     allowUserOverwrite,
     allowSystemOverride,
     writeSystemLocked,
+    defaultPrivateOwnerUserId,
   } = args
   // R3 §8 (Codex R3-build): reject a NUL note path at the write
   // surface — `refKey`'s in-memory delimiter is U+0000; a NUL in the
@@ -236,6 +241,16 @@ export async function upsertAtomImpl(
     ...systemLockInsert,
     ...deriveSearchFields(path, finalBody),
   })
+  if (defaultPrivateOwnerUserId) {
+    await ctx.db.insert('atomAccess', {
+      atomId: id,
+      mode: 'private',
+      ownerUserId: defaultPrivateOwnerUserId,
+      allowedUserIds: [],
+      setAt: now,
+      setByUserId: defaultPrivateOwnerUserId,
+    })
+  }
   // R3 §1 — new note: no prior ⇒ every inline value is withheld
   // until the owner confirms it (strict; closes C2 for atoms).
   await applyAtomCapture(ctx, workspaceId, path, null, finalBody)
@@ -497,6 +512,8 @@ export const upsert = mutation({
       body,
       source,
       isUserEdit: true,
+      defaultPrivateOwnerUserId:
+        workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
     // org-plan §5/§13 Phase C — debounced _map.md regen (2s coalesced).
     await scheduleMapRegen(ctx, workspaceId)
@@ -647,6 +664,10 @@ export const move = mutation({
       )
       .unique()
     if (!src) throw new Error(`not found: ${fromPath}`)
+    const srcAccess = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q) => q.eq('atomId', src._id))
+      .unique()
 
     // file-org-v1 §2.3 (Track-4 D4.1a) — lock-guard chokepoint #3.
     // Rename-context message variant. A system atom has a path that's
@@ -664,7 +685,7 @@ export const move = mutation({
     if (dst) throw new Error(`already exists: ${toPath}`)
 
     const now = Date.now()
-    await ctx.db.insert('atoms', {
+    const movedId = await ctx.db.insert('atoms', {
       workspaceId,
       path: toPath,
       body: src.body,
@@ -686,6 +707,17 @@ export const move = mutation({
       // searchText), even though the body is unchanged.
       ...deriveSearchFields(toPath, src.body),
     })
+    if (srcAccess) {
+      await ctx.db.insert('atomAccess', {
+        atomId: movedId,
+        mode: srcAccess.mode,
+        ownerUserId: srcAccess.ownerUserId,
+        allowedUserIds: srcAccess.allowedUserIds,
+        setAt: srcAccess.setAt,
+        setByUserId: srcAccess.setByUserId,
+      })
+      await ctx.db.delete(srcAccess._id)
+    }
     // snapshot the source before the delete side of the move
     await recordTrash(ctx, {
       workspaceId,
@@ -892,6 +924,8 @@ export const _upsertInternal = internalMutation({
       body,
       source,
       allowUserOverwrite,
+      defaultPrivateOwnerUserId:
+        viewerSubject && workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
   },
 })

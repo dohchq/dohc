@@ -17,6 +17,25 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   return orgId
 }
 
+async function makeOrgDefault(
+  t: ReturnType<typeof convexTest>,
+  orgId: string,
+  path: string,
+) {
+  const atom = await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    return atoms.find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === orgId && row.path === path,
+    )
+  })
+  await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+    atomId: atom!._id,
+    activeWorkspaceId: orgId,
+    mode: null,
+  })
+}
+
 // P1 (multiplayer-and-h-followups §6.5) — the docs.* DSL ops in the
 // query namespace are the THIRD read surface (after editor + render
 // route + search): both `docs.glob("**/*.md")` (path enumerator) and
@@ -44,6 +63,7 @@ describe('P1 — evalQueryBlocks (reactive editor)', () => {
       path: 'public/page.md',
       body: 'p',
     })
+    await makeOrgDefault(t, orgId, 'public/page.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'alice/secret.md',

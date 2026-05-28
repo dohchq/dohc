@@ -396,7 +396,11 @@ async function moveImpl(
   //    of the unique index and Convex doesn't expose a key rewrite).
   for (const a of movedAtoms) {
     const newPath = atomPathMap.get(a.path)!
-    await ctx.db.insert('atoms', {
+    const access = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q: any) => q.eq('atomId', a._id))
+      .unique()
+    const movedId = await ctx.db.insert('atoms', {
       workspaceId,
       path: newPath,
       body: a.body,
@@ -411,6 +415,17 @@ async function moveImpl(
       // path changed in the folder rename → recompute search fields.
       ...deriveSearchFields(newPath, a.body),
     })
+    if (access) {
+      await ctx.db.insert('atomAccess', {
+        atomId: movedId,
+        mode: access.mode,
+        ownerUserId: access.ownerUserId,
+        allowedUserIds: access.allowedUserIds,
+        setAt: access.setAt,
+        setByUserId: access.setByUserId,
+      })
+      await ctx.db.delete(access._id)
+    }
     await ctx.db.delete(a._id)
     // R3 §1 — folder move = per-atom move: drop old-path captures,
     // fresh withhold at the new path (a moved value is re-withheld

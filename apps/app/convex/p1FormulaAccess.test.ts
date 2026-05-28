@@ -17,6 +17,25 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   return orgId
 }
 
+async function makeOrgDefault(
+  t: ReturnType<typeof convexTest>,
+  orgId: string,
+  path: string,
+) {
+  const atom = await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    return atoms.find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === orgId && row.path === path,
+    )
+  })
+  await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+    atomId: atom!._id,
+    activeWorkspaceId: orgId,
+    mode: null,
+  })
+}
+
 // P1 (multiplayer-and-h-followups §6.5) — the FOURTH read surface
 // is the reactive formula evaluator. `{= sum(salary) }` in any
 // editor aggregates inline `{salary: 120000}` values across the
@@ -39,6 +58,7 @@ describe('P1 — evalFormulas (reactive)', () => {
       path: 'public/alice.md',
       body: '{salary: 100000}',
     })
+    await makeOrgDefault(t, orgId, 'public/alice.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'private/bob.md',
@@ -89,6 +109,7 @@ describe('P1 — evalFormulas (reactive)', () => {
       path: 'projects/p1.md',
       body: '{status: active}',
     })
+    await makeOrgDefault(t, orgId, 'projects/p1.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'projects/secret.md',

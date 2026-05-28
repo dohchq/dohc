@@ -23,6 +23,25 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   return orgId
 }
 
+async function makeOrgDefault(
+  t: ReturnType<typeof convexTest>,
+  orgId: string,
+  path: string,
+) {
+  const atom = await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    return atoms.find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === orgId && row.path === path,
+    )
+  })
+  await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+    atomId: atom!._id,
+    activeWorkspaceId: orgId,
+    mode: null,
+  })
+}
+
 describe('P1 read-path filtering — atoms.list', () => {
   it('private atom is hidden from non-owner members', async () => {
     const t = convexTest(schema, modules)
@@ -33,6 +52,7 @@ describe('P1 read-path filtering — atoms.list', () => {
       path: 'public.md',
       body: 'public',
     })
+    await makeOrgDefault(t, orgId, 'public.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'private.md',
@@ -121,6 +141,7 @@ describe('P1 read-path filtering — atoms.list', () => {
       path: 'team/wins.md',
       body: 'public',
     })
+    await makeOrgDefault(t, orgId, 'team/wins.md')
     // Alice restricts hr/ folder to herself.
     await t
       .withIdentity({ subject: ALICE })
@@ -235,6 +256,7 @@ describe('P1 read-path filtering — search.run', () => {
       path: 'public.md',
       body: 'hi',
     })
+    await makeOrgDefault(t, orgId, 'public.md')
     const secret = await t.run(async (ctx) =>
       ctx.db
         .query('atoms')

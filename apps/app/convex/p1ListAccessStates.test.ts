@@ -17,6 +17,25 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   return orgId
 }
 
+async function makeOrgDefault(
+  t: ReturnType<typeof convexTest>,
+  orgId: string,
+  path: string,
+) {
+  const atom = await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    return atoms.find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === orgId && row.path === path,
+    )
+  })
+  await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+    atomId: atom!._id,
+    activeWorkspaceId: orgId,
+    mode: null,
+  })
+}
+
 // P1 (multiplayer-and-h-followups §6.5) — file-tree lock-badge
 // data source. Tree consumes [{fileId, mode}] and renders a Lock
 // icon next to each match.
@@ -42,6 +61,7 @@ describe('P1 — listAccessStates', () => {
       path: 'open/x.md',
       body: 'x',
     })
+    await makeOrgDefault(t, orgId, 'open/x.md')
 
     const [pRow, rRow] = await t.run(async (ctx) => {
       const allAtoms = await ctx.db.query('atoms').collect()
@@ -85,6 +105,7 @@ describe('P1 — listAccessStates', () => {
       path: 'team/n.md',
       body: 'n',
     })
+    await makeOrgDefault(t, orgId, 'team/n.md')
     const out = await t
       .withIdentity({ subject: ALICE })
       .query(api.atomAccess.listAccessStates, { activeWorkspaceId: orgId })

@@ -31,6 +31,74 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
 // row, and to folder-cascade-only for creation.
 
 describe('P1 — write path', () => {
+  it('org upsert CREATE defaults new docs to private owner access', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await seedOrgWithMembers(t)
+
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'alice/default-private.md',
+      body: 'private by default',
+    })
+
+    const row = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'alice/default-private.md'),
+        )
+        .unique(),
+    )
+    const access = await t.run(async (ctx) =>
+      ctx.db
+        .query('atomAccess')
+        .withIndex('by_atom', (q) => q.eq('atomId', row!._id))
+        .unique(),
+    )
+
+    expect(access).toMatchObject({
+      mode: 'private',
+      ownerUserId: ALICE,
+      allowedUserIds: [],
+    })
+
+    const aliceRows = await t
+      .withIdentity({ subject: ALICE })
+      .query(api.atoms.list, { activeWorkspaceId: orgId })
+    const bobRows = await t
+      .withIdentity({ subject: BOB })
+      .query(api.atoms.list, { activeWorkspaceId: orgId })
+
+    expect(aliceRows.find((r) => r.path === 'alice/default-private.md')).toBeDefined()
+    expect(bobRows.find((r) => r.path === 'alice/default-private.md')).toBeUndefined()
+  })
+
+  it('personal upsert CREATE keeps personal docs without access sidecars', async () => {
+    const t = convexTest(schema, modules)
+
+    await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
+      path: 'personal.md',
+      body: 'personal default',
+    })
+
+    const row = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', ALICE).eq('path', 'personal.md'),
+        )
+        .unique(),
+    )
+    const access = await t.run(async (ctx) =>
+      ctx.db
+        .query('atomAccess')
+        .withIndex('by_atom', (q) => q.eq('atomId', row!._id))
+        .unique(),
+    )
+
+    expect(access).toBeNull()
+  })
+
   it('upsert OVERWRITE: teammate cannot clobber a private atom', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrgWithMembers(t)
@@ -168,6 +236,19 @@ describe('P1 — write path', () => {
       path: 'public/movable.md',
       body: 'm',
     })
+    const publicSource = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'public/movable.md'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: publicSource!._id,
+      activeWorkspaceId: orgId,
+      mode: null,
+    })
     await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setFolderAccess, {
       activeWorkspaceId: orgId,
       folderPath: 'alice',
@@ -197,6 +278,25 @@ describe('P1 — write path', () => {
         toPath: 'bob/new.md',
       })
     expect(moved.ok).toBe(true)
+    const movedRow = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'bob/new.md'),
+        )
+        .unique(),
+    )
+    const movedAccess = await t.run(async (ctx) =>
+      ctx.db
+        .query('atomAccess')
+        .withIndex('by_atom', (q) => q.eq('atomId', movedRow!._id))
+        .unique(),
+    )
+    expect(movedAccess).toMatchObject({
+      mode: 'private',
+      ownerUserId: BOB,
+      allowedUserIds: [],
+    })
 
     // Setup #3: a private SOURCE — Bob can't move Alice's private doc.
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {

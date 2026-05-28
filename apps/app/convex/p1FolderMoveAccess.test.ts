@@ -122,6 +122,25 @@ describe('P1 — folders.move gates', () => {
         toPath: 'alice-renamed',
       })
     expect(result.atomsMoved).toBeGreaterThan(0)
+    const moved = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'alice-renamed/a.md'),
+        )
+        .unique(),
+    )
+    const movedAccess = await t.run(async (ctx) =>
+      ctx.db
+        .query('atomAccess')
+        .withIndex('by_atom', (q) => q.eq('atomId', moved!._id))
+        .unique(),
+    )
+    expect(movedAccess).toMatchObject({
+      mode: 'private',
+      ownerUserId: ALICE,
+      allowedUserIds: [],
+    })
   })
 
   it("non-restricted move: teammate renames freely (no access rows in subtree)", async () => {
@@ -131,6 +150,19 @@ describe('P1 — folders.move gates', () => {
       activeWorkspaceId: orgId,
       path: 'shared/n.md',
       body: 'n',
+    })
+    const shared = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'shared/n.md'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: shared!._id,
+      activeWorkspaceId: orgId,
+      mode: null,
     })
     const result = await t
       .withIdentity({ subject: BOB })

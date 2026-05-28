@@ -112,7 +112,8 @@ export function ShareDialog({
           P1 — within-workspace access (private/restricted/org-default).
           Shown ONLY when getAtomAccessByFileId returned a row (i.e.
           the caller can see this atom). For an org-default atom the
-          state is implicit; the toggle exposes the private switch.
+          company-visible state is explicit only when a private doc
+          is toggled off; new org docs are private by default.
           Owner-only edit: if someone else owns the access record,
           setAtomAccess throws and the error renders below.
         */}
@@ -142,10 +143,10 @@ export function ShareDialog({
                 </p>
                 <p className="mt-0.5 text-[11px] text-ink-faint">
                   {atomAccess.mode === 'private'
-                    ? 'Hidden from teammates in this workspace. Toggle off to make it visible to everyone.'
+                    ? 'Default for new docs in a company workspace. Toggle off to make it visible to everyone.'
                     : atomAccess.mode === 'restricted'
                       ? 'Visible only to you and the people you listed.'
-                      : 'Default for new docs in a company workspace. Toggle on to make this one private to you.'}
+                      : 'Company-visible. New docs are private by default; toggle on to make this one private again.'}
                 </p>
               </div>
               <div className="ml-2">

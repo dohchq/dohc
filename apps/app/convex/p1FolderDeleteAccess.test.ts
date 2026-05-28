@@ -177,6 +177,19 @@ describe('P1 — folders.remove subtree access gate', () => {
       path: 'common/x.md',
       body: 'x',
     })
+    const common = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'common/x.md'),
+        )
+        .unique(),
+    )
+    await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+      atomId: common!._id,
+      activeWorkspaceId: orgId,
+      mode: null,
+    })
     // Bob deletes — passes (no atomAccess / folderAccess in subtree).
     const result = await t
       .withIdentity({ subject: BOB })

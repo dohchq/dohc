@@ -457,12 +457,10 @@ export default defineSchema({
     .index('by_org_workspace', ['orgId', 'workspaceId']),
 
   // P1 (multiplayer-and-h-followups §6.5) — per-atom + per-folder
-  // access controls. Notion-full model: org workspaces stay "everyone
-  // sees everything by default," but EVERY atom + folder gets an
-  // opt-in access toggle (private / restricted-to-list). Absence of a
-  // row means "org-default" (the common case — keeps the sidecar
-  // table small + the resolver fast for the 99% of atoms with no
-  // restriction).
+  // access controls. New user/agent-created docs in org workspaces
+  // are born private by inserting an atomAccess row. Absence of a row
+  // still means "org-default" (company-visible) for legacy docs,
+  // explicit toggle-offs, and system-maintained rows.
 
   /** Per-atom access override. Set by `atoms.setAccess` mutation;
    *  consulted by `resolveAtomAccess` after the membership gate but

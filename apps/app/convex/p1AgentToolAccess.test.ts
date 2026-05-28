@@ -17,6 +17,25 @@ async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   return orgId
 }
 
+async function makeOrgDefault(
+  t: ReturnType<typeof convexTest>,
+  orgId: string,
+  path: string,
+) {
+  const atom = await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    return atoms.find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === orgId && row.path === path,
+    )
+  })
+  await t.withIdentity({ subject: ALICE }).mutation(api.atomAccess.setAtomAccess, {
+    atomId: atom!._id,
+    activeWorkspaceId: orgId,
+    mode: null,
+  })
+}
+
 // P1 (multiplayer-and-h-followups §6.5) — verify the internal atom-read
 // queries the agent tools call (_listInternal, _getInternal) actually
 // filter by access when `viewerSubject` is passed. The agent tools
@@ -39,6 +58,7 @@ describe('P1 — _listInternal filters by viewerSubject', () => {
       path: 'public.md',
       body: 'p',
     })
+    await makeOrgDefault(t, orgId, 'public.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'alice/secret.md',
@@ -73,6 +93,7 @@ describe('P1 — _listInternal filters by viewerSubject', () => {
       path: 'public.md',
       body: 'p',
     })
+    await makeOrgDefault(t, orgId, 'public.md')
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
       path: 'alice/secret.md',

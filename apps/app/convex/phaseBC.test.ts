@@ -53,7 +53,25 @@ describe('Phase B (org-plan §5) — activeWorkspaceId threading', () => {
       path: 'shared/onboarding.md',
       body: 'welcome',
     })
-    // B reads it as a Member — same org, same workspace.
+    // New org docs are private by default, so B can use the workspace
+    // but does not see A's doc until A makes it company-visible.
+    const privateRows = await asB.query(api.atoms.list, { activeWorkspaceId: orgId })
+    expect(privateRows.find((r) => r.path === 'shared/onboarding.md')).toBeUndefined()
+
+    const row = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'shared/onboarding.md'),
+        )
+        .unique(),
+    )
+    await asA.mutation(api.atomAccess.setAtomAccess, {
+      atomId: row!._id,
+      activeWorkspaceId: orgId,
+      mode: null,
+    })
+    // B reads it as a Member once the doc is company-visible.
     const rows = await asB.query(api.atoms.list, { activeWorkspaceId: orgId })
     expect(rows.find((r) => r.path === 'shared/onboarding.md')).toBeDefined()
   })

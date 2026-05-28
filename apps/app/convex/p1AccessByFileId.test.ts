@@ -36,7 +36,7 @@ async function fileIdOf(t: ReturnType<typeof convexTest>, orgId: string, path: s
 }
 
 describe('P1 — getAtomAccessByFileId', () => {
-  it('owner-default atom returns mode=org-default', async () => {
+  it('new org atom returns mode=private by default', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrgWithMembers(t)
     await t.withIdentity({ subject: ALICE }).mutation(api.atoms.upsert, {
@@ -52,8 +52,8 @@ describe('P1 — getAtomAccessByFileId', () => {
         activeWorkspaceId: orgId,
       })
     expect(got).toEqual({
-      mode: 'org-default',
-      ownerUserId: null,
+      mode: 'private',
+      ownerUserId: ALICE,
       allowedUserIds: [],
     })
   })
@@ -125,6 +125,13 @@ describe('P1 — setAtomAccessByFileId', () => {
       body: 'n',
     })
     const fid = await fileIdOf(t, orgId, 'team/n.md')
+    await t
+      .withIdentity({ subject: ALICE })
+      .mutation(api.atomAccess.setAtomAccessByFileId, {
+        fileId: fid,
+        activeWorkspaceId: orgId,
+        mode: null,
+      })
     const res = await t
       .withIdentity({ subject: ALICE })
       .mutation(api.atomAccess.setAtomAccessByFileId, {
