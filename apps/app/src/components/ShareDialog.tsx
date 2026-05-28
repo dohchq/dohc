@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -60,6 +60,8 @@ export function ShareDialog({
   const [email, setEmail] = useState('')
   const [targetWorkspaceId, setTargetWorkspaceId] = useState<string>('')
   const [permission, setPermission] = useState<'view' | 'edit'>('view')
+  const [permissionOpen, setPermissionOpen] = useState(false)
+  const permissionMenuRef = useRef<HTMLDivElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -109,6 +111,43 @@ export function ShareDialog({
   const generalAccessOptions = getGeneralAccessOptions(isPersonalWorkspace)
   const canChangeGeneralAccess =
     generalAccess.canChangeGeneralAccess && !!atomAccess
+  const permissionOptions: Array<{
+    value: 'view' | 'edit'
+    label: string
+    description: string
+  }> = [
+    {
+      value: 'view',
+      label: 'View only',
+      description: 'Can read this document',
+    },
+    {
+      value: 'edit',
+      label: 'Can edit',
+      description: 'Can change this document',
+    },
+  ]
+  const permissionLabel =
+    permissionOptions.find((option) => option.value === permission)?.label ??
+    'View only'
+
+  useEffect(() => {
+    if (!permissionOpen) return
+    function onPointerDown(event: PointerEvent) {
+      if (!permissionMenuRef.current?.contains(event.target as Node)) {
+        setPermissionOpen(false)
+      }
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setPermissionOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [permissionOpen])
 
   async function submit() {
     if (busy) return
@@ -262,16 +301,59 @@ export function ShareDialog({
                   ))}
                 </div>
               )}
-              <select
-                value={permission}
-                onChange={(e) =>
-                  setPermission(e.target.value as 'view' | 'edit')
-                }
-                className="rounded-full border border-rule bg-surface px-2.5 py-1 text-[11.5px] font-medium text-ink-dim outline-none hover:text-ink-strong focus:border-accent"
-              >
-                <option value="view">View only</option>
-                <option value="edit">Can edit</option>
-              </select>
+              <div ref={permissionMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGeneralAccessOpen(false)
+                    setPermissionOpen((v) => !v)
+                  }}
+                  className="inline-flex min-w-[104px] items-center justify-between gap-2 rounded-full border border-rule bg-surface px-3 py-1.5 text-[11.5px] font-semibold text-ink-dim shadow-sm transition-colors hover:border-ink-faint hover:text-ink-strong focus:border-accent focus:outline-none"
+                  aria-haspopup="menu"
+                  aria-expanded={permissionOpen}
+                >
+                  <span>{permissionLabel}</span>
+                  <ChevronDown
+                    className={`size-3.5 transition-transform ${
+                      permissionOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+                {permissionOpen && (
+                  <div className="absolute right-0 top-full z-20 mt-1.5 w-44 overflow-hidden rounded-[8px] border border-rule bg-surface p-1 shadow-2xl">
+                    {permissionOptions.map((option) => {
+                      const active = option.value === permission
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => {
+                            setPermission(option.value)
+                            setPermissionOpen(false)
+                          }}
+                          className={`flex w-full items-start justify-between gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page ${
+                            active ? 'bg-page text-ink-strong' : 'text-ink-dim'
+                          }`}
+                          role="menuitemradio"
+                          aria-checked={active}
+                        >
+                          <span>
+                            <span className="block text-[12.5px] font-semibold">
+                              {option.label}
+                            </span>
+                            <span className="block text-[11px] text-ink-faint">
+                              {option.description}
+                            </span>
+                          </span>
+                          {active && (
+                            <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={submit}
