@@ -240,7 +240,7 @@ export function GraphView({
       </div>
 
       <div ref={wrapRef} className="relative flex-1 overflow-hidden">
-        {!FG || !ready ? (
+        {!FG || !ready || data.nodes.length === 0 ? (
           <div className="grid h-full place-items-center text-ink-faint text-sm">
             {ready && data.nodes.length === 0
               ? 'Nothing to show yet — add some {data} and [[links]], or have a file shared with you.'

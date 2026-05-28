@@ -121,6 +121,12 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     expect(GRAPH_VIEW).not.toMatch(/setScope|scope ===|My files|Shared with me|Company/)
   })
 
+  it('GraphView keeps the empty-state fallback visible after the renderer loads', () => {
+    expect(GRAPH_VIEW).toMatch(
+      /!\s*FG\s*\|\|\s*!\s*ready\s*\|\|\s*data\.nodes\.length\s*===\s*0/,
+    )
+  })
+
   it('/r/<atomId> route reads ?w= and forwards to getRenderable + evalFormulas', () => {
     expect(R_ROUTE).toMatch(/searchParams\.get\(['"]w['"]\)/)
     // Both server-side queries receive the URL-derived activeWorkspaceId.
