@@ -55,14 +55,14 @@ describe('countTypeLines — §1.2 strict-reject DUPLICATE `type:` lines', () =>
     expect(countTypeLines('')).toBe(0)
     expect(countTypeLines('id: x')).toBe(0)
     expect(countTypeLines('type: skill\nid: x')).toBe(1)
-    expect(countTypeLines('type: skill\nid: x\ntype: plugin')).toBe(2)
+    expect(countTypeLines('type: skill\nid: x\ntype: html')).toBe(2)
   })
   it('isHtmlAtomBody REJECTS duplicate `type:` lines (Track-3 P1 tightening)', () => {
     // Pre-Track-3 the first-line-wins regex would match `type: html`
     // first; v6 fold introduces structural rejection of any
     // frontmatter with >1 type: declaration.
     expect(
-      isHtmlAtomBody('---\ntype: html\nid: x\ntype: plugin\n---\nb'),
+      isHtmlAtomBody('---\ntype: html\nid: x\ntype: skill\n---\nb'),
     ).toBe(false)
     expect(
       isHtmlAtomBody('---\ntype: html\ntype: html\nid: x\n---\nb'),

@@ -99,10 +99,9 @@ The product should feel valuable even when the entire "organization" is just one
 Do not weaken authorization, ownership, or review gates for convenience.
 
 - Authorization is derived server-side. Browser/client callers must not be trusted to provide user identity.
-- Every atom, folder, entity, share, plugin setting, and capture is scoped to a workspace.
+- Every atom, folder, entity, share, and capture is scoped to a workspace.
 - Agent writes must respect user locks, folder/atom access, sharing boundaries, and skill-turn gates.
 - HTML atoms are sandboxed and sanitized.
-- Custom plugins run in sandboxed iframes and write only through `window.dohc`.
 - `atoms.body` is becoming a derived markdown cache from the canonical Y.Doc. Do not build new behavior that depends on raw full-body markdown patching as the source of truth.
 
 ### Repeated work should become skills

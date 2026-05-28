@@ -65,7 +65,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(org).toMatch(/identity atom is `company\.md`/)
     expect(org).toMatch(/the team's|the Acme workspace/)
     expect(org).toMatch(/starter setup.*for the TEAM/i)
-    expect(org).toMatch(/Plugins \+ skills are Owner-only/i)
+    expect(org).toMatch(/Skills are Owner-only/i)
   })
 
   it('org and personal share the same body length except for preamble + substitution', () => {

@@ -26,7 +26,6 @@ import type { Id } from '../../convex/_generated/dataModel'
 import { Chat } from '@/components/Chat'
 import { SharingPanel } from '@/components/SharingPanel'
 import { ProposalsPanel } from '@/components/ProposalsPanel'
-import { PluginPanel } from '@/components/PluginPanel'
 import { CommandPalette } from '@/components/CommandPalette'
 import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
@@ -59,9 +58,7 @@ function AppLayout() {
   )
 }
 
-const BUILD_PLUGIN_PROMPT = `I want to build a new plugin. Available kernels are heatmap, list (with layouts: cards/kanban/template), table, and custom. Custom kernels are full HTML/JS in a sandboxed iframe with read+write access via window.dohc. Ask me what view I want, what query it should claim (e.g. entities.list("booking")), which kernel to use, and which kernel-specific fields / commands / overlay flag to set. Then write the plugin atom to plugins/<id>.md with the right frontmatter.`
-
-type View = 'atom' | 'graph' | 'plugins'
+type View = 'atom' | 'graph'
 
 // Display name for a file path: the leaf, sans a single extension
 // (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
@@ -315,7 +312,6 @@ function App() {
     docEmoji: string | null | undefined
   }>(() => {
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
-    if (view === 'plugins') return { docTitle: 'Plugins', docEmoji: null }
     if (urlShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
       // null ⇒ gone/forbidden: fall back to the brand default.
@@ -345,10 +341,8 @@ function App() {
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
   // P3+P4 Codex fold F2+F3: a STRUCTURALLY-typed second channel
   // for programmatic skill-fire dispatches. Palette skill clicks
-  // route here (NOT through pendingPrompt), so a plugin command
-  // whose text happens to start with `/<path>` cannot accidentally
-  // become a skill-fire via detectSkillFire. The two channels are
-  // mutually exclusive at the type level.
+  // route here (NOT through pendingPrompt), so only a real skill
+  // palette row can become a skill-fire.
   const [pendingSkillFire, setPendingSkillFire] = useState<string | null>(
     null,
   )
@@ -760,14 +754,14 @@ function App() {
       }`}
     >
       <ActivityBar
-        view={view === 'plugins' ? 'plugins' : view === 'graph' ? 'graph' : 'atom'}
+        view={view === 'graph' ? 'graph' : 'atom'}
         onSelect={(v) => setView(v)}
       />
       <FileTree
         files={files ?? []}
         folders={folders ?? []}
         activePath={activePath}
-        view={view === 'plugins' ? 'plugins' : 'atom'}
+        view="atom"
         onOpenSearch={() => setSearchOpen(true)}
         user={user}
         sharedWithMe={sharedWithMe ?? []}
@@ -793,7 +787,7 @@ function App() {
       />
       {view === 'graph' ? (
         <GraphView onOpenAtom={openAtom} onOpenShared={openShared} />
-      ) : view === 'atom' ? (
+      ) : (
         urlShareId ? (
           // key by shareId → fresh state per share (no stale draft
           // reuse when switching shared files; codex P1).
@@ -813,16 +807,6 @@ function App() {
             pendingSaveRef={pendingSaveRef}
           />
         )
-      ) : (
-        <PluginPanel
-          onOpenAtom={(path) => {
-            openAtom(path)
-            setEnterEdit(true)
-          }}
-          onCreatePlugin={() => {
-            setPendingPrompt(BUILD_PLUGIN_PROMPT)
-          }}
-        />
       )}
       {/* The single 3rd column — EXACTLY ONE of Chat / Sharing /
        *  Proposals (each toggle force-closes the other two; the grid
@@ -920,32 +904,18 @@ function App() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
-        onFirePrompt={(p) => {
-          // P3+P4 Codex fold F2: opening chat is part of the
-          // fire — without it, Chat is unmounted and the
-          // pendingPrompt sits stale, replaying later when
-          // the user opens chat manually (concrete repro
-          // verified in review).
-          setChatOpen(true)
-          setSharingOpen(false)
-          setProposalsOpen(false)
-          setPendingPrompt(p)
-        }}
         onFireSkill={(path) => {
           // P3+P4 Codex fold F2+F3: dedicated channel for
           // programmatic skill-fire. Does NOT pass through
           // detectSkillFire (Chat consumes pendingSkillFire
           // directly via sendMessage({entry:'skill-fire'})).
           // The structural enforcement is now route-checked
-          // at the type system — a plugin command's prompt
-          // text can never become a skill-fire by accident.
+          // at the type system.
           setChatOpen(true)
           setSharingOpen(false)
           setProposalsOpen(false)
           setPendingSkillFire(path)
         }}
-        onOpenAtom={openAtom}
-        onOpenPlugins={() => setView('plugins')}
       />
       {sharePromptFor && (
         <ShareDialog

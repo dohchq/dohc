@@ -13,7 +13,7 @@ lives in `apps/app`.
   `{= sum(logs.2025_07_*.billable)}`). Computed values render after the
   token and update as the underlying files change.
 - **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, queried by plugins and `query` blocks.
+  user-declared types, queried by `query` blocks.
 - **Folders** — organize atoms; support icons, colors, stars, and
   drag-and-drop move with wikilink-rewrite cascade.
 
@@ -30,8 +30,6 @@ lives in `apps/app`.
 - **Onboarding** — a short questionnaire seeds the agent's first turn,
   which builds a tailored, populated workspace (dashboard + `me.md`).
 - **Graph** — a force-directed view of atoms and their links.
-- **Plugins** — heatmap / list / table / custom kernels. Custom kernels
-  are sandboxed iframes with read+write access via `window.dohc`.
 - **Sharing** — per-atom shares (view/edit) with consent surfaces.
 
 ## Stack

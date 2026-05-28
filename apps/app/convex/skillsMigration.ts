@@ -21,7 +21,7 @@ import { deriveSearchFields } from './searchText'
 // SAFE-MIGRATION RULE: inject `type: skill` ONLY into legacy
 // `skills/*.md` atoms with NO existing `type:` declaration in their
 // frontmatter. Atoms that already declare a type (skill / html /
-// plugin / anything) are NEVER re-typed — the user's existing
+// action / anything) are NEVER re-typed — the user's existing
 // frontmatter wins. This avoids the Codex round-2 FAIL-4 false-
 // positive class (an atom at `skills/x.md` with `type: html`
 // would be wrongly re-typed; here it is structurally protected).

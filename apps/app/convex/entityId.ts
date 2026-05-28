@@ -18,9 +18,9 @@ export function isCanonicalEntityId(type: unknown, slug: unknown): boolean {
   return true
 }
 
-// Throwing form for write paths that should fail loud (agent / plugin
-// bridge via _upsertMany / _patch). Recovery paths that must return a
-// result instead of throwing use the predicate directly.
+// Throwing form for write paths that should fail loud (agent writes via
+// _upsertMany / _patch). Recovery paths that must return a result
+// instead of throwing use the predicate directly.
 export function assertCanonicalEntityId(type: string, slug: string) {
   if (!isCanonicalEntityId(type, slug)) {
     throw new Error(

@@ -12,7 +12,6 @@ import {
   decideAtomIdAction,
   reconcileAtomIdIndex,
   isHtmlAtomBody,
-  isPluginAtomBody,
   formulaConcreteFileId,
   injectFrontmatterTitle,
   extractLeadingH1,
@@ -396,41 +395,6 @@ describe('isHtmlAtomBody — pure (parallels MAP_PATH discipline)', () => {
     const t0 = Date.now()
     expect(isHtmlAtomBody(evil)).toBe(false) // no closing fence ⇒ no fm
     expect(Date.now() - t0).toBeLessThan(50) // splitFrontmatter guard
-  })
-})
-
-// Track-3 P2b.3 fold (Codex F1) — parity with isHtmlAtomBody /
-// isSkillAtomBody. Used by `convex/agent.ts`:write_atom to gate
-// plugin-atom persistence from a skill turn.
-describe('isPluginAtomBody — pure (parity with isHtmlAtomBody / isSkillAtomBody)', () => {
-  it('true for frontmatter type: plugin (bare / quoted / spaced / id-seeded)', () => {
-    expect(isPluginAtomBody('---\ntype: plugin\n---\nkernel:foo')).toBe(true)
-    expect(isPluginAtomBody('---\ntype: "plugin"\n---\nx')).toBe(true)
-    expect(isPluginAtomBody("---\ntype:'plugin'\n---\nx")).toBe(true)
-    expect(isPluginAtomBody('---\ntype:   plugin\n---\nx')).toBe(true)
-    expect(
-      isPluginAtomBody('---\ntype: plugin\nid: evil\n---\nkernel:custom'),
-    ).toBe(true)
-  })
-  it('false for non-plugin / no-frontmatter / near-miss', () => {
-    expect(isPluginAtomBody('---\ntype: skill\n---\nx')).toBe(false)
-    expect(isPluginAtomBody('---\ntype: html\n---\nx')).toBe(false)
-    expect(isPluginAtomBody('---\nid: a\n---\n# md note')).toBe(false)
-    expect(isPluginAtomBody('# just markdown')).toBe(false)
-    expect(isPluginAtomBody('---\ntype: plug\n---\nx')).toBe(false)
-    expect(isPluginAtomBody('not a {type: plugin} atom')).toBe(false)
-    expect(isPluginAtomBody('')).toBe(false)
-  })
-  it('strict-grammar: duplicate type lines are NOT a plugin atom (§1.2)', () => {
-    expect(
-      isPluginAtomBody('---\ntype: plugin\ntype: html\n---\nx'),
-    ).toBe(false)
-  })
-  it('ReDoS-safe: leading --- + huge whitespace, no close ⇒ fast false', () => {
-    const evil = '---\n' + ' \n'.repeat(40000) + 'type: plugin'
-    const t0 = Date.now()
-    expect(isPluginAtomBody(evil)).toBe(false)
-    expect(Date.now() - t0).toBeLessThan(50)
   })
 })
 

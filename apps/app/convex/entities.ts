@@ -19,8 +19,8 @@ import {
 // end. Without it, an entity like {type:"a/b", slug:"c"} makes
 // recordCapture's first-'/' split miss the lookup → NO withhold row
 // is created → a granted window leaks the unconfirmed value. Enforced
-// at every write chokepoint (covers the agent AND the public plugin
-// bridge, which both route through _upsertMany / _patch).
+// at every write chokepoint (covers the agent and internal callers that
+// route through _upsertMany / _patch).
 // The canonical-id rule now lives in the neutral `./entityId` module
 // (no Convex/db imports) so entities.ts AND trash.ts both depend on
 // IT, not on each other (kills the entities↔trash cycle — Codex LOW).
@@ -106,7 +106,7 @@ export const _listByType = internalQuery({
   // `limit` so the query-block eval path can BOUND this read
   // (unbounded `.collect()` run reactively per-keystroke is the
   // live-crash class). Omitted ⇒ unbounded, byte-identical to before
-  // (zero regression for the agent / pluginBridge callers). When
+  // (zero regression for the agent callers). When
   // given, take `limit+1` so the caller can detect + honestly
   // disclose truncation.
   args: {
@@ -158,8 +158,7 @@ export const _find = internalQuery({
 //       design forbids even for a skill that was given the SAFE
 //       enable for it; "create" is additive, "update" is not).
 // The mode is OPTIONAL; omitted ⇒ unchanged byte-identical upsert
-// semantics for the agent's `update_entity` + pluginBridge
-// `window.dohc.upsert` callers (no regression).
+// semantics for the agent's `update_entity` callers (no regression).
 //
 // P2b.2 fold (Codex F1): a plain `Error` subclass's custom fields
 // (`.kind`, `.mode`, `.conflicts`) DO NOT survive the
@@ -301,8 +300,7 @@ export const _upsertMany = internalMutation({
       const prevData = existing?.data
       if (existing) {
         // recoverability: overwriting an entity's data is destructive
-        // of the prior value — snapshot before the patch (covers the
-        // agent + the plugin-bridge `window.dohc.upsert` path).
+        // of the prior value — snapshot before the patch.
         if (JSON.stringify(existing.data) !== JSON.stringify(it.data)) {
           await recordTrashCoalesced(ctx, {
             workspaceId,
@@ -323,9 +321,8 @@ export const _upsertMany = internalMutation({
         })
         created++
       }
-      // R2.1 (C2, per-KEY): every entity write (agent AND public
-      // pluginBridge route here) WITHHOLDS each CHANGED scalar field
-      // from shared windows until the owner confirms THAT key.
+      // R2.1 (C2, per-KEY): every entity write WITHHOLDS each CHANGED
+      // scalar field from shared windows until the owner confirms THAT key.
       await captureChangedKeys(
         ctx,
         workspaceId,
@@ -356,11 +353,10 @@ export const _patch = internalMutation({
       .unique()
     if (!existing) throw new Error(`not found: ${type}/${slug}`)
     const merged = { ...(existing.data ?? {}), ...data }
-    // Re-review HIGH: _patch is reachable from the PUBLIC plugin
-    // bridge (window.dohc.patch) and the agent's update_entity tool
-    // and overwrites existing keys' values — a destructive overwrite
-    // that previously bypassed trash entirely. Snapshot prior data
-    // (coalesced) before the patch.
+    // Re-review HIGH: _patch is reachable from the agent's update_entity
+    // tool and overwrites existing keys' values — a destructive
+    // overwrite that previously bypassed trash entirely. Snapshot prior
+    // data (coalesced) before the patch.
     if (JSON.stringify(existing.data) !== JSON.stringify(merged)) {
       await recordTrashCoalesced(ctx, {
         workspaceId,

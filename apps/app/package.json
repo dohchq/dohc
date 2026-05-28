@@ -23,7 +23,6 @@
     "@convex-dev/agent": "0.6.1",
     "@convex-dev/workos-authkit": "^0.2.2",
     "@dohc/brand": "workspace:*",
-    "@dohc/plugin-sdk": "workspace:*",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@fontsource/ibm-plex-mono": "^5.2.7",

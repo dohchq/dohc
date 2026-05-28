@@ -1,8 +1,8 @@
-import { Files, Workflow, Puzzle } from 'lucide-react'
+import { Files, Workflow } from 'lucide-react'
 
 // graph-v1 1c — VSCode-style activity bar (icon rail). Switches the
-// primary view: Files (explorer + editor), Graph, Plugins.
-export type ActivityView = 'atom' | 'graph' | 'plugins'
+// primary view: Files (explorer + editor), Graph.
+export type ActivityView = 'atom' | 'graph'
 
 const ITEMS: Array<{
   view: ActivityView
@@ -11,7 +11,6 @@ const ITEMS: Array<{
 }> = [
   { view: 'atom', label: 'Files', Icon: Files },
   { view: 'graph', label: 'Graph', Icon: Workflow },
-  { view: 'plugins', label: 'Plugins', Icon: Puzzle },
 ]
 
 export function ActivityBar({
