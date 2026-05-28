@@ -5,8 +5,10 @@
 //     `atomShares` row grants a viewer access, addressed by the
 //     owner's rename-proof `fileId`.
 //   - `resolveShareAccess` is the ONE door: every shared read/render/
-//     write resolves through it; it re-verifies the caller is the
-//     grantee. Absence / wrong viewer ⇒ DENY (mirrors resolveWindow).
+//     write resolves through it; it re-verifies the caller is part of
+//     the grant audience. Absence / wrong viewer ⇒ DENY (mirrors
+//     resolveWindow). Public-link shares still require a signed-in
+//     viewer; they do not expose anonymous internet reads.
 //   - The owner's OWN functions (atoms.list/getByPath/upsert/…) stay
 //     workspace-scoped and UNTOUCHED. This is a PARALLEL, gated read
 //     path — not a widening of those queries (which would risk the
@@ -47,7 +49,20 @@ export async function resolveShareAccess(
   // THIS owner shared via the SAME audience as this grant — never
   // the owner's private vault. Computed per audience below.
   let sharedFileIds: Set<string>
-  if (row.granteeWorkspaceId) {
+  if (row.publicAccess === true) {
+    // ── public-link share — any signed-in viewer with the shareId may
+    // read it. Formula scope is still limited to this owner's public
+    // shares, never the whole owner workspace.
+    const grants = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) =>
+        q.eq('ownerWorkspaceId', row.ownerWorkspaceId),
+      )
+      .collect()
+    sharedFileIds = new Set(
+      grants.filter((g) => g.publicAccess === true).map((g) => g.fileId),
+    )
+  } else if (row.granteeWorkspaceId) {
     // ── person-to-person share — caller must BE the grantee.
     if (row.granteeWorkspaceId !== viewer) return null
     const grants = await ctx.db
@@ -62,7 +77,7 @@ export async function resolveShareAccess(
         .map((g) => g.fileId),
     )
   } else if (row.granteeOrgId) {
-    // ── org/"company" share — caller must be a MEMBER of the org.
+    // ── workspace share — caller must be a MEMBER of that workspace.
     if (!(await isMember(ctx, row.granteeOrgId, viewer))) return null
     const grants = await ctx.db
       .query('atomShares')
@@ -123,6 +138,7 @@ async function scheduleShareAudienceDisconnect(
     ownerWorkspaceId: string
     granteeWorkspaceId?: string
     granteeOrgId?: string
+    publicAccess?: boolean
   },
 ): Promise<void> {
   if (row.granteeWorkspaceId) {
@@ -132,6 +148,8 @@ async function scheduleShareAudienceDisconnect(
     })
     return
   }
+
+  if (row.publicAccess === true) return
 
   const granteeOrgId = row.granteeOrgId
   if (!granteeOrgId) return
@@ -213,7 +231,7 @@ export const shareAtomToOrg = mutation({
   handler: async (ctx, { fileId, orgId, permission, activeWorkspaceId }) => {
     const owner = await requireWorkspace(ctx, activeWorkspaceId)
     if (!(await isMember(ctx, orgId, owner))) {
-      throw new Error('You are not a member of that company.')
+      throw new Error('You are not a member of that workspace.')
     }
     const mine = await ownerAtomByFileId(ctx, owner, fileId)
     if (!mine) throw new Error(`You don't own a file with id "${fileId}".`)
@@ -236,6 +254,44 @@ export const shareAtomToOrg = mutation({
       ownerWorkspaceId: owner,
       fileId,
       granteeOrgId: orgId,
+      permission,
+      createdBy: owner,
+      createdAt: Date.now(),
+    })
+  },
+})
+
+// Share one of MY files as an "Anyone with the link" grant. The link
+// is still a shareId, and readers must be signed in, but no specific
+// workspace/person membership is required once they have the link.
+export const shareAtomPublic = mutation({
+  args: {
+    fileId: v.string(),
+    permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fileId, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const mine = await ownerAtomByFileId(ctx, owner, fileId)
+    if (!mine) throw new Error(`You don't own a file with id "${fileId}".`)
+    const existing = (
+      await ctx.db
+        .query('atomShares')
+        .withIndex('by_owner_fileId', (q) =>
+          q.eq('ownerWorkspaceId', owner).eq('fileId', fileId),
+        )
+        .collect()
+    ).find((row) => row.publicAccess === true)
+    if (existing) {
+      if (existing.permission !== permission) {
+        await ctx.db.patch(existing._id, { permission })
+      }
+      return existing._id
+    }
+    return await ctx.db.insert('atomShares', {
+      ownerWorkspaceId: owner,
+      fileId,
+      publicAccess: true,
       permission,
       createdBy: owner,
       createdAt: Date.now(),
@@ -335,9 +391,10 @@ export const listMyShares = query({
       shareId: r._id,
       fileId: r.fileId,
       // exactly one is set — the owner's manage view labels the
-      // audience (person vs company) from these (review P2-3).
+      // audience (person vs workspace vs public link) from these.
       granteeWorkspaceId: r.granteeWorkspaceId ?? null,
       granteeOrgId: r.granteeOrgId ?? null,
+      publicAccess: r.publicAccess === true,
       permission: r.permission,
       createdAt: r.createdAt,
     }))

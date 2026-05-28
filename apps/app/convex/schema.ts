@@ -148,12 +148,12 @@ export default defineSchema({
     fileId: v.string(),
     // EXACTLY ONE audience is set:
     //   granteeWorkspaceId — a person-to-person share (1a/1b).
-    //   granteeOrgId       — an org/"company" share (1c): every
-    //                        member of that org may read it.
-    // resolveShareAccess branches on which is present (the membership
-    // check for org-shares is the new gate).
+    //   granteeOrgId       — a workspace share: every member may read it.
+    //   publicAccess       — anyone signed in with the shareId may read it.
+    // resolveShareAccess branches on which is present.
     granteeWorkspaceId: v.optional(v.string()),
     granteeOrgId: v.optional(v.string()),
+    publicAccess: v.optional(v.boolean()),
     permission: v.union(v.literal('view'), v.literal('edit')),
     createdBy: v.string(),
     createdAt: v.number(),

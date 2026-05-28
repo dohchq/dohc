@@ -13,6 +13,8 @@ import {
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import {
   getGeneralAccessCopy,
+  getGeneralAccessOptions,
+  type GeneralAccessValue,
   getShareTargetPlaceholder,
 } from './shareDialogCopy'
 
@@ -36,6 +38,7 @@ export function ShareDialog({
   const myShares = useQuery(api.atomShares.listMyShares, {})
   const shareAtom = useMutation(api.atomShares.shareAtom)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
+  const shareAtomPublic = useMutation(api.atomShares.shareAtomPublic)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)
   // P1 (multiplayer-and-h-followups §6.5) — within-workspace
   // access (private/restricted/workspace-default). Distinct from the
@@ -61,6 +64,9 @@ export function ShareDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [publicShareOverride, setPublicShareOverride] = useState<
+    Id<'atomShares'> | null | undefined
+  >(undefined)
 
   const workspaces = myWorkspaces ?? []
   const currentWorkspace = workspaces.find(
@@ -84,10 +90,24 @@ export function ShareDialog({
   const workspaceName = (id: string) =>
     workspaces.find((w) => w.workspaceId === id)?.name ?? 'Workspace'
   const existing = (myShares ?? []).filter((s) => s.fileId === fileId)
+  const publicShare = existing.find((s) => s.publicAccess === true)
+  const namedShares = existing.filter((s) => s.publicAccess !== true)
+  const publicShareId =
+    publicShareOverride === undefined
+      ? (publicShare?.shareId as Id<'atomShares'> | undefined)
+      : (publicShareOverride ?? undefined)
+  const hasPublicLink = !!publicShareId
   const generalAccess = getGeneralAccessCopy({
     isPersonalWorkspace,
     accessMode: atomAccess?.mode ?? 'private',
+    hasPublicLink,
   })
+  const generalAccessValue: GeneralAccessValue = hasPublicLink
+    ? 'link'
+    : !isPersonalWorkspace && atomAccess?.mode === 'org-default'
+      ? 'workspace'
+      : 'restricted'
+  const generalAccessOptions = getGeneralAccessOptions(isPersonalWorkspace)
   const canChangeGeneralAccess =
     generalAccess.canChangeGeneralAccess && !!atomAccess
 
@@ -121,17 +141,34 @@ export function ShareDialog({
     }
   }
 
-  async function changeGeneralAccess(next: 'restricted' | 'workspace') {
+  async function changeGeneralAccess(next: GeneralAccessValue) {
     if (!canChangeGeneralAccess || generalAccessBusy) return
     setGeneralAccessBusy(true)
     setGeneralAccessError(null)
     setGeneralAccessOpen(false)
     try {
-      await setAtomAccess({
-        fileId,
-        activeWorkspaceId,
-        mode: next === 'workspace' ? null : 'private',
-      })
+      if (next === 'link') {
+        const shareId = await shareAtomPublic({
+          fileId,
+          activeWorkspaceId,
+          permission: 'view',
+        })
+        setPublicShareOverride(shareId as Id<'atomShares'>)
+        return
+      }
+
+      if (publicShareId) {
+        await unshareAtom({ shareId: publicShareId, activeWorkspaceId })
+        setPublicShareOverride(null)
+      }
+
+      if (!isPersonalWorkspace) {
+        await setAtomAccess({
+          fileId,
+          activeWorkspaceId,
+          mode: next === 'workspace' ? null : 'private',
+        })
+      }
     } catch (e) {
       setGeneralAccessError((e as Error).message)
     } finally {
@@ -140,10 +177,13 @@ export function ShareDialog({
   }
 
   function copyLink() {
-    const href =
-      typeof window !== 'undefined' && window.location?.href
-        ? window.location.href
-        : ''
+    const href = (() => {
+      if (typeof window === 'undefined' || !window.location?.origin) return ''
+      if (publicShareId) {
+        return `${window.location.origin}/w/me/shared/${encodeURIComponent(publicShareId)}`
+      }
+      return window.location.href
+    })()
     if (href) void navigator.clipboard?.writeText(href)
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1500)
@@ -155,11 +195,11 @@ export function ShareDialog({
       onClick={onClose}
     >
       <div
-        className="w-[min(92vw,680px)] rounded-[10px] border border-rule bg-surface p-6 shadow-2xl"
+        className="w-[min(92vw,560px)] rounded-[10px] border border-rule bg-surface p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
-          <h2 className="min-w-0 text-[24px] font-medium leading-tight text-ink-strong">
+          <h2 className="min-w-0 text-[21px] font-medium leading-tight text-ink-strong">
             Share “{fileLabel}”
           </h2>
           <button
@@ -172,8 +212,8 @@ export function ShareDialog({
           </button>
         </div>
 
-        <div className="mt-6 rounded-[6px] border border-rule bg-page px-4 py-3 focus-within:border-accent">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+        <div className="mt-5 rounded-[7px] border border-rule bg-page/70 px-3 py-2.5 focus-within:border-accent">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             {effectiveShareMode === 'person' ? (
               <input
                 autoFocus
@@ -182,13 +222,13 @@ export function ShareDialog({
                 onKeyDown={(e) => e.key === 'Enter' && submit()}
                 placeholder={getShareTargetPlaceholder(isPersonalWorkspace)}
                 spellCheck={false}
-                className="min-w-0 flex-1 bg-transparent text-[18px] text-ink-strong outline-none placeholder:text-ink-faint"
+                className="min-w-0 flex-1 bg-transparent text-[15px] text-ink-strong outline-none placeholder:text-ink-faint"
               />
             ) : (
               <select
                 value={selectedWorkspaceId}
                 onChange={(e) => setTargetWorkspaceId(e.target.value)}
-                className="min-w-0 flex-1 bg-transparent text-[16px] text-ink-strong outline-none"
+                className="min-w-0 flex-1 bg-transparent text-[15px] text-ink-strong outline-none"
               >
                 {workspaceTargets.map((w) => (
                   <option key={w.workspaceId} value={w.workspaceId}>
@@ -197,15 +237,15 @@ export function ShareDialog({
                 ))}
               </select>
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center justify-end gap-2">
               {canShareToWorkspace && (
-                <div className="flex overflow-hidden rounded-full border border-rule bg-surface">
+                <div className="flex overflow-hidden rounded-full border border-rule bg-surface/90">
                   {(['person', 'workspace'] as const).map((m) => (
                     <button
                       key={m}
                       type="button"
                       onClick={() => setShareMode(m)}
-                      className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                      className={`px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
                         effectiveShareMode === m
                           ? 'bg-ink-strong text-surface'
                           : 'text-ink-dim hover:text-ink-strong'
@@ -221,7 +261,7 @@ export function ShareDialog({
                 onChange={(e) =>
                   setPermission(e.target.value as 'view' | 'edit')
                 }
-                className="rounded-full border border-rule bg-surface px-3 py-1.5 text-[12px] font-medium text-ink-dim outline-none hover:text-ink-strong focus:border-accent"
+                className="rounded-full border border-rule bg-surface px-2.5 py-1 text-[11.5px] font-medium text-ink-dim outline-none hover:text-ink-strong focus:border-accent"
               >
                 <option value="view">View only</option>
                 <option value="edit">Can edit</option>
@@ -235,7 +275,7 @@ export function ShareDialog({
                     ? !handle.trim()
                     : !selectedWorkspaceId)
                 }
-                className="rounded-full bg-ink-strong px-4 py-1.5 text-[12.5px] font-semibold text-surface transition-opacity disabled:opacity-40"
+                className="rounded-full bg-ink-strong px-3.5 py-1 text-[12px] font-semibold text-surface transition-opacity disabled:opacity-40"
               >
                 {busy ? 'Sharing...' : 'Share'}
               </button>
@@ -249,50 +289,50 @@ export function ShareDialog({
           </p>
         )}
 
-        <section className="mt-7">
-          <h3 className="text-[17px] font-semibold text-ink-strong">
+        <section className="mt-6">
+          <h3 className="text-[15px] font-semibold text-ink-strong">
             People with access
           </h3>
-          <div className="mt-4 flex items-center gap-4">
-            <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-[15px] font-semibold text-ink-strong">
+          <div className="mt-3 grid grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3">
+            <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-[13px] font-semibold text-ink-strong">
               Y
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[15px] font-semibold text-ink-strong">
+              <p className="truncate text-[13.5px] font-semibold text-ink-strong">
                 You
               </p>
-              <p className="truncate text-[13px] text-ink-dim">
+              <p className="truncate text-[12px] text-ink-dim">
                 {me?.workspaceId ?? 'Your handle'}
               </p>
             </div>
-            <span className="shrink-0 text-[14px] text-ink-faint">Owner</span>
+            <span className="shrink-0 text-[12.5px] text-ink-faint">Owner</span>
           </div>
 
-          {existing.length > 0 && (
-            <ul className="mt-3 flex flex-col gap-2">
-              {existing.map((s) => (
+          {namedShares.length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1.5">
+              {namedShares.map((s) => (
                 <li
                   key={s.shareId}
-                  className="flex items-center gap-4 rounded-[6px] py-1"
+                  className="grid grid-cols-[36px_minmax(0,1fr)_auto_32px] items-center gap-3 rounded-[6px] py-1"
                 >
-                  <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
+                  <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
                     {s.granteeOrgId ? (
-                      <Users className="size-5" />
+                      <Users className="size-4" />
                     ) : (
-                      <span className="text-[14px] font-semibold">P</span>
+                      <span className="text-[12px] font-semibold">P</span>
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[14px] font-medium text-ink-strong">
+                    <p className="truncate text-[13px] font-medium text-ink-strong">
                       {s.granteeOrgId
                         ? workspaceName(s.granteeOrgId)
                         : s.granteeWorkspaceId}
                     </p>
-                    <p className="truncate text-[12px] text-ink-faint">
+                    <p className="truncate text-[11.5px] text-ink-faint">
                       {s.granteeOrgId ? 'Workspace' : 'Person'}
                     </p>
                   </div>
-                  <span className="text-[13px] text-ink-dim">
+                  <span className="text-[12px] text-ink-dim">
                     {s.permission === 'edit' ? 'Can edit' : 'Viewer'}
                   </span>
                   <button
@@ -313,16 +353,18 @@ export function ShareDialog({
           )}
         </section>
 
-        <section className="mt-8">
-          <h3 className="text-[17px] font-semibold text-ink-strong">
+        <section className="mt-6">
+          <h3 className="text-[15px] font-semibold text-ink-strong">
             General access
           </h3>
-          <div className="mt-4 flex items-center gap-4">
-            <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-ink-strong">
+          <div className="mt-3 grid grid-cols-[36px_minmax(0,1fr)] items-center gap-3">
+            <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-strong">
               {generalAccess.label === 'Restricted' ? (
-                <Lock className="size-5" />
+                <Lock className="size-4" />
+              ) : generalAccess.label === 'Anyone with the link' ? (
+                <LinkIcon className="size-4" />
               ) : (
-                <Users className="size-5" />
+                <Users className="size-4" />
               )}
             </div>
             <div className="min-w-0 flex-1">
@@ -331,7 +373,7 @@ export function ShareDialog({
                   type="button"
                   disabled={!canChangeGeneralAccess || generalAccessBusy}
                   onClick={() => setGeneralAccessOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 rounded-[5px] px-1 py-0.5 text-[15px] font-semibold text-ink-strong transition-colors enabled:hover:bg-page disabled:cursor-default"
+                  className="inline-flex items-center gap-1 rounded-[5px] px-1 py-0.5 text-[13.5px] font-semibold text-ink-strong transition-colors enabled:hover:bg-page disabled:cursor-default"
                   aria-haspopup={canChangeGeneralAccess ? 'menu' : undefined}
                   aria-expanded={
                     canChangeGeneralAccess ? generalAccessOpen : undefined
@@ -341,41 +383,37 @@ export function ShareDialog({
                   {canChangeGeneralAccess && <ChevronDown className="size-4" />}
                 </button>
                 {generalAccessOpen && canChangeGeneralAccess && (
-                  <div className="absolute left-0 top-full z-10 mt-2 w-64 overflow-hidden rounded-[8px] border border-rule bg-surface p-1 shadow-xl">
-                    <button
-                      type="button"
-                      onClick={() => void changeGeneralAccess('restricted')}
-                      className="flex w-full items-start gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page"
-                    >
-                      <Lock className="mt-0.5 size-4 text-ink-dim" />
-                      <span>
-                        <span className="block text-[13px] font-semibold text-ink-strong">
-                          Restricted
+                  <div className="absolute left-0 top-full z-10 mt-2 w-[280px] overflow-hidden rounded-[8px] border border-rule bg-surface p-1 shadow-xl">
+                    {generalAccessOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => void changeGeneralAccess(option.value)}
+                        className={`flex w-full items-start gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page ${
+                          generalAccessValue === option.value ? 'bg-page' : ''
+                        }`}
+                      >
+                        {option.value === 'restricted' ? (
+                          <Lock className="mt-0.5 size-4 text-ink-dim" />
+                        ) : option.value === 'link' ? (
+                          <LinkIcon className="mt-0.5 size-4 text-ink-dim" />
+                        ) : (
+                          <Users className="mt-0.5 size-4 text-ink-dim" />
+                        )}
+                        <span>
+                          <span className="block text-[12.5px] font-semibold text-ink-strong">
+                            {option.label}
+                          </span>
+                          <span className="block text-[11px] text-ink-faint">
+                            {option.description}
+                          </span>
                         </span>
-                        <span className="block text-[11.5px] text-ink-faint">
-                          Only people with access can open.
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void changeGeneralAccess('workspace')}
-                      className="flex w-full items-start gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page"
-                    >
-                      <Users className="mt-0.5 size-4 text-ink-dim" />
-                      <span>
-                        <span className="block text-[13px] font-semibold text-ink-strong">
-                          Workspace
-                        </span>
-                        <span className="block text-[11.5px] text-ink-faint">
-                          Anyone in this workspace can open.
-                        </span>
-                      </span>
-                    </button>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
-              <p className="mt-0.5 text-[13px] text-ink-dim">
+              <p className="mt-0.5 text-[12px] text-ink-dim">
                 {generalAccess.description}
               </p>
             </div>
@@ -387,11 +425,11 @@ export function ShareDialog({
           )}
         </section>
 
-        <div className="mt-8 flex items-center justify-between gap-3">
+        <div className="mt-6 flex items-center justify-between gap-3">
           <button
             type="button"
             onClick={copyLink}
-            className="inline-flex items-center gap-2 rounded-full border border-rule bg-surface px-5 py-2.5 text-[15px] font-semibold text-accent transition-colors hover:bg-page"
+            className="inline-flex items-center gap-2 rounded-full border border-rule bg-surface px-4 py-2 text-[13px] font-semibold text-accent transition-colors hover:bg-page"
           >
             {copied ? (
               <Check className="size-4" />
@@ -403,7 +441,7 @@ export function ShareDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full bg-accent px-7 py-2.5 text-[15px] font-semibold text-white transition-opacity hover:opacity-90"
+            className="rounded-full bg-accent px-6 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
           >
             Done
           </button>

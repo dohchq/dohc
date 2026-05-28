@@ -31,6 +31,70 @@ const bodyAt = (t: ReturnType<typeof convexTest>, path: string) =>
   })
 
 describe('sharing-v1 1a — share grant + gated read', () => {
+  it('owner creates public link → anyone signed in with the link can read', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Public Doc')
+
+    const shareId = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomPublic, {
+        fileId: 'doc',
+        permission: 'view',
+      })
+
+    const granteeGet = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, { shareId })
+    expect(granteeGet?.body).toContain('# Public Doc')
+
+    const strangerGet = await t
+      .withIdentity({ subject: STRANGER })
+      .query(api.atomShares.getSharedAtom, { shareId })
+    expect(strangerGet?.body).toContain('# Public Doc')
+
+    const granteeList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, {})
+    expect(granteeList).toHaveLength(0)
+
+    const ownerShares = await t
+      .withIdentity({ subject: OWNER })
+      .query(api.atomShares.listMyShares, {})
+    expect(ownerShares[0]).toMatchObject({
+      fileId: 'doc',
+      publicAccess: true,
+      permission: 'view',
+    })
+  })
+
+  it('public link re-share is idempotent and revoke cuts it off', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\nx')
+
+    const id1 = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomPublic, {
+        fileId: 'doc',
+        permission: 'view',
+      })
+    const id2 = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomPublic, {
+        fileId: 'doc',
+        permission: 'edit',
+      })
+
+    expect(id2).toBe(id1)
+    await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.unshareAtom, { shareId: id1 })
+
+    const after = await t
+      .withIdentity({ subject: STRANGER })
+      .query(api.atomShares.getSharedAtom, { shareId: id1 })
+    expect(after).toBeNull()
+  })
+
   it('owner shares → grantee can read; stranger cannot', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc\n{val: 42}')
