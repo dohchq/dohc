@@ -10,7 +10,7 @@ databases, formulas, and automations by hand.
 
 dohc is an AI-native workspace where the user remains the author, owner,
 and decision maker, while the AI is responsible for building out the
-documents, notes, apps, workflows, maps, and views that make the work
+documents, notes, apps, workflows, and views that make the work
 usable.
 
 The user should describe intent, review results, correct direction, and
@@ -31,7 +31,7 @@ user to become a builder before they get value.
 In short:
 
 - Coda: the user builds apps out of document primitives.
-- dohc: the AI builds useful docs, views, maps, and workflows out of
+- dohc: the AI builds useful docs, views, and workflows out of
   AI-friendly primitives, with the user in control.
 
 ## Product implication
@@ -47,7 +47,8 @@ The preferred substrate is text:
 - Sketches and lightweight diagrams can be ASCII-first.
 - Dynamic data uses readable, LLM-friendly syntax.
 - Links and references are explicit.
-- Maps summarize the workspace so agents can gather context quickly.
+- Search, links, recents, and explicit context atoms help agents gather
+  context quickly.
 - Generated views should be reproducible from source files and structured
   values.
 - Important changes should be inspectable, reversible, and attributable.
@@ -65,8 +66,8 @@ dohc should prioritize primitives that help agents work reliably:
 - **Readable dynamic data:** inline atoms, formulas, query blocks, and
   structured declarations that can be read and written without guessing
   hidden UI state.
-- **Workspace map:** a maintained index of important files, concepts,
-  entities, relationships, open questions, and current priorities.
+- **Agent navigation tools:** search, links, recents, source citations,
+  and explicit context atoms that help the agent choose what to read next.
 - **Source-backed views:** dashboards, tables, graphs, and summaries that
   trace back to source atoms and declared data.
 - **Inspectable workflows:** automations and routines expressed in clear
@@ -110,7 +111,7 @@ Daily surfaces should feel:
 ## Positioning sentence
 
 dohc is the AI-native workspace that turns messy work into living,
-inspectable documents, maps, apps, and workflows.
+inspectable documents, apps, and workflows.
 
 ## Product test
 

@@ -7,7 +7,6 @@ import {
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteInFolder } from './atomAccess'
-import { scheduleMapRegen } from './loop'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
 import { applyAtomCapture } from './atomCapture'
@@ -122,10 +121,7 @@ export const create = mutation({
     if (!(await canWriteInFolder(ctx, workspaceId, path, viewerSubject))) {
       throw new Error('You do not have access to create folders here.')
     }
-    const id = await createImpl(ctx, workspaceId, path)
-    // Phase C — debounced .context/_map.md regen (new folder appears in the map).
-    await scheduleMapRegen(ctx, workspaceId)
-    return id
+    return await createImpl(ctx, workspaceId, path)
   },
 })
 
@@ -197,10 +193,7 @@ export const move = mutation({
     // — undefined ⇒ no gate (system caller back-compat).
     const identity = await ctx.auth.getUserIdentity()
     const viewerSubject = identity?.subject ?? ''
-    const out = await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
-    // Phase C — debounced .context/_map.md regen (folder rename moves children).
-    await scheduleMapRegen(ctx, workspaceId)
-    return out
+    return await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
   },
 })
 
@@ -565,10 +558,7 @@ export const remove = mutation({
     // already used here — partial-deletes are the wrong fail mode).
     const identity = await ctx.auth.getUserIdentity()
     const viewerSubject = identity?.subject ?? ''
-    const out = await removeImpl(ctx, workspaceId, path, true, viewerSubject)
-    // Phase C — debounced .context/_map.md regen (folder deletion drops subtree).
-    await scheduleMapRegen(ctx, workspaceId)
-    return out
+    return await removeImpl(ctx, workspaceId, path, true, viewerSubject)
   },
 })
 

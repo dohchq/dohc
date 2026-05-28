@@ -50,7 +50,7 @@ describe('P1 — _upsertInternal gate (legacy/system write path)', () => {
       activeWorkspaceId: orgId,
       mode: 'private',
     })
-    // System path (regenerateMap etc.) — no viewerSubject ⇒ unfiltered.
+    // System path — no viewerSubject ⇒ unfiltered.
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: orgId,
       path: 'alice/private.md',

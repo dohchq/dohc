@@ -11,13 +11,12 @@ import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import {
   parseInlineAtomsFromMarkdown,
-  MAP_PATH,
   INTENT_PATH,
   ORG_IDENTITY_PATH,
   PERSONAL_IDENTITY_PATH,
 } from './inlineAtom'
 import { resolveLiveTotalValue } from './liveTotals'
-import { isLegacySkillPath, isNonDataAtom } from './atomId'
+import { isNonDataAtom } from './atomId'
 
 // Phase 4 Unit 4b — the weekly reconcile loop. Intent vs reality →
 // an ADVISORY proposed move, approved at the edge (reviewed-by-
@@ -39,48 +38,23 @@ const GOAL_RE = /^goal_([A-Za-z_][A-Za-z0-9_]*)$/
 const RECONCILE_FANOUT_PAGE = 200
 const PENDING_PROPOSALS_MAX = 100
 
-// Unit 4c — the Map + gardening, folded into the weekly pass.
-// R3 §6: MAP_PATH now imported from inlineAtom (single source of
-// truth — was a private const here + a literal in liveTotals).
-const MAP_SCAN_CAP = 5000
+const GARDEN_SCAN_CAP = 5000
 const GARDEN_ID = 'gardening:structure'
 // Singleton/system notes are intentionally standalone — never flagged
 // as orphans (that would be pure noise).
 const NOT_ORPHAN = new Set([
-  MAP_PATH,
   PERSONAL_IDENTITY_PATH,
   ORG_IDENTITY_PATH,
   INTENT_PATH,
 ])
-// Track-3 P1: consolidated into the canonical `isLegacySkillPath`
-// in convex/atomId.ts (single source — the §6 OR-compat term).
-// (Local const removed; the import above + the §6.2 audit table.)
-// Heuristic wikilink scan (advisory only — Map/gardening are
-// suggestions, never data integrity or a cross-desk path; a regex is
-// fine here, unlike the FROZEN atom grammar).
+// Track-3 P1: non-data filtering is centralized in convex/atomId.ts.
+// Gardening scans only data notes; views, skills, and legacy skill paths
+// are intentionally skipped to avoid noisy tidy-up proposals.
+// Heuristic wikilink scan (advisory only — gardening suggestions are never
+// data integrity or a cross-desk path; a regex is fine here, unlike the
+// FROZEN atom grammar).
 const WIKILINK = /\[\[([^\]\n|]+)(?:\|[^\]\n]*)?\]\]/g
-// Byte-bound the generated index so a big vault can't exceed Convex's
-// document limit and throw inside the scheduled cron (Codex MED).
-const MAP_MAX_LINKS_PER_NOTE = 12
-const MAP_MAX_CHARS = 256_000
-// Map summaries echo note text. Neutralise `{}` so a copied
-// `Logged {billable: 10}` can NEVER be parsed as a real atom — the
-// generated index must never be (or look like) a value source
-// (Codex HIGH, defence in depth on top of excluding .context/_map.md from
-// value scans).
-const firstProseLine = (body: string): string => {
-  for (const raw of (body ?? '').split('\n')) {
-    const line = raw
-      .replace(/^#+\s*/, '')
-      .replace(/\{/g, '(')
-      .replace(/\}/g, ')')
-      .trim()
-    if (line) return line.length > 80 ? line.slice(0, 79) + '…' : line
-  }
-  return ''
-}
-
-type NoteRow = { path: string; body?: string; source?: string }
+type NoteRow = { path: string; body?: string }
 
 async function loadNotes(
   ctx: QueryCtx,
@@ -89,76 +63,12 @@ async function loadNotes(
   const rows = await ctx.db
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-    .take(MAP_SCAN_CAP + 1)
-  if (rows.length > MAP_SCAN_CAP) return { overflow: true } // fail-soft
+    .take(GARDEN_SCAN_CAP + 1)
+  if (rows.length > GARDEN_SCAN_CAP) return { overflow: true } // fail-soft
   return {
     overflow: false,
-    notes: rows.map((r) => ({ path: r.path, body: r.body, source: r.source })),
+    notes: rows.map((r) => ({ path: r.path, body: r.body })),
   }
-}
-
-/** Deterministic `.context/_map.md` body for a fixed vault (folder → notes →
- *  one-line summary + outbound links). Generated artifact, clearly
- *  marked. */
-function buildMapBody(notes: NoteRow[]): string {
-  const indexed = notes
-    .filter((n) => n.path !== MAP_PATH)
-    .sort((a, b) => a.path.localeCompare(b.path))
-  const byFolder = new Map<string, NoteRow[]>()
-  for (const n of indexed) {
-    const slash = n.path.lastIndexOf('/')
-    const folder = slash >= 0 ? n.path.slice(0, slash) : '(root)'
-    ;(byFolder.get(folder) ?? byFolder.set(folder, []).get(folder)!).push(n)
-  }
-  // BUDGET-AWARE: accumulate with a running char budget and per-line
-  // component caps; STOP before allocating past MAP_MAX_CHARS (Codex
-  // MED — slicing AFTER join could allocate multi-GB first and OOM the
-  // cron). Total allocation is bounded to ~MAP_MAX_CHARS by
-  // construction.
-  const cap = (s: string, n: number) =>
-    s.length > n ? s.slice(0, n - 1) + '…' : s
-  const out: string[] = [
-    '# _map',
-    '',
-    '> Auto-maintained by dohc (regenerated weekly). This is a generated',
-    "> index — edit your notes, not this file. Delete it and dohc",
-    '> rebuilds it next pass.',
-    '',
-    `total notes: ${indexed.length}`,
-    '',
-  ]
-  let used = out.reduce((a, l) => a + l.length + 1, 0)
-  const TRUNC = '\n> … map truncated (vault too large for one index).\n'
-  let truncated = false
-  const tryPush = (line: string): boolean => {
-    if (used + line.length + 1 > MAP_MAX_CHARS - TRUNC.length) {
-      truncated = true
-      return false
-    }
-    out.push(line)
-    used += line.length + 1
-    return true
-  }
-  outer: for (const folder of [...byFolder.keys()].sort()) {
-    if (!tryPush(`## ${cap(folder, 200)}`) || !tryPush('')) break
-    for (const n of byFolder.get(folder)!) {
-      const summary = cap(firstProseLine(n.body ?? ''), 80)
-      const links = [
-        ...new Set(
-          [...(n.body ?? '').matchAll(WIKILINK)].map((m) =>
-            cap(m[1].trim(), 80),
-          ),
-        ),
-      ].slice(0, MAP_MAX_LINKS_PER_NOTE)
-      const linkHint = links.length ? ` → ${links.join(', ')}` : ''
-      const line = `- [[${cap(n.path, 200)}]]${summary ? ` — ${summary}` : ''}${linkHint}`
-      if (!tryPush(line)) break outer
-    }
-    if (!tryPush('')) break
-  }
-  let body = out.join('\n').trimEnd() + '\n'
-  if (truncated) body += TRUNC
-  return body
 }
 
 /** Detect own-desk structural issues (orphans, exact duplicates).
@@ -172,7 +82,7 @@ async function detectGardenIssues(
   const loaded = await loadNotes(ctx, workspaceId)
   if (loaded.overflow) return null // can't prove → don't propose
   const notes = loaded.notes.filter(
-    (n) => n.path !== MAP_PATH && !isLegacySkillPath(n.path),
+    (n) => !isNonDataAtom(n.path, n.body ?? ''),
   )
   if (notes.length === 0) return null
 
@@ -228,53 +138,6 @@ async function detectGardenIssues(
         .join('; ')} — keep one`,
     )
   return `Tidy-up suggestion (advisory — dohc deletes nothing): ${parts.join(' | ')}`
-}
-
-/** Regenerate `.context/_map.md`. Overwrites ONLY a dohc-authored map
- *  (`source==='agent'`); a user-authored OR unknown/legacy-source
- *  `.context/_map.md` is left untouched (Codex LOW/MED — only overwrite what we
- *  provably own). Fail-soft on scan overflow and on a duplicate-row
- *  `.context/_map.md` (a scheduled cron must NEVER throw — Codex MED). Reuses
- *  upsertAtomImpl ⇒ recoverability (prior map snapshotted to trash)
- *  for free. */
-// Exported so onboarding._complete reuses the SAME deterministic
-// builder (no parallel map logic — the anti-duplication discipline):
-// a finished onboarding ALWAYS has a living Map (ai-os-ideas #1).
-export async function regenerateMap(
-  ctx: MutationCtx,
-  workspaceId: string,
-): Promise<
-  | 'written'
-  | 'skipped-not-agent-owned'
-  | 'skipped-ambiguous-map'
-  | 'skipped-overflow'
-> {
-  // .take(2) (NOT .first()/.unique()): upsertAtomImpl does .unique()
-  // internally and would THROW into the scheduled mutation on a
-  // pathological duplicate (workspace,.context/_map.md). Pre-detect + fail-soft.
-  const existingRows = await ctx.db
-    .query('atoms')
-    .withIndex('by_workspace_path', (q) =>
-      q.eq('workspaceId', workspaceId).eq('path', MAP_PATH),
-    )
-    .take(2)
-  if (existingRows.length > 1) return 'skipped-ambiguous-map'
-  const existing = existingRows[0]
-  // Only overwrite what we provably generated. source==='user' AND
-  // any unknown/unset source ⇒ leave it (the editor always stamps
-  // 'user' for user edits; a non-'agent' map is not ours to clobber).
-  if (existing && existing.source !== 'agent') {
-    return 'skipped-not-agent-owned'
-  }
-  const loaded = await loadNotes(ctx, workspaceId)
-  if (loaded.overflow) return 'skipped-overflow'
-  await ctx.runMutation(internal.atoms._upsertInternal, {
-    workspaceId,
-    path: MAP_PATH,
-    body: buildMapBody(loaded.notes),
-    source: 'agent',
-  })
-  return 'written'
 }
 
 /**
@@ -488,23 +351,16 @@ export const _resolveProposal = internalMutation({
 })
 
 /**
- * Unit 4c — fold the Map + gardening into the weekly pass for ONE
- * workspace. Regenerates `.context/_map.md` (recoverable, never clobbers a
- * user-authored map) and, if there are own-desk structural issues,
- * upserts ONE idempotent advisory gardening proposal per
- * (workspace, epoch-week). NEVER deletes/auto-applies (masterplan
- * non-goal) — the only note write is the regenerated `.context/_map.md`
- * (a generated index, not user prose). It is agent-owned but not
- * system-locked, so the user can delete it like any other file.
+ * Fold gardening into the weekly pass for ONE workspace. If there are
+ * own-desk structural issues, upsert ONE idempotent advisory gardening
+ * proposal per (workspace, epoch-week). NEVER deletes or auto-applies.
  */
-async function gardenAndMapImpl(
+async function gardenImpl(
   ctx: MutationCtx,
   workspaceId: string,
-): Promise<{ mapRegen: unknown; gardening: 0 | 1 }> {
-    const mapRegen = await regenerateMap(ctx, workspaceId)
-
+): Promise<{ gardening: 0 | 1 }> {
     const summary = await detectGardenIssues(ctx, workspaceId)
-    if (!summary) return { mapRegen, gardening: 0 as const }
+    if (!summary) return { gardening: 0 as const }
 
     const period = periodOf(Date.now())
     const existing = await ctx.db
@@ -516,11 +372,10 @@ async function gardenAndMapImpl(
           .eq('identifier', GARDEN_ID),
       )
       .first()
-    if (existing) return { mapRegen, gardening: 0 as const }
+    if (existing) return { gardening: 0 as const }
 
-    // Persist only own-desk structural facts (note paths) — no
-    // cross-desk value (the Codex-HIGH cache concern was cross-desk
-    // live-totals). Re-evaluated LIVE at digest, dropped when tidied.
+    // Persist only own-desk structural facts (note paths). Re-evaluated
+    // LIVE at digest, dropped when tidied.
     await ctx.db.insert('proposals', {
       workspaceId,
       period,
@@ -530,99 +385,19 @@ async function gardenAndMapImpl(
       status: 'pending',
       createdAt: Date.now(),
     })
-    return { mapRegen, gardening: 1 as const }
+    return { gardening: 1 as const }
 }
 
-export const _gardenAndMap = internalMutation({
+export const _garden = internalMutation({
   args: { workspaceId: v.string() },
-  handler: (ctx, { workspaceId }) => gardenAndMapImpl(ctx, workspaceId),
-})
-
-// ── org-plan §5/§13 Phase C — DEBOUNCED `.context/_map.md` regen ────
-//
-// Goal: rapid edits coalesce to ONE regen per `REGEN_DEBOUNCE_MS`
-// window per workspace, so the map "feels in sync" without the
-// 7-day cron lag and without a regen-per-keystroke storm.
-//
-// Mechanism: `mapRegenSchedule` row per workspace tracks the next
-// pending regen's `scheduledFor` timestamp + the scheduler job id.
-// Triggers (atoms.upsert/move/remove + folders.create/move/remove)
-// call `scheduleMapRegen`, which:
-//   - if a pending schedule is still in the future → no-op (coalesce)
-//   - else inserts/patches the row and schedules `_gardenAndMapDebounced`
-//     for `now + REGEN_DEBOUNCE_MS`.
-// The scheduled mutation deletes its own row (so the next trigger
-// re-arms) and runs `gardenAndMapImpl`.
-
-export const REGEN_DEBOUNCE_MS = 2_000
-
-export async function scheduleMapRegen(
-  ctx: MutationCtx,
-  workspaceId: string,
-): Promise<void> {
-  const existing = await ctx.db
-    .query('mapRegenSchedule')
-    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-    .unique()
-  const now = Date.now()
-  // Already pending in the future ⇒ coalesce (do nothing).
-  if (existing && existing.scheduledFor > now) return
-
-  // Re-arming a stale row (scheduledFor <= now): the old scheduled job
-  // is still in the queue but the row's scheduledFor is in the past.
-  // Cancel it so a delayed scheduler firing it doesn't trigger a
-  // SECOND regen alongside the new one we're about to schedule.
-  // (Round-2 review H1.) Cancel is best-effort — a job that already
-  // fired returns an error; we ignore and proceed.
-  if (existing && existing.scheduledJobId) {
-    try {
-      await ctx.scheduler.cancel(existing.scheduledJobId)
-    } catch {
-      /* already fired or cancelled — fine */
-    }
-  }
-
-  const scheduledFor = now + REGEN_DEBOUNCE_MS
-  const jobId = await ctx.scheduler.runAfter(
-    REGEN_DEBOUNCE_MS,
-    internal.loop._gardenAndMapDebounced,
-    { workspaceId },
-  )
-  if (existing) {
-    await ctx.db.patch(existing._id, { scheduledFor, scheduledJobId: jobId })
-  } else {
-    await ctx.db.insert('mapRegenSchedule', {
-      workspaceId,
-      scheduledFor,
-      scheduledJobId: jobId,
-    })
-  }
-}
-
-export const _gardenAndMapDebounced = internalMutation({
-  args: { workspaceId: v.string() },
-  handler: async (ctx, { workspaceId }) => {
-    // Row-missing is the SIGNAL that another fire (or a manual call)
-    // has already done the regen — early return prevents double-work.
-    // Combined with scheduler.cancel on re-arm (above), this makes
-    // the regen exactly-once per coalesce window even when the OCC
-    // race window opens between two near-simultaneous fires.
-    // (Round-2 review H1 + L3.)
-    const row = await ctx.db
-      .query('mapRegenSchedule')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .unique()
-    if (!row) return
-    await ctx.db.delete(row._id)
-    return await gardenAndMapImpl(ctx, workspaceId)
-  },
+  handler: (ctx, { workspaceId }) => gardenImpl(ctx, workspaceId),
 })
 
 // ── P4 public surface (design loop-ux v2 §4) — owner-scoped wrappers;
 // workspace STRICTLY from requireWorkspace (never a client arg —
 // C1/L8). listPending/accept/dismiss delegate to the shared impls
 // (agent path ≡ public path; loop.test.ts the proof). runNow is a
-// NEW owner mutation calling the SAME two internals the agent
+// NEW owner mutation calling the SAME internals the agent
 // run_loop body calls, returning their RAW results.
 
 /** Owner's pending advisory digest (live-resolved + grant-gated by
@@ -658,12 +433,11 @@ export const dismiss = mutation({
  * Run the weekly pass NOW for the caller's OWN workspace — the
  * clickable twin of the agent `run_loop` tool (NOT a body-extract:
  * that tool's body returns a formatted string). Calls the SAME two
- * internals (`reconcileImpl` then `gardenAndMapImpl`) and returns
+ * internals (`reconcileImpl` then `gardenImpl`) and returns
  * their RAW counts + reconcile's `reason`. Idempotent per epoch-week
- * (engine). ADVISORY: writes ONLY the `proposals` table + regenerates
- * the agent-owned `.context/_map.md` — never user atoms/entities/user note
- * bodies. The panel may say "nothing new" ONLY when
- * `proposed === 0 && gardening === 0`.
+ * (engine). ADVISORY: writes ONLY the `proposals` table — never user
+ * atoms/entities/user note bodies. The panel may say "nothing new"
+ * ONLY when `proposed === 0 && gardening === 0`.
  */
 export const runNow = mutation({
   args: {},
@@ -676,7 +450,7 @@ export const runNow = mutation({
   }> => {
     const ws = await requireWorkspace(ctx)
     const rec = await reconcileImpl(ctx, ws)
-    const gm = await gardenAndMapImpl(ctx, ws)
+    const gm = await gardenImpl(ctx, ws)
     // OMIT `reason` on the success path — Convex objects must not
     // carry an explicit `undefined` field (Codex blocker); the
     // contract is `reason?` (absent), not `reason: undefined`.
@@ -689,7 +463,7 @@ export const runNow = mutation({
 /**
  * Weekly cron fan-out. Enumerates the `onboarding` table (one row per
  * active workspace — the existing per-workspace registry) and
- * schedules the FULL weekly pass (reconcile + map/gardening) per
+ * schedules the FULL weekly pass (reconcile + gardening) per
  * workspace. Batched + self-rescheduling (same terminating + complete
  * pattern as captures._purgeCaptures). Both are idempotent per
  * epoch-week, so a duplicate onboarding row double-scheduling is
@@ -705,7 +479,7 @@ export const _reconcileAll = internalMutation({
       await ctx.scheduler.runAfter(0, internal.loop._reconcile, {
         workspaceId: row.workspaceId,
       })
-      await ctx.scheduler.runAfter(0, internal.loop._gardenAndMap, {
+      await ctx.scheduler.runAfter(0, internal.loop._garden, {
         workspaceId: row.workspaceId,
       })
     }

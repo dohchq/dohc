@@ -10,7 +10,7 @@ import {
   isNonDataAtom,
   countTypeLines,
 } from './atomId'
-import { INTENT_PATH, MAP_PATH } from './inlineAtom'
+import { INTENT_PATH } from './inlineAtom'
 
 const modules = import.meta.glob('./**/*.ts')
 
@@ -89,13 +89,13 @@ describe('isLegacySkillPath — top-level `skills/` prefix only', () => {
 })
 
 describe('isNonDataAtom — §6 unified predicate (the 11-site source of truth)', () => {
-  it('matches MAP_PATH, html, skill, legacy-skill-path', () => {
-    expect(isNonDataAtom(MAP_PATH, 'anything')).toBe(true)
+  it('matches html, skill, legacy-skill-path', () => {
     expect(isNonDataAtom('r.md', HTML)).toBe(true)
     expect(isNonDataAtom('s.md', SKILL)).toBe(true)
     expect(isNonDataAtom('skills/legacy.md', 'no frontmatter')).toBe(true)
   })
   it('does NOT match plain md / unrelated paths', () => {
+    expect(isNonDataAtom('.context/_map.md', 'anything')).toBe(false)
     expect(isNonDataAtom('notes/x.md', MD)).toBe(false)
     expect(isNonDataAtom('logs/2025_07_14.md', 'billable: 4')).toBe(false)
   })

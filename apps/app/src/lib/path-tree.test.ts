@@ -97,7 +97,7 @@ describe('buildTree — D4.5 sort order (folders → starred → alphabetical)',
 })
 
 describe('nodeLabel — canonical .context files', () => {
-  it('labels the .context folder and its reserved files specially', () => {
+  it('labels the .context folder and active reserved files specially', () => {
     const tree = buildTree([
       row('.context/_map.md'),
       row('.context/me.md'),
@@ -109,7 +109,7 @@ describe('nodeLabel — canonical .context files', () => {
     const context = tree.children.find((c) => c.fullPath === '.context')!
     expect(nodeLabel(context)).toBe('.context')
     expect(context.children.map((c) => nodeLabel(c))).toEqual([
-      'Map · your setup',
+      '_map',
       'Company',
       'Intent',
       'Me',

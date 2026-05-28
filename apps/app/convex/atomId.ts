@@ -26,10 +26,7 @@
 //    determinism/rename-proofing identical either way.
 
 import type { MutationCtx } from './_generated/server'
-// skills-commands-v1 §6.1 needs MAP_PATH as a term in
-// `isNonDataAtom`. inlineAtom.ts is itself pure + dependency-free
-// (just the FROZEN parser + the MAP_PATH constant) — no cycle.
-import { MAP_PATH, parseInlineAtomsFromMarkdown } from './inlineAtom'
+import { parseInlineAtomsFromMarkdown } from './inlineAtom'
 
 // ── §1.1 path → candidate file-id (the fixed normalization) ─────────
 // lowercase · drop extension · per `/` segment · `[^a-z0-9_]→_` (this
@@ -100,8 +97,7 @@ export function joinFrontmatter(fm: string, rest: string): string {
   return fm + rest
 }
 
-// html-atoms-v1 §6 — the SINGLE shared predicate (one-constant
-// discipline, exactly paralleling `MAP_PATH`): an html atom is a
+// html-atoms-v1 §6 — the SINGLE shared predicate: an html atom is a
 // VISUAL VIEW, never a value-atom data source, so every value-atom
 // scanner skips it. Frontmatter `type: html` (the existing
 // action/html meta pattern). Reuses the AUDITED, Phase-4
@@ -216,9 +212,9 @@ export function isLegacySkillPath(path: string): boolean {
 
 // skills-commands-v1 §6.1 — the ONE unified predicate every
 // value-atom scanner uses. EXACTLY mirrors the §6 audited skip:
-// MAP_PATH (derived artifact) OR html (view, not a source — §6) OR
-// skill (instructions, not a source — Track-3) OR legacy-skill-path
-// (compat-window term, removed after P2 migration).
+// html (view, not a source — §6) OR skill (instructions, not a
+// source — Track-3) OR legacy-skill-path (compat-window term,
+// removed after P2 migration).
 //
 // Track-3 P1 RETROFITS this predicate at three `convex/windows.ts`
 // sites (gather / withheld / availableKeys) that Track-2 P1a's §6
@@ -230,7 +226,6 @@ export function isLegacySkillPath(path: string): boolean {
 // examples no longer capture or cross shared windows."
 export function isNonDataAtom(path: string, body: string): boolean {
   return (
-    path === MAP_PATH ||
     // D4.13 — a `.html` path is a VIEW (extension-determined); its
     // `{k:v}` examples never capture or cross a shared window. The
     // `type: html` body check stays as a backward-compat fallback.

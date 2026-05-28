@@ -9,7 +9,6 @@ import {
   isFolderColor,
   isFolderIcon,
 } from './atomLocks'
-import { MAP_PATH } from './inlineAtom'
 
 // file-org-v1 §5.1 / §5.2 / §5.4 — Track-4 D4.1a verification suite.
 // Covers the 5 chokepoint lock guards, the §2-A Track-3 composition
@@ -62,15 +61,15 @@ async function getAtom(t: ReturnType<typeof convexTest>, path: string) {
 describe('lock guards — upsertAtomImpl (chokepoint #1)', () => {
   it('refuses agent overwrite of a systemLocked atom', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true, source: 'agent' })
+    await seedAtom(t, 'system.md', { systemLocked: true, source: 'agent' })
     await expect(
       t.mutation(internal.atoms._upsertInternal, {
         workspaceId: W,
-        path: '_map.md',
+        path: 'system.md',
         body: 'spoof',
       }),
     ).rejects.toThrow(/system-managed/)
-    expect((await getAtom(t, '_map.md'))?.systemLocked).toBe(true)
+    expect((await getAtom(t, 'system.md'))?.systemLocked).toBe(true)
   })
 
   it('refuses agent overwrite of a userLocked atom', async () => {
@@ -88,15 +87,15 @@ describe('lock guards — upsertAtomImpl (chokepoint #1)', () => {
 
   it('allows _upsertSystem to overwrite a systemLocked atom', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true, source: 'agent' })
+    await seedAtom(t, 'system.md', { systemLocked: true, source: 'agent' })
     await t.mutation(internal.atoms._upsertSystem, {
       workspaceId: W,
-      path: '_map.md',
-      body: 'fresh map',
+      path: 'system.md',
+      body: 'fresh system',
       source: 'agent',
     })
-    const row = await getAtom(t, '_map.md')
-    expect(row?.body).toMatch(/fresh map/)
+    const row = await getAtom(t, 'system.md')
+    expect(row?.body).toMatch(/fresh system/)
     expect(row?.systemLocked).toBe(true) // re-asserted
   })
 
@@ -128,22 +127,16 @@ describe('lock guards — atoms.remove (chokepoint #2) [internal path]', () => {
     expect(await getAtom(t, 'system.md')).not.toBeNull()
   })
 
-  it('deletes stale locked map files because _map is user-removable now', async () => {
+  it('former map paths obey ordinary lock guards', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, MAP_PATH, { systemLocked: true, userLocked: true })
-    await seedAtom(t, '_map.md', { systemLocked: true, userLocked: true })
-
-    await t.mutation(internal.atoms._removeInternal, {
-      workspaceId: W,
-      path: MAP_PATH,
-    })
-    await t.mutation(internal.atoms._removeInternal, {
-      workspaceId: W,
-      path: '_map.md',
-    })
-
-    expect(await getAtom(t, MAP_PATH)).toBeNull()
-    expect(await getAtom(t, '_map.md')).toBeNull()
+    await seedAtom(t, '.context/_map.md', { systemLocked: true })
+    await expect(
+      t.mutation(internal.atoms._removeInternal, {
+        workspaceId: W,
+        path: '.context/_map.md',
+      }),
+    ).rejects.toThrow(/system-managed/)
+    expect(await getAtom(t, '.context/_map.md')).not.toBeNull()
   })
 
   it('refuses removal of a userLocked atom', async () => {
@@ -243,11 +236,11 @@ describe('atoms.setStar', () => {
 
   it('stars a systemLocked atom — line 39 says favorite, not "favorite if unlocked"', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true })
+    await seedAtom(t, 'system.md', { systemLocked: true })
     await t
       .withIdentity({ subject: W })
-      .mutation(api.atoms.setStar, { path: '_map.md', starred: true })
-    expect((await getAtom(t, '_map.md'))?.starred).toBe(true)
+      .mutation(api.atoms.setStar, { path: 'system.md', starred: true })
+    expect((await getAtom(t, 'system.md'))?.starred).toBe(true)
   })
 })
 
@@ -297,19 +290,17 @@ describe('atoms.setLock — public mutation behavior (D4.1b)', () => {
   })
 
   // D4.1b R2-fold (indep FAIL-1): setLock used to refuse on a
-  // systemLocked atom, creating a dual-lock trap (user locked an
-  // agent-written atom before the loop tick, ended up unable to
-  // clear their own decoration). Fix: setLock toggles userLocked
-  // regardless of systemLocked. systemLocked stays untouched.
+  // systemLocked atom, creating a dual-lock trap. Fix: setLock toggles
+  // userLocked regardless of systemLocked. systemLocked stays untouched.
   it('toggles userLocked on a systemLocked atom (R2-fold) — systemLocked unaffected', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true })
+    await seedAtom(t, 'system.md', { systemLocked: true })
     const r = await t
       .withIdentity({ subject: W })
-      .mutation(api.atoms.setLock, { path: '_map.md', locked: true })
+      .mutation(api.atoms.setLock, { path: 'system.md', locked: true })
     expect(r.locked).toBe(true)
     expect(r.changed).toBe(true)
-    const row = await getAtom(t, '_map.md')
+    const row = await getAtom(t, 'system.md')
     // userLocked applied; systemLocked preserved.
     expect(row?.userLocked).toBe(true)
     expect(row?.systemLocked).toBe(true)
@@ -317,16 +308,16 @@ describe('atoms.setLock — public mutation behavior (D4.1b)', () => {
 
   it('R2-fold dual-lock release path — setLock(false) on {systemLocked, userLocked} clears userLocked only', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', {
+    await seedAtom(t, 'system.md', {
       systemLocked: true,
       userLocked: true,
     })
     const r = await t
       .withIdentity({ subject: W })
-      .mutation(api.atoms.setLock, { path: '_map.md', locked: false })
+      .mutation(api.atoms.setLock, { path: 'system.md', locked: false })
     expect(r.locked).toBe(false)
     expect(r.changed).toBe(true)
-    const row = await getAtom(t, '_map.md')
+    const row = await getAtom(t, 'system.md')
     expect(row?.userLocked).toBeFalsy() // cleared
     expect(row?.systemLocked).toBe(true) // preserved
   })
@@ -373,23 +364,22 @@ describe('atoms.setLock — public mutation behavior (D4.1b)', () => {
 })
 
 // D4.1a R1-fold (indep FAIL-3): `_upsertSystem` must overwrite a
-// dual-locked atom. Without the fold, a user who toggled their
-// user-lock on `_map.md` would halt the next loop tick.
+// dual-locked atom.
 describe('_upsertSystem — dual-lock bypass (R1-fold FAIL-3)', () => {
   it('overwrites a {systemLocked:true, userLocked:true} atom', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', {
+    await seedAtom(t, 'system.md', {
       systemLocked: true,
       userLocked: true,
     })
     await t.mutation(internal.atoms._upsertSystem, {
       workspaceId: W,
-      path: '_map.md',
-      body: 'fresh map after dual-lock',
+      path: 'system.md',
+      body: 'fresh system after dual-lock',
       source: 'agent',
     })
-    const row = await getAtom(t, '_map.md')
-    expect(row?.body).toMatch(/fresh map/)
+    const row = await getAtom(t, 'system.md')
+    expect(row?.body).toMatch(/fresh system/)
     expect(row?.systemLocked).toBe(true)
     // userLocked is preserved — _upsertSystem only re-asserts
     // systemLocked. The user's decoration on top survives.

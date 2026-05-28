@@ -4,7 +4,6 @@ import type { QueryCtx } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
-import { MAP_PATH } from './inlineAtom'
 import { splitFrontmatter } from './atomId'
 
 // docs.find dumping a whole note's RAW markdown body (frontmatter +
@@ -91,15 +90,12 @@ async function listAtomPathsCapped(
   // sort/slice so `docs.glob(...)` in a query block never enumerates
   // a private atom path for a viewer who can't read it. Filter is
   // per-row via the shared resolver — same gate the editor / search
-  // / render route use. `.context/_map.md` filter remains (derived index).
+  // / render route use.
   const visible: typeof rows = []
   for (const r of rows) {
     if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
   }
-  return visible
-    .map((r) => r.path)
-    .filter((p) => p !== MAP_PATH)
-    .sort()
+  return visible.map((r) => r.path).sort()
 }
 async function getAtomBody(
   ctx: QueryCtx,
@@ -107,7 +103,6 @@ async function getAtomBody(
   path: string,
   viewerSubject: string,
 ): Promise<string | null> {
-  if (path === MAP_PATH) return null // derived index — not findable
   const row = await ctx.db
     .query('atoms')
     .withIndex('by_workspace_path', (q) =>

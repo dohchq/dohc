@@ -384,8 +384,6 @@ From the brief, create a small COHERENT starter setup for their work
   (e.g. a log entry with \`{billable: 4.5}\`, a project with
   \`{budget: 8000} {status: active}\`). Modest and real.
 - a hero \`dashboard.md\` that is CONNECTED to those files — see §2.
-dohc maintains \`.context/_map.md\` (their navigable index) automatically —
-never hand-write or mention maintaining it.
 
 ### 2 — THE DASHBOARD IS A CONNECTED, INVITING, EDITABLE DOCUMENT
 
@@ -815,7 +813,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     set_lock: createTool({
       description:
-        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "lock .context/company.md", "unlock my plan"). Toggles the USER lock only; the generated map is independently owned by the loop and is unaffected. file-org-v1 D4.1b (R2 fold).',
+        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "lock .context/company.md", "unlock my plan"). Toggles the USER lock only. file-org-v1 D4.1b (R2 fold).',
       inputSchema: z.object({
         path: z.string(),
         locked: z.boolean(),
@@ -981,21 +979,23 @@ export const dohcAgent = new Agent(components.agent, {
 
     run_loop: createTool({
       description:
-        'Run the FULL weekly pass NOW for this user: (1) reconcile each {goal_<id>: n} in .context/intent.md against the live {<id>} rollup → advisory proposal for any behind-goal metric; (2) regenerate the .context/_map.md vault index; (3) flag orphan/duplicate notes as an advisory tidy-up. Idempotent per week. Changes NOTHING automatically except rebuilding the generated .context/_map.md (recoverable) — all suggestions are reviewed at the edge. Use when the user asks to "run my loop" / "where am I vs my goals" / "tidy my vault".',
+        'Run the FULL weekly pass NOW for this user: (1) reconcile each {goal_<id>: n} in .context/intent.md against the live {<id>} rollup → advisory proposal for any behind-goal metric; (2) flag orphan/duplicate notes as an advisory tidy-up. Idempotent per week. Changes NOTHING automatically to user atoms/entities/user note bodies — all suggestions are reviewed at the edge. Use when the user asks to "run my loop" / "where am I vs my goals" / "tidy my vault".',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
         const rec = (await ctx.runMutation(internal.loop._reconcile, {
           workspaceId,
         })) as { proposed: number; reason?: string }
-        const gm = (await ctx.runMutation(internal.loop._gardenAndMap, {
+        const gm = (await ctx.runMutation(internal.loop._garden, {
           workspaceId,
-        })) as { mapRegen: string; gardening: number }
+        })) as { gardening: number }
         const recPart =
           rec.reason === 'no .context/intent.md'
             ? 'no .context/intent.md yet (add {goal_<id>: n} atoms to track goals)'
+            : rec.reason === 'ambiguous .context/intent.md'
+              ? 'ambiguous .context/intent.md (multiple atoms exist at that path; resolve the duplicate before running the loop)'
             : `${rec.proposed} new goal proposal(s)`
-        return `weekly pass done — ${recPart}; .context/_map.md ${gm.mapRegen}; ${gm.gardening} tidy-up suggestion(s). All advisory; nothing changed except the regenerated index.`
+        return `weekly pass done — ${recPart}; ${gm.gardening} tidy-up suggestion(s). All advisory; no user atoms/entities/user note bodies changed.`
       },
     }),
 

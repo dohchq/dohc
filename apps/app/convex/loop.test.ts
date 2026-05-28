@@ -222,141 +222,7 @@ describe('loop._reconcile — cross-desk goal via window rollup (REGRESSION: rev
   })
 })
 
-describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (advisory, never deletes)', () => {
-  const mapBody = (t: T, ws: string) =>
-    t.run(async (ctx) => {
-      const r = (await ctx.db.query('atoms').collect()).find(
-        (a: any) => a.workspaceId === ws && a.path === '.context/_map.md',
-      )
-      return r
-        ? {
-            body: r.body as string,
-            source: r.source,
-            systemLocked: r.systemLocked,
-          }
-        : null
-    })
-
-  it('regenerates a deterministic .context/_map.md; only .context/_map.md is written; nothing deleted', async () => {
-    const t = convexTest(schema, modules)
-    await seedNote(t, W, 'notes/a.md', '# Alpha\nlinks [[notes/b.md]]')
-    await seedNote(t, W, 'notes/b.md', 'Beta body')
-    await seedNote(t, W, '.context/me.md', 'I am the user')
-
-    const r1 = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    expect(r1.mapRegen).toBe('written')
-    const m1 = await mapBody(t, W)
-    expect(m1?.source).toBe('agent')
-    expect(m1?.systemLocked).toBeFalsy()
-    expect(m1?.body).toContain('# _map')
-    expect(m1?.body).toContain('[[notes/a.md]]')
-    expect(m1?.body).toContain('Alpha') // heading used as summary
-    expect(m1?.body).toContain('→ notes/b.md') // outbound link hint
-    expect(m1?.body).not.toMatch(/\[\[_map\.md\]\]/) // never indexes itself
-
-    // user notes byte-unchanged; only .context/_map.md added; NOTHING deleted
-    const live = await t.run(async (ctx) =>
-      (await ctx.db.query('atoms').collect())
-        .filter((a: any) => a.workspaceId === W)
-        .map((a: any) => a.path)
-        .sort(),
-    )
-    expect(live).toEqual(['.context/_map.md', '.context/me.md', 'notes/a.md', 'notes/b.md'])
-    const a = await t.run(async (ctx) =>
-      (await ctx.db.query('atoms').collect()).find(
-        (x: any) => x.workspaceId === W && x.path === 'notes/a.md',
-      ),
-    )
-    expect(a!.body).toBe('# Alpha\nlinks [[notes/b.md]]') // untouched
-
-    // deterministic: regen again ⇒ identical body
-    const r2 = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    expect(r2.mapRegen).toBe('written')
-    expect((await mapBody(t, W))?.body).toBe(m1?.body)
-
-    await asW(t).mutation(api.atoms.remove, { path: '.context/_map.md' })
-    expect(await mapBody(t, W)).toBeNull()
-  })
-
-  it('overwrites ONLY an agent-owned map: user OR unknown-source .context/_map.md is left untouched (Codex LOW/MED)', async () => {
-    const t = convexTest(schema, modules)
-    await t.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'MINE', updatedAt: 1, source: 'user' })
-    })
-    await seedNote(t, W, 'notes/a.md', 'a')
-    const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    expect(r.mapRegen).toBe('skipped-not-agent-owned')
-    expect((await mapBody(t, W))?.body).toBe('MINE')
-
-    // unknown/unset source (legacy/external insert) is ALSO not ours
-    const t2 = convexTest(schema, modules)
-    await t2.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'LEGACY', updatedAt: 1 })
-    })
-    await seedNote(t2, W, 'notes/a.md', 'a')
-    expect((await t2.mutation(internal.loop._gardenAndMap, { workspaceId: W })).mapRegen).toBe('skipped-not-agent-owned')
-    expect((await mapBody(t2, W))?.body).toBe('LEGACY')
-  })
-
-  it('duplicate .context/_map.md rows ⇒ fail-soft (no cron throw) (Codex MED)', async () => {
-    const t = convexTest(schema, modules)
-    await t.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'x', updatedAt: 1, source: 'agent' })
-      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'y', updatedAt: 1, source: 'agent' })
-    })
-    await seedNote(t, W, 'notes/a.md', 'a')
-    const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    expect(r.mapRegen).toBe('skipped-ambiguous-map') // did not throw
-  })
-
-  it('REGRESSION (Codex HIGH): .context/_map.md never double-counts a note’s atoms into live-totals / reconcile', async () => {
-    const t = convexTest(schema, modules)
-    // first prose line of work.md LOOKS like an atom — it is the
-    // single source of {billable: 10}.
-    await seedNote(t, W, 'work.md', 'Logged {billable: 10} on Acme.')
-    await seedNote(t, W, '.context/intent.md', '{goal_billable: 15}')
-    await t.mutation(internal.liveTotals._define, {
-      workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
-    })
-    // generate .context/_map.md (its summary echoes "Logged {billable: 10}")
-    await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    const m = await mapBody(t, W)
-    expect(m?.body).not.toContain('{billable: 10}') // braces neutralised
-    expect(m?.body).toContain('(billable: 10)') // sanitised echo
-
-    await t.mutation(internal.loop._reconcile, { workspaceId: W })
-    const d = await t.query(internal.loop._pendingProposals, { workspaceId: W })
-    const it = d.items.find((i: any) => i.identifier === 'billable')
-    expect(it?.actual).toBe(10) // NOT 20 — .context/_map.md excluded from value scan
-  })
-
-  it('map link hints are capped per note (byte-bound; Codex MED)', async () => {
-    const t = convexTest(schema, modules)
-    const many = Array.from({ length: 30 }, (_, i) => `[[notes/t${i}.md]]`).join(' ')
-    await seedNote(t, W, 'hub.md', `hub ${many}`)
-    await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    const body = (await mapBody(t, W))!.body
-    const hubLine = body.split('\n').find((l) => l.includes('[[hub.md]]'))!
-    // count ONLY the link-hint segment (after ` → `); the summary echo
-    // may also contain raw [[..]] text — cosmetic, not the bound.
-    const hint = hubLine.split(' → ')[1] ?? ''
-    const shown = (hint.match(/notes\/t\d+\.md/g) ?? []).length
-    expect(shown).toBeLessThanOrEqual(12) // MAP_MAX_LINKS_PER_NOTE
-    expect(shown).toBeGreaterThan(0)
-  })
-
-  it('per-component caps bound map allocation (Codex MED #3 — no over-allocate-then-slice)', async () => {
-    const t = convexTest(schema, modules)
-    const longPath = 'deep/' + 'x'.repeat(500) + '.md'
-    await seedNote(t, W, longPath, 'y'.repeat(2000)) // huge path + body
-    await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    const body = (await mapBody(t, W))!.body
-    const line = body.split('\n').find((l) => l.startsWith('- [[')) ?? ''
-    // path display capped (~200) + summary capped (80) — NOT 500/2000
-    expect(line.length).toBeLessThan(400)
-    expect(line).toContain('…') // truncation ellipsis present
-  })
-
+describe('loop._garden — Unit 4c: gardening (advisory, never deletes)', () => {
   it('a legacy proposal row with NO kind is treated as metric (Codex MED #5 — widen-migrate-narrow)', async () => {
     const t = convexTest(schema, modules)
     await seedNote(t, W, 'work.md', '{x: 5}')
@@ -386,7 +252,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (
     await seedNote(t, W, 'dup2.md', 'SAME CONTENT') // exact dup
     await seedNote(t, W, '.context/me.md', 'singleton — not an orphan')
 
-    const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
+    const r = await t.mutation(internal.loop._garden, { workspaceId: W })
     expect(r.gardening).toBe(1)
     const gp = (await proposals(t, W)).filter((p: any) => p.kind === 'gardening')
     expect(gp).toHaveLength(1)
@@ -396,7 +262,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (
     expect('goal' in gp[0]).toBe(false)
 
     // idempotent per week
-    await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
+    await t.mutation(internal.loop._garden, { workspaceId: W })
     expect((await proposals(t, W)).filter((p: any) => p.kind === 'gardening')).toHaveLength(1)
 
     // shows in the digest, re-evaluated LIVE
@@ -407,7 +273,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (
     const n = await t.run(async (ctx) =>
       (await ctx.db.query('atoms').collect()).filter((a: any) => a.workspaceId === W).length,
     )
-    expect(n).toBe(7) // 6 seeded + .context/_map.md ; zero deletions
+    expect(n).toBe(6) // zero deletions and no generated map atom
 
     // tidy up EVERY issue: link the orphan; make the dups distinct AND
     // give them outbound links (so de-duping doesn't just turn them
@@ -425,16 +291,23 @@ describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (
     expect(d2.items.some((i: any) => i.kind === 'gardening')).toBe(false) // dropped, no nag
   })
 
-  it('a goal/value atom inside .context/_map.md content cannot create phantom data (it is excluded from its own index + gardening)', async () => {
+  it('ignores non-data atoms when scanning for gardening issues', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'notes/a.md', 'real [[notes/b.md]]')
-    await seedNote(t, W, 'notes/b.md', 'b')
-    const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
-    // a + b mutually... b has no outbound but is linked → not orphan;
-    // a links b and is not linked → a is an orphan candidate? a has
-    // outbound (≥1) so NOT orphan. So no gardening proposal.
-    expect(r.gardening).toBe(0)
+    await seedNote(t, W, 'dashboards/overview.html', 'standalone dashboard')
+    await seedNote(t, W, 'skills/legacy.md', 'legacy skill instructions')
+    await seedNote(t, W, 'modern-skill.md', [
+      '---',
+      'type: skill',
+      '---',
+      'modern skill instructions',
+    ].join('\n'))
+
+    expect(await t.mutation(internal.loop._garden, { workspaceId: W })).toEqual({
+      gardening: 0,
+    })
+    expect((await proposals(t, W)).filter((p: any) => p.kind === 'gardening')).toEqual([])
   })
+
 })
 
 // ── P4 public surface (design loop-ux v2) — owner-scoped wrappers
@@ -446,7 +319,7 @@ const asW = (t: T) => t.withIdentity({ subject: W })
 const userNotes = (t: T, ws: string) =>
   t.run(async (ctx) =>
     (await ctx.db.query('atoms').collect())
-      .filter((r: any) => r.workspaceId === ws && r.path !== '.context/_map.md')
+      .filter((r: any) => r.workspaceId === ws)
       .map((r: any) => ({ path: r.path, body: r.body }))
       .sort((a: any, b: any) => a.path.localeCompare(b.path)),
   )
@@ -530,7 +403,7 @@ describe('P4 — public runNow: advisory + idempotent + reason passthrough', () 
     expect(await userNotes(t, W)).toEqual(before) // user notes untouched
   })
 
-  it('behind a goal ⇒ proposed:1; idempotent same week ⇒ {0,0}; user notes byte-unchanged (only .context/_map.md may change)', async () => {
+  it('behind a goal ⇒ proposed:1; idempotent same week ⇒ {0,0}; user notes byte-unchanged', async () => {
     const t = convexTest(schema, modules)
     await seedBehindGoal(t)
     const before = await userNotes(t, W)
@@ -554,8 +427,7 @@ describe('P4 — public runNow: advisory + idempotent + reason passthrough', () 
       proposed: 0,
       gardening: 0,
     })
-    // ADVISORY: entities empty; USER notes byte-unchanged (the design
-    // invariant: .context/_map.md MAY be (re)written, user prose never).
+    // ADVISORY: entities empty; user prose never changes.
     expect(await entityCount(t)).toBe(0)
     expect(await userNotes(t, W)).toEqual(before)
   })

@@ -7,7 +7,6 @@
 // docs/development/search-plan.md and the audit test in
 // src/__tests__/searchWriteAudit.test.ts.
 
-import { MAP_PATH } from './inlineAtom'
 import {
   splitFrontmatter,
   isHtmlAtomBody,
@@ -107,11 +106,11 @@ export function basename(path: string): string {
   return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
 }
 
-/** Whether an atom appears in search. Excludes ONLY the derived index
- *  `.context/_map.md`; INCLUDES html / markdown / user files. (Do NOT reuse
- *  `isNonDataAtom` — it excludes html atoms, which we must search.) */
+/** Whether an atom appears in search. INCLUDES html / markdown / user
+ *  files. (Do NOT reuse `isNonDataAtom` — it excludes html atoms, which
+ *  we must search.) */
 export function isAtomSearchable(path: string): boolean {
-  return path !== MAP_PATH
+  return path.length > 0
 }
 
 /** The derived fields to write on every atom path/body change. */

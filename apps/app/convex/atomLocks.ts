@@ -32,9 +32,9 @@ export type UserLockData = {
 function formatSystemLockMessage(path: string, context: LockContext): string {
   switch (context) {
     case 'edit':
-      return `Cannot edit "${path}": this is a system-managed file (e.g. an AI-maintained map). Its contents are regenerated automatically.`
+      return `Cannot edit "${path}": this is a system-managed file.`
     case 'delete':
-      return `Cannot delete "${path}": this is a system-managed file. It will be re-created on the next regeneration cycle.`
+      return `Cannot delete "${path}": this is a system-managed file.`
     case 'rename':
       return `Cannot rename "${path}": this is a system-managed file. Its path is part of the system contract.`
   }

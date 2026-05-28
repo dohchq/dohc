@@ -5,20 +5,18 @@ Two decisions were refined in **round 2** (review pass: Codex +
 codebase-verifier + pragmatist). The refinements preserve the
 user-visible outcome but swap a simpler implementation in.
 
-## 1. `_map.md` refresh cadence (personal + org)
-**Decided (round 2): debounced full-regen on every atom write, 2s
-coalesced per workspace, reusing `loop.regenerateMap` (extended with
-`skipTrash: true` so the trash table doesn't bloat).** The
-user-visible outcome — "feels in sync, push-based, faster than weekly,
-for personal too" — is preserved.
+## 1. Workspace map
+**Superseded for MVP: remove `_map.md` generation and refresh machinery.**
+The MVP agent should navigate with explicit tools (`list_atoms`, search,
+`read_atom`, recents/source citations) plus the canonical context atoms
+(`.context/me.md`, `.context/company.md`, `.context/intent.md`) instead
+of a generated workspace map.
 
-The round-1 choice ("straight to V2 — `mapEntries` indexed table") was
-demoted to **V2-deferred**. Both Codex and the pragmatist flagged it
-as scope-creep relative to the search-plan precedent (which adds
-fields, not tables): the debounced approach achieves the same UX with
-no new table, no audit-by-grep, no `_backfillMapEntries`, no write-site
-threading. Promote if/when a workspace's regen time becomes
-user-visible (almost certainly not at v1's scale).
+The earlier debounced `_map.md` plan sounded aligned with the AI OS
+inspiration, but it did not prove enough value for MVP-sized workspaces
+and created a generated artifact agents could over-trust. Revisit later
+only if real usage shows navigation failures at scale; the likely future
+shape is a database-backed context router, not a large text map.
 
 ## 2. Org Owners
 **Decided: multiple Owners allowed.** Survives a single Owner leaving.
