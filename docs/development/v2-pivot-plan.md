@@ -138,7 +138,7 @@ Phase 0 started from `main` at `103a46ff9ef746bc4c82fbcb00bfd07a80c7bae8`. That 
 | `agent.ts` tool schemas | `read_atom` stays as cache read; `write_atom`/`suggest_in_doc` are retired; semantic tools call Hocuspocus |
 | `atomSuggestions.ts` CRUD shape | Schema field rename (`rangeFrom/rangeTo` → `relAnchorFrom/relAnchorTo` as Y.RelativePosition byte arrays); CRUD logic mostly preserved |
 | Display name caching (3.9.18) | Same approach in Y.Awareness user object |
-| Captures, trash, proposals, captures, file tree | Untouched |
+| Captures, trash, proposals, file tree | Untouched |
 
 ### Code that gets deleted
 | File | Why |
