@@ -51,25 +51,136 @@ const SHARE_TARGET_ALLOW = new Set([
   // cross-workspace READ (atomShares.getSharedAtom) correctly takes NO
   // workspace arg — viewer = requireWorkspace via resolveShareAccess.
   'atomShares.ts:shareAtom',
+  // org-plan §6 — Owner-gated member ops. `memberWorkspaceId` names the
+  // GRANTEE (which member to remove / change role for); the caller's
+  // authority is requireRole(ctx, orgId, 'owner') which internally calls
+  // requireWorkspace. Same grant-style shape as windows.grant.
+  'orgs.ts:removeMember',
+  'orgs.ts:changeRole',
 ])
+
+// REVIEWED server-to-server exception. Hocuspocus must ask Convex about an
+// OWNER workspace + atomId because the browser connects to a document room
+// named by owner workspace/fileId. This is not a client-trusted workspace arg:
+// the public query is unusable without HOCUSPOCUS_CONVEX_SERVER_TOKEN, and the
+// browser never calls it directly.
+const SERVER_TOKEN_ALLOW = new Set([
+  'hocuspocusAuth.ts:checkAtomAccess',
+  // Phase 1.4 bootstrap is also server-to-server only: Hocuspocus supplies
+  // the owner workspace/fileId while lazily initializing a missing Y.Doc from
+  // the existing atoms.body cache. The query is useless without the same
+  // HOCUSPOCUS_CONVEX_SERVER_TOKEN gate.
+  'hocuspocusAuth.ts:loadAtomBootstrap',
+  // Phase 1.6 projection is server-to-server only: Hocuspocus owns the
+  // Y.Doc->markdown cache update and writes through the same shared token.
+  'hocuspocusAuth.ts:setBodyCache',
+  // Phase 1.8 semantic create is server-to-server only: Hocuspocus creates
+  // the Convex row and initializes canonical Y.Doc state through one token gate.
+  'hocuspocusAuth.ts:createAtom',
+])
+
+// REVIEWED collab-token exception. The browser may ask Convex for a JWT scoped
+// to an owner workspace before opening a shared Hocuspocus room. That JWT is
+// identity-only; it grants no data by itself. Hocuspocus must still call the
+// server-token-gated ACL query before read/write. The suppression is void unless
+// the action is authenticated and signs only a collab token with the shared JWT
+// secret, without touching ctx.db.
+const COLLAB_TOKEN_ALLOW = new Set(['auth.ts:getCollabToken'])
 
 // crude export-block splitter: `export const NAME = (mutation|query|
 // action|internalMutation|…)({ … })` up to the args/handler region.
 // Also reports whether the fn body calls requireWorkspace (so an
 // allowlisted exception cannot silently lose its auth check).
+//
+// Org-plan §5 NOTE: a NEW shape entered the codebase in Phase B —
+// `activeWorkspaceId: v.optional(v.string())`. Unlike the legacy
+// `workspaceId` / `viewerWorkspaceId` / `granteeWorkspaceId` args (which
+// claim to BE someone's workspace and are the dangerous bug class), the
+// `activeWorkspaceId` arg is the URL-derived ACTIVE workspace handle:
+// the caller is asking "evaluate this in workspace X" and the gate is
+// `requireWorkspace(ctx, activeWorkspaceId)` which membership-checks it.
+// Spoofing `activeWorkspaceId` to point at someone else's workspace is
+// caught by the membership lookup in convex/auth.ts. We therefore strip
+// `activeWorkspaceId` from the args head BEFORE scanning for "workspace"
+// so it doesn't trigger the tripwire — but the regex still catches every
+// other workspace-naming arg shape.
 function publicFnsTakingWorkspace(
   src: string,
-): Array<{ name: string; kind: string; authed: boolean }> {
-  const hits: Array<{ name: string; kind: string; authed: boolean }> = []
+): Array<{
+  name: string
+  kind: string
+  authed: boolean
+  serverTokenGated: boolean
+  collabTokenMint: boolean
+}> {
+  const hits: Array<{
+    name: string
+    kind: string
+    authed: boolean
+    serverTokenGated: boolean
+    collabTokenMint: boolean
+  }> = []
   const re =
     /export\s+const\s+(\w+)\s*=\s*(internalMutation|internalQuery|internalAction|mutation|query|action)\s*\(\{([\s\S]{0,600}?)handler/g
   let m: RegExpExecArray | null
   while ((m = re.exec(src))) {
     const [, name, kind, head] = m
     const isPublic = !kind.startsWith('internal')
-    if (isPublic && /\bargs\s*:\s*\{[\s\S]*?workspace/i.test(head)) {
-      const body = src.slice(m.index, m.index + 2000)
-      hits.push({ name, kind, authed: /requireWorkspace\s*\(/.test(body) })
+    if (!isPublic) continue
+    const nextExport = src.indexOf('\nexport const ', m.index + 1)
+    const body = src.slice(
+      m.index,
+      nextExport === -1 ? m.index + 2000 : nextExport,
+    )
+    // Codex round-2 LOW tightening: only exempt `activeWorkspaceId`
+    // from the workspace-arg detection when the body ACTUALLY routes
+    // it through a known auth check. Otherwise a future fn could
+    // declare `activeWorkspaceId` as args + ignore it (or pass it
+    // directly into a db query as a workspaceId) and silently pass
+    // CI. The exemption now requires one of:
+    //   - `requireWorkspace(ctx, activeWorkspaceId)`  (mutation/query)
+    //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
+    //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
+    //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
+    //     uses required `v.string()` form because the recovery action
+    //     only makes sense in an org context (no `me` sentinel value).
+    const validatesActive =
+      /requireWorkspace\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*\)/.test(
+        body,
+      ) ||
+      /runQuery\([\s\S]{0,80}_resolveWorkspaceForCaller[\s\S]{0,200}activeWorkspaceId/.test(
+        body,
+      ) ||
+      /requireRole\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
+      )
+    // Strip BOTH optional + required shapes of activeWorkspaceId when
+    // validated (P1's recoverTombstonedAtom uses the required form).
+    const headWithoutActive = validatesActive
+      ? head
+          .replace(
+            /\bactiveWorkspaceId\s*:\s*v\.optional\(v\.string\(\)\)\s*,?/g,
+            '',
+          )
+          .replace(/\bactiveWorkspaceId\s*:\s*v\.string\(\)\s*,?/g, '')
+      : head
+    if (/\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
+      // `requireRole(ctx, …)` internally calls `requireWorkspace` — it
+      // is also a valid auth check (org-plan §6 introduced it).
+      hits.push({
+        name,
+        kind,
+        authed: /\b(requireWorkspace|requireRole)\s*\(/.test(body),
+        serverTokenGated:
+          /\bserverToken\b/.test(head) &&
+          (/HOCUSPOCUS_CONVEX_SERVER_TOKEN/.test(body) ||
+            (/requireServerToken\s*\(/.test(body) &&
+              /HOCUSPOCUS_CONVEX_SERVER_TOKEN/.test(src))),
+        collabTokenMint:
+          /new\s+SignJWT\s*\(/.test(body) &&
+            /HOCUSPOCUS_JWT_SECRET/.test(body) &&
+          !/\bctx\.db\b/.test(body),
+      })
     }
   }
   return hits
@@ -84,7 +195,11 @@ describe('authz boundary (§6 tripwire — not a proof; see §6b contract)', () 
       const rel = f.split('/convex/')[1]
       for (const h of publicFnsTakingWorkspace(readFileSync(f, 'utf8'))) {
         const allowed =
-          SHARE_TARGET_ALLOW.has(`${rel}:${h.name}`) && h.authed
+          (SHARE_TARGET_ALLOW.has(`${rel}:${h.name}`) && h.authed) ||
+          (SERVER_TOKEN_ALLOW.has(`${rel}:${h.name}`) && h.serverTokenGated) ||
+          (COLLAB_TOKEN_ALLOW.has(`${rel}:${h.name}`) &&
+            h.authed &&
+            h.collabTokenMint)
         if (allowed) continue
         offenders.push(`${rel}: ${h.name} (${h.kind})`)
       }
@@ -119,6 +234,82 @@ export const grant = mutation({
     const [h2] = publicFnsTakingWorkspace(secure)
     expect(h2.authed).toBe(true)
     expect(SHARE_TARGET_ALLOW.has(`windows.ts:${h2.name}`) && h2.authed).toBe(true)
+  })
+
+  it('the Hocuspocus server-token allowlist is VOID without a server token gate (meta)', () => {
+    const insecure = `
+export const checkAtomAccess = query({
+  args: { workspaceId: v.string(), userId: v.string() },
+  handler: async (ctx, { workspaceId, userId }) => {
+    return { workspaceAuthzVersion: 1, canRead: true, canWrite: true }
+  },
+})`
+    const [h] = publicFnsTakingWorkspace(insecure)
+    expect(h).toMatchObject({
+      name: 'checkAtomAccess',
+      serverTokenGated: false,
+    })
+    expect(
+      SERVER_TOKEN_ALLOW.has(`hocuspocusAuth.ts:${h.name}`) &&
+        h.serverTokenGated,
+    ).toBe(false)
+
+    const secure = `
+export const checkAtomAccess = query({
+  args: { serverToken: v.string(), workspaceId: v.string(), userId: v.string() },
+  handler: async (ctx, { serverToken, workspaceId, userId }) => {
+    if (serverToken !== process.env.HOCUSPOCUS_CONVEX_SERVER_TOKEN) throw new Error('Invalid')
+    return { workspaceAuthzVersion: 1, canRead: true, canWrite: true }
+  },
+})`
+    const [h2] = publicFnsTakingWorkspace(secure)
+    expect(h2.serverTokenGated).toBe(true)
+    expect(
+      SERVER_TOKEN_ALLOW.has(`hocuspocusAuth.ts:${h2.name}`) &&
+        h2.serverTokenGated,
+    ).toBe(true)
+  })
+
+  it('the collab-token allowlist is VOID without auth and JWT-only minting (meta)', () => {
+    const insecure = `
+export const getCollabToken = action({
+  args: { workspaceId: v.optional(v.string()) },
+  handler: async (ctx, { workspaceId }) => {
+    await ctx.db.query('atoms').collect()
+    return 'token'
+  },
+})`
+    const [h] = publicFnsTakingWorkspace(insecure)
+    expect(h).toMatchObject({
+      name: 'getCollabToken',
+      authed: false,
+      collabTokenMint: false,
+    })
+    expect(
+      COLLAB_TOKEN_ALLOW.has(`auth.ts:${h.name}`) &&
+        h.authed &&
+        h.collabTokenMint,
+    ).toBe(false)
+
+    const secure = `
+export const getCollabToken = action({
+  args: { workspaceId: v.optional(v.string()) },
+  handler: async (ctx, { workspaceId }) => {
+    const caller = await requireWorkspace(ctx)
+    return await new SignJWT({ sub: caller, ws: workspaceId ?? caller })
+      .sign(secretKey(requiredEnv('HOCUSPOCUS_JWT_SECRET')))
+  },
+})`
+    const [h2] = publicFnsTakingWorkspace(secure)
+    expect(h2).toMatchObject({
+      authed: true,
+      collabTokenMint: true,
+    })
+    expect(
+      COLLAB_TOKEN_ALLOW.has(`auth.ts:${h2.name}`) &&
+        h2.authed &&
+        h2.collabTokenMint,
+    ).toBe(true)
   })
 
   it('resolveWindow is never called with a client-sourced viewer (direct-form tripwire)', () => {

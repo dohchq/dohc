@@ -1,9 +1,20 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
-// D4.33 — `/p/<fileId>` (an atom is open). Vestigial: the `_app`
-// layout renders the whole shell and reads the open fileId from the
-// path (useLocation). This child only declares the route + param so
-// the URL is valid and navigable.
+// R1 — legacy `/p/<fileId>` URL redirects to `/w/me/p/<fileId>`.
+//
+// Preserves bookmarks + share-this-link flows that pre-date R1.
+// The redirect is permanent in intent (the new URL is canonical), but
+// we use a regular redirect so TanStack's internal routing handles it
+// cleanly. `me` is the personal-workspace sentinel; the URL parser
+// resolves it to `activeWorkspaceId === undefined` (the API back-compat
+// path) — see `workspaceIdFromPathname` in `lib/active-workspace.tsx`.
 export const Route = createFileRoute('/_app/p/$atomId')({
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: '/w/$wsId/p/$atomId',
+      params: { wsId: 'me', atomId: params.atomId },
+      replace: true,
+    })
+  },
   component: () => null,
 })

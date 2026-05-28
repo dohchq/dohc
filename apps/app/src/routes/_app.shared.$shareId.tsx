@@ -1,9 +1,15 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
-// sharing-v1 1a — `/shared/<shareId>` opens an atom shared WITH the
-// current user (read-only in 1a). Vestigial like the other `_app`
-// children: the layout shell reads the shareId from the path
-// (useLocation) and renders SharedAtomView in the main content.
+// R1 — legacy `/shared/<shareId>` redirects to `/w/me/shared/<shareId>`.
+// Preserves existing share links from before R1. See `_app.p.$atomId.tsx`
+// for the parallel atom-URL redirect rationale.
 export const Route = createFileRoute('/_app/shared/$shareId')({
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: '/w/$wsId/shared/$shareId',
+      params: { wsId: 'me', shareId: params.shareId },
+      replace: true,
+    })
+  },
   component: () => null,
 })

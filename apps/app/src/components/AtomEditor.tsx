@@ -1,24 +1,44 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
 } from 'react'
-import { useQuery } from 'convex/react'
+import { useAction, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import {
   parseInlineAtoms,
   parseInlineAtomsFromMarkdown,
 } from '../lib/inlineAtom'
-import { QUERY_FENCE_RE } from '../lib/dslparse'
-import { Crepe } from '@milkdown/crepe'
-import { commandsCtx, editorViewCtx, prosePluginsCtx } from '@milkdown/kit/core'
-import { clearTextInCurrentBlockCommand } from '@milkdown/kit/preset/commonmark'
-import { Plugin, PluginKey, TextSelection } from '@milkdown/kit/prose/state'
-import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
-import { Milkdown, MilkdownProvider, useEditor } from '@milkdown/react'
+import { isQueryFenceLanguage, QUERY_FENCE_RE } from '../lib/dslparse'
+import { Extension, type Editor } from '@tiptap/core'
+import { EditorContent, useEditor } from '@tiptap/react'
+import { StarterKit } from '@tiptap/starter-kit'
+import { CodeBlockLowlight } from '@tiptap/extension-code-block-lowlight'
+import { TableKit } from '@tiptap/extension-table'
+import { Markdown } from '@tiptap/markdown'
+import { Placeholder } from '@tiptap/extensions/placeholder'
+import { TrailingNode } from '@tiptap/extensions/trailing-node'
+import {
+  Collaboration,
+  isChangeOrigin,
+} from '@tiptap/extension-collaboration'
+import { CollaborationCaret } from '@tiptap/extension-collaboration-caret'
+import {
+  NodeSelection,
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type EditorState,
+} from '@tiptap/pm/state'
+import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
+import { common, createLowlight } from 'lowlight'
+import * as Y from 'yjs'
+import { IndexeddbPersistence } from 'y-indexeddb'
+import type { Awareness } from 'y-protocols/awareness'
 import {
   hasAsciiSketchContentMetadata,
   isAsciiSketchLanguage,
@@ -34,19 +54,192 @@ import {
   type WikilinkFile,
 } from './wikilinkPlugin'
 import { WikilinkPicker } from './WikilinkPicker'
+import {
+  FLOATING_MENU_MAX_HEIGHT,
+  FLOATING_MENU_VIEWPORT_MARGIN,
+  resolveFloatingMenuPosition,
+  type FloatingMenuPlacement,
+} from './floatingMenuPosition'
 import type { Id } from '../../convex/_generated/dataModel'
+import { dohcMarkdownExtensions } from '../editor-v2/dohc-markdown-extensions'
+import {
+  createDohcAwareness,
+  createDohcHocuspocusProvider,
+  encodeDohcHocuspocusDocumentName,
+  fetchHocuspocusDocumentState,
+  fetchHocuspocusCapabilities,
+  resolveHocuspocusUrl,
+  startHocuspocusTokenRefresh,
+} from '../editor-v2/hocuspocusProvider'
+import { encodeDohcYDocUpdate, markdownToYDoc } from '../editor-v2/import-export'
+import { canEditDohcEditor } from '../editor-v2/editorReadiness'
+import {
+  hasIndexeddbYDocState,
+  markIndexeddbYDocState,
+} from '../editor-v2/indexeddbState'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 
 // Global event name that any UI affordance can dispatch to ask AtomShell to
 // open the ASCII sketcher modal. The slash menu's "ASCII sketch" item and
 // the command palette's "Insert ASCII sketch" entry both fire this.
 export const OPEN_SKETCH_EVENT = 'dohc:open-sketch'
 
-const ASCII_SKETCH_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>`
-// D4.8 — slash-menu icon for the /link command. lucide "link-2".
-const WIKILINK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`
+export type SlashCommandId =
+  | 'ascii-sketch'
+  | 'wikilink'
+  | 'heading-1'
+  | 'heading-2'
+  | 'heading-3'
+  | 'bulleted-list'
+  | 'numbered-list'
+  | 'quote'
+  | 'code-block'
+  | 'divider'
+  | 'table'
+  | 'query-block'
 
-import '@milkdown/crepe/theme/common/style.css'
-import '@milkdown/crepe/theme/frame.css'
+export type SlashCommandItem = {
+  id: SlashCommandId
+  label: string
+  hint: string
+  glyph: string
+  aliases: string[]
+}
+
+type SlashCommandState =
+  | { open: false }
+  | {
+      open: true
+      from: number
+      to: number
+      query: string
+      selected: number
+      x: number
+      y: number
+      maxHeight: number
+      placement: FloatingMenuPlacement
+    }
+
+const CLOSED_SLASH_COMMAND_STATE: SlashCommandState = { open: false }
+const LOCAL_SYNC_FALLBACK_MS = 2500
+const COLLAB_BOOTSTRAP_TIMEOUT_MS = 5000
+const REMOTE_SYNC_STALL_MS = 12000
+const lowlight = createLowlight(common)
+const COLLABORATOR_COLORS = [
+  '#1a73e8',
+  '#188038',
+  '#d93025',
+  '#9334e6',
+  '#e8710a',
+  '#00796b',
+  '#c5221f',
+] as const
+
+const SLASH_COMMANDS: SlashCommandItem[] = [
+  {
+    id: 'ascii-sketch',
+    label: 'ASCII sketch',
+    hint: 'Draw a native text sketch',
+    glyph: 'A',
+    aliases: ['ascii', 'art', 'diagram', 'draw', 'sketch'],
+  },
+  {
+    id: 'wikilink',
+    label: 'Link',
+    hint: 'Link another page',
+    glyph: '[[',
+    aliases: ['link', 'page', 'wiki', 'wikilink'],
+  },
+  {
+    id: 'heading-1',
+    label: 'Heading 1',
+    hint: 'Large section heading',
+    glyph: 'H1',
+    aliases: ['h1', 'heading', 'title'],
+  },
+  {
+    id: 'heading-2',
+    label: 'Heading 2',
+    hint: 'Medium section heading',
+    glyph: 'H2',
+    aliases: ['h2', 'subheading', 'subtitle'],
+  },
+  {
+    id: 'heading-3',
+    label: 'Heading 3',
+    hint: 'Small section heading',
+    glyph: 'H3',
+    aliases: ['h3', 'heading', 'subheading'],
+  },
+  {
+    id: 'bulleted-list',
+    label: 'Bulleted list',
+    hint: 'Start a simple list',
+    glyph: '-',
+    aliases: ['bullet', 'bulleted', 'list', 'ul'],
+  },
+  {
+    id: 'numbered-list',
+    label: 'Numbered list',
+    hint: 'Start an ordered list',
+    glyph: '1.',
+    aliases: ['number', 'numbered', 'ordered', 'ol'],
+  },
+  {
+    id: 'quote',
+    label: 'Quote',
+    hint: 'Call out a thought',
+    glyph: '>',
+    aliases: ['blockquote', 'quote'],
+  },
+  {
+    id: 'code-block',
+    label: 'Code block',
+    hint: 'Write code or raw text',
+    glyph: '</>',
+    aliases: ['code', 'fence', 'pre'],
+  },
+  {
+    id: 'divider',
+    label: 'Divider',
+    hint: 'Separate sections',
+    glyph: '—',
+    aliases: ['divider', 'line', 'rule', 'separator', 'hr'],
+  },
+  {
+    id: 'table',
+    label: 'Table',
+    hint: 'Insert a simple grid',
+    glyph: '▦',
+    aliases: ['table', 'grid', 'rows', 'columns'],
+  },
+  {
+    id: 'query-block',
+    label: 'Query block',
+    hint: 'Embed a dohc query',
+    glyph: '{}',
+    aliases: ['data', 'database', 'live', 'query'],
+  },
+]
+
+export function filterSlashCommands(query: string): SlashCommandItem[] {
+  const normalized = query.trim().toLowerCase()
+  if (!normalized) return SLASH_COMMANDS
+  return SLASH_COMMANDS.filter((command) => {
+    if (command.label.toLowerCase().includes(normalized)) return true
+    return command.aliases.some((alias) => alias.includes(normalized))
+  })
+}
+
+export function findSlashCommandMatch(
+  textBeforeCursor: string,
+): { slashOffset: number; query: string } | null {
+  const match = /(?:^|\s)\/([A-Za-z0-9_-]{0,40})$/.exec(textBeforeCursor)
+  if (!match) return null
+  const matchedText = match[0] ?? ''
+  const slashOffset = match.index + matchedText.lastIndexOf('/')
+  return { slashOffset, query: match[1]?.toLowerCase() ?? '' }
+}
 
 export type AtomEditorHandle = {
   insertCodeBlock: (language: string, content: string) => void
@@ -56,14 +249,25 @@ export type AtomEditorHandle = {
 type Props = {
   value: string
   onChange: (next: string) => void
+  onPreviewChange?: (next: string) => void
   autoFocus?: boolean
   // sharing-v1 — when set, this atom is opened via a share grant:
   // formulas resolve through evalFormulasShared (scoped to the
   // shared set in the OWNER's workspace), and the own-workspace
   // live-total + query-block resolvers are disabled (v1).
   shareId?: Id<'atomShares'>
-  // sharing-v1 — view-only shared atom: Crepe is read-only.
+  // Dev/isolated surfaces can render the editor without authenticated
+  // Convex-backed live-total/formula/query resolvers.
+  disableReactiveResolvers?: boolean
+  // sharing-v1 — view-only shared atom: Tiptap is read-only.
   readOnly?: boolean
+  frontmatter?: Record<string, unknown>
+  collab?: {
+    workspaceId: string
+    atomId: string
+    userId?: string | null
+    userName?: string | null
+  }
   /** Fired when the user clicks an `language: ascii` code block. The
    *  position is the doc offset of the node — pass it back to
    *  replaceCodeBlockAt on commit. */
@@ -77,7 +281,7 @@ type Props = {
 }
 
 // A ProseMirror plugin that (1) decorates `language: ascii` code blocks
-// with a marker class so CSS can strip the Crepe code-block chrome and
+// with a marker class so CSS can strip the Tiptap code-block chrome and
 // (2) intercepts clicks on those blocks to fire a callback. The callback
 // is held in a ref so callers can swap it without rebuilding the editor.
 const asciiBlockKey = new PluginKey('dohc-ascii-block')
@@ -110,10 +314,198 @@ function makeAsciiBlockPlugin(
   })
 }
 
+function syncYMapFromRecord(
+  map: Y.Map<unknown>,
+  values: Record<string, unknown>,
+  previousValues: Record<string, unknown> | null,
+): void {
+  map.doc?.transact(() => {
+    for (const key of Object.keys(previousValues ?? {})) {
+      if (
+        !Object.hasOwn(values, key) &&
+        yMapValueEquals(map.get(key), previousValues?.[key])
+      ) {
+        map.delete(key)
+      }
+    }
+    for (const [key, value] of Object.entries(values)) {
+      const previousValue = previousValues?.[key]
+      if (previousValues && yMapValueEquals(value, previousValue)) continue
+      if (!yMapValueEquals(map.get(key), value)) map.set(key, value)
+    }
+  })
+}
+
+function yMapValueEquals(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false
+    if (left.length !== right.length) return false
+    return left.every((item, index) => yMapValueEquals(item, right[index]))
+  }
+
+  if (isJsonRecord(left) || isJsonRecord(right)) {
+    if (!isJsonRecord(left) || !isJsonRecord(right)) return false
+    const leftKeys = Object.keys(left)
+    const rightKeys = Object.keys(right)
+    if (leftKeys.length !== rightKeys.length) return false
+    return leftKeys.every(
+      (key) => Object.hasOwn(right, key) && yMapValueEquals(left[key], right[key]),
+    )
+  }
+
+  return false
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+type DocDescendantNode = {
+  type: { name: string }
+  attrs: Record<string, unknown>
+  textContent: string
+  nodeSize: number
+}
+
 type DocLike = {
   descendants: (
-    cb: (node: { type: { name: string }; attrs: Record<string, unknown>; textContent: string; nodeSize: number }, pos: number) => boolean | void,
+    cb: (node: DocDescendantNode, pos: number) => boolean | void,
   ) => void
+  nodeAt: (pos: number) => DocDescendantNode | null
+}
+
+function isCodeBlockNode(node: { type: { name: string } }): boolean {
+  return node.type.name === 'code_block' || node.type.name === 'codeBlock'
+}
+
+type CollaborationPresenceUser = {
+  clientId: number
+  color: string
+  id: string
+  initials: string
+  isLocal: boolean
+  name: string
+}
+
+type AwarenessPresenceApi = Awareness & {
+  getStates: () => Map<number, Record<string, unknown>>
+  off: (event: 'update' | 'change', listener: () => void) => void
+  on: (event: 'update' | 'change', listener: () => void) => void
+}
+
+function hasAwarenessPresenceApi(
+  awareness: Awareness,
+): awareness is AwarenessPresenceApi {
+  const candidate = awareness as Partial<AwarenessPresenceApi>
+  return (
+    typeof candidate.getStates === 'function' &&
+    typeof candidate.on === 'function' &&
+    typeof candidate.off === 'function'
+  )
+}
+
+function cleanCollaboratorName(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : 'You'
+}
+
+function collaboratorInitials(name: string): string {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const initials =
+    parts.length > 1
+      ? `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? ''}`
+      : name.slice(0, 1)
+  return initials.toUpperCase() || 'Y'
+}
+
+function collabColorForId(id: string): string {
+  let hash = 0
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return COLLABORATOR_COLORS[hash % COLLABORATOR_COLORS.length]
+}
+
+function normalizeCollabColor(value: unknown, fallbackId = ''): string {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value)
+    ? value
+    : collabColorForId(fallbackId || 'local')
+}
+
+function collabColorAlpha(hex: string, alpha: number): string {
+  const r = Number.parseInt(hex.slice(1, 3), 16)
+  const g = Number.parseInt(hex.slice(3, 5), 16)
+  const b = Number.parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+function readCollaborationPresence(
+  awareness: AwarenessPresenceApi,
+  localClientId: number,
+): CollaborationPresenceUser[] {
+  return Array.from(awareness.getStates().entries())
+    .map(([clientId, state]) => {
+      const user = isJsonRecord(state.user) ? state.user : null
+      if (!user) return null
+
+      const id =
+        typeof user.id === 'string' && user.id.trim()
+          ? user.id.trim()
+          : `client-${clientId}`
+      const name = cleanCollaboratorName(user.name)
+      const color = normalizeCollabColor(user.color, id)
+      return {
+        clientId,
+        color,
+        id,
+        initials: collaboratorInitials(name),
+        isLocal: clientId === localClientId,
+        name,
+      }
+    })
+    .filter((user): user is CollaborationPresenceUser => user !== null)
+    .sort((left, right) => {
+      if (left.isLocal !== right.isLocal) return left.isLocal ? -1 : 1
+      return left.name.localeCompare(right.name)
+    })
+}
+
+function renderCollaborationCaret(user: Record<string, unknown>): HTMLElement {
+  const name = cleanCollaboratorName(user.name)
+  const id = typeof user.id === 'string' ? user.id : name
+  const color = normalizeCollabColor(user.color, id)
+
+  const caret = document.createElement('span')
+  caret.className = 'dohc-collab-caret'
+  caret.style.setProperty('--dohc-collab-color', color)
+  caret.setAttribute('data-collaborator', name)
+
+  const label = document.createElement('span')
+  label.className = 'dohc-collab-label'
+  label.textContent = name
+
+  caret.append(label)
+  return caret
+}
+
+function renderCollaborationSelection(user: Record<string, unknown>) {
+  const name = cleanCollaboratorName(user.name)
+  const id = typeof user.id === 'string' ? user.id : name
+  const color = normalizeCollabColor(user.color, id)
+
+  return {
+    nodeName: 'span',
+    class: 'dohc-collab-selection',
+    style: `--dohc-collab-color: ${color}; background-color: ${collabColorAlpha(
+      color,
+      0.2,
+    )}; border-bottom-color: ${color};`,
+    'data-collaborator': name,
+  }
 }
 
 function buildAsciiDecorations(
@@ -124,15 +516,25 @@ function buildAsciiDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
-    if (
-      node.type.name === 'code_block' &&
-      isAsciiSketchLanguage(node.attrs.language)
-    ) {
+    if (isCodeBlockNode(node) && isAsciiSketchLanguage(node.attrs.language)) {
+      const hasMetadata = hasAsciiSketchContentMetadata(node.textContent)
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
-          class: `ascii-sketch-block${hasAsciiSketchContentMetadata(node.textContent) ? ' ascii-sketch-block-has-metadata' : ''}`,
+          class: `ascii-sketch-block${hasMetadata ? ' ascii-sketch-block-has-metadata' : ''}`,
         }),
       )
+      if (hasMetadata) {
+        const firstLineEnd = node.textContent.indexOf('\n')
+        const metadataLength =
+          firstLineEnd === -1 ? node.textContent.length : firstLineEnd + 1
+        if (metadataLength > 0) {
+          decorations.push(
+            Decoration.inline(pos + 1, pos + 1 + metadataLength, {
+              class: 'ascii-sketch-metadata-line',
+            }),
+          )
+        }
+      }
       // An "edit" button rendered as a zero-width widget right before the
       // block. CSS positions the button absolutely so it floats over the
       // block's top-left corner and only fades in on hover. We use side:-1
@@ -177,11 +579,295 @@ function buildAsciiDecorations(
   return DecorationSet.create(doc as never, decorations)
 }
 
+const slashCommandKey = new PluginKey('dohc-slash-command')
+const blockControlsKey = new PluginKey('dohc-block-controls')
+
+function makeSlashCommandPlugin({
+  stateRef,
+  setState,
+  runCommandRef,
+}: {
+  stateRef: React.RefObject<SlashCommandState>
+  setState: React.Dispatch<React.SetStateAction<SlashCommandState>>
+  runCommandRef: React.RefObject<(id: SlashCommandId) => void>
+}) {
+  const close = () => setState(CLOSED_SLASH_COMMAND_STATE)
+
+  const refresh = (view: EditorView) => {
+    const next = readSlashCommandState(view, stateRef.current)
+    setState(next)
+  }
+
+  return new Plugin({
+    key: slashCommandKey,
+    view(view) {
+      refresh(view)
+      return {
+        update(nextView) {
+          refresh(nextView)
+        },
+        destroy() {
+          close()
+        },
+      }
+    },
+    props: {
+      handleKeyDown(view, event) {
+        const slashState = stateRef.current
+        if (!slashState.open) return false
+
+        const items = filterSlashCommands(slashState.query)
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          setState((current) =>
+            current.open
+              ? {
+                  ...current,
+                  selected: items.length
+                    ? (current.selected + 1) % items.length
+                    : 0,
+                }
+              : current,
+          )
+          return true
+        }
+
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          setState((current) =>
+            current.open
+              ? {
+                  ...current,
+                  selected: items.length
+                    ? (current.selected - 1 + items.length) % items.length
+                    : 0,
+                }
+              : current,
+          )
+          return true
+        }
+
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          const command = items[slashState.selected] ?? items[0]
+          if (!command) return false
+          event.preventDefault()
+          runCommandRef.current(command.id)
+          return true
+        }
+
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          close()
+          view.focus()
+          return true
+        }
+
+        return false
+      },
+    },
+  })
+}
+
+function makeBlockControlsPlugin({
+  onInsertRef,
+  onSelectRef,
+}: {
+  onInsertRef: React.RefObject<(pos: number) => void>
+  onSelectRef: React.RefObject<(pos: number) => void>
+}) {
+  return new Plugin({
+    key: blockControlsKey,
+    state: {
+      init(_, instance) {
+        return buildBlockControlDecorations(
+          instance.doc,
+          onInsertRef,
+          onSelectRef,
+        )
+      },
+      apply(tr, old) {
+        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
+        return buildBlockControlDecorations(tr.doc, onInsertRef, onSelectRef)
+      },
+    },
+    props: {
+      decorations(state) {
+        return blockControlsKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+type TopLevelDocLike = {
+  forEach: (
+    cb: (
+      node: {
+        type: { name: string }
+        attrs?: Record<string, unknown>
+        nodeSize: number
+      },
+      offset: number,
+      index: number,
+    ) => void,
+  ) => void
+}
+
+function buildBlockControlDecorations(
+  doc: unknown,
+  onInsertRef: React.RefObject<(pos: number) => void>,
+  onSelectRef: React.RefObject<(pos: number) => void>,
+): DecorationSet {
+  const decorations: Decoration[] = []
+
+  ;(doc as TopLevelDocLike).forEach((node, offset, index) => {
+    const isAsciiCodeBlock =
+      isCodeBlockNode(node) && isAsciiSketchLanguage(node.attrs?.language)
+    if (!isBlockControlTarget(node.type.name) && !isAsciiCodeBlock) return
+
+    const pos = offset
+    decorations.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        class: 'dohc-block-node',
+        'data-dohc-block-index': String(index),
+      }),
+    )
+    decorations.push(
+      Decoration.widget(
+        pos + 1,
+        () => {
+          const wrap = document.createElement('span')
+          wrap.className = 'dohc-block-affordance'
+          wrap.setAttribute('contenteditable', 'false')
+
+          const plus = document.createElement('button')
+          plus.type = 'button'
+          plus.className = 'dohc-block-gutter-btn dohc-block-plus'
+          plus.title = 'insert block'
+          plus.setAttribute('aria-label', 'insert block')
+          plus.addEventListener('mousedown', stopEditorMouseEvent)
+          plus.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            onInsertRef.current(pos)
+          })
+
+          const handle = document.createElement('button')
+          handle.type = 'button'
+          handle.className = 'dohc-block-gutter-btn dohc-block-handle'
+          handle.title = 'select block'
+          handle.setAttribute('aria-label', 'select block')
+          handle.addEventListener('mousedown', stopEditorMouseEvent)
+          handle.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            onSelectRef.current(pos)
+          })
+
+          wrap.append(plus, handle)
+          return wrap
+        },
+        { side: -1, key: `dohc-block-controls-${pos}` },
+      ),
+    )
+  })
+
+  return DecorationSet.create(doc as never, decorations)
+}
+
+function isBlockControlTarget(nodeName: string): boolean {
+  return [
+    'paragraph',
+    'heading',
+    'blockquote',
+    'queryBlock',
+  ].includes(nodeName)
+}
+
+function stopEditorMouseEvent(event: Event) {
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof globalThis.setTimeout> | null = null
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = globalThis.setTimeout(() => {
+      reject(new Error('Timed out waiting for collaboration bootstrap'))
+    }, timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) globalThis.clearTimeout(timeout)
+  })
+}
+
+function isEditableEditor(editor: Editor | null | undefined): boolean {
+  if (!editor) return false
+  if ((editor as { isEditable?: boolean }).isEditable === false) return false
+  if ((editor.view as { editable?: boolean }).editable === false) return false
+  return true
+}
+
+function readSlashCommandState(
+  view: EditorView,
+  previous: SlashCommandState,
+): SlashCommandState {
+  if ((view as { editable?: boolean }).editable === false) {
+    return CLOSED_SLASH_COMMAND_STATE
+  }
+
+  const state = view.state as EditorState
+  const { selection } = state
+  if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE
+
+  const $from = selection.$from
+  if (!$from.parent.isTextblock || $from.parent.type.spec.code) {
+    return CLOSED_SLASH_COMMAND_STATE
+  }
+
+  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset)
+  const match = findSlashCommandMatch(textBeforeCursor)
+  if (!match) return CLOSED_SLASH_COMMAND_STATE
+
+  const blockStart = $from.start()
+  const from = blockStart + match.slashOffset
+  const to = selection.from
+  const items = filterSlashCommands(match.query)
+  const selected = previous.open
+    ? Math.min(previous.selected, Math.max(items.length - 1, 0))
+    : 0
+
+  let x = 0
+  let y = 0
+  let maxHeight = FLOATING_MENU_MAX_HEIGHT
+  let placement: FloatingMenuPlacement = 'below'
+  try {
+    const coords = view.coordsAtPos(from)
+    const position = resolveFloatingMenuPosition({ cursorRect: coords })
+    x = position.x
+    y = position.y
+    maxHeight = position.maxHeight
+    placement = position.placement
+  } catch {
+    x = FLOATING_MENU_VIEWPORT_MARGIN
+    y = 28
+  }
+
+  return {
+    open: true,
+    from,
+    to,
+    query: match.query,
+    selected,
+    x,
+    y,
+    maxHeight,
+    placement,
+  }
+}
+
 // Humanize a query fence so the user sees WHAT it shows, not raw DSL.
 // `entities.list("project", { "status": "in-progress" })`
 //   → "project · status: in-progress"
 // Defensive: any parse miss falls back to the first non-empty line.
-export function humanizeQuery(src: string): string {
+export function humanizeQuery(src: string): string | null {
   // This runs in buildQueryDecorations on EVERY keystroke (the query
   // block is a live editable code_block — a user can paste a JWT /
   // base64 / minified line into it). Hard-cap the scanned text AND
@@ -194,7 +880,7 @@ export function humanizeQuery(src: string): string {
   )
   if (!m) {
     const first = text.split('\n').find((l) => l.trim())
-    return first ? first.trim().slice(0, 80) : 'live data'
+    return first ? first.trim().slice(0, 80) : null
   }
   const resource = m[3]
   const filters: string[] = []
@@ -210,8 +896,8 @@ export function humanizeQuery(src: string): string {
 }
 
 // Mirror of the ascii-block plugin for `language: query`: tame the
-// glaring Crepe code-block chrome and prepend a calm human caption so
-// a query reads as an intentional "live data" element, not scary DSL
+// glaring Tiptap code-block chrome and prepend a calm human caption so
+// a query reads as an intentional live query element, not scary DSL
 // (impressions #17). The raw query stays an editable code block —
 // markdown is still the truth; a power user edits it directly.
 const queryBlockKey = new PluginKey('dohc-query-block')
@@ -234,18 +920,18 @@ function buildQueryDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
-    if (
-      node.type.name === 'code_block' &&
-      String(node.attrs.language ?? '')
-        .trim()
-        .toLowerCase() === 'query'
-    ) {
+    const isCodeQueryBlock =
+      isCodeBlockNode(node) && isQueryFenceLanguage(node.attrs.language)
+    const isDohcQueryBlock = node.type.name === 'queryBlock'
+    if (isCodeQueryBlock || isDohcQueryBlock) {
+      const src = node.textContent.trim()
+      const label = humanizeQuery(src)
+      if (!src || !label) return
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
           class: 'query-atom-block',
         }),
       )
-      const label = humanizeQuery(node.textContent)
       decorations.push(
         Decoration.widget(
           pos,
@@ -254,7 +940,7 @@ function buildQueryDecorations(
             wrap.className = 'query-atom-caption'
             wrap.setAttribute('contenteditable', 'false')
             wrap.innerHTML =
-              '<span class="query-atom-dot"></span><span class="query-atom-live">live</span>'
+              '<span class="query-atom-dot"></span><span class="query-atom-live">query</span>'
             const t = document.createElement('span')
             t.className = 'query-atom-label'
             t.textContent = label
@@ -267,7 +953,6 @@ function buildQueryDecorations(
       // the RESULT — verbatim code-fence text is the key (code is not
       // markdown-escaped, so doc text === markdown fence === server
       // src; no Phase-3-style escape mismatch).
-      const src = node.textContent.trim()
       const entry = map.get(src)
       if (entry !== undefined) {
         const v = entry.value
@@ -312,6 +997,286 @@ function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
     props: {
       decorations(state) {
         return queryBlockKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+const codeLanguageKey = new PluginKey('dohc-code-language')
+const codeBlockContinuationKey = new PluginKey('dohc-code-block-continuation')
+
+const CODE_LANGUAGE_OPTIONS = [
+  { value: '', label: 'Plain text' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'tsx', label: 'TSX' },
+  { value: 'jsx', label: 'JSX' },
+  { value: 'python', label: 'Python' },
+  { value: 'bash', label: 'Shell' },
+  { value: 'json', label: 'JSON' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'sql', label: 'SQL' },
+  { value: 'yaml', label: 'YAML' },
+  { value: 'go', label: 'Go' },
+  { value: 'rust', label: 'Rust' },
+] as const
+
+function cleanCodeLanguage(value: string): string {
+  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? '').slice(
+    0,
+    48,
+  )
+}
+
+function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean {
+  if (view.editable === false) return false
+
+  const { state } = view
+  const node = state.doc.nodeAt(blockPos)
+  const paragraphType = state.schema.nodes.paragraph
+  if (!node || !paragraphType) return false
+
+  const insertPos = blockPos + node.nodeSize
+  const $insert = state.doc.resolve(insertPos)
+  let tr = state.tr
+
+  if (
+    !(
+      $insert.nodeAfter?.type === paragraphType &&
+      $insert.nodeAfter.content.size === 0
+    )
+  ) {
+    if (
+      !$insert.parent.canReplaceWith(
+        $insert.index(),
+        $insert.index(),
+        paragraphType,
+      )
+    ) {
+      return false
+    }
+    tr = tr.insert(insertPos, paragraphType.create())
+  }
+
+  const selectionPos = Math.min(insertPos + 1, tr.doc.content.size)
+  tr = tr.setSelection(TextSelection.create(tr.doc, selectionPos)).scrollIntoView()
+  view.dispatch(tr)
+  view.focus()
+  return true
+}
+
+function codeBlockAtSelection(state: EditorState): {
+  node: DocDescendantNode
+  pos: number
+} | null {
+  const { $from } = state.selection
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth)
+    if (!isCodeBlockNode(node)) continue
+    return { node: node as unknown as DocDescendantNode, pos: $from.before(depth) }
+  }
+  return null
+}
+
+function isSelectionAtEndOfCodeBlock(state: EditorState): boolean {
+  if (!state.selection.empty) return false
+  const block = codeBlockAtSelection(state)
+  if (!block) return false
+  return state.selection.$from.parentOffset >= block.node.textContent.length
+}
+
+function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
+  const decorations: Decoration[] = []
+
+  ;(doc as DocLike).descendants((node, pos) => {
+    if (!isCodeBlockNode(node)) return
+    if (isAsciiSketchLanguage(node.attrs.language)) return
+    if (isQueryFenceLanguage(node.attrs.language)) return
+
+    const language = cleanCodeLanguage(String(node.attrs.language ?? ''))
+    decorations.push(
+      Decoration.node(pos, pos + node.nodeSize, {
+        class: 'dohc-code-block',
+      }),
+    )
+    decorations.push(
+      Decoration.widget(
+        pos,
+        (view, getPos) => {
+          const toolbar = document.createElement('div')
+          toolbar.className = 'dohc-code-block-toolbar'
+          toolbar.setAttribute('contenteditable', 'false')
+
+          const left = document.createElement('div')
+          left.className = 'dohc-code-block-toolbar-left'
+
+          const dot = document.createElement('span')
+          dot.className = 'dohc-code-block-dot'
+          dot.setAttribute('aria-hidden', 'true')
+
+          const select = document.createElement('select')
+          select.className = 'dohc-code-language-select'
+          select.setAttribute('aria-label', 'code language')
+          select.disabled = view.editable === false
+
+          const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
+            (option) => option.value === language,
+          )
+          const options = hasKnownLanguage
+            ? CODE_LANGUAGE_OPTIONS
+            : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS]
+          for (const option of options) {
+            const el = document.createElement('option')
+            el.value = option.value
+            el.textContent = option.label
+            select.appendChild(el)
+          }
+          select.value = language
+
+          const commit = () => {
+            const blockPos = getPos()
+            if (blockPos === undefined) return
+            const current = view.state.doc.nodeAt(blockPos)
+            if (!current || !isCodeBlockNode(current)) return
+
+            const nextLanguage = cleanCodeLanguage(select.value)
+            const currentLanguage = cleanCodeLanguage(
+              String(current.attrs.language ?? ''),
+            )
+            select.value = nextLanguage
+            if (nextLanguage === currentLanguage) return
+
+            view.dispatch(
+              view.state.tr
+                .setNodeMarkup(blockPos, undefined, {
+                  ...current.attrs,
+                  language: nextLanguage,
+                })
+                .scrollIntoView(),
+            )
+          }
+
+          select.addEventListener('mousedown', (event) =>
+            event.stopPropagation(),
+          )
+          select.addEventListener('click', (event) => event.stopPropagation())
+          select.addEventListener('keydown', (event) => {
+            event.stopPropagation()
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              select.value = language
+              view.focus()
+            }
+          })
+          select.addEventListener('change', commit)
+
+          const copy = document.createElement('button')
+          copy.type = 'button'
+          copy.className = 'dohc-code-copy-btn'
+          copy.setAttribute('aria-label', 'copy code')
+          copy.textContent = 'copy'
+          copy.addEventListener('mousedown', stopEditorMouseEvent)
+          copy.addEventListener('click', (event) => {
+            stopEditorMouseEvent(event)
+            const write = navigator.clipboard?.writeText(node.textContent)
+            if (!write) return
+            void write.then(() => {
+              copy.textContent = 'copied'
+              window.setTimeout(() => {
+                copy.textContent = 'copy'
+              }, 1200)
+            })
+          })
+
+          left.append(dot, select)
+          toolbar.append(left, copy)
+          return toolbar
+        },
+        {
+          side: -1,
+          key: `code-lang-${pos}-${language}`,
+          ignoreSelection: true,
+          stopEvent: () => true,
+        },
+      ),
+    )
+    const nextNode = (doc as DocLike).nodeAt(pos + node.nodeSize)
+    if (!nextNode || !isCodeBlockNode(nextNode)) {
+      decorations.push(
+        Decoration.widget(
+          pos + node.nodeSize,
+          (view) => {
+            const wrap = document.createElement('div')
+            wrap.className = 'dohc-code-block-continuation'
+            wrap.setAttribute('contenteditable', 'false')
+
+            const button = document.createElement('button')
+            button.type = 'button'
+            button.className = 'dohc-code-block-continue-btn'
+            button.setAttribute('aria-label', 'add paragraph below code block')
+            button.disabled = view.editable === false
+            button.textContent = '+'
+            button.addEventListener('mousedown', stopEditorMouseEvent)
+            button.addEventListener('click', (event) => {
+              stopEditorMouseEvent(event)
+              insertParagraphAfterBlock(view, pos)
+            })
+
+            wrap.append(button)
+            return wrap
+          },
+          {
+            side: 1,
+            key: `code-continue-${pos}`,
+            ignoreSelection: true,
+            stopEvent: () => true,
+          },
+        ),
+      )
+    }
+  })
+
+  return DecorationSet.create(doc as never, decorations)
+}
+
+function makeCodeBlockChromePlugin() {
+  return new Plugin({
+    key: codeLanguageKey,
+    state: {
+      init(_, instance) {
+        return buildCodeLanguageDecorations(instance.doc)
+      },
+      apply(tr, old) {
+        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
+        return buildCodeLanguageDecorations(tr.doc)
+      },
+    },
+    props: {
+      decorations(state) {
+        return codeLanguageKey.getState(state) as DecorationSet | undefined
+      },
+    },
+  })
+}
+
+function makeCodeBlockContinuationPlugin() {
+  return new Plugin({
+    key: codeBlockContinuationKey,
+    props: {
+      handleKeyDown(view, event) {
+        const block = codeBlockAtSelection(view.state)
+        if (!block) return false
+
+        const explicitExit =
+          event.key === 'Enter' && (event.metaKey || event.ctrlKey)
+        const arrowExit =
+          event.key === 'ArrowDown' && isSelectionAtEndOfCodeBlock(view.state)
+        if (!explicitExit && !arrowExit) return false
+
+        event.preventDefault()
+        return insertParagraphAfterBlock(view, block.pos)
       },
     },
   })
@@ -590,11 +1555,12 @@ function makeAtomPillPlugin(
   })
 }
 
-type CrepeEditorProps = {
+type TiptapEditorProps = {
   defaultValue: string
   onChangeRef: React.RefObject<(next: string) => void>
+  onPreviewChangeRef: React.RefObject<((next: string) => void) | null>
   autoFocus: boolean
-  crepeRef: React.RefObject<Crepe | null>
+  editorRef: React.RefObject<Editor | null>
   onAsciiClickRef: React.RefObject<
     ((pos: number, content: string, language: string) => void) | null
   >
@@ -615,14 +1581,86 @@ type CrepeEditorProps = {
   fileIdMapRef: React.RefObject<
     ReadonlyMap<string, { path: string; title?: string | null }>
   >
+  collab?: Props['collab']
+  fetchCollabToken: (workspaceId: string) => Promise<string>
   readOnly?: boolean
+  frontmatter?: Props['frontmatter']
 }
 
-function CrepeEditor({
+type SlashCommandChain = {
+  focus: () => SlashCommandChain
+  deleteRange: (range: { from: number; to: number }) => SlashCommandChain
+  insertContent: (content: string) => SlashCommandChain
+  setTextSelection: (position: number) => SlashCommandChain
+  setParagraph: () => SlashCommandChain
+  toggleHeading: (attrs: { level: 1 | 2 | 3 }) => SlashCommandChain
+  toggleBulletList: () => SlashCommandChain
+  toggleOrderedList: () => SlashCommandChain
+  toggleBlockquote: () => SlashCommandChain
+  setCodeBlock: (attrs?: { language: string }) => SlashCommandChain
+  setHorizontalRule: () => SlashCommandChain
+  insertTable: (attrs?: {
+    rows?: number
+    cols?: number
+    withHeaderRow?: boolean
+  }) => SlashCommandChain
+  run: () => boolean
+}
+
+function SlashCommandMenu({
+  state,
+  onSelect,
+  onHover,
+}: {
+  state: SlashCommandState
+  onSelect: (id: SlashCommandId) => void
+  onHover: (index: number) => void
+}) {
+  if (!state.open) return null
+  const items = filterSlashCommands(state.query)
+
+  return (
+    <div
+      className="dohc-slash-menu"
+      data-placement={state.placement}
+      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight }}
+      role="listbox"
+      aria-label="slash commands"
+      onMouseDown={(event) => event.preventDefault()}
+    >
+      {items.length ? (
+        items.map((item, index) => (
+          <button
+            key={item.id}
+            type="button"
+            role="option"
+            aria-selected={index === state.selected}
+            className={`dohc-slash-menu__item${
+              index === state.selected ? ' is-selected' : ''
+            }`}
+            onMouseEnter={() => onHover(index)}
+            onClick={() => onSelect(item.id)}
+          >
+            <span className="dohc-slash-menu__glyph">{item.glyph}</span>
+            <span className="dohc-slash-menu__copy">
+              <span className="dohc-slash-menu__label">{item.label}</span>
+              <span className="dohc-slash-menu__hint">{item.hint}</span>
+            </span>
+          </button>
+        ))
+      ) : (
+        <div className="dohc-slash-menu__empty">No commands</div>
+      )}
+    </div>
+  )
+}
+
+function TiptapAtomEditor({
   defaultValue,
   onChangeRef,
+  onPreviewChangeRef,
   autoFocus,
-  crepeRef,
+  editorRef,
   onAsciiClickRef,
   liveTotalsRef,
   liveTotalsTick,
@@ -634,241 +1672,844 @@ function CrepeEditor({
   knownFilesArray,
   onOpenWikilinkRef,
   fileIdMapRef,
+  collab,
+  fetchCollabToken,
   readOnly,
-}: CrepeEditorProps) {
+  frontmatter,
+}: TiptapEditorProps) {
   // D4.8b — autocomplete state from the wikilink plugin.
   const [acState, setAcState] = useState<AutocompleteState>({
     active: false,
   })
+  const editorWrapRef = useRef<HTMLDivElement | null>(null)
+  const [slashState, setSlashState] = useState<SlashCommandState>(
+    CLOSED_SLASH_COMMAND_STATE,
+  )
+  const slashStateRef = useRef<SlashCommandState>(slashState)
+  const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {})
+  const blockInsertRef = useRef<(pos: number) => void>(() => {})
+  const blockSelectRef = useRef<(pos: number) => void>(() => {})
+  useEffect(() => {
+    slashStateRef.current = slashState
+  }, [slashState])
   const setAcStateRef = useRef(setAcState)
   useEffect(() => {
     setAcStateRef.current = setAcState
   }, [])
-  const { get } = useEditor((root) => {
-    const crepe = new Crepe({
-      root,
-      defaultValue,
-      featureConfigs: {
-        [Crepe.Feature.BlockEdit]: {
-          // Extend the slash menu with an "ASCII sketch" item under a custom
-          // group. We clear the "/" trigger first so it doesn't end up in
-          // the document, then fire a global event the AtomShell listens
-          // for to open the sketcher modal.
-          buildMenu: (builder) => {
-            builder
-              .addGroup('dohc', 'dohc')
-              .addItem('ascii-sketch', {
-                label: 'ASCII sketch',
-                icon: ASCII_SKETCH_ICON_SVG,
-                onRun: (ctx) => {
-                  const commands = ctx.get(commandsCtx)
-                  commands.call(clearTextInCurrentBlockCommand.key)
-                  window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
-                },
-              })
-              .addItem('wikilink', {
-                // D4.8 — /link command. Insert `[[]]` at the cursor
-                // with caret positioned between the brackets so the
-                // user can immediately start typing the target path.
-                label: 'Link',
-                icon: WIKILINK_ICON_SVG,
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                onRun: (ctx: any) => {
-                  const commands = ctx.get(commandsCtx)
-                  commands.call(clearTextInCurrentBlockCommand.key)
-                  const view = ctx.get(editorViewCtx)
-                  const { from } = view.state.selection
-                  const tr = view.state.tr.insertText('[[]]', from, from)
-                  // Place caret between the `[[` and `]]`.
-                  tr.setSelection(
-                    TextSelection.near(tr.doc.resolve(from + 2)),
-                  )
-                  view.dispatch(tr)
-                  view.focus()
-                },
-              })
-          },
-        },
+
+  const documentName = useMemo(
+    () =>
+      collab
+        ? encodeDohcHocuspocusDocumentName({
+            workspaceId: collab.workspaceId,
+            atomId: collab.atomId,
+          })
+        : null,
+    [collab?.workspaceId, collab?.atomId],
+  )
+  const hocuspocusUrl = useMemo(
+    () =>
+      documentName
+        ? resolveHocuspocusUrl({
+            envUrl: import.meta.env.VITE_HOCUSPOCUS_URL,
+          })
+        : null,
+    [documentName],
+  )
+  const collaborationRequested = !!documentName && !!hocuspocusUrl
+  const collaborationRequired = !!documentName
+  const [collabBootstrap, setCollabBootstrap] = useState<
+    'pending' | 'server' | 'client' | 'unavailable'
+  >('pending')
+  const [clientSeededDocumentName, setClientSeededDocumentName] = useState<
+    string | null
+  >(null)
+  const collaborationPending =
+    collaborationRequested &&
+    (collabBootstrap === 'pending' ||
+      (collabBootstrap === 'client' && clientSeededDocumentName !== documentName))
+  const collaborationEnabled =
+    collaborationRequested &&
+    (collabBootstrap === 'server' ||
+      (collabBootstrap === 'client' && clientSeededDocumentName === documentName))
+  const ydoc = useMemo(() => new Y.Doc(), [documentName])
+  const [localSync, setLocalSync] = useState<{
+    documentName: string | null
+    collaborationEnabled: boolean
+    ready: boolean
+    hasCache: boolean
+  }>({
+    documentName: null,
+    collaborationEnabled: false,
+    ready: true,
+    hasCache: false,
+  })
+  const [remoteSync, setRemoteSync] = useState<{
+    documentName: string | null
+    ready: boolean
+  }>({ documentName: null, ready: true })
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const lastMarkdownRef = useRef<string | null>(null)
+  const lastSyncedFrontmatterRef = useRef<Record<string, unknown> | null>(null)
+  const fetchTokenRef = useRef(fetchCollabToken)
+  const localReady =
+    !collaborationEnabled ||
+    (localSync.documentName === documentName &&
+      localSync.collaborationEnabled === collaborationEnabled &&
+      localSync.ready)
+  const remoteReady =
+    !collaborationEnabled ||
+    (remoteSync.documentName === documentName && remoteSync.ready)
+  const hasLocalCache =
+    collaborationEnabled &&
+    localSync.documentName === documentName &&
+    localSync.collaborationEnabled === collaborationEnabled &&
+    localSync.hasCache
+  const frontmatterSnapshot = useMemo(
+    () => (frontmatter ? JSON.stringify(frontmatter) : null),
+    [frontmatter],
+  )
+  const canWriteYDocMetadata =
+    collaborationEnabled &&
+    !readOnly &&
+    localReady &&
+    !syncError &&
+    (remoteReady || hasLocalCache)
+  const awarenessUser = useMemo(
+    () =>
+      collab
+        ? {
+            id: collab.userId?.trim() || collab.workspaceId,
+            name: cleanCollaboratorName(collab.userName),
+            color: collab.userId?.trim()
+              ? collabColorForId(collab.userId.trim())
+              : '#4f46e5',
+          }
+        : null,
+    [collab?.userId, collab?.userName, collab?.workspaceId],
+  )
+  const awareness = useMemo(
+    () =>
+      collaborationEnabled && awarenessUser
+        ? createDohcAwareness(ydoc, {
+            publish: !readOnly,
+            user: awarenessUser,
+          })
+        : null,
+    [awarenessUser, collaborationEnabled, readOnly, ydoc],
+  )
+  const caretProvider = useMemo(
+    () => (awareness ? { awareness } : null),
+    [awareness],
+  )
+  const [presenceUsers, setPresenceUsers] = useState<CollaborationPresenceUser[]>(
+    [],
+  )
+  useEffect(() => {
+    if (!collaborationEnabled || !awareness || !hasAwarenessPresenceApi(awareness)) {
+      setPresenceUsers([])
+      return
+    }
+
+    const updatePresence = () => {
+      setPresenceUsers(readCollaborationPresence(awareness, ydoc.clientID))
+    }
+
+    updatePresence()
+    awareness.on('update', updatePresence)
+    awareness.on('change', updatePresence)
+    return () => {
+      awareness.off('update', updatePresence)
+      awareness.off('change', updatePresence)
+    }
+  }, [awareness, collaborationEnabled, ydoc])
+  const remotePresenceUsers = useMemo(
+    () => presenceUsers.filter((user) => !user.isLocal),
+    [presenceUsers],
+  )
+  useEffect(() => {
+    fetchTokenRef.current = fetchCollabToken
+  }, [fetchCollabToken])
+
+  useEffect(() => {
+    return () => ydoc.destroy()
+  }, [ydoc])
+
+  useEffect(() => {
+    setLocalSync({
+      documentName,
+      collaborationEnabled,
+      ready: !collaborationEnabled,
+      hasCache: false,
+    })
+    setRemoteSync({ documentName, ready: !collaborationEnabled })
+    setSyncError(null)
+    lastSyncedFrontmatterRef.current = null
+  }, [collaborationEnabled, documentName])
+
+  useEffect(() => {
+    if (!collaborationRequested || !hocuspocusUrl || !documentName) {
+      setCollabBootstrap('unavailable')
+      return
+    }
+
+    let cancelled = false
+    setCollabBootstrap('pending')
+    withTimeout(
+      fetchHocuspocusCapabilities(hocuspocusUrl).then(async (capabilities) => {
+        if (capabilities.atomBootstrap) return 'server' as const
+        const state = await fetchHocuspocusDocumentState(
+          hocuspocusUrl,
+          documentName,
+        )
+        return state.exists ? ('server' as const) : ('client' as const)
+      }),
+      COLLAB_BOOTSTRAP_TIMEOUT_MS,
+    )
+      .then((bootstrap) => {
+        if (!cancelled) setCollabBootstrap(bootstrap)
+      })
+      .catch(() => {
+        if (!cancelled) setCollabBootstrap('unavailable')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [collaborationRequested, documentName, hocuspocusUrl])
+
+  useEffect(() => {
+    if (collabBootstrap !== 'client' || !documentName) {
+      setClientSeededDocumentName((current) =>
+        current === null ? current : null,
+      )
+      return
+    }
+    if (clientSeededDocumentName === documentName) return
+
+    const source = markdownToYDoc(defaultValue)
+    Y.applyUpdate(ydoc, encodeDohcYDocUpdate(source))
+    source.destroy()
+    setClientSeededDocumentName(documentName)
+  }, [collabBootstrap, clientSeededDocumentName, defaultValue, documentName, ydoc])
+
+  useEffect(() => {
+    if (!collaborationEnabled || !documentName) return
+
+    let cancelled = false
+    let persistence: IndexeddbPersistence | null = null
+    const fallbackTimer = globalThis.setTimeout(() => {
+      if (cancelled) return
+      setLocalSync((current) =>
+        current.documentName === documentName &&
+        current.collaborationEnabled === collaborationEnabled &&
+        !current.ready
+          ? {
+              documentName,
+              collaborationEnabled,
+              ready: true,
+              hasCache: false,
+            }
+          : current,
+      )
+    }, LOCAL_SYNC_FALLBACK_MS)
+
+    if (readOnly) {
+      globalThis.clearTimeout(fallbackTimer)
+      setLocalSync({
+        documentName,
+        collaborationEnabled,
+        ready: true,
+        hasCache: false,
+      })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setLocalSync({
+      documentName,
+      collaborationEnabled,
+      ready: false,
+      hasCache: false,
+    })
+    void hasIndexeddbYDocState(documentName)
+      .catch(() => false)
+      .then((hasCache) => {
+        if (cancelled) return
+        persistence = new IndexeddbPersistence(documentName, ydoc)
+        const markSynced = () => {
+          globalThis.clearTimeout(fallbackTimer)
+          setLocalSync({
+            documentName,
+            collaborationEnabled,
+            ready: true,
+            hasCache,
+          })
+        }
+        persistence.on('synced', markSynced)
+        void persistence.whenSynced.then(markSynced)
+      })
+
+    return () => {
+      cancelled = true
+      globalThis.clearTimeout(fallbackTimer)
+      void persistence?.destroy()
+    }
+  }, [collaborationEnabled, documentName, readOnly, ydoc])
+
+  useEffect(() => {
+    if (
+      !collaborationEnabled ||
+      !localReady ||
+      !documentName ||
+      !hocuspocusUrl ||
+      !collab
+    )
+      return
+    const provider = createDohcHocuspocusProvider({
+      url: hocuspocusUrl,
+      documentName,
+      ydoc,
+      token: () => fetchTokenRef.current(collab.workspaceId),
+      awareness,
+      onAuthenticated: () => setSyncError(null),
+      onAuthenticationFailed: ({ reason }) => setSyncError(reason),
+      onSynced: ({ state }) => {
+        setRemoteSync({ documentName, ready: state })
+        if (state) {
+          setSyncError(null)
+          markIndexeddbYDocState(documentName)
+          setLocalSync((current) =>
+            current.documentName === documentName
+              ? { ...current, hasCache: true }
+              : current,
+          )
+        }
+      },
+      onStatus: ({ status }) => {
+        if (status === 'disconnected') {
+          setRemoteSync({ documentName, ready: false })
+        }
       },
     })
-    crepe.on((listener) => {
-      listener.markdownUpdated((_ctx, markdown, prev) => {
-        if (markdown !== prev) onChangeRef.current(markdown)
-      })
-    })
-    crepe.editor.config((ctx) => {
-      const plugin = makeAsciiBlockPlugin(onAsciiClickRef)
-      const wikilinkPlugin = makeWikilinkPlugin(
-        () => knownFilesRef.current,
-        (s) => setAcStateRef.current(s),
-      )
-      // D4.8 — DOM-level click handler. Decorations carry the
-      // resolved target in `data-wikilink-target`; closest()
-      // climbs from the click target up to the decoration's span.
-      const wikilinkClickPlugin = new Plugin({
-        key: new PluginKey('dohc-wikilink-click'),
-        props: {
-          handleClick(view, _pos, event) {
-            const t = event.target as HTMLElement | null
-            const el = t?.closest('[data-wikilink-target]') as
-              | HTMLElement
-              | null
-            if (!el) return false
-            const target = el.getAttribute('data-wikilink-target')
-            if (!target) return false
-            event.preventDefault()
-            onOpenWikilinkRef.current?.(target)
-            return true
-          },
-        },
-      })
-      // D4.8h — clicks on ANY atom pill (value/liveTotal/formula)
-      // expand to source. The pill has contenteditable=false so PM
-      // doesn't move the cursor on click; this handler reads the
-      // pill's start position from `data-atom-pos` and explicitly
-      // sets the selection just inside the range, triggering the
-      // source-mode re-render via the selection-aware apply().
-      const formulaClickPlugin = new Plugin({
-        key: new PluginKey('dohc-atom-pill-click'),
-        props: {
-          handleClick(view, _pos, event) {
-            const t = event.target as HTMLElement | null
-            const el = t?.closest('.dohc-atom-pill') as HTMLElement | null
-            if (!el) return false
-            const posAttr = el.getAttribute('data-atom-pos')
-            if (!posAttr) return false
-            const pos = parseInt(posAttr, 10)
-            if (!Number.isFinite(pos)) return false
-            event.preventDefault()
-            const tr = view.state.tr.setSelection(
-              TextSelection.near(view.state.doc.resolve(pos + 1)),
-            )
-            view.dispatch(tr)
-            view.focus()
-            return true
-          },
-        },
-      })
-      const extra = [
-        plugin,
-        wikilinkPlugin,
-        wikilinkClickPlugin,
-        formulaClickPlugin,
-        makeQueryBlockPlugin(queryResultsRef),
-      ]
-      // Phase 1b: inline-atom rendering, additive + flag-gated. The
-      // live-total value chip only ANNOTATES a styled {identifier}
-      // token — without that decoration it's an orphan number, so it
-      // rides the SAME kill-switch (never a chip with no token).
-      if (inlineAtomsEnabled()) {
-        extra.push(
-          makeInlineAtomPlugin(),
-          // D4.8h — single unified atom-pill plugin handles all 3
-          // kinds (value / liveTotal / formula). Replaces the
-          // older separate liveTotal + formula plugins.
-          makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
-        )
-      }
-      ctx.update(prosePluginsCtx, (plugins) => [...plugins, ...extra])
-    })
-    // sharing-v1 — view-only shared atom: make Crepe non-editable.
-    // readOnly is fixed for this editor instance (the shared viewer
-    // mounts fresh per atom), so setting it once at creation is
-    // sufficient. The markdownUpdated listener still won't fire from
-    // the user since editing is disabled.
-    if (readOnly) crepe.setReadonly(true)
-    crepeRef.current = crepe
-    return crepe
-  })
-
-  useEffect(() => {
+    const stopRefresh = startHocuspocusTokenRefresh(provider)
     return () => {
-      crepeRef.current = null
+      stopRefresh()
+      provider.destroy()
     }
-  }, [crepeRef])
+  }, [
+    collaborationEnabled,
+    localReady,
+    documentName,
+    hocuspocusUrl,
+    ydoc,
+    collab?.workspaceId,
+    awareness,
+  ])
 
   useEffect(() => {
-    if (!autoFocus) return
+    if (
+      !collaborationEnabled ||
+      !localReady ||
+      !documentName ||
+      remoteReady ||
+      hasLocalCache ||
+      syncError
+    ) {
+      return
+    }
+
+    const timer = globalThis.setTimeout(() => {
+      setSyncError('Sync unavailable')
+    }, REMOTE_SYNC_STALL_MS)
+
+    return () => globalThis.clearTimeout(timer)
+  }, [
+    collaborationEnabled,
+    documentName,
+    hasLocalCache,
+    localReady,
+    remoteReady,
+    syncError,
+  ])
+
+  useEffect(() => {
+    if (!canWriteYDocMetadata || !frontmatterSnapshot) return
+
+    try {
+      syncYMapFromRecord(
+        ydoc.getMap('frontmatter'),
+        JSON.parse(frontmatterSnapshot) as Record<string, unknown>,
+        lastSyncedFrontmatterRef.current,
+      )
+      lastSyncedFrontmatterRef.current = JSON.parse(
+        frontmatterSnapshot,
+      ) as Record<string, unknown>
+    } catch {
+      /* malformed metadata cannot be represented as canonical Y.Map values */
+    }
+  }, [canWriteYDocMetadata, frontmatterSnapshot, ydoc])
+
+  const dohcPlugins = useMemo(
+    () =>
+      Extension.create({
+        name: 'dohcDecorations',
+        addProseMirrorPlugins() {
+          const wikilinkPlugin = makeWikilinkPlugin(
+            () => knownFilesRef.current,
+            (s) => setAcStateRef.current(s),
+          )
+          const wikilinkClickPlugin = new Plugin({
+            key: new PluginKey('dohc-wikilink-click'),
+            props: {
+              handleClick(_view, _pos, event) {
+                const t = event.target as HTMLElement | null
+                const el = t?.closest(
+                  '[data-wikilink-target], [data-dohc-wikilink]',
+                ) as HTMLElement | null
+                if (!el) return false
+                const target =
+                  el.getAttribute('data-wikilink-target') ??
+                  el.getAttribute('data-dohc-wikilink')
+                if (!target) return false
+                event.preventDefault()
+                onOpenWikilinkRef.current?.(target)
+                return true
+              },
+            },
+          })
+          const atomPillClickPlugin = new Plugin({
+            key: new PluginKey('dohc-atom-pill-click'),
+            props: {
+              handleClick(view, _pos, event) {
+                const t = event.target as HTMLElement | null
+                const el = t?.closest('.dohc-atom-pill') as HTMLElement | null
+                if (!el) return false
+                const posAttr = el.getAttribute('data-atom-pos')
+                if (!posAttr) return false
+                const pos = parseInt(posAttr, 10)
+                if (!Number.isFinite(pos)) return false
+                event.preventDefault()
+                const tr = view.state.tr.setSelection(
+                  TextSelection.near(view.state.doc.resolve(pos + 1)),
+                )
+                view.dispatch(tr)
+                view.focus()
+                return true
+              },
+            },
+          })
+          const extra = [
+            makeAsciiBlockPlugin(onAsciiClickRef),
+            makeSlashCommandPlugin({
+              stateRef: slashStateRef,
+              setState: setSlashState,
+              runCommandRef: slashCommandRunnerRef,
+            }),
+            makeBlockControlsPlugin({
+              onInsertRef: blockInsertRef,
+              onSelectRef: blockSelectRef,
+            }),
+            wikilinkPlugin,
+            wikilinkClickPlugin,
+            atomPillClickPlugin,
+            makeQueryBlockPlugin(queryResultsRef),
+            makeCodeBlockChromePlugin(),
+            makeCodeBlockContinuationPlugin(),
+          ]
+          if (inlineAtomsEnabled()) {
+            extra.push(
+              makeInlineAtomPlugin(),
+              makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
+            )
+          }
+          return extra
+        },
+      }),
+    [
+      fileIdMapRef,
+      formulaRef,
+      knownFilesRef,
+      liveTotalsRef,
+      onAsciiClickRef,
+      onOpenWikilinkRef,
+      queryResultsRef,
+    ],
+  )
+
+  const extensions = useMemo(
+    () => [
+      StarterKit.configure({
+        codeBlock: false,
+        undoRedo: collaborationEnabled ? false : undefined,
+        trailingNode: false,
+      }),
+      CodeBlockLowlight.configure({
+        lowlight,
+        defaultLanguage: null,
+      }),
+      ...dohcMarkdownExtensions,
+      TableKit,
+      Markdown.configure({ indentation: { style: 'space', size: 2 } }),
+      Placeholder.configure({
+        includeChildren: true,
+        showOnlyCurrent: false,
+        placeholder: ({ node }) => {
+          if (node.type.name === 'tableCell' || node.type.name === 'tableHeader')
+            return ''
+          if (node.type.name === 'heading') return 'Heading'
+          return "Type '/' for commands"
+        },
+      }),
+      ...(collaborationRequired
+        ? []
+        : [
+            TrailingNode.configure({
+              node: 'paragraph',
+              notAfter: ['paragraph'],
+            }),
+          ]),
+      ...(collaborationEnabled
+        ? [Collaboration.configure({ document: ydoc, field: 'body' })]
+        : []),
+      ...(collaborationEnabled && caretProvider && awarenessUser && !readOnly
+        ? [
+            CollaborationCaret.configure({
+              provider: caretProvider,
+              user: awarenessUser,
+              render: renderCollaborationCaret,
+              selectionRender: renderCollaborationSelection,
+            }),
+          ]
+        : []),
+      dohcPlugins,
+    ],
+    [
+      awarenessUser,
+      caretProvider,
+      collaborationEnabled,
+      collaborationRequired,
+      dohcPlugins,
+      readOnly,
+      ydoc,
+    ],
+  )
+
+  const editor = useEditor(
+    {
+      extensions,
+      content: collaborationEnabled ? undefined : defaultValue,
+      contentType: collaborationEnabled ? undefined : 'markdown',
+      editorProps: {
+        attributes: {
+          class: 'dohc-notion-editor',
+        },
+      },
+      editable: canEditDohcEditor({
+        readOnly,
+        collaborationRequired,
+        collaborationEnabled,
+        collaborationPending,
+        localReady,
+        remoteReady,
+        hasLocalCache,
+        syncError,
+      }),
+      immediatelyRender: false,
+      onUpdate({ editor, transaction }) {
+        const markdown = editor.getMarkdown()
+        if (markdown === lastMarkdownRef.current) return
+        lastMarkdownRef.current = markdown
+        if (collaborationEnabled && isChangeOrigin(transaction)) {
+          onPreviewChangeRef.current?.(markdown)
+          return
+        }
+        onChangeRef.current(markdown)
+      },
+    },
+    [extensions, collaborationEnabled, documentName],
+  )
+
+  const openSlashMenuAtPosition = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view) return
+
+      let x = 0
+      let y = 28
+      let maxHeight = FLOATING_MENU_MAX_HEIGHT
+      let placement: FloatingMenuPlacement = 'below'
+      try {
+        const coords = view.coordsAtPos(pos)
+        const position = resolveFloatingMenuPosition({ cursorRect: coords })
+        x = position.x
+        y = position.y
+        maxHeight = position.maxHeight
+        placement = position.placement
+      } catch {
+        /* jsdom and offscreen editors cannot always resolve coordinates */
+      }
+
+      setSlashState({
+        open: true,
+        from: pos,
+        to: pos,
+        query: '',
+        selected: 0,
+        x,
+        y,
+        maxHeight,
+        placement,
+      })
+    },
+    [editor],
+  )
+
+  const insertBlockAfter = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view || !isEditableEditor(editor)) return
+
+      const { state } = view
+      const node = state.doc.nodeAt(pos)
+      const paragraph = state.schema.nodes.paragraph
+      if (!node || !paragraph) return
+
+      const canReuseEmptyParagraph =
+        node.type.name === 'paragraph' && node.textContent.length === 0
+      const selectionPos = canReuseEmptyParagraph
+        ? pos + 1
+        : pos + node.nodeSize + 1
+      const tr = canReuseEmptyParagraph
+        ? state.tr
+        : state.tr.insert(pos + node.nodeSize, paragraph.create())
+      tr
+        .setSelection(TextSelection.near(tr.doc.resolve(selectionPos)))
+        .scrollIntoView()
+      view.dispatch(tr)
+      view.focus()
+      openSlashMenuAtPosition(selectionPos)
+    },
+    [editor, openSlashMenuAtPosition],
+  )
+
+  const selectBlock = useCallback(
+    (pos: number) => {
+      const view = editor?.view
+      if (!view) return
+      const node = view.state.doc.nodeAt(pos)
+      if (!node) return
+      view.dispatch(
+        view.state.tr
+          .setSelection(NodeSelection.create(view.state.doc, pos))
+          .scrollIntoView(),
+      )
+      view.focus()
+    },
+    [editor],
+  )
+
+  useEffect(() => {
+    blockInsertRef.current = insertBlockAfter
+    blockSelectRef.current = selectBlock
+  }, [insertBlockAfter, selectBlock])
+
+  const runSlashCommand = useCallback(
+    (id: SlashCommandId) => {
+      const state = slashStateRef.current
+      if (!state.open || !editor) return
+      if (!isEditableEditor(editor)) return
+
+      const range = { from: state.from, to: state.to }
+      const chain = editor
+        .chain()
+        .focus()
+        .deleteRange(range) as unknown as SlashCommandChain
+      setSlashState(CLOSED_SLASH_COMMAND_STATE)
+
+      switch (id) {
+        case 'ascii-sketch':
+          chain.run()
+          window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
+          return
+        case 'wikilink':
+          chain.insertContent('[[]]').setTextSelection(state.from + 2).run()
+          return
+        case 'heading-1':
+          chain.toggleHeading({ level: 1 }).run()
+          return
+        case 'heading-2':
+          chain.toggleHeading({ level: 2 }).run()
+          return
+        case 'heading-3':
+          chain.toggleHeading({ level: 3 }).run()
+          return
+        case 'bulleted-list':
+          chain.toggleBulletList().run()
+          return
+        case 'numbered-list':
+          chain.toggleOrderedList().run()
+          return
+        case 'quote':
+          chain.toggleBlockquote().run()
+          return
+        case 'code-block':
+          chain.setCodeBlock({ language: '' }).run()
+          return
+        case 'divider':
+          chain.setHorizontalRule().run()
+          return
+        case 'table':
+          chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+          return
+        case 'query-block':
+          chain
+            .setCodeBlock({ language: 'query' })
+            .insertContent('entities.list("project")')
+            .run()
+          return
+      }
+    },
+    [editor],
+  )
+
+  useEffect(() => {
+    slashCommandRunnerRef.current = runSlashCommand
+  }, [runSlashCommand])
+
+  useEffect(() => {
+    editorRef.current = editor
+    return () => {
+      if (editorRef.current === editor) editorRef.current = null
+    }
+  }, [editor, editorRef])
+
+  const editable = canEditDohcEditor({
+    readOnly,
+    collaborationRequired,
+    collaborationEnabled,
+    collaborationPending,
+    localReady,
+    remoteReady,
+    hasLocalCache,
+    syncError,
+  })
+  useEffect(() => {
+    editor?.setEditable(editable)
+  }, [editor, editable])
+
+  useEffect(() => {
+    if (!autoFocus || !editor) return
     const id = requestAnimationFrame(() => {
-      const editor = get()
-      if (!editor) return
-      const root = (editor as unknown as { root?: HTMLElement }).root
-      const focusable = root?.querySelector<HTMLElement>('.ProseMirror')
-      focusable?.focus()
+      editor.commands.focus('end')
     })
     return () => cancelAnimationFrame(id)
-  }, [autoFocus, get])
+  }, [autoFocus, editor])
 
   // Resolved live-totals changed (reactive query) → ask the plugin to
   // rebuild its value widgets from the fresh ref via a no-op meta
   // transaction. Best-effort: harmless if the editor isn't ready.
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(liveTotalKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(liveTotalKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [liveTotalsTick, crepeRef])
+  }, [liveTotalsTick, editor])
 
   // Parallel refresh for resolved formulas (same no-op meta-tr
   // mechanism; distinct key so it never disturbs the live-total set).
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(formulaKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(formulaKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [formulaTick, crepeRef])
+  }, [formulaTick, editor])
 
   // Parallel refresh for resolved query-block results (§5.2 4B).
   useEffect(() => {
     try {
-      crepeRef.current?.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx)
-        view.dispatch(view.state.tr.setMeta(queryBlockKey, true))
-      })
+      const view = editor?.view
+      view?.dispatch(view.state.tr.setMeta(queryBlockKey, true))
     } catch {
       /* editor not mounted yet — init() already reads the ref */
     }
-  }, [queryTick, crepeRef])
+  }, [queryTick, editor])
 
-  // D4.8b — viewRef gives the picker access to coordsAtPos +
-  // dispatch. useEditor().get() returns the editor instance; we
-  // hop through to the underlying ProseMirror view via the milkdown
-  // ctx. Computed lazily on each render so it stays current.
-  const pickerView = (() => {
-    try {
-      const editor = get()
-      if (!editor) return null
-      let view: unknown = null
-      editor.action((ctx) => {
-        view = ctx.get(editorViewCtx)
-      })
-      return view as Parameters<typeof WikilinkPicker>[0]['view']
-    } catch {
-      return null
-    }
-  })()
+  // D4.8b — viewRef gives the picker access to coordsAtPos + dispatch.
+  const pickerView = editor
+    ? (editor.view as Parameters<typeof WikilinkPicker>[0]['view'])
+    : null
   const pickerState: Parameters<typeof WikilinkPicker>[0]['state'] =
     acState.active
       ? { open: true, from: acState.from, query: acState.query }
       : { open: false }
   return (
-    <>
-      <Milkdown />
+    <div className="dohc-tiptap-editor" ref={editorWrapRef}>
+      {collaborationRequired &&
+        (collaborationPending ||
+          !hocuspocusUrl ||
+          collabBootstrap === 'unavailable' ||
+          (collaborationEnabled &&
+            (!localReady || syncError || (!remoteReady && !hasLocalCache)))) && (
+          <div className="dohc-editor-sync-state" role="status">
+            {syncError || !hocuspocusUrl || collabBootstrap === 'unavailable'
+              ? 'Sync unavailable'
+              : 'Syncing…'}
+          </div>
+        )}
+      {collaborationEnabled && (
+        <div className="dohc-editor-presence" role="status" aria-live="polite">
+          <span className="dohc-editor-presence-dot" aria-hidden="true" />
+          <span className="dohc-editor-presence-text">Synced</span>
+          {remotePresenceUsers.length > 0 && (
+            <div
+              className="dohc-collab-avatars"
+              aria-label="Collaborators in this document"
+            >
+              {remotePresenceUsers.slice(0, 5).map((user) => (
+                <span
+                  key={user.clientId}
+                  className={`dohc-collab-avatar${
+                    user.isLocal ? ' is-local' : ''
+                  }`}
+                  style={{ '--dohc-collab-color': user.color } as React.CSSProperties}
+                  title={`${user.name}${user.isLocal ? ' (you)' : ''}`}
+                  aria-label={`${user.name}${user.isLocal ? ' (you)' : ''}`}
+                >
+                  {user.initials}
+                </span>
+              ))}
+              {remotePresenceUsers.length > 5 && (
+                <span className="dohc-collab-avatar is-count">
+                  +{remotePresenceUsers.length - 5}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      <EditorContent editor={editor} />
+      <SlashCommandMenu
+        state={slashState}
+        onSelect={runSlashCommand}
+        onHover={(index) =>
+          setSlashState((current) =>
+            current.open ? { ...current, selected: index } : current,
+          )
+        }
+      />
       <WikilinkPicker
         state={pickerState}
         files={knownFilesArray}
         view={pickerView}
         onDismiss={() => setAcState({ active: false })}
       />
-    </>
+    </div>
   )
 }
 
@@ -876,19 +2517,36 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   {
     value,
     onChange,
+    onPreviewChange,
     autoFocus,
     onAsciiBlockClick,
     knownFiles,
     onOpenWikilink,
     shareId,
+    disableReactiveResolvers,
     readOnly,
+    frontmatter,
+    collab,
   },
   ref,
 ) {
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const getCollabToken = useAction(api.auth.getCollabToken)
+  const fetchCollabToken = useMemo(
+    () => async (workspaceId: string) =>
+      await getCollabToken({ workspaceId }),
+    [getCollabToken],
+  )
   const onChangeRef = useRef(onChange)
   useEffect(() => {
     onChangeRef.current = onChange
   }, [onChange])
+  const onPreviewChangeRef = useRef<((next: string) => void) | null>(
+    onPreviewChange ?? null,
+  )
+  useEffect(() => {
+    onPreviewChangeRef.current = onPreviewChange ?? null
+  }, [onPreviewChange])
 
   // Stash the ASCII-click handler in a ref so the ProseMirror plugin (built
   // once at editor creation) always sees the latest callback without
@@ -933,7 +2591,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     onOpenWikilinkRef.current = onOpenWikilink ?? null
   }, [onOpenWikilink])
 
-  const crepeRef = useRef<Crepe | null>(null)
+  const editorRef = useRef<Editor | null>(null)
 
   // The doc's {identifier} live-totals → one reactive batched query
   // so the editor renders their computed values inline (the doc is
@@ -955,7 +2613,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     api.liveTotals.resolveMany,
     // sharing-v1 — live totals are own-workspace; disabled in a
     // shared atom (v1) to avoid any cross-workspace resolution.
-    !shareId && liveIdents.length ? { identifiers: liveIdents } : 'skip',
+    !disableReactiveResolvers && !shareId && liveIdents.length
+      ? { identifiers: liveIdents }
+      : 'skip',
   )
   const liveTotalsRef = useRef<Record<string, number | null>>({})
   const [liveTotalsTick, setLiveTotalsTick] = useState(0)
@@ -970,7 +2630,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // == the rendered set, exactly mirroring the live-total wiring.
   const formulaSrcs = useMemo(() => {
     // key by the parser-CANONICAL `.src` (already unescaped) — the
-    // SAME key the widget derives from the doc span, so Crepe's
+    // SAME key the widget derives from the doc span, so Tiptap's
     // markdown escaping of `_`/`*` can never desync them (BLOCKER).
     const ss = parseInlineAtomsFromMarkdown(value)
       .filter((a) => a.kind === 'formula')
@@ -982,11 +2642,15 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   // ever active; the other is 'skip'.
   const resolvedFormulasOwn = useQuery(
     api.formulaEval.evalFormulas,
-    !shareId && formulaSrcs.length ? { srcs: formulaSrcs } : 'skip',
+    !disableReactiveResolvers && !shareId && formulaSrcs.length
+      ? { srcs: formulaSrcs, activeWorkspaceId }
+      : 'skip',
   )
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
-    shareId && formulaSrcs.length ? { shareId, srcs: formulaSrcs } : 'skip',
+    !disableReactiveResolvers && shareId && formulaSrcs.length
+      ? { shareId, srcs: formulaSrcs }
+      : 'skip',
   )
   const resolvedFormulas = shareId ? resolvedFormulasShared : resolvedFormulasOwn
   const formulaRef = useRef<FormulaMap>(new Map())
@@ -1018,7 +2682,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     // sharing-v1 — query blocks read the own-workspace vault; disabled
     // in a shared atom (v1) — they'd otherwise resolve in the viewer's
     // workspace, not the owner's, and scoping them is a later task.
-    !shareId && querySrcs.length ? { srcs: querySrcs } : 'skip',
+    !disableReactiveResolvers && !shareId && querySrcs.length
+      ? { srcs: querySrcs, activeWorkspaceId }
+      : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
   const [queryTick, setQueryTick] = useState(0)
@@ -1033,67 +2699,94 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     ref,
     () => ({
       insertCodeBlock(language: string, content: string) {
-        const crepe = crepeRef.current
-        if (!crepe) return
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx)
-          const { state } = view
-          const codeBlockType = state.schema.nodes.code_block
-          if (!codeBlockType) return
-          const textNode = content ? state.schema.text(content) : null
-          const node = codeBlockType.create(
-            { language },
-            textNode ? [textNode] : undefined,
-          )
-          const tr = state.tr.replaceSelectionWith(node).scrollIntoView()
-          view.dispatch(tr)
-          view.focus()
-        })
-      },
-      replaceCodeBlockAt(pos: number, content: string, language?: string) {
-        const crepe = crepeRef.current
-        if (!crepe) return
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx)
-          const { state } = view
-          const node = state.doc.nodeAt(pos)
-          if (!node || node.type.name !== 'code_block') return
-          const codeBlockType = state.schema.nodes.code_block
-          const textNode = content ? state.schema.text(content) : null
-          const next = codeBlockType.create(
-            language ? { ...node.attrs, language } : node.attrs,
-            textNode ? [textNode] : undefined,
-          )
-          const tr = state.tr
-            .replaceWith(pos, pos + node.nodeSize, next)
+        const editor = editorRef.current
+        if (!editor || !isEditableEditor(editor)) return
+        const view = editor.view
+        const { state } = view
+        const codeBlockType =
+          state.schema.nodes.codeBlock ?? state.schema.nodes.code_block
+        const paragraphType = state.schema.nodes.paragraph
+        if (!codeBlockType) return
+        const textNode = content ? state.schema.text(content) : null
+        const node = codeBlockType.create(
+          { language },
+          textNode ? [textNode] : undefined,
+        )
+
+        if (
+          paragraphType &&
+          isAsciiSketchLanguage(language) &&
+          state.selection.empty &&
+          state.selection.$from.parent.isTextblock &&
+          state.selection.$from.parent.textContent.trim() === ''
+        ) {
+          const blockStart = state.selection.$from.before()
+          const blockEnd = state.selection.$from.after()
+          const afterSketchPos = blockStart + node.nodeSize
+          let tr = state.tr.replaceWith(blockStart, blockEnd, node)
+          tr = tr.insert(afterSketchPos, paragraphType.create())
+          tr = tr
+            .setSelection(TextSelection.create(tr.doc, afterSketchPos + 1))
             .scrollIntoView()
           view.dispatch(tr)
-        })
+          view.focus()
+          return
+        }
+
+        const tr = state.tr.replaceSelectionWith(node).scrollIntoView()
+        view.dispatch(tr)
+        view.focus()
+      },
+      replaceCodeBlockAt(pos: number, content: string, language?: string) {
+        const editor = editorRef.current
+        if (!editor || !isEditableEditor(editor)) return
+        const view = editor.view
+        const { state } = view
+        const node = state.doc.nodeAt(pos)
+        if (
+          !node ||
+          (node.type.name !== 'code_block' && node.type.name !== 'codeBlock')
+        )
+          return
+        const codeBlockType =
+          state.schema.nodes.codeBlock ?? state.schema.nodes.code_block
+        if (!codeBlockType) return
+        const textNode = content ? state.schema.text(content) : null
+        const next = codeBlockType.create(
+          language ? { ...node.attrs, language } : node.attrs,
+          textNode ? [textNode] : undefined,
+        )
+        const tr = state.tr
+          .replaceWith(pos, pos + node.nodeSize, next)
+          .scrollIntoView()
+        view.dispatch(tr)
       },
     }),
     [],
   )
 
   return (
-    <MilkdownProvider>
-      <CrepeEditor
-        defaultValue={value}
-        onChangeRef={onChangeRef}
-        autoFocus={!!autoFocus}
-        crepeRef={crepeRef}
-        onAsciiClickRef={onAsciiClickRef}
-        liveTotalsRef={liveTotalsRef}
-        liveTotalsTick={liveTotalsTick}
-        formulaRef={formulaRef}
-        formulaTick={formulaTick}
-        queryResultsRef={queryResultsRef}
-        queryTick={queryTick}
-        knownFilesRef={knownFilesRef}
-        knownFilesArray={knownFiles ?? []}
-        onOpenWikilinkRef={onOpenWikilinkRef}
-        fileIdMapRef={fileIdMapRef}
-        readOnly={!!readOnly}
-      />
-    </MilkdownProvider>
+    <TiptapAtomEditor
+      defaultValue={value}
+      onChangeRef={onChangeRef}
+      onPreviewChangeRef={onPreviewChangeRef}
+      autoFocus={!!autoFocus}
+      editorRef={editorRef}
+      onAsciiClickRef={onAsciiClickRef}
+      liveTotalsRef={liveTotalsRef}
+      liveTotalsTick={liveTotalsTick}
+      formulaRef={formulaRef}
+      formulaTick={formulaTick}
+      queryResultsRef={queryResultsRef}
+      queryTick={queryTick}
+      knownFilesRef={knownFilesRef}
+      knownFilesArray={knownFiles ?? []}
+      onOpenWikilinkRef={onOpenWikilinkRef}
+      fileIdMapRef={fileIdMapRef}
+      collab={collab}
+      fetchCollabToken={fetchCollabToken}
+      readOnly={!!readOnly}
+      frontmatter={frontmatter}
+    />
   )
 })

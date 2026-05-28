@@ -70,12 +70,12 @@ describe('graph-v1 1c — sharedGraph never crosses owners', () => {
   })
 })
 
-// ── 1c review — graph matches Crepe-escaped wikilinks ───────────────
+// ── 1c review — graph matches legacy-escaped wikilinks ───────────────
 describe('graph-v1 — escaped wikilinks produce edges (codex gap #1)', () => {
-  it('a \\[\\[..]] link (as Crepe stores user-typed links) is an edge', async () => {
+  it('a \\[\\[..]] link (as a legacy editor stored user-typed links) is an edge', async () => {
     const t = convexTest(schema, modules)
     await seed(t, 'clients/acme.md', '---\nid: clients.acme\n---\nx')
-    // Crepe serializes a typed [[clients/acme]] with escaped opening brackets:
+    // a legacy editor serialized a typed [[clients/acme]] with escaped opening brackets:
     await seed(t, 'dash.md', '---\nid: dash\n---\n\\[\\[clients/acme]] notes')
     const g = await t.withIdentity({ subject: W }).query(api.graph.personalGraph, {})
     expect(

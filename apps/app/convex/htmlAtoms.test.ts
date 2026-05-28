@@ -289,7 +289,7 @@ describe('atoms.list — §5 html tree-perception projection', () => {
         updatedAt: 2,
       })
     })
-    const rows = await t.withIdentity({ subject: W }).query(api.atoms.list)
+    const rows = await t.withIdentity({ subject: W }).query(api.atoms.list, {})
     const byPath = Object.fromEntries(rows.map((r) => [r.path, r]))
     expect(byPath['dash.html'].type).toBe('html')
     expect(byPath['notes.md'].type).toBeNull()
@@ -305,7 +305,7 @@ describe('atoms.list — §5 html tree-perception projection', () => {
         updatedAt: 1,
       })
     })
-    const rows = await t.withIdentity({ subject: W2 }).query(api.atoms.list)
+    const rows = await t.withIdentity({ subject: W2 }).query(api.atoms.list, {})
     expect(rows.find((r) => r.path === 'dash.html')).toBeUndefined()
   })
 })

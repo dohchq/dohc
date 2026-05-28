@@ -51,7 +51,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
         subject: 'user|123',
         email: 'a@b.test',
       })
-      .query(api.skills.list)
+      .query(api.skills.list, {})
     expect(res).toEqual([])
   })
 
@@ -64,7 +64,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       path: 'skills/weekly-review.md',
       body: '---\ntype: skill\n---\n\nRun the weekly review.',
     })
-    const res = await ti.query(api.skills.list)
+    const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
     expect(res[0]).toMatchObject({
       path: 'skills/weekly-review.md',
@@ -81,7 +81,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       path: 'skills/legacy-skill.md',
       body: '# Legacy\n\nThis is a legacy skill without frontmatter.',
     })
-    const res = await ti.query(api.skills.list)
+    const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
     expect(res[0]).toMatchObject({
       path: 'skills/legacy-skill.md',
@@ -104,7 +104,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       path: 'skills/real-skill.md',
       body: '---\ntype: skill\n---\nDo a thing.',
     })
-    const res = await ti.query(api.skills.list)
+    const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
     expect(res[0].path).toBe('skills/real-skill.md')
   })
@@ -124,7 +124,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       path: 'skills/mike.md',
       body: '---\ntype: skill\n---\nx',
     })
-    const res = await ti.query(api.skills.list)
+    const res = await ti.query(api.skills.list, {})
     expect(res.map((r) => r.label)).toEqual(['alpha', 'mike', 'zebra'])
   })
 
@@ -139,7 +139,7 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       path: 'skills/client/standup.md',
       body: '---\ntype: skill\n---\nx',
     })
-    const res = await ti.query(api.skills.list)
+    const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(2)
     expect(res.every((r) => r.label === 'standup')).toBe(true)
     // Both entries are present; the canonical `path` distinguishes

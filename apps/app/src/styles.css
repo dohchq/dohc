@@ -453,7 +453,7 @@
 }
 .doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
   font-weight: 700;
-  letter-spacing: -0.014em;
+  letter-spacing: 0;
   color: var(--ink-strong);
   line-height: 1.25;
   margin: 0;
@@ -628,15 +628,15 @@
 }
 
 /* D4.8b — autocomplete picker (the popover that appears when the
- * user types `[[`). Positioned absolutely just below the cursor by
- * the React component. */
+ * user types `[[`). Positioned by viewport-aware floating menu math
+ * in the React component. */
 .dohc-wikilink-picker {
   background: var(--color-elevated);
   border: 1px solid var(--color-rule);
   border-radius: 6px;
+  box-sizing: border-box;
   padding: 4px 0;
-  min-width: 240px;
-  max-width: 360px;
+  width: min(360px, calc(100vw - 24px));
   max-height: 260px;
   overflow-y: auto;
   box-shadow: var(--shadow-md);
@@ -965,71 +965,173 @@
   cursor: text;
 }
 
-/* Milkdown editor — strip the default frame chrome so it inherits the
+/* Tiptap editor — strip the default frame chrome so it inherits the
  * doc column (.doc max-width + padding) and matches our font stack. */
-.doc-editing .milkdown {
+.doc-editing .dohc-tiptap-editor {
   background: transparent;
   font-family: var(--font-sans);
   color: var(--ink);
   font-size: 16px;
   line-height: 1.5;
-  /* Crepe applies its own --crepe-font-* vars (Noto Sans / Noto Serif /
+  position: relative;
+  /* Tiptap applies its own --tiptap-font-* vars (Noto Sans / Noto Serif /
    * Space Mono) inside the editor, which would otherwise override our
    * cascade. Map them to our chosen pair so headings, paragraphs, and
    * code in the markdown match the rest of the app. */
-  --crepe-font-default: var(--font-sans);
-  --crepe-font-title: var(--font-sans);
-  --crepe-font-code: var(--font-mono);
-  /* Crepe's frame theme hardcodes a LIGHT palette on `.milkdown`
+  --tiptap-font-default: var(--font-sans);
+  --tiptap-font-title: var(--font-sans);
+  --tiptap-font-code: var(--font-mono);
+  /* Tiptap's frame theme hardcodes a LIGHT palette on `.tiptap`
    * (surface #f7f7f7, background #fff, …), so code/query blocks and
    * the editor chrome rendered as a glaring white box in dark mode.
-   * Map every Crepe design token to our theme-aware --color-* tokens
+   * Map every Tiptap design token to our theme-aware --color-* tokens
    * (they already flip light/dark) — ONE source, so the whole editor
    * follows the palette in both modes. Neutral mappings (ink/panel/
-   * rule) keep contrast safe; accent only where Crepe means accent. */
-  --crepe-color-background: var(--color-page);
-  --crepe-color-on-background: var(--color-ink);
-  --crepe-color-surface: var(--color-panel);
-  --crepe-color-surface-low: color-mix(
+   * rule) keep contrast safe; accent only where Tiptap means accent. */
+  --tiptap-color-background: var(--color-page);
+  --tiptap-color-on-background: var(--color-ink);
+  --tiptap-color-surface: var(--color-panel);
+  --tiptap-color-surface-low: color-mix(
     in srgb,
     var(--color-ink) 7%,
     var(--color-panel)
   );
-  --crepe-color-on-surface: var(--color-ink);
-  --crepe-color-on-surface-variant: var(--color-ink-dim);
-  --crepe-color-outline: var(--color-rule-strong);
-  --crepe-color-primary: var(--color-ink-strong);
-  --crepe-color-secondary: var(--color-rule);
-  --crepe-color-on-secondary: var(--color-ink);
-  --crepe-color-inverse: var(--color-ink-strong);
-  --crepe-color-on-inverse: var(--color-surface);
-  --crepe-color-inline-code: var(--color-accent);
-  --crepe-color-error: var(--color-danger);
-  --crepe-color-hover: color-mix(
+  --tiptap-color-on-surface: var(--color-ink);
+  --tiptap-color-on-surface-variant: var(--color-ink-dim);
+  --tiptap-color-outline: var(--color-rule-strong);
+  --tiptap-color-primary: var(--color-ink-strong);
+  --tiptap-color-secondary: var(--color-rule);
+  --tiptap-color-on-secondary: var(--color-ink);
+  --tiptap-color-inverse: var(--color-ink-strong);
+  --tiptap-color-on-inverse: var(--color-surface);
+  --tiptap-color-inline-code: var(--color-accent);
+  --tiptap-color-error: var(--color-danger);
+  --tiptap-color-hover: color-mix(
     in srgb,
     var(--color-ink) 8%,
     transparent
   );
-  --crepe-color-selected: color-mix(
+  --tiptap-color-selected: color-mix(
     in srgb,
     var(--color-accent) 18%,
     transparent
   );
-  --crepe-color-inline-area: var(--color-rule);
+  --tiptap-color-inline-area: var(--color-rule);
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: -2px 0 12px;
+  min-height: 28px;
+  pointer-events: none;
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence-dot {
+  background: var(--color-success);
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 16%, transparent);
+  height: 6px;
+  width: 6px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence-text {
+  letter-spacing: 0.01em;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatars {
+  display: inline-flex;
+  margin-left: 2px;
+  pointer-events: auto;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar {
+  align-items: center;
+  background: var(--dohc-collab-color, var(--color-accent));
+  border: 2px solid var(--color-page);
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  height: 24px;
+  justify-content: center;
+  line-height: 1;
+  margin-left: -6px;
+  min-width: 24px;
+  padding: 0 6px;
+  position: relative;
+  text-transform: uppercase;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar:first-child {
+  margin-left: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar.is-local {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dohc-collab-color, var(--color-accent)) 55%, transparent);
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar.is-count {
+  background: var(--color-panel);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-caret,
+.doc-editing .dohc-tiptap-editor .collaboration-carets__caret,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-cursor {
+  border-left: 2px solid var(--dohc-collab-color, var(--color-info, #1a73e8));
+  border-right: none;
+  box-sizing: border-box;
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+  z-index: 20;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-label,
+.doc-editing .dohc-tiptap-editor .collaboration-carets__label,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-cursor > div {
+  background: var(--dohc-collab-color, #1a73e8);
+  border-radius: 4px;
+  bottom: calc(100% + 2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+  color: #fff;
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  left: -2px;
+  line-height: 1;
+  max-width: 160px;
+  overflow: hidden;
+  padding: 4px 6px;
+  position: absolute;
+  text-overflow: ellipsis;
+  transform: translateY(-1px);
+  white-space: nowrap;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-selection,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-selection {
+  border-bottom: 1px solid var(--dohc-collab-color, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
-/* Editor block rhythm — Notion/AppFlowy-style. Crepe ships much larger
+/* Editor block rhythm — Notion/AppFlowy-style. Tiptap ships much larger
  * defaults (h1 = 42px / mt 32px, etc.) so we override every heading,
  * paragraph, list, and blockquote rule with a 2-class selector to win
  * on specificity. Padding is the spacing primitive (not margin) so
  * adjacent blocks sit ~6px apart and headings can have generous top
  * breathing space while hugging the next block below them. */
-.doc-editing .milkdown h1 {
-  font-size: 30px;
+.doc-editing .dohc-tiptap-editor h1 {
+  font-size: 28px;
   line-height: 1.25;
   font-weight: 700;
-  letter-spacing: -0.018em;
-  padding: 28px 0 4px;
+  letter-spacing: 0;
+  padding: 16px 0 4px;
   margin: 0;
   color: var(--ink-strong);
 }
@@ -1149,7 +1251,7 @@
    * reads: this is THE page title, headings inside are sections. */
   font-size: 44px;
   font-weight: 800;
-  letter-spacing: -0.024em;
+  letter-spacing: 0;
   line-height: 1.15;
   color: var(--ink-strong);
   padding: 6px 0 8px;
@@ -1220,86 +1322,98 @@
 .dohc-source .token.italic {
   font-style: italic;
 }
-.doc-editing .milkdown h2 {
-  font-size: 24px;
+.doc-editing .dohc-tiptap-editor h2 {
+  font-size: 23px;
   line-height: 1.3;
   font-weight: 700;
-  letter-spacing: -0.014em;
-  padding: 24px 0 3px;
+  letter-spacing: 0;
+  padding: 14px 0 3px;
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h3 {
-  font-size: 20px;
+.doc-editing .dohc-tiptap-editor h3 {
+  font-size: 19px;
   line-height: 1.3;
   font-weight: 600;
-  letter-spacing: -0.01em;
-  padding: 20px 0 2px;
+  letter-spacing: 0;
+  padding: 12px 0 2px;
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h4 {
+.doc-editing .dohc-tiptap-editor h4 {
   font-size: 17px;
   line-height: 1.35;
   font-weight: 600;
-  padding: 16px 0 2px;
+  padding: 10px 0 2px;
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h5 {
+.doc-editing .dohc-tiptap-editor h5 {
   font-size: 15px;
   line-height: 1.4;
   font-weight: 600;
-  padding: 14px 0 2px;
+  padding: 8px 0 2px;
   margin: 0;
   color: var(--ink-strong);
 }
-.doc-editing .milkdown h6 {
+.doc-editing .dohc-tiptap-editor h6 {
   font-size: 13px;
   line-height: 1.4;
   font-weight: 600;
-  padding: 12px 0 2px;
+  padding: 8px 0 2px;
   margin: 0;
   color: var(--ink-dim);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
-.doc-editing .milkdown p {
+.doc-editing .dohc-tiptap-editor p {
   font-size: 16px;
   line-height: 1.5;
   padding: 3px 0;
   margin: 0;
 }
-.doc-editing .milkdown ul,
-.doc-editing .milkdown ol {
+.doc-editing .dohc-tiptap-editor ul,
+.doc-editing .dohc-tiptap-editor ol {
   margin: 0;
-  padding: 2px 0;
+  padding: 2px 0 2px 1.45em;
 }
-.doc-editing .milkdown li {
+.doc-editing .dohc-tiptap-editor ul {
+  list-style-position: outside;
+  list-style-type: disc;
+}
+.doc-editing .dohc-tiptap-editor ol {
+  list-style-position: outside;
+  list-style-type: decimal;
+}
+.doc-editing .dohc-tiptap-editor li {
   margin: 0;
-  padding: 1px 0;
+  padding: 1px 0 1px 0.15em;
   font-size: 16px;
   line-height: 1.5;
 }
-.doc-editing .milkdown li p {
+.doc-editing .dohc-tiptap-editor li::marker {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.doc-editing .dohc-tiptap-editor li p {
   padding: 0;
 }
-.doc-editing .milkdown blockquote {
+.doc-editing .dohc-tiptap-editor blockquote {
   border-left: 3px solid var(--rule-strong);
   padding: 4px 0 4px 16px;
   margin: 6px 0;
   color: var(--ink-dim);
   font-style: italic;
 }
-.doc-editing .milkdown blockquote p {
+.doc-editing .dohc-tiptap-editor blockquote p {
   padding: 0;
 }
-.doc-editing .milkdown hr {
+.doc-editing .dohc-tiptap-editor hr {
   border: none;
   border-top: 1px solid var(--rule);
   margin: 16px 0;
 }
-.doc-editing .milkdown code {
+.doc-editing .dohc-tiptap-editor code {
   background: var(--bg-panel);
   padding: 1px 5px;
   border-radius: var(--radius-xs);
@@ -1307,40 +1421,572 @@
   font-family: var(--font-mono);
   color: var(--accent);
 }
-/* Crepe's "Please enter..." placeholder uses `color-mix(--crepe-color-on-background, transparent 60%)`
+.doc-editing .dohc-tiptap-editor pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0.7em 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+}
+.doc-editing .dohc-tiptap-editor pre code {
+  background: transparent;
+  border-radius: 0;
+  color: inherit;
+  display: block;
+  font-size: inherit;
+  padding: 0;
+  white-space: pre;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-keyword,
+.doc-editing .dohc-tiptap-editor pre code .hljs-selector-tag,
+.doc-editing .dohc-tiptap-editor pre code .hljs-built_in {
+  color: #c792ea;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-string,
+.doc-editing .dohc-tiptap-editor pre code .hljs-attr,
+.doc-editing .dohc-tiptap-editor pre code .hljs-symbol {
+  color: #a8cc8c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-number,
+.doc-editing .dohc-tiptap-editor pre code .hljs-literal {
+  color: #f78c6c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-title,
+.doc-editing .dohc-tiptap-editor pre code .hljs-function {
+  color: #82aaff;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-comment {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-code-block {
+  background: color-mix(in srgb, var(--color-page) 88%, var(--color-ink) 3%);
+  border-top-color: color-mix(in srgb, var(--rule) 72%, transparent);
+  border-radius: 0 0 7px 7px;
+  margin: 0 0 0.85em;
+  padding: 12px 14px 13px;
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-code-block + .dohc-code-block-toolbar {
+  margin-top: 0.45em;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 34px;
+  margin: 0.85em 0 0;
+  padding: 5px 7px 5px 9px;
+  background: color-mix(in srgb, var(--color-page) 76%, var(--color-ink) 6%);
+  border: 1px solid var(--rule);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  box-shadow: 0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset;
+  color: var(--ink-faint);
+  position: relative;
+  z-index: 6;
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-toolbar-left {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+  min-width: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-dot {
+  background: color-mix(in srgb, var(--color-accent) 58%, var(--ink-faint));
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 12%, transparent);
+  flex: 0 0 auto;
+  height: 6px;
+  width: 6px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select {
+  appearance: none;
+  background-color: var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink-dim);
+  color-scheme: light;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  height: 24px;
+  line-height: 1;
+  max-width: 136px;
+  min-width: 94px;
+  outline: none;
+  padding: 0 23px 0 8px;
+  pointer-events: auto;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option {
+  background-color: var(--color-surface);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option:checked {
+  background-color: var(--color-panel);
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:focus {
+  background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  height: 24px;
+  line-height: 1;
+  padding: 0 8px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:hover,
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:focus-visible {
+  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:hover {
+  background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+[data-theme='dark'] .doc-editing .dohc-tiptap-editor .dohc-code-language-select {
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark'])
+    .doc-editing
+    .dohc-tiptap-editor
+    .dohc-code-language-select {
+    color-scheme: dark;
+  }
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation {
+  align-items: center;
+  display: flex;
+  height: 22px;
+  margin: -10px 0 7px;
+  pointer-events: auto;
+  position: relative;
+  user-select: none;
+  width: 100%;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation::after {
+  background: color-mix(in srgb, var(--color-ink) 18%, transparent);
+  content: '';
+  flex: 1;
+  height: 1px;
+  opacity: 0.35;
+  transform: scaleX(0.98);
+  transition:
+    opacity var(--t-fast),
+    transform var(--t-fast);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation:hover::after,
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation:focus-within::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 400;
+  height: 22px;
+  justify-content: center;
+  line-height: 1;
+  margin-left: -31px;
+  margin-right: 9px;
+  opacity: 0.62;
+  padding: 0 0 1px;
+  pointer-events: auto;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    opacity var(--t-fast),
+    transform var(--t-fast);
+  width: 23px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:hover,
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:focus-visible {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--ink-dim);
+  opacity: 1;
+  outline: none;
+  transform: scale(1.02);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:disabled {
+  cursor: default;
+  opacity: 0;
+}
+.doc-editing .dohc-tiptap-editor table {
+  border-collapse: collapse;
+  font-size: 14px;
+  margin: 0.8em 0;
+  table-layout: fixed;
+  width: 100%;
+}
+.doc-editing .dohc-tiptap-editor th,
+.doc-editing .dohc-tiptap-editor td {
+  border: 1px solid var(--rule);
+  min-width: 92px;
+  padding: 6px 8px;
+  position: relative;
+  vertical-align: top;
+}
+.doc-editing .dohc-tiptap-editor th {
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+.doc-editing .dohc-tiptap-editor td {
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .selectedCell::after {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+.doc-editing .dohc-tiptap-editor .column-resize-handle {
+  background: var(--color-accent);
+  bottom: -1px;
+  pointer-events: none;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 3px;
+}
+/* Tiptap's "Please enter..." placeholder uses `color-mix(--tiptap-color-on-background, transparent 60%)`
  * which lands near-black on dark backgrounds and is basically invisible.
  * Force it to our theme's dim ink so it stays readable in both modes. */
-.doc-editing .milkdown .crepe-placeholder::before {
+.doc-editing .dohc-tiptap-editor .tiptap-placeholder::before {
   color: var(--ink-faint) !important;
 }
-.doc-editing .milkdown .ProseMirror {
+.doc-editing .dohc-tiptap-editor .ProseMirror {
   outline: none;
   padding: 0;
   background: transparent;
   font-family: var(--font-sans);
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  min-height: 48vh;
 }
-.doc-editing .milkdown .ProseMirror:focus {
+.doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+  margin-left: -42px;
+  padding-left: 42px !important;
+}
+.doc-editing .dohc-tiptap-editor .tiptap {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror:focus {
   outline: none;
 }
+.doc-editing .dohc-tiptap-editor .ProseMirror .is-empty::before {
+  color: var(--ink-faint);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  opacity: 0.58;
+  pointer-events: none;
+}
+.doc-editing .dohc-tiptap-editor th .is-empty::before,
+.doc-editing .dohc-tiptap-editor td .is-empty::before {
+  content: '' !important;
+}
 
-/* Crepe's default list layout pads the marker to a fixed 32px / 24px box
+.doc-editing .dohc-tiptap-editor .dohc-block-node {
+  position: relative;
+  --dohc-block-control-top: 3px;
+}
+.doc-editing .dohc-tiptap-editor h1.dohc-block-node {
+  --dohc-block-control-top: 21px;
+}
+.doc-editing .dohc-tiptap-editor h2.dohc-block-node {
+  --dohc-block-control-top: 16px;
+}
+.doc-editing .dohc-tiptap-editor h3.dohc-block-node {
+  --dohc-block-control-top: 12px;
+}
+.doc-editing .dohc-tiptap-editor h4.dohc-block-node {
+  --dohc-block-control-top: 9px;
+}
+.doc-editing .dohc-tiptap-editor h5.dohc-block-node {
+  --dohc-block-control-top: 6px;
+}
+.doc-editing .dohc-tiptap-editor h6.dohc-block-node {
+  --dohc-block-control-top: 5px;
+}
+.doc-editing .dohc-tiptap-editor blockquote.dohc-block-node {
+  --dohc-block-control-top: 4px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  height: 28px;
+  justify-content: flex-end;
+  left: -50px;
+  padding-right: 3px;
+  pointer-events: auto;
+  position: absolute;
+  top: calc(var(--dohc-block-control-top) - 2px);
+  user-select: none;
+  width: 48px;
+  z-index: 5;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  flex: 0 0 23px;
+  display: inline-flex;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  height: 24px;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+  padding: 0;
+  pointer-events: auto;
+  position: relative;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    opacity var(--t-fast),
+    transform var(--t-fast);
+  transform: scale(0.96);
+  width: 23px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus {
+  font-size: 18px;
+  font-weight: 400;
+  padding-bottom: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus::before {
+  content: '+';
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle {
+  cursor: grab;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle::before {
+  background-image: radial-gradient(
+    circle,
+    currentColor 1.15px,
+    transparent 1.25px
+  );
+  background-position: 0 0;
+  background-size: 5px 5px;
+  content: '';
+  display: block;
+  height: 15px;
+  opacity: 0.8;
+  width: 10px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:hover {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--ink-dim);
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:focus-visible {
+  color: var(--ink-strong);
+  outline: 1px solid var(--rule-strong);
+  outline-offset: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:active {
+  cursor: grabbing;
+  transform: scale(0.92);
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:focus-within .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node.ProseMirror-selectednode .dohc-block-gutter-btn {
+  color: var(--ink-dim);
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-block-node .dohc-block-affordance {
+  top: 5px;
+}
+.doc-editing .dohc-tiptap-editor pre.ascii-sketch-block.dohc-block-node .dohc-block-affordance {
+  top: -6px;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-block.dohc-block-node .dohc-block-affordance {
+  top: 2px;
+}
+
+@media (max-width: 720px) {
+  .doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+    margin-left: -36px;
+    padding-left: 36px !important;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+    gap: 0;
+    left: -40px;
+    width: 38px;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+    flex-basis: 19px;
+    width: 19px;
+  }
+}
+
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu {
+  position: fixed;
+  z-index: 30;
+  width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+  background: color-mix(in srgb, var(--color-surface) 94%, var(--color-ink) 6%);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  box-shadow:
+    0 18px 45px color-mix(in srgb, #000 30%, transparent),
+    0 1px 0 color-mix(in srgb, #fff 7%, transparent) inset;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  color: var(--ink);
+  text-align: left;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item:hover,
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item.is-selected {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-page) 84%, var(--color-ink) 5%);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__label {
+  color: var(--ink-strong);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__hint {
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__empty {
+  padding: 10px 12px;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.dohc-editor-sync-state {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+.dohc-editor-sync-state::before {
+  background: currentColor;
+  border-radius: 999px;
+  content: '';
+  height: 6px;
+  opacity: 0.55;
+  width: 6px;
+}
+
+/* Tiptap's default list layout pads the marker to a fixed 32px / 24px box
  * (height + padding tuned for their default body size). At our 15px /
  * 1.7 line-height the marker box is taller than the content paragraph
  * and `align-items: flex-start` pushes the marker above the text
  * baseline. Strip the fixed sizing and switch to baseline alignment so
  * marker and text share the same line. */
-.doc-editing .milkdown .milkdown-list-item-block > .list-item {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item > .list-item {
   align-items: baseline;
   gap: 0.5em;
 }
-.doc-editing .milkdown .milkdown-list-item-block .label-wrapper {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper {
   height: auto;
   width: auto;
   min-width: 1.4em;
   padding: 0;
   line-height: inherit;
 }
-.doc-editing .milkdown .milkdown-list-item-block .label-wrapper .label {
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper .label {
   height: auto;
   width: auto;
   min-width: 1.4em;
@@ -1351,12 +1997,13 @@
 
 /* ---------- inline ASCII sketches ----------
  * A code-block decoration (.ascii-sketch-block) tags any `language: ascii`
- * fence; strip the Crepe code-block chrome so the art reads as a piece of
+ * fence; strip the Tiptap code-block chrome so the art reads as a piece of
  * the page rather than a syntax-highlighter widget. Click anywhere on the
  * block to re-open the sketcher with that content. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block {
   background: transparent;
   border: none;
+  overflow: visible;
   padding: 0;
   margin: 0.6em 0;
   cursor: text;
@@ -1368,32 +2015,26 @@
   width: max-content;
   max-width: none;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .language-picker {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .language-picker {
   display: none;
 }
 /* The block's `.tools` row holds the language picker + a `.tools-button-group`
  * with the copy/preview-toggle buttons. The copy icon was overlapping with
  * the "click to edit" hint we add below — hide the whole row since none of
  * those affordances make sense for a sketch. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .tools-button-group {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools-button-group {
   display: none !important;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .milkdown-code-block-placeholder {
-  display: none;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-gutters {
-  display: none !important;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block code {
   background: transparent;
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.25;
-  /* Crepe ships a CodeMirror theme that paints code text in a soft
+  /* Tiptap ships a CodeMirror theme that paints code text in a soft
    * mid-grey — fine for syntax-highlighted code, way too low-contrast for
    * plain ascii art. Force the page's primary ink color (and override the
-   * inner spans Crepe colors via cm-line :where()). */
+   * inner spans Tiptap colors via cm-line :where()). */
   color: var(--ink);
   /* Editor sizes to the longest line — no fixed width box, no scrollbar.
    * The block's parent (.ascii-sketch-block) decides whether to overflow
@@ -1401,50 +2042,22 @@
   width: max-content;
   max-width: none;
 }
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line * {
-  color: var(--ink);
-}
-/* CodeMirror's outer scroller would otherwise put a horizontal scrollbar
- * under the art for any sketch wider than the column. We don't want a
- * scrollbar in read view; the art is meant to be seen at once. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-scroller {
-  overflow: visible;
-  width: max-content;
-  max-width: none;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-editor .cm-content {
-  padding: 0;
-  width: max-content;
-  min-width: 0;
-}
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-line {
-  padding: 0;
-  width: max-content;
-}
-.doc-editing .milkdown .ascii-sketch-block.ascii-sketch-block-has-metadata .cm-line:first-child {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .ascii-sketch-metadata-line {
   display: none;
-}
-/* CodeMirror tints the row holding the cursor (`.cm-activeLine`) and its
- * gutter — appears as a horizontal bar across the block when the editor
- * has focus. We don't want it on display-style ASCII art. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLine,
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block .cm-activeLineGutter {
-  background: transparent !important;
 }
 /* Same idea for ProseMirror's "this code block is the selected node"
  * background tint when the user clicks the block. */
-.doc-editing .milkdown .ascii-sketch-block.milkdown-code-block.ProseMirror-selectednode {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block.ProseMirror-selectednode {
   background: transparent !important;
   outline: none !important;
 }
 /* ── Query atom block (impressions #17) ───────────────────────────
  * A `language: query` fence is the LIVE-DATA primitive, but raw
- * `entities.list("project", {…})` reads as scary code. Tame Crepe's
+ * `entities.list("project", {…})` reads as scary code. Tame Tiptap's
  * code-block chrome (like ascii) and present it as a calm "live"
  * card with a human caption; the DSL stays an editable, but quiet
  * and SECONDARY, source line (markdown is still the truth). */
-.doc-editing .milkdown .query-atom-block.milkdown-code-block {
+.doc-editing .dohc-tiptap-editor .query-atom-block {
   background: color-mix(in srgb, var(--color-accent) 5%, var(--color-surface));
   border: 1px solid var(--rule);
   border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
@@ -1453,14 +2066,7 @@
   margin: 0.7em 0;
   position: relative;
 }
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .language-picker,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .tools-button-group,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .milkdown-code-block-placeholder,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-gutters {
-  display: none !important;
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-editor {
+.doc-editing .dohc-tiptap-editor .query-atom-block code {
   background: transparent;
   font-family: var(--font-mono);
   /* the source is secondary — small + muted, present for the power
@@ -1469,21 +2075,13 @@
   line-height: 1.5;
   color: var(--ink-faint);
 }
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-line * {
-  color: var(--ink-faint);
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLine,
-.doc-editing .milkdown .query-atom-block.milkdown-code-block .cm-activeLineGutter {
-  background: transparent !important;
-}
-.doc-editing .milkdown .query-atom-block.milkdown-code-block.ProseMirror-selectednode {
+.doc-editing .dohc-tiptap-editor .query-atom-block.ProseMirror-selectednode {
   outline: none !important;
 }
 /* The human caption widget rendered just before the block. Unlike
  * the ascii zero-size affordance this one TAKES layout space — it is
  * the primary, legible label that replaces "wtf is this code". */
-.doc-editing .milkdown .query-atom-caption {
+.doc-editing .dohc-tiptap-editor .query-atom-caption {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1491,21 +2089,21 @@
   font-size: 12px;
   user-select: none;
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-dot {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-dot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
   background: var(--color-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-live {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-live {
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-accent);
 }
-.doc-editing .milkdown .query-atom-caption .query-atom-label {
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-label {
   font-weight: 600;
   color: var(--ink-strong);
 }
@@ -1513,7 +2111,7 @@
  * (now-secondary) source. THIS is the prominent, legible thing the
  * eye lands on: the data, not the DSL. pre-wrap preserves ascii
  * heatmaps + line structure; text-only (no innerHTML — XSS-safe). */
-.doc-editing .milkdown .query-atom-result {
+.doc-editing .dohc-tiptap-editor .query-atom-result {
   white-space: pre-wrap;
   font-size: 13px;
   line-height: 1.55;
@@ -1527,7 +2125,7 @@
   background: color-mix(in srgb, var(--color-accent) 4%, var(--color-surface));
   user-select: none;
 }
-.doc-editing .milkdown .query-atom-empty {
+.doc-editing .dohc-tiptap-editor .query-atom-empty {
   margin: -0.2em 0 0.7em;
   padding: 6px 12px;
   font-size: 13px;
@@ -1538,7 +2136,7 @@
  * ascii block by the ProseMirror plugin; CSS positions the actual button
  * absolutely so it floats over the block's top-left corner. The widget
  * itself doesn't take layout space — the block above flows as normal. */
-.doc-editing .milkdown .ascii-sketch-edit-affordance {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance {
   position: relative;
   display: inline-block;
   width: 0;
@@ -1547,7 +2145,7 @@
    * select the preceding paragraph. */
   user-select: none;
 }
-.doc-editing .milkdown .ascii-sketch-edit-btn {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn {
   position: absolute;
   /* Sit just inside the top-left corner of the block that follows. The
    * widget is at the block's start position so (0, 0) of the button =
@@ -1572,15 +2170,15 @@
   z-index: 1;
   white-space: nowrap;
 }
-.doc-editing .milkdown .ascii-sketch-edit-btn:hover {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn:hover {
   color: var(--ink);
   border-color: var(--ink);
 }
 /* Reveal the button when the user hovers EITHER the button itself OR the
  * ascii block immediately following the affordance widget. :has lets us
  * react to hover on the sibling. */
-.doc-editing .milkdown .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
-.doc-editing .milkdown .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
   opacity: 1;
   pointer-events: auto;
 }

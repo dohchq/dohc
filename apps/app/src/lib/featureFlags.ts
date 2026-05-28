@@ -9,6 +9,13 @@
 //   • import.meta.env.VITE_DOHC_<NAME> === '1'  (build-time)
 // Default OFF ⇒ zero user-facing change until explicitly enabled.
 
+// 3.9.21 — `multiplayer` GRADUATED to default-on (like
+// inline-atoms before it). The gate has been removed from
+// AtomView; the bootstrap → collab → presence pipeline now
+// engages for every markdown atom. If you ever need a
+// per-browser kill switch in dev, add it back to this union
+// and re-thread to AtomView; for now keeping the type
+// minimal.
 export type FeatureFlag = 'inline-atoms'
 
 export function featureEnabled(name: FeatureFlag): boolean {

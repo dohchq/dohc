@@ -5,8 +5,10 @@
 //     `atomShares` row grants a viewer access, addressed by the
 //     owner's rename-proof `fileId`.
 //   - `resolveShareAccess` is the ONE door: every shared read/render/
-//     write resolves through it; it re-verifies the caller is the
-//     grantee. Absence / wrong viewer ⇒ DENY (mirrors resolveWindow).
+//     write resolves through it; it re-verifies the caller is part of
+//     the grant audience. Absence / wrong viewer ⇒ DENY (mirrors
+//     resolveWindow). Public-link shares still require a signed-in
+//     viewer; they do not expose anonymous internet reads.
 //   - The owner's OWN functions (atoms.list/getByPath/upsert/…) stay
 //     workspace-scoped and UNTOUCHED. This is a PARALLEL, gated read
 //     path — not a widening of those queries (which would risk the
@@ -18,9 +20,10 @@ import { v } from 'convex/values'
 import { query, mutation } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
-import { requireWorkspace } from './auth'
+import { normalizeEmail, requireWorkspace } from './auth'
 import { extractFrontmatterId, deriveTitle } from './atomId'
 import { isMember } from './orgs'
+import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 
 export type AccessContext = {
   viewerWorkspaceId: string
@@ -46,7 +49,20 @@ export async function resolveShareAccess(
   // THIS owner shared via the SAME audience as this grant — never
   // the owner's private vault. Computed per audience below.
   let sharedFileIds: Set<string>
-  if (row.granteeWorkspaceId) {
+  if (row.publicAccess === true) {
+    // ── public-link share — any signed-in viewer with the shareId may
+    // read it. Formula scope is still limited to this owner's public
+    // shares, never the whole owner workspace.
+    const grants = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) =>
+        q.eq('ownerWorkspaceId', row.ownerWorkspaceId),
+      )
+      .collect()
+    sharedFileIds = new Set(
+      grants.filter((g) => g.publicAccess === true).map((g) => g.fileId),
+    )
+  } else if (row.granteeWorkspaceId) {
     // ── person-to-person share — caller must BE the grantee.
     if (row.granteeWorkspaceId !== viewer) return null
     const grants = await ctx.db
@@ -61,7 +77,7 @@ export async function resolveShareAccess(
         .map((g) => g.fileId),
     )
   } else if (row.granteeOrgId) {
-    // ── org/"company" share — caller must be a MEMBER of the org.
+    // ── workspace share — caller must be a MEMBER of that workspace.
     if (!(await isMember(ctx, row.granteeOrgId, viewer))) return null
     const grants = await ctx.db
       .query('atomShares')
@@ -116,6 +132,110 @@ export async function ownerAtomByFileId(
   return atom
 }
 
+async function userProfileByWorkspaceId(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+) {
+  return await ctx.db
+    .query('userProfiles')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .first()
+}
+
+async function userProfileByEmail(ctx: QueryCtx | MutationCtx, email: string) {
+  const normalizedEmail = normalizeEmail(email)
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    throw new Error('Enter an email address.')
+  }
+  return await ctx.db
+    .query('userProfiles')
+    .withIndex('by_normalizedEmail', (q) =>
+      q.eq('normalizedEmail', normalizedEmail),
+    )
+    .first()
+}
+
+async function shareAtomWithWorkspace(
+  ctx: MutationCtx,
+  {
+    owner,
+    fileId,
+    granteeWorkspaceId,
+    permission,
+  }: {
+    owner: string
+    fileId: string
+    granteeWorkspaceId: string
+    permission: 'view' | 'edit'
+  },
+): Promise<Id<'atomShares'>> {
+  if (granteeWorkspaceId === owner) {
+    throw new Error('Cannot share a file with yourself.')
+  }
+  // The caller must actually OWN the fileId (a bound index row).
+  const mine = await ownerAtomByFileId(ctx, owner, fileId)
+  if (!mine) {
+    throw new Error(`You don't own a file with id "${fileId}".`)
+  }
+  const existing = await ctx.db
+    .query('atomShares')
+    .withIndex('by_owner_grantee_fileId', (q) =>
+      q
+        .eq('ownerWorkspaceId', owner)
+        .eq('granteeWorkspaceId', granteeWorkspaceId)
+        .eq('fileId', fileId),
+    )
+    .first()
+  if (existing) {
+    if (existing.permission !== permission) {
+      await ctx.db.patch(existing._id, { permission })
+    }
+    return existing._id
+  }
+  return await ctx.db.insert('atomShares', {
+    ownerWorkspaceId: owner,
+    fileId,
+    granteeWorkspaceId,
+    permission,
+    createdBy: owner,
+    createdAt: Date.now(),
+  })
+}
+
+async function scheduleShareAudienceDisconnect(
+  ctx: MutationCtx,
+  row: {
+    ownerWorkspaceId: string
+    granteeWorkspaceId?: string
+    granteeOrgId?: string
+    publicAccess?: boolean
+  },
+): Promise<void> {
+  if (row.granteeWorkspaceId) {
+    await scheduleHocuspocusDisconnect(ctx, {
+      workspaceId: row.ownerWorkspaceId,
+      userId: row.granteeWorkspaceId,
+    })
+    return
+  }
+
+  if (row.publicAccess === true) return
+
+  const granteeOrgId = row.granteeOrgId
+  if (!granteeOrgId) return
+  const members = await ctx.db
+    .query('memberships')
+    .withIndex('by_org', (q) => q.eq('orgId', granteeOrgId))
+    .collect()
+  for (const member of members) {
+    if (member.workspaceId === row.ownerWorkspaceId) continue
+    await scheduleHocuspocusDisconnect(ctx, {
+      workspaceId: row.ownerWorkspaceId,
+      userId: member.workspaceId,
+    })
+  }
+}
+
 // ── Owner: share / revoke ───────────────────────────────────────────
 // Share one of MY files (by fileId) with another workspace. Only the
 // owner of the fileId may share it; grantee must differ from owner;
@@ -126,39 +246,40 @@ export const shareAtom = mutation({
     fileId: v.string(),
     granteeWorkspaceId: v.string(),
     permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { fileId, granteeWorkspaceId, permission }) => {
-    const owner = await requireWorkspace(ctx)
-    if (granteeWorkspaceId === owner) {
-      throw new Error('Cannot share a file with yourself.')
-    }
-    // The caller must actually OWN the fileId (a bound index row).
-    const mine = await ownerAtomByFileId(ctx, owner, fileId)
-    if (!mine) {
-      throw new Error(`You don't own a file with id "${fileId}".`)
-    }
-    const existing = await ctx.db
-      .query('atomShares')
-      .withIndex('by_owner_grantee_fileId', (q) =>
-        q
-          .eq('ownerWorkspaceId', owner)
-          .eq('granteeWorkspaceId', granteeWorkspaceId)
-          .eq('fileId', fileId),
-      )
-      .first()
-    if (existing) {
-      if (existing.permission !== permission) {
-        await ctx.db.patch(existing._id, { permission })
-      }
-      return existing._id
-    }
-    return await ctx.db.insert('atomShares', {
-      ownerWorkspaceId: owner,
+  handler: async (
+    ctx,
+    { fileId, granteeWorkspaceId, permission, activeWorkspaceId },
+  ) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    return await shareAtomWithWorkspace(ctx, {
+      owner,
       fileId,
       granteeWorkspaceId,
       permission,
-      createdBy: owner,
-      createdAt: Date.now(),
+    })
+  },
+})
+
+export const shareAtomByEmail = mutation({
+  args: {
+    fileId: v.string(),
+    email: v.string(),
+    permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fileId, email, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const profile = await userProfileByEmail(ctx, email)
+    if (!profile) {
+      throw new Error('No dohc user found for that email yet.')
+    }
+    return await shareAtomWithWorkspace(ctx, {
+      owner,
+      fileId,
+      granteeWorkspaceId: profile.workspaceId,
+      permission,
     })
   },
 })
@@ -172,11 +293,12 @@ export const shareAtomToOrg = mutation({
     fileId: v.string(),
     orgId: v.id('orgs'),
     permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { fileId, orgId, permission }) => {
-    const owner = await requireWorkspace(ctx)
+  handler: async (ctx, { fileId, orgId, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     if (!(await isMember(ctx, orgId, owner))) {
-      throw new Error('You are not a member of that company.')
+      throw new Error('You are not a member of that workspace.')
     }
     const mine = await ownerAtomByFileId(ctx, owner, fileId)
     if (!mine) throw new Error(`You don't own a file with id "${fileId}".`)
@@ -206,18 +328,60 @@ export const shareAtomToOrg = mutation({
   },
 })
 
+// Share one of MY files as an "Anyone with the link" grant. The link
+// is still a shareId, and readers must be signed in, but no specific
+// workspace/person membership is required once they have the link.
+export const shareAtomPublic = mutation({
+  args: {
+    fileId: v.string(),
+    permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fileId, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const mine = await ownerAtomByFileId(ctx, owner, fileId)
+    if (!mine) throw new Error(`You don't own a file with id "${fileId}".`)
+    const existing = (
+      await ctx.db
+        .query('atomShares')
+        .withIndex('by_owner_fileId', (q) =>
+          q.eq('ownerWorkspaceId', owner).eq('fileId', fileId),
+        )
+        .collect()
+    ).find((row) => row.publicAccess === true)
+    if (existing) {
+      if (existing.permission !== permission) {
+        await ctx.db.patch(existing._id, { permission })
+      }
+      return existing._id
+    }
+    return await ctx.db.insert('atomShares', {
+      ownerWorkspaceId: owner,
+      fileId,
+      publicAccess: true,
+      permission,
+      createdBy: owner,
+      createdAt: Date.now(),
+    })
+  },
+})
+
 // Revoke a share. Only the OWNER may revoke. Revoke-to-exhaustion:
 // delete the row by id (one row per shareId). Works for person- and
-// org-shares alike (the row _id is the handle either way).
+// org-shares alike (the row _id is the share handle either way).
 export const unshareAtom = mutation({
-  args: { shareId: v.id('atomShares') },
-  handler: async (ctx, { shareId }) => {
-    const owner = await requireWorkspace(ctx)
+  args: {
+    shareId: v.id('atomShares'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { shareId, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     const row = await ctx.db.get(shareId)
     if (!row) return { ok: true as const } // already gone — idempotent
     if (row.ownerWorkspaceId !== owner) {
       throw new Error('Only the owner can revoke a share.')
     }
+    await scheduleShareAudienceDisconnect(ctx, row)
     await ctx.db.delete(shareId)
     return { ok: true as const }
   },
@@ -238,7 +402,10 @@ export async function cascadeDeleteSharesForFileId(
       q.eq('ownerWorkspaceId', ownerWorkspaceId).eq('fileId', fileId),
     )
     .collect()
-  for (const r of rows) await ctx.db.delete(r._id)
+  for (const r of rows) {
+    await scheduleShareAudienceDisconnect(ctx, r)
+    await ctx.db.delete(r._id)
+  }
 }
 
 // ── Viewer: what's shared with me ───────────────────────────────────
@@ -246,9 +413,9 @@ export async function cascadeDeleteSharesForFileId(
 // for each file shared TO the caller, resolving each owner atom's
 // current path + display title through the gated path.
 export const listSharedWithMe = query({
-  args: {},
-  handler: async (ctx) => {
-    const viewer = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const viewer = await requireWorkspace(ctx, activeWorkspaceId)
     const grants = await ctx.db
       .query('atomShares')
       .withIndex('by_grantee', (q) => q.eq('granteeWorkspaceId', viewer))
@@ -280,23 +447,48 @@ export const listSharedWithMe = query({
 
 // What I have shared (owner's manage/revoke view).
 export const listMyShares = query({
-  args: {},
-  handler: async (ctx) => {
-    const owner = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await ctx.db
       .query('atomShares')
       .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))
       .collect()
-    return rows.map((r) => ({
-      shareId: r._id,
-      fileId: r.fileId,
-      // exactly one is set — the owner's manage view labels the
-      // audience (person vs company) from these (review P2-3).
-      granteeWorkspaceId: r.granteeWorkspaceId ?? null,
-      granteeOrgId: r.granteeOrgId ?? null,
-      permission: r.permission,
-      createdAt: r.createdAt,
-    }))
+    const out = []
+    for (const r of rows) {
+      const profile = r.granteeWorkspaceId
+        ? await userProfileByWorkspaceId(ctx, r.granteeWorkspaceId)
+        : null
+      out.push({
+        shareId: r._id,
+        fileId: r.fileId,
+        // exactly one is set — the owner's manage view labels the
+        // audience (person vs workspace vs public link) from these.
+        granteeWorkspaceId: r.granteeWorkspaceId ?? null,
+        granteeEmail: profile?.email ?? null,
+        granteeName: profile?.name ?? null,
+        granteeOrgId: r.granteeOrgId ?? null,
+        publicAccess: r.publicAccess === true,
+        permission: r.permission,
+        createdAt: r.createdAt,
+      })
+    }
+    return out
+  },
+})
+
+// Lightweight owner projection for persistent UI chrome. The Share dialog
+// needs audience labels; the sidebar only needs to know whether a file has
+// at least one active grant.
+export const listSharedFileIds = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))
+      .collect()
+    return [...new Set(rows.map((r) => r.fileId))].sort()
   },
 })
 

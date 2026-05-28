@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import { parseFrontmatter } from '../lib/frontmatter'
@@ -9,13 +10,14 @@ import { AtomEditor } from './AtomEditor'
 // sharing-v1 1a/1b — view OR collaboratively edit an atom shared WITH
 // the current user. Formulas resolve through evalFormulasShared
 // (scoped) via AtomEditor's `shareId`. With a 'view' grant the editor
-// is read-only; with 'edit' it autosaves through upsertSharedAtom
-// using OPTIMISTIC CONCURRENCY (baseVersion) — a stale save is
-// rejected with a CONFLICT the user can resolve by reloading, so a
-// co-editor's work is never silently clobbered.
+// is read-only; with 'edit' markdown changes go through the shared
+// Hocuspocus/Yjs document. The legacy whole-body CAS save path stays disabled
+// for collaborative markdown so a CRDT merge cannot become a false conflict.
 export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
+  const { user } = useAuth()
   const shared = useQuery(api.atomShares.getSharedAtom, { shareId })
   const save = useMutation(api.atoms.upsertSharedAtom)
+  const legacyAutosaveEnabled = false
 
   // local edit buffer + the exact body we're editing against
   const [draft, setDraft] = useState<string | null>(null)
@@ -30,6 +32,8 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
   const [saveError, setSaveError] = useState<string | null>(null)
 
   const canEdit = shared?.permission === 'edit'
+  const collabUserName =
+    user?.firstName || user?.email?.split('@')[0] || 'You'
 
   // First load seeds the buffer + base body. We do NOT clobber an
   // in-progress local edit on a reactive refetch (LWW v1) — a stale
@@ -43,7 +47,9 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shared])
 
-  // Debounced autosave for edit grants (content compare-and-swap).
+  // Legacy debounced autosave for edit grants (content compare-and-swap).
+  // Disabled for v2 collaborative markdown; Phase 1.6 moves cache projection
+  // to Hocuspocus so this client-side whole-body path can be removed.
   // `saving` in the deps means a finished save re-runs this: if
   // `draft` advanced during the in-flight save, the follow-up save
   // fires (no stranded edits).
@@ -53,7 +59,15 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     // every debounce (revoked/locked) in a loop (codex re-review).
     // The next user edit clears saveError (onChange) → one retry per
     // edit, never a loop.
-    if (!canEdit || draft === null || conflict || saveError || saving) return
+    if (
+      !legacyAutosaveEnabled ||
+      !canEdit ||
+      draft === null ||
+      conflict ||
+      saveError ||
+      saving
+    )
+      return
     const base = remoteBodyRef.current
     if (base === null || draft === base) return
     const body = draft
@@ -76,7 +90,16 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
         .finally(() => setSaving(false))
     }, 600)
     return () => clearTimeout(t)
-  }, [draft, canEdit, conflict, saveError, saving, save, shareId])
+  }, [
+    draft,
+    legacyAutosaveEnabled,
+    canEdit,
+    conflict,
+    saveError,
+    saving,
+    save,
+    shareId,
+  ])
 
   const { title, isHtml } = useMemo(() => {
     const src = draft ?? shared?.body ?? ''
@@ -113,6 +136,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
   }
 
   const body = draft ?? shared.body
+  const { meta: frontmatter } = parseFrontmatter(body)
   const { fm, rest } = splitFrontmatter(body)
   const leaf =
     shared.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ?? shared.path
@@ -123,6 +147,11 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     setSaveError(null)
     setDraft(shared!.body)
     remoteBodyRef.current = shared!.body
+  }
+
+  function previewDraft(next: string) {
+    setDraft(next)
+    remoteBodyRef.current = next
   }
 
   return (
@@ -195,8 +224,16 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
               setDraft(joinFrontmatter(fm, next))
             }
           }}
+          onPreviewChange={(next) => previewDraft(joinFrontmatter(fm, next))}
           shareId={shareId}
           readOnly={!canEdit || conflict}
+          frontmatter={frontmatter}
+          collab={{
+            workspaceId: shared.ownerWorkspaceId,
+            atomId: shared.fileId,
+            userId: user?.id,
+            userName: collabUserName,
+          }}
         />
       )}
     </div>

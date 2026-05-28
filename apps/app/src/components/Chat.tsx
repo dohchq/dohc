@@ -5,6 +5,8 @@ import { Send } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
+import { useSetChatBusy } from '../lib/chat-busy'
 
 // Track-3 P3 — slash-command detection. EXACT design-pinned
 // grammar (skills-commands-v1 §3.3 line 317):
@@ -73,11 +75,17 @@ export function Chat({
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
   // collect; filtered to type:skill or skills/* path).
-  const skills = useQuery(api.skills.list) ?? []
+  // org-plan §5: active workspace threaded through skills + the
+  // (org-plan §5 non-defaultable) listMessages thread surface. The
+  // agent.sendMessage action remains personal-default for now (an
+  // action cannot validate active membership; the thread itself
+  // binds to a workspace via threadRefs, which is the long-term fix).
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
 
   const messagesQuery = useUIMessages(
     api.agent.listMessages,
-    threadId ? { threadId } : 'skip',
+    threadId ? { threadId, activeWorkspaceId } : 'skip',
     { initialNumItems: 50, stream: true },
   )
 
@@ -95,6 +103,19 @@ export function Chat({
       ),
     [uiMessages],
   )
+
+  // F1 (multiplayer-and-h-followups §7) — publish busy state up to
+  // ChatBusyContext so the WorkspaceSwitcher can disable itself while
+  // a stream is mid-flight. Without this, switching workspace mid-send
+  // navigates (R1 commit 3) → chat rebinds to new workspace's thread
+  // → in-flight assistant tokens are orphaned. v1 fix: block the
+  // switcher. v2 (deferred): confirm dialog + AbortController via the
+  // agent action.
+  const setChatBusy = useSetChatBusy()
+  useEffect(() => {
+    setChatBusy(busy)
+    return () => setChatBusy(false)
+  }, [busy, setChatBusy])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -144,10 +165,11 @@ export function Chat({
           threadId,
           prompt: promptText,
           entry: 'skill-fire',
+          activeWorkspaceId,
         })
         return
       }
-      await sendMessage({ threadId, prompt })
+      await sendMessage({ threadId, prompt, activeWorkspaceId })
     } catch (e) {
       console.error(e)
     } finally {
@@ -182,6 +204,7 @@ export function Chat({
           threadId,
           prompt: path,
           entry: 'skill-fire',
+          activeWorkspaceId,
         })
       } catch (e) {
         console.error(e)

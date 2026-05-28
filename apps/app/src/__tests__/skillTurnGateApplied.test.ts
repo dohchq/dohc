@@ -32,7 +32,7 @@ const AGENT_SRC = readFileSync(
 // §2-A.1 UNAUTHORIZABLE-set (skills-commands-v1.md lines 391-419,
 // design v9 / gate-cleared at commit 3497b40). Every op-name here
 // MUST be paired with a `requireDirectUserAuthorization(ctx, '<op>')`
-// call somewhere in agent.ts. `write_atom` and `capture` are
+// call somewhere in agent.ts. `create_atom` and `capture` are
 // CONDITIONAL gates (gated by input shape); the call still exists.
 const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   // State flips / user-decision class
@@ -46,7 +46,7 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'delete_entity',
   'delete_folder',
   // Destructive overwrite / elevated capability
-  'write_atom',
+  'create_atom',
   'update_entity',
   // Self-modifying / sharing class
   'save_skill',
@@ -154,10 +154,10 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
   'set_lock',
 ] as const
 
-// Ops where the gate is INSIDE a conditional (write_atom, capture).
+// Ops where the gate is INSIDE a conditional (create_atom, capture).
 // Verify the conditional gate exists; placement covered by the
 // surrounding conditional logic in the source.
-const CONDITIONAL_GATE_OPS = ['write_atom', 'capture'] as const
+const CONDITIONAL_GATE_OPS = ['create_atom', 'capture'] as const
 
 // Ops where the gate is AFTER a `requiresConfirmation` early-return
 // branch (delete_*). Verify the gate is below that early-return
@@ -223,34 +223,34 @@ describe('Track-3 P2b.3 fold (Codex F2/F3) — gate PLACEMENT, not just presence
       // wraps the gate; side effect happens in the always-flow
       // below).
       expect(gateIdx).toBeGreaterThan(0)
-      // Side effect must exist downstream; for capture/write_atom
+      // Side effect must exist downstream; for capture/create_atom
       // both `requireWorkspace` and `ctx.runMutation` follow.
       expect(sideIdx).toBeGreaterThan(gateIdx)
     })
   }
 })
 
-// P2b.3 fold (Codex F1) — write_atom's elevated-capability
+// P2b.3 fold (Codex F1) — create_atom's elevated-capability
 // predicate MUST include `type: plugin` body + `plugins/*` path
 // (the design §2-A.1 line 397 explicit list). Lock that the
-// helper module exports `isPluginAtomBody` AND that write_atom's
+// helper module exports `isPluginAtomBody` AND that create_atom's
 // condition references both `plugins/` and `isPluginAtomBody`.
-describe('Track-3 P2b.3 fold (Codex F1) — write_atom gates plugin atoms', () => {
+describe('Track-3 P2b.3 fold (Codex F1) — create_atom gates plugin atoms', () => {
   it('agent.ts imports isPluginAtomBody from ./atomId', () => {
     expect(AGENT_SRC).toMatch(
       /import\s+\{[^}]*isPluginAtomBody[^}]*\}\s+from\s+['"]\.\/atomId['"]/,
     )
   })
 
-  it('write_atom condition includes path.startsWith("plugins/") + isPluginAtomBody(body)', () => {
-    const body = TOOL_BODIES['write_atom']
+  it('create_atom condition includes path.startsWith("plugins/") + isPluginAtomBody(content)', () => {
+    const body = TOOL_BODIES['create_atom']
     expect(body).toBeTruthy()
     expect(body).toMatch(/path\.startsWith\(['"]plugins\//)
-    expect(body).toMatch(/isPluginAtomBody\(body\)/)
+    expect(body).toMatch(/isPluginAtomBody\(content\)/)
     // And the skill-shape predicates are still in place (no
     // regression on the existing checks).
     expect(body).toMatch(/path\.startsWith\(['"]skills\//)
-    expect(body).toMatch(/isSkillAtomBody\(body\)/)
+    expect(body).toMatch(/isSkillAtomBody\(content\)/)
   })
 })
 
@@ -267,7 +267,7 @@ describe('Track-3 P2b.3 fold (Codex F1) — write_atom gates plugin atoms', () =
 // SAFE_NO_GATE_OPS is the design's SKILL-MAY-CALL list
 // (skills-commands-v1.md §2-A.1 "SKILL MAY CALL without further
 // human confirm"). Read-only or explicitly-additive writes.
-// `write_atom` and `capture` are CONDITIONAL — they have gates
+// `create_atom` and `capture` are CONDITIONAL — they have gates
 // inside an `if` and DO NOT belong on this allowlist (the gate
 // MUST be present so the regression test catches a removal of
 // the `if`-block).
@@ -290,6 +290,11 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   // explicitly-additive writes (no overwrite path)
   'create_entities', // gated via mutation-level strictCreate (P2b.2 BRACE) — no `requireDirectUserAuthorization` needed at the tool layer; the depth-read + strictCreate mode is the structural enforcement
   'create_folder',
+  'insert_after_heading',
+  'propose_replace_text',
+  'rewrite_section',
+  'write_atom', // retired v1 tool: always refuses, no side effect
+  'suggest_in_doc', // retired v1 tool: always refuses, no side effect
   // P2c — the skill-fire entry. Structurally restricted to
   // SKILL_ENTRY_TOOLS activeTools mode (depth=0 + entry='skill-
   // fire'); refuses depth>0 recursion via its own internal
@@ -337,7 +342,10 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'pending_proposals', 'pending_captures', 'review_window_sharing',
       'onboarding_state', 'run_query', 'run_loop',
       'create_entities', 'create_folder',
+      'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
+      'write_atom', // retired v1 tool: always refuses
+      'suggest_in_doc', // retired v1 tool: always refuses
     ])
     expect([...SAFE_NO_GATE_OPS].sort()).toEqual([...expectedSafe].sort())
   })

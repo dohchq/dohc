@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
 import {
   extractFrontmatterId,
   isHtmlAtomBody,
@@ -25,9 +26,16 @@ import {
 // the Convex runtime. This returns the raw post-frontmatter HTML;
 // the route sanitizes + wraps + sets the §2-C headers.
 export const getRenderable = query({
-  args: { atomId: v.string() },
-  handler: async (ctx, { atomId }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
+  // The /r/<atomId> server-side route forwards `?w=<wsId>` here; the
+  // client-side HtmlAtomFrame appends that param to the iframe URL
+  // from `useActiveWorkspaceId()`. Backend stays optional for URL
+  // back-compat: old shared links without `?w=` resolve against the
+  // caller's personal workspace via requireWorkspace(ctx, undefined),
+  // which is the documented v0 surface — not a regression.
+  args: { atomId: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { atomId, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     if (!atomId) return null
 
     // .take(2), NOT .unique(): a duplicate (ws,fileId) row is index
@@ -69,6 +77,14 @@ export const getRenderable = query({
     // POSITIVE id mismatch is rejected.
     const fid = extractFrontmatterId(atom.body)
     if (fid !== null && fid !== atomId) return null
+
+    // P1 (multiplayer-and-h-followups §6.5) — access gate. Render
+    // route returns null for atoms the viewer can't read (the /r
+    // route maps this to 404, consistent with the M5 fix from the
+    // org-tenancy round-2 review — never confirms the atom exists).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, atom._id, viewerSubject))) return null
 
     const { rest } = splitFrontmatter(atom.body)
     return { html: rest, updatedAt: atom.updatedAt }

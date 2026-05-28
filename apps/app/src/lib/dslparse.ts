@@ -43,8 +43,14 @@ export type QueryFence = {
   src: string
 }
 
+export function isQueryFenceLanguage(language: unknown): boolean {
+  const normalized = String(language ?? '').trim().toLowerCase()
+  return normalized === 'query' || normalized === 'dohc-query'
+}
+
 // Same RE used in AtomView splitQueries but with the info-string captured.
-export const QUERY_FENCE_RE = /```query(?:[ \t]+([^\n]*))?\n([\s\S]*?)```/g
+export const QUERY_FENCE_RE =
+  /```(?:query|dohc-query)(?:[ \t]+([^\n]*))?\n([\s\S]*?)```/g
 
 export function parseFenceInfo(info: string | undefined): Record<string, string> {
   if (!info) return {}

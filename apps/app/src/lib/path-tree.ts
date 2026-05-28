@@ -7,6 +7,9 @@ export type FileRow = {
   path: string
   title?: string | null
   source: string
+  // Last-write timestamp (projected by api.atoms.list). Absent on callers
+  // that don't project it.
+  updatedAt?: number
   // html-atoms-v1 §5 — 'html' ⇒ tree badges it as a page (no `.html`
   // extension exists). Advisory/additive; absent on legacy rows.
   type?: string | null
@@ -37,6 +40,9 @@ export type TreePage = {
   starred?: boolean
   // emoji-icons — user-chosen icon emoji (null/absent ⇒ default icon)
   icon?: string | null
+  // D4.8e — rename-proof fileId, passed through for share indicators
+  // and URL-stable page routing.
+  fileId?: string | null
 }
 
 export type TreeNode = {
@@ -121,6 +127,7 @@ export function buildTree(
           userLocked: f.userLocked,
           starred: f.starred,
           icon: f.icon ?? null,
+          fileId: f.fileId ?? null,
         }
       } else {
         cursor = child

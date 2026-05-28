@@ -37,7 +37,20 @@ const EXEMPT = new Set<string>([
 ])
 
 // PRODUCTION callers. A new caller MUST be added here.
-const EXPECTED_CALLERS = new Set<string>([resolve(CONVEX_DIR, 'loop.ts')])
+const EXPECTED_CALLERS = new Set<string>([
+  resolve(CONVEX_DIR, 'loop.ts'),
+  // H-2 (multiplayer-and-h-followups §4 A2) — `orgs._seedNewOrg` writes
+  // a starter `company.md` + `dashboard.md` into a freshly-created org
+  // workspace via `_upsertSystem`. Same invariant satisfied: this is
+  // the SECOND systemLocked mouth, called exactly once per org create
+  // (idempotent on re-seed; new content is also agent-owned). The
+  // lock invariant — "system atoms have one owner that asserts the
+  // lock on every refresh" — holds: `_seedNewOrg` is only invoked
+  // by `createOrgWithBridge` on org creation, and `regenerateMap`
+  // (the loop.ts caller) owns `_map.md` separately. No overlap, no
+  // dueling owners on the same atom.
+  resolve(CONVEX_DIR, 'orgs.ts'),
+])
 
 function listConvexSources(): string[] {
   const out: string[] = []

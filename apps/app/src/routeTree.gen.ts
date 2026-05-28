@@ -17,8 +17,12 @@ import { Route as RAtomIdRouteImport } from './routes/r/$atomId'
 import { Route as ApiAuthSignOutRouteImport } from './routes/api/auth/sign-out'
 import { Route as ApiAuthSignInRouteImport } from './routes/api/auth/sign-in'
 import { Route as ApiAuthCallbackRouteImport } from './routes/api/auth/callback'
+import { Route as AppWWsIdRouteImport } from './routes/_app.w.$wsId'
 import { Route as AppSharedShareIdRouteImport } from './routes/_app.shared.$shareId'
 import { Route as AppPAtomIdRouteImport } from './routes/_app.p.$atomId'
+import { Route as AppWWsIdIndexRouteImport } from './routes/_app.w.$wsId.index'
+import { Route as AppWWsIdSharedShareIdRouteImport } from './routes/_app.w.$wsId.shared.$shareId'
+import { Route as AppWWsIdPAtomIdRouteImport } from './routes/_app.w.$wsId.p.$atomId'
 
 const SignedOutRoute = SignedOutRouteImport.update({
   id: '/signed-out',
@@ -59,6 +63,11 @@ const ApiAuthCallbackRoute = ApiAuthCallbackRouteImport.update({
   path: '/api/auth/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppWWsIdRoute = AppWWsIdRouteImport.update({
+  id: '/w/$wsId',
+  path: '/w/$wsId',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSharedShareIdRoute = AppSharedShareIdRouteImport.update({
   id: '/shared/$shareId',
   path: '/shared/$shareId',
@@ -69,6 +78,21 @@ const AppPAtomIdRoute = AppPAtomIdRouteImport.update({
   path: '/p/$atomId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppWWsIdIndexRoute = AppWWsIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
+const AppWWsIdSharedShareIdRoute = AppWWsIdSharedShareIdRouteImport.update({
+  id: '/shared/$shareId',
+  path: '/shared/$shareId',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
+const AppWWsIdPAtomIdRoute = AppWWsIdPAtomIdRouteImport.update({
+  id: '/p/$atomId',
+  path: '/p/$atomId',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -77,9 +101,13 @@ export interface FileRoutesByFullPath {
   '/r/$atomId': typeof RAtomIdRoute
   '/p/$atomId': typeof AppPAtomIdRoute
   '/shared/$shareId': typeof AppSharedShareIdRoute
+  '/w/$wsId': typeof AppWWsIdRouteWithChildren
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/w/$wsId/': typeof AppWWsIdIndexRoute
+  '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
+  '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
 export interface FileRoutesByTo {
   '/playground': typeof PlaygroundRoute
@@ -91,6 +119,9 @@ export interface FileRoutesByTo {
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/w/$wsId': typeof AppWWsIdIndexRoute
+  '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
+  '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -101,9 +132,13 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute
   '/_app/p/$atomId': typeof AppPAtomIdRoute
   '/_app/shared/$shareId': typeof AppSharedShareIdRoute
+  '/_app/w/$wsId': typeof AppWWsIdRouteWithChildren
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/_app/w/$wsId/': typeof AppWWsIdIndexRoute
+  '/_app/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
+  '/_app/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -114,9 +149,13 @@ export interface FileRouteTypes {
     | '/r/$atomId'
     | '/p/$atomId'
     | '/shared/$shareId'
+    | '/w/$wsId'
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/w/$wsId/'
+    | '/w/$wsId/p/$atomId'
+    | '/w/$wsId/shared/$shareId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/playground'
@@ -128,6 +167,9 @@ export interface FileRouteTypes {
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/w/$wsId'
+    | '/w/$wsId/p/$atomId'
+    | '/w/$wsId/shared/$shareId'
   id:
     | '__root__'
     | '/_app'
@@ -137,9 +179,13 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/p/$atomId'
     | '/_app/shared/$shareId'
+    | '/_app/w/$wsId'
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/_app/w/$wsId/'
+    | '/_app/w/$wsId/p/$atomId'
+    | '/_app/w/$wsId/shared/$shareId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -210,6 +256,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_app/w/$wsId': {
+      id: '/_app/w/$wsId'
+      path: '/w/$wsId'
+      fullPath: '/w/$wsId'
+      preLoaderRoute: typeof AppWWsIdRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/shared/$shareId': {
       id: '/_app/shared/$shareId'
       path: '/shared/$shareId'
@@ -224,19 +277,58 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppPAtomIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/w/$wsId/': {
+      id: '/_app/w/$wsId/'
+      path: '/'
+      fullPath: '/w/$wsId/'
+      preLoaderRoute: typeof AppWWsIdIndexRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/shared/$shareId': {
+      id: '/_app/w/$wsId/shared/$shareId'
+      path: '/shared/$shareId'
+      fullPath: '/w/$wsId/shared/$shareId'
+      preLoaderRoute: typeof AppWWsIdSharedShareIdRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/p/$atomId': {
+      id: '/_app/w/$wsId/p/$atomId'
+      path: '/p/$atomId'
+      fullPath: '/w/$wsId/p/$atomId'
+      preLoaderRoute: typeof AppWWsIdPAtomIdRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
   }
 }
+
+interface AppWWsIdRouteChildren {
+  AppWWsIdIndexRoute: typeof AppWWsIdIndexRoute
+  AppWWsIdPAtomIdRoute: typeof AppWWsIdPAtomIdRoute
+  AppWWsIdSharedShareIdRoute: typeof AppWWsIdSharedShareIdRoute
+}
+
+const AppWWsIdRouteChildren: AppWWsIdRouteChildren = {
+  AppWWsIdIndexRoute: AppWWsIdIndexRoute,
+  AppWWsIdPAtomIdRoute: AppWWsIdPAtomIdRoute,
+  AppWWsIdSharedShareIdRoute: AppWWsIdSharedShareIdRoute,
+}
+
+const AppWWsIdRouteWithChildren = AppWWsIdRoute._addFileChildren(
+  AppWWsIdRouteChildren,
+)
 
 interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
   AppPAtomIdRoute: typeof AppPAtomIdRoute
   AppSharedShareIdRoute: typeof AppSharedShareIdRoute
+  AppWWsIdRoute: typeof AppWWsIdRouteWithChildren
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
   AppPAtomIdRoute: AppPAtomIdRoute,
   AppSharedShareIdRoute: AppSharedShareIdRoute,
+  AppWWsIdRoute: AppWWsIdRouteWithChildren,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

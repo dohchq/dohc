@@ -70,8 +70,8 @@ export function normalizeFileId(path: string): string {
 // join is pure concat, so prefix + rest is byte-identical to the
 // original whenever `rest` is unchanged. This is what makes the
 // editor's frontmatter round-trip provably lossless without a
-// fragile custom Milkdown frontmatter node (Context7-confirmed:
-// Crepe has no remark-frontmatter; a custom node is a 5-part,
+// fragile custom rich-editor frontmatter node (Context7-confirmed:
+// the previous editor had no remark-frontmatter; a custom node is a 5-part,
 // byte-fragile effort).
 const FM_PREFIX_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n)?/
 

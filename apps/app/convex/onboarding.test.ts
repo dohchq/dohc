@@ -184,6 +184,31 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
   })
+
+  it('completeIfReady flips an already-populated workspace from IN_PROGRESS to DONE', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, 'me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'dashboard.md',
+      '# Workspace\n```query\nentities.list("booking")\n```',
+    )
+
+    await asW(t).mutation(api.onboarding.completeIfReady, {})
+
+    expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
+  })
+
+  it('completeIfReady keeps the never-empty invariant for the client handoff', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+
+    await expect(
+      asW(t).mutation(api.onboarding.completeIfReady, {}),
+    ).rejects.toThrow(/not populated/)
+    expect(await asW(t).query(api.onboarding.state, {})).toBe('IN_PROGRESS')
+  })
 })
 
 describe('P1 — start LEASE: single-doc CAS + heartbeat + staleness recovery', () => {

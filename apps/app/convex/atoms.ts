@@ -5,11 +5,16 @@ import {
   internalQuery,
   internalMutation,
 } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
+import { scheduleMapRegen } from './loop'
+import { canReadAtom, canWriteAtomPath } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
 import { isSafeAtomPath } from './inlineAtom'
+import { deriveSearchFields } from './searchText'
+import { internal } from './_generated/api'
 import {
   seedAtomIdIntoBody,
   reconcileAtomIdIndex,
@@ -40,6 +45,7 @@ import {
   resolveShareAccess,
   ownerAtomByFileId,
 } from './atomShares'
+import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
 import type { MutationCtx } from './_generated/server'
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
@@ -93,8 +99,11 @@ export async function upsertAtomImpl(
      *  doesn't fire on the freshly-locked state). Only `_upsertSystem`
      *  sets it. */
     writeSystemLocked?: boolean
+    /** When set on a brand-new atom, create it as private to this
+     *  user. Used for user/agent-created docs in org workspaces. */
+    defaultPrivateOwnerUserId?: string
   },
-): Promise<string> {
+): Promise<Id<'atoms'>> {
   const {
     workspaceId,
     path,
@@ -104,6 +113,7 @@ export async function upsertAtomImpl(
     allowUserOverwrite,
     allowSystemOverride,
     writeSystemLocked,
+    defaultPrivateOwnerUserId,
   } = args
   // R3 §8 (Codex R3-build): reject a NUL note path at the write
   // surface — `refKey`'s in-memory delimiter is U+0000; a NUL in the
@@ -205,6 +215,7 @@ export async function upsertAtomImpl(
       source: source ?? existing.source,
       ...noticePatch,
       ...systemLockPatch,
+      ...deriveSearchFields(path, finalBody),
     })
     // R3 §1 — structural atom capture (the body-change chokepoint):
     // diff prior vs new inline values; changed ⇒ withheld until
@@ -228,7 +239,18 @@ export async function upsertAtomImpl(
     updatedAt: now,
     source: source ?? (isUserEdit ? 'user' : 'agent'),
     ...systemLockInsert,
+    ...deriveSearchFields(path, finalBody),
   })
+  if (defaultPrivateOwnerUserId) {
+    await ctx.db.insert('atomAccess', {
+      atomId: id,
+      mode: 'private',
+      ownerUserId: defaultPrivateOwnerUserId,
+      allowedUserIds: [],
+      setAt: now,
+      setByUserId: defaultPrivateOwnerUserId,
+    })
+  }
   // R3 §1 — new note: no prior ⇒ every inline value is withheld
   // until the owner confirms it (strict; closes C2 for atoms).
   await applyAtomCapture(ctx, workspaceId, path, null, finalBody)
@@ -297,20 +319,39 @@ export async function removeAtomImpl(
   const deletedFileId = extractFrontmatterId(existing.body)
   if (deletedFileId) {
     await cascadeDeleteSharesForFileId(ctx, workspaceId, deletedFileId)
+    await scheduleHocuspocusDeleteDocument(ctx, {
+      workspaceId,
+      atomId: deletedFileId,
+    })
   }
 }
 
 // Public CRUD for synthesized atoms. workspaceId is derived from auth.
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal. Membership-gated by requireWorkspace when an org id is
+  // supplied. (Adds to every public atoms surface; see also getByPath,
+  // upsert, remove, move, setLock, setIcon, setStar, idAdvisory.)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    return rows
+    // P1 (multiplayer-and-h-followups §6.5) — filter atoms the viewer
+    // can't read. Per-row resolveAtomAccess: ~3 db lookups (atomAccess,
+    // atomTombstones, folderAccess walk) per atom. For typical workspaces
+    // (~hundreds of atoms, few access overrides) the cost is small;
+    // optimize via batch-preload if profiling shows a hot path.
+    const visible: typeof rows = []
+    for (const r of rows) {
+      if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
+    }
+    return visible
       .map((r) => ({
         _id: r._id,
         path: r.path,
@@ -356,15 +397,23 @@ export const list = query({
 })
 
 export const getByPath = query({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await ctx.db
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const row = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
         q.eq('workspaceId', workspaceId).eq('path', path),
       )
       .unique()
+    if (!row) return null
+    // P1 — gate by access. Non-allowed viewers see null (consistent
+    // with "atom doesn't exist for me" — search/queries/etc. produce
+    // the same fail-closed shape).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, row._id, viewerSubject))) return null
+    return row
   },
 })
 
@@ -380,16 +429,16 @@ export const getByPath = query({
 //   suffixed   — benign: the address was auto-named `<wanted>_n`
 //                because another file wanted `<wanted>`.
 export const idAdvisory = query({
-  args: { path: v.string() },
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
   handler: async (
     ctx,
-    { path },
+    { path, activeWorkspaceId },
   ): Promise<{
     kind: 'collision' | 'suffixed' | null
     fileId: string | null
     wanted: string | null
   }> => {
-    const workspaceId = await requireWorkspace(ctx)
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const none = { kind: null, fileId: null, wanted: null } as const
     const atom = await ctx.db
       .query('atoms')
@@ -398,6 +447,15 @@ export const idAdvisory = query({
       )
       .unique()
     if (!atom) return none
+    // P1 (multiplayer-and-h-followups §6.5) — collapse to the
+    // missing-shape for atoms the viewer can't read. Without this,
+    // a teammate could probe whether `alice/secret.md` exists by
+    // calling idAdvisory and getting back a non-`none` fileId.
+    // Same no-existence-oracle pattern as atoms.getByPath /
+    // htmlAtoms.getRenderable / search.run.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canReadAtom(ctx, atom._id, viewerSubject))) return none
     const fileId = extractFrontmatterId(atom.body)
     if (fileId === null) return none
 
@@ -429,19 +487,37 @@ export const upsert = mutation({
     path: v.string(),
     body: v.string(),
     source: v.optional(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { path, body, source }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  handler: async (ctx, { path, body, source, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — write-path access
+    // gate. Notion-full: read == write at the per-atom layer, so a
+    // teammate can't overwrite your private atom (canWriteAtomPath
+    // routes to canReadAtom for an existing path), AND can't
+    // PLANT a doc in your private folder (folder cascade applies
+    // on the creation branch). Hard-error rather than fail-soft —
+    // a silent no-op would mask data loss in the editor.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to write at this path.')
+    }
     // The user's own editor. Overwriting their own content is allowed
     // (isUserEdit) but still snapshotted (coalesced) so a fat-finger
     // auto-save is recoverable.
-    return await upsertAtomImpl(ctx, {
+    const out = await upsertAtomImpl(ctx, {
       workspaceId,
       path,
       body,
       source,
       isUserEdit: true,
+      defaultPrivateOwnerUserId:
+        workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
+    // org-plan §5/§13 Phase C — debounced _map.md regen (2s coalesced).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
@@ -521,10 +597,20 @@ export const upsertSharedAtom = mutation({
 })
 
 export const remove = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 — delete is a write. Same gate as upsert; canWriteAtomPath
+    // returns false for a tombstoned atom (correct: the tombstone
+    // recovery flow is the ONLY way to operate on it).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to delete this atom.')
+    }
     await removeAtomImpl(ctx, workspaceId, path)
+    // Phase C — debounced _map.md regen.
+    await scheduleMapRegen(ctx, workspaceId)
   },
 })
 
@@ -535,9 +621,13 @@ export const remove = mutation({
 //      point at the new path
 // This keeps wikilinks/transclusions stable across moves.
 export const move = mutation({
-  args: { fromPath: v.string(), toPath: v.string() },
-  handler: async (ctx, { fromPath, toPath }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    fromPath: v.string(),
+    toPath: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fromPath, toPath, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     if (fromPath === toPath)
       return {
         ok: true as const,
@@ -553,6 +643,20 @@ export const move = mutation({
       throw new Error(`invalid atom path (contains U+0000): ${JSON.stringify(toPath)}`)
     }
 
+    // P1 — move is a write at BOTH ends: the rename touches the
+    // source atom (so the caller must be able to write the source)
+    // AND lands a new row at the destination (so the destination
+    // folder cascade applies — can't move a doc INTO a teammate's
+    // private folder). Both checks before any state changes.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteAtomPath(ctx, workspaceId, fromPath, viewerSubject))) {
+      throw new Error('You do not have access to move this atom.')
+    }
+    if (!(await canWriteAtomPath(ctx, workspaceId, toPath, viewerSubject))) {
+      throw new Error('You do not have access to move into this destination.')
+    }
+
     const src = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -560,6 +664,10 @@ export const move = mutation({
       )
       .unique()
     if (!src) throw new Error(`not found: ${fromPath}`)
+    const srcAccess = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q) => q.eq('atomId', src._id))
+      .unique()
 
     // file-org-v1 §2.3 (Track-4 D4.1a) — lock-guard chokepoint #3.
     // Rename-context message variant. A system atom has a path that's
@@ -577,7 +685,7 @@ export const move = mutation({
     if (dst) throw new Error(`already exists: ${toPath}`)
 
     const now = Date.now()
-    await ctx.db.insert('atoms', {
+    const movedId = await ctx.db.insert('atoms', {
       workspaceId,
       path: toPath,
       body: src.body,
@@ -595,7 +703,21 @@ export const move = mutation({
       // user moving the file IS acknowledgment that they've decided
       // about its skill-ness (moved out of `skills/` ⇒ no longer a
       // skill; moved within `skills/` ⇒ they kept it, deliberately).
+      // Recompute search fields — the path changed (basename/path feed
+      // searchText), even though the body is unchanged.
+      ...deriveSearchFields(toPath, src.body),
     })
+    if (srcAccess) {
+      await ctx.db.insert('atomAccess', {
+        atomId: movedId,
+        mode: srcAccess.mode,
+        ownerUserId: srcAccess.ownerUserId,
+        allowedUserIds: srcAccess.allowedUserIds,
+        setAt: srcAccess.setAt,
+        setByUserId: srcAccess.setByUserId,
+      })
+      await ctx.db.delete(srcAccess._id)
+    }
     // snapshot the source before the delete side of the move
     await recordTrash(ctx, {
       workspaceId,
@@ -624,13 +746,13 @@ export const move = mutation({
     const toNoExt = toPath.replace(/\.md$/i, '')
     const escapedFrom = escapeRegex(fromPath)
     const escapedFromNoExt = escapeRegex(fromNoExt)
-    // D4.7d — Milkdown Crepe's markdown serializer escapes the
+    // D4.7d — legacy editor's markdown serializer escapes the
     // OPENING brackets on save: typing `[[playground/a]]` in the
     // editor produces `\[\[playground/a]]` in the stored body
     // (CommonMark only requires the opening `[`s to be escaped to
     // suppress link parsing; closing `]]` stays bare). The cascade
     // regex must match BOTH forms — `[[...]]` from seeded fixtures
-    // / agent writes + `\[\[...]]` from Crepe-typed bodies.
+    // / agent writes + `\[\[...]]` from legacy-editor-typed bodies.
     const linkRe = new RegExp(
       `\\\\?\\[\\\\?\\[(!?)(${escapedFrom}|${escapedFromNoExt})\\\\?\\]\\\\?\\]`,
       'g',
@@ -670,7 +792,11 @@ export const move = mutation({
           a.body,
           a.source ?? 'agent',
         )
-        await ctx.db.patch(a._id, { body: rewritten, updatedAt: now })
+        await ctx.db.patch(a._id, {
+          body: rewritten,
+          updatedAt: now,
+          ...deriveSearchFields(a.path, rewritten),
+        })
         // R3 §1 — cascade is a link-only rewrite ⇒ the value-atom
         // diff is empty (no-op); but route it through the contract so
         // a body that DID change a value can never bypass capture.
@@ -679,6 +805,8 @@ export const move = mutation({
       }
     }
 
+    // Phase C — debounced _map.md regen (rename moves paths in the map).
+    await scheduleMapRegen(ctx, workspaceId)
     return {
       ok: true as const,
       moved: 1,
@@ -698,30 +826,61 @@ function escapeRegex(s: string): string {
 
 export const _listInternal = internalQuery({
   // atom-address-v1 §5.2 (Phase-4 precondition 1): optional `limit`
-  // to BOUND the query-block `vault.glob` read. Omitted ⇒ unbounded
+  // to BOUND the query-block `docs.glob` read. Omitted ⇒ unbounded
   // (byte-identical for the agent callers); given ⇒ take limit+1 so
   // truncation is detectable + honestly disclosed.
-  args: { workspaceId: v.string(), limit: v.optional(v.number()) },
-  handler: async (ctx, { workspaceId, limit }) => {
+  //
+  // P1 (multiplayer-and-h-followups §6.5): optional `viewerSubject` —
+  // when provided, filter to atoms the viewer can READ (private +
+  // restricted atoms the viewer isn't allowed in are dropped). Agent
+  // tools that surface paths to the model MUST pass it so the agent
+  // can't read a teammate's private atom via list_atoms. Omitted
+  // (e.g. `regenerateMap` calling for the system view) ⇒ unfiltered,
+  // back-compat with the v0 surface.
+  args: {
+    workspaceId: v.string(),
+    limit: v.optional(v.number()),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, limit, viewerSubject }) => {
     const base = ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     const rows =
       limit === undefined ? await base.collect() : await base.take(limit + 1)
-    return rows.map((r) => r.path).sort()
+    if (!viewerSubject) return rows.map((r) => r.path).sort()
+    const visible: typeof rows = []
+    for (const r of rows) {
+      if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)
+    }
+    return visible.map((r) => r.path).sort()
   },
 })
 
 export const _getInternal = internalQuery({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  // P1: optional `viewerSubject` — when provided, returns null if
+  // the viewer can't read this atom. Agent tools pass it; legacy /
+  // system callers omit (back-compat).
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
     const row = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
         q.eq('workspaceId', workspaceId).eq('path', path),
       )
       .unique()
-    return row ? row.body : null
+    if (!row) return null
+    if (
+      viewerSubject &&
+      !(await canReadAtom(ctx, row._id, viewerSubject))
+    ) {
+      return null
+    }
+    return row.body
   },
 })
 
@@ -738,11 +897,24 @@ export const _upsertInternal = internalMutation({
     // write over user content THROWS unless explicitly allowed (the
     // write_atom tool only sets this after user confirmation).
     allowUserOverwrite: v.optional(v.boolean()),
+    // P1 (multiplayer-and-h-followups §6.5) — when present, gate the
+    // write through canWriteAtomPath against THIS user's access. The
+    // agent-tool callers (write_atom + capture etc.) pass the actor
+    // subject; system callers (regenerateMap, plugin install) call
+    // without it (allowed — the system surface is intentionally
+    // unconstrained, audit-by-grep enforces that).
+    viewerSubject: v.optional(v.string()),
   },
   handler: async (
     ctx,
-    { workspaceId, path, body, source, allowUserOverwrite },
+    { workspaceId, path, body, source, allowUserOverwrite, viewerSubject },
   ) => {
+    if (
+      viewerSubject &&
+      !(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to write at this path.')
+    }
     // Agent path: the guard + coalesced snapshot live in the single
     // shared impl (isUserEdit defaults false → user-content overwrite
     // refused unless allowUserOverwrite).
@@ -752,13 +924,83 @@ export const _upsertInternal = internalMutation({
       body,
       source,
       allowUserOverwrite,
+      defaultPrivateOwnerUserId:
+        viewerSubject && workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
   },
 })
 
+export const _setBodyCache = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    atomId: v.string(),
+    markdown: v.string(),
+    projectionHash: v.string(),
+    schemaVersion: v.number(),
+    ydocStateVector: v.string(),
+    lastEditedByUserId: v.optional(v.string()),
+    projectedAt: v.number(),
+  },
+  handler: async (
+    ctx,
+    {
+      workspaceId,
+      atomId,
+      markdown,
+      projectionHash,
+      schemaVersion,
+      ydocStateVector,
+      lastEditedByUserId,
+      projectedAt,
+    },
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'missing-atom' | 'frontmatter-id-mismatch' }
+  > => {
+    const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
+    if (!atom) {
+      return { ok: false, reason: 'missing-atom' }
+    }
+
+    if (extractFrontmatterId(markdown) !== atomId) {
+      return { ok: false, reason: 'frontmatter-id-mismatch' }
+    }
+
+    await ctx.db.patch(atom._id, {
+      body: markdown,
+      updatedAt: projectedAt,
+      ...(lastEditedByUserId ? { lastEditedByUserId } : {}),
+      bodyProjectionHash: projectionHash,
+      bodyProjectionVersion: schemaVersion,
+      bodyProjectionStateVector: ydocStateVector,
+      bodyProjectedAt: projectedAt,
+      ...deriveSearchFields(atom.path, markdown),
+    })
+    await applyAtomCapture(ctx, workspaceId, atom.path, atom.body, markdown)
+    await reconcileAtomIdIndex(ctx, workspaceId, atom.path, markdown, {
+      isRestore: false,
+    })
+    await scheduleMapRegen(ctx, workspaceId)
+
+    return { ok: true }
+  },
+})
+
 export const _removeInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    // P1 — same pattern as _upsertInternal: agent callers pass
+    // viewerSubject; system callers omit it.
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    if (
+      viewerSubject &&
+      !(await canWriteAtomPath(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to delete this atom.')
+    }
     await removeAtomImpl(ctx, workspaceId, path)
   },
 })
@@ -837,9 +1079,13 @@ async function setLockImpl(
 }
 
 export const setLock = mutation({
-  args: { path: v.string(), locked: v.boolean() },
-  handler: async (ctx, { path, locked }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    locked: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, locked, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     return await setLockImpl(ctx, workspaceId, path, locked)
   },
 })
@@ -867,9 +1113,13 @@ export const _setLockInternal = internalMutation({
 // lives in the frontmatter `icon:` (the file's metadata), so this
 // rewrites the body through the normal chokepoint (preserves the id).
 export const setIcon = mutation({
-  args: { path: v.string(), icon: v.string() },
-  handler: async (ctx, { path, icon }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    icon: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, icon, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const existing = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -893,9 +1143,13 @@ export const setIcon = mutation({
 })
 
 export const setStar = mutation({
-  args: { path: v.string(), starred: v.boolean() },
-  handler: async (ctx, { path, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    starred: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const existing = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
@@ -1003,11 +1257,55 @@ export const migrateBodyTitlesToFrontmatter = internalMutation({
       const stripped = joinFrontmatter(fm, h1.bodyWithoutH1)
       const next = injectFrontmatterTitle(stripped, title)
       if (next !== a.body) {
-        await ctx.db.patch(a._id, { body: next, updatedAt: Date.now() })
+        await ctx.db.patch(a._id, {
+          body: next,
+          updatedAt: Date.now(),
+          ...deriveSearchFields(a.path, next),
+        })
         if (existingTitle) deduped++
         else migrated++
       }
     }
     return { migrated, deduped }
+  },
+})
+
+// app-wide search backfill (docs/development/search-plan.md §5). Populates
+// `searchText`/`searchable` on existing atoms that predate the feature.
+// Paginates and self-schedules so each transaction stays within Convex's
+// read/write limits; a modest page size keeps large bodies safe. Run via
+// `npx convex run atoms:_backfillSearch '{}'` (all workspaces) or scoped
+// from `search.ensureIndexed` (one workspace, self-healing on first
+// search). Idempotent — patches only rows whose fields aren't in sync.
+export const _backfillSearch = internalMutation({
+  args: {
+    workspaceId: v.optional(v.string()),
+    cursor: v.optional(v.string()),
+    batch: v.optional(v.number()),
+  },
+  handler: async (ctx, { workspaceId, cursor, batch }) => {
+    const numItems = batch ?? 40
+    const q = workspaceId
+      ? ctx.db
+          .query('atoms')
+          .withIndex('by_workspace', (i) => i.eq('workspaceId', workspaceId))
+      : ctx.db.query('atoms')
+    const page = await q.paginate({ cursor: cursor ?? null, numItems })
+    let patched = 0
+    for (const a of page.page) {
+      const sf = deriveSearchFields(a.path, a.body)
+      if (a.searchText !== sf.searchText || a.searchable !== sf.searchable) {
+        await ctx.db.patch(a._id, sf)
+        patched++
+      }
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.atoms._backfillSearch, {
+        workspaceId,
+        cursor: page.continueCursor,
+        batch: numItems,
+      })
+    }
+    return { patched, done: page.isDone }
   },
 })

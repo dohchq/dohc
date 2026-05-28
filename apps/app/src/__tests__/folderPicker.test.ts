@@ -60,9 +60,11 @@ describe('FolderPicker — D4.5b structural surface', () => {
     )
   })
 
-  it('Clear button calls onCommit with all-null + starred:false', () => {
+  it('Clear button calls onCommit with all-null but PRESERVES starred', () => {
+    // Favoriting moved to the row's inline star, so clearing a folder's
+    // icon/color must not flip its favorite.
     expect(SRC).toMatch(
-      /onCommit\(\{\s*icon:\s*null,\s*color:\s*null,\s*starred:\s*false\s*\}\)/,
+      /onCommit\(\{\s*icon:\s*null,\s*color:\s*null,\s*starred\s*\}\)/,
     )
   })
 
@@ -108,7 +110,7 @@ describe('FolderPicker — D4.5b structural surface', () => {
   // R4 fold of Codex FAIL-2 / indep FAIL-3 — all controls disabled
   // while busy; Escape + backdrop refuse to close.
   it('R4 fold — every control disabled when busy=true', () => {
-    // Icon buttons, color buttons, checkbox, X (close), Clear,
+    // Color buttons, X (close), Clear,
     // Cancel, Done all carry `disabled={busy}` or check `if (busy)`
     // at handler entry.
     expect(SRC.match(/disabled=\{busy\}/g)?.length ?? 0).toBeGreaterThanOrEqual(5)

@@ -744,7 +744,7 @@ function CatalogDetail({
 
       <section className="rounded-lg border border-dashed border-rule bg-panel/40 px-5 py-4">
         <p className="text-[12.5px] text-ink-dim leading-relaxed">
-          Installing copies a templated plugin atom into your vault at{' '}
+          Installing copies a templated plugin atom into your workspace at{' '}
           <code className="font-mono text-[11.5px] bg-panel px-1.5 py-0.5 rounded border border-rule text-ink">
             plugins/{entry.id}.md
           </code>

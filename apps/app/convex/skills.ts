@@ -1,3 +1,4 @@
+import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
 import { isSkillAtomBody, isLegacySkillPath } from './atomId'
@@ -31,9 +32,12 @@ export function pathDeriveLabel(path: string): string {
 }
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // the caller's personal workspace if omitted. Membership-gated by
+  // requireWorkspace when an org workspace is supplied.
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))

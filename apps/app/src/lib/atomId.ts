@@ -1,6 +1,6 @@
 // Editor-side re-export of the PURE frontmatter split/join helpers
 // (atom-address-v1 Phase-1 b1: strip the leading YAML frontmatter
-// before Crepe, reattach the exact bytes on save). Same one-impl
+// before Tiptap, reattach the exact bytes on save). Same one-impl
 // pattern as src/lib/inlineAtom.ts: the canonical code lives in
 // convex/atomId.ts; its only Convex import is `import type
 // MutationCtx` (fully type-erased), so this re-export is client-safe

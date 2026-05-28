@@ -51,9 +51,38 @@ export default defineSchema({
     // tree). This column is retained only so pre-existing rows that
     // were written with it still validate; it is no longer read/written.
     icon: v.optional(v.string()),
+    // app-wide search (docs/development/search-plan.md). Derived on every
+    // path/body write via deriveSearchFields(); see convex/searchText.ts.
+    //   searchText  — indexed: title×3 + basename + path + plaintext(body)
+    //   searchable  — false only for the derived index `_map.md`
+    searchText: v.optional(v.string()),
+    searchable: v.optional(v.boolean()),
+    // org-plan §4/§7 — collaborator edit lease for human-vs-human
+    // conflict (NOT the AI/system locks; those stay on systemLocked /
+    // userLocked). `editingBy` is the writer's WorkOS subject;
+    // `editingUntil` is the lease expiry (ms epoch). Expires naturally
+    // — no heartbeat — so a closed tab can't permanently block teammates.
+    editingBy: v.optional(v.string()),
+    editingUntil: v.optional(v.number()),
+    // org-plan §4 — provenance. The pill shows "last writer," not the
+    // original author (the name is precise: lastEdited, not author).
+    lastEditedByUserId: v.optional(v.string()),
+    // v2 Phase 1.6 — `body` is a derived markdown cache projected from
+    // the canonical Y.Doc. These fields make cache freshness/drift
+    // observable without loading the Y.Doc for normal search/read paths.
+    bodyProjectionHash: v.optional(v.string()),
+    bodyProjectionVersion: v.optional(v.number()),
+    bodyProjectionStateVector: v.optional(v.string()),
+    bodyProjectedAt: v.optional(v.number()),
   })
     .index('by_workspace_path', ['workspaceId', 'path'])
-    .index('by_workspace', ['workspaceId']),
+    .index('by_workspace', ['workspaceId'])
+    // recent-docs empty state for search (newest-updated first).
+    .index('by_workspace_updated', ['workspaceId', 'updatedAt'])
+    .searchIndex('search_text', {
+      searchField: 'searchText',
+      filterFields: ['workspaceId', 'searchable'],
+    }),
 
   // skills-commands-v1 §2-A.2 (Track-3 P2b.1) — per-turn structural
   // enforcement of the UNAUTHORIZABLE-set rule. Keyed by
@@ -119,12 +148,12 @@ export default defineSchema({
     fileId: v.string(),
     // EXACTLY ONE audience is set:
     //   granteeWorkspaceId — a person-to-person share (1a/1b).
-    //   granteeOrgId       — an org/"company" share (1c): every
-    //                        member of that org may read it.
-    // resolveShareAccess branches on which is present (the membership
-    // check for org-shares is the new gate).
+    //   granteeOrgId       — a workspace share: every member may read it.
+    //   publicAccess       — anyone signed in with the shareId may read it.
+    // resolveShareAccess branches on which is present.
     granteeWorkspaceId: v.optional(v.string()),
     granteeOrgId: v.optional(v.string()),
+    publicAccess: v.optional(v.boolean()),
     permission: v.union(v.literal('view'), v.literal('edit')),
     createdBy: v.string(),
     createdAt: v.number(),
@@ -145,6 +174,16 @@ export default defineSchema({
     ])
     .index('by_owner_org_fileId', ['ownerWorkspaceId', 'granteeOrgId', 'fileId']),
 
+  userProfiles: defineTable({
+    workspaceId: v.string(),
+    email: v.string(),
+    normalizedEmail: v.string(),
+    name: v.optional(v.string()),
+    updatedAt: v.number(),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_normalizedEmail', ['normalizedEmail']),
+
   // sharing-v1 1c — app-level "company"/org. A workspace creates an
   // org (becomes owner) and others join by the invite code. Members
   // are `memberships` rows. Org-shared atoms (atomShares.granteeOrgId)
@@ -154,7 +193,19 @@ export default defineSchema({
     inviteCode: v.string(),
     createdBy: v.string(),
     createdAt: v.number(),
-  }).index('by_inviteCode', ['inviteCode']),
+    // org-plan §4 additions (Phase 3: orgs promoted from share-audience
+    // to tenancy unit). All optional + back-compatible.
+    //   accent       — tiny visual identity token (v1.5 polish).
+    //   workosOrgId  — SSO link to a WorkOS Organization (deferred — set
+    //                  via the reconcile bridge once WorkOS wiring lands).
+    //   status       — 'active' | 'archived'. Defaults to 'active' on new
+    //                  orgs; existing rows treated as 'active'.
+    accent: v.optional(v.string()),
+    workosOrgId: v.optional(v.string()),
+    status: v.optional(v.union(v.literal('active'), v.literal('archived'))),
+  })
+    .index('by_inviteCode', ['inviteCode'])
+    .index('by_workos_org', ['workosOrgId']),
 
   // Entities — the underlying data the user's atoms query. The agent
   // declares types per workspace (e.g. 'person', 'project', 'booking').
@@ -209,6 +260,20 @@ export default defineSchema({
   threadRefs: defineTable({
     workspaceId: v.string(),
     threadId: v.string(),
+  }).index('by_workspace', ['workspaceId']),
+
+  // org-plan §5/§13 Phase C — DEBOUNCED `_map.md` regen.
+  //
+  // Each row says "a regen for this workspace is already scheduled to
+  // fire at `scheduledFor`". A second mutation arriving inside that
+  // 2-second window short-circuits — no extra schedule, no extra row.
+  // When the scheduled job runs it deletes its own row; the NEXT
+  // mutation re-arms. Net effect: rapid edits coalesce to one regen
+  // per `REGEN_DEBOUNCE_MS` window per workspace.
+  mapRegenSchedule: defineTable({
+    workspaceId: v.string(),
+    scheduledFor: v.number(),
+    scheduledJobId: v.optional(v.id('_scheduled_functions')),
   }).index('by_workspace', ['workspaceId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
@@ -375,10 +440,97 @@ export default defineSchema({
   memberships: defineTable({
     orgId: v.string(),
     workspaceId: v.string(), // == the member's user/workspace id
-    role: v.string(),
+    // role is the typed v1 union (org-plan §6 / decisions.md §3).
+    // Phase 0 rows only ever wrote 'owner' / 'member' (legacy code path
+    // had no admin tier), so this tightening doesn't fail existing data.
+    role: v.union(v.literal('owner'), v.literal('member')),
+    // org-plan §4 additions. All optional + back-compatible (rows that
+    // predate this default to status:'active'). status='invited' is the
+    // pending-invite row written by a future inviteMember mutation;
+    // joinOrg flips it to 'active'. status='removed' is the soft-tombstone
+    // for offboarding (preserves the row so joinOrg-via-invite reactivates
+    // instead of orphaning a duplicate row).
+    //   invitedBy   — WorkOS subject of the inviting owner.
+    //   invitedAt   — ms epoch, set on row insert.
+    //   acceptedAt  — ms epoch, set when the invitee joins.
+    status: v.optional(
+      v.union(v.literal('active'), v.literal('invited'), v.literal('removed')),
+    ),
+    invitedBy: v.optional(v.string()),
+    invitedAt: v.optional(v.number()),
+    acceptedAt: v.optional(v.number()),
   })
     .index('by_org', ['orgId'])
-    .index('by_workspace', ['workspaceId']),
+    .index('by_workspace', ['workspaceId'])
+    // exact (org, member) lookup — the hot path for requireWorkspace /
+    // requireRole. Replaces the by_workspace + linear scan in isMember.
+    .index('by_org_workspace', ['orgId', 'workspaceId']),
+
+  // P1 (multiplayer-and-h-followups §6.5) — per-atom + per-folder
+  // access controls. New user/agent-created docs in org workspaces
+  // are born private by inserting an atomAccess row. Absence of a row
+  // still means "org-default" (company-visible) for legacy docs,
+  // explicit toggle-offs, and system-maintained rows.
+
+  /** Per-atom access override. Set by `atoms.setAccess` mutation;
+   *  consulted by `resolveAtomAccess` after the membership gate but
+   *  before the org-default ALLOW. Owners do NOT bypass (decision
+   *  P1-B): the `ownerUserId` field is the only principal allowed to
+   *  read a `private` atom. */
+  atomAccess: defineTable({
+    atomId: v.id('atoms'),
+    mode: v.union(v.literal('private'), v.literal('restricted')),
+    /** The single principal allowed to read + edit + change access.
+     *  For `restricted`, this is the owner; `allowedUserIds` extends
+     *  read+edit to a list. For `private`, `allowedUserIds` must be
+     *  `[]` — only the owner reads. */
+    ownerUserId: v.string(),
+    allowedUserIds: v.array(v.string()),
+    setAt: v.number(),
+    setByUserId: v.string(),
+  }).index('by_atom', ['atomId']),
+
+  /** Per-folder access override. Cascades to atoms inside the folder
+   *  via `resolveAtomAccess`'s folder-walk (deepest folder with a row
+   *  wins). An atom inside a restricted folder can override back to
+   *  org-default by setting its own `atomAccess` row with the right
+   *  mode + allowedUserIds. */
+  folderAccess: defineTable({
+    workspaceId: v.string(),
+    /** Canonical folder path (no leading/trailing slash; matches
+     *  `folders.path` shape). Empty string means "workspace root" —
+     *  a workspace-wide private mark (rare; used for "this whole
+     *  org is restricted to a sub-team"). */
+    folderPath: v.string(),
+    mode: v.union(v.literal('private'), v.literal('restricted')),
+    ownerUserId: v.string(),
+    allowedUserIds: v.array(v.string()),
+    setAt: v.number(),
+    setByUserId: v.string(),
+  }).index('by_workspace_path', ['workspaceId', 'folderPath']),
+
+  /** Tombstoned atoms (decision P1-C). When a member is removed from
+   *  an org (`removeMember` / `leaveOrg`), their `private` atoms are
+   *  not deleted — they get a tombstone row that makes them invisible
+   *  to everyone (including org Owners) until an Owner explicitly
+   *  calls `recoverTombstonedAtom` to re-categorize them.
+   *
+   *  Preserves the departed member's work without leaking it on
+   *  accidental offboarding + without orphaning data. */
+  atomTombstones: defineTable({
+    atomId: v.id('atoms'),
+    workspaceId: v.string(),
+    reason: v.union(v.literal('member-departed')),
+    tombstonedAt: v.number(),
+    originalOwnerUserId: v.string(),
+    /** Set when an Owner calls `recoverTombstonedAtom` — the tombstone
+     *  row stays for audit but the atom becomes visible per its new
+     *  access. */
+    recoveredByOwnerUserId: v.optional(v.string()),
+    recoveredAt: v.optional(v.number()),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_atom', ['atomId']),
 
   // An owner-defined, permissioned projection of their own atoms.
   // selector/shape/audience are declarative config (data, not code).
@@ -469,4 +621,69 @@ export default defineSchema({
       'period',
       'identifier',
     ]),
+
+  // v2 atomSuggestions sidecar. Semantic agent tools write proposed
+  // edits here; the editor subscribes and renders inline bubbles.
+  // Accept calls Hocuspocus to mutate canonical Y.Doc state; reject
+  // only resolves the sidecar row. Suggestions are not embedded in
+  // the markdown projection.
+  atomSuggestions: defineTable({
+    atomId: v.id('atoms'),
+    workspaceId: v.string(),
+    // Deprecated v1 markdown-body offsets. New suggestions must use
+    // anchorStart/anchorEnd. These remain optional only so old rows
+    // can load during the v2 cleanup window.
+    rangeFrom: v.optional(v.number()),
+    rangeTo: v.optional(v.number()),
+    // v2 Phase 1.7: Y.RelativePosition anchors encoded as base64
+    // `Y.encodeRelativePosition(...)`. These are canonical for
+    // suggestions on Y.Doc-backed atoms; rangeFrom/rangeTo remain
+    // optional only for temporary v1 cleanup compatibility.
+    anchorStart: v.optional(v.string()),
+    anchorEnd: v.optional(v.string()),
+    // The text the agent wants to write at the anchored range.
+    proposedText: v.string(),
+    // Semantic intent witness. Y.RelativePosition preserves location
+    // through CRDT edits; expectedText/prefix/suffix preserve meaning.
+    // Hocuspocus refuses or marks needs-review when the live text no
+    // longer matches the agent's witness.
+    expectedText: v.optional(v.string()),
+    expectedPrefix: v.optional(v.string()),
+    expectedSuffix: v.optional(v.string()),
+    createdFromProjectionHash: v.optional(v.string()),
+    // The original instruction that produced this suggestion
+    // (e.g. "rewrite intro"). Surfaced in the bubble UI.
+    instruction: v.string(),
+    // True when the agent created this. v1 always true (only
+    // agent → suggestion path); reserved for future human-to-human
+    // suggestion threads.
+    authorIsAgent: v.boolean(),
+    // identity.subject of the agent or human author.
+    authorUserId: v.string(),
+    // 3.9.18 — cached display name (identity.name) at create
+    // time. Bubble headers render "Agent suggestion (Alice)"
+    // instead of "Agent suggestion (ws_alice_)".
+    authorUserName: v.optional(v.string()),
+    // Set when accepted; the human who clicked Accept.
+    resolvedByUserId: v.optional(v.string()),
+    // 3.9.18 — cached display name at resolve time. Bubble
+    // shows "accepted by Alice 2s ago" instead of subject prefix.
+    resolvedByUserName: v.optional(v.string()),
+    resolvedAt: v.optional(v.number()),
+    // 'pending' until accept/reject; then 'accepted' or 'rejected'.
+    // We keep accepted/rejected rows briefly (see 3.9.1
+    // listPending filter) so other tabs can show the fade-out
+    // "accepted by Bob 2s ago" UI per the plan acceptance.
+    status: v.union(
+      v.literal('pending'),
+      v.literal('accepted'),
+      v.literal('rejected'),
+      v.literal('stale'),
+      v.literal('needs-review'),
+    ),
+    createdAt: v.number(),
+  })
+    .index('by_atomId_status', ['atomId', 'status'])
+    .index('by_atomId', ['atomId'])
+    .index('by_workspaceId', ['workspaceId']),
 })

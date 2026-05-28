@@ -6,11 +6,14 @@ import {
 } from './_generated/server'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
+import { canReadAtom, canWriteInFolder } from './atomAccess'
+import { scheduleMapRegen } from './loop'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
 import { isSafeAtomPath } from './inlineAtom'
+import { deriveSearchFields } from './searchText'
 import {
   SystemLockError,
   UserLockError,
@@ -39,9 +42,11 @@ import { cascadeDeleteSharesForFileId } from './atomShares'
 // folders via the UI and they persist.
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const workspaceId = await requireWorkspace(ctx)
+  // Phase B (org-plan §5): optional `activeWorkspaceId` — defaults to
+  // personal; membership-gated when an org id is supplied.
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const [folderRows, metaRows] = await Promise.all([
       ctx.db
         .query('folders')
@@ -104,17 +109,43 @@ export const list = query({
 })
 
 export const create = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await createImpl(ctx, workspaceId, path)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — creating a folder
+    // inside a private/restricted parent must obey the folder
+    // cascade (otherwise a teammate could mkdir inside your private
+    // `alice/` and start dropping docs in it). canWriteInFolder
+    // walks bottom-up from the target path; org-default allows.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    if (!(await canWriteInFolder(ctx, workspaceId, path, viewerSubject))) {
+      throw new Error('You do not have access to create folders here.')
+    }
+    const id = await createImpl(ctx, workspaceId, path)
+    // Phase C — debounced _map.md regen (new folder appears in the map).
+    await scheduleMapRegen(ctx, workspaceId)
+    return id
   },
 })
 
-// Internal version for the agent's create_folder tool.
+// Internal version for the agent's create_folder tool. P1: same
+// optional `viewerSubject` pattern as `_upsertInternal` — the agent
+// callers pass it; system callers omit it (back-compat). When
+// passed, run the folder-cascade write gate before creating.
 export const _createInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    if (
+      viewerSubject &&
+      !(await canWriteInFolder(ctx, workspaceId, path, viewerSubject))
+    ) {
+      throw new Error('You do not have access to create folders here.')
+    }
     return await createImpl(ctx, workspaceId, path)
   },
 })
@@ -150,10 +181,26 @@ async function createImpl(ctx: any, workspaceId: string, path: string) {
 // Throws on conflict (destination already exists) or when the destination
 // is inside the source (would create an unreachable cycle).
 export const move = mutation({
-  args: { fromPath: v.string(), toPath: v.string() },
-  handler: async (ctx, { fromPath, toPath }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await moveImpl(ctx, workspaceId, fromPath, toPath)
+  args: {
+    fromPath: v.string(),
+    toPath: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fromPath, toPath, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — folder rename is two
+    // recursive write operations rolled into one: it touches every
+    // atom in the source subtree (so the viewer must be allowed to
+    // WRITE each of them) and it lands them under the destination
+    // (so the destination folder cascade must allow). Same all-or-
+    // nothing posture as folders.remove. Plumbed in via viewerSubject
+    // — undefined ⇒ no gate (system caller back-compat).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    const out = await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
+    // Phase C — debounced _map.md regen (folder rename moves children).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
@@ -162,6 +209,8 @@ async function moveImpl(
   workspaceId: string,
   fromPath: string,
   toPath: string,
+  // P1 — undefined ⇒ system caller (no gate).
+  viewerSubject: string | undefined,
 ) {
   // file-org-v1 §2.3 — shared policy (the source need only normalize;
   // empty source is the older "source folder path required" error).
@@ -208,6 +257,30 @@ async function moveImpl(
   for (const a of movedAtoms) {
     if (a.systemLocked) throw new SystemLockError(a.path, 'rename')
     if (a.userLocked) throw new UserLockError(a.path, 'rename')
+    // P1 — same all-or-nothing posture as the lock check above:
+    // refuse the WHOLE move if ANY atom in the source subtree is
+    // unreadable to the viewer. A partial move (leave the private
+    // ones, move the rest) would split the subtree across two
+    // folders with no record of the split — confusing and unsafe.
+    if (
+      viewerSubject !== undefined &&
+      !(await canReadAtom(ctx, a._id, viewerSubject))
+    ) {
+      throw new Error(
+        'You do not have access to move this folder — it contains atoms you cannot read.',
+      )
+    }
+  }
+  // P1 — destination cascade: even if the source is fully writable,
+  // the destination folder might be a teammate's private folder.
+  // Check the destination root the same way create_folder does.
+  if (
+    viewerSubject !== undefined &&
+    !(await canWriteInFolder(ctx, workspaceId, to, viewerSubject))
+  ) {
+    throw new Error(
+      'You do not have access to move into this destination folder.',
+    )
   }
 
   // Atom destination conflicts.
@@ -289,7 +362,7 @@ async function moveImpl(
     const movedPaths = new Set(movedAtoms.map((a: any) => a.path))
     const movedReplacements = movedAtoms.map((a: any) => {
       const noExt = a.path.replace(/\.md$/i, '')
-      // D4.7d — match BOTH `[[...]]` and `\[\[...]]` (Crepe escapes
+      // D4.7d — match BOTH `[[...]]` and `\[\[...]]` (a legacy editor escaped
       // opening brackets on save). Same regex shape as the cascade
       // loop below; identical handling in atoms.move.
       return new RegExp(
@@ -323,7 +396,11 @@ async function moveImpl(
   //    of the unique index and Convex doesn't expose a key rewrite).
   for (const a of movedAtoms) {
     const newPath = atomPathMap.get(a.path)!
-    await ctx.db.insert('atoms', {
+    const access = await ctx.db
+      .query('atomAccess')
+      .withIndex('by_atom', (q: any) => q.eq('atomId', a._id))
+      .unique()
+    const movedId = await ctx.db.insert('atoms', {
       workspaceId,
       path: newPath,
       body: a.body,
@@ -335,7 +412,20 @@ async function moveImpl(
       // so userLocked here is moot but harmless to forward (defensive).
       ...(a.starred ? { starred: true } : {}),
       ...(a.userLocked ? { userLocked: true } : {}),
+      // path changed in the folder rename → recompute search fields.
+      ...deriveSearchFields(newPath, a.body),
     })
+    if (access) {
+      await ctx.db.insert('atomAccess', {
+        atomId: movedId,
+        mode: access.mode,
+        ownerUserId: access.ownerUserId,
+        allowedUserIds: access.allowedUserIds,
+        setAt: access.setAt,
+        setByUserId: access.setByUserId,
+      })
+      await ctx.db.delete(access._id)
+    }
     await ctx.db.delete(a._id)
     // R3 §1 — folder move = per-atom move: drop old-path captures,
     // fresh withhold at the new path (a moved value is re-withheld
@@ -393,7 +483,7 @@ async function moveImpl(
         const oldNoExt = oldPath.replace(/\.md$/i, '')
         const newNoExt = newPath.replace(/\.md$/i, '')
         // D4.7d — escape-tolerant wikilink match. See atoms.move for
-        // rationale: Crepe escapes opening `[`s.
+        // rationale: a legacy editor escaped opening `[`s.
         const re = new RegExp(
           `\\\\?\\[\\\\?\\[(!?)(${escapeRegex(oldPath)}|${escapeRegex(oldNoExt)})\\\\?\\]\\\\?\\]`,
           'g',
@@ -434,7 +524,11 @@ async function moveImpl(
           a.body,
           a.source ?? 'agent',
         )
-        await ctx.db.patch(a._id, { body: rewritten, updatedAt: now })
+        await ctx.db.patch(a._id, {
+          body: rewritten,
+          updatedAt: now,
+          ...deriveSearchFields(a.path, rewritten),
+        })
         // R3 §1 — link-only rewrite ⇒ value diff empty (no-op); routed
         // through the contract so a value change can never bypass it.
         await applyAtomCapture(ctx, workspaceId, a.path, a.body, rewritten)
@@ -460,18 +554,35 @@ function escapeRegex(s: string): string {
 // `<path>/` AND any nested folder rows. The parent folder row itself
 // is also deleted. Returns counts for the caller's confirmation toast.
 export const remove = mutation({
-  args: { path: v.string() },
-  handler: async (ctx, { path }) => {
-    const workspaceId = await requireWorkspace(ctx)
-    return await removeImpl(ctx, workspaceId, path, true)
+  args: { path: v.string(), activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { path, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    // P1 (multiplayer-and-h-followups §6.5) — recursive delete is
+    // the most dangerous P1 surface: a teammate could erase a
+    // private folder's contents in one shot. Pre-scan the WHOLE
+    // subtree and refuse the delete if ANY atom is unreadable to
+    // the viewer (same all-or-nothing posture as the lock pre-scan
+    // already used here — partial-deletes are the wrong fail mode).
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    const out = await removeImpl(ctx, workspaceId, path, true, viewerSubject)
+    // Phase C — debounced _map.md regen (folder deletion drops subtree).
+    await scheduleMapRegen(ctx, workspaceId)
+    return out
   },
 })
 
-// Internal version called by the agent's delete_folder tool.
+// Internal version called by the agent's delete_folder tool. P1:
+// optional viewerSubject — agent passes it, system callers omit it
+// (back-compat; system path is unconstrained as in `_upsertInternal`).
 export const _removeInternal = internalMutation({
-  args: { workspaceId: v.string(), path: v.string() },
-  handler: async (ctx, { workspaceId, path }) => {
-    return await removeImpl(ctx, workspaceId, path, true)
+  args: {
+    workspaceId: v.string(),
+    path: v.string(),
+    viewerSubject: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, path, viewerSubject }) => {
+    return await removeImpl(ctx, workspaceId, path, true, viewerSubject)
   },
 })
 
@@ -482,11 +593,12 @@ export const _removeInternal = internalMutation({
 // file-org-v1 §2.3 — continuation passes `isFirstInvocation: false`
 // so the lock pre-scan does NOT run again. The first pass already
 // proved no locks; subsequent passes are pure batched deletes of
-// the proven-safe subtree.
+// the proven-safe subtree. P1 access check ALSO runs only on the
+// first pass — subsequent passes inherit its proof.
 export const _removeContinue = internalMutation({
   args: { workspaceId: v.string(), path: v.string() },
   handler: async (ctx, { workspaceId, path }) => {
-    return await removeImpl(ctx, workspaceId, path, false)
+    return await removeImpl(ctx, workspaceId, path, false, undefined)
   },
 })
 
@@ -502,6 +614,9 @@ async function removeImpl(
   workspaceId: string,
   path: string,
   isFirstInvocation: boolean,
+  // P1 — first-invocation only; continuations inherit the proof.
+  // undefined ⇒ no access gate (system caller back-compat).
+  viewerSubject: string | undefined,
 ) {
   const clean = path.replace(/^\/+|\/+$/g, '')
   const prefix = `${clean}/`
@@ -543,6 +658,20 @@ async function removeImpl(
         subtreeCount++
         if (a.systemLocked) throw new SystemLockError(a.path, 'delete')
         if (a.userLocked) throw new UserLockError(a.path, 'delete')
+        // P1 — refuse the WHOLE delete if ANY atom in the subtree
+        // is unreadable to the viewer. Same all-or-nothing posture
+        // as the lock pre-scan above: a partial-delete (skip the
+        // unreadable ones, take the rest) would leave a teammate's
+        // private subtree intact but its enclosing folder gone —
+        // a confusing, unsafe outcome. Fail loud instead.
+        if (
+          viewerSubject !== undefined &&
+          !(await canReadAtom(ctx, a._id, viewerSubject))
+        ) {
+          throw new Error(
+            'You do not have access to delete this folder — it contains atoms you cannot read.',
+          )
+        }
       }
     }
     if (subtreeCount > SCAN_CAP) {
@@ -735,9 +864,10 @@ export const setMeta = mutation({
     icon: v.optional(v.union(v.string(), v.null())),
     color: v.optional(v.union(v.string(), v.null())),
     starred: v.optional(v.boolean()),
+    activeWorkspaceId: v.optional(v.string()),
   },
-  handler: async (ctx, { path, icon, color, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  handler: async (ctx, { path, icon, color, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const check = validateFolderPath(path)
     if (!check.ok) throw new Error(check.reason)
     const clean = check.path
@@ -812,9 +942,13 @@ export const setMeta = mutation({
 
 // Sugar over setMeta for the common "favorite a folder" path.
 export const setStar = mutation({
-  args: { path: v.string(), starred: v.boolean() },
-  handler: async (ctx, { path, starred }) => {
-    const workspaceId = await requireWorkspace(ctx)
+  args: {
+    path: v.string(),
+    starred: v.boolean(),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { path, starred, activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const check = validateFolderPath(path)
     if (!check.ok) throw new Error(check.reason)
     const clean = check.path

@@ -175,7 +175,7 @@ describe('evalFormulas — end-to-end single-pass query', () => {
   })
 
   it('BLOCKER regression: serializer-escaped markdown yields the SAME canonical src key', () => {
-    // Crepe reserializes `_`/`*` escaped. The query side parses the
+    // a legacy editor reserialized `_`/`*` escaped. The query side parses the
     // ESCAPED markdown; the widget parses the UNESCAPED doc text.
     // Both MUST produce the identical `.src` or the chip vanishes.
     const escaped = 'July: {= sum(logs.2025\\_07\\_\\*.billable)}'

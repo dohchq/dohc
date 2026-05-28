@@ -7,10 +7,18 @@ be weakened by rebrand or UI work.
 
 - The authenticated identity is derived server-side via
   `ctx.auth.getUserIdentity()`. Functions NEVER accept a `userId` (or any
-  user identifier) as an argument for authorization.
+  user identifier) as an argument for authorization from browser/client
+  callers.
 - There is intentionally **no** unauthenticated request → data escape.
   An earlier env-gated dev bypass was removed because Convex public
   functions are raw internet endpoints on a shared deployment.
+- Server-to-server bridges may use explicit identity/workspace arguments only
+  behind a shared server secret. The current reviewed exception is
+  `hocuspocusAuth.checkAtomAccess`, which requires
+  `HOCUSPOCUS_CONVEX_SERVER_TOKEN` and is called by the Hocuspocus service,
+  not by the browser. Its `userId` comes from the signed collab token `sub`,
+  while `workspaceId` is the owner workspace encoded in the Hocuspocus
+  document name; Convex performs the final share/org ACL decision.
 
 ## Ownership
 
@@ -23,7 +31,8 @@ be weakened by rebrand or UI work.
 ## Locks and gates
 
 - A user lock on an atom refuses all agent writes at the data layer; the
-  user's own editor still works.
+  user's own editor still works. Hocuspocus forwards signed `actorKind` into
+  the Convex ACL bridge so collaborative writes follow the same rule.
 - The skill-turn gate and inline-window caps are structural, fail-closed
   invariants. The supporting tests (`skillTurnGate`, `strictKeystone`,
   `r3InlineWindow`, `windows`, `atomShares`) must keep passing.

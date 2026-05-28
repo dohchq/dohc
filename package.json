@@ -2,14 +2,26 @@
   "name": "dohc",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0",
+    "pnpm": "10.24.0"
+  },
   "scripts": {
-    "dev": "pnpm --filter @dohc/app --if-present run dev",
-    "build": "pnpm --filter @dohc/app --if-present run build",
+    "dev": "node scripts/dev-sync.mjs && pnpm --filter @dohc/app --if-present run dev",
+    "dev:app": "pnpm --filter @dohc/app --if-present run dev",
+    "dev:sync": "node scripts/dev-sync.mjs",
+    "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
+    "build": "pnpm -r --if-present build",
     "start": "pnpm --filter @dohc/app --if-present run start",
     "preview": "pnpm --filter @dohc/app --if-present run preview",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
+    "test:e2e": "playwright test",
+    "test:hocuspocus:integration": "pnpm --filter @dohc/hocuspocus run test:integration",
     "lint": "pnpm -r --if-present lint"
   },
-  "packageManager": "pnpm@10.24.0"
+  "packageManager": "pnpm@10.24.0",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
 }

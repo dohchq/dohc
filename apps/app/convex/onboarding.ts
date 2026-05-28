@@ -5,6 +5,7 @@ import {
   mutation,
 } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { requireWorkspace } from './auth'
 import { regenerateMap } from './loop'
@@ -69,6 +70,32 @@ export type OnboardingProgress = {
   dashboardPath: string | null
 }
 
+/** org-plan §6 / §11-step-4 — workspace-kind branch. A workspace is an
+ *  org iff its id matches a row in `orgs`; otherwise it's personal
+ *  (workspaceId === WorkOS subject). Cached per call.
+ *
+ *  The identity-atom path differs by kind:
+ *    personal → `me.md`   (the user's about-themselves brief)
+ *    org      → `company.md` (the org's about-itself brief)
+ *  This lets the same onboarding flow assemble the appropriate
+ *  identity artifact without forking the whole pipeline. */
+async function isOrgWorkspace(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+): Promise<boolean> {
+  // orgs._id IS the workspace id for org workspaces. A personal
+  // workspaceId is a WorkOS subject (e.g. `user_01ABC…`) — not a valid
+  // Convex Id shape. `normalizeId` is the docs-blessed way to ask "is
+  // this string a valid Id for this table" without a try/catch: it
+  // returns the typed Id on hit, null on shape mismatch. Then a single
+  // `db.get` confirms the row actually exists (defensive only — once
+  // normalizeId returns an Id, get returns either the row or null).
+  const orgId = ctx.db.normalizeId('orgs', workspaceId)
+  if (orgId === null) return false
+  const row = await ctx.db.get(orgId)
+  return row !== null
+}
+
 /** The SAME helper `_complete` uses, so the public `progress` query
  *  and the never-empty invariant can never desync. Bounded scans. */
 export async function progressOf(
@@ -79,8 +106,12 @@ export async function progressOf(
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(500)
+  // Identity atom: personal ⇒ me.md, org ⇒ company.md (org-plan §6).
+  const identityFile = (await isOrgWorkspace(ctx, workspaceId))
+    ? 'company.md'
+    : 'me.md'
   const me = atoms.find(
-    (a) => a.path === 'me.md' || a.path.endsWith('/me.md'),
+    (a) => a.path === identityFile || a.path.endsWith(`/${identityFile}`),
   )
   const dashboards = atoms.filter(
     (a) => !isNonDataAtom(a.path, a.body) && a.body.includes('```query'),
@@ -102,6 +133,45 @@ export async function progressOf(
     mePath: me?.path ?? null,
     dashboardPath: hero?.path ?? null,
   }
+}
+
+async function completeWorkspaceOnboarding(
+  ctx: MutationCtx,
+  workspaceId: string,
+) {
+  const row = await onboardingRow(ctx, workspaceId)
+  if (row?.completedAt) return null
+
+  const p = await progressOf(ctx, workspaceId)
+  if (!p.hasMe || !p.hasDashboardWithQuery) {
+    throw new Error(
+      `cannot finish onboarding: vault not populated yet ` +
+        `(me.md=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
+        `Write a populated dashboard and me.md first.`,
+    )
+  }
+  // ai-os-ideas #1 (the Map): a finished onboarding gets a living
+  // navigable index, server-guaranteed (not prompt-hope), reusing
+  // the loop's deterministic builder. regenerateMap handles its
+  // KNOWN conditions (dup/overflow/not-owned) but its upsert (+ the
+  // capture pipeline it triggers) can still throw for other
+  // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
+  // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
+  // on any failure, degrade silently (the weekly loop regenerates
+  // _map.md anyway). Catching internally does NOT roll back this
+  // mutation's transaction in Convex (only a thrown handler does).
+  try {
+    await regenerateMap(ctx, workspaceId)
+  } catch {
+    /* never block finish on the optional Map */
+  }
+  if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
+  else
+    await ctx.db.insert('onboarding', {
+      workspaceId,
+      completedAt: Date.now(),
+    })
+  return null
 }
 
 // ── internal (agent-driven) ─────────────────────────────────────────
@@ -131,37 +201,7 @@ export const _begin = internalMutation({
 export const _complete = internalMutation({
   args: { workspaceId: v.string() },
   handler: async (ctx, { workspaceId }) => {
-    const p = await progressOf(ctx, workspaceId)
-    if (!p.hasMe || !p.hasDashboardWithQuery) {
-      throw new Error(
-        `cannot finish onboarding: vault not populated yet ` +
-          `(me.md=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-          `Write a populated dashboard and me.md first.`,
-      )
-    }
-    // ai-os-ideas #1 (the Map): a finished onboarding gets a living
-    // navigable index, server-guaranteed (not prompt-hope), reusing
-    // the loop's deterministic builder. regenerateMap handles its
-    // KNOWN conditions (dup/overflow/not-owned) but its upsert (+ the
-    // capture pipeline it triggers) can still throw for other
-    // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
-    // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
-    // on any failure, degrade silently (the weekly loop regenerates
-    // _map.md anyway). Catching internally does NOT roll back this
-    // mutation's transaction in Convex (only a thrown handler does).
-    try {
-      await regenerateMap(ctx, workspaceId)
-    } catch {
-      /* never block finish on the optional Map */
-    }
-    const row = await onboardingRow(ctx, workspaceId)
-    if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
-    else
-      await ctx.db.insert('onboarding', {
-        workspaceId,
-        completedAt: Date.now(),
-      })
-    return null
+    return completeWorkspaceOnboarding(ctx, workspaceId)
   },
 })
 
@@ -224,9 +264,14 @@ export const heartbeat = internalMutation({
  *  to the client only while auth/token bootstraps (Convex semantics);
  *  the gate treats undefined as "still loading". */
 export const state = query({
-  args: {},
-  handler: async (ctx): Promise<OnboardingState> => {
-    const ws = await requireWorkspace(ctx)
+  // org-plan §5 + Jenny/ultrathink M3: pass activeWorkspaceId so the
+  // Gate component sees the ACTIVE workspace's onboarding state. The
+  // prior shape only ever returned personal's state, so an org user
+  // who completed personal onboarding would be sent to <App/> for
+  // their org even when org-onboarding hasn't run yet.
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }): Promise<OnboardingState> => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     return deriveState(await onboardingRow(ctx, ws))
   },
 })
@@ -235,9 +280,9 @@ export const state = query({
  *  in" surface. Same helper as the never-empty invariant ⇒ the
  *  surface cannot claim more than the server will actually accept. */
 export const progress = query({
-  args: {},
-  handler: async (ctx): Promise<OnboardingProgress> => {
-    const ws = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }): Promise<OnboardingProgress> => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     return progressOf(ctx, ws)
   },
 })
@@ -248,9 +293,9 @@ export const progress = query({
  *  (a deferred user is still resumable; `finish_onboarding` still
  *  requires a populated vault). Idempotent. */
 export const defer = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const ws = await requireWorkspace(ctx)
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
     const row = await onboardingRow(ctx, ws)
     if (!row) {
       await ctx.db.insert('onboarding', {
@@ -261,5 +306,20 @@ export const defer = mutation({
       await ctx.db.patch(row._id, { deferredAt: Date.now() })
     }
     return null
+  },
+})
+
+/** Client recovery for a ready-but-still-IN_PROGRESS workspace.
+ *  Fresh shared workspaces are seeded with the identity atom +
+ *  dashboard before the client opens them. If the public progress
+ *  invariant is already satisfied, the ready handoff can complete
+ *  without waiting for an agent tool call. This reuses the exact same
+ *  server floor as `_complete`; an empty workspace still cannot fake
+ *  DONE. */
+export const completeIfReady = mutation({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
+    return completeWorkspaceOnboarding(ctx, ws)
   },
 })

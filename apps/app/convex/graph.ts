@@ -20,7 +20,7 @@ import { ownerAtomByFileId } from './atomShares'
 import { viewerOrgIds } from './orgs'
 
 const NOTE_SCAN_CAP = 5000
-// Escape-TOLERANT wikilink matcher — Crepe stores a user-typed
+// Escape-TOLERANT wikilink matcher — a legacy editor stored a user-typed
 // `[[a/b]]` as `\[\[a/b]]` (escaped opening brackets), so the bare
 // `[[…]]` form alone misses every editor-authored link (codex
 // completeness gap #1). Mirrors the cascade's regex in atoms.move.

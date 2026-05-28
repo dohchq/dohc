@@ -18,7 +18,7 @@ docs                  product, brand, development, qa, security
 ```bash
 pnpm install
 cp apps/app/.env.example apps/app/.env.local   # fill in real values
-pnpm dev        # vite (:3000) + convex dev
+pnpm dev        # local Postgres + Hocuspocus sync, vite (:3000), Convex dev
 ```
 
 ## Commands
@@ -27,6 +27,8 @@ pnpm dev        # vite (:3000) + convex dev
 pnpm typecheck   # tsc --noEmit across workspaces
 pnpm test        # vitest (incl. the brand no-legacy guard)
 pnpm build       # vite build (TanStack Start + Nitro)
+pnpm dev:sync    # start only local Postgres + Hocuspocus
+pnpm dev:app     # start only Vite + Convex dev
 ```
 
 ## Docs
@@ -44,7 +46,7 @@ pnpm build       # vite build (TanStack Start + Nitro)
 ## Stack
 
 TanStack Start + Router, React 19, Vite, Tailwind CSS v4, Convex, WorkOS
-AuthKit, Milkdown, Vitest, Nitro.
+AuthKit, Tiptap, Yjs, Hocuspocus, Vitest, Nitro.
 
 ## Deployment
 

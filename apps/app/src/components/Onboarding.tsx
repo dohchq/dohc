@@ -14,6 +14,7 @@ import {
 import { api } from '../../convex/_generated/api'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Markdown } from '@/components/Markdown'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
@@ -164,22 +165,29 @@ export function Onboarding({ state }: Props) {
   )
   const introRef = useRef<string | null>(null)
 
+  // org-plan §5: onboarding is always per-workspace. ensureThread +
+  // listMessages thread the active workspace (non-defaultable). The
+  // startOnboarding + sendMessage actions stay personal-default for
+  // now (the action limitation; thread→workspace binding is the
+  // long-term fix).
+  const activeWorkspaceId = useActiveWorkspaceId()
   const ensureThread = useMutation(api.agent.ensureThread)
   const startOnboarding = useAction(api.agent.startOnboarding)
   const defer = useMutation(api.onboarding.defer)
+  const completeIfReady = useMutation(api.onboarding.completeIfReady)
   const sendMessage = useAction(api.agent.sendMessage)
-  const progress = useQuery(api.onboarding.progress)
+  const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
 
   const [threadId, setThreadId] = useState<string | null>(null)
   useEffect(() => {
     let alive = true
-    ensureThread({})
+    ensureThread({ activeWorkspaceId })
       .then((id) => alive && setThreadId(id))
       .catch(() => {})
     return () => {
       alive = false
     }
-  }, [ensureThread])
+  }, [ensureThread, activeWorkspaceId])
 
   // Kick dohc's first turn. With the questionnaire brief ⇒ that's the
   // prompt (one clear turn). Idempotent + race-proof + crash-
@@ -192,11 +200,13 @@ export function Onboarding({ state }: Props) {
       if (!threadId) return
       setKicking(true)
       setKickFailed(false)
-      startOnboarding(intro ? { intro } : {})
+      startOnboarding(
+        intro ? { intro, activeWorkspaceId } : { activeWorkspaceId },
+      )
         .catch(() => setKickFailed(true))
         .finally(() => setKicking(false))
     },
-    [threadId, startOnboarding],
+    [threadId, startOnboarding, activeWorkspaceId],
   )
   useEffect(() => {
     if (phase === 'working' && threadId && !kicked.current) {
@@ -208,7 +218,7 @@ export function Onboarding({ state }: Props) {
   // ── live conversation (same pipeline as Chat — not a fork) ──────
   const mq = useUIMessages(
     api.agent.listMessages,
-    threadId ? { threadId } : 'skip',
+    threadId ? { threadId, activeWorkspaceId } : 'skip',
     { initialNumItems: 50, stream: true },
   )
   const messages: UIMessage[] = useMemo(() => {
@@ -304,12 +314,15 @@ export function Onboarding({ state }: Props) {
   const upsertAtom = useMutation(api.atoms.upsert)
   const meAtom = useQuery(
     api.atoms.getByPath,
-    progress?.mePath ? { path: progress.mePath } : 'skip',
+    progress?.mePath ? { path: progress.mePath, activeWorkspaceId } : 'skip',
   )
   const heroAtom = useQuery(
     api.atoms.getByPath,
-    progress?.dashboardPath ? { path: progress.dashboardPath } : 'skip',
+    progress?.dashboardPath
+      ? { path: progress.dashboardPath, activeWorkspaceId }
+      : 'skip',
   )
+  const completingReadyRef = useRef(false)
   useEffect(() => {
     if (
       workspaceReady &&
@@ -324,8 +337,19 @@ export function Onboarding({ state }: Props) {
       } catch {
         /* private-mode / quota — App shows its normal default */
       }
+      if (!completingReadyRef.current) {
+        completingReadyRef.current = true
+        completeIfReady({ activeWorkspaceId }).catch(() => {
+          completingReadyRef.current = false
+        })
+      }
     }
-  }, [workspaceReady, progress?.dashboardPath])
+  }, [
+    workspaceReady,
+    progress?.dashboardPath,
+    completeIfReady,
+    activeWorkspaceId,
+  ])
 
   // ── Intro — exactly two choices ────────────────────────────────
   if (phase === 'intro') {
@@ -477,9 +501,11 @@ export function Onboarding({ state }: Props) {
               path={meAtom.path}
               body={meAtom.body}
               onSave={(next) =>
-                upsertAtom({ path: meAtom.path, body: next }).then(
-                  () => undefined,
-                )
+                upsertAtom({
+                  path: meAtom.path,
+                  body: next,
+                  activeWorkspaceId,
+                }).then(() => undefined)
               }
             />
           )}

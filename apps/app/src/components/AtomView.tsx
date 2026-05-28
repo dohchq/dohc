@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import { Share2, Smile } from 'lucide-react'
 import RSCE from 'react-simple-code-editor'
 import { api } from '../../convex/_generated/api'
@@ -27,6 +28,7 @@ import {
   isSkillAtomBody,
 } from '../lib/atomId'
 import { buildShareText } from '../lib/shareText'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { PropertiesPanel } from './PropertiesPanel'
 import { HtmlAtomFrame } from './HtmlAtomFrame'
 import { usePlugins } from '../plugins/usePlugins'
@@ -73,9 +75,10 @@ export function AtomView({
   // No path → no atom is open. We skip the Convex query and render an
   // empty placeholder below. Don't fall back to a "default" atom path.
   const effectivePath = path
+  const activeWorkspaceId = useActiveWorkspaceId()
   const row = useQuery(
     api.atoms.getByPath,
-    effectivePath ? { path: effectivePath } : 'skip',
+    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
   )
   const upsert = useMutation(api.atoms.upsert)
   // atom-address-v1 §1.4 — proactively learn if THIS file's address
@@ -83,7 +86,7 @@ export function AtomView({
   // unexplained). Rendered as a calm inline line by AtomShell.
   const idAdvisory = useQuery(
     api.atoms.idAdvisory,
-    effectivePath ? { path: effectivePath } : 'skip',
+    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
   )
 
   // Always-editor: the rendered doc IS the editor. There's no separate read
@@ -99,7 +102,7 @@ export function AtomView({
   const remoteBodyRef = useRef<string | null>(null)
   // syncedPath = the path whose initial content we've loaded into draft.
   // Until this matches the current path, we render a loader instead of
-  // mounting the editor — Milkdown is uncontrolled and only reads its
+  // mounting the editor — Tiptap is uncontrolled and only reads its
   // initial value at mount time, so we must not mount it with stale or
   // empty content while the row is still in flight.
   const [syncedPath, setSyncedPath] = useState<string | null>(null)
@@ -136,10 +139,11 @@ export function AtomView({
         path: effectivePath,
         body: toSave,
         source: 'user',
+        activeWorkspaceId,
       })
     }, 500)
     return () => clearTimeout(t)
-  }, [draft, row, upsert, effectivePath])
+  }, [draft, row, upsert, effectivePath, activeWorkspaceId])
 
   // D4.28 — immediate commit (no debounce) for the raw-source
   // textarea. Editing the frontmatter `id:` per-keystroke on the
@@ -153,7 +157,12 @@ export function AtomView({
     if (!effectivePath) return
     if (next === remoteBodyRef.current) return
     remoteBodyRef.current = next
-    await upsert({ path: effectivePath, body: next, source: 'user' })
+    await upsert({ path: effectivePath, body: next, source: 'user', activeWorkspaceId })
+  }
+
+  function previewDraft(next: string) {
+    setDraft(next)
+    remoteBodyRef.current = next
   }
 
   // D4.7c — flushPendingSave: synchronously dispatch any pending
@@ -180,12 +189,13 @@ export function AtomView({
         path: effectivePath,
         body: toSave,
         source: 'user',
+        activeWorkspaceId,
       })
     }
     return () => {
       if (pendingSaveRef.current) pendingSaveRef.current = null
     }
-  }, [effectivePath, upsert, pendingSaveRef])
+  }, [effectivePath, upsert, pendingSaveRef, activeWorkspaceId])
 
   // enterEdit signals "focus the editor on arrival" — used by new-page
   // creation and marketplace's "edit atom" jump. Clear the flag upstream
@@ -275,9 +285,14 @@ export function AtomView({
         <EmptyAtom path={effectivePath} />
       ) : (
         <AtomShell
+          /* 3.9.21 — multiplayer is default-on; the key
+             suffix that previously tracked the flag's on/off
+             state is no longer needed. Reverting to the
+             original effectivePath-only key. */
           key={effectivePath}
           draft={draft}
           onChange={setDraft}
+          onPreviewChange={previewDraft}
           onRunAction={onRunAction}
           subpages={subpages}
           allFiles={files}
@@ -299,6 +314,7 @@ export function AtomView({
           // backward-compat fallback inside AtomShell.)
           pathIsHtml={effectivePath ? isHtmlPath(effectivePath) : false}
           path={effectivePath}
+          activeWorkspaceId={activeWorkspaceId}
           // D4.28 — immediate-commit for the raw-source textarea
           // (avoids per-keystroke id reconcile).
           onCommitSource={commitDraft}
@@ -335,6 +351,7 @@ function NoFile() {
 function AtomShell({
   draft,
   onChange,
+  onPreviewChange,
   onRunAction,
   subpages,
   allFiles,
@@ -345,11 +362,13 @@ function AtomShell({
   savedAtomId,
   pathIsHtml,
   path,
+  activeWorkspaceId,
   onCommitSource,
   onShare,
 }: {
   draft: string
   onChange: (next: string) => void
+  onPreviewChange?: (next: string) => void
   onRunAction: (prompt: string) => void
   subpages: FileRow[]
   // D4.8 — full vault file list (not just subpages) so the
@@ -371,13 +390,18 @@ function AtomShell({
   pathIsHtml?: boolean
   // the atom's current path (for the html title default = filename)
   path?: string | null
+  activeWorkspaceId?: string
   // D4.28 — immediately persist the raw-source buffer (one save +
   // one id-reconcile) on blur/done.
   onCommitSource?: (next: string) => void
   // sharing-v1 1a — share this file (by its fileId).
   onShare?: (fileId: string) => void
 }) {
+  const { user } = useAuth()
   const editorRef = useRef<AtomEditorHandle | null>(null)
+  const identity = useQuery(api.auth.whoami)
+  const collabUserName =
+    user?.firstName || user?.email?.split('@')[0] || 'You'
   // D4.8 — known-files list for the wikilink plugin's resolver +
   // autocomplete picker. Memoized so the editor's plugin reads a
   // stable identity until the file list actually changes. The
@@ -405,7 +429,7 @@ function AtomShell({
   // inserting a fresh fence at the cursor.
   const [editingBlock, setEditingBlock] = useState<{ pos: number; text: string; language: string } | null>(null)
   // atom-address-v1 §1.4 — (b1) the leading YAML frontmatter (incl.
-  // the rename-proof `id:`) is split off so Crepe never renders it as
+  // the rename-proof `id:`) is split off so Tiptap never renders it as
   // prose (zero frontmatter glyphs); the exact captured bytes are
   // reattached on every change, so it round-trips byte-identical.
   // (b2) `sourceMode` swaps the editor for a raw textarea over the
@@ -486,7 +510,7 @@ function AtomShell({
   const isAction = meta.type === 'action'
   const isPlugin = meta.type === 'plugin'
   // D4.13 — EXTENSION determines rendering: a `.html` path renders
-  // as a sandboxed HTML page (the §2-B route iframe), NEVER Crepe.
+  // as a sandboxed HTML page (the §2-B route iframe), NEVER Tiptap.
   // `type: html` frontmatter is kept as a backward-compat fallback
   // so existing agent-authored html atoms (.md + type: html) keep
   // working. The §2-B route + tree badge mirror this same OR.
@@ -635,7 +659,7 @@ function AtomShell({
           atom has no frontmatter, so the toggle was hidden, so you
           could never drop into raw mode to ADD frontmatter — making
           it impossible to hand-author an html / skill / plugin atom
-          (Crepe hides frontmatter, so typing `---\ntype: html\n---`
+          (Tiptap hides frontmatter, so typing `---\ntype: html\n---`
           in the formatted editor doesn't stick). Always-on unblocks
           manual creation of typed atoms + raw `id:` edits on a fresh
           file. Plain notes just gain a faint, ignorable "⟨⟩ source"
@@ -751,26 +775,40 @@ function AtomShell({
         />
       ) : isHtml ? (
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
-        // route iframe (Crepe is never used for an html body). The
+        // route iframe (Tiptap is never used for an html body). The
         // ⟨⟩ source toggle above still flips to the raw textarea.
         <HtmlAtomFrame atomId={atomId} body={rest} />
+      ) : identity === undefined ? (
+        <div className="py-8 text-sm text-ink-dim">loading…</div>
       ) : (
         <AtomEditor
           ref={editorRef}
-          // (b1) Crepe only ever sees the body WITHOUT frontmatter →
+          // (b1) Tiptap only ever sees the body WITHOUT frontmatter →
           // zero frontmatter glyphs. On change we reattach the exact
           // captured `fm` bytes, so the frontmatter round-trips
-          // byte-identical regardless of Crepe's content normalization.
+          // byte-identical regardless of Tiptap's content normalization.
           // D4.22 — title lives in frontmatter now, so the editor
           // gets the full content body again (no title extraction).
           value={rest}
           onChange={(next) => onChange(joinFrontmatter(fm, next))}
+          onPreviewChange={(next) => onPreviewChange?.(joinFrontmatter(fm, next))}
+          frontmatter={meta}
           autoFocus={autoFocus}
           onAsciiBlockClick={(pos, content, language) => {
             setEditingBlock({ pos, text: content, language })
             setSketcherOpen(true)
           }}
           knownFiles={knownFiles}
+          collab={
+            identity?.workspaceId && atomId
+              ? {
+                  workspaceId: activeWorkspaceId ?? identity.workspaceId,
+                  atomId,
+                  userId: user?.id,
+                  userName: collabUserName,
+                }
+              : undefined
+          }
           onOpenWikilink={(target) => {
             // Resolution rule (matches the cascade): if the target
             // matches an existing file (with or without .md),

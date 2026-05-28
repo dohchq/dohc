@@ -1,4 +1,13 @@
-import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import {
+  createContext,
+  Fragment,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+} from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -20,10 +29,16 @@ import {
   Star,
   Palette,
   Share2,
+  Compass,
+  User,
+  Building2,
+  Target,
+  Search,
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
 import { DohcMark } from './DohcLogo'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { useTheme } from '@/lib/use-theme'
 import {
   buildTree,
@@ -36,6 +51,7 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
+import { partitionTree } from '@/lib/file-tree-sections'
 
 type Props = {
   files: FileRow[]
@@ -92,8 +108,198 @@ type Props = {
     permission: 'view' | 'edit'
     available: boolean
   }>
+  sharedByMeFileIds?: string[]
   activeShareId?: string | null
   onOpenShared?: (shareId: string) => void
+  // Opens the full-content search overlay (⌘⇧F).
+  onOpenSearch?: () => void
+}
+
+// Optional tree-level presence context. v2 live presence is owned by
+// Hocuspocus/Y.Awareness inside the editor; FileTree currently passes an
+// empty set after the v1 Convex presence table was removed. The context
+// keeps the row rendering path stable if we later project awareness into
+// the sidebar.
+//
+// Default value = empty set so the context works outside
+// FileTree (e.g. tests that mount a single TreeRowNode in
+// isolation; not a current use case but avoids hard-coded
+// undefined checks at every consumer).
+const PresenceContext = createContext<ReadonlySet<string>>(new Set())
+
+function readSectionOpen(key: string, dflt: boolean): boolean {
+  if (typeof window === 'undefined') return dflt
+  try {
+    const v = window.localStorage.getItem(key)
+    return v === null ? dflt : v === '1'
+  } catch {
+    return dflt
+  }
+}
+
+function writeSectionOpen(key: string, open: boolean) {
+  try {
+    window.localStorage.setItem(key, open ? '1' : '0')
+  } catch {
+    // localStorage unavailable / quota — non-fatal.
+  }
+}
+
+/** A section's open/closed state, persisted to localStorage by key. */
+function usePersistedSectionToggle(key: string, dflt: boolean) {
+  const [open, setOpen] = useState(() => readSectionOpen(key, dflt))
+  useEffect(() => {
+    writeSectionOpen(key, open)
+  }, [key, open])
+  return [open, setOpen] as const
+}
+
+/**
+ * A collapsible sidebar section, VSCode-explorer style: a chevron +
+ * uppercase label header that toggles a region below it. The header is
+ * a real <button> with aria-expanded/aria-controls; the chevron is
+ * visual-only. `trailing` holds optional header-right actions (e.g. the
+ * "+ new" menu on Personal workspace).
+ */
+function TreeSection({
+  id,
+  label,
+  open,
+  onToggle,
+  divider = false,
+  trailing,
+  children,
+}: {
+  id: string
+  label: string
+  open: boolean
+  onToggle: () => void
+  /** Draw a top rule — the explorer-style separator between sections. */
+  divider?: boolean
+  trailing?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div className={divider ? 'border-t border-rule mt-1 pt-1' : ''}>
+      <div className="group flex items-center pl-2.5 pr-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls={id}
+          className="flex flex-1 items-center gap-1 py-1 text-left text-ink-faint hover:text-ink-dim transition-colors"
+        >
+          {open ? (
+            <ChevronDown className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+          ) : (
+            <ChevronRight className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+          )}
+          <span
+            id={`${id}-label`}
+            className="text-[10px] uppercase tracking-[0.12em] font-medium"
+          >
+            {label}
+          </span>
+        </button>
+        {trailing}
+      </div>
+      <div id={id} role="group" aria-labelledby={`${id}-label`} hidden={!open}>
+        {open && children}
+      </div>
+    </div>
+  )
+}
+
+// Context section: a small, read-only list of the reserved "maps &
+// manuals" files. Curated labels + icons (the section is not a tree —
+// these files aren't dragged or renamed from here; they open on click).
+const CONTEXT_META: Record<
+  string,
+  { label: string; Icon: typeof Compass; locked?: boolean }
+> = {
+  '_map.md': { label: 'Map · your setup', Icon: Compass, locked: true },
+  'me.md': { label: 'Me', Icon: User },
+  'company.md': { label: 'Company', Icon: Building2 },
+  'intent.md': { label: 'Intent', Icon: Target },
+}
+function ContextRow({
+  icon: Icon,
+  label,
+  active,
+  locked,
+  onClick,
+}: {
+  icon: typeof Compass
+  label: string
+  active: boolean
+  locked?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
+        active
+          ? 'bg-hover text-ink-strong font-medium'
+          : 'text-ink-dim hover:text-ink hover:bg-hover'
+      }`}
+    >
+      <Icon className="size-3.5 shrink-0" strokeWidth={2} />
+      <span className="truncate">{label}</span>
+      {locked && (
+        <Lock className="ml-auto size-3 shrink-0 text-ink-faint" strokeWidth={2} />
+      )}
+    </button>
+  )
+}
+
+function ContextList({
+  files,
+  activePath,
+  onOpen,
+}: {
+  files: FileRow[]
+  activePath: string | null
+  onOpen: (path: string) => void
+}) {
+  const byPath = new Map(files.map((f) => [f.path, f]))
+  // Object key order is the curated display order (insertion order).
+  const roots = Object.keys(CONTEXT_META).filter((p) => byPath.has(p))
+  const skills = files
+    .filter((f) => f.path.startsWith('skills/'))
+    .sort((a, b) => a.path.localeCompare(b.path))
+  return (
+    <div className="px-1.5 pb-1">
+      {roots.map((p) => {
+        const meta = CONTEXT_META[p]
+        return (
+          <ContextRow
+            key={p}
+            icon={meta.Icon}
+            label={meta.label}
+            locked={meta.locked}
+            active={activePath === p}
+            onClick={() => onOpen(p)}
+          />
+        )
+      })}
+      {skills.map((f) => {
+        const name =
+          f.title || f.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() || f.path
+        return (
+          <ContextRow
+            key={f.path}
+            icon={Sparkles}
+            label={name}
+            active={activePath === f.path}
+            onClick={() => onOpen(f.path)}
+          />
+        )
+      })}
+    </div>
+  )
 }
 
 export function FileTree({
@@ -117,11 +323,48 @@ export function FileTree({
   onMoveFolder,
   onSetFileIcon,
   sharedWithMe,
+  sharedByMeFileIds,
   activeShareId,
   onOpenShared,
+  onOpenSearch,
 }: Props) {
-  const tree = useMemo(() => buildTree(files, folders), [files, folders])
+  // v2: sidebar presence is intentionally quiet for now. Editor carets are the
+  // primary live-collaboration UI, and removed v1 Convex presence rows should
+  // not be recreated just to light up sidebar dots.
+  const presentPathSet = useMemo<ReadonlySet<string>>(() => new Set(), [])
+  const sharedByMeIds = useMemo(
+    () => new Set(sharedByMeFileIds ?? []),
+    [sharedByMeFileIds],
+  )
+
+  // Partition the flat lists into the three sidebar sections. Pure
+  // presentation — no file moves. The main tree is built from the
+  // Personal-workspace subset; Context surfaces the reserved files.
+  const { personalFiles, personalFolders, contextFiles } = useMemo(
+    () => partitionTree(files, folders),
+    [files, folders],
+  )
+  const tree = useMemo(
+    () => buildTree(personalFiles, personalFolders),
+    [personalFiles, personalFolders],
+  )
   const label = user?.firstName || user?.email?.split('@')[0] || 'signed in'
+
+  // Collapsible-section open state, persisted per section (mirrors the
+  // chat-open localStorage pattern in _app.tsx). Personal + Context +
+  // Shared all default open.
+  const [openPersonal, setOpenPersonal] = usePersistedSectionToggle(
+    'dohc-section-personal',
+    true,
+  )
+  const [openContext, setOpenContext] = usePersistedSectionToggle(
+    'dohc-section-context',
+    true,
+  )
+  const [openShared, setOpenShared] = usePersistedSectionToggle(
+    'dohc-section-shared',
+    true,
+  )
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   useEffect(() => {
@@ -148,6 +391,12 @@ export function FileTree({
   // first Tab into the tree lands on their open file.
   const [focusedPath, setFocusedPath] = useState<string | null>(activePath)
   const rowRefs = useRef(new Map<string, HTMLDivElement | null>())
+  // Programmatic DOM focus must follow ONLY keyboard arrow-nav — never
+  // the automatic bootstrap re-anchor (which would steal focus from the
+  // editor when the open file lives in another section) and never mount
+  // (clicks/onFocus already place DOM focus). Set true just before a
+  // keyboard-driven setFocusedPath; the focus-DOM effect consumes it.
+  const wantDomFocusRef = useRef(false)
 
   // Flatten the visible rows in render order. This is the lookup the
   // pure nav function uses. Re-derived each render because both
@@ -200,10 +449,13 @@ export function FileTree({
     }
   }, [focusedPath, flatRows, activePath])
 
-  // After a focus change, move DOM focus onto the corresponding row so
-  // the screen reader announces it. Only acts when the row is in the
-  // visible set (a focused row whose folder collapsed disappears).
+  // Move DOM focus onto the focused row so the screen reader announces
+  // it — but ONLY when a keyboard arrow-nav requested it (wantDomFocus).
+  // The bootstrap re-anchor and mount must not grab focus, or opening a
+  // file in another section would yank focus off the editor.
   useEffect(() => {
+    if (!wantDomFocusRef.current) return
+    wantDomFocusRef.current = false
     if (focusedPath === null) return
     const el = rowRefs.current.get(focusedPath)
     if (el && document.activeElement !== el) el.focus({ preventScroll: false })
@@ -232,9 +484,9 @@ export function FileTree({
   const pendingStars = useRef(new Map<string, boolean>())
   const pendingFolderStars = useRef(new Map<string, boolean>())
 
-  // Trigger a render when the optimistic maps mutate so the row
-  // re-evaluates its current state. The ref is the source of truth;
-  // this counter is just a tickle.
+  // Trigger a render when the optimistic maps mutate so row affordances
+  // re-evaluate immediately. The ref is the source of truth; this
+  // counter is just a tickle.
   const [, setPendingTick] = useState(0)
   const bumpPending = useCallback(() => setPendingTick((n) => n + 1), [])
 
@@ -279,6 +531,39 @@ export function FileTree({
     for (const f of files) m.set(f.path, f)
     return m
   }, [files])
+
+  // Optimistic-aware "is this file starred?" — reads the pending
+  // override first so a just-clicked/just-pressed star reflects
+  // instantly, before the Convex projection catches up.
+  const starredOf = useCallback(
+    (path: string) => {
+      const o = pendingStars.current.get(path)
+      return o !== undefined ? o : fileByPath.get(path)?.starred === true
+    },
+    [fileByPath],
+  )
+
+  // Toggle a file's favorite, optimistically. Shared by the row's star
+  // button and the Shift+S shortcut so both behave identically.
+  const toggleFileStar = useCallback(
+    (path: string) => {
+      if (!onToggleStar) return
+      const current = starredOf(path)
+      const willStar = !current
+      setAnnouncement(willStar ? 'starring…' : 'unstarring…')
+      pendingStars.current.set(path, willStar)
+      bumpPending()
+      void onToggleStar(path, current).then(
+        () => setAnnouncement(willStar ? 'starred' : 'unstarred'),
+        () => {
+          setAnnouncement('')
+          pendingStars.current.delete(path)
+          bumpPending()
+        },
+      )
+    },
+    [onToggleStar, starredOf, bumpPending],
+  )
 
   // file-org-v1 D4.6 — VSCode-style "create where you're standing".
   // The "+" button (header) creates at the level of the currently
@@ -376,6 +661,36 @@ export function FileTree({
     return m
   }, [folders])
 
+  // Folder favorite — the optimistic-aware read + toggle, mirroring the
+  // file-star pair. Shared by the folder row's star button and Shift+S.
+  const folderStarredOf = useCallback(
+    (path: string) => {
+      const o = pendingFolderStars.current.get(path)
+      return o !== undefined ? o : folderStarByPath.get(path) === true
+    },
+    [folderStarByPath],
+  )
+  const toggleFolderStar = useCallback(
+    (path: string) => {
+      if (!onToggleFolderStar) return
+      const current = folderStarredOf(path)
+      const willStar = !current
+      setAnnouncement(willStar ? 'starring folder…' : 'unstarring folder…')
+      pendingFolderStars.current.set(path, willStar)
+      bumpPending()
+      void onToggleFolderStar(path, current).then(
+        () =>
+          setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
+        () => {
+          setAnnouncement('')
+          pendingFolderStars.current.delete(path)
+          bumpPending()
+        },
+      )
+    },
+    [onToggleFolderStar, folderStarredOf, bumpPending],
+  )
+
   const onTreeKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       // file-org-v1 D4.4a — Track-4 affordance shortcuts. L toggles
@@ -424,43 +739,11 @@ export function FileTree({
         const row = fileByPath.get(focusedPath)
         const pathSnapshot = focusedPath
         if (row) {
-          if (!onToggleStar) return
-          const optimistic = pendingStars.current.get(focusedPath)
-          const currentlyStarred =
-            optimistic !== undefined ? optimistic : row.starred === true
-          const willStar = !currentlyStarred
-          setAnnouncement(willStar ? 'starring…' : 'unstarring…')
-          pendingStars.current.set(focusedPath, willStar)
-          bumpPending()
-          void onToggleStar(pathSnapshot, currentlyStarred).then(
-            () => setAnnouncement(willStar ? 'starred' : 'unstarred'),
-            () => {
-              setAnnouncement('')
-              pendingStars.current.delete(pathSnapshot)
-              bumpPending()
-            },
-          )
+          toggleFileStar(pathSnapshot)
           return
         }
         // Folder row
-        if (!onToggleFolderStar) return
-        const optimistic = pendingFolderStars.current.get(focusedPath)
-        const currentlyStarred =
-          optimistic !== undefined
-            ? optimistic
-            : folderStarByPath.get(pathSnapshot) === true
-        const willStar = !currentlyStarred
-        setAnnouncement(willStar ? 'starring folder…' : 'unstarring folder…')
-        pendingFolderStars.current.set(focusedPath, willStar)
-        bumpPending()
-        void onToggleFolderStar(pathSnapshot, currentlyStarred).then(
-          () => setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
-          () => {
-            setAnnouncement('')
-            pendingFolderStars.current.delete(pathSnapshot)
-            bumpPending()
-          },
-        )
+        toggleFolderStar(pathSnapshot)
         return
       }
 
@@ -483,6 +766,8 @@ export function FileTree({
       e.preventDefault()
       switch (action.kind) {
         case 'focus':
+          // Keyboard nav — DOM focus should follow to the new row.
+          wantDomFocusRef.current = true
           setFocusedPath(action.path)
           break
         case 'expand':
@@ -508,6 +793,8 @@ export function FileTree({
       onToggleLock,
       onToggleStar,
       onToggleFolderStar,
+      toggleFileStar,
+      toggleFolderStar,
       setAnnouncement,
       bumpPending,
     ],
@@ -563,6 +850,10 @@ export function FileTree({
   // a focused folder, auto-expand it so the new row will be
   // visible right after commit. Cheap defensive UX.
   function beginPending(kind: 'page' | 'folder') {
+    // The inline create row lives inside the Personal section; make
+    // sure it's expanded or the input would mount hidden (and never
+    // focus) when the user creates while the section is collapsed.
+    setOpenPersonal(true)
     if (targetDir !== '' && !expanded.has(targetDir)) {
       setExpanded((prev) => new Set(prev).add(targetDir))
     }
@@ -570,6 +861,7 @@ export function FileTree({
   }
 
   return (
+    <PresenceContext.Provider value={presentPathSet}>
     <aside className="flex h-screen flex-col bg-panel border-r border-rule overflow-hidden">
       {/* file-org-v1 D4.4b — ARIA-live region for lock/star toggle
           announcements. Visually hidden (1px square, overflow-
@@ -632,7 +924,19 @@ export function FileTree({
             dohc
           </span>
         </div>
-        <div className="relative">
+        <div className="flex items-center gap-0.5">
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+              title="search (⌘⇧F)"
+              aria-label="search pages"
+            >
+              <Search className="size-4" strokeWidth={2} />
+            </button>
+          )}
+          <div className="relative">
           <button
             onClick={() => setNewOpen((v) => !v)}
             className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
@@ -684,20 +988,26 @@ export function FileTree({
               </div>
             </>
           )}
+          </div>
         </div>
       </header>
 
-      {/* Section label */}
-      <div className="px-4 pt-1 pb-2">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-ink-faint font-medium">
-          Vault
-        </span>
-      </div>
+      {/* org-plan §9 Phase D — workspace switcher. Compact dropdown
+          between the brand header and the file sections; "Personal"
+          when no org is active, otherwise the active org's name. */}
+      <WorkspaceSwitcher />
 
-      {/* Tree list */}
-      {/* pt-1 so the topmost row's focus ring isn't clipped by the
-          scroll container's top edge. */}
-      <div className="flex-1 overflow-y-auto px-1.5 pt-1 pb-3">
+      {/* Sections — VSCode-explorer style: collapsible groups over the
+          same flat file list (a pure presentation partition). */}
+      <div className="flex-1 overflow-y-auto pb-3">
+        <TreeSection
+          id="filetree-personal"
+          label="Personal workspace"
+          open={openPersonal}
+          onToggle={() => setOpenPersonal((v) => !v)}
+        >
+          {/* pt-1 so the topmost row's focus ring isn't clipped. */}
+          <div className="px-1.5 pt-1">
         {/* D4.6b — PendingRow renders INLINE at the target folder's
             depth (VSCode-style). The root case (targetDir === '')
             still renders at the top of the tree container; the
@@ -713,14 +1023,14 @@ export function FileTree({
 
         {tree.children.length === 0 && !pending ? (
           <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
-            Empty vault — hit{' '}
+            No pages yet — hit{' '}
             <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">⌘K</kbd>{' '}
             or the <Plus className="inline size-3 -mt-0.5" /> button to start.
           </div>
         ) : (
           <div
             role="tree"
-            aria-label="vault"
+            aria-label="personal workspace"
             onKeyDown={onTreeKeyDown}
             // D4.7 — root drop zone. Dropping on empty space in the
             // tree container (not on any row) moves the source to
@@ -799,26 +1109,60 @@ export function FileTree({
                     ? (path, current) => setPickerFile({ path, current })
                     : undefined
                 }
+                onToggleFileStar={onToggleStar ? toggleFileStar : undefined}
+                starredOf={starredOf}
+                onToggleFolderStar={
+                  onToggleFolderStar ? toggleFolderStar : undefined
+                }
+                folderStarredOf={folderStarredOf}
                 dragOverPath={dragOverPath}
                 setDragOverPath={setDragOverPath}
                 handleDrop={handleDrop}
                 pendingKind={pending}
                 pendingTargetDir={targetDir}
                 onPendingCommit={commitPending}
+                sharedByMeIds={sharedByMeIds}
               />
             ))}
           </div>
         )}
-      </div>
-
-      {/* sharing-v1 1a — "Shared with me" section (second explorer
-          group). Hidden when nothing is shared with the user. */}
-      {(sharedWithMe?.length ?? 0) > 0 && (
-        <div className="border-t border-rule px-2 py-2 overflow-y-auto max-h-[30vh]">
-          <div className="px-2 pb-1 text-[10.5px] font-semibold uppercase tracking-wide text-ink-faint">
-            Shared with me
           </div>
-          {sharedWithMe!.map((s) => {
+        </TreeSection>
+
+        {/* Context — the AI-OS "maps & manuals": the reserved files you
+            and dohc navigate by. Read-only here; they open on click. */}
+        {contextFiles.length > 0 && (
+          <TreeSection
+            id="filetree-context"
+            label="Context"
+            open={openContext}
+            onToggle={() => setOpenContext((v) => !v)}
+            divider
+          >
+            <ContextList
+              files={contextFiles}
+              activePath={activePath}
+              onOpen={onOpen}
+            />
+          </TreeSection>
+        )}
+
+        {/* sharing-v1 1a — "Shared with me". Always shown so the surface
+            is discoverable, with a calm empty state when nothing's shared. */}
+        <TreeSection
+          id="filetree-shared"
+          label="Shared with me"
+          open={openShared}
+          onToggle={() => setOpenShared((v) => !v)}
+          divider
+        >
+          <div className="px-1.5 pb-1">
+            {(sharedWithMe?.length ?? 0) === 0 && (
+              <p className="px-2 py-1 text-[11.5px] leading-relaxed text-ink-faint">
+                Nothing shared with you yet.
+              </p>
+            )}
+          {(sharedWithMe ?? []).map((s) => {
             const leaf =
               s.title ||
               s.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ||
@@ -843,8 +1187,9 @@ export function FileTree({
               </button>
             )
           })}
-        </div>
-      )}
+          </div>
+        </TreeSection>
+      </div>
 
       {/* Footer — Plugins lives in the activity bar now. */}
       <footer className="border-t border-rule px-3 py-2.5 flex flex-col gap-2">
@@ -869,6 +1214,7 @@ export function FileTree({
         </div>
       </footer>
     </aside>
+    </PresenceContext.Provider>
   )
 }
 
@@ -942,12 +1288,17 @@ function TreeRowNode({
   onRenameFile,
   onOpenPicker,
   onOpenFileIcon,
+  onToggleFileStar,
+  starredOf,
+  onToggleFolderStar,
+  folderStarredOf,
   dragOverPath,
   setDragOverPath,
   handleDrop,
   pendingKind,
   pendingTargetDir,
   onPendingCommit,
+  sharedByMeIds,
 }: {
   node: TreeNode
   depth: number
@@ -967,6 +1318,13 @@ function TreeRowNode({
   onOpenPicker?: (node: TreeNode) => void
   // emoji-icons — file rows only; opens the EmojiPicker for the file.
   onOpenFileIcon?: (path: string, current: string | null) => void
+  // Favorite toggle for file rows (optimistic-aware). Wired only when
+  // the parent provided a star mutation; absent ⇒ read-only star.
+  onToggleFileStar?: (path: string) => void
+  starredOf?: (path: string) => boolean
+  // Favorite toggle for folder rows (optimistic-aware), same contract.
+  onToggleFolderStar?: (path: string) => void
+  folderStarredOf?: (path: string) => boolean
   // file-org-v1 D4.7 — DnD state + handler from the parent.
   dragOverPath: string | null
   setDragOverPath: (path: string | null) => void
@@ -982,11 +1340,17 @@ function TreeRowNode({
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
   onPendingCommit: (value: string) => void
+  sharedByMeIds: ReadonlySet<string>
 }) {
   const isFolder = node.page === null
   const isExpanded = expanded.has(node.fullPath)
   const label = nodeLabel(node)
   const indent = 8 + depth * 14
+  // Optional presence indicator. With v2 the set is empty unless a future
+  // awareness projection feeds it, so the sidebar stays visually calm while
+  // live collaboration is represented by editor carets.
+  const presentPathSet = useContext(PresenceContext)
+  const isPresent = !isFolder && presentPathSet.has(node.fullPath)
   // file-org-v1 D4.3 — roving tabIndex. The focused row carries
   // tabIndex=0; all others carry tabIndex=-1. The bootstrap-effect
   // at the top of FileTree guarantees focusedPath is non-null on
@@ -999,6 +1363,7 @@ function TreeRowNode({
   if (!isFolder) {
     const isActive = viewIsAtom && activePath === node.page!.path
     const filePath = node.page!.path
+    const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
     // D4.7 — DnD: leaf row is BOTH draggable (the file itself) AND
     // droppable (drop INTO file = drop into file's parent folder).
     const leafParent = filePath.includes('/')
@@ -1085,6 +1450,14 @@ function TreeRowNode({
           <FileText className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         )}
         <span className="truncate text-[12.5px] font-medium">{label}</span>
+        {/* Optional sidebar presence dot. */}
+        {isPresent && (
+          <span
+            className="ml-1 inline-block size-1.5 shrink-0 rounded-full bg-emerald-500"
+            aria-label="Live editing session active"
+            title="Live editing session active"
+          />
+        )}
         {/* file-org-v1 D4.4a — lock + star affordances. Lock icon
             color signals owner (violet=system, ink-dim=user); both
             present ⇒ system color wins (it's the stronger
@@ -1102,12 +1475,28 @@ function TreeRowNode({
             }
           />
         )}
-        {node.page!.starred && (
-          <Star
-            className="size-3 shrink-0 fill-current text-accent-2"
-            strokeWidth={1.5}
-            aria-label="starred"
+        {isSharedByMe && (
+          <Share2
+            className="size-3 shrink-0 text-accent opacity-80"
+            strokeWidth={2}
+            aria-label="shared"
           />
+        )}
+        {onToggleFileStar ? (
+          <StarToggle
+            starred={
+              starredOf ? starredOf(filePath) : node.page!.starred === true
+            }
+            onToggle={() => onToggleFileStar(filePath)}
+          />
+        ) : (
+          node.page!.starred && (
+            <Star
+              className="size-3 shrink-0 fill-current text-accent-2"
+              strokeWidth={1.5}
+              aria-label="starred"
+            />
+          )
         )}
         <RowActions
           onRename={() => void onRenameFile(filePath)}
@@ -1213,12 +1602,23 @@ function TreeRowNode({
         {/* file-org-v1 D4.5 — folder star icon (next to label,
             before the row-actions menu). Mirrors the leaf-row
             star treatment for consistency. */}
-        {node.starred && (
-          <Star
-            className="size-3 shrink-0 fill-current text-accent-2"
-            strokeWidth={1.5}
-            aria-label="starred folder"
+        {onToggleFolderStar ? (
+          <StarToggle
+            starred={
+              folderStarredOf
+                ? folderStarredOf(node.fullPath)
+                : node.starred === true
+            }
+            onToggle={() => onToggleFolderStar(node.fullPath)}
           />
+        ) : (
+          node.starred && (
+            <Star
+              className="size-3 shrink-0 fill-current text-accent-2"
+              strokeWidth={1.5}
+              aria-label="starred folder"
+            />
+          )
         )}
         <RowActions
           onRename={() => void onRenameFolder(node.fullPath)}
@@ -1275,15 +1675,54 @@ function TreeRowNode({
             onRenameFile={onRenameFile}
             onOpenPicker={onOpenPicker}
             onOpenFileIcon={onOpenFileIcon}
+            onToggleFileStar={onToggleFileStar}
+            starredOf={starredOf}
+            onToggleFolderStar={onToggleFolderStar}
+            folderStarredOf={folderStarredOf}
             dragOverPath={dragOverPath}
             setDragOverPath={setDragOverPath}
             handleDrop={handleDrop}
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
             onPendingCommit={onPendingCommit}
+            sharedByMeIds={sharedByMeIds}
           />
         ))}
     </Fragment>
+  )
+}
+
+// Favorite toggle on a file row. Persistent (filled, accent) when
+// starred; revealed on hover when not — so it both indicates and
+// toggles the favorite without a second always-on star.
+function StarToggle({
+  starred,
+  onToggle,
+}: {
+  starred: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation()
+        onToggle()
+      }}
+      title={starred ? 'unfavorite' : 'favorite'}
+      aria-label={starred ? 'unfavorite' : 'favorite'}
+      aria-pressed={starred}
+      className={`flex size-5 shrink-0 items-center justify-center rounded hover:bg-hover transition-opacity ${
+        starred
+          ? 'opacity-100 text-accent-2'
+          : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-ink-faint hover:text-ink'
+      }`}
+    >
+      <Star
+        className={`size-3 ${starred ? 'fill-current' : ''}`}
+        strokeWidth={starred ? 1.5 : 2}
+      />
+    </button>
   )
 }
 

@@ -9,10 +9,12 @@
  */
 
 import type * as agent from "../agent.js";
+import type * as atomAccess from "../atomAccess.js";
 import type * as atomCapture from "../atomCapture.js";
 import type * as atomId from "../atomId.js";
 import type * as atomLocks from "../atomLocks.js";
 import type * as atomShares from "../atomShares.js";
+import type * as atomSuggestions from "../atomSuggestions.js";
 import type * as atoms from "../atoms.js";
 import type * as auth from "../auth.js";
 import type * as captures from "../captures.js";
@@ -25,17 +27,23 @@ import type * as entityId from "../entityId.js";
 import type * as folders from "../folders.js";
 import type * as formulaEval from "../formulaEval.js";
 import type * as graph from "../graph.js";
+import type * as hocuspocusAdmin from "../hocuspocusAdmin.js";
+import type * as hocuspocusAuth from "../hocuspocusAuth.js";
 import type * as htmlAtoms from "../htmlAtoms.js";
 import type * as inlineAtom from "../inlineAtom.js";
 import type * as liveTotal from "../liveTotal.js";
 import type * as liveTotals from "../liveTotals.js";
 import type * as loop from "../loop.js";
 import type * as onboarding from "../onboarding.js";
+import type * as orgRoles from "../orgRoles.js";
 import type * as orgs from "../orgs.js";
+import type * as orgsBridge from "../orgsBridge.js";
 import type * as pluginBridge from "../pluginBridge.js";
 import type * as plugins from "../plugins.js";
 import type * as queries from "../queries.js";
 import type * as resolveWindow from "../resolveWindow.js";
+import type * as search from "../search.js";
+import type * as searchText from "../searchText.js";
 import type * as seed from "../seed.js";
 import type * as skillTurnGate from "../skillTurnGate.js";
 import type * as skills from "../skills.js";
@@ -51,10 +59,12 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
+  atomAccess: typeof atomAccess;
   atomCapture: typeof atomCapture;
   atomId: typeof atomId;
   atomLocks: typeof atomLocks;
   atomShares: typeof atomShares;
+  atomSuggestions: typeof atomSuggestions;
   atoms: typeof atoms;
   auth: typeof auth;
   captures: typeof captures;
@@ -67,17 +77,23 @@ declare const fullApi: ApiFromModules<{
   folders: typeof folders;
   formulaEval: typeof formulaEval;
   graph: typeof graph;
+  hocuspocusAdmin: typeof hocuspocusAdmin;
+  hocuspocusAuth: typeof hocuspocusAuth;
   htmlAtoms: typeof htmlAtoms;
   inlineAtom: typeof inlineAtom;
   liveTotal: typeof liveTotal;
   liveTotals: typeof liveTotals;
   loop: typeof loop;
   onboarding: typeof onboarding;
+  orgRoles: typeof orgRoles;
   orgs: typeof orgs;
+  orgsBridge: typeof orgsBridge;
   pluginBridge: typeof pluginBridge;
   plugins: typeof plugins;
   queries: typeof queries;
   resolveWindow: typeof resolveWindow;
+  search: typeof search;
+  searchText: typeof searchText;
   seed: typeof seed;
   skillTurnGate: typeof skillTurnGate;
   skills: typeof skills;

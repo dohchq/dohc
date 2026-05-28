@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createFileRoute,
   useNavigate,
   useLocation,
   Outlet,
 } from '@tanstack/react-router'
-import { useMutation, useQuery } from 'convex/react'
+import { useAction, useMutation, useQuery } from 'convex/react'
 import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import {
   MessageSquare,
@@ -14,7 +14,8 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
-import { applyFrontmatter } from '@/lib/frontmatter'
+import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
+import { useDocumentMeta } from '@/lib/use-document-meta'
 import { FileTree } from '@/components/FileTree'
 import { AtomView } from '@/components/AtomView'
 import { SharedAtomView } from '@/components/SharedAtomView'
@@ -27,8 +28,14 @@ import { SharingPanel } from '@/components/SharingPanel'
 import { ProposalsPanel } from '@/components/ProposalsPanel'
 import { PluginPanel } from '@/components/PluginPanel'
 import { CommandPalette } from '@/components/CommandPalette'
+import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
+import {
+  ActiveWorkspaceProvider,
+  useActiveWorkspaceId,
+} from '@/lib/active-workspace'
+import { ChatBusyProvider } from '@/lib/chat-busy'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
 // PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
@@ -43,16 +50,27 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   return (
-    <>
-      <Home />
-      <Outlet />
-    </>
+    <ActiveWorkspaceProvider>
+      <ChatBusyProvider>
+        <Home />
+        <Outlet />
+      </ChatBusyProvider>
+    </ActiveWorkspaceProvider>
   )
 }
 
 const BUILD_PLUGIN_PROMPT = `I want to build a new plugin. Available kernels are heatmap, list (with layouts: cards/kanban/template), table, and custom. Custom kernels are full HTML/JS in a sandboxed iframe with read+write access via window.dohc. Ask me what view I want, what query it should claim (e.g. entities.list("booking")), which kernel to use, and which kernel-specific fields / commands / overlay flag to set. Then write the plugin atom to plugins/<id>.md with the right frontmatter.`
 
 type View = 'atom' | 'graph' | 'plugins'
+
+// Display name for a file path: the leaf, sans a single extension
+// (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
+// fallback when an atom has no frontmatter `title:` — mirrors how the
+// tree labels untitled files.
+function leafName(path: string): string {
+  const leaf = path.split('/').pop() ?? path
+  return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
+}
 
 function Home() {
   const { user, loading } = useAuth()
@@ -78,7 +96,48 @@ function Gate() {
   // Gate only mounts post-auth, so this query always runs authed;
   // `undefined` ⇒ the state query is still resolving ⇒ keep showing
   // loading (never flash the wrong screen — P1 design v1 §gate).
-  const state = useQuery(api.onboarding.state)
+  //
+  // Jenny/ultrathink M3: `state` must be scoped to the ACTIVE workspace,
+  // not personal-by-default. Otherwise an org user who finished personal
+  // onboarding skips the wedge for their (still-NEW) org. The hook is
+  // safe to use here because <Gate /> renders inside the provider via
+  // <Home />.
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const state = useQuery(api.onboarding.state, { activeWorkspaceId })
+
+  // W1 (H-7) — fire WorkOS membership reconcile on first sign-in for
+  // each user.id + every 4h. Catches the "user removed in WorkOS but
+  // session is still valid" case without waiting for the periodic cron.
+  // Fire-and-forget: a WorkOS outage doesn't block the UI.
+  const { user } = useAuth()
+  const reconcileMembership = useAction(api.orgsBridge.reconcileMembership)
+  const upsertMyProfile = useMutation(api.auth.upsertMyProfile)
+  useEffect(() => {
+    if (!user?.id) return
+    const LAST_USER = 'dohc.lastReconcileFor'
+    const STAMP_KEY = 'dohc.lastReconcileAt'
+    const FOUR_HOURS_MS = 4 * 60 * 60 * 1000
+    try {
+      const lastUser = window.localStorage.getItem(LAST_USER)
+      const lastAtRaw = window.localStorage.getItem(STAMP_KEY)
+      const lastAt = lastAtRaw ? Number(lastAtRaw) : 0
+      const isNewUser = lastUser !== user.id
+      const isStale = Date.now() - lastAt > FOUR_HOURS_MS
+      if (isNewUser || isStale) {
+        void reconcileMembership({}).catch(() => {})
+        window.localStorage.setItem(LAST_USER, user.id)
+        window.localStorage.setItem(STAMP_KEY, String(Date.now()))
+      }
+    } catch {
+      // localStorage unavailable (private mode) — fire anyway, the
+      // server side is idempotent.
+      void reconcileMembership({}).catch(() => {})
+    }
+  }, [user?.id, reconcileMembership])
+  useEffect(() => {
+    if (!user?.id) return
+    void upsertMyProfile({}).catch(() => {})
+  }, [user?.id, user?.email, upsertMyProfile])
   if (state === undefined) {
     return (
       <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">
@@ -151,10 +210,19 @@ function SignInPrompt() {
 
 function App() {
   const { user } = useAuth()
-  const files = useQuery(api.atoms.list)
-  const folders = useQuery(api.folders.list)
+  // org-plan §5 Phase B — every read/write is scoped to the active
+  // workspace. undefined ⇒ caller's personal workspace (the v0 default;
+  // back-compat preserved by requireWorkspace(ctx, undefined)).
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const files = useQuery(api.atoms.list, { activeWorkspaceId })
+  const folders = useQuery(api.folders.list, { activeWorkspaceId })
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
-  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe)
+  const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
+    activeWorkspaceId,
+  })
+  const sharedByMeFileIds = useQuery(api.atomShares.listSharedFileIds, {
+    activeWorkspaceId,
+  })
   // The fileId currently being shared (drives the ShareDialog).
   const [sharePromptFor, setSharePromptFor] = useState<string | null>(null)
   const ensureThread = useMutation(api.agent.ensureThread)
@@ -187,13 +255,20 @@ function App() {
   // + the files list, so a rename/move (path changes, fileId stable)
   // re-derives the open path automatically — NO URL change needed.
   const location = useLocation()
+  // R1 — recognize BOTH the legacy URL shape AND the new workspace-
+  // scoped `/w/<wsId>/...` shape. Either form opens the right atom;
+  // the activeWorkspaceId is derived separately by the hook (URL
+  // wins → `useActiveWorkspaceId()`). Order in the regex alternation
+  // matters: the workspace-scoped match must come FIRST so a literal
+  // `/w/me/p/<id>` doesn't accidentally match `/p/<id>` on the suffix.
   const urlFileId = (() => {
-    const m = /^\/p\/(.+)$/.exec(location.pathname)
+    const m = /^(?:\/w\/[^/]+)?\/p\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   // sharing-v1 1a — `/shared/<shareId>` opens an atom shared WITH me.
+  // Same R1 dual-shape: matches `/shared/<id>` and `/w/<wsId>/shared/<id>`.
   const urlShareId = (() => {
-    const m = /^\/shared\/(.+)$/.exec(location.pathname)
+    const m = /^(?:\/w\/[^/]+)?\/shared\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const navigate = useNavigate()
@@ -224,6 +299,49 @@ function App() {
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>('atom')
+
+  // Notion-style browser tab: reflect the open surface in the title +
+  // favicon. This shell is the single owner — the open page lives in
+  // live Convex queries here, not in route loader data. For a shared
+  // page (`/shared/<id>`) we read its title/emoji from the SAME query
+  // SharedAtomView uses; Convex multiplexes the identical subscription,
+  // so it costs nothing extra.
+  const sharedAtomForMeta = useQuery(
+    api.atomShares.getSharedAtom,
+    urlShareId ? { shareId: urlShareId as Id<'atomShares'> } : 'skip',
+  )
+  const { docTitle, docEmoji } = useMemo<{
+    docTitle: string | null | undefined
+    docEmoji: string | null | undefined
+  }>(() => {
+    if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
+    if (view === 'plugins') return { docTitle: 'Plugins', docEmoji: null }
+    if (urlShareId) {
+      // undefined ⇒ still loading: hold the current tab (no brand flash).
+      // null ⇒ gone/forbidden: fall back to the brand default.
+      if (sharedAtomForMeta === undefined)
+        return { docTitle: undefined, docEmoji: undefined }
+      if (sharedAtomForMeta === null)
+        return { docTitle: null, docEmoji: null }
+      const { meta } = parseFrontmatter(sharedAtomForMeta.body)
+      const title =
+        (typeof meta.title === 'string' && meta.title.trim()) ||
+        leafName(sharedAtomForMeta.path)
+      const emoji =
+        typeof meta.icon === 'string' && meta.icon.trim()
+          ? meta.icon.trim()
+          : null
+      return { docTitle: title, docEmoji: emoji }
+    }
+    if (!activePath) return { docTitle: null, docEmoji: null }
+    const f = (files ?? []).find((x) => x.path === activePath)
+    return {
+      docTitle: (f?.title && f.title.trim()) || leafName(activePath),
+      docEmoji: f?.icon ?? null,
+    }
+  }, [view, urlShareId, sharedAtomForMeta, activePath, files])
+  useDocumentMeta({ title: docTitle, emoji: docEmoji })
+
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
   // P3+P4 Codex fold F2+F3: a STRUCTURALLY-typed second channel
   // for programmatic skill-fire dispatches. Palette skill clicks
@@ -236,6 +354,7 @@ function App() {
   )
   const [enterEdit, setEnterEdit] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   // Chat panel is hidden by default — when the user wants to talk to the
   // agent they pop it open via the floating toggle (or ⌘\). Persisted to
   // localStorage so the preference survives reloads.
@@ -280,19 +399,28 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    ensureThread({}).then((id) => {
+    ensureThread({ activeWorkspaceId }).then((id) => {
       if (!cancelled) setThreadId(id as string)
     })
     return () => {
       cancelled = true
     }
-  }, [ensureThread])
+  }, [ensureThread, activeWorkspaceId])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((p) => !p)
+      }
+      // ⌘⇧F opens full-content search across all pages.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === 'f'
+      ) {
+        e.preventDefault()
+        setSearchOpen((s) => !s)
       }
       // ⌘\ toggles the chat panel.
       if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
@@ -343,23 +471,31 @@ function App() {
       setOptimisticPath(path)
       const fid = (files ?? []).find((f) => f.path === path)?.fileId
       if (fid) {
+        // R1 — navigate to the new workspace-scoped URL. `me` sentinel
+        // for personal (activeWorkspaceId === undefined ⇒ /w/me/...);
+        // the literal org id for org workspaces (/w/<orgId>/...).
         void navigate({
-          to: '/p/$atomId',
-          params: { atomId: fid },
+          to: '/w/$wsId/p/$atomId',
+          params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
           replace: opts?.replace ?? false,
         })
       }
     },
-    [files, navigate],
+    [files, navigate, activeWorkspaceId],
   )
 
   // Clear the open atom (→ home). Used on delete of the open atom.
   const clearOpenAtom = useCallback(
     (opts?: { replace?: boolean }) => {
       setOptimisticPath(null)
-      void navigate({ to: '/', replace: opts?.replace ?? false })
+      // R1 — workspace home, not bare root. Stays in the active workspace.
+      void navigate({
+        to: '/w/$wsId',
+        params: { wsId: activeWorkspaceId ?? 'me' },
+        replace: opts?.replace ?? false,
+      })
     },
-    [navigate],
+    [navigate, activeWorkspaceId],
   )
 
   // sharing-v1 1a — open an atom shared WITH me (by share id).
@@ -367,9 +503,13 @@ function App() {
     (sid: string) => {
       setOptimisticPath(null)
       setView('atom')
-      void navigate({ to: '/shared/$shareId', params: { shareId: sid } })
+      // R1 — workspace-scoped share URL.
+      void navigate({
+        to: '/w/$wsId/shared/$shareId',
+        params: { wsId: activeWorkspaceId ?? 'me', shareId: sid },
+      })
     },
-    [navigate],
+    [navigate, activeWorkspaceId],
   )
 
   // Bridge: once the optimistic path's file gains a real fileId in
@@ -379,13 +519,14 @@ function App() {
     if (!optimisticPath || !files) return
     const fid = files.find((f) => f.path === optimisticPath)?.fileId
     if (fid && urlFileId !== fid) {
+      // R1 — workspace-scoped URL.
       void navigate({
-        to: '/p/$atomId',
-        params: { atomId: fid },
+        to: '/w/$wsId/p/$atomId',
+        params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
         replace: true,
       })
     }
-  }, [optimisticPath, files, urlFileId, navigate])
+  }, [optimisticPath, files, urlFileId, navigate, activeWorkspaceId])
 
   // Once the URL→files derivation converges to the optimistic path,
   // drop the override so the URL is the sole source of truth (a
@@ -404,7 +545,7 @@ function App() {
   }, [urlFileId])
 
   async function createAtom(path: string, body = '') {
-    await upsertAtom({ path, body, source: 'user' })
+    await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
     // openAtom shows it immediately (optimistic); the bridge effect
     // writes the URL once the new file lands in `files` with a fileId.
     openAtom(path)
@@ -436,7 +577,7 @@ function App() {
     const clean = name.trim().replace(/^\/+|\/+$/g, '')
     if (!clean) return
     try {
-      await createFolder({ path: clean })
+      await createFolder({ path: clean, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't create folder: ${(e as Error).message}`)
     }
@@ -453,7 +594,7 @@ function App() {
   // miss for sighted users; the alert is loud).
   async function toggleLockAtPath(path: string, currentlyLocked: boolean) {
     try {
-      await setLockAtom({ path, locked: !currentlyLocked })
+      await setLockAtom({ path, locked: !currentlyLocked, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyLocked ? 'unlock' : 'lock'}: ${(e as Error).message}`)
       throw e
@@ -461,7 +602,7 @@ function App() {
   }
   async function toggleStarAtPath(path: string, currentlyStarred: boolean) {
     try {
-      await setStarAtom({ path, starred: !currentlyStarred })
+      await setStarAtom({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'}: ${(e as Error).message}`)
       throw e
@@ -469,7 +610,7 @@ function App() {
   }
   async function toggleFolderStarAtPath(path: string, currentlyStarred: boolean) {
     try {
-      await setFolderStar({ path, starred: !currentlyStarred })
+      await setFolderStar({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
       window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'} folder: ${(e as Error).message}`)
       throw e
@@ -488,6 +629,7 @@ function App() {
       icon: next.icon,
       color: next.color,
       starred: next.starred,
+      activeWorkspaceId,
     })
   }
 
@@ -500,7 +642,7 @@ function App() {
     // wikilink cascade sees the latest body.
     await pendingSaveRef.current?.()
     try {
-      const result = await moveAtom({ fromPath, toPath })
+      const result = await moveAtom({ fromPath, toPath, activeWorkspaceId })
       // D4.30 — no URL change: the open atom's fileId is stable
       // across the move, so `activePath` re-derives to `toPath`
       // automatically when `files` refreshes.
@@ -509,7 +651,7 @@ function App() {
           () =>
             window.alert(
               `Moved ${fromPath} → ${toPath}\n` +
-                `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across the vault.`,
+                `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across your workspace.`,
             ),
           0,
         )
@@ -523,7 +665,7 @@ function App() {
     // D4.7c — flush autosave before the cascade runs.
     await pendingSaveRef.current?.()
     try {
-      await moveFolder({ fromPath, toPath })
+      await moveFolder({ fromPath, toPath, activeWorkspaceId })
       // D4.8 — link-cascade alert removed per user feedback;
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
@@ -537,7 +679,7 @@ function App() {
     const ok = window.confirm(`Delete ${path}?\n\nThis can't be undone.`)
     if (!ok) return
     try {
-      await removeAtom({ path })
+      await removeAtom({ path, activeWorkspaceId })
       // D4.30 — if we just deleted the open atom, clear the URL.
       if (activePath === path) clearOpenAtom({ replace: true })
     } catch (e) {
@@ -558,7 +700,7 @@ function App() {
     // D4.7c — flush autosave so the cascade reads the latest body.
     await pendingSaveRef.current?.()
     try {
-      await moveAtom({ fromPath: path, toPath: target })
+      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
       // D4.30 — no URL change; fileId is stable, activePath
       // re-derives to `target` automatically.
       // D4.8 — link-cascade alert removed; the rewrite is silent.
@@ -575,7 +717,7 @@ function App() {
     // D4.7c — flush autosave before cascade.
     await pendingSaveRef.current?.()
     try {
-      await moveFolder({ fromPath: path, toPath: target })
+      await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
       // D4.30 — no URL change: every moved atom keeps its fileId
       // (folders.move reconciles the index), so the open atom's
       // `activePath` re-derives to its new path automatically.
@@ -591,7 +733,10 @@ function App() {
     )
     if (!ok) return
     try {
-      const { atomCount, folderCount } = await removeFolder({ path })
+      const { atomCount, folderCount } = await removeFolder({
+        path,
+        activeWorkspaceId,
+      })
       // D4.30 — if the open atom was inside the deleted folder, clear the URL.
       if (activePath && (activePath === path || activePath.startsWith(`${path}/`))) {
         clearOpenAtom({ replace: true })
@@ -623,8 +768,10 @@ function App() {
         folders={folders ?? []}
         activePath={activePath}
         view={view === 'plugins' ? 'plugins' : 'atom'}
+        onOpenSearch={() => setSearchOpen(true)}
         user={user}
         sharedWithMe={sharedWithMe ?? []}
+        sharedByMeFileIds={sharedByMeFileIds ?? []}
         activeShareId={urlShareId}
         onOpenShared={openShared}
         onOpen={(p) => openAtom(p)}
@@ -639,7 +786,7 @@ function App() {
         onToggleFolderStar={toggleFolderStarAtPath}
         onSetFolderMeta={setFolderMetaAtPath}
         onSetFileIcon={async (path, icon) => {
-          await setIconAtom({ path, icon })
+          await setIconAtom({ path, icon, activeWorkspaceId })
         }}
         onMoveFile={moveFileByDrop}
         onMoveFolder={moveFolderByDrop}
@@ -765,6 +912,11 @@ function App() {
         )}
         <span>{chatOpen ? 'Hide chat' : 'Chat'}</span>
       </button>
+      <SearchOverlay
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onOpenAtom={openAtom}
+      />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

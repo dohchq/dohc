@@ -8,7 +8,7 @@
 //      as literal markdown (no schema change) so the rename
 //      cascade in convex/{atoms,folders}.move continues to operate
 //      on `[[path]]` and the file body roundtrips cleanly through
-//      Crepe's markdown serializer.
+//      Tiptap's markdown serializer.
 //      Mechanism: emit a Decoration.widget at the start of the
 //      range with the pill DOM, plus a Decoration.inline over the
 //      full range with `class: dohc-wikilink-hidden` that
@@ -25,8 +25,8 @@
 //      to the editor to replace the `[[query` with the chosen
 //      path + close brackets.
 
-import { Plugin, PluginKey } from '@milkdown/kit/prose/state'
-import { Decoration, DecorationSet } from '@milkdown/kit/prose/view'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { PMDocLike, PMNodeLike } from './inlineAtomPlugin'
 
 export const wikilinkPluginKey = new PluginKey('dohc-wikilink')
@@ -117,8 +117,10 @@ export function detectAutocomplete(
   cursorPos: number,
 ): AutocompleteState {
   let found: AutocompleteState = { active: false }
-  doc.descendants((node, pos) => {
+  doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return
+    if (isCodeBlock(parent)) return
+    if ((node.marks ?? []).some(isCodeMark)) return
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return

@@ -50,6 +50,7 @@ import {
 } from './inlineAtom'
 import { isNonDataAtom, extractFrontmatterId } from './atomId'
 import { resolveShareAccess } from './atomShares'
+import { canReadAtom } from './atomAccess'
 
 // Same bound + posture as liveTotals.NOTE_SCAN_CAP: a wrong
 // authoritative-looking number is worse than `—` — over the cap we
@@ -206,6 +207,13 @@ async function buildStore(
   // ref (or an injected `{= sum(salary) }`) resolves to `—`, never
   // leaking the owner's other data.
   allowedFileIds?: Set<string>,
+  // P1 (multiplayer-and-h-followups §6.5) — when present, only atoms
+  // the viewer can read enter the store. So `{= sum(:salary) }` in a
+  // public dashboard never aggregates a teammate's private atom's
+  // inline values. Composes with `allowedFileIds` (shared path) —
+  // both must allow an atom for it to enter. An empty-string subject
+  // (no identity) fails-closed to private/restricted owners-only.
+  viewerSubject?: string,
 ): Promise<FormulaStore | null> {
   // atomIds has no `by_workspace` index — query the by_workspace_fileId
   // COMPOUND index by its `workspaceId` PREFIX (Convex prefix scan):
@@ -231,6 +239,17 @@ async function buildStore(
     const fileId = pathToFileId.get(a.path)
     if (!fileId) continue // not an addressed file (§1.3)
     if (allowedFileIds && !allowedFileIds.has(fileId)) continue // shared-scope
+    // P1 — viewer-access gate. Skip atoms this viewer can't read
+    // before any inline value enters the aggregation. Composes with
+    // the shared-scope guard above (both must allow). When the
+    // caller passed no `viewerSubject` (legacy / unauth path), this
+    // is a no-op — back-compat for any future internal caller.
+    if (
+      viewerSubject !== undefined &&
+      !(await canReadAtom(ctx, a._id, viewerSubject))
+    ) {
+      continue
+    }
     // D4.27 — DEFENSIVE: the index is a derived cache. Distrust it on
     // read — if the body's frontmatter id disagrees with the index's
     // bound fileId for this path, the index is stale/corrupt; skip
@@ -263,16 +282,25 @@ async function buildStore(
  * query side (from the markdown `value`) and the widget side (from
  * the unescaped ProseMirror doc text) derive via the SAME frozen
  * parser — fixing the Phase-3 dual-review BLOCKER where a raw-token
- * key mismatched after Crepe re-escaped `_`/`*`. Deduped, ≤64.
+ * key mismatched after a legacy editor re-escaped `_`/`*`. Deduped, ≤64.
  * Unknown / malformed ⇒ value:null. Never throws.
  */
 export const evalFormulas = query({
-  args: { srcs: v.array(v.string()) },
+  // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
+  // Frontend callers (AtomEditor, HtmlAtomFrame, /r/<atomId> route)
+  // all pass activeWorkspaceId from `useActiveWorkspaceId()` /
+  // `?w=<wsId>`. Backend keeps the arg optional only for backend
+  // tests; cross-tenant safety holds either way (requireWorkspace
+  // rejects a spoofed non-member id).
+  args: {
+    srcs: v.array(v.string()),
+    activeWorkspaceId: v.optional(v.string()),
+  },
   handler: async (
     ctx,
-    { srcs },
+    { srcs, activeWorkspaceId },
   ): Promise<Array<{ src: string; value: FormulaValue }>> => {
-    const viewer = await requireWorkspace(ctx)
+    const viewer = await requireWorkspace(ctx, activeWorkspaceId)
     const uniq = Array.from(new Set(srcs)).slice(0, MAX_FORMULAS)
     // Return an ARRAY, NOT an object keyed by `src` (Codex P3-fold
     // FAIL): a canonical src is attacker/author-influenceable — as an
@@ -284,7 +312,12 @@ export const evalFormulas = query({
     const out: Array<{ src: string; value: FormulaValue }> = []
     if (uniq.length === 0) return out
 
-    const store = await buildStore(ctx, viewer)
+    // P1 — pull the user subject so per-atom access is enforced
+    // when buildStore aggregates inline values. requireWorkspace
+    // already validated identity, so this is always defined here.
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
+    const store = await buildStore(ctx, viewer, undefined, viewerSubject)
     for (const src of uniq) {
       let value: FormulaValue = null
       if (store) {
