@@ -127,6 +127,19 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
   it('confirms before destructive leave (no silent offboarding)', () => {
     expect(DIALOG_SRC).toMatch(/window\.confirm/)
   })
+
+  it('keeps shared-workspace creation behind an explicit secondary action', () => {
+    expect(DIALOG_SRC).toMatch(/createOpen/)
+    expect(DIALOG_SRC).toMatch(/New shared workspace|Create shared workspace/)
+    expect(DIALOG_SRC).not.toMatch(/Create or join/i)
+    expect(DIALOG_SRC).not.toMatch(/No orgs yet/)
+  })
+
+  it('uses personal-first workspace language in the management copy', () => {
+    expect(DIALOG_SRC).toMatch(/Private by default/)
+    expect(DIALOG_SRC).toMatch(/No shared workspaces yet/)
+    expect(DIALOG_SRC).toMatch(/Have an invite code/)
+  })
 })
 
 describe('_app.tsx wires the switcher into the live queries', () => {
