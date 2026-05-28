@@ -220,13 +220,6 @@ function App() {
   const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
     activeWorkspaceId,
   })
-  // P1 (multiplayer-and-h-followups §6.5) — per-atom access overrides
-  // (private/restricted), keyed by fileId. Drives the lock icon badges
-  // in the file tree. Empty array (no override rows) is the common
-  // case — almost-zero cost to query, single small array.
-  const accessStates = useQuery(api.atomAccess.listAccessStates, {
-    activeWorkspaceId,
-  })
   // The fileId currently being shared (drives the ShareDialog).
   const [sharePromptFor, setSharePromptFor] = useState<string | null>(null)
   const ensureThread = useMutation(api.agent.ensureThread)
@@ -770,7 +763,6 @@ function App() {
       <FileTree
         files={files ?? []}
         folders={folders ?? []}
-        accessStates={accessStates ?? []}
         activePath={activePath}
         view={view === 'plugins' ? 'plugins' : 'atom'}
         onOpenSearch={() => setSearchOpen(true)}
