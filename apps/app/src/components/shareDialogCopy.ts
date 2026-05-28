@@ -3,8 +3,8 @@ export type GeneralAccessValue = 'restricted' | 'link' | 'workspace'
 
 export function getShareTargetPlaceholder(isPersonalWorkspace: boolean): string {
   return isPersonalWorkspace
-    ? 'Add people by handle'
-    : 'Add people or workspaces by handle'
+    ? 'Add people by email'
+    : 'Add people or workspaces by email'
 }
 
 export function getGeneralAccessCopy({

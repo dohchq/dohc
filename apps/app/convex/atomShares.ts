@@ -20,7 +20,7 @@ import { v } from 'convex/values'
 import { query, mutation } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
-import { requireWorkspace } from './auth'
+import { normalizeEmail, requireWorkspace } from './auth'
 import { extractFrontmatterId, deriveTitle } from './atomId'
 import { isMember } from './orgs'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
@@ -132,6 +132,76 @@ export async function ownerAtomByFileId(
   return atom
 }
 
+async function userProfileByWorkspaceId(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+) {
+  return await ctx.db
+    .query('userProfiles')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .first()
+}
+
+async function userProfileByEmail(ctx: QueryCtx | MutationCtx, email: string) {
+  const normalizedEmail = normalizeEmail(email)
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    throw new Error('Enter an email address.')
+  }
+  return await ctx.db
+    .query('userProfiles')
+    .withIndex('by_normalizedEmail', (q) =>
+      q.eq('normalizedEmail', normalizedEmail),
+    )
+    .first()
+}
+
+async function shareAtomWithWorkspace(
+  ctx: MutationCtx,
+  {
+    owner,
+    fileId,
+    granteeWorkspaceId,
+    permission,
+  }: {
+    owner: string
+    fileId: string
+    granteeWorkspaceId: string
+    permission: 'view' | 'edit'
+  },
+): Promise<Id<'atomShares'>> {
+  if (granteeWorkspaceId === owner) {
+    throw new Error('Cannot share a file with yourself.')
+  }
+  // The caller must actually OWN the fileId (a bound index row).
+  const mine = await ownerAtomByFileId(ctx, owner, fileId)
+  if (!mine) {
+    throw new Error(`You don't own a file with id "${fileId}".`)
+  }
+  const existing = await ctx.db
+    .query('atomShares')
+    .withIndex('by_owner_grantee_fileId', (q) =>
+      q
+        .eq('ownerWorkspaceId', owner)
+        .eq('granteeWorkspaceId', granteeWorkspaceId)
+        .eq('fileId', fileId),
+    )
+    .first()
+  if (existing) {
+    if (existing.permission !== permission) {
+      await ctx.db.patch(existing._id, { permission })
+    }
+    return existing._id
+  }
+  return await ctx.db.insert('atomShares', {
+    ownerWorkspaceId: owner,
+    fileId,
+    granteeWorkspaceId,
+    permission,
+    createdBy: owner,
+    createdAt: Date.now(),
+  })
+}
+
 async function scheduleShareAudienceDisconnect(
   ctx: MutationCtx,
   row: {
@@ -183,36 +253,33 @@ export const shareAtom = mutation({
     { fileId, granteeWorkspaceId, permission, activeWorkspaceId },
   ) => {
     const owner = await requireWorkspace(ctx, activeWorkspaceId)
-    if (granteeWorkspaceId === owner) {
-      throw new Error('Cannot share a file with yourself.')
-    }
-    // The caller must actually OWN the fileId (a bound index row).
-    const mine = await ownerAtomByFileId(ctx, owner, fileId)
-    if (!mine) {
-      throw new Error(`You don't own a file with id "${fileId}".`)
-    }
-    const existing = await ctx.db
-      .query('atomShares')
-      .withIndex('by_owner_grantee_fileId', (q) =>
-        q
-          .eq('ownerWorkspaceId', owner)
-          .eq('granteeWorkspaceId', granteeWorkspaceId)
-          .eq('fileId', fileId),
-      )
-      .first()
-    if (existing) {
-      if (existing.permission !== permission) {
-        await ctx.db.patch(existing._id, { permission })
-      }
-      return existing._id
-    }
-    return await ctx.db.insert('atomShares', {
-      ownerWorkspaceId: owner,
+    return await shareAtomWithWorkspace(ctx, {
+      owner,
       fileId,
       granteeWorkspaceId,
       permission,
-      createdBy: owner,
-      createdAt: Date.now(),
+    })
+  },
+})
+
+export const shareAtomByEmail = mutation({
+  args: {
+    fileId: v.string(),
+    email: v.string(),
+    permission: v.union(v.literal('view'), v.literal('edit')),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { fileId, email, permission, activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const profile = await userProfileByEmail(ctx, email)
+    if (!profile) {
+      throw new Error('No dohc user found for that email yet.')
+    }
+    return await shareAtomWithWorkspace(ctx, {
+      owner,
+      fileId,
+      granteeWorkspaceId: profile.workspaceId,
+      permission,
     })
   },
 })
@@ -301,7 +368,7 @@ export const shareAtomPublic = mutation({
 
 // Revoke a share. Only the OWNER may revoke. Revoke-to-exhaustion:
 // delete the row by id (one row per shareId). Works for person- and
-// org-shares alike (the row _id is the handle either way).
+// org-shares alike (the row _id is the share handle either way).
 export const unshareAtom = mutation({
   args: {
     shareId: v.id('atomShares'),
@@ -387,17 +454,26 @@ export const listMyShares = query({
       .query('atomShares')
       .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))
       .collect()
-    return rows.map((r) => ({
-      shareId: r._id,
-      fileId: r.fileId,
-      // exactly one is set — the owner's manage view labels the
-      // audience (person vs workspace vs public link) from these.
-      granteeWorkspaceId: r.granteeWorkspaceId ?? null,
-      granteeOrgId: r.granteeOrgId ?? null,
-      publicAccess: r.publicAccess === true,
-      permission: r.permission,
-      createdAt: r.createdAt,
-    }))
+    const out = []
+    for (const r of rows) {
+      const profile = r.granteeWorkspaceId
+        ? await userProfileByWorkspaceId(ctx, r.granteeWorkspaceId)
+        : null
+      out.push({
+        shareId: r._id,
+        fileId: r.fileId,
+        // exactly one is set — the owner's manage view labels the
+        // audience (person vs workspace vs public link) from these.
+        granteeWorkspaceId: r.granteeWorkspaceId ?? null,
+        granteeEmail: profile?.email ?? null,
+        granteeName: profile?.name ?? null,
+        granteeOrgId: r.granteeOrgId ?? null,
+        publicAccess: r.publicAccess === true,
+        permission: r.permission,
+        createdAt: r.createdAt,
+      })
+    }
+    return out
   },
 })
 

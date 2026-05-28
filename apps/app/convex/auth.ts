@@ -11,15 +11,25 @@
 
 import { SignJWT } from 'jose'
 import { v } from 'convex/values'
-import { action, query } from './_generated/server'
+import { action, mutation, query } from './_generated/server'
 import type { QueryCtx, MutationCtx } from './_generated/server'
+
+type AuthIdentity = {
+  subject: string
+  email?: string | null
+  name?: string | null
+}
 
 // Structural type for callers that pass NO `active` arg (the
 // default-to-personal path). Actions have `auth` but no `db`, so this
 // is the loosest shape we accept. Explicit non-personal active requires
 // QueryCtx | MutationCtx (membership lookup needs db).
 type AuthOnlyCtx = {
-  auth: { getUserIdentity: () => Promise<{ subject: string } | null> }
+  auth: { getUserIdentity: () => Promise<AuthIdentity | null> }
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase()
 }
 
 // SECURITY: there is intentionally NO "unauthenticated request →
@@ -115,7 +125,65 @@ export const getCollabToken = action({
 export const whoami = query({
   args: {},
   handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity()
     const workspaceId = await requireWorkspace(ctx)
-    return { workspaceId }
+    return {
+      workspaceId,
+      email: identity?.email ?? null,
+      name: identity?.name ?? null,
+    }
+  },
+})
+
+export const upsertMyProfile = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const email = normalizeEmail(identity.email ?? '')
+    if (!email) {
+      return {
+        workspaceId: identity.subject,
+        email: null,
+        profileId: null,
+      }
+    }
+
+    const existing = await ctx.db
+      .query('userProfiles')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', identity.subject))
+      .first()
+    const patch: {
+      email: string
+      normalizedEmail: string
+      updatedAt: number
+      name?: string
+    } = {
+      email,
+      normalizedEmail: email,
+      updatedAt: Date.now(),
+    }
+    if (identity.name?.trim()) {
+      patch.name = identity.name.trim()
+    }
+
+    if (existing) {
+      await ctx.db.patch(existing._id, patch)
+      return {
+        workspaceId: identity.subject,
+        email,
+        profileId: existing._id,
+      }
+    }
+
+    const profileId = await ctx.db.insert('userProfiles', {
+      workspaceId: identity.subject,
+      ...patch,
+    })
+    return {
+      workspaceId: identity.subject,
+      email,
+      profileId,
+    }
   },
 })

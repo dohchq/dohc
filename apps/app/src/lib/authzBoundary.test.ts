@@ -127,7 +127,11 @@ function publicFnsTakingWorkspace(
     const [, name, kind, head] = m
     const isPublic = !kind.startsWith('internal')
     if (!isPublic) continue
-    const body = src.slice(m.index, m.index + 2000)
+    const nextExport = src.indexOf('\nexport const ', m.index + 1)
+    const body = src.slice(
+      m.index,
+      nextExport === -1 ? m.index + 2000 : nextExport,
+    )
     // Codex round-2 LOW tightening: only exempt `activeWorkspaceId`
     // from the workspace-arg detection when the body ACTUALLY routes
     // it through a known auth check. Otherwise a future fn could

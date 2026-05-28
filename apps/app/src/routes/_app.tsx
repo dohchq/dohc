@@ -111,6 +111,7 @@ function Gate() {
   // Fire-and-forget: a WorkOS outage doesn't block the UI.
   const { user } = useAuth()
   const reconcileMembership = useAction(api.orgsBridge.reconcileMembership)
+  const upsertMyProfile = useMutation(api.auth.upsertMyProfile)
   useEffect(() => {
     if (!user?.id) return
     const LAST_USER = 'dohc.lastReconcileFor'
@@ -133,6 +134,10 @@ function Gate() {
       void reconcileMembership({}).catch(() => {})
     }
   }, [user?.id, reconcileMembership])
+  useEffect(() => {
+    if (!user?.id) return
+    void upsertMyProfile({}).catch(() => {})
+  }, [user?.id, user?.email, upsertMyProfile])
   if (state === undefined) {
     return (
       <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">

@@ -174,6 +174,16 @@ export default defineSchema({
     ])
     .index('by_owner_org_fileId', ['ownerWorkspaceId', 'granteeOrgId', 'fileId']),
 
+  userProfiles: defineTable({
+    workspaceId: v.string(),
+    email: v.string(),
+    normalizedEmail: v.string(),
+    name: v.optional(v.string()),
+    updatedAt: v.number(),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_normalizedEmail', ['normalizedEmail']),
+
   // sharing-v1 1c — app-level "company"/org. A workspace creates an
   // org (becomes owner) and others join by the invite code. Members
   // are `memberships` rows. Org-shared atoms (atomShares.granteeOrgId)

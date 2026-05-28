@@ -81,4 +81,11 @@ describe('share dialog copy', () => {
 
     expect(samples).not.toMatch(/\b(company|organization|org|team)\b/i)
   })
+
+  it('asks for people by email instead of handle', () => {
+    expect(getShareTargetPlaceholder(true)).toBe('Add people by email')
+    expect(getShareTargetPlaceholder(false)).toBe(
+      'Add people or workspaces by email',
+    )
+  })
 })

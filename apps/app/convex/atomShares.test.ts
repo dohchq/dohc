@@ -31,6 +31,93 @@ const bodyAt = (t: ReturnType<typeof convexTest>, path: string) =>
   })
 
 describe('sharing-v1 1a — share grant + gated read', () => {
+  it('owner shares by recipient email, not workspace handle', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Email Doc')
+
+    await t
+      .withIdentity({
+        subject: GRANTEE,
+        email: 'grantee@example.com',
+        name: 'Grace Recipient',
+      })
+      .mutation(api.auth.upsertMyProfile, {})
+
+    const shareId = await t
+      .withIdentity({ subject: OWNER, email: 'owner@example.com' })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: '  GRANTEE@example.com ',
+        permission: 'view',
+      })
+
+    const got = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, { shareId })
+    expect(got?.body).toContain('# Email Doc')
+
+    const ownerShares = await t
+      .withIdentity({ subject: OWNER })
+      .query(api.atomShares.listMyShares, {})
+    expect(ownerShares[0]).toMatchObject({
+      granteeWorkspaceId: GRANTEE,
+      granteeEmail: 'grantee@example.com',
+      granteeName: 'Grace Recipient',
+    })
+  })
+
+  it('does not create a share for an unknown email address', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\nx')
+
+    await expect(
+      t.withIdentity({ subject: OWNER }).mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: 'missing@example.com',
+        permission: 'view',
+      }),
+    ).rejects.toThrow(/No dohc user found/i)
+  })
+
+  it('shares by email from the active workspace, not only personal', async () => {
+    const t = convexTest(schema, modules)
+    const { orgId } = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.orgs.createOrg, { name: 'Design workspace' })
+    await t.mutation(internal.atoms._upsertInternal, {
+      workspaceId: orgId,
+      path: 'workspace-doc.md',
+      body: '---\nid: workspace.doc\n---\n# Workspace Doc',
+      source: 'user',
+    })
+    await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@example.com' })
+      .mutation(api.auth.upsertMyProfile, {})
+
+    const shareId = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        activeWorkspaceId: orgId,
+        fileId: 'workspace.doc',
+        email: 'grantee@example.com',
+        permission: 'view',
+      })
+
+    const ownerShares = await t
+      .withIdentity({ subject: OWNER })
+      .query(api.atomShares.listMyShares, { activeWorkspaceId: orgId })
+    expect(ownerShares).toHaveLength(1)
+    expect(ownerShares[0]).toMatchObject({
+      fileId: 'workspace.doc',
+      granteeEmail: 'grantee@example.com',
+    })
+
+    const got = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, { shareId })
+    expect(got?.body).toContain('# Workspace Doc')
+  })
+
   it('owner creates public link → anyone signed in with the link can read', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Public Doc')

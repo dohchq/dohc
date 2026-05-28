@@ -18,11 +18,10 @@ import {
   getShareTargetPlaceholder,
 } from './shareDialogCopy'
 
-// sharing-v1 1a — share a file with another user. v1 addresses the
-// recipient by their workspace HANDLE (the WorkOS subject the other
-// person sees as "your handle" below). A directory/email lookup is a
-// later improvement. The owner's authority is the auth'd session; the
-// handle only names who may read this file.
+// sharing-v1 1a — share a file with another user. The UI accepts an
+// email address, then the server resolves it through the signed-in
+// profile directory to the recipient's workspace id before granting
+// access. The owner's authority is still the auth'd session.
 export function ShareDialog({
   fileId,
   fileLabel,
@@ -35,8 +34,8 @@ export function ShareDialog({
   const activeWorkspaceId = useActiveWorkspaceId()
   const me = useQuery(api.auth.whoami)
   const myWorkspaces = useQuery(api.orgs.myWorkspaces, {})
-  const myShares = useQuery(api.atomShares.listMyShares, {})
-  const shareAtom = useMutation(api.atomShares.shareAtom)
+  const myShares = useQuery(api.atomShares.listMyShares, { activeWorkspaceId })
+  const shareAtomByEmail = useMutation(api.atomShares.shareAtomByEmail)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
   const shareAtomPublic = useMutation(api.atomShares.shareAtomPublic)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)
@@ -58,7 +57,7 @@ export function ShareDialog({
     null,
   )
   const [shareMode, setShareMode] = useState<'person' | 'workspace'>('person')
-  const [handle, setHandle] = useState('')
+  const [email, setEmail] = useState('')
   const [targetWorkspaceId, setTargetWorkspaceId] = useState<string>('')
   const [permission, setPermission] = useState<'view' | 'edit'>('view')
   const [busy, setBusy] = useState(false)
@@ -126,13 +125,19 @@ export function ShareDialog({
           orgId:
             selectedWorkspaceId as Parameters<typeof shareAtomToOrg>[0]['orgId'],
           permission,
+          activeWorkspaceId,
         })
       } else {
-        const grantee = handle.trim()
-        if (!grantee) return
-        await shareAtom({ fileId, granteeWorkspaceId: grantee, permission })
+        const granteeEmail = email.trim()
+        if (!granteeEmail) return
+        await shareAtomByEmail({
+          fileId,
+          email: granteeEmail,
+          permission,
+          activeWorkspaceId,
+        })
       }
-      setHandle('')
+      setEmail('')
       setError(null)
     } catch (e) {
       setError((e as Error).message)
@@ -217,10 +222,11 @@ export function ShareDialog({
             {effectiveShareMode === 'person' ? (
               <input
                 autoFocus
-                value={handle}
-                onChange={(e) => setHandle(e.target.value)}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && submit()}
                 placeholder={getShareTargetPlaceholder(isPersonalWorkspace)}
+                type="email"
                 spellCheck={false}
                 className="min-w-0 flex-1 bg-transparent text-[15px] text-ink-strong outline-none placeholder:text-ink-faint"
               />
@@ -272,7 +278,7 @@ export function ShareDialog({
                 disabled={
                   busy ||
                   (effectiveShareMode === 'person'
-                    ? !handle.trim()
+                    ? !email.trim()
                     : !selectedWorkspaceId)
                 }
                 className="rounded-full bg-ink-strong px-3.5 py-1 text-[12px] font-semibold text-surface transition-opacity disabled:opacity-40"
@@ -302,7 +308,7 @@ export function ShareDialog({
                 You
               </p>
               <p className="truncate text-[12px] text-ink-dim">
-                {me?.workspaceId ?? 'Your handle'}
+                {me?.email ?? me?.workspaceId ?? 'Your email'}
               </p>
             </div>
             <span className="shrink-0 text-[12.5px] text-ink-faint">Owner</span>
@@ -326,10 +332,14 @@ export function ShareDialog({
                     <p className="truncate text-[13px] font-medium text-ink-strong">
                       {s.granteeOrgId
                         ? workspaceName(s.granteeOrgId)
-                        : s.granteeWorkspaceId}
+                        : (s.granteeName ??
+                          s.granteeEmail ??
+                          s.granteeWorkspaceId)}
                     </p>
                     <p className="truncate text-[11.5px] text-ink-faint">
-                      {s.granteeOrgId ? 'Workspace' : 'Person'}
+                      {s.granteeOrgId
+                        ? 'Workspace'
+                        : (s.granteeEmail ?? 'Person')}
                     </p>
                   </div>
                   <span className="text-[12px] text-ink-dim">
@@ -341,6 +351,7 @@ export function ShareDialog({
                     onClick={() =>
                       void unshareAtom({
                         shareId: s.shareId as Id<'atomShares'>,
+                        activeWorkspaceId,
                       })
                     }
                     className="grid size-8 place-items-center rounded-full text-ink-faint transition-colors hover:bg-page hover:text-danger"
