@@ -291,6 +291,23 @@ describe('loop._garden — Unit 4c: gardening (advisory, never deletes)', () => 
     expect(d2.items.some((i: any) => i.kind === 'gardening')).toBe(false) // dropped, no nag
   })
 
+  it('ignores non-data atoms when scanning for gardening issues', async () => {
+    const t = convexTest(schema, modules)
+    await seedNote(t, W, 'dashboards/overview.html', 'standalone dashboard')
+    await seedNote(t, W, 'skills/legacy.md', 'legacy skill instructions')
+    await seedNote(t, W, 'modern-skill.md', [
+      '---',
+      'type: skill',
+      '---',
+      'modern skill instructions',
+    ].join('\n'))
+
+    expect(await t.mutation(internal.loop._garden, { workspaceId: W })).toEqual({
+      gardening: 0,
+    })
+    expect((await proposals(t, W)).filter((p: any) => p.kind === 'gardening')).toEqual([])
+  })
+
 })
 
 // ── P4 public surface (design loop-ux v2) — owner-scoped wrappers

@@ -56,10 +56,12 @@ Decisions and the pitfalls they flagged are recorded inline.
 - **There is no document search today.** The ⌘K palette
   (`apps/app/src/components/CommandPalette.tsx`) only filters *commands*
   and *skills* by title — it never looks at document content.
-- All writes funnel through one impl: **`upsertAtomImpl`**
+- Most authoring writes funnel through **`upsertAtomImpl`**
   (`apps/app/convex/atoms.ts:73`), called by the public `upsert`
   mutation, `_upsertInternal` (agent), and `_upsertSystem`. This
-  is the single hook point for indexing.
+  is a primary hook point for indexing, but not the only write
+  surface: `atoms.move`, `folders.move`, restore, seed, and migration
+  paths can bypass it and need separate indexing treatment.
 - Pure, server-safe text helpers already exist in
   `apps/app/convex/atomId.ts`: `splitFrontmatter`, `isHtmlAtomBody`,
   `deriveTitle`, and `isNonDataAtom` (the predicate for HTML/skill

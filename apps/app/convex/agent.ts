@@ -992,6 +992,8 @@ export const dohcAgent = new Agent(components.agent, {
         const recPart =
           rec.reason === 'no .context/intent.md'
             ? 'no .context/intent.md yet (add {goal_<id>: n} atoms to track goals)'
+            : rec.reason === 'ambiguous .context/intent.md'
+              ? 'ambiguous .context/intent.md (multiple atoms exist at that path; resolve the duplicate before running the loop)'
             : `${rec.proposed} new goal proposal(s)`
         return `weekly pass done — ${recPart}; ${gm.gardening} tidy-up suggestion(s). All advisory; no user atoms/entities/user note bodies changed.`
       },

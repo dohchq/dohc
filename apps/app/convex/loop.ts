@@ -16,7 +16,7 @@ import {
   PERSONAL_IDENTITY_PATH,
 } from './inlineAtom'
 import { resolveLiveTotalValue } from './liveTotals'
-import { isLegacySkillPath, isNonDataAtom } from './atomId'
+import { isNonDataAtom } from './atomId'
 
 // Phase 4 Unit 4b — the weekly reconcile loop. Intent vs reality →
 // an ADVISORY proposed move, approved at the edge (reviewed-by-
@@ -47,9 +47,9 @@ const NOT_ORPHAN = new Set([
   ORG_IDENTITY_PATH,
   INTENT_PATH,
 ])
-// Track-3 P1: consolidated into the canonical `isLegacySkillPath`
-// in convex/atomId.ts (single source — the §6 OR-compat term).
-// (Local const removed; the import above + the §6.2 audit table.)
+// Track-3 P1: non-data filtering is centralized in convex/atomId.ts.
+// Gardening scans only data notes; views, skills, and legacy skill paths
+// are intentionally skipped to avoid noisy tidy-up proposals.
 // Heuristic wikilink scan (advisory only — gardening suggestions are never
 // data integrity or a cross-desk path; a regex is fine here, unlike the
 // FROZEN atom grammar).
@@ -81,7 +81,9 @@ async function detectGardenIssues(
 ): Promise<string | null> {
   const loaded = await loadNotes(ctx, workspaceId)
   if (loaded.overflow) return null // can't prove → don't propose
-  const notes = loaded.notes.filter((n) => !isLegacySkillPath(n.path))
+  const notes = loaded.notes.filter(
+    (n) => !isNonDataAtom(n.path, n.body ?? ''),
+  )
   if (notes.length === 0) return null
 
   // outbound + inbound wikilink degree (match on full path OR basename)
