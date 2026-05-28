@@ -9,6 +9,18 @@ const W = 'ws_graph'
 
 const seed = (t: ReturnType<typeof convexTest>, path: string, body: string) =>
   t.mutation(internal.atoms._upsertInternal, { workspaceId: W, path, body, source: 'user' })
+const seedFor = (
+  t: ReturnType<typeof convexTest>,
+  workspaceId: string,
+  path: string,
+  body: string,
+) =>
+  t.mutation(internal.atoms._upsertInternal, {
+    workspaceId,
+    path,
+    body,
+    source: 'user',
+  })
 
 describe('graph-v1 1c — personalGraph', () => {
   it('cells carry their {} atoms; wikilinks + formula refs are edges', async () => {
@@ -38,6 +50,28 @@ describe('graph-v1 1c — personalGraph', () => {
     await seed(t, 'dash.md', '---\nid: dash\n---\n{= sum(ghost.x) } [[nope]]')
     const g = await t.withIdentity({ subject: W }).query(api.graph.personalGraph, {})
     expect(g.edges).toHaveLength(0)
+  })
+
+  it('reads the caller-visible files from the active workspace, not always personal', async () => {
+    const t = convexTest(schema, modules)
+    const owner = 'ws_graph_owner'
+    const member = 'ws_graph_member'
+    const { orgId, inviteCode } = await t
+      .withIdentity({ subject: owner })
+      .mutation(api.orgs.createOrg, {
+        name: 'Graph Workspace',
+      })
+    await t.withIdentity({ subject: member }).mutation(api.orgs.joinOrg, {
+      inviteCode,
+    })
+    await seedFor(t, member, 'personal.md', '---\nid: personal\n---\nPersonal')
+    await seedFor(t, orgId, 'team.md', '---\nid: team\n---\nTeam')
+
+    const g = await t.withIdentity({ subject: member }).query(api.graph.personalGraph, {
+      activeWorkspaceId: orgId,
+    })
+
+    expect(g.nodes.map((n) => n.fileId)).toEqual(['team'])
   })
 })
 

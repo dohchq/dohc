@@ -3,12 +3,13 @@ import type { ComponentType } from 'react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import type { GraphNode, GraphEdge } from '../../convex/graph'
-import { OrgBar } from './OrgBar'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 
 // graph-v1 1c — the knowledge graph. Cells (files) are nodes; an edge
-// is a wikilink or a concrete formula reference. Two scopes:
-//   • Personal — my own cells.
-//   • Company  — cells shared WITH me (cross-workspace, gated).
+// is a wikilink or a concrete formula reference. The view merges every
+// graph slice visible from the currently selected workspace: owned
+// files, files shared directly with that workspace, and workspace-wide
+// shared files.
 // ForceGraph2D (canvas) is lazy-loaded so the heavy renderer never
 // reaches the SSR bundle and only loads when the graph is opened.
 
@@ -26,12 +27,10 @@ export function GraphView({
   onOpenAtom: (path: string) => void
   onOpenShared: (shareId: string) => void
 }) {
-  const [scope, setScope] = useState<
-    'all' | 'personal' | 'shared' | 'company'
-  >('all')
-  const personal = useQuery(api.graph.personalGraph, {})
-  const shared = useQuery(api.graph.sharedGraph, {})
-  const company = useQuery(api.graph.companyGraph, {})
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const personal = useQuery(api.graph.personalGraph, { activeWorkspaceId })
+  const shared = useQuery(api.graph.sharedGraph, { activeWorkspaceId })
+  const workspaceWide = useQuery(api.graph.companyGraph, { activeWorkspaceId })
 
   // lazy + client-only load of the canvas renderer
   const [FG, setFG] = useState<ForceGraphComponent | null>(null)
@@ -62,10 +61,9 @@ export function GraphView({
   // Build the renderer's graph from one or more scope results.
   //  • CLONE nodes AND links — react-force-graph/d3 mutate
   //    link.source/target (id → node object) in place; cloning keeps
-  //    the Convex query cache objects pristine across re-renders +
-  //    scope switches (codex P1).
+  //    the Convex query cache objects pristine across re-renders.
   //  • Dedupe nodes by id (a cell shared to me both personally and via
-  //    my company would otherwise appear twice).
+  //    a workspace-wide share would otherwise appear twice).
   //  • Dedupe links UNDIRECTED (sorted endpoints) — the graph is
   //    visually undirected, so a↔b and a-formula-b shouldn't stack
   //    into doubled lines (codex P2).
@@ -92,18 +90,13 @@ export function GraphView({
     return { nodes, links }
   }
 
-  const src =
-    scope === 'personal' ? personal : scope === 'shared' ? shared : company
-  const allReady = !!personal && !!shared && !!company
-  const ready = scope === 'all' ? allReady : src !== undefined
+  const allReady = !!personal && !!shared && !!workspaceWide
+  const ready = allReady
 
   const data: FGData = useMemo(() => {
-    if (scope === 'all') {
-      return allReady ? buildFG([personal!, shared!, company!]) : EMPTY_FG
-    }
-    return src ? buildFG([src]) : EMPTY_FG
+    return allReady ? buildFG([personal!, shared!, workspaceWide!]) : EMPTY_FG
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, personal, shared, company, src])
+  }, [personal, shared, workspaceWide])
 
   // ── theme-aware palette (concrete rgb so we can modulate alpha for
   // the hover dim/highlight). Re-read when the theme flips.
@@ -214,8 +207,8 @@ export function GraphView({
   // ── physics: a touch more spacing than the defaults + fit-to-view ──
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef = useRef<any>(null)
-  // re-fit the view ONCE per data/scope change (not on every engine
-  // stop — that would fight a user who panned/zoomed after a drag).
+  // re-fit the view ONCE per data change (not on every engine stop —
+  // that would fight a user who panned/zoomed after a drag).
   const didFit = useRef(false)
   useEffect(() => {
     didFit.current = false
@@ -241,46 +234,16 @@ export function GraphView({
     <div className="flex h-screen flex-col bg-page">
       <div className="flex items-center gap-2 border-b border-rule px-4 py-2.5">
         <span className="text-[13px] font-semibold text-ink-strong">Graph</span>
-        <div className="ml-3 flex overflow-hidden rounded-md border border-rule">
-          {(['all', 'personal', 'shared', 'company'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setScope(s)}
-              className={`px-3 py-1 text-[12px] transition-colors ${
-                scope === s
-                  ? 'bg-ink-strong text-surface'
-                  : 'text-ink-dim hover:text-ink-strong'
-              }`}
-            >
-              {s === 'all'
-                ? 'All'
-                : s === 'personal'
-                  ? 'My files'
-                  : s === 'shared'
-                    ? 'Shared with me'
-                    : 'Company'}
-            </button>
-          ))}
-        </div>
         <span className="ml-auto text-[11.5px] text-ink-faint">
           {data.nodes.length} cells · {data.links.length} links
         </span>
       </div>
 
-      {scope === 'company' && <OrgBar />}
-
       <div ref={wrapRef} className="relative flex-1 overflow-hidden">
         {!FG || !ready ? (
           <div className="grid h-full place-items-center text-ink-faint text-sm">
             {ready && data.nodes.length === 0
-              ? scope === 'all'
-                ? 'Nothing to show yet — add some {data} and [[links]], or have a file shared with you.'
-                : scope === 'personal'
-                  ? 'No connected cells yet — add some {data} and [[links]].'
-                  : scope === 'shared'
-                    ? 'Nothing shared with you yet.'
-                    : 'No company files yet — members can “Share to company”.'
+              ? 'Nothing to show yet — add some {data} and [[links]], or have a file shared with you.'
               : 'loading graph…'}
           </div>
         ) : (
@@ -295,8 +258,8 @@ export function GraphView({
             cooldownTicks={120}
             d3VelocityDecay={0.28}
             onEngineStop={() => {
-              // fit once per data/scope; preserve the user's pan/zoom
-              // on later settles (e.g. after dragging a node).
+              // fit once per data set; preserve the user's pan/zoom on
+              // later settles (e.g. after dragging a node).
               if (didFit.current) return
               didFit.current = true
               fgRef.current?.zoomToFit?.(400, 56)

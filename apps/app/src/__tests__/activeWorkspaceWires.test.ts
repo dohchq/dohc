@@ -25,6 +25,7 @@ const CHAT = read('components/Chat.tsx')
 const ONBOARDING = read('components/Onboarding.tsx')
 const APP = read('routes/_app.tsx')
 const R_ROUTE = read('routes/r/$atomId.tsx')
+const GRAPH_VIEW = read('components/GraphView.tsx')
 
 describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceId', () => {
   it('AtomEditor passes activeWorkspaceId to evalFormulas + evalQueryBlocks', () => {
@@ -101,6 +102,23 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
       /api\.atomShares\.listSharedFileIds,\s*\{\s*activeWorkspaceId\s*,?\s*\}/,
     )
     expect(APP).toMatch(/sharedByMeFileIds=\{sharedByMeFileIds\s*\?\?\s*\[\]\}/)
+  })
+
+  it('GraphView reads every graph slice from the active workspace with no company selector/form', () => {
+    expect(GRAPH_VIEW).toMatch(
+      /useActiveWorkspaceId[\s\S]{0,200}from\s+['"](?:@\/lib|\.\.\/lib)\/active-workspace['"]/,
+    )
+    expect(GRAPH_VIEW).toMatch(
+      /api\.graph\.personalGraph,\s*\{\s*activeWorkspaceId\s*\}/,
+    )
+    expect(GRAPH_VIEW).toMatch(
+      /api\.graph\.sharedGraph,\s*\{\s*activeWorkspaceId\s*\}/,
+    )
+    expect(GRAPH_VIEW).toMatch(
+      /api\.graph\.companyGraph,\s*\{\s*activeWorkspaceId\s*\}/,
+    )
+    expect(GRAPH_VIEW).not.toMatch(/<OrgBar\b/)
+    expect(GRAPH_VIEW).not.toMatch(/setScope|scope ===|My files|Shared with me|Company/)
   })
 
   it('/r/<atomId> route reads ?w= and forwards to getRenderable + evalFormulas', () => {

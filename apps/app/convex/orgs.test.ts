@@ -110,7 +110,7 @@ describe('orgs 1c — share to company (opt-in, members only)', () => {
   })
 })
 
-describe('orgs 1c — company graph (opt-in only; scoped formulas)', () => {
+describe('orgs 1c — workspace-wide graph shares (opt-in only; scoped formulas)', () => {
   it('shows org-shared cells to members; private cells never appear; formulas scoped', async () => {
     const t = convexTest(schema, modules)
     const { orgId } = await makeOrgWithMember(t)
@@ -120,8 +120,10 @@ describe('orgs 1c — company graph (opt-in only; scoped formulas)', () => {
     const shareId = await t.withIdentity({ subject: A }).mutation(api.atomShares.shareAtomToOrg, {
       fileId: 'roadmap', orgId, permission: 'view',
     })
-    // member B's company graph: roadmap appears, secret does NOT
-    const g = await t.withIdentity({ subject: B }).query(api.graph.companyGraph, {})
+    // member B's active workspace graph: roadmap appears, secret does NOT
+    const g = await t.withIdentity({ subject: B }).query(api.graph.companyGraph, {
+      activeWorkspaceId: orgId,
+    })
     expect(g.nodes.map((n) => n.fileId).sort()).toEqual(['roadmap'])
     expect(g.nodes.find((n) => n.fileId === 'secret')).toBeUndefined()
     // the roadmap's formula over A's PRIVATE secret resolves to null (no leak)
@@ -129,7 +131,7 @@ describe('orgs 1c — company graph (opt-in only; scoped formulas)', () => {
       shareId, srcs: ['sum(secret.salary)'],
     })
     expect(res[0].value).toBeNull()
-    // a non-member sees an empty company graph
+    // without an active shared workspace, the org-share slice is empty
     expect(
       (await t.withIdentity({ subject: C }).query(api.graph.companyGraph, {})).nodes,
     ).toHaveLength(0)

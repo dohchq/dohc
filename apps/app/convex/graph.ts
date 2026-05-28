@@ -3,7 +3,8 @@
 // connect cells via wikilinks ([[…]]) and concrete formula references
 // ({= … }). PURE-ish read: one atomIds scan + one capped atom scan,
 // derived entirely from the bodies (the source of truth). Owner-
-// scoped; the "company graph" (1c org layer) is a separate concern.
+// scoped; workspace-wide org shares are handled as a separate slice.
+import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
 import {
@@ -17,7 +18,7 @@ import {
   formulaConcreteFileId,
 } from './atomId'
 import { ownerAtomByFileId } from './atomShares'
-import { viewerOrgIds } from './orgs'
+import { canReadAtom } from './atomAccess'
 
 const NOTE_SCAN_CAP = 5000
 // Escape-TOLERANT wikilink matcher — a legacy editor stored a user-typed
@@ -25,6 +26,7 @@ const NOTE_SCAN_CAP = 5000
 // `[[…]]` form alone misses every editor-authored link (codex
 // completeness gap #1). Mirrors the cascade's regex in atoms.move.
 const WIKILINK = /\\?\[\\?\[([^\\\]\n|]+)(?:\|[^\]\n]*)?\\?\]\\?\]/g
+const activeWorkspaceArgs = { activeWorkspaceId: v.optional(v.string()) }
 
 export type GraphNode = {
   /** UNIQUE node identity. Personal nodes use the fileId (unique in
@@ -58,11 +60,14 @@ function leafOf(path: string): string {
 
 // My own cells + their atoms + the edges between them.
 export const personalGraph = query({
-  args: {},
+  args: activeWorkspaceArgs,
   handler: async (
     ctx,
+    { activeWorkspaceId },
   ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> => {
-    const ws = await requireWorkspace(ctx)
+    const ws = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const idRows = await ctx.db
       .query('atomIds')
       .withIndex('by_workspace_fileId', (q) => q.eq('workspaceId', ws))
@@ -71,10 +76,14 @@ export const personalGraph = query({
     for (const r of idRows) {
       if (r.state === 'bound' && r.path) pathToFileId.set(r.path, r.fileId)
     }
-    const atoms = await ctx.db
+    const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', ws))
       .take(NOTE_SCAN_CAP + 1)
+    const atoms: typeof rows = []
+    for (const r of rows) {
+      if (await canReadAtom(ctx, r._id, viewerSubject)) atoms.push(r)
+    }
 
     const nodes: GraphNode[] = []
     const known = new Set<string>()
@@ -126,7 +135,7 @@ export const personalGraph = query({
   },
 })
 
-// The "company" view (1c v1): cells shared WITH me, each rendered as
+// Direct shares: cells shared WITH the active workspace, each rendered as
 // a node with its atoms (resolved through the gated share path). The
 // full org-wide graph needs the org/membership layer; this surfaces
 // the cross-workspace data the viewer is actually entitled to see.
@@ -136,11 +145,12 @@ export const personalGraph = query({
 const qualify = (ownerWs: string, fileId: string) => `${ownerWs}::${fileId}`
 
 export const sharedGraph = query({
-  args: {},
+  args: activeWorkspaceArgs,
   handler: async (
     ctx,
+    { activeWorkspaceId },
   ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> => {
-    const viewer = await requireWorkspace(ctx)
+    const viewer = await requireWorkspace(ctx, activeWorkspaceId)
     // by_grantee already restricts to the viewer's OWN grants — so we
     // don't need resolveShareAccess per node (which re-collects all
     // grants → O(n²)); the index IS the authorization. Resolve each
@@ -220,39 +230,38 @@ export const sharedGraph = query({
   },
 })
 
-// sharing-v1 1c — the COMPANY graph: cells members explicitly shared
-// TO an org the viewer belongs to (granteeOrgId). Private files never
-// appear (opt-in only). Same gating as sharedGraph: each cell is
-// resolved through the owner's index (ownerAtomByFileId), nodes are
-// owner-qualified, edges only connect cells shared to the SAME org by
-// the SAME owner — never reveals an unshared cell.
+// sharing-v1 1c — workspace-wide org shares: cells members explicitly
+// shared TO the active org (granteeOrgId). Private files never appear
+// (opt-in only). Same gating as sharedGraph: each cell is resolved
+// through the owner's index (ownerAtomByFileId), nodes are owner-qualified,
+// edges only connect cells shared to the SAME org by the SAME owner —
+// never reveals an unshared cell.
 export const companyGraph = query({
-  args: {},
+  args: activeWorkspaceArgs,
   handler: async (
     ctx,
+    { activeWorkspaceId },
   ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> => {
-    const viewer = await requireWorkspace(ctx)
-    const orgIds = await viewerOrgIds(ctx, viewer)
-    if (orgIds.size === 0) return { nodes: [], edges: [] }
+    const caller = await requireWorkspace(ctx)
+    const active = await requireWorkspace(ctx, activeWorkspaceId)
+    if (active === caller) return { nodes: [], edges: [] }
 
-    // org-share rows for every org the viewer belongs to (capped).
+    // org-share rows for the active shared workspace (capped).
     const grants: Array<{
       _id: string
       ownerWorkspaceId: string
       fileId: string
     }> = []
-    for (const orgId of orgIds) {
-      const rows = await ctx.db
-        .query('atomShares')
-        .withIndex('by_org', (q) => q.eq('granteeOrgId', orgId))
-        .take(NOTE_SCAN_CAP)
-      for (const r of rows) {
-        grants.push({
-          _id: r._id,
-          ownerWorkspaceId: r.ownerWorkspaceId,
-          fileId: r.fileId,
-        })
-      }
+    const rows = await ctx.db
+      .query('atomShares')
+      .withIndex('by_org', (q) => q.eq('granteeOrgId', active))
+      .take(NOTE_SCAN_CAP)
+    for (const r of rows) {
+      grants.push({
+        _id: r._id,
+        ownerWorkspaceId: r.ownerWorkspaceId,
+        fileId: r.fileId,
+      })
     }
 
     const nodes: GraphNode[] = []
