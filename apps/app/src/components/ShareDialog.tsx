@@ -2,14 +2,25 @@ import { useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
-import { X, Copy, Check, Lock, Users, Globe } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  Link as LinkIcon,
+  Lock,
+  Users,
+  X,
+} from 'lucide-react'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import {
+  getGeneralAccessCopy,
+  getShareTargetPlaceholder,
+} from './shareDialogCopy'
 
 // sharing-v1 1a — share a file with another user. v1 addresses the
 // recipient by their workspace HANDLE (the WorkOS subject the other
 // person sees as "your handle" below). A directory/email lookup is a
-// later (org-layer) improvement. The owner's authority is the
-// auth'd session; the handle only names who may read this file.
+// later improvement. The owner's authority is the auth'd session; the
+// handle only names who may read this file.
 export function ShareDialog({
   fileId,
   fileLabel,
@@ -21,55 +32,79 @@ export function ShareDialog({
 }) {
   const activeWorkspaceId = useActiveWorkspaceId()
   const me = useQuery(api.auth.whoami)
-  const myOrgs = useQuery(api.orgs.myOrgs)
+  const myWorkspaces = useQuery(api.orgs.myWorkspaces, {})
   const myShares = useQuery(api.atomShares.listMyShares, {})
   const shareAtom = useMutation(api.atomShares.shareAtom)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)
   // P1 (multiplayer-and-h-followups §6.5) — within-workspace
-  // access (private/restricted/org-default). Distinct from the
+  // access (private/restricted/workspace-default). Distinct from the
   // cross-workspace share grants below: this hides the doc from
-  // teammates in the SAME workspace; the grants share it with
-  // someone OUTSIDE. Both can coexist on the same atom — an
-  // explicit cross-workspace share overrides the within-workspace
-  // private flag (the share IS the grant).
+  // peers in the SAME workspace; the grants share it with someone
+  // OUTSIDE. Both can coexist on the same atom — an explicit
+  // cross-workspace share overrides the within-workspace private flag
+  // (the share IS the grant).
   const atomAccess = useQuery(api.atomAccess.getAtomAccessByFileId, {
     fileId,
     activeWorkspaceId,
   })
   const setAtomAccess = useMutation(api.atomAccess.setAtomAccessByFileId)
-  const [accessBusy, setAccessBusy] = useState(false)
-  const [accessError, setAccessError] = useState<string | null>(null)
-  const [mode, setMode] = useState<'person' | 'company'>('person')
+  const [generalAccessBusy, setGeneralAccessBusy] = useState(false)
+  const [generalAccessOpen, setGeneralAccessOpen] = useState(false)
+  const [generalAccessError, setGeneralAccessError] = useState<string | null>(
+    null,
+  )
+  const [shareMode, setShareMode] = useState<'person' | 'workspace'>('person')
   const [handle, setHandle] = useState('')
-  const [orgId, setOrgId] = useState<string>('')
+  const [targetWorkspaceId, setTargetWorkspaceId] = useState<string>('')
   const [permission, setPermission] = useState<'view' | 'edit'>('view')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
-  const orgs = myOrgs ?? []
-  // default the org select to the first org once loaded
-  const selectedOrg = orgId || orgs[0]?.orgId || ''
+  const workspaces = myWorkspaces ?? []
+  const currentWorkspace = workspaces.find(
+    (w) => w.workspaceId === activeWorkspaceId,
+  )
+  const isPersonalWorkspace =
+    !activeWorkspaceId ||
+    activeWorkspaceId === me?.workspaceId ||
+    currentWorkspace?.kind === 'personal'
+  const workspaceTargets = workspaces.filter((w) => w.kind === 'org')
+  const canShareToWorkspace =
+    !isPersonalWorkspace && workspaceTargets.length > 0
+  const effectiveShareMode = canShareToWorkspace ? shareMode : 'person'
+  const selectedWorkspaceId =
+    targetWorkspaceId ||
+    (!isPersonalWorkspace ? activeWorkspaceId : undefined) ||
+    workspaceTargets[0]?.workspaceId ||
+    ''
 
   // existing grants FOR THIS FILE — so the owner can see + revoke them.
-  const orgName = (id: string) =>
-    orgs.find((o) => o.orgId === id)?.name ?? 'a company'
+  const workspaceName = (id: string) =>
+    workspaces.find((w) => w.workspaceId === id)?.name ?? 'Workspace'
   const existing = (myShares ?? []).filter((s) => s.fileId === fileId)
+  const generalAccess = getGeneralAccessCopy({
+    isPersonalWorkspace,
+    accessMode: atomAccess?.mode ?? 'private',
+  })
+  const canChangeGeneralAccess =
+    generalAccess.canChangeGeneralAccess && !!atomAccess
 
   async function submit() {
     if (busy) return
     setBusy(true)
     setError(null)
     try {
-      if (mode === 'company') {
-        if (!selectedOrg) {
-          setError('Create or join a company first (Graph → Company).')
+      if (effectiveShareMode === 'workspace') {
+        if (!selectedWorkspaceId) {
+          setError('Choose a workspace.')
           return
         }
         await shareAtomToOrg({
           fileId,
-          orgId: selectedOrg as Parameters<typeof shareAtomToOrg>[0]['orgId'],
+          orgId:
+            selectedWorkspaceId as Parameters<typeof shareAtomToOrg>[0]['orgId'],
           permission,
         })
       } else {
@@ -77,7 +112,8 @@ export function ShareDialog({
         if (!grantee) return
         await shareAtom({ fileId, granteeWorkspaceId: grantee, permission })
       }
-      onClose()
+      setHandle('')
+      setError(null)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -85,196 +121,125 @@ export function ShareDialog({
     }
   }
 
+  async function changeGeneralAccess(next: 'restricted' | 'workspace') {
+    if (!canChangeGeneralAccess || generalAccessBusy) return
+    setGeneralAccessBusy(true)
+    setGeneralAccessError(null)
+    setGeneralAccessOpen(false)
+    try {
+      await setAtomAccess({
+        fileId,
+        activeWorkspaceId,
+        mode: next === 'workspace' ? null : 'private',
+      })
+    } catch (e) {
+      setGeneralAccessError((e as Error).message)
+    } finally {
+      setGeneralAccessBusy(false)
+    }
+  }
+
+  function copyLink() {
+    const href =
+      typeof window !== 'undefined' && window.location?.href
+        ? window.location.href
+        : ''
+    if (href) void navigator.clipboard?.writeText(href)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-backdrop/40"
+      className="fixed inset-0 z-50 grid place-items-center bg-backdrop/40 px-4"
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-w-[92vw] rounded-xl border border-rule bg-surface p-5 shadow-lg"
+        className="w-[min(92vw,680px)] rounded-[10px] border border-rule bg-surface p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
-          <h2 className="text-[15px] font-semibold text-ink-strong">
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="min-w-0 text-[24px] font-medium leading-tight text-ink-strong">
             Share “{fileLabel}”
           </h2>
           <button
             type="button"
             onClick={onClose}
-            className="text-ink-faint hover:text-ink-dim"
+            className="grid size-9 shrink-0 place-items-center rounded-full text-ink-dim transition-colors hover:bg-page hover:text-ink-strong"
             aria-label="Close"
           >
-            <X className="size-4" />
+            <X className="size-5" />
           </button>
         </div>
 
-        {/*
-          P1 — within-workspace access (private/restricted/org-default).
-          Shown ONLY when getAtomAccessByFileId returned a row (i.e.
-          the caller can see this atom). For an org-default atom the
-          company-visible state is explicit only when a private doc
-          is toggled off; new org docs are private by default.
-          Owner-only edit: if someone else owns the access record,
-          setAtomAccess throws and the error renders below.
-        */}
-        {atomAccess && (
-          <div className="mt-4 rounded-md border border-rule bg-page p-3">
-            <div className="flex items-start gap-2">
-              <div className="mt-0.5">
-                {atomAccess.mode === 'private' ? (
-                  <Lock className="size-4 text-ink-strong" />
-                ) : atomAccess.mode === 'restricted' ? (
-                  <Users className="size-4 text-ink-strong" />
-                ) : (
-                  <Globe className="size-4 text-ink-dim" />
-                )}
-              </div>
-              <div className="flex-1">
-                <p className="text-[12.5px] font-medium text-ink-strong">
-                  {atomAccess.mode === 'private'
-                    ? 'Only you can see this'
-                    : atomAccess.mode === 'restricted'
-                      ? `Restricted (${atomAccess.allowedUserIds.length + 1} ${
-                          atomAccess.allowedUserIds.length === 0
-                            ? 'person'
-                            : 'people'
-                        })`
-                      : 'Everyone in the company can see this'}
-                </p>
-                <p className="mt-0.5 text-[11px] text-ink-faint">
-                  {atomAccess.mode === 'private'
-                    ? 'Default for new docs in a company workspace. Toggle off to make it visible to everyone.'
-                    : atomAccess.mode === 'restricted'
-                      ? 'Visible only to you and the people you listed.'
-                      : 'Company-visible. New docs are private by default; toggle on to make this one private again.'}
-                </p>
-              </div>
-              <div className="ml-2">
-                <button
-                  type="button"
-                  disabled={accessBusy}
-                  onClick={async () => {
-                    if (accessBusy) return
-                    setAccessBusy(true)
-                    setAccessError(null)
-                    try {
-                      await setAtomAccess({
-                        fileId,
-                        activeWorkspaceId,
-                        // Simple toggle: org-default ↔ private. Restricted
-                        // is reachable via a future "add people" affordance
-                        // (the backend supports it today; the dialog
-                        // surfaces just the binary switch for v1 simplicity
-                        // per the design decision "MVP keep it small").
-                        mode: atomAccess.mode === 'private' ? null : 'private',
-                      })
-                    } catch (e) {
-                      setAccessError((e as Error).message)
-                    } finally {
-                      setAccessBusy(false)
-                    }
-                  }}
-                  className={`rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
-                    atomAccess.mode === 'private'
-                      ? 'border-ink-strong bg-ink-strong text-surface'
-                      : 'border-rule bg-surface text-ink-dim hover:text-ink-strong'
-                  } disabled:opacity-50`}
-                  aria-pressed={atomAccess.mode === 'private'}
-                >
-                  {atomAccess.mode === 'private' ? 'Private' : 'Make private'}
-                </button>
-              </div>
-            </div>
-            {accessError && (
-              <p
-                className="mt-2 text-[11.5px] text-danger"
-                role="alert"
-              >
-                {accessError}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* mode: a person, or the whole company */}
-        <div className="mt-4 flex overflow-hidden rounded-md border border-rule w-fit">
-          {(['person', 'company'] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              className={`px-3 py-1 text-[12px] transition-colors ${
-                mode === m
-                  ? 'bg-ink-strong text-surface'
-                  : 'text-ink-dim hover:text-ink-strong'
-              }`}
-            >
-              {m === 'person' ? 'A person' : 'My company'}
-            </button>
-          ))}
-        </div>
-
-        {mode === 'person' ? (
-          <>
-            <label className="mt-3 block text-[12px] font-medium text-ink-dim">
-              Recipient handle
-            </label>
-            <input
-              autoFocus
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && submit()}
-              placeholder="paste their handle"
-              spellCheck={false}
-              className="mt-1 w-full rounded-md border border-rule bg-page px-2.5 py-1.5 font-mono text-[12.5px] text-ink-strong outline-none focus:border-accent"
-            />
-          </>
-        ) : (
-          <>
-            <label className="mt-3 block text-[12px] font-medium text-ink-dim">
-              Company
-            </label>
-            {orgs.length === 0 ? (
-              <p className="mt-1 text-[12px] text-ink-dim">
-                You're not in a company yet — create or join one in
-                Graph → Company.
-              </p>
+        <div className="mt-6 rounded-[6px] border border-rule bg-page px-4 py-3 focus-within:border-accent">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+            {effectiveShareMode === 'person' ? (
+              <input
+                autoFocus
+                value={handle}
+                onChange={(e) => setHandle(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && submit()}
+                placeholder={getShareTargetPlaceholder(isPersonalWorkspace)}
+                spellCheck={false}
+                className="min-w-0 flex-1 bg-transparent text-[18px] text-ink-strong outline-none placeholder:text-ink-faint"
+              />
             ) : (
               <select
-                value={selectedOrg}
-                onChange={(e) => setOrgId(e.target.value)}
-                className="mt-1 w-full rounded-md border border-rule bg-page px-2.5 py-1.5 text-[12.5px] text-ink-strong outline-none focus:border-accent"
+                value={selectedWorkspaceId}
+                onChange={(e) => setTargetWorkspaceId(e.target.value)}
+                className="min-w-0 flex-1 bg-transparent text-[16px] text-ink-strong outline-none"
               >
-                {orgs.map((o) => (
-                  <option key={o.orgId} value={o.orgId}>
-                    {o.name}
+                {workspaceTargets.map((w) => (
+                  <option key={w.workspaceId} value={w.workspaceId}>
+                    {w.name}
                   </option>
                 ))}
               </select>
             )}
-            <p className="mt-1 text-[11px] text-ink-faint">
-              Everyone in the company will be able to see this file.
-            </p>
-          </>
-        )}
-
-        <div className="mt-3 flex items-center gap-2 text-[12px]">
-          <span className="text-ink-dim">Permission</span>
-          <div className="flex overflow-hidden rounded-md border border-rule">
-            {(['view', 'edit'] as const).map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setPermission(p)}
-                className={`px-2.5 py-1 text-[12px] transition-colors ${
-                  permission === p
-                    ? 'bg-ink-strong text-surface'
-                    : 'text-ink-dim hover:text-ink-strong'
-                }`}
+            <div className="flex items-center gap-2">
+              {canShareToWorkspace && (
+                <div className="flex overflow-hidden rounded-full border border-rule bg-surface">
+                  {(['person', 'workspace'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setShareMode(m)}
+                      className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                        effectiveShareMode === m
+                          ? 'bg-ink-strong text-surface'
+                          : 'text-ink-dim hover:text-ink-strong'
+                      }`}
+                    >
+                      {m === 'person' ? 'Person' : 'Workspace'}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <select
+                value={permission}
+                onChange={(e) =>
+                  setPermission(e.target.value as 'view' | 'edit')
+                }
+                className="rounded-full border border-rule bg-surface px-3 py-1.5 text-[12px] font-medium text-ink-dim outline-none hover:text-ink-strong focus:border-accent"
               >
-                {p === 'view' ? 'View only' : 'Can edit'}
+                <option value="view">View only</option>
+                <option value="edit">Can edit</option>
+              </select>
+              <button
+                type="button"
+                onClick={submit}
+                disabled={
+                  busy ||
+                  (effectiveShareMode === 'person'
+                    ? !handle.trim()
+                    : !selectedWorkspaceId)
+                }
+                className="rounded-full bg-ink-strong px-4 py-1.5 text-[12.5px] font-semibold text-surface transition-opacity disabled:opacity-40"
+              >
+                {busy ? 'Sharing...' : 'Share'}
               </button>
-            ))}
+            </div>
           </div>
         </div>
 
@@ -284,70 +249,163 @@ export function ShareDialog({
           </p>
         )}
 
-        {existing.length > 0 && (
-          <div className="mt-4 border-t border-rule pt-3">
-            <p className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">
-              Already shared with
-            </p>
-            <ul className="mt-1.5 flex flex-col gap-1">
+        <section className="mt-7">
+          <h3 className="text-[17px] font-semibold text-ink-strong">
+            People with access
+          </h3>
+          <div className="mt-4 flex items-center gap-4">
+            <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-[15px] font-semibold text-ink-strong">
+              Y
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[15px] font-semibold text-ink-strong">
+                You
+              </p>
+              <p className="truncate text-[13px] text-ink-dim">
+                {me?.workspaceId ?? 'Your handle'}
+              </p>
+            </div>
+            <span className="shrink-0 text-[14px] text-ink-faint">Owner</span>
+          </div>
+
+          {existing.length > 0 && (
+            <ul className="mt-3 flex flex-col gap-2">
               {existing.map((s) => (
                 <li
                   key={s.shareId}
-                  className="flex items-center gap-2 text-[12px]"
+                  className="flex items-center gap-4 rounded-[6px] py-1"
                 >
-                  <span className="truncate text-ink-strong">
-                    {s.granteeOrgId
-                      ? `🏢 ${orgName(s.granteeOrgId)}`
-                      : `👤 ${s.granteeWorkspaceId}`}
-                  </span>
-                  <span className="text-ink-faint">
-                    {s.permission === 'edit' ? 'can edit' : 'view'}
+                  <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
+                    {s.granteeOrgId ? (
+                      <Users className="size-5" />
+                    ) : (
+                      <span className="text-[14px] font-semibold">P</span>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[14px] font-medium text-ink-strong">
+                      {s.granteeOrgId
+                        ? workspaceName(s.granteeOrgId)
+                        : s.granteeWorkspaceId}
+                    </p>
+                    <p className="truncate text-[12px] text-ink-faint">
+                      {s.granteeOrgId ? 'Workspace' : 'Person'}
+                    </p>
+                  </div>
+                  <span className="text-[13px] text-ink-dim">
+                    {s.permission === 'edit' ? 'Can edit' : 'Viewer'}
                   </span>
                   <button
                     type="button"
-                    title="Revoke"
+                    title="Remove access"
                     onClick={() =>
                       void unshareAtom({
                         shareId: s.shareId as Id<'atomShares'>,
                       })
                     }
-                    className="ml-auto text-ink-faint hover:text-danger"
+                    className="grid size-8 place-items-center rounded-full text-ink-faint transition-colors hover:bg-page hover:text-danger"
                   >
-                    <X className="size-3.5" />
+                    <X className="size-4" />
                   </button>
                 </li>
               ))}
             </ul>
-          </div>
-        )}
-
-        <div className="mt-5 flex items-center justify-between">
-          {/* Your handle — give this to someone so they can share with you */}
-          {me?.workspaceId && (
-            <button
-              type="button"
-              onClick={() => {
-                void navigator.clipboard?.writeText(me.workspaceId)
-                setCopied(true)
-                window.setTimeout(() => setCopied(false), 1500)
-              }}
-              className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink-dim"
-              title="Copy your handle so others can share with you"
-            >
-              {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-              {copied ? 'copied your handle' : 'copy my handle'}
-            </button>
           )}
+        </section>
+
+        <section className="mt-8">
+          <h3 className="text-[17px] font-semibold text-ink-strong">
+            General access
+          </h3>
+          <div className="mt-4 flex items-center gap-4">
+            <div className="grid size-11 shrink-0 place-items-center rounded-full bg-page text-ink-strong">
+              {generalAccess.label === 'Restricted' ? (
+                <Lock className="size-5" />
+              ) : (
+                <Users className="size-5" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="relative inline-block">
+                <button
+                  type="button"
+                  disabled={!canChangeGeneralAccess || generalAccessBusy}
+                  onClick={() => setGeneralAccessOpen((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-[5px] px-1 py-0.5 text-[15px] font-semibold text-ink-strong transition-colors enabled:hover:bg-page disabled:cursor-default"
+                  aria-haspopup={canChangeGeneralAccess ? 'menu' : undefined}
+                  aria-expanded={
+                    canChangeGeneralAccess ? generalAccessOpen : undefined
+                  }
+                >
+                  {generalAccess.label}
+                  {canChangeGeneralAccess && <ChevronDown className="size-4" />}
+                </button>
+                {generalAccessOpen && canChangeGeneralAccess && (
+                  <div className="absolute left-0 top-full z-10 mt-2 w-64 overflow-hidden rounded-[8px] border border-rule bg-surface p-1 shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => void changeGeneralAccess('restricted')}
+                      className="flex w-full items-start gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page"
+                    >
+                      <Lock className="mt-0.5 size-4 text-ink-dim" />
+                      <span>
+                        <span className="block text-[13px] font-semibold text-ink-strong">
+                          Restricted
+                        </span>
+                        <span className="block text-[11.5px] text-ink-faint">
+                          Only people with access can open.
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void changeGeneralAccess('workspace')}
+                      className="flex w-full items-start gap-3 rounded-[6px] px-3 py-2 text-left transition-colors hover:bg-page"
+                    >
+                      <Users className="mt-0.5 size-4 text-ink-dim" />
+                      <span>
+                        <span className="block text-[13px] font-semibold text-ink-strong">
+                          Workspace
+                        </span>
+                        <span className="block text-[11.5px] text-ink-faint">
+                          Anyone in this workspace can open.
+                        </span>
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              <p className="mt-0.5 text-[13px] text-ink-dim">
+                {generalAccess.description}
+              </p>
+            </div>
+          </div>
+          {generalAccessError && (
+            <p className="mt-3 text-[12px] text-danger" role="alert">
+              {generalAccessError}
+            </p>
+          )}
+        </section>
+
+        <div className="mt-8 flex items-center justify-between gap-3">
           <button
             type="button"
-            onClick={submit}
-            disabled={
-              busy ||
-              (mode === 'person' ? !handle.trim() : !selectedOrg)
-            }
-            className="rounded-md bg-ink-strong px-3.5 py-1.5 text-[13px] font-medium text-surface disabled:opacity-50"
+            onClick={copyLink}
+            className="inline-flex items-center gap-2 rounded-full border border-rule bg-surface px-5 py-2.5 text-[15px] font-semibold text-accent transition-colors hover:bg-page"
           >
-            {busy ? 'Sharing…' : 'Share'}
+            {copied ? (
+              <Check className="size-4" />
+            ) : (
+              <LinkIcon className="size-4" />
+            )}
+            {copied ? 'Copied link' : 'Copy link'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-accent px-7 py-2.5 text-[15px] font-semibold text-white transition-opacity hover:opacity-90"
+          >
+            Done
           </button>
         </div>
       </div>
