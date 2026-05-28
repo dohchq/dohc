@@ -137,13 +137,20 @@ export const createOrg = mutation({
     // by_inviteCode, so two orgs sharing a code would land a joiner in
     // the wrong org. Regenerate until the indexed lookup is empty.
     let inviteCode = ''
+    let foundUniqueInviteCode = false
     for (let i = 0; i < 8; i++) {
       inviteCode = randomInviteCode()
       const clash = await ctx.db
         .query('orgs')
         .withIndex('by_inviteCode', (q) => q.eq('inviteCode', inviteCode))
         .first()
-      if (!clash) break
+      if (!clash) {
+        foundUniqueInviteCode = true
+        break
+      }
+    }
+    if (!foundUniqueInviteCode) {
+      throw new Error('Could not generate a unique invite code. Please retry.')
     }
     const now = Date.now()
     const orgId = await ctx.db.insert('orgs', {

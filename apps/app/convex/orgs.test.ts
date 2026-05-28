@@ -26,6 +26,7 @@ async function makeOrgWithMember(t: ReturnType<typeof convexTest>) {
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
 })
 
 describe('orgs 1c — create / join / membership', () => {
@@ -48,6 +49,31 @@ describe('orgs 1c — create / join / membership', () => {
     await expect(
       t.withIdentity({ subject: B }).mutation(api.orgs.joinOrg, { inviteCode: 'nope' }),
     ).rejects.toThrow(/no workspace/i)
+  })
+
+  it('create fails closed if invite code generation keeps colliding', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('orgs', {
+        name: 'Existing',
+        inviteCode: '0000000000',
+        createdBy: A,
+        createdAt: 1,
+        status: 'active',
+      })
+    })
+    vi.stubGlobal('crypto', {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(0)
+        return bytes
+      },
+    })
+
+    await expect(
+      t.withIdentity({ subject: A }).mutation(api.orgs.createOrg, {
+        name: 'Collision Inc',
+      }),
+    ).rejects.toThrow(/unique invite code/i)
   })
 })
 

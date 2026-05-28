@@ -831,7 +831,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     finish_onboarding: createTool({
       description:
-        'Mark onboarding DONE. ONLY call once the vault has a populated dashboard AND .context/me.md (never end empty).',
+        'Mark onboarding DONE. ONLY call once the vault has a populated dashboard AND the identity atom (.context/me.md in personal, .context/company.md in org) (never end empty).',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         // §2-A.1 UNAUTHORIZABLE: state-flip (user-decision class).
@@ -844,7 +844,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     set_lock: createTool({
       description:
-        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "unlock my plan"). Toggles the USER lock only; the generated map is independently owned by the loop and is unaffected. file-org-v1 D4.1b (R2 fold).',
+        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "lock .context/company.md", "unlock my plan"). Toggles the USER lock only; the generated map is independently owned by the loop and is unaffected. file-org-v1 D4.1b (R2 fold).',
       inputSchema: z.object({
         path: z.string(),
         locked: z.boolean(),

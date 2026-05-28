@@ -1,6 +1,12 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { buildSystemPrompt } from './agent'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const AGENT_SRC = readFileSync(resolve(__dirname, 'agent.ts'), 'utf8')
 
 // A1 (multiplayer-and-h-followups §4) — workspace-kind-aware
 // system prompt. Personal callers get SYSTEM_PROMPT verbatim (the
@@ -77,5 +83,11 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     // ~2000-3000 chars for the preamble; +50ish for substitutions.
     expect(bodyDelta).toBeGreaterThan(500)
     expect(bodyDelta).toBeLessThan(5000)
+  })
+
+  it('tool metadata describes both personal and org identity paths', () => {
+    expect(AGENT_SRC).toContain('.context/me.md in personal')
+    expect(AGENT_SRC).toContain('.context/company.md in org')
+    expect(AGENT_SRC).toContain('"lock .context/company.md"')
   })
 })
