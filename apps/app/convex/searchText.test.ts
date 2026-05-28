@@ -12,8 +12,9 @@ import {
 } from './searchText'
 
 describe('isAtomSearchable', () => {
-  it('excludes ONLY the derived index _map.md', () => {
-    expect(isAtomSearchable('_map.md')).toBe(false)
+  it('excludes ONLY the canonical derived index .context/_map.md', () => {
+    expect(isAtomSearchable('.context/_map.md')).toBe(false)
+    expect(isAtomSearchable('_map.md')).toBe(true)
   })
   it('includes html, markdown, and user files (NOT !isNonDataAtom)', () => {
     expect(isAtomSearchable('dashboard.html')).toBe(true) // html must be searchable
@@ -90,8 +91,8 @@ describe('deriveSearchFields', () => {
     expect(searchText).toContain('[client] --> [server]')
   })
 
-  it('_map.md is NOT searchable and has empty searchText', () => {
-    const { searchText, searchable } = deriveSearchFields('_map.md', '# Map\n- stuff')
+  it('.context/_map.md is NOT searchable and has empty searchText', () => {
+    const { searchText, searchable } = deriveSearchFields('.context/_map.md', '# Map\n- stuff')
     expect(searchable).toBe(false)
     expect(searchText).toBe('')
   })

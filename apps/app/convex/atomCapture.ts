@@ -32,8 +32,8 @@ import { isNonDataAtom } from './atomId'
  * changed inline-value `(path,key)`. Called inside the writer's
  * transaction. Never throws into a write.
  *
- * `_map.md` is a derived index (echoes other notes) — NEVER a source
- * of value atoms; excluded here AND in the gather via the SAME
+ * `.context/_map.md` is a derived index (echoes other notes) — NEVER
+ * a source of value atoms; excluded here AND in the gather via the SAME
  * `MAP_PATH` constant (no drift).
  *
  * Lifecycle (design v4 §5, Codex v3 HIGH reconciliation):

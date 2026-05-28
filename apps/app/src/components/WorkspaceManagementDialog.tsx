@@ -72,7 +72,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     setErr(null)
     try {
       const { orgId } = await createOrg({ name })
-      // A2 (H-2): the bridge action seeds company.md + dashboard before
+      // A2 (H-2): the bridge action seeds .context/company.md + dashboard before
       // returning. setActiveWorkspaceId navigates to /w/<orgId> (R1
       // commit 3), so the user lands on the new workspace's home.
       // Closing the dialog so they see the populated workspace cleanly.

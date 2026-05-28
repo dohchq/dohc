@@ -9,6 +9,7 @@ import {
   isFolderColor,
   isFolderIcon,
 } from './atomLocks'
+import { MAP_PATH } from './inlineAtom'
 
 // file-org-v1 §5.1 / §5.2 / §5.4 — Track-4 D4.1a verification suite.
 // Covers the 5 chokepoint lock guards, the §2-A Track-3 composition
@@ -117,11 +118,32 @@ describe('lock guards — upsertAtomImpl (chokepoint #1)', () => {
 describe('lock guards — atoms.remove (chokepoint #2) [internal path]', () => {
   it('refuses removal of a systemLocked atom', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true })
+    await seedAtom(t, 'system.md', { systemLocked: true })
     await expect(
-      t.mutation(internal.atoms._removeInternal, { workspaceId: W, path: '_map.md' }),
+      t.mutation(internal.atoms._removeInternal, {
+        workspaceId: W,
+        path: 'system.md',
+      }),
     ).rejects.toThrow(/system-managed/)
-    expect(await getAtom(t, '_map.md')).not.toBeNull()
+    expect(await getAtom(t, 'system.md')).not.toBeNull()
+  })
+
+  it('deletes stale locked map files because _map is user-removable now', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, MAP_PATH, { systemLocked: true, userLocked: true })
+    await seedAtom(t, '_map.md', { systemLocked: true, userLocked: true })
+
+    await t.mutation(internal.atoms._removeInternal, {
+      workspaceId: W,
+      path: MAP_PATH,
+    })
+    await t.mutation(internal.atoms._removeInternal, {
+      workspaceId: W,
+      path: '_map.md',
+    })
+
+    expect(await getAtom(t, MAP_PATH)).toBeNull()
+    expect(await getAtom(t, '_map.md')).toBeNull()
   })
 
   it('refuses removal of a userLocked atom', async () => {

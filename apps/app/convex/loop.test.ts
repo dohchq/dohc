@@ -6,7 +6,7 @@ import { api, internal } from './_generated/api'
 import type { Id } from './_generated/dataModel'
 
 // Phase 4 Unit 4b — weekly reconcile. Intent (goal_<id> atoms in
-// intent.md, PROSE only) vs reality (the SAME resolveLiveTotalValue
+// .context/intent.md, PROSE only) vs reality (the SAME resolveLiveTotalValue
 // path) → ADVISORY pending proposal, never auto-applied, idempotent
 // per week. The row stores ONLY the workspace's own goal + a marker;
 // `actual` is re-resolved LIVE + grant-gated at digest time (so a
@@ -33,7 +33,7 @@ const digest = (t: T, ws: string) =>
 describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolves live', () => {
   it('one proposal when actual < goal; idempotent; row stores NO cross-desk value', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', 'This week: {goal_billable: 40} and prose.')
+    await seedNote(t, W, '.context/intent.md', 'This week: {goal_billable: 40} and prose.')
     await seedNote(t, W, 'work.md', 'Logged {billable: 10} and {billable: 6}.')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
@@ -67,7 +67,7 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
 
   it('caught up since proposal created ⇒ silently dropped from the digest', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', '{goal_billable: 40}')
+    await seedNote(t, W, '.context/intent.md', '{goal_billable: 40}')
     await seedNote(t, W, 'work.md', '{billable: 5}')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
@@ -81,7 +81,7 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
 
   it('on/above goal ⇒ no proposal; null rollup ⇒ skip; no intent ⇒ reason', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', '{goal_billable: 10}')
+    await seedNote(t, W, '.context/intent.md', '{goal_billable: 10}')
     await seedNote(t, W, 'work.md', '{billable: 50}')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
@@ -89,12 +89,12 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
     expect(await t.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({ proposed: 0 })
 
     const t2 = convexTest(schema, modules)
-    await seedNote(t2, W, 'intent.md', '{goal_undef: 99}')
+    await seedNote(t2, W, '.context/intent.md', '{goal_undef: 99}')
     expect(await t2.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({ proposed: 0 })
 
     const t3 = convexTest(schema, modules)
     expect(await t3.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({
-      proposed: 0, reason: 'no intent.md',
+      proposed: 0, reason: 'no .context/intent.md',
     })
   })
 
@@ -115,7 +115,7 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
       '',
       'no real goal anywhere above.',
     ].join('\n')
-    await seedNote(t, W, 'intent.md', intent)
+    await seedNote(t, W, '.context/intent.md', intent)
     await seedNote(t, W, 'work.md', '{billable: 1}')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
@@ -125,25 +125,25 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
     // and a REAL prose goal in the same doc still works
     await t.run(async (ctx) => {
       const row = (await ctx.db.query('atoms').collect()).find(
-        (r: any) => r.workspaceId === W && r.path === 'intent.md',
+        (r: any) => r.workspaceId === W && r.path === '.context/intent.md',
       )
       await ctx.db.patch(row!._id, { body: intent + '\n\nReal: {goal_billable: 40}' })
     })
     expect(await t.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({ proposed: 1 })
   })
 
-  it('ambiguous (duplicate) intent.md ⇒ fail-soft, no throw', async () => {
+  it('ambiguous (duplicate) .context/intent.md ⇒ fail-soft, no throw', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', '{goal_x: 9}')
-    await seedNote(t, W, 'intent.md', '{goal_x: 9}') // pathological dup
+    await seedNote(t, W, '.context/intent.md', '{goal_x: 9}')
+    await seedNote(t, W, '.context/intent.md', '{goal_x: 9}') // pathological dup
     expect(await t.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({
-      proposed: 0, reason: 'ambiguous intent.md',
+      proposed: 0, reason: 'ambiguous .context/intent.md',
     })
   })
 
   it('non-number / malformed goal atom is ignored', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', '{goal_x: not_a_number} {goal_: 5} {notgoal: 1}')
+    await seedNote(t, W, '.context/intent.md', '{goal_x: not_a_number} {goal_: 5} {notgoal: 1}')
     expect(await t.mutation(internal.loop._reconcile, { workspaceId: W })).toEqual({ proposed: 0 })
   })
 })
@@ -151,7 +151,7 @@ describe('loop._reconcile — behind goal ⇒ one advisory marker; digest resolv
 describe('loop — approve at the edge (advisory; never auto-applies)', () => {
   it('accept / dismiss; re-resolve + cross-workspace guarded', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'intent.md', '{goal_billable: 40}')
+    await seedNote(t, W, '.context/intent.md', '{goal_billable: 40}')
     await seedNote(t, W, 'work.md', '{billable: 5}')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
@@ -189,7 +189,7 @@ describe('loop._reconcile — cross-desk goal via window rollup (REGRESSION: rev
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'team_hours', spec: { kind: 'window', windowId: w },
     })
-    await seedNote(t, W, 'intent.md', 'Team target {goal_team_hours: 100}')
+    await seedNote(t, W, '.context/intent.md', 'Team target {goal_team_hours: 100}')
     return w
   }
 
@@ -222,39 +222,46 @@ describe('loop._reconcile — cross-desk goal via window rollup (REGRESSION: rev
   })
 })
 
-describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory, never deletes)', () => {
+describe('loop._gardenAndMap — Unit 4c: thicker .context/_map.md + gardening (advisory, never deletes)', () => {
   const mapBody = (t: T, ws: string) =>
     t.run(async (ctx) => {
       const r = (await ctx.db.query('atoms').collect()).find(
-        (a: any) => a.workspaceId === ws && a.path === '_map.md',
+        (a: any) => a.workspaceId === ws && a.path === '.context/_map.md',
       )
-      return r ? { body: r.body as string, source: r.source } : null
+      return r
+        ? {
+            body: r.body as string,
+            source: r.source,
+            systemLocked: r.systemLocked,
+          }
+        : null
     })
 
-  it('regenerates a deterministic _map.md; only _map.md is written; nothing deleted', async () => {
+  it('regenerates a deterministic .context/_map.md; only .context/_map.md is written; nothing deleted', async () => {
     const t = convexTest(schema, modules)
     await seedNote(t, W, 'notes/a.md', '# Alpha\nlinks [[notes/b.md]]')
     await seedNote(t, W, 'notes/b.md', 'Beta body')
-    await seedNote(t, W, 'me.md', 'I am the user')
+    await seedNote(t, W, '.context/me.md', 'I am the user')
 
     const r1 = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
     expect(r1.mapRegen).toBe('written')
     const m1 = await mapBody(t, W)
     expect(m1?.source).toBe('agent')
+    expect(m1?.systemLocked).toBeFalsy()
     expect(m1?.body).toContain('# _map')
     expect(m1?.body).toContain('[[notes/a.md]]')
     expect(m1?.body).toContain('Alpha') // heading used as summary
     expect(m1?.body).toContain('→ notes/b.md') // outbound link hint
     expect(m1?.body).not.toMatch(/\[\[_map\.md\]\]/) // never indexes itself
 
-    // user notes byte-unchanged; only _map.md added; NOTHING deleted
+    // user notes byte-unchanged; only .context/_map.md added; NOTHING deleted
     const live = await t.run(async (ctx) =>
       (await ctx.db.query('atoms').collect())
         .filter((a: any) => a.workspaceId === W)
         .map((a: any) => a.path)
         .sort(),
     )
-    expect(live).toEqual(['_map.md', 'me.md', 'notes/a.md', 'notes/b.md'])
+    expect(live).toEqual(['.context/_map.md', '.context/me.md', 'notes/a.md', 'notes/b.md'])
     const a = await t.run(async (ctx) =>
       (await ctx.db.query('atoms').collect()).find(
         (x: any) => x.workspaceId === W && x.path === 'notes/a.md',
@@ -266,12 +273,15 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     const r2 = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
     expect(r2.mapRegen).toBe('written')
     expect((await mapBody(t, W))?.body).toBe(m1?.body)
+
+    await asW(t).mutation(api.atoms.remove, { path: '.context/_map.md' })
+    expect(await mapBody(t, W)).toBeNull()
   })
 
-  it('overwrites ONLY an agent-owned map: user OR unknown-source _map.md is left untouched (Codex LOW/MED)', async () => {
+  it('overwrites ONLY an agent-owned map: user OR unknown-source .context/_map.md is left untouched (Codex LOW/MED)', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '_map.md', body: 'MINE', updatedAt: 1, source: 'user' })
+      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'MINE', updatedAt: 1, source: 'user' })
     })
     await seedNote(t, W, 'notes/a.md', 'a')
     const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
@@ -281,34 +291,34 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     // unknown/unset source (legacy/external insert) is ALSO not ours
     const t2 = convexTest(schema, modules)
     await t2.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '_map.md', body: 'LEGACY', updatedAt: 1 })
+      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'LEGACY', updatedAt: 1 })
     })
     await seedNote(t2, W, 'notes/a.md', 'a')
     expect((await t2.mutation(internal.loop._gardenAndMap, { workspaceId: W })).mapRegen).toBe('skipped-not-agent-owned')
     expect((await mapBody(t2, W))?.body).toBe('LEGACY')
   })
 
-  it('duplicate _map.md rows ⇒ fail-soft (no cron throw) (Codex MED)', async () => {
+  it('duplicate .context/_map.md rows ⇒ fail-soft (no cron throw) (Codex MED)', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
-      await ctx.db.insert('atoms', { workspaceId: W, path: '_map.md', body: 'x', updatedAt: 1, source: 'agent' })
-      await ctx.db.insert('atoms', { workspaceId: W, path: '_map.md', body: 'y', updatedAt: 1, source: 'agent' })
+      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'x', updatedAt: 1, source: 'agent' })
+      await ctx.db.insert('atoms', { workspaceId: W, path: '.context/_map.md', body: 'y', updatedAt: 1, source: 'agent' })
     })
     await seedNote(t, W, 'notes/a.md', 'a')
     const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
     expect(r.mapRegen).toBe('skipped-ambiguous-map') // did not throw
   })
 
-  it('REGRESSION (Codex HIGH): _map.md never double-counts a note’s atoms into live-totals / reconcile', async () => {
+  it('REGRESSION (Codex HIGH): .context/_map.md never double-counts a note’s atoms into live-totals / reconcile', async () => {
     const t = convexTest(schema, modules)
     // first prose line of work.md LOOKS like an atom — it is the
     // single source of {billable: 10}.
     await seedNote(t, W, 'work.md', 'Logged {billable: 10} on Acme.')
-    await seedNote(t, W, 'intent.md', '{goal_billable: 15}')
+    await seedNote(t, W, '.context/intent.md', '{goal_billable: 15}')
     await t.mutation(internal.liveTotals._define, {
       workspaceId: W, identifier: 'billable', spec: { kind: 'ownDesk', op: 'sum', key: 'billable' },
     })
-    // generate _map.md (its summary echoes "Logged {billable: 10}")
+    // generate .context/_map.md (its summary echoes "Logged {billable: 10}")
     await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
     const m = await mapBody(t, W)
     expect(m?.body).not.toContain('{billable: 10}') // braces neutralised
@@ -317,7 +327,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     await t.mutation(internal.loop._reconcile, { workspaceId: W })
     const d = await t.query(internal.loop._pendingProposals, { workspaceId: W })
     const it = d.items.find((i: any) => i.identifier === 'billable')
-    expect(it?.actual).toBe(10) // NOT 20 — _map.md excluded from value scan
+    expect(it?.actual).toBe(10) // NOT 20 — .context/_map.md excluded from value scan
   })
 
   it('map link hints are capped per note (byte-bound; Codex MED)', async () => {
@@ -374,7 +384,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     await seedNote(t, W, 'notes/lonely.md', 'no links in or out') // ORPHAN
     await seedNote(t, W, 'dup1.md', 'SAME CONTENT')
     await seedNote(t, W, 'dup2.md', 'SAME CONTENT') // exact dup
-    await seedNote(t, W, 'me.md', 'singleton — not an orphan')
+    await seedNote(t, W, '.context/me.md', 'singleton — not an orphan')
 
     const r = await t.mutation(internal.loop._gardenAndMap, { workspaceId: W })
     expect(r.gardening).toBe(1)
@@ -382,7 +392,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     expect(gp).toHaveLength(1)
     expect(gp[0].summary).toContain('notes/lonely.md')
     expect(gp[0].summary).toContain('dup1.md')
-    expect(gp[0].summary).not.toContain('me.md') // singleton excluded
+    expect(gp[0].summary).not.toContain('.context/me.md') // singleton excluded
     expect('goal' in gp[0]).toBe(false)
 
     // idempotent per week
@@ -397,7 +407,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     const n = await t.run(async (ctx) =>
       (await ctx.db.query('atoms').collect()).filter((a: any) => a.workspaceId === W).length,
     )
-    expect(n).toBe(7) // 6 seeded + _map.md ; zero deletions
+    expect(n).toBe(7) // 6 seeded + .context/_map.md ; zero deletions
 
     // tidy up EVERY issue: link the orphan; make the dups distinct AND
     // give them outbound links (so de-duping doesn't just turn them
@@ -415,7 +425,7 @@ describe('loop._gardenAndMap — Unit 4c: thicker _map.md + gardening (advisory,
     expect(d2.items.some((i: any) => i.kind === 'gardening')).toBe(false) // dropped, no nag
   })
 
-  it('a goal/value atom inside _map.md content cannot create phantom data (it is excluded from its own index + gardening)', async () => {
+  it('a goal/value atom inside .context/_map.md content cannot create phantom data (it is excluded from its own index + gardening)', async () => {
     const t = convexTest(schema, modules)
     await seedNote(t, W, 'notes/a.md', 'real [[notes/b.md]]')
     await seedNote(t, W, 'notes/b.md', 'b')
@@ -436,7 +446,7 @@ const asW = (t: T) => t.withIdentity({ subject: W })
 const userNotes = (t: T, ws: string) =>
   t.run(async (ctx) =>
     (await ctx.db.query('atoms').collect())
-      .filter((r: any) => r.workspaceId === ws && r.path !== '_map.md')
+      .filter((r: any) => r.workspaceId === ws && r.path !== '.context/_map.md')
       .map((r: any) => ({ path: r.path, body: r.body }))
       .sort((a: any, b: any) => a.path.localeCompare(b.path)),
   )
@@ -444,7 +454,7 @@ const entityCount = (t: T) =>
   t.run(async (ctx) => (await ctx.db.query('entities').collect()).length)
 
 async function seedBehindGoal(t: T) {
-  await seedNote(t, W, 'intent.md', 'This week: {goal_billable: 40}.')
+  await seedNote(t, W, '.context/intent.md', 'This week: {goal_billable: 40}.')
   await seedNote(t, W, 'work.md', 'Logged {billable: 10} and {billable: 6}.')
   await t.mutation(internal.liveTotals._define, {
     workspaceId: W,
@@ -510,17 +520,17 @@ describe('P4 — public accept/dismiss: advisory, terminal, owner-scoped', () =>
 })
 
 describe('P4 — public runNow: advisory + idempotent + reason passthrough', () => {
-  it('no intent.md ⇒ {proposed:0,gardening:0,reason:"no intent.md"}; never writes user data', async () => {
+  it('no .context/intent.md ⇒ {proposed:0,gardening:0,reason:"no .context/intent.md"}; never writes user data', async () => {
     const t = convexTest(schema, modules)
-    await seedNote(t, W, 'me.md', '# Me') // a user note, NOT intent.md
+    await seedNote(t, W, '.context/me.md', '# Me') // a user note, NOT .context/intent.md
     const before = await userNotes(t, W)
     const r = await asW(t).mutation(api.loop.runNow, {})
-    expect(r).toEqual({ proposed: 0, gardening: 0, reason: 'no intent.md' })
+    expect(r).toEqual({ proposed: 0, gardening: 0, reason: 'no .context/intent.md' })
     expect(await entityCount(t)).toBe(0)
     expect(await userNotes(t, W)).toEqual(before) // user notes untouched
   })
 
-  it('behind a goal ⇒ proposed:1; idempotent same week ⇒ {0,0}; user notes byte-unchanged (only _map.md may change)', async () => {
+  it('behind a goal ⇒ proposed:1; idempotent same week ⇒ {0,0}; user notes byte-unchanged (only .context/_map.md may change)', async () => {
     const t = convexTest(schema, modules)
     await seedBehindGoal(t)
     const before = await userNotes(t, W)
@@ -545,7 +555,7 @@ describe('P4 — public runNow: advisory + idempotent + reason passthrough', () 
       gardening: 0,
     })
     // ADVISORY: entities empty; USER notes byte-unchanged (the design
-    // invariant: _map.md MAY be (re)written, user prose never).
+    // invariant: .context/_map.md MAY be (re)written, user prose never).
     expect(await entityCount(t)).toBe(0)
     expect(await userNotes(t, W)).toEqual(before)
   })

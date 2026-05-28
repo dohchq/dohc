@@ -194,7 +194,7 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     expect(r.length).toBe(5)
   })
 
-  it('Independent P4: docs.find is a DIGEST (frontmatter stripped); _map.md excluded', async () => {
+  it('Independent P4: docs.find is a DIGEST (frontmatter stripped); .context/_map.md excluded', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: W,
@@ -203,12 +203,18 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
       source: 'user',
     })
     await t.run(async (ctx) => {
-      // a real `_map.md` — glob `*` would match it but the filter
-      // must exclude the derived index.
+      // a real `.context/_map.md` — glob `**.md` would match it but
+      // the filter must exclude the derived context index.
+      await ctx.db.insert('atoms', {
+        workspaceId: W,
+        path: '.context/_map.md',
+        body: '# Map\n- [[logs/2025-07-14.md]]',
+        updatedAt: 1,
+      })
       await ctx.db.insert('atoms', {
         workspaceId: W,
         path: '_map.md',
-        body: '# Map\n- [[logs/2025-07-14.md]]',
+        body: '# Ordinary root map\nsearchable now',
         updatedAt: 1,
       })
     })
@@ -216,18 +222,24 @@ describe('Phase-4 4B — evalQueryBlocks reactive query', () => {
     const r = await as.query(api.queries.evalQueryBlocks, {
       srcs: [
         'docs.find("logs/2025-07-14.md")',
-        'docs.find("_map.md")', // derived index — not findable
-        'docs.glob("*.md")', // matches _map.md by pattern — filter must drop it
+        'docs.find(".context/_map.md")', // derived context index — not findable
+        'docs.find("_map.md")', // ordinary root file — findable
+        'docs.glob("**.md")', // matches .context/_map.md by pattern — filter must drop it
       ],
     })
     const m = new Map(r.map((e) => [e.src, e.value]))
     const find = m.get('docs.find("logs/2025-07-14.md")') as string
     expect(find).not.toContain('---\nid:') // frontmatter stripped (digest)
     expect(find).toContain('# July 14') // the actual content shows
-    expect(m.get('docs.find("_map.md")')).toBe('_(missing: _map.md)_')
-    // `*.md` matches `_map.md` by pattern; the exclusion filter must
-    // drop it ⇒ no matches (logs/… has a slash, `*` is single-seg).
-    expect(m.get('docs.glob("*.md")')).toBe('_(no matches)_')
+    expect(m.get('docs.find(".context/_map.md")')).toBe(
+      '_(missing: .context/_map.md)_',
+    )
+    expect(m.get('docs.find("_map.md")')).toContain('# Ordinary root map')
+    // `**.md` matches `.context/_map.md` by pattern; the exclusion
+    // filter must drop only that generated context file.
+    expect(m.get('docs.glob("**.md")')).toBe(
+      '- [[_map.md]]\n- [[logs/2025-07-14.md]]',
+    )
   })
 
   it('Codex P4-fold-2: a 40-line note + trailing newline is NOT falsely "truncated"; >40 IS', async () => {

@@ -17,6 +17,7 @@ import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { countActiveOwners, requireRole } from './orgRoles'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
+import { ORG_IDENTITY_PATH } from './inlineAtom'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
@@ -26,6 +27,22 @@ const isActive = (m: { status?: string } | null | undefined): boolean =>
 const isOrgActive = <T extends { status?: string }>(
   org: T | null | undefined,
 ): org is T => !!org && (org.status === undefined || org.status === 'active')
+
+function randomInviteCode(): string {
+  const bytes = new Uint8Array(8)
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256)
+    }
+  }
+  return [...bytes]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 10)
+}
 
 async function scheduleOrgShareDisconnects(
   ctx: MutationCtx,
@@ -120,13 +137,20 @@ export const createOrg = mutation({
     // by_inviteCode, so two orgs sharing a code would land a joiner in
     // the wrong org. Regenerate until the indexed lookup is empty.
     let inviteCode = ''
+    let foundUniqueInviteCode = false
     for (let i = 0; i < 8; i++) {
-      inviteCode = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
+      inviteCode = randomInviteCode()
       const clash = await ctx.db
         .query('orgs')
         .withIndex('by_inviteCode', (q) => q.eq('inviteCode', inviteCode))
         .first()
-      if (!clash) break
+      if (!clash) {
+        foundUniqueInviteCode = true
+        break
+      }
+    }
+    if (!foundUniqueInviteCode) {
+      throw new Error('Could not generate a unique invite code. Please retry.')
     }
     const now = Date.now()
     const orgId = await ctx.db.insert('orgs', {
@@ -467,7 +491,7 @@ export const myWorkspaces = query({
 })
 
 // H-2 (multiplayer-and-h-followups §4 A2) — seed a freshly-created org
-// with a starter `company.md` + dashboard + an `onboarding` row so the
+// with a starter `.context/company.md` + dashboard + an `onboarding` row so the
 // agent's first turn in the new workspace has something to operate
 // against (instead of an empty void). Called from `createOrgWithBridge`
 // after the Convex insert + WorkOS sync. Internal (the bridge is the
@@ -477,7 +501,7 @@ export const myWorkspaces = query({
 // final copy — the agent's first onboarding turn (kicked from the
 // dialog post-create) will refine it from the team's context. The
 // starter exists so:
-//  - `onboarding.progressOf` finds company.md and reports hasMe:true
+//  - `onboarding.progressOf` finds .context/company.md and reports hasMe:true
 //    once the agent fills it in, satisfying the never-end-empty floor.
 //  - The user lands on a real page when navigated to /w/<orgId>/p/<companyMdFileId>
 //    instead of an empty workspace state.
@@ -502,12 +526,12 @@ export const _seedNewOrg = internalMutation({
       await ctx.db.insert('onboarding', { workspaceId: orgId as string })
     }
 
-    // 2) company.md — the team identity atom. Pre-fills the org name +
+    // 2) .context/company.md — the team identity atom. Pre-fills the org name +
     //    leaves clear seams the agent (and the team) edit on first
     //    pass. Title via frontmatter (Notion-style per SYSTEM_PROMPT).
-    await ctx.runMutation(internal.atoms._upsertSystem, {
+    await ctx.runMutation(internal.atoms._upsertInternal, {
       workspaceId: orgId as string,
-      path: 'company.md',
+      path: ORG_IDENTITY_PATH,
       body: `---
 title: ${name}
 ---
@@ -534,7 +558,7 @@ _What ${name} does — edit this to describe the team's work, how you operate, a
     //    (a real query, not wall-to-wall DSL). Lists the team's recent
     //    files so the dashboard is non-empty even before the agent
     //    populates structured data.
-    await ctx.runMutation(internal.atoms._upsertSystem, {
+    await ctx.runMutation(internal.atoms._upsertInternal, {
       workspaceId: orgId as string,
       path: 'dashboard.md',
       body: `---

@@ -69,15 +69,15 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete THROWS with me.md but no query dashboard', async () => {
+  it('_complete THROWS with .context/me.md but no query dashboard', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, 'me.md', '# Me\nfreelance designer')
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer')
     await expect(
       t.mutation(internal.onboarding._complete, { workspaceId: W }),
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete THROWS with a query dashboard but no me.md', async () => {
+  it('_complete THROWS with a query dashboard but no .context/me.md', async () => {
     const t = convexTest(schema, modules)
     await seedAtom(t, 'dashboard.md', '# Dash\n```query\nentities.list("x")\n```')
     await expect(
@@ -85,10 +85,10 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete SUCCEEDS only with me.md AND a populated dashboard → DONE', async () => {
+  it('_complete SUCCEEDS only with .context/me.md AND a populated dashboard → DONE', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
-    await seedAtom(t, 'me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
     await seedAtom(
       t,
       'dashboard.md',
@@ -148,7 +148,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       mePath: null,
       dashboardPath: null,
     })
-    await seedAtom(t, 'me.md', '# Me')
+    await seedAtom(t, '.context/me.md', '# Me')
     await seedAtom(t, 'dashboard.md', '```query\nentities.list("x")\n```')
     await t.run((ctx) =>
       ctx.db.insert('entities', {
@@ -163,7 +163,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       entityCount: 1,
       hasMe: true,
       hasDashboardWithQuery: true,
-      mePath: 'me.md',
+      mePath: '.context/me.md',
       dashboardPath: 'dashboard.md',
     })
   })
@@ -179,7 +179,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await asW(t).mutation(api.onboarding.defer, {}) // idempotent
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DEFERRED')
     // a deferred user who genuinely finishes still reaches DONE (DONE>DEFERRED)
-    await seedAtom(t, 'me.md', '# Me')
+    await seedAtom(t, '.context/me.md', '# Me')
     await seedAtom(t, 'd.md', '```query\nx\n```')
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
@@ -188,7 +188,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
   it('completeIfReady flips an already-populated workspace from IN_PROGRESS to DONE', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
-    await seedAtom(t, 'me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
     await seedAtom(
       t,
       'dashboard.md',

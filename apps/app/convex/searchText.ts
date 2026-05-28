@@ -108,7 +108,7 @@ export function basename(path: string): string {
 }
 
 /** Whether an atom appears in search. Excludes ONLY the derived index
- *  `_map.md`; INCLUDES html / markdown / user files. (Do NOT reuse
+ *  `.context/_map.md`; INCLUDES html / markdown / user files. (Do NOT reuse
  *  `isNonDataAtom` — it excludes html atoms, which we must search.) */
 export function isAtomSearchable(path: string): boolean {
   return path !== MAP_PATH

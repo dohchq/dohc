@@ -35,10 +35,9 @@ export default defineSchema({
     // additive on existing rows (default `undefined`, treated as
     // false at every read site). The lock guards refuse a write at
     // the data layer; the star is a pure cosmetic.
-    //   systemLocked — written by `_upsertSystem` only (one prod
-    //     caller: `loop.regenerateMap`); refuses ALL writes save
+    //   systemLocked — written by `_upsertSystem` only (currently no
+    //     production callers); refuses ALL writes save
     //     `allowSystemOverride: true` and `_upsertSystem` itself.
-    //     The "map files ai uses" of impressions.md line 39.
     //   userLocked — soft lock set by the user via the future
     //     `setLock` mutation (lands D4.1b ATOMICALLY with §2-A.1);
     //     refuses agent writes; the user's OWN edit still succeeds.
@@ -54,7 +53,7 @@ export default defineSchema({
     // app-wide search (docs/development/search-plan.md). Derived on every
     // path/body write via deriveSearchFields(); see convex/searchText.ts.
     //   searchText  — indexed: title×3 + basename + path + plaintext(body)
-    //   searchable  — false only for the derived index `_map.md`
+    //   searchable  — false only for the derived index `.context/_map.md`
     searchText: v.optional(v.string()),
     searchable: v.optional(v.boolean()),
     // org-plan §4/§7 — collaborator edit lease for human-vs-human
@@ -262,7 +261,7 @@ export default defineSchema({
     threadId: v.string(),
   }).index('by_workspace', ['workspaceId']),
 
-  // org-plan §5/§13 Phase C — DEBOUNCED `_map.md` regen.
+  // org-plan §5/§13 Phase C — DEBOUNCED `.context/_map.md` regen.
   //
   // Each row says "a regen for this workspace is already scheduled to
   // fire at `scheduledFor`". A second mutation arriving inside that
@@ -581,7 +580,7 @@ export default defineSchema({
   // reviewed-by-default PATTERN without overloading that table.
   //
   // Phase-4 review (Codex HIGH): the row stores ONLY the workspace's
-  // OWN data (goal, from its own intent.md) + a marker. It does NOT
+  // OWN data (goal, from its own .context/intent.md) + a marker. It does NOT
   // persist `actual`/`message` — a cross-desk live-total cached here
   // would survive grant revocation and leak (sharing-and-lenses.md:
   // live totals roll up "through permitted windows"; markdown is the
@@ -606,7 +605,7 @@ export default defineSchema({
     // a required field would reject any pre-existing row on deploy).
     // Absent ⇒ treated as 'metric' by readers (the original shape).
     kind: v.optional(v.union(v.literal('metric'), v.literal('gardening'))),
-    goal: v.optional(v.number()), // metric only — own intent.md goal
+    goal: v.optional(v.number()), // metric only — own .context/intent.md goal
     summary: v.optional(v.string()), // gardening only — own note paths
     status: v.union(
       v.literal('pending'),

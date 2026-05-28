@@ -10,6 +10,7 @@ import {
   isNonDataAtom,
   countTypeLines,
 } from './atomId'
+import { INTENT_PATH, MAP_PATH } from './inlineAtom'
 
 const modules = import.meta.glob('./**/*.ts')
 
@@ -89,7 +90,7 @@ describe('isLegacySkillPath — top-level `skills/` prefix only', () => {
 
 describe('isNonDataAtom — §6 unified predicate (the 11-site source of truth)', () => {
   it('matches MAP_PATH, html, skill, legacy-skill-path', () => {
-    expect(isNonDataAtom('_map.md', 'anything')).toBe(true)
+    expect(isNonDataAtom(MAP_PATH, 'anything')).toBe(true)
     expect(isNonDataAtom('r.md', HTML)).toBe(true)
     expect(isNonDataAtom('s.md', SKILL)).toBe(true)
     expect(isNonDataAtom('skills/legacy.md', 'no frontmatter')).toBe(true)
@@ -271,15 +272,15 @@ describe('§6 r1-fold FAIL-1 — data → non-data → data round trip clears st
   })
 })
 
-// ── Track-3 P1 r1-fold (Codex FAIL-2): intent.md authored as
+// ── Track-3 P1 r1-fold (Codex FAIL-2): .context/intent.md authored as
 // type:skill/type:html must NOT extract goal proposals. ──
 
-describe('§6 r1-fold FAIL-2 — loop.ts intent.md skips a non-data body', () => {
-  it('a skill-typed intent.md proposes nothing', async () => {
+describe('§6 r1-fold FAIL-2 — loop.ts .context/intent.md skips a non-data body', () => {
+  it('a skill-typed .context/intent.md proposes nothing', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: W,
-      path: 'intent.md',
+      path: INTENT_PATH,
       body: '---\ntype: skill\nid: intent\n---\nExample goal {goal_billable: 40}',
       source: 'user',
     })

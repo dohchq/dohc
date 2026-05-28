@@ -9,14 +9,20 @@ import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
-import { parseInlineAtomsFromMarkdown, MAP_PATH } from './inlineAtom'
+import {
+  parseInlineAtomsFromMarkdown,
+  MAP_PATH,
+  INTENT_PATH,
+  ORG_IDENTITY_PATH,
+  PERSONAL_IDENTITY_PATH,
+} from './inlineAtom'
 import { resolveLiveTotalValue } from './liveTotals'
 import { isLegacySkillPath, isNonDataAtom } from './atomId'
 
 // Phase 4 Unit 4b — the weekly reconcile loop. Intent vs reality →
 // an ADVISORY proposed move, approved at the edge (reviewed-by-
 // default). Composes, doesn't duplicate: intent = author-typed value
-// atoms in intent.md (markdown is truth), reality = the SAME
+// atoms in .context/intent.md (markdown is truth), reality = the SAME
 // resolveLiveTotalValue path as the editor's `{identifier}`. NEVER
 // auto-applies anything (masterplan non-goal); a proposal is the
 // owner's own loop artifact (its own table — never an atom/entity, so
@@ -28,7 +34,7 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 // reconciles in the same 7-day bucket never double-propose.
 const periodOf = (ts: number) => `w${Math.floor(ts / WEEK_MS)}`
 
-// intent.md value atom `{goal_<id>: n}` pairs with rollup `{<id>}`.
+// .context/intent.md value atom `{goal_<id>: n}` pairs with rollup `{<id>}`.
 const GOAL_RE = /^goal_([A-Za-z_][A-Za-z0-9_]*)$/
 const RECONCILE_FANOUT_PAGE = 200
 const PENDING_PROPOSALS_MAX = 100
@@ -40,7 +46,12 @@ const MAP_SCAN_CAP = 5000
 const GARDEN_ID = 'gardening:structure'
 // Singleton/system notes are intentionally standalone — never flagged
 // as orphans (that would be pure noise).
-const NOT_ORPHAN = new Set([MAP_PATH, 'me.md', 'company.md', 'intent.md'])
+const NOT_ORPHAN = new Set([
+  MAP_PATH,
+  PERSONAL_IDENTITY_PATH,
+  ORG_IDENTITY_PATH,
+  INTENT_PATH,
+])
 // Track-3 P1: consolidated into the canonical `isLegacySkillPath`
 // in convex/atomId.ts (single source — the §6 OR-compat term).
 // (Local const removed; the import above + the §6.2 audit table.)
@@ -55,7 +66,7 @@ const MAP_MAX_CHARS = 256_000
 // Map summaries echo note text. Neutralise `{}` so a copied
 // `Logged {billable: 10}` can NEVER be parsed as a real atom — the
 // generated index must never be (or look like) a value source
-// (Codex HIGH, defence in depth on top of excluding _map.md from
+// (Codex HIGH, defence in depth on top of excluding .context/_map.md from
 // value scans).
 const firstProseLine = (body: string): string => {
   for (const raw of (body ?? '').split('\n')) {
@@ -86,7 +97,7 @@ async function loadNotes(
   }
 }
 
-/** Deterministic `_map.md` body for a fixed vault (folder → notes →
+/** Deterministic `.context/_map.md` body for a fixed vault (folder → notes →
  *  one-line summary + outbound links). Generated artifact, clearly
  *  marked. */
 function buildMapBody(notes: NoteRow[]): string {
@@ -219,11 +230,11 @@ async function detectGardenIssues(
   return `Tidy-up suggestion (advisory — dohc deletes nothing): ${parts.join(' | ')}`
 }
 
-/** Regenerate `_map.md`. Overwrites ONLY a dohc-authored map
+/** Regenerate `.context/_map.md`. Overwrites ONLY a dohc-authored map
  *  (`source==='agent'`); a user-authored OR unknown/legacy-source
- *  `_map.md` is left untouched (Codex LOW/MED — only overwrite what we
+ *  `.context/_map.md` is left untouched (Codex LOW/MED — only overwrite what we
  *  provably own). Fail-soft on scan overflow and on a duplicate-row
- *  `_map.md` (a scheduled cron must NEVER throw — Codex MED). Reuses
+ *  `.context/_map.md` (a scheduled cron must NEVER throw — Codex MED). Reuses
  *  upsertAtomImpl ⇒ recoverability (prior map snapshotted to trash)
  *  for free. */
 // Exported so onboarding._complete reuses the SAME deterministic
@@ -240,7 +251,7 @@ export async function regenerateMap(
 > {
   // .take(2) (NOT .first()/.unique()): upsertAtomImpl does .unique()
   // internally and would THROW into the scheduled mutation on a
-  // pathological duplicate (workspace,_map.md). Pre-detect + fail-soft.
+  // pathological duplicate (workspace,.context/_map.md). Pre-detect + fail-soft.
   const existingRows = await ctx.db
     .query('atoms')
     .withIndex('by_workspace_path', (q) =>
@@ -257,13 +268,7 @@ export async function regenerateMap(
   }
   const loaded = await loadNotes(ctx, workspaceId)
   if (loaded.overflow) return 'skipped-overflow'
-  // file-org-v1 §2.3 (Track-4 D4.1a) — system atom path. Routes
-  // through `_upsertSystem` which (1) bypasses the systemLocked
-  // chokepoint with `allowSystemOverride:true` and (2) RE-ASSERTS
-  // `systemLocked:true` on every refresh so an accidental flag
-  // clear self-heals on the next loop tick. This is the SOLE
-  // production caller of `_upsertSystem` (audit-by-grep enforced).
-  await ctx.runMutation(internal.atoms._upsertSystem, {
+  await ctx.runMutation(internal.atoms._upsertInternal, {
     workspaceId,
     path: MAP_PATH,
     body: buildMapBody(loaded.notes),
@@ -273,7 +278,7 @@ export async function regenerateMap(
 }
 
 /**
- * Reconcile ONE workspace. Reads intent.md goals, resolves each
+ * Reconcile ONE workspace. Reads .context/intent.md goals, resolves each
  * paired live-total, and for a behind-goal metric upserts ONE pending
  * proposal — idempotent per (workspace, epoch-week, identifier). Pure
  * w.r.t. user data: only writes the `proposals` table, never a note
@@ -287,32 +292,32 @@ async function reconcileImpl(
   workspaceId: string,
 ): Promise<{
   proposed: number
-  reason?: 'no intent.md' | 'ambiguous intent.md'
+  reason?: 'no .context/intent.md' | 'ambiguous .context/intent.md'
 }> {
     // .take(2) (not .unique()): a scheduled cron must NEVER throw on a
     // pathological duplicate (workspace,path) — fail-soft (Codex LOW).
     const intentRows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace_path', (q) =>
-        q.eq('workspaceId', workspaceId).eq('path', 'intent.md'),
+        q.eq('workspaceId', workspaceId).eq('path', INTENT_PATH),
       )
       .take(2)
     if (intentRows.length !== 1) {
       const reason =
         intentRows.length === 0
-          ? ('no intent.md' as const)
-          : ('ambiguous intent.md' as const)
+          ? ('no .context/intent.md' as const)
+          : ('ambiguous .context/intent.md' as const)
       return { proposed: 0, reason }
     }
     const intent = intentRows[0]
-    // Track-3 P1 r1-fold FAIL-2: if intent.md was authored as
+    // Track-3 P1 r1-fold FAIL-2: if .context/intent.md was authored as
     // `type: html`/`type: skill`/lives at a legacy `skills/*`
     // path (extremely unusual but adversarially reachable), it is
     // NOT a value source — the §6 unified contract says EVERY
     // value-scanner skips a non-data atom. Apply for consistency
-    // (harmless named no-op for normal `intent.md`).
+    // (harmless named no-op for normal `.context/intent.md`).
     if (isNonDataAtom(intent.path, intent.body ?? '')) {
-      return { proposed: 0, reason: 'no intent.md' as const }
+      return { proposed: 0, reason: 'no .context/intent.md' as const }
     }
 
     const period = periodOf(Date.now())
@@ -484,13 +489,13 @@ export const _resolveProposal = internalMutation({
 
 /**
  * Unit 4c — fold the Map + gardening into the weekly pass for ONE
- * workspace. Regenerates `_map.md` (recoverable, never clobbers a
+ * workspace. Regenerates `.context/_map.md` (recoverable, never clobbers a
  * user-authored map) and, if there are own-desk structural issues,
  * upserts ONE idempotent advisory gardening proposal per
  * (workspace, epoch-week). NEVER deletes/auto-applies (masterplan
- * non-goal) — the only note write is the regenerated `_map.md`
- * (a generated index, not user prose), via `_upsertSystem` so the
- * prior map is snapshotted to trash AND the row stays `systemLocked`.
+ * non-goal) — the only note write is the regenerated `.context/_map.md`
+ * (a generated index, not user prose). It is agent-owned but not
+ * system-locked, so the user can delete it like any other file.
  */
 async function gardenAndMapImpl(
   ctx: MutationCtx,
@@ -533,7 +538,7 @@ export const _gardenAndMap = internalMutation({
   handler: (ctx, { workspaceId }) => gardenAndMapImpl(ctx, workspaceId),
 })
 
-// ── org-plan §5/§13 Phase C — DEBOUNCED `_map.md` regen ──────────────
+// ── org-plan §5/§13 Phase C — DEBOUNCED `.context/_map.md` regen ────
 //
 // Goal: rapid edits coalesce to ONE regen per `REGEN_DEBOUNCE_MS`
 // window per workspace, so the map "feels in sync" without the
@@ -656,7 +661,7 @@ export const dismiss = mutation({
  * internals (`reconcileImpl` then `gardenAndMapImpl`) and returns
  * their RAW counts + reconcile's `reason`. Idempotent per epoch-week
  * (engine). ADVISORY: writes ONLY the `proposals` table + regenerates
- * the agent-owned `_map.md` — never user atoms/entities/user note
+ * the agent-owned `.context/_map.md` — never user atoms/entities/user note
  * bodies. The panel may say "nothing new" ONLY when
  * `proposed === 0 && gardening === 0`.
  */
@@ -667,7 +672,7 @@ export const runNow = mutation({
   ): Promise<{
     proposed: number
     gardening: 0 | 1
-    reason?: 'no intent.md' | 'ambiguous intent.md'
+    reason?: 'no .context/intent.md' | 'ambiguous .context/intent.md'
   }> => {
     const ws = await requireWorkspace(ctx)
     const rec = await reconcileImpl(ctx, ws)

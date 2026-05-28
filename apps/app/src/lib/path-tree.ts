@@ -181,8 +181,11 @@ function sortTree(node: TreeNode) {
 // Display label for a tree node.
 export function nodeLabel(node: TreeNode): string {
   // ai-os-ideas #1 — the Map is the navigable index, not a cryptic
-  // `_map` dotfile. Surface it as a friendly first-class artifact.
-  if (node.segment === '_map.md') return 'Map · your setup'
+  // `.context/_map` file. Surface it as a friendly first-class artifact.
+  if (node.fullPath === '.context/_map.md') return 'Map · your setup'
+  if (node.fullPath === '.context/me.md') return 'Me'
+  if (node.fullPath === '.context/intent.md') return 'Intent'
+  if (node.fullPath === '.context/company.md') return 'Company'
   if (node.page?.title) return node.page.title
   // D4.16 — strip the rendering extension (.md OR .html) so a
   // titleless file shows its clean name (e.g. `dashboard`, not
