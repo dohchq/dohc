@@ -93,7 +93,7 @@ export async function recordCapture(
       .unique()
     if (!a) throw new Error(`capture target not found: atom ${args.ref}`)
     // §6 unified (Track-3 P1): non-data atoms (html view, skill
-    // instructions, derived map, legacy skills/-path) never
+    // instructions, legacy skills/-path) never
     // produce capture rows — same posture as the rest of §6.
     if (isNonDataAtom(a.path, a.body ?? '')) return { tier, status }
     // R3 §3 (Codex v3 HIGH) — folded EXACTLY like the entity branch

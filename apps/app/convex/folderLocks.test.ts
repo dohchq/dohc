@@ -67,14 +67,14 @@ async function getMeta(t: ReturnType<typeof convexTest>, path: string) {
 describe('atoms.move — chokepoint #3', () => {
   it('refuses to rename a systemLocked atom', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, '_map.md', { systemLocked: true })
+    await seedAtom(t, 'system.md', { systemLocked: true })
     await expect(
       t
         .withIdentity({ subject: W })
-        .mutation(api.atoms.move, { fromPath: '_map.md', toPath: 'oldmap.md' }),
+        .mutation(api.atoms.move, { fromPath: 'system.md', toPath: 'old-system.md' }),
     ).rejects.toThrow(/system-managed/)
-    expect(await getAtom(t, '_map.md')).not.toBeNull()
-    expect(await getAtom(t, 'oldmap.md')).toBeNull()
+    expect(await getAtom(t, 'system.md')).not.toBeNull()
+    expect(await getAtom(t, 'old-system.md')).toBeNull()
   })
 
   it('refuses to rename a userLocked atom', async () => {
@@ -109,7 +109,7 @@ describe('folders.move — chokepoint #4', () => {
     const t = convexTest(schema, modules)
     await seedFolder(t, 'team')
     await seedAtom(t, 'team/anna.md')
-    await seedAtom(t, 'team/_map.md', { systemLocked: true })
+    await seedAtom(t, 'team/system.md', { systemLocked: true })
     await expect(
       t
         .withIdentity({ subject: W })

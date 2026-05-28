@@ -3,6 +3,9 @@
 Status: revised v2 after a 5-reviewer round-2 review (Codex, Plan agent, Karen, Pragmatist, Jenny). Companion to `org-plan.md` (Phase 3 org-tenancy; landing).
 Audience: dohc team + implementing engineers; structured so each phase is its own PR.
 
+> **Supersession note:** Any generated `_map.md` / map regeneration items
+> in this older plan are no longer MVP direction. See `decisions.md`.
+
 > **Round-2 review changes + user decisions (this revision absorbs):**
 > 0. **One single PR, not 6-7 splits** (user decision after the round-2 review). The phase labels below are work-sequencing aids inside one ship, not separate review units. ~13-18 weeks of work landing as one drop, opened against `main` once `feat/orgs-tenancy` (PR #1) merges.
 > 0a. **NEW Phase P1 — Notion-full per-atom + per-folder access controls** (user decision after the multiplayer plan). Org workspaces stay "everyone sees everything by default," but every atom + folder gets a per-page access toggle (private / restricted-to-list / org-default). Lands BEFORE multiplayer because cursor presence + AI visibility need to be access-aware from the start. Owners do NOT bypass restrictions. Departed members' private atoms tombstone with Owner recovery.

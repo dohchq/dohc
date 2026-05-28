@@ -7,12 +7,11 @@ import {
 } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
-import { scheduleMapRegen } from './loop'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
-import { isSafeAtomPath, MAP_PATH } from './inlineAtom'
+import { isSafeAtomPath } from './inlineAtom'
 import { deriveSearchFields } from './searchText'
 import { internal } from './_generated/api'
 import {
@@ -47,10 +46,6 @@ import {
 } from './atomShares'
 import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
 import type { MutationCtx } from './_generated/server'
-
-function isObsoleteMapSpecialCase(path: string): boolean {
-  return path === MAP_PATH || path === '_map.md'
-}
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
 // must NOT write a trash snapshot per keystroke. Instead we snapshot
@@ -279,15 +274,10 @@ export async function removeAtomImpl(
   // Delete-context message variant. systemLocked refuses ALL deletes
   // (no override here); userLocked refuses ALL deletes (the user's
   // own delete still works after they unlock via setLock).
-  //
-  // .context-v1: map locks are obsolete. Old rows may still carry
-  // systemLocked/userLocked from the pre-.context era, but both the
-  // canonical generated map and the former root map are user-removable.
-  const mapSpecialCase = isObsoleteMapSpecialCase(path)
-  if (!mapSpecialCase && existing.systemLocked) {
+  if (existing.systemLocked) {
     throw new SystemLockError(path, 'delete')
   }
-  if (!mapSpecialCase && existing.userLocked) {
+  if (existing.userLocked) {
     throw new UserLockError(path, 'delete')
   }
   await recordTrash(ctx, {
@@ -330,12 +320,10 @@ export async function removeAtomImpl(
   const deletedFileId = extractFrontmatterId(existing.body)
   if (deletedFileId) {
     await cascadeDeleteSharesForFileId(ctx, workspaceId, deletedFileId)
-    if (!mapSpecialCase) {
-      await scheduleHocuspocusDeleteDocument(ctx, {
-        workspaceId,
-        atomId: deletedFileId,
-      })
-    }
+    await scheduleHocuspocusDeleteDocument(ctx, {
+      workspaceId,
+      atomId: deletedFileId,
+    })
   }
 }
 
@@ -528,8 +516,6 @@ export const upsert = mutation({
       defaultPrivateOwnerUserId:
         workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
-    // org-plan §5/§13 Phase C — debounced .context/_map.md regen (2s coalesced).
-    await scheduleMapRegen(ctx, workspaceId)
     return out
   },
 })
@@ -622,8 +608,6 @@ export const remove = mutation({
       throw new Error('You do not have access to delete this atom.')
     }
     await removeAtomImpl(ctx, workspaceId, path)
-    // Phase C — debounced .context/_map.md regen.
-    await scheduleMapRegen(ctx, workspaceId)
   },
 })
 
@@ -683,9 +667,8 @@ export const move = mutation({
       .unique()
 
     // file-org-v1 §2.3 (Track-4 D4.1a) — lock-guard chokepoint #3.
-    // Rename-context message variant. A system atom has a path that's
-    // part of the system contract (the loop reads MAP_PATH literally);
-    // a userLocked atom is the user's explicit "don't touch this".
+    // Rename-context message variant. A system atom is part of the system
+    // contract; a userLocked atom is the user's explicit "don't touch this".
     if (src.systemLocked) throw new SystemLockError(fromPath, 'rename')
     if (src.userLocked) throw new UserLockError(fromPath, 'rename')
 
@@ -818,8 +801,6 @@ export const move = mutation({
       }
     }
 
-    // Phase C — debounced .context/_map.md regen (rename moves paths in the map).
-    await scheduleMapRegen(ctx, workspaceId)
     return {
       ok: true as const,
       moved: 1,
@@ -848,8 +829,7 @@ export const _listInternal = internalQuery({
   // restricted atoms the viewer isn't allowed in are dropped). Agent
   // tools that surface paths to the model MUST pass it so the agent
   // can't read a teammate's private atom via list_atoms. Omitted
-  // (e.g. `regenerateMap` calling for the system view) ⇒ unfiltered,
-  // back-compat with the v0 surface.
+  // (e.g. seed flows) ⇒ unfiltered, back-compat with the v0 surface.
   args: {
     workspaceId: v.string(),
     limit: v.optional(v.number()),
@@ -913,8 +893,7 @@ export const _upsertInternal = internalMutation({
     // P1 (multiplayer-and-h-followups §6.5) — when present, gate the
     // write through canWriteAtomPath against THIS user's access. The
     // agent-tool callers (write_atom + capture etc.) pass the actor
-    // subject; system callers (regenerateMap, seed flows) call
-    // without it (allowed — the system surface is intentionally
+    // subject; system callers (seed flows) call without it (allowed — the system surface is intentionally
     // unconstrained, audit-by-grep enforces that).
     viewerSubject: v.optional(v.string()),
   },
@@ -993,8 +972,6 @@ export const _setBodyCache = internalMutation({
     await reconcileAtomIdIndex(ctx, workspaceId, atom.path, markdown, {
       isRestore: false,
     })
-    await scheduleMapRegen(ctx, workspaceId)
-
     return { ok: true }
   },
 })
@@ -1170,9 +1147,8 @@ export const setStar = mutation({
       )
       .unique()
     if (!existing) throw new Error(`not found: ${path}`)
-    // Pure cosmetic — NOT lock-guarded (a user can always star their
-    // own systemLocked map file for easy access; impressions.md line
-    // 39 says "favorite/star a file/folder", not "favorite IF unlocked").
+    // Pure cosmetic — NOT lock-guarded. A user can always favorite/star a
+    // file/folder without changing its content or lock contract.
     const next = starred ? true : undefined
     if ((existing.starred ?? false) === Boolean(next)) {
       return { ok: true as const, changed: false }

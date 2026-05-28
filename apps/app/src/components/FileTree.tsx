@@ -31,7 +31,6 @@ import {
   Share2,
   Search,
   Brain,
-  Compass,
   User,
   Target,
   Building2,
@@ -211,15 +210,10 @@ function TreeSection({
 }
 
 function contextFileIcon(path: string) {
-  if (path === '.context/_map.md') return Compass
   if (path === '.context/me.md') return User
   if (path === '.context/intent.md') return Target
   if (path === '.context/company.md') return Building2
   return null
-}
-
-function isMapLockObsolete(path: string) {
-  return path === '.context/_map.md' || path === '_map.md'
 }
 
 export function FileTree({
@@ -1252,9 +1246,7 @@ function TreeRowNode({
     const filePath = node.page!.path
     const ContextIcon = contextFileIcon(filePath)
     const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
-    const showLock =
-      !isMapLockObsolete(filePath) &&
-      (node.page!.systemLocked || node.page!.userLocked)
+    const showLock = node.page!.systemLocked || node.page!.userLocked
     // D4.7 — DnD: leaf row is BOTH draggable (the file itself) AND
     // droppable (drop INTO file = drop into file's parent folder).
     const leafParent = filePath.includes('/')

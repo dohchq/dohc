@@ -262,13 +262,12 @@ async function gatherWindowAtoms(
         let totalBytes = 0
         for (const n of notes) {
           if (atomSrc === null) break
-          // (Track-3 P1: MAP_PATH subsumed by isNonDataAtom below.)
           if (!isSafeAtomPath(n.path)) {
             atomSrc = null // R3 §8 — NUL path ⇒ fail-closed: drop all
             break
           }
           // Track-3 P1 §6 retrofit: non-data atoms (html view, skill
-          // instructions, derived map, legacy `skills/*`) NEVER
+          // instructions, legacy `skills/*`) NEVER
           // contribute values to cross-desk gather. Closes the
           // Track-2 P1a latent gap honestly (deploy-note material).
           if (isNonDataAtom(n.path, n.body ?? '')) continue
@@ -500,7 +499,6 @@ async function windowWithheldAtoms(
   let emitted = 0
   let totalBytes = 0
   for (const n of notes) {
-    // (Track-3 P1: MAP_PATH subsumed by isNonDataAtom below.)
     // R3 (Codex R3-fold NEW MED): the consent enumeration MUST mirror
     // the gather's GLOBAL atom-source drop, or report ≠ resolution
     // (the R2.2-MED#5 lying-consent class for atoms). resolveWindow-
@@ -796,7 +794,7 @@ export const consentOverview = query({
  * It uses the IDENTICAL primitives — `isScalar`, the FAIL-CLOSED
  * `parseInlineAtomsFromMarkdownWithStatus` (NOT the fail-soft
  * variant), the SAME `SCAN_CAP` / `ATOM_TOTAL_BYTES_MAX` /
- * `isSafeAtomPath` / `MAP_PATH` — but DELIBERATELY OMITS the
+ * `isSafeAtomPath` / `isNonDataAtom` — but DELIBERATELY OMITS the
  * reviewed-by-default exclusion: the owner is designing a window
  * over their OWN desk, so an unconfirmed key is still a valid thing
  * to put in a window (the gate fires later, at cross-desk resolve).
@@ -842,7 +840,7 @@ export const availableKeys = query({
     for (const n of notes.slice(0, SCAN_CAP)) {
       // Track-3 P1 §6 retrofit: availableKeys must also skip
       // non-data atoms (html/skill/legacy-skills bodies are NOT
-      // value sources; MAP_PATH subsumed).
+      // value sources).
       if (isNonDataAtom(n.path, n.body ?? '')) continue
       if (!isSafeAtomPath(n.path)) {
         truncated = true

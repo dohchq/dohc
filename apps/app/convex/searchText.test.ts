@@ -12,8 +12,8 @@ import {
 } from './searchText'
 
 describe('isAtomSearchable', () => {
-  it('excludes ONLY the canonical derived index .context/_map.md', () => {
-    expect(isAtomSearchable('.context/_map.md')).toBe(false)
+  it('treats former map paths as ordinary searchable atoms', () => {
+    expect(isAtomSearchable('.context/_map.md')).toBe(true)
     expect(isAtomSearchable('_map.md')).toBe(true)
   })
   it('includes html, markdown, and user files (NOT !isNonDataAtom)', () => {
@@ -91,10 +91,11 @@ describe('deriveSearchFields', () => {
     expect(searchText).toContain('[client] --> [server]')
   })
 
-  it('.context/_map.md is NOT searchable and has empty searchText', () => {
+  it('.context/_map.md indexes like any other markdown atom', () => {
     const { searchText, searchable } = deriveSearchFields('.context/_map.md', '# Map\n- stuff')
-    expect(searchable).toBe(false)
-    expect(searchText).toBe('')
+    expect(searchable).toBe(true)
+    expect(searchText).toContain('Map')
+    expect(searchText).toContain('stuff')
   })
 
   it('caps the indexed plaintext', () => {

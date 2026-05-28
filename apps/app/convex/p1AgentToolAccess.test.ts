@@ -77,8 +77,7 @@ describe('P1 — _listInternal filters by viewerSubject', () => {
       activeWorkspaceId: orgId,
       mode: 'private',
     })
-    // System call (no viewerSubject): sees both — regenerateMap +
-    // similar legacy callers don't filter.
+    // System call (no viewerSubject): sees both — legacy callers don't filter.
     const all = await t.query(internal.atoms._listInternal, {
       workspaceId: orgId,
     })
@@ -188,7 +187,7 @@ describe('P1 — _getInternal filters by viewerSubject', () => {
       activeWorkspaceId: orgId,
       mode: 'private',
     })
-    // System call (regenerateMap, etc.): unfiltered.
+    // System call: unfiltered.
     expect(
       await t.query(internal.atoms._getInternal, {
         workspaceId: orgId,

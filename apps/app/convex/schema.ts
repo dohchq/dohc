@@ -53,7 +53,7 @@ export default defineSchema({
     // app-wide search (docs/development/search-plan.md). Derived on every
     // path/body write via deriveSearchFields(); see convex/searchText.ts.
     //   searchText  — indexed: title×3 + basename + path + plaintext(body)
-    //   searchable  — false only for the derived index `.context/_map.md`
+    //   searchable  — available for future per-atom search visibility controls
     searchText: v.optional(v.string()),
     searchable: v.optional(v.boolean()),
     // org-plan §4/§7 — collaborator edit lease for human-vs-human
@@ -259,20 +259,6 @@ export default defineSchema({
   threadRefs: defineTable({
     workspaceId: v.string(),
     threadId: v.string(),
-  }).index('by_workspace', ['workspaceId']),
-
-  // org-plan §5/§13 Phase C — DEBOUNCED `.context/_map.md` regen.
-  //
-  // Each row says "a regen for this workspace is already scheduled to
-  // fire at `scheduledFor`". A second mutation arriving inside that
-  // 2-second window short-circuits — no extra schedule, no extra row.
-  // When the scheduled job runs it deletes its own row; the NEXT
-  // mutation re-arms. Net effect: rapid edits coalesce to one regen
-  // per `REGEN_DEBOUNCE_MS` window per workspace.
-  mapRegenSchedule: defineTable({
-    workspaceId: v.string(),
-    scheduledFor: v.number(),
-    scheduledJobId: v.optional(v.id('_scheduled_functions')),
   }).index('by_workspace', ['workspaceId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to

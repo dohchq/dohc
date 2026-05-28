@@ -8,8 +8,8 @@ import type { Id } from '../../convex/_generated/dataModel'
 // Design: docs/strategy/loop-ux-design.md (gate CLEARED v2).
 // A PULL surface: opened on demand, never a per-item nag. The
 // advisory spine: dohc NEVER changes your work — accept is a pure
-// status flip; Run-now writes only the proposals table + dohc's own
-// .context/_map.md index, never user content. This panel renders DIRECTLY
+// status flip; Run-now writes only the proposals table, never user
+// content. This panel renders DIRECTLY
 // from the live `listPending` query — it intentionally keeps NO
 // client snapshot of `items` (a frozen list could resurface a
 // revoked cross-desk row); per-row action state is ephemeral and

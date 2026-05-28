@@ -371,7 +371,7 @@ describe('Phase-1 fold B — idAdvisory surfacing (required, not best-effort)', 
 
 // html-atoms-v1 §6 Track-2 P1 — the predicate + the enumerated
 // value-scan skips (html is a VIEW, never a value-atom source).
-describe('isHtmlAtomBody — pure (parallels MAP_PATH discipline)', () => {
+describe('isHtmlAtomBody — pure non-data classification', () => {
   it('true for frontmatter type: html (bare / quoted / spaced / id-seeded)', () => {
     expect(isHtmlAtomBody('---\ntype: html\n---\n<h1>x</h1>')).toBe(true)
     expect(isHtmlAtomBody('---\ntype: "html"\n---\n<x/>')).toBe(true)

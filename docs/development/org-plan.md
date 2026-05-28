@@ -1,6 +1,10 @@
 # Organizations — design plan
 
 **Status:** draft / proposal (not yet implemented)
+**Supersession note:** Any `_map.md` / map regeneration pieces in this
+older plan are no longer MVP direction. See `decisions.md`: the generated
+workspace map feature was removed in favor of explicit navigation tools
+and context atoms.
 **Goal:** Bring **multi-user organizations** to dohc while keeping the
 calm, personal-first soul of the product intact. Each human keeps their
 **personal workspace**; orgs are **separate shared workspaces** with

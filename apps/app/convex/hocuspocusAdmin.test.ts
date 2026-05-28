@@ -3,7 +3,6 @@ import { convexTest } from 'convex-test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import schema from './schema'
 import { api, internal } from './_generated/api'
-import { MAP_PATH } from './inlineAtom'
 
 const modules = import.meta.glob('./**/*.ts')
 const OWNER = 'ws_owner'
@@ -179,23 +178,6 @@ describe('Hocuspocus admin disconnect bridge', () => {
       JSON.parse(init.body as string),
     )
     expect(bodies).toContainEqual({ workspaceId: OWNER, atomId: 'doc' })
-  })
-
-  it('deletes obsolete map atoms without requiring Hocuspocus admin env', async () => {
-    const t = convexTest(schema, modules)
-    vi.stubEnv('HOCUSPOCUS_JWT_SECRET', 'jwt-secret')
-    await t.mutation(internal.atoms._upsertInternal, {
-      workspaceId: OWNER,
-      path: MAP_PATH,
-      body: '---\nid: _map\n---\n# Map',
-      source: 'agent',
-    })
-
-    await expect(
-      t.withIdentity({ subject: OWNER }).mutation(api.atoms.remove, {
-        path: MAP_PATH,
-      }),
-    ).resolves.toBeNull()
   })
 
   it('schedules org member disconnects when an org share is revoked, excluding the owner', async () => {

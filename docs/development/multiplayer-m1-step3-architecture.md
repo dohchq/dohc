@@ -6,6 +6,10 @@ at the bottom for the v2 findings absorbed below. v3 addresses Codex's
 top 3 remaining concerns (table split, concrete shared-helper contract,
 schema-extraction resolution) plus the 4 NEW issues v2 introduced.
 
+**Supersession note:** References to `scheduleMapRegen` / generated map
+maintenance in this older plan are no longer MVP direction. The generated
+workspace map feature was removed; see `decisions.md`.
+
 **Context**:
 - Builds on `multiplayer-and-h-followups-plan.md` + `transport-spike-result.md`.
 - M1 step 1 (foundation: convex.config + prosemirror.ts + auth gates) is

@@ -538,7 +538,6 @@ export function formatValueAtomText(
 }
 
 export const CONTEXT_DIR = '.context'
-export const MAP_PATH = `${CONTEXT_DIR}/_map.md`
 export const PERSONAL_IDENTITY_PATH = `${CONTEXT_DIR}/me.md`
 export const ORG_IDENTITY_PATH = `${CONTEXT_DIR}/company.md`
 export const INTENT_PATH = `${CONTEXT_DIR}/intent.md`

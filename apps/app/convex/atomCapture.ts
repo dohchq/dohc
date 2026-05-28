@@ -31,11 +31,6 @@ import { isNonDataAtom } from './atomId'
  * Diff the PRIOR vs NEW note body and structurally withhold every
  * changed inline-value `(path,key)`. Called inside the writer's
  * transaction. Never throws into a write.
- *
- * `.context/_map.md` is a derived index (echoes other notes) — NEVER
- * a source of value atoms; excluded here AND in the gather via the SAME
- * `MAP_PATH` constant (no drift).
- *
  * Lifecycle (design v4 §5, Codex v3 HIGH reconciliation):
  *  • NEW body unparseable / too big ⇒ coalesce the parse-fail
  *    SENTINEL ⇒ whole note withheld + `blocked`. Return.
@@ -56,8 +51,8 @@ export async function applyAtomCapture(
   newBody: string,
 ): Promise<void> {
   // §6 unified predicate (Track-3 P1 + r1-fold FAIL-1): a non-data
-  // atom (MAP_PATH / html / skill / legacy-`skills/*`) never sources
-  // values. CRITICAL: when transitioning data→non-data, CLEAR any
+  // atom (html / skill / legacy-`skills/*`) never sources values.
+  // CRITICAL: when transitioning data→non-data, CLEAR any
   // prior captures at this path. Otherwise a `data → non-data → data`
   // round-trip (set `{billable:1}` + confirm; flip to type:skill +
   // example `{billable:999}`; flip back to plain `{billable:999}`)

@@ -58,14 +58,14 @@ Decisions and the pitfalls they flagged are recorded inline.
   and *skills* by title — it never looks at document content.
 - All writes funnel through one impl: **`upsertAtomImpl`**
   (`apps/app/convex/atoms.ts:73`), called by the public `upsert`
-  mutation, `_upsertInternal` (agent), and `_upsertSystem` (the loop). This
+  mutation, `_upsertInternal` (agent), and `_upsertSystem`. This
   is the single hook point for indexing.
 - Pure, server-safe text helpers already exist in
   `apps/app/convex/atomId.ts`: `splitFrontmatter`, `isHtmlAtomBody`,
-  `deriveTitle`, and `isNonDataAtom` (the predicate that already excludes
-  `_map.md` and other non-content atoms).
-- Reserved/system atoms (`_map.md`, `me.md`, `intent.md`, `skills/…`)
-  exist and should not dominate or clutter results.
+  `deriveTitle`, and `isNonDataAtom` (the predicate for HTML/skill
+  non-data atoms).
+- Context atoms such as `me.md` and `intent.md` are user-readable files
+  and should remain searchable.
 
 ---
 
@@ -114,7 +114,7 @@ Add to `atoms` (`schema.ts`), all optional/additive (back-compatible):
 ```ts
 // derived on write — see §5
 searchText: v.optional(v.string()),   // indexed: title×3 + path + plaintext(body)
-searchable: v.optional(v.boolean()),  // true for content atoms; false for _map.md / system noise
+searchable: v.optional(v.boolean()),  // reserved for future visibility controls
 ```
 
 Search index:
@@ -204,11 +204,9 @@ deriveSearchFields(path, body): { searchText: string; searchable: boolean }
 `searchable` rule — **do NOT use `!isNonDataAtom`**: that predicate returns
 `true` for HTML atoms (`.html` / `type: html`, `atomId.ts:268`), which we
 **must** search. Define it explicitly: `searchable = true` for normal
-content atoms **including HTML and markdown** (and user files like
-`me.md`/`intent.md`), `false` only for the derived index `_map.md`
-(`MAP_PATH`) and any system/agent-generated noise we choose to hide.
-Compute once here (an indexed `filterField`), never re-check paths at query
-time.
+content atoms **including HTML, markdown, and context files like
+`me.md`/`intent.md`**. Compute once here (an indexed `filterField`), never
+re-check paths at query time.
 
 **Backfill (existing atoms):**
 1. Ship the schema fields (nullable) + the write-site changes (helper at
@@ -356,7 +354,8 @@ Convex returns rows, not highlighted snippets — generate them ourselves.
 - **`searchable` mis-defined:** `!isNonDataAtom` would exclude HTML atoms
   (and not exclude `me.md`/`intent.md`). Use the explicit rule (§5).
 - Indexing raw HTML without stripping `script`/`style`/tag noise → garbage matches.
-- Letting `_map.md` / `skills/` / agent-generated atoms dominate → fixed by `searchable`.
+- Letting generated/system noise dominate → fixed by `searchable` when a
+  concrete hidden system artifact exists.
 - Trying to make Convex FTS behave like Algolia (complex field boosting) — don't; use composition + post-rank.
 - Forgetting **path/filename** search.
 - The **1024-scan cap** hides later docs on very broad queries; the
@@ -373,13 +372,12 @@ Convex returns rows, not highlighted snippets — generate them ourselves.
 ## 12. Testing
 
 - **Unit (pure):** `deriveSearchFields` for md / HTML / ascii / frontmatter
-  / 128 KB cap; `searchable` (**includes** HTML + `me.md`/`intent.md`,
-  **excludes** `_map.md` / system noise — the exact bug from review);
+  / 128 KB cap; `searchable` (**includes** HTML + `me.md`/`intent.md`
+  and former map paths);
   `normalize` (16-term cap, lowercase, doesn't throw on pasted prose);
   `postRank` ordering; `makeSnippet` window + escaping + prefix-on-last-term.
 - **Integration (`convexTest`):** seed atoms across workspaces → assert
-  search is workspace-scoped, excludes `_map.md`, ranks title matches
-  first, finds text inside an ascii sketch and inside an HTML atom's
+  search is workspace-scoped, ranks title matches first, finds text inside an ascii sketch and inside an HTML atom's
   visible text, empty/short query returns recent docs, and a **rename
   (`atoms.move`) updates `searchText`** (the write-surface regression test).
 - **Audit:** grep-test that no atom path/body `insert`/`patch` exists
@@ -400,7 +398,7 @@ Convex returns rows, not highlighted snippets — generate them ourselves.
 **Still open:**
 1. Snippet fidelity: is one window enough, or do we want multiple match windows per result?
 2. Editor "scroll-to-and-highlight match" — v1 or follow-up? (Recommend follow-up.)
-3. Should `skills/*` atoms be searchable, or hidden like `_map.md`? (Lean: searchable — they're real content.)
+3. Should `skills/*` atoms be searchable? (Lean: searchable — they're real content.)
 
 ---
 
