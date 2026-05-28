@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildTree, type FolderInput, type FileRow } from './path-tree'
+import {
+  buildTree,
+  nodeLabel,
+  type FolderInput,
+  type FileRow,
+} from './path-tree'
 
 // file-org-v1 §5.7 / D4.5 — buildTree + sort tests. The sort rule:
 //   1. folders before leaves
@@ -88,5 +93,28 @@ describe('buildTree — D4.5 sort order (folders → starred → alphabetical)',
     expect(tree.children[0]!.icon).toBeFalsy()
     expect(tree.children[0]!.color).toBeFalsy()
     expect(tree.children[0]!.starred).toBeFalsy()
+  })
+})
+
+describe('nodeLabel — canonical .context files', () => {
+  it('labels the .context folder and its reserved files specially', () => {
+    const tree = buildTree([
+      row('.context/_map.md'),
+      row('.context/me.md'),
+      row('.context/intent.md'),
+      row('.context/company.md'),
+      row('_map.md'),
+      row('me.md'),
+    ])
+    const context = tree.children.find((c) => c.fullPath === '.context')!
+    expect(nodeLabel(context)).toBe('.context')
+    expect(context.children.map((c) => nodeLabel(c))).toEqual([
+      'Map · your setup',
+      'Company',
+      'Intent',
+      'Me',
+    ])
+    expect(nodeLabel(tree.children.find((c) => c.fullPath === '_map.md')!)).toBe('_map')
+    expect(nodeLabel(tree.children.find((c) => c.fullPath === 'me.md')!)).toBe('me')
   })
 })

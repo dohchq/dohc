@@ -283,10 +283,11 @@ async function proposeReplaceTextTool(
 // H-1 (org-plan multiplayer-and-h-followups §4 A1) — the system prompt
 // is workspace-kind-aware. Personal workspaces use SYSTEM_PROMPT
 // verbatim (the v0 behavior); org workspaces get an ORG_PREAMBLE
-// prepended PLUS a `me.md` → `company.md` substitution applied to the
-// body. The substitution catches all the `me.md` literal references
+// prepended PLUS a `.context/me.md` → `.context/company.md`
+// substitution applied to the body. The substitution catches all the
+// `.context/me.md` literal references
 // (5+ in body + tool descriptions) so the agent's `create_atom` calls
-// land at `company.md` in an org workspace. The preamble tells the
+// land at `.context/company.md` in an org workspace. The preamble tells the
 // model the framing (team context, possessives, identity-atom name)
 // so prose like "yours, edit it anytime" is read as "the team's."
 //
@@ -312,11 +313,11 @@ You are operating in the **${orgName}** team workspace — NOT a personal vault.
 The body below was originally written for personal workspaces; apply these
 overrides as you read it:
 
-- The identity atom is \`company.md\` (about ${orgName} + how the team works),
-  NOT \`me.md\`. Every literal "me.md" below has been substituted to "company.md".
+- The identity atom is \`.context/company.md\` (about ${orgName} + how the team works),
+  NOT \`.context/me.md\`. Every literal ".context/me.md" below has been substituted to ".context/company.md".
 - "The user" means the chat caller; they're acting on behalf of the team.
 - "yours" / "your vault" → read as "the team's" / "the ${orgName} workspace".
-- The starter setup (\`§ONBOARDING → 1\`) is for the TEAM: \`company.md\`
+- The starter setup (\`§ONBOARDING → 1\`) is for the TEAM: \`.context/company.md\`
   captures what ${orgName} does + how the team works, starter files cover
   the team's domains (e.g. \`clients/\`, \`projects/\`, \`runbooks/\`), the
   dashboard surfaces team-wide metrics from those files.
@@ -329,9 +330,12 @@ overrides as you read it:
 ---
 
 `
-  // Substitute the literal me.md path so create_atom etc. land at
-  // company.md, not me.md. The preamble handles the framing.
-  return orgPreamble + SYSTEM_PROMPT.replaceAll('me.md', 'company.md')
+  // Substitute the literal identity path so create_atom etc. land at
+  // .context/company.md, not .context/me.md. The preamble handles the framing.
+  return orgPreamble + SYSTEM_PROMPT.replaceAll(
+    '.context/me.md',
+    '.context/company.md',
+  )
 }
 
 const SYSTEM_PROMPT = `\
@@ -366,24 +370,25 @@ The user ALREADY answered a short structured questionnaire — their
 answers are your FIRST user message (a brief). Do NOT re-interrogate.
 Do NOT re-ask what they answered. From the brief, immediately build a
 tailored STARTER SETUP made for THEM — real, not an empty template.
-The vault MUST contain a populated dashboard AND a me.md before you
+The vault MUST contain a populated dashboard AND a .context/me.md before you
 call finish_onboarding (hard floor).
 
 ### 1 — BUILD A TAILORED STARTER (a scaffold, not an empty vault)
 
 From the brief, create a small COHERENT starter setup for their work
 — templates, not dogma:
-- \`me.md\` — a PORTABLE identity atom: who they are, how they work,
+- \`.context/me.md\` — a PORTABLE identity atom: who they are, how they work,
   what bites them, how they want dohc to operate. You re-read this
   every session. Plain prose the USER owns.
 - 1–3 role-appropriate starter FILES they can grow into (e.g.
-  \`logs/\`, \`projects/\`, \`clients/\`, an \`intent.md\` with one
-  real goal) — ONLY what fits their brief. **These hold the real
-  DATA**: put genuine \`{key: value}\` inline atoms in them
+  \`logs/\`, \`projects/\`, \`clients/\`, and optionally
+  \`.context/intent.md\` with one real goal) — ONLY what fits their
+  brief. **Non-context files hold the real DATA**: put genuine
+  \`{key: value}\` inline atoms in them
   (e.g. a log entry with \`{billable: 4.5}\`, a project with
   \`{budget: 8000} {status: active}\`). Modest and real.
 - a hero \`dashboard.md\` that is CONNECTED to those files — see §2.
-dohc maintains \`_map.md\` (their navigable index) automatically —
+dohc maintains \`.context/_map.md\` (their navigable index) automatically —
 never hand-write or mention maintaining it.
 
 ### 2 — THE DASHBOARD IS A CONNECTED, INVITING, EDITABLE DOCUMENT
@@ -431,14 +436,14 @@ numbers:
 
 ### 3 — HAND OFF
 
-Show me.md back in one line: "here's what I learned about you — it's
+Show .context/me.md back in one line: "here's what I learned about you — it's
 yours, edit it anytime." If the dashboard uses a dated-window
 formula, your handoff MUST also state, in one plain line, that it is
 a FIXED window the user (or you, on ask) re-points each period —
 e.g. "the numbers show July; say 'roll it to August' or edit the
 date." (A static window does not auto-advance; disclose it, never
 let it silently decay.) Only when the vault has a populated dashboard
-AND me.md: call finish_onboarding, then ONE line on what they can do
+AND .context/me.md: call finish_onboarding, then ONE line on what they can do
 next (edit the dashboard directly, or ask you to extend it).
 
 ## PAGE TITLE & PROPERTIES (frontmatter, Notion-style)
@@ -826,7 +831,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     finish_onboarding: createTool({
       description:
-        'Mark onboarding DONE. ONLY call once the vault has a populated dashboard AND me.md (never end empty).',
+        'Mark onboarding DONE. ONLY call once the vault has a populated dashboard AND .context/me.md (never end empty).',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         // §2-A.1 UNAUTHORIZABLE: state-flip (user-decision class).
@@ -839,7 +844,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     set_lock: createTool({
       description:
-        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock me.md", "unlock my plan"). Toggles the USER lock only; the system flag on map files is independently owned by the loop and is unaffected. file-org-v1 D4.1b (R2 fold).',
+        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "unlock my plan"). Toggles the USER lock only; the generated map is independently owned by the loop and is unaffected. file-org-v1 D4.1b (R2 fold).',
       inputSchema: z.object({
         path: z.string(),
         locked: z.boolean(),
@@ -1005,7 +1010,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     run_loop: createTool({
       description:
-        'Run the FULL weekly pass NOW for this user: (1) reconcile each {goal_<id>: n} in intent.md against the live {<id>} rollup → advisory proposal for any behind-goal metric; (2) regenerate the _map.md vault index; (3) flag orphan/duplicate notes as an advisory tidy-up. Idempotent per week. Changes NOTHING automatically except rebuilding the generated _map.md (recoverable) — all suggestions are reviewed at the edge. Use when the user asks to "run my loop" / "where am I vs my goals" / "tidy my vault".',
+        'Run the FULL weekly pass NOW for this user: (1) reconcile each {goal_<id>: n} in .context/intent.md against the live {<id>} rollup → advisory proposal for any behind-goal metric; (2) regenerate the .context/_map.md vault index; (3) flag orphan/duplicate notes as an advisory tidy-up. Idempotent per week. Changes NOTHING automatically except rebuilding the generated .context/_map.md (recoverable) — all suggestions are reviewed at the edge. Use when the user asks to "run my loop" / "where am I vs my goals" / "tidy my vault".',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
@@ -1016,10 +1021,10 @@ export const dohcAgent = new Agent(components.agent, {
           workspaceId,
         })) as { mapRegen: string; gardening: number }
         const recPart =
-          rec.reason === 'no intent.md'
-            ? 'no intent.md yet (add {goal_<id>: n} atoms to track goals)'
+          rec.reason === 'no .context/intent.md'
+            ? 'no .context/intent.md yet (add {goal_<id>: n} atoms to track goals)'
             : `${rec.proposed} new goal proposal(s)`
-        return `weekly pass done — ${recPart}; _map.md ${gm.mapRegen}; ${gm.gardening} tidy-up suggestion(s). All advisory; nothing changed except the regenerated index.`
+        return `weekly pass done — ${recPart}; .context/_map.md ${gm.mapRegen}; ${gm.gardening} tidy-up suggestion(s). All advisory; nothing changed except the regenerated index.`
       },
     }),
 
@@ -2419,7 +2424,7 @@ export const sendMessage = action({
 
     // H-1 (A1) — resolve workspace KIND for the system-prompt builder.
     // Personal ⇒ unchanged SYSTEM_PROMPT (byte-identical to v0).
-    // Org ⇒ ORG_PREAMBLE + me.md→company.md substitution.
+    // Org ⇒ ORG_PREAMBLE + .context/me.md→.context/company.md substitution.
     const kindInfo = await ctx.runQuery(
       internal.agent._resolveWorkspaceKindForCaller,
       { activeWorkspaceId },
@@ -2464,7 +2469,7 @@ export const sendMessage = action({
       {
         // H-1 (A1): per-call system override. Personal callers get
         // SYSTEM_PROMPT verbatim; org callers get ORG_PREAMBLE + the
-        // me.md→company.md substituted body. The Agent's static
+        // .context/me.md→.context/company.md substituted body. The Agent's static
         // `instructions: SYSTEM_PROMPT` is the fallback when `system`
         // isn't provided — kept for completeness.
         system: systemPrompt,
@@ -2576,7 +2581,7 @@ export const startOnboarding = action({
       { activeWorkspaceId },
     )
     // H-1 (A1) — workspace-kind-aware system prompt; org workspaces
-    // get ORG_PREAMBLE + me.md→company.md (so onboarding seeds + asks
+    // get ORG_PREAMBLE + .context/me.md→.context/company.md (so onboarding seeds + asks
     // about the team, not a personal vault).
     const kindInfo = await ctx.runQuery(
       internal.agent._resolveWorkspaceKindForCaller,

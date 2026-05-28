@@ -9,7 +9,7 @@ import type { Id } from '../../convex/_generated/dataModel'
 // A PULL surface: opened on demand, never a per-item nag. The
 // advisory spine: dohc NEVER changes your work — accept is a pure
 // status flip; Run-now writes only the proposals table + dohc's own
-// _map.md index, never user content. This panel renders DIRECTLY
+// .context/_map.md index, never user content. This panel renders DIRECTLY
 // from the live `listPending` query — it intentionally keeps NO
 // client snapshot of `items` (a frozen list could resurface a
 // revoked cross-desk row); per-row action state is ephemeral and
@@ -27,7 +27,7 @@ type Item = {
 type RunResult = {
   proposed: number
   gardening: 0 | 1
-  reason?: 'no intent.md' | 'ambiguous intent.md'
+  reason?: 'no .context/intent.md' | 'ambiguous .context/intent.md'
 }
 
 export function ProposalsPanel({
@@ -104,7 +104,7 @@ export function ProposalsPanel({
   const runLine = (() => {
     if (!runResult) return null
     if (runResult.reason)
-      return 'Set goals in intent.md (e.g. {goal_billable: 40}) and dohc will track them.'
+      return 'Set goals in .context/intent.md (e.g. {goal_billable: 40}) and dohc will track them.'
     if (runResult.proposed === 0 && runResult.gardening === 0)
       return hasItems
         ? 'Already checked this week — nothing new.'

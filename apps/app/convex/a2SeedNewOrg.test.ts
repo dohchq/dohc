@@ -9,7 +9,7 @@ const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_a2_alice'
 
 describe('_seedNewOrg (H-2 / A2)', () => {
-  it('seeds onboarding row + company.md + dashboard.md with the org name', async () => {
+  it('seeds onboarding row + .context/company.md + dashboard.md with the org name', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
 
@@ -32,21 +32,21 @@ describe('_seedNewOrg (H-2 / A2)', () => {
     expect(onboardingRow?.completedAt).toBeUndefined()
     expect(onboardingRow?.deferredAt).toBeUndefined()
 
-    // company.md exists in the org workspace with the org name in
-    // frontmatter + body. systemLocked + agent-owned (so the agent
-    // can rewrite it; user-write attempts get the lock guard).
+    // .context/company.md exists in the org workspace with the org
+    // name in frontmatter + body. It is agent-owned but not
+    // system-locked, so the user can delete it like any other file.
     const companyMd = await t.run(async (ctx) =>
       ctx.db
         .query('atoms')
         .withIndex('by_workspace_path', (q) =>
-          q.eq('workspaceId', orgId).eq('path', 'company.md'),
+          q.eq('workspaceId', orgId).eq('path', '.context/company.md'),
         )
         .unique(),
     )
     expect(companyMd).not.toBeNull()
     expect(companyMd?.body).toContain('title: Acme Inc')
     expect(companyMd?.body).toContain('What Acme Inc does')
-    expect(companyMd?.systemLocked).toBe(true)
+    expect(companyMd?.systemLocked).toBeFalsy()
     expect(companyMd?.source).toBe('agent')
 
     // dashboard.md exists with a query block (the live primitive the
@@ -83,10 +83,10 @@ describe('_seedNewOrg (H-2 / A2)', () => {
     expect(rows.length).toBe(1)
   })
 
-  it('progressOf finds the seeded company.md as the identity atom (H-1 + H-2 integration)', async () => {
+  it('progressOf finds the seeded .context/company.md as the identity atom (H-1 + H-2 integration)', async () => {
     // H-1 (A1) made progressOf branch on workspace kind (looks for
-    // company.md in orgs vs me.md in personal). H-2 (A2) seeds
-    // company.md. End-to-end: a freshly-created + seeded org reports
+    // .context/company.md in orgs vs .context/me.md in personal).
+    // H-2 (A2) seeds .context/company.md. End-to-end: a freshly-created + seeded org reports
     // hasMe:true via the org branch.
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
@@ -99,7 +99,7 @@ describe('_seedNewOrg (H-2 / A2)', () => {
       return await progressOf(ctx, orgId)
     })
     expect(progress.hasMe).toBe(true)
-    expect(progress.mePath).toBe('company.md')
+    expect(progress.mePath).toBe('.context/company.md')
     expect(progress.hasDashboardWithQuery).toBe(true)
     expect(progress.dashboardPath).toBe('dashboard.md')
   })

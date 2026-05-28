@@ -29,11 +29,12 @@ import {
   Star,
   Palette,
   Share2,
+  Search,
+  Brain,
   Compass,
   User,
-  Building2,
   Target,
-  Search,
+  Building2,
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
@@ -51,7 +52,6 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
-import { partitionTree } from '@/lib/file-tree-sections'
 
 type Props = {
   files: FileRow[]
@@ -210,96 +210,16 @@ function TreeSection({
   )
 }
 
-// Context section: a small, read-only list of the reserved "maps &
-// manuals" files. Curated labels + icons (the section is not a tree —
-// these files aren't dragged or renamed from here; they open on click).
-const CONTEXT_META: Record<
-  string,
-  { label: string; Icon: typeof Compass; locked?: boolean }
-> = {
-  '_map.md': { label: 'Map · your setup', Icon: Compass, locked: true },
-  'me.md': { label: 'Me', Icon: User },
-  'company.md': { label: 'Company', Icon: Building2 },
-  'intent.md': { label: 'Intent', Icon: Target },
-}
-function ContextRow({
-  icon: Icon,
-  label,
-  active,
-  locked,
-  onClick,
-}: {
-  icon: typeof Compass
-  label: string
-  active: boolean
-  locked?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
-        active
-          ? 'bg-hover text-ink-strong font-medium'
-          : 'text-ink-dim hover:text-ink hover:bg-hover'
-      }`}
-    >
-      <Icon className="size-3.5 shrink-0" strokeWidth={2} />
-      <span className="truncate">{label}</span>
-      {locked && (
-        <Lock className="ml-auto size-3 shrink-0 text-ink-faint" strokeWidth={2} />
-      )}
-    </button>
-  )
+function contextFileIcon(path: string) {
+  if (path === '.context/_map.md') return Compass
+  if (path === '.context/me.md') return User
+  if (path === '.context/intent.md') return Target
+  if (path === '.context/company.md') return Building2
+  return null
 }
 
-function ContextList({
-  files,
-  activePath,
-  onOpen,
-}: {
-  files: FileRow[]
-  activePath: string | null
-  onOpen: (path: string) => void
-}) {
-  const byPath = new Map(files.map((f) => [f.path, f]))
-  // Object key order is the curated display order (insertion order).
-  const roots = Object.keys(CONTEXT_META).filter((p) => byPath.has(p))
-  const skills = files
-    .filter((f) => f.path.startsWith('skills/'))
-    .sort((a, b) => a.path.localeCompare(b.path))
-  return (
-    <div className="px-1.5 pb-1">
-      {roots.map((p) => {
-        const meta = CONTEXT_META[p]
-        return (
-          <ContextRow
-            key={p}
-            icon={meta.Icon}
-            label={meta.label}
-            locked={meta.locked}
-            active={activePath === p}
-            onClick={() => onOpen(p)}
-          />
-        )
-      })}
-      {skills.map((f) => {
-        const name =
-          f.title || f.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() || f.path
-        return (
-          <ContextRow
-            key={f.path}
-            icon={Sparkles}
-            label={name}
-            active={activePath === f.path}
-            onClick={() => onOpen(f.path)}
-          />
-        )
-      })}
-    </div>
-  )
+function isMapLockObsolete(path: string) {
+  return path === '.context/_map.md' || path === '_map.md'
 }
 
 export function FileTree({
@@ -337,28 +257,14 @@ export function FileTree({
     [sharedByMeFileIds],
   )
 
-  // Partition the flat lists into the three sidebar sections. Pure
-  // presentation — no file moves. The main tree is built from the
-  // Personal-workspace subset; Context surfaces the reserved files.
-  const { personalFiles, personalFolders, contextFiles } = useMemo(
-    () => partitionTree(files, folders),
-    [files, folders],
-  )
-  const tree = useMemo(
-    () => buildTree(personalFiles, personalFolders),
-    [personalFiles, personalFolders],
-  )
+  const tree = useMemo(() => buildTree(files, folders), [files, folders])
   const label = user?.firstName || user?.email?.split('@')[0] || 'signed in'
 
   // Collapsible-section open state, persisted per section (mirrors the
-  // chat-open localStorage pattern in _app.tsx). Personal + Context +
-  // Shared all default open.
+  // chat-open localStorage pattern in _app.tsx). Personal + Shared
+  // both default open.
   const [openPersonal, setOpenPersonal] = usePersistedSectionToggle(
     'dohc-section-personal',
-    true,
-  )
-  const [openContext, setOpenContext] = usePersistedSectionToggle(
-    'dohc-section-context',
     true,
   )
   const [openShared, setOpenShared] = usePersistedSectionToggle(
@@ -997,8 +903,7 @@ export function FileTree({
           when no org is active, otherwise the active org's name. */}
       <WorkspaceSwitcher />
 
-      {/* Sections — VSCode-explorer style: collapsible groups over the
-          same flat file list (a pure presentation partition). */}
+      {/* Sections — VSCode-explorer style. */}
       <div className="flex-1 overflow-y-auto pb-3">
         <TreeSection
           id="filetree-personal"
@@ -1128,24 +1033,6 @@ export function FileTree({
         )}
           </div>
         </TreeSection>
-
-        {/* Context — the AI-OS "maps & manuals": the reserved files you
-            and dohc navigate by. Read-only here; they open on click. */}
-        {contextFiles.length > 0 && (
-          <TreeSection
-            id="filetree-context"
-            label="Context"
-            open={openContext}
-            onToggle={() => setOpenContext((v) => !v)}
-            divider
-          >
-            <ContextList
-              files={contextFiles}
-              activePath={activePath}
-              onOpen={onOpen}
-            />
-          </TreeSection>
-        )}
 
         {/* sharing-v1 1a — "Shared with me". Always shown so the surface
             is discoverable, with a calm empty state when nothing's shared. */}
@@ -1363,7 +1250,11 @@ function TreeRowNode({
   if (!isFolder) {
     const isActive = viewIsAtom && activePath === node.page!.path
     const filePath = node.page!.path
+    const ContextIcon = contextFileIcon(filePath)
     const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
+    const showLock =
+      !isMapLockObsolete(filePath) &&
+      (node.page!.systemLocked || node.page!.userLocked)
     // D4.7 — DnD: leaf row is BOTH draggable (the file itself) AND
     // droppable (drop INTO file = drop into file's parent folder).
     const leafParent = filePath.includes('/')
@@ -1439,6 +1330,11 @@ function TreeRowNode({
           >
             {node.page!.icon}
           </span>
+        ) : ContextIcon ? (
+          <ContextIcon
+            className="size-3.5 shrink-0 opacity-80 text-accent"
+            strokeWidth={1.8}
+          />
         ) : node.page!.type === 'html' ? (
           <Globe className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         ) : node.page!.type === 'skill' ? (
@@ -1462,7 +1358,7 @@ function TreeRowNode({
             color signals owner (violet=system, ink-dim=user); both
             present ⇒ system color wins (it's the stronger
             constraint). Star is accent-2-filled when set. */}
-        {(node.page!.systemLocked || node.page!.userLocked) && (
+        {showLock && (
           <Lock
             className={`size-3 shrink-0 ${
               node.page!.systemLocked
@@ -1588,13 +1484,16 @@ function TreeRowNode({
         {(() => {
           // file-org-v1 D4.5 — folders use the lucide folder shape,
           // tinted by the chosen color. (Icons/emojis are files-only.)
-          const chosenColor = colorVarFor(node.color)
-          const Base = isExpanded ? FolderOpen : Folder
+          const isContextFolder = node.fullPath === '.context'
+          const chosenColor = isContextFolder
+            ? 'var(--color-accent)'
+            : colorVarFor(node.color)
+          const Base = isContextFolder ? Brain : isExpanded ? FolderOpen : Folder
           return (
             <Base
               className="size-3.5 shrink-0"
               strokeWidth={1.8}
-              style={{ color: chosenColor, opacity: node.color ? 1 : 0.7 }}
+              style={{ color: chosenColor, opacity: isContextFolder || node.color ? 1 : 0.7 }}
             />
           )
         })()}

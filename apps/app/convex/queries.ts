@@ -91,7 +91,7 @@ async function listAtomPathsCapped(
   // sort/slice so `docs.glob(...)` in a query block never enumerates
   // a private atom path for a viewer who can't read it. Filter is
   // per-row via the shared resolver — same gate the editor / search
-  // / render route use. `_map.md` filter remains (derived index).
+  // / render route use. `.context/_map.md` filter remains (derived index).
   const visible: typeof rows = []
   for (const r of rows) {
     if (await canReadAtom(ctx, r._id, viewerSubject)) visible.push(r)

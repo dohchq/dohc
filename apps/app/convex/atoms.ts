@@ -12,7 +12,7 @@ import { canReadAtom, canWriteAtomPath } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
 import { clearAtomCaptures } from './captures'
-import { isSafeAtomPath } from './inlineAtom'
+import { isSafeAtomPath, MAP_PATH } from './inlineAtom'
 import { deriveSearchFields } from './searchText'
 import { internal } from './_generated/api'
 import {
@@ -47,6 +47,10 @@ import {
 } from './atomShares'
 import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
 import type { MutationCtx } from './_generated/server'
+
+function isObsoleteMapSpecialCase(path: string): boolean {
+  return path === MAP_PATH || path === '_map.md'
+}
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
 // must NOT write a trash snapshot per keystroke. Instead we snapshot
@@ -91,8 +95,8 @@ export async function upsertAtomImpl(
     allowUserOverwrite?: boolean
     /** file-org-v1 §2.3 (Track-4 D4.1a). true ⇒ this write is
      *  permitted to overwrite a `systemLocked` atom — held ONLY by
-     *  `_upsertSystem` (audit-by-grep enforced; one prod caller:
-     *  `loop.regenerateMap`). Public/agent paths NEVER set this. */
+     *  `_upsertSystem` (audit-by-grep enforced; currently no prod
+     *  callers). Public/agent paths NEVER set this. */
     allowSystemOverride?: boolean
     /** file-org-v1 §2.3 — this write is the one that's TURNING the
      *  systemLocked flag on (so the lock-guard inside this same call
@@ -149,9 +153,8 @@ export async function upsertAtomImpl(
     }
     // D4.1a R1-fold (indep FAIL-3): `_upsertSystem` owns the system
     // slot. A user-lock decorating a system atom must NOT halt the
-    // loop's map regeneration. The system slot's owner asserts
-    // ownership regardless of user decoration; the user can still
-    // unlock later and the next loop tick re-asserts cleanly.
+    // system writer. The system slot's owner asserts ownership
+    // regardless of user decoration; the user can still unlock later.
     if (
       existing.userLocked &&
       !isUserEdit &&
@@ -274,11 +277,19 @@ export async function removeAtomImpl(
   if (!existing) return
   // file-org-v1 §2.3 (Track-4 D4.1a) — lock-guard chokepoint #2.
   // Delete-context message variant. systemLocked refuses ALL deletes
-  // (no override here — the system atom is meant to be regenerated,
-  // never removed); userLocked refuses ALL deletes (the user's own
-  // delete still works after they unlock via setLock).
-  if (existing.systemLocked) throw new SystemLockError(path, 'delete')
-  if (existing.userLocked) throw new UserLockError(path, 'delete')
+  // (no override here); userLocked refuses ALL deletes (the user's
+  // own delete still works after they unlock via setLock).
+  //
+  // .context-v1: map locks are obsolete. Old rows may still carry
+  // systemLocked/userLocked from the pre-.context era, but both the
+  // canonical generated map and the former root map are user-removable.
+  const mapSpecialCase = isObsoleteMapSpecialCase(path)
+  if (!mapSpecialCase && existing.systemLocked) {
+    throw new SystemLockError(path, 'delete')
+  }
+  if (!mapSpecialCase && existing.userLocked) {
+    throw new UserLockError(path, 'delete')
+  }
   await recordTrash(ctx, {
     workspaceId,
     kind: 'atom',
@@ -319,10 +330,12 @@ export async function removeAtomImpl(
   const deletedFileId = extractFrontmatterId(existing.body)
   if (deletedFileId) {
     await cascadeDeleteSharesForFileId(ctx, workspaceId, deletedFileId)
-    await scheduleHocuspocusDeleteDocument(ctx, {
-      workspaceId,
-      atomId: deletedFileId,
-    })
+    if (!mapSpecialCase) {
+      await scheduleHocuspocusDeleteDocument(ctx, {
+        workspaceId,
+        atomId: deletedFileId,
+      })
+    }
   }
 }
 
@@ -515,7 +528,7 @@ export const upsert = mutation({
       defaultPrivateOwnerUserId:
         workspaceId !== viewerSubject ? viewerSubject : undefined,
     })
-    // org-plan §5/§13 Phase C — debounced _map.md regen (2s coalesced).
+    // org-plan §5/§13 Phase C — debounced .context/_map.md regen (2s coalesced).
     await scheduleMapRegen(ctx, workspaceId)
     return out
   },
@@ -609,7 +622,7 @@ export const remove = mutation({
       throw new Error('You do not have access to delete this atom.')
     }
     await removeAtomImpl(ctx, workspaceId, path)
-    // Phase C — debounced _map.md regen.
+    // Phase C — debounced .context/_map.md regen.
     await scheduleMapRegen(ctx, workspaceId)
   },
 })
@@ -805,7 +818,7 @@ export const move = mutation({
       }
     }
 
-    // Phase C — debounced _map.md regen (rename moves paths in the map).
+    // Phase C — debounced .context/_map.md regen (rename moves paths in the map).
     await scheduleMapRegen(ctx, workspaceId)
     return {
       ok: true as const,
@@ -891,7 +904,7 @@ export const _upsertInternal = internalMutation({
     body: v.string(),
     source: v.optional(v.string()),
     // STRUCTURAL GUARD (Phase-2 review). The agent write path must NOT
-    // silently overwrite a USER-authored atom (me.md, hand-edited
+    // silently overwrite a USER-authored atom (.context/me.md, hand-edited
     // dashboards) — that is the prompt-injection blast radius. This is
     // a data-layer invariant, independent of model/prompt: an agent
     // write over user content THROWS unless explicitly allowed (the
@@ -1006,12 +1019,12 @@ export const _removeInternal = internalMutation({
 })
 
 // file-org-v1 §2.3 (Track-4 D4.1a) — the SOLE entry that may overwrite
-// a `systemLocked` atom AND that writes `systemLocked: true`. Held by
-// `loop.regenerateMap` only; an audit-by-grep test
-// (src/__tests__/upsertSystemAudit.test.ts) refuses a second caller.
+// a `systemLocked` atom AND that writes `systemLocked: true`. There
+// are currently no production callers; an audit-by-grep test
+// (src/__tests__/upsertSystemAudit.test.ts) refuses an unreviewed caller.
 // Lifecycle invariant: every `_upsertSystem` call re-asserts the lock
 // (idempotent), so an accidental flag clear is healed on the next
-// loop tick. NEVER expose as a public mutation.
+// system refresh. NEVER expose as a public mutation.
 export const _upsertSystem = internalMutation({
   args: {
     workspaceId: v.string(),
@@ -1034,15 +1047,15 @@ export const _upsertSystem = internalMutation({
 // file-org-v1 §3.2 + §2-A.1 (Track-4 D4.1b ATOMIC, R2-fold of indep
 // FAIL-1) — user-controlled LOCK toggle. `setLock` touches ONLY the
 // `userLocked` flag. `systemLocked` stays owned by `_upsertSystem`
-// (audit-by-grep enforced; one production caller —
-// `loop.regenerateMap`). The user has NO public API to mutate
+// (audit-by-grep enforced; currently no production callers). The user
+// has NO public API to mutate
 // `systemLocked` because exposing it would be a DoS surface (any
 // caller could mark arbitrary atoms as "system-managed" and
 // undeletable).
 //
 // Indep R2 fold: the OLDER refuse-on-systemLocked branch was wrong.
-// A user who locked an agent-written atom BEFORE the next loop
-// tick would get permanently stuck with an orphan userLocked
+// A user who locked an agent-written atom BEFORE a system refresh
+// would get permanently stuck with an orphan userLocked
 // decoration (functionally inert because `_upsertSystem` bypasses
 // both locks per D4.1a R1-fold FAIL-3, but symbolically stuck — no
 // path to clear). The fix: setLock toggles userLocked regardless

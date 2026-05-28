@@ -123,7 +123,7 @@ export const create = mutation({
       throw new Error('You do not have access to create folders here.')
     }
     const id = await createImpl(ctx, workspaceId, path)
-    // Phase C — debounced _map.md regen (new folder appears in the map).
+    // Phase C — debounced .context/_map.md regen (new folder appears in the map).
     await scheduleMapRegen(ctx, workspaceId)
     return id
   },
@@ -198,7 +198,7 @@ export const move = mutation({
     const identity = await ctx.auth.getUserIdentity()
     const viewerSubject = identity?.subject ?? ''
     const out = await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
-    // Phase C — debounced _map.md regen (folder rename moves children).
+    // Phase C — debounced .context/_map.md regen (folder rename moves children).
     await scheduleMapRegen(ctx, workspaceId)
     return out
   },
@@ -566,7 +566,7 @@ export const remove = mutation({
     const identity = await ctx.auth.getUserIdentity()
     const viewerSubject = identity?.subject ?? ''
     const out = await removeImpl(ctx, workspaceId, path, true, viewerSubject)
-    // Phase C — debounced _map.md regen (folder deletion drops subtree).
+    // Phase C — debounced .context/_map.md regen (folder deletion drops subtree).
     await scheduleMapRegen(ctx, workspaceId)
     return out
   },

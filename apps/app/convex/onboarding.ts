@@ -9,11 +9,26 @@ import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { requireWorkspace } from './auth'
 import { regenerateMap } from './loop'
+import { ORG_IDENTITY_PATH, PERSONAL_IDENTITY_PATH } from './inlineAtom'
 // Track-3 P1 §6 retrofit: a skill or html atom's example ```query
 // block falsely satisfied "vault has a populated dashboard" and
 // flipped onboarding to MAINTENANCE incorrectly. Skip non-data
 // atoms in the heuristic. (Codex r2 round-2 FAIL-§6.)
 import { isNonDataAtom } from './atomId'
+
+function randomLeaseOwner(): string {
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi?.randomUUID) return cryptoApi.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256)
+    }
+  }
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
 
 // Explicit onboarding state (Phase 1 / Eng-EG6). The agent's tools
 // drive transitions; the FRONTEND reads `state`/`progress` (public,
@@ -24,7 +39,8 @@ import { isNonDataAtom } from './atomId'
 //  - readers use `.first()` not `.unique()`: a stray duplicate row
 //    degrades gracefully instead of throwing and bricking onboarding.
 //  - `_complete` enforces "never end empty" SERVER-SIDE (not prompt-
-//    hope): refuses unless me.md AND a populated dashboard exist.
+//    hope): refuses unless the canonical .context identity file AND a
+//    populated dashboard exist.
 //  - the start LEASE is a single-document atomic CAS on THIS row's
 //    own `kickoffAt`, kept fresh by an action-driven heartbeat;
 //    recovery is staleness-only (survives a HARD process kill). No
@@ -75,8 +91,8 @@ export type OnboardingProgress = {
  *  (workspaceId === WorkOS subject). Cached per call.
  *
  *  The identity-atom path differs by kind:
- *    personal → `me.md`   (the user's about-themselves brief)
- *    org      → `company.md` (the org's about-itself brief)
+ *    personal → `.context/me.md`   (the user's about-themselves brief)
+ *    org      → `.context/company.md` (the org's about-itself brief)
  *  This lets the same onboarding flow assemble the appropriate
  *  identity artifact without forking the whole pipeline. */
 async function isOrgWorkspace(
@@ -106,13 +122,11 @@ export async function progressOf(
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(500)
-  // Identity atom: personal ⇒ me.md, org ⇒ company.md (org-plan §6).
+  // Identity atom: personal ⇒ .context/me.md, org ⇒ .context/company.md.
   const identityFile = (await isOrgWorkspace(ctx, workspaceId))
-    ? 'company.md'
-    : 'me.md'
-  const me = atoms.find(
-    (a) => a.path === identityFile || a.path.endsWith(`/${identityFile}`),
-  )
+    ? ORG_IDENTITY_PATH
+    : PERSONAL_IDENTITY_PATH
+  const me = atoms.find((a) => a.path === identityFile)
   const dashboards = atoms.filter(
     (a) => !isNonDataAtom(a.path, a.body) && a.body.includes('```query'),
   )
@@ -144,10 +158,13 @@ async function completeWorkspaceOnboarding(
 
   const p = await progressOf(ctx, workspaceId)
   if (!p.hasMe || !p.hasDashboardWithQuery) {
+    const identityFile = (await isOrgWorkspace(ctx, workspaceId))
+      ? ORG_IDENTITY_PATH
+      : PERSONAL_IDENTITY_PATH
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
-        `(me.md=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-        `Write a populated dashboard and me.md first.`,
+        `(${identityFile}=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
+        `Write a populated dashboard and ${identityFile} first.`,
     )
   }
   // ai-os-ideas #1 (the Map): a finished onboarding gets a living
@@ -158,7 +175,7 @@ async function completeWorkspaceOnboarding(
   // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
   // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
   // on any failure, degrade silently (the weekly loop regenerates
-  // _map.md anyway). Catching internally does NOT roll back this
+  // .context/_map.md anyway). Catching internally does NOT roll back this
   // mutation's transaction in Convex (only a thrown handler does).
   try {
     await regenerateMap(ctx, workspaceId)
@@ -194,8 +211,9 @@ export const _begin = internalMutation({
 /**
  * Mark onboarding DONE — ONLY if the vault is genuinely populated.
  * The "never end empty" wedge promise is a DB invariant here,
- * independent of the model: requires `me.md` AND a ```query
- * dashboard. Throws otherwise so the agent cannot finish empty.
+ * independent of the model: requires the canonical .context identity
+ * file AND a ```query dashboard. Throws otherwise so the agent cannot
+ * finish empty.
  * Reuses `progressOf` so the gate's public `progress` can never lie.
  */
 export const _complete = internalMutation({
@@ -230,7 +248,7 @@ export const claimKickoff = internalMutation({
       !!row.kickoffAt &&
       now - row.kickoffAt <= ONBOARDING_STALE_MS
     if (fresh) return { won: false, owner: null }
-    const owner = crypto.randomUUID()
+    const owner = randomLeaseOwner()
     if (row)
       await ctx.db.patch(row._id, { kickoffAt: now, kickoffOwner: owner })
     else

@@ -26,8 +26,15 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     // The leaf-row branch renders the Lock icon inside a
     // (systemLocked || userLocked) conditional with an aria-label
     // distinguishing the two owners.
+    expect(SRC).toMatch(/!isMapLockObsolete\(filePath\)/)
     expect(SRC).toMatch(/node\.page!\.systemLocked\s*\|\|\s*node\.page!\.userLocked/)
     expect(SRC).toMatch(/<Lock\b[^>]*aria-label=\{?[\s\S]*?system-locked/)
+  })
+
+  it('suppresses stale lock affordances for _map files', () => {
+    expect(SRC).toMatch(/function\s+isMapLockObsolete\(path: string\)/)
+    expect(SRC).toMatch(/path\s*===\s*['"]\.context\/_map\.md['"]/)
+    expect(SRC).toMatch(/path\s*===\s*['"]_map\.md['"]/)
   })
 
   it('renders Star icon on a leaf row when starred is true', () => {
@@ -44,10 +51,26 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(/<Share2\b[^>]*aria-label="shared"/)
   })
 
+  it('renders special icons for the .context folder and canonical context files', () => {
+    expect(SRC).toMatch(/import\s*\{[^}]*\bBrain\b[^}]*\bCompass\b[^}]*\bUser\b[^}]*\bTarget\b[^}]*\bBuilding2\b[^}]*\}\s*from\s*['"]lucide-react['"]/s)
+    expect(SRC).toMatch(/node\.fullPath\s*===\s*['"]\.context['"]/)
+    expect(SRC).toMatch(/path\s*===\s*['"]\.context\/_map\.md['"]/)
+    expect(SRC).toMatch(/path\s*===\s*['"]\.context\/me\.md['"]/)
+    expect(SRC).toMatch(/path\s*===\s*['"]\.context\/intent\.md['"]/)
+    expect(SRC).toMatch(/path\s*===\s*['"]\.context\/company\.md['"]/)
+  })
+
   it('does not render a Quick access sidebar section', () => {
     expect(SRC).not.toMatch(/Quick access/)
     expect(SRC).not.toMatch(/filetree-quick/)
     expect(SRC).not.toMatch(/selectQuickAccess/)
+  })
+
+  it('does not render a Context sidebar section', () => {
+    expect(SRC).not.toMatch(/label="Context"/)
+    expect(SRC).not.toMatch(/filetree-context/)
+    expect(SRC).not.toMatch(/ContextList/)
+    expect(SRC).not.toMatch(/partitionTree/)
   })
 
   it('Shift+L (lower OR upper) toggles lock (R3 fold — bare L reserved for future typeahead)', () => {

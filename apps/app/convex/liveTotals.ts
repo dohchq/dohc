@@ -95,8 +95,8 @@ export async function resolveLiveTotalValue(
   if (notes.length > NOTE_SCAN_CAP) return null // fail-soft
   const atoms: ValueAtom[] = []
   for (const n of notes) {
-    // `_map.md` is a dohc-GENERATED index that echoes note text; it is
-    // a derived artifact, NEVER a source of truth for value atoms.
+    // `.context/_map.md` is a dohc-GENERATED index that echoes note
+    // text; it is a derived artifact, NEVER a source of truth for value atoms.
     // Counting it would double-count atoms it copied into summaries
     // (Phase-4 review Codex HIGH). Exclude it (the gardening/map
     // scanners already do).

@@ -537,7 +537,11 @@ export function formatValueAtomText(
   return String(v)
 }
 
-export const MAP_PATH = '_map.md'
+export const CONTEXT_DIR = '.context'
+export const MAP_PATH = `${CONTEXT_DIR}/_map.md`
+export const PERSONAL_IDENTITY_PATH = `${CONTEXT_DIR}/me.md`
+export const ORG_IDENTITY_PATH = `${CONTEXT_DIR}/company.md`
+export const INTENT_PATH = `${CONTEXT_DIR}/intent.md`
 
 /** R3 §5 — write-path / gather caps. `fromMarkdown` is O(bytes), so
  *  the structural capture diff and the cross-desk gather must bound

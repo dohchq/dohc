@@ -113,7 +113,7 @@ function composeIntro(ordered: Q[], a: Answers): string {
     'Here’s me, so you can set up my workspace:',
     ...lines,
     '',
-    'Set it up now — build me a populated dashboard and my profile (me.md). Don’t re-ask what I just answered; if a realistic example helps make it concrete, use one that fits my work.',
+    'Set it up now — build me a populated dashboard and my profile (.context/me.md). Don’t re-ask what I just answered; if a realistic example helps make it concrete, use one that fits my work.',
   ].join('\n')
 }
 

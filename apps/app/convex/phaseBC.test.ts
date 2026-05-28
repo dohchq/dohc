@@ -123,7 +123,7 @@ describe('Phase B (org-plan §5) — activeWorkspaceId threading', () => {
   })
 })
 
-describe('Phase C (org-plan §13) — debounced _map.md regen', () => {
+describe('Phase C (org-plan §13) — debounced .context/_map.md regen', () => {
   it('schedules a coalesced map regen on upsert', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
@@ -243,15 +243,16 @@ describe('Phase C (org-plan §13) — debounced _map.md regen', () => {
 })
 
 describe('Phase B.4 (org-plan §6 / §11-step-4) — onboarding workspace-kind branch', () => {
-  it('personal workspace looks for me.md; org workspace looks for company.md', async () => {
+  it('personal workspace looks for .context/me.md; org workspace looks for .context/company.md', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
     const { orgId } = await asA.mutation(api.orgs.createOrg, { name: 'Acme' })
 
-    // Personal: writing company.md (the WRONG file for personal) ⇒
-    // hasMe stays false because progressOf looks for me.md here.
+    // Personal: root me.md is ordinary now, and the org identity file
+    // in .context is still the wrong identity file for personal.
+    await asA.mutation(api.atoms.upsert, { path: 'me.md', body: 'old root profile' })
     await asA.mutation(api.atoms.upsert, {
-      path: 'company.md',
+      path: '.context/company.md',
       body: 'wrong file',
     })
     let personal = await t.run(async (ctx) => {
@@ -260,19 +261,25 @@ describe('Phase B.4 (org-plan §6 / §11-step-4) — onboarding workspace-kind b
     })
     expect(personal.hasMe).toBe(false)
 
-    // Personal: writing me.md ⇒ hasMe flips true.
-    await asA.mutation(api.atoms.upsert, { path: 'me.md', body: 'about A' })
+    // Personal: writing .context/me.md ⇒ hasMe flips true.
+    await asA.mutation(api.atoms.upsert, { path: '.context/me.md', body: 'about A' })
     personal = await t.run(async (ctx) => {
       const { progressOf } = await import('./onboarding')
       return await progressOf(ctx, A)
     })
     expect(personal.hasMe).toBe(true)
+    expect(personal.mePath).toBe('.context/me.md')
 
-    // Org: writing me.md (the WRONG file for org) ⇒ hasMe false there
-    // because progressOf looks for company.md.
+    // Org: root company.md is ordinary now, and .context/me.md is the
+    // wrong identity file for org workspaces.
     await asA.mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
-      path: 'me.md',
+      path: 'company.md',
+      body: 'old root company',
+    })
+    await asA.mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: '.context/me.md',
       body: 'wrong file',
     })
     let org = await t.run(async (ctx) => {
@@ -281,10 +288,10 @@ describe('Phase B.4 (org-plan §6 / §11-step-4) — onboarding workspace-kind b
     })
     expect(org.hasMe).toBe(false)
 
-    // Org: writing company.md ⇒ org.hasMe flips true.
+    // Org: writing .context/company.md ⇒ org.hasMe flips true.
     await asA.mutation(api.atoms.upsert, {
       activeWorkspaceId: orgId,
-      path: 'company.md',
+      path: '.context/company.md',
       body: 'about Acme',
     })
     org = await t.run(async (ctx) => {
@@ -292,6 +299,7 @@ describe('Phase B.4 (org-plan §6 / §11-step-4) — onboarding workspace-kind b
       return await progressOf(ctx, orgId)
     })
     expect(org.hasMe).toBe(true)
+    expect(org.mePath).toBe('.context/company.md')
   })
 })
 

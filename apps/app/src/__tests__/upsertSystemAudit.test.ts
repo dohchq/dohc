@@ -8,15 +8,17 @@ import { fileURLToPath } from 'node:url'
 //
 //   `_upsertSystem` is the SOLE entry that may overwrite a
 //   systemLocked atom AND is the SOLE writer of `systemLocked: true`.
-//   Production callers: exactly one — `convex/loop.ts` (regenerateMap).
+//   Production callers: none. Canonical context files live under
+//   `.context/` and are user-deletable; generated context is no longer
+//   system locked.
 //
 // A future PR that adds a SECOND caller introduces a second mouth
 // onto the system-lock surface. The lock invariant — "system atoms
 // have one owner that asserts the lock on every refresh" — is
 // destroyed if that owner becomes plural. This test refuses the
-// addition: a second caller MUST be added explicitly to
-// EXPECTED_CALLERS (which forces the second mouth's behavior to be
-// reasoned about, documented, and lock-asserted).
+// addition: a caller MUST be added explicitly to EXPECTED_CALLERS
+// (which forces the system-lock behavior to be reasoned about,
+// documented, and lock-asserted).
 //
 // Test scope: any non-test, non-generated file under `convex/` that
 // references `_upsertSystem`. Matches `internal.atoms._upsertSystem`
@@ -37,20 +39,7 @@ const EXEMPT = new Set<string>([
 ])
 
 // PRODUCTION callers. A new caller MUST be added here.
-const EXPECTED_CALLERS = new Set<string>([
-  resolve(CONVEX_DIR, 'loop.ts'),
-  // H-2 (multiplayer-and-h-followups §4 A2) — `orgs._seedNewOrg` writes
-  // a starter `company.md` + `dashboard.md` into a freshly-created org
-  // workspace via `_upsertSystem`. Same invariant satisfied: this is
-  // the SECOND systemLocked mouth, called exactly once per org create
-  // (idempotent on re-seed; new content is also agent-owned). The
-  // lock invariant — "system atoms have one owner that asserts the
-  // lock on every refresh" — holds: `_seedNewOrg` is only invoked
-  // by `createOrgWithBridge` on org creation, and `regenerateMap`
-  // (the loop.ts caller) owns `_map.md` separately. No overlap, no
-  // dueling owners on the same atom.
-  resolve(CONVEX_DIR, 'orgs.ts'),
-])
+const EXPECTED_CALLERS = new Set<string>([])
 
 function listConvexSources(): string[] {
   const out: string[] = []
@@ -99,8 +88,8 @@ describe('_upsertSystem audit — allowlist enforcement', () => {
     expect(actual).toEqual(expected)
   })
 
-  it('the production caller is loop.ts (positive case sanity)', () => {
+  it('loop.ts no longer writes generated context through _upsertSystem', () => {
     const loopSrc = readFileSync(resolve(CONVEX_DIR, 'loop.ts'), 'utf8')
-    expect(loopSrc).toMatch(/_upsertSystem/)
+    expect(loopSrc).not.toMatch(/internal\.atoms\._upsertSystem\b/)
   })
 })
