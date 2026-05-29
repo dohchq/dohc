@@ -47,6 +47,7 @@
     "@workos/authkit-tanstack-react-start": "^0.7.0",
     "ai": "6.0.180",
     "convex": "^1.37.0",
+    "d3-force-3d": "^3.0.6",
     "emoji-mart": "^5.6.0",
     "isomorphic-dompurify": "3.14.0",
     "jose": "^6.2.3",
