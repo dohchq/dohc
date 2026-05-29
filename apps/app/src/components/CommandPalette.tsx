@@ -4,12 +4,75 @@ import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { OPEN_SKETCH_EVENT } from './AtomEditor'
 
-type Command = {
+type RunnableRow = {
+  path: string
+  label: string
+}
+
+export type CommandPaletteEntry = {
   id: string
   title: string
   hint?: string
   kind?: 'skill' | 'command' | undefined
   run: () => void
+}
+
+export function buildCommandPaletteEntries({
+  savedCommands,
+  skills,
+  onClose,
+  onFireSkill,
+  onFireCommand,
+  onOpenSketch,
+}: {
+  savedCommands: ReadonlyArray<RunnableRow>
+  skills: ReadonlyArray<RunnableRow>
+  onClose: () => void
+  onFireSkill: (path: string) => void
+  onFireCommand: (path: string) => void
+  onOpenSketch: () => void
+}): CommandPaletteEntry[] {
+  const out: CommandPaletteEntry[] = []
+  // Commands first: they're explicit user-fired shortcuts. Skills
+  // follow as reusable process instructions.
+  for (const c of savedCommands) {
+    out.push({
+      id: `command.${c.path}`,
+      title: c.label,
+      hint: `command · ${c.path}`,
+      kind: 'command',
+      run: () => {
+        onClose()
+        onFireCommand(c.path)
+      },
+    })
+  }
+  for (const s of skills) {
+    out.push({
+      id: `skill.${s.path}`,
+      title: s.label,
+      hint: `skill · ${s.path}`,
+      kind: 'skill',
+      run: () => {
+        onClose()
+        // P3+P4 Codex fold F3: dedicated channel — skill
+        // dispatch routes through onFireSkill. Only this
+        // callsite (and only with a real skill path) reaches
+        // the skill-fire dispatch.
+        onFireSkill(s.path)
+      },
+    })
+  }
+  out.push({
+    id: 'sys.insert-ascii-sketch',
+    title: 'Insert ASCII sketch',
+    hint: 'editor · ⌘⇧D',
+    run: () => {
+      onClose()
+      onOpenSketch()
+    },
+  })
+  return out
 }
 
 type Props = {
@@ -45,55 +108,19 @@ export function CommandPalette({
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  const commands: Command[] = useMemo(() => {
-    const out: Command[] = []
-    // Commands first: they're explicit user-fired shortcuts. Skills
-    // follow as reusable process instructions.
-    for (const c of savedCommands) {
-      out.push({
-        id: `command.${c.path}`,
-        title: c.label,
-        hint: `command · ${c.path}`,
-        kind: 'command',
-        run: () => {
-          onClose()
-          onFireCommand(c.path)
-        },
-      })
-    }
-    for (const s of skills) {
-      out.push({
-        id: `skill.${s.path}`,
-        title: s.label,
-        hint: `skill · ${s.path}`,
-        kind: 'skill',
-        run: () => {
-          onClose()
-          // P3+P4 Codex fold F3: dedicated channel — skill
-          // dispatch routes through onFireSkill. Only this
-          // callsite (and only with a real skill path) reaches
-          // the skill-fire dispatch.
-          onFireSkill(s.path)
-        },
-      })
-    }
-    out.push({
-      id: 'sys.insert-ascii-sketch',
-      title: 'Insert ASCII sketch',
-      hint: 'editor · ⌘⇧D',
-      run: () => {
-        onClose()
-        window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
-      },
-    })
-    return out
-  }, [
-    savedCommands,
-    skills,
-    onClose,
-    onFireCommand,
-    onFireSkill,
-  ])
+  const commands = useMemo(
+    () =>
+      buildCommandPaletteEntries({
+        savedCommands,
+        skills,
+        onClose,
+        onFireCommand,
+        onFireSkill,
+        onOpenSketch: () =>
+          window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT)),
+      }),
+    [savedCommands, skills, onClose, onFireCommand, onFireSkill],
+  )
 
   const filtered = useMemo(() => {
     const q = filter.toLowerCase().trim()

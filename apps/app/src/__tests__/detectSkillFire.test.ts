@@ -140,6 +140,13 @@ describe('Commands — detectCommandFire (/<command> grammar)', () => {
     })
   })
 
+  it('respects leading whitespace before a command fire', () => {
+    expect(detectCommandFire('  /draft-invoice for Acme', commands)).toEqual({
+      matched: { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
+      extras: 'for Acme',
+    })
+  })
+
   it('does not treat /skill as a command', () => {
     expect(detectCommandFire('/skill .skills/foo.md', commands)).toBeNull()
   })

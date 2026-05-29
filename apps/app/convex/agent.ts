@@ -1506,7 +1506,7 @@ export const dohcAgent = new Agent(components.agent, {
           return `(command too long: ${bytes} bytes exceeds the ${SKILL_MAX_BYTES}-byte cap. Split it into a smaller command plus skills.)`
         }
         const begun = (await ctx.runMutation(
-          internal.skillTurnGate._beginSkillTurnIfClear,
+          internal.skillTurnGate._beginCommandTurnIfClear,
           { threadId, promptMessageId },
         )) as { ok: true } | { ok: false; reason: string }
         if (!begun.ok) {
@@ -2210,12 +2210,15 @@ export const _assertOwnThread = internalQuery({
 //   2. `COMMAND_ENTRY_TOOLS = ['run_command']` — depth=0 AND
 //      experimental_context.entry==='command-fire'. The model's ONLY
 //      legal tool is `run_command`.
-//   3. `SAFE_FOR_SKILL_TOOLS` — depth>0 (inside a skill/command turn).
-//      NO `run_skill`/`run_command` recursion, NO UNAUTHORIZABLE tools (the
-//      structural enforcement; even with the per-handler gate the
-//      model would burn a step learning the gate; this prevents
+//   3. `SAFE_FOR_COMMAND_TOOLS` — depth>0 + kind='command'. A command
+//      can compose ONE saved skill while still excluding
+//      UNAUTHORIZABLE tools.
+//   4. `SAFE_FOR_SKILL_TOOLS` — depth>0 + kind='skill'. NO
+//      `run_skill`/`run_command` recursion, NO UNAUTHORIZABLE tools
+//      (the structural enforcement; even with the per-handler gate
+//      the model would burn a step learning the gate; this prevents
 //      that). Reads + additive writes only.
-//   4. `USER_TURN_TOOLS_NO_RUN_SKILL` — depth=0 AND no entry flag
+//   5. `USER_TURN_TOOLS_NO_RUN_SKILL` — depth=0 AND no entry flag
 //      (the normal direct-user turn; UNAUTHORIZABLE tools available
 //      via the existing `requiresConfirmation` flow). `run_skill`
 //      and `run_command` are STRUCTURALLY ABSENT.
@@ -2246,11 +2249,12 @@ const UNAUTHORIZABLE_TOOLS = [
   'set_lock', // file-org-v1 D4.1b — user-decision class; never at depth>0
 ] as const
 
-// At depth>0 the model gets ONLY the safe additive-writes/reads
-// surface. `run_skill` is excluded (no recursion). UNAUTHORIZABLE
-// tools are absent (BRACE). `create_entities` is here but its
-// handler routes to `_upsertMany({mode:'strictCreate'})` so only
-// brand-new entities are creatable (P2b.2 invariant).
+// At depth>0 + kind='skill' the model gets ONLY the safe
+// additive-writes/reads surface. `run_skill` is excluded (no
+// recursion). UNAUTHORIZABLE tools are absent (BRACE).
+// `create_entities` is here but its handler routes to
+// `_upsertMany({mode:'strictCreate'})` so only brand-new entities are
+// creatable (P2b.2 invariant).
 const SAFE_FOR_SKILL_TOOLS = [
   'list_atoms',
   'read_atom',
@@ -2272,6 +2276,8 @@ const SAFE_FOR_SKILL_TOOLS = [
   'rewrite_section',
 ] as const
 
+const SAFE_FOR_COMMAND_TOOLS = [...SAFE_FOR_SKILL_TOOLS, 'run_skill'] as const
+
 // The full tool set MINUS run_skill/run_command. Palette / slash entry
 // is the ONLY route to these entry tools; the normal user turn never has
 // it available, so the user can't accidentally invoke it.
@@ -2291,7 +2297,8 @@ export type SkillTurnEntry = 'skill-fire' | 'command-fire' | undefined
  *  thread + (optionally) the entry-flag for this turn + the
  *  ctx for in-step `skillTurnState.depth` reads. P2b.4 fold
  *  (Codex F1+F3+F5) — dispatch:
- *    depth>0              ⇒ SAFE_FOR_SKILL_TOOLS  (BRACE under BELT)
+ *    depth>0 + command    ⇒ SAFE_FOR_COMMAND_TOOLS (one saved skill allowed)
+ *    depth>0 + skill      ⇒ SAFE_FOR_SKILL_TOOLS  (BRACE under BELT)
  *    depth=0 + skill-fire ⇒ SKILL_ENTRY_TOOLS  ({run_skill}; forced)
  *    depth=0 + command-fire ⇒ COMMAND_ENTRY_TOOLS ({run_command}; forced)
  *    otherwise            ⇒ USER_TURN_TOOLS_NO_RUN_SKILL (normal turn)
@@ -2321,6 +2328,7 @@ export function buildPrepareStep(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }: any) => {
     let depth = 0
+    let turnKind: 'skill' | 'command' | null = null
     // When promptMessageId is known (sendMessage / startOnboarding-
     // with-intro path) we read the source-of-truth row. When it's
     // unknown (the NO-INTRO branch where the SDK generates the id
@@ -2331,24 +2339,30 @@ export function buildPrepareStep(
     if (promptMessageId) {
       try {
         const r = (await ctx.runQuery(
-          internal.skillTurnGate._readTurnDepth,
+          internal.skillTurnGate._readTurnState,
           { threadId, promptMessageId },
-        )) as { depth: number }
+        )) as { depth: number; kind?: 'skill' | 'command' | null }
         depth = r.depth
+        turnKind = r.kind ?? (depth > 0 ? 'skill' : null)
       } catch {
         // Defensive: if the read fails (transient Convex error),
         // fall back to depth=0. The per-handler BELT (P2b.3)
         // still trips on UNAUTHORIZABLE tools — fail-safe.
         depth = 0
+        turnKind = null
       }
     }
 
-    // MODE 1 — depth>0 (in a skill turn). The structural BRACE:
-    // model sees ONLY SAFE_FOR_SKILL_TOOLS. No run_skill (no
-    // recursion). No UNAUTHORIZABLE tools (except the two
-    // CONDITIONALLY safe ones whose handler BELT refuses elevated
-    // inputs).
+    // MODE 1 — depth>0 (in a command or skill turn). The structural BRACE:
+    // command turns may compose one saved skill; once run_skill starts,
+    // _beginSkillTurnIfClear upgrades the row to kind='skill' and
+    // recursion closes again. UNAUTHORIZABLE tools stay absent in
+    // both variants (except the two conditionally safe tools whose
+    // handler BELT refuses elevated inputs).
     if (depth > 0) {
+      if (turnKind === 'command') {
+        return { activeTools: [...SAFE_FOR_COMMAND_TOOLS] }
+      }
       return { activeTools: [...SAFE_FOR_SKILL_TOOLS] }
     }
 
@@ -2394,6 +2408,7 @@ export function buildPrepareStep(
 export {
   UNAUTHORIZABLE_TOOLS,
   SAFE_FOR_SKILL_TOOLS,
+  SAFE_FOR_COMMAND_TOOLS,
   USER_TURN_TOOLS_NO_RUN_SKILL,
   SKILL_ENTRY_TOOLS,
   COMMAND_ENTRY_TOOLS,

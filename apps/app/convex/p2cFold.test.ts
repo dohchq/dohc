@@ -91,4 +91,40 @@ describe('Track-3 P2c fold (Codex F3) — _beginSkillTurnIfClear is atomic', () 
     )
     expect(rows).toHaveLength(2)
   })
+
+  it('command turn allows exactly one transition into run_skill, then blocks recursion', async () => {
+    const t = convexTest(schema, modules)
+    expect(
+      await t.mutation(internal.skillTurnGate._beginCommandTurnIfClear, {
+        threadId: T,
+        promptMessageId: M,
+      }),
+    ).toEqual({ ok: true })
+    expect(
+      await t.query(internal.skillTurnGate._readTurnState, {
+        threadId: T,
+        promptMessageId: M,
+      }),
+    ).toEqual({ depth: 1, kind: 'command' })
+
+    expect(
+      await t.mutation(internal.skillTurnGate._beginSkillTurnIfClear, {
+        threadId: T,
+        promptMessageId: M,
+      }),
+    ).toEqual({ ok: true })
+    expect(
+      await t.query(internal.skillTurnGate._readTurnState, {
+        threadId: T,
+        promptMessageId: M,
+      }),
+    ).toEqual({ depth: 1, kind: 'skill' })
+
+    expect(
+      await t.mutation(internal.skillTurnGate._beginSkillTurnIfClear, {
+        threadId: T,
+        promptMessageId: M,
+      }),
+    ).toEqual({ ok: false, reason: 'already-started' })
+  })
 })

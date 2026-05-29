@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import {
   buildPrepareStep,
   UNAUTHORIZABLE_TOOLS,
+  SAFE_FOR_COMMAND_TOOLS,
   SAFE_FOR_SKILL_TOOLS,
   USER_TURN_TOOLS_NO_RUN_SKILL,
   SKILL_ENTRY_TOOLS,
@@ -70,6 +71,15 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     expect(SAFE_FOR_SKILL_TOOLS).not.toContain('run_command')
   })
 
+  it('SAFE_FOR_COMMAND_TOOLS allows exactly the one-hop run_skill composition path', () => {
+    expect(SAFE_FOR_COMMAND_TOOLS).toContain('run_skill')
+    expect(SAFE_FOR_COMMAND_TOOLS).not.toContain('run_command')
+    const intersection = SAFE_FOR_COMMAND_TOOLS.filter((t) =>
+      (UNAUTHORIZABLE_TOOLS as readonly string[]).includes(t),
+    )
+    expect(intersection.sort()).toEqual(['capture', 'create_atom'])
+  })
+
   it('SAFE_FOR_SKILL_TOOLS overlaps UNAUTHORIZABLE only on CONDITIONAL tools (create_atom + capture)', () => {
     // create_atom and capture are CONDITIONALLY unauthorizable —
     // gated only on elevated inputs (confirm:true / .skills/.commands /
@@ -119,11 +129,11 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
 })
 
 // Fake ctx for buildPrepareStep tests — implements runQuery
-// (the only ctx method buildPrepareStep uses). The depth value
-// is configurable so we can simulate depth=0 and depth>0.
-function makeFakeCtx(depth: number) {
+// (the only ctx method buildPrepareStep uses). The depth/kind values
+// are configurable so we can simulate normal, command, and skill turns.
+function makeFakeCtx(depth: number, kind?: 'skill' | 'command' | null) {
   return {
-    runQuery: async (_fn: any, _args: any) => ({ depth }),
+    runQuery: async (_fn: any, _args: any) => ({ depth, kind }),
   } as any
 }
 
@@ -214,7 +224,7 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
 
   it('depth>0 OVERRIDES entry="command-fire" (no re-firing run_command in the same turn)', async () => {
     const fn = buildPrepareStep(
-      makeFakeCtx(1),
+      makeFakeCtx(1, 'skill'),
       'thread-T',
       'msg-M',
       'command-fire',
@@ -223,6 +233,21 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
     expect(out.activeTools.sort()).toEqual(
       [...SAFE_FOR_SKILL_TOOLS].sort(),
     )
+    expect(out.toolChoice).toBeUndefined()
+  })
+
+  it('depth>0 + command kind permits one saved skill after run_command', async () => {
+    const fn = buildPrepareStep(
+      makeFakeCtx(1, 'command'),
+      'thread-T',
+      'msg-M',
+      'command-fire',
+    )
+    const out = await fn({ messages: [], stepNumber: 1 })
+    expect(out.activeTools.sort()).toEqual(
+      [...SAFE_FOR_COMMAND_TOOLS].sort(),
+    )
+    expect(out.activeTools).toContain('run_skill')
     expect(out.toolChoice).toBeUndefined()
   })
 

@@ -100,7 +100,8 @@ export default defineSchema({
   skillTurnState: defineTable({
     threadId: v.string(),
     promptMessageId: v.string(),
-    depth: v.number(), // 0 = normal user turn; 1 = inside run_skill
+    depth: v.number(), // 0 = normal user turn; 1 = inside run_skill/run_command
+    kind: v.optional(v.union(v.literal('skill'), v.literal('command'))),
     startedAt: v.number(),
   }).index('by_thread_msg', ['threadId', 'promptMessageId']),
 

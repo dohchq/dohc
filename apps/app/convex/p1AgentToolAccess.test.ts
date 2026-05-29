@@ -240,16 +240,25 @@ describe('P1 — tool wiring (structural)', () => {
     const __dirname = dirname(fileURLToPath(import.meta.url))
     const SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
 
-    for (const name of ['run_skill', 'run_command']) {
-      const match = SRC.match(
-        new RegExp(
-          `${name}:\\s*createTool\\([\\s\\S]+?inputSchema[\\s\\S]+?execute[\\s\\S]+?_getInternal[\\s\\S]{0,500}?\\)\\)`,
-        ),
+    const toolSource = (name: 'run_skill' | 'run_command') => {
+      const start = SRC.indexOf(`    ${name}: createTool({`)
+      expect(start).toBeGreaterThan(0)
+      const nextTool = SRC.indexOf('\n\n    ', start + 1)
+      expect(nextTool).toBeGreaterThan(start)
+      return SRC.slice(start, nextTool)
+    }
+
+    for (const name of ['run_skill', 'run_command'] as const) {
+      const tool = toolSource(name)
+      const viewerIdx = tool.indexOf(
+        'const viewerSubject = await viewerSubjectFromTool(ctx)',
       )
-      expect(match).not.toBeNull()
-      const tool = match?.[0] ?? ''
-      expect(tool).toContain('viewerSubjectFromTool(ctx)')
-      expect(tool).toMatch(/viewerSubject\s*,?\s*\}/)
+      const getInternalIdx = tool.indexOf('internal.atoms._getInternal')
+      expect(viewerIdx).toBeGreaterThan(0)
+      expect(getInternalIdx).toBeGreaterThan(viewerIdx)
+      expect(tool.slice(getInternalIdx)).toMatch(
+        /_getInternal[\s\S]{0,200}\{[\s\S]{0,250}\bviewerSubject\b[\s\S]{0,250}\}\s*\)/,
+      )
     }
   })
 

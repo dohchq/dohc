@@ -108,6 +108,7 @@ describe('isNonDataAtom — §6 unified predicate (the 11-site source of truth)'
     expect(isNonDataAtom('r.md', HTML)).toBe(true)
     expect(isNonDataAtom('s.md', SKILL)).toBe(true)
     expect(isNonDataAtom('.commands/draft-invoice.md', COMMAND)).toBe(true)
+    expect(isNonDataAtom('.skills/weekly-review.md', 'plain body')).toBe(true)
     expect(isNonDataAtom('skills/legacy.md', 'no frontmatter')).toBe(true)
   })
   it('does NOT match plain md / unrelated paths', () => {

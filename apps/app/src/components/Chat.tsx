@@ -286,7 +286,7 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingCommandFire, threadId])
+  }, [pendingCommandFire, threadId, sending, busy])
 
   const slashQuery = useMemo(() => {
     const m = input.match(/^\s*\/([^\s]*)$/)

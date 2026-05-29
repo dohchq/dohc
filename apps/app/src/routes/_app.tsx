@@ -33,6 +33,7 @@ import {
   useActiveWorkspaceId,
 } from '@/lib/active-workspace'
 import { ChatBusyProvider } from '@/lib/chat-busy'
+import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
 // PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
@@ -865,14 +866,18 @@ function App() {
           // directly via sendMessage({entry:'skill-fire'})).
           // The structural enforcement is now route-checked
           // at the type system.
-          setChatOpen(true)
-          setSharingOpen(false)
-          setPendingSkillFire(path)
+          firePaletteSkill(path, {
+            setChatOpen,
+            setSharingOpen,
+            setPendingSkillFire,
+          })
         }}
         onFireCommand={(path) => {
-          setChatOpen(true)
-          setSharingOpen(false)
-          setPendingCommandFire(path)
+          firePaletteCommand(path, {
+            setChatOpen,
+            setSharingOpen,
+            setPendingCommandFire,
+          })
         }}
       />
       {sharePromptFor && (
