@@ -13,7 +13,11 @@ import {
   parseInlineAtoms,
   parseInlineAtomsFromMarkdown,
 } from '../lib/inlineAtom'
-import { isQueryFenceLanguage, QUERY_FENCE_RE } from '../lib/dslparse'
+import {
+  isQueryFenceLanguage,
+  parseQuerySrc,
+  QUERY_FENCE_RE,
+} from '../lib/dslparse'
 import { Extension, type Editor } from '@tiptap/core'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { StarterKit } from '@tiptap/starter-kit'
@@ -44,7 +48,6 @@ import {
   isAsciiSketchLanguage,
 } from '../lib/asciiSketchMetadata'
 import {
-  inlineAtomsEnabled,
   makeInlineAtomPlugin,
   computeAtomRanges,
 } from './inlineAtomPlugin'
@@ -215,10 +218,10 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: 'query-block',
-    label: 'Query block',
-    hint: 'Embed a dohc query',
-    glyph: '{}',
-    aliases: ['data', 'database', 'live', 'query'],
+    label: 'Live view',
+    hint: 'Show a live list or table',
+    glyph: '↻',
+    aliases: ['data', 'database', 'live', 'query', 'view'],
   },
 ]
 
@@ -863,36 +866,200 @@ function readSlashCommandState(
   }
 }
 
-// Humanize a query fence so the user sees WHAT it shows, not raw DSL.
-// `entities.list("project", { "status": "in-progress" })`
-//   → "project · status: in-progress"
-// Defensive: any parse miss falls back to the first non-empty line.
-export function humanizeQuery(src: string): string | null {
-  // This runs in buildQueryDecorations on EVERY keystroke (the query
-  // block is a live editable code_block — a user can paste a JWT /
-  // base64 / minified line into it). Hard-cap the scanned text AND
-  // bound every quantifier: the prior `([a-zA-Z_]+)\.([a-zA-Z_]+)`
-  // backtracked O(n²) on a long no-dot word run (200k → ~20s editor
-  // freeze; subagent). A real query is tens of chars — 600 is plenty.
-  const text = (src ?? '').trim().slice(0, 600)
-  const m = /([a-zA-Z_]{1,40})\.([a-zA-Z_]{1,40})\s*\(\s*"([^"]{1,120})"/.exec(
-    text,
-  )
-  if (!m) {
-    const first = text.split('\n').find((l) => l.trim())
-    return first ? first.trim().slice(0, 80) : null
+export type QueryViewDescriptor = {
+  badge: string
+  title: string
+  subtitle: string | null
+  sourceLabel: string
+  loadingText: string
+  emptyText: string
+  errorText: string
+}
+
+export type QueryViewResultState = {
+  kind: 'loading' | 'empty' | 'error' | 'unavailable' | 'result'
+  text: string
+}
+
+function titleCaseWords(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+function pluralizeResource(resource: string): { title: string; lower: string } {
+  const clean = resource.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  if (!clean) return { title: 'Items', lower: 'items' }
+  if (clean === 'person' || clean === 'people') {
+    return { title: 'People', lower: 'people' }
   }
-  const resource = m[3]
-  const filters: string[] = []
-  const brace = /\{([^}]{0,400})\}/.exec(text.slice(m.index))
-  if (brace) {
-    const re = /"([^"]+)"\s*:\s*"?([^",}]+?)"?\s*(?:,|$)/g
-    let f: RegExpExecArray | null
-    while ((f = re.exec(brace[1])) !== null) {
-      filters.push(`${f[1]}: ${f[2].trim()}`)
+  const words = clean.split(/\s+/).filter(Boolean)
+  const last = words[words.length - 1] ?? 'item'
+  let pluralLast = last
+  if (!/(s|x|z|ch|sh)$/.test(last)) {
+    pluralLast = last.endsWith('y')
+      ? `${last.slice(0, -1)}ies`
+      : `${last}s`
+  } else if (!last.endsWith('s')) {
+    pluralLast = `${last}es`
+  }
+  const plural = [...words.slice(0, -1), pluralLast].join(' ')
+  return { title: titleCaseWords(plural), lower: plural }
+}
+
+function singularResourceTitle(resource: string): string {
+  const clean = resource.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  if (!clean) return 'Item'
+  if (clean === 'person' || clean === 'people') return 'Person'
+  return titleCaseWords(clean)
+}
+
+function formatQueryFilters(filters: Record<string, unknown>): string | null {
+  const parts = Object.entries(filters)
+    .filter(([key]) => key.trim().length > 0)
+    .slice(0, 4)
+    .map(([key, value]) => {
+      const text =
+        value === null
+          ? 'empty'
+          : typeof value === 'string' ||
+              typeof value === 'number' ||
+              typeof value === 'boolean'
+            ? String(value)
+            : JSON.stringify(value)
+      return `${key}: ${text}`
+    })
+  return parts.length ? parts.join(' · ') : null
+}
+
+// Describe a fenced query as the product object it really is: a live
+// document view. The editable DSL remains the durable source, but the
+// UI should answer "what will I see here?" before it reveals machinery.
+export function describeQueryView(src: string): QueryViewDescriptor | null {
+  const text = (src ?? '').trim().slice(0, 600)
+  if (!text) return null
+  const parsed = parseQuerySrc(text)
+  if (!parsed) {
+    const first = text.split('\n').find((l) => l.trim())
+    if (!first) return null
+    const title = first.trim().slice(0, 80)
+    return {
+      badge: 'Live view',
+      title,
+      subtitle: null,
+      sourceLabel: text,
+      loadingText: 'Loading live view...',
+      emptyText: 'No results yet.',
+      errorText: "This live view couldn't update.",
     }
   }
-  return filters.length ? `${resource} · ${filters.join(' · ')}` : resource
+
+  const filters = formatQueryFilters(parsed.filters)
+  if (parsed.namespace === 'entities') {
+    const plural = pluralizeResource(parsed.resource)
+    const singular = singularResourceTitle(parsed.resource)
+    const isFind = parsed.verb === 'find'
+    const title =
+      parsed.verb === 'count'
+        ? `${singular} count`
+        : isFind
+          ? singular
+          : plural.title
+    return {
+      badge: 'Live view',
+      title,
+      subtitle: filters,
+      sourceLabel: text,
+      loadingText: isFind
+        ? `Loading ${singular.toLowerCase()}...`
+        : `Loading ${plural.lower}...`,
+      emptyText: isFind
+        ? `${singular} not found.`
+        : filters
+          ? `No matching ${plural.lower} yet.`
+          : `No ${plural.lower} yet.`,
+      errorText: "This live view couldn't update.",
+    }
+  }
+
+  if (parsed.namespace === 'docs' || parsed.namespace === 'vault') {
+    const isFind = parsed.verb === 'find'
+    return {
+      badge: 'Live view',
+      title: isFind ? 'Document' : 'Documents',
+      subtitle: parsed.resource || filters,
+      sourceLabel: text,
+      loadingText: isFind ? 'Loading document...' : 'Loading documents...',
+      emptyText: isFind ? 'Document not found.' : 'No matching documents yet.',
+      errorText: "This live view couldn't update.",
+    }
+  }
+
+  if (parsed.namespace === 'capacity') {
+    return {
+      badge: 'Live view',
+      title: parsed.verb === 'risks' ? 'Capacity risks' : 'Capacity',
+      subtitle: filters,
+      sourceLabel: text,
+      loadingText: 'Loading capacity...',
+      emptyText: 'No capacity signal yet.',
+      errorText: "This live view couldn't update.",
+    }
+  }
+
+  return {
+    badge: 'Live view',
+    title: titleCaseWords(parsed.resource || `${parsed.namespace} ${parsed.verb}`),
+    subtitle: filters,
+    sourceLabel: text,
+    loadingText: 'Loading live view...',
+    emptyText: 'No results yet.',
+    errorText: "This live view couldn't update.",
+  }
+}
+
+// Back-compat export used by older tests/callers. This is now a compact
+// label derived from the richer live-view descriptor.
+export function humanizeQuery(src: string): string | null {
+  const view = describeQueryView(src)
+  if (!view) return null
+  return view.subtitle ? `${view.title} · ${view.subtitle}` : view.title
+}
+
+export function formatQueryViewResult(
+  entry: QueryResultEntry | undefined,
+  view: QueryViewDescriptor,
+): QueryViewResultState {
+  if (entry === undefined) {
+    return { kind: 'loading', text: view.loadingText }
+  }
+  if ('unavailableText' in entry) {
+    return { kind: 'unavailable', text: entry.unavailableText }
+  }
+  if (entry.value === null) {
+    return { kind: 'error', text: view.errorText }
+  }
+  const text = entry.value.trim()
+  if (
+    text === '_(nothing)_' ||
+    text === '_(no match)_' ||
+    text === '_(empty note)_'
+  ) {
+    return { kind: 'empty', text: view.emptyText }
+  }
+  return { kind: 'result', text: entry.value }
+}
+
+function stableWidgetTextKey(text: string): string {
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0
+  }
+  return `${text.length}:${hash >>> 0}`
 }
 
 // Mirror of the ascii-block plugin for `language: query`: tame the
@@ -912,11 +1079,15 @@ const queryBlockKey = new PluginKey('dohc-query-block')
 // Result is rendered as SAFE preformatted text (textContent, no
 // innerHTML/XSS; ascii heatmaps render correctly; rich-markdown
 // rendering is a noted polish follow-up, not slop).
-type QueryResultMap = Map<string, { value: string | null }>
+type QueryResultEntry =
+  | { value: string | null }
+  | { unavailableText: string }
+type QueryResultMap = Map<string, QueryResultEntry>
 
 function buildQueryDecorations(
   doc: unknown,
   map: QueryResultMap,
+  unavailableText: string | null,
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
@@ -925,8 +1096,8 @@ function buildQueryDecorations(
     const isDohcQueryBlock = node.type.name === 'queryBlock'
     if (isCodeQueryBlock || isDohcQueryBlock) {
       const src = node.textContent.trim()
-      const label = humanizeQuery(src)
-      if (!src || !label) return
+      const view = describeQueryView(src)
+      if (!src || !view) return
       decorations.push(
         Decoration.node(pos, pos + node.nodeSize, {
           class: 'query-atom-block',
@@ -939,59 +1110,88 @@ function buildQueryDecorations(
             const wrap = document.createElement('div')
             wrap.className = 'query-atom-caption'
             wrap.setAttribute('contenteditable', 'false')
-            wrap.innerHTML =
-              '<span class="query-atom-dot"></span><span class="query-atom-live">query</span>'
-            const t = document.createElement('span')
-            t.className = 'query-atom-label'
-            t.textContent = label
-            wrap.appendChild(t)
+            const dot = document.createElement('span')
+            dot.className = 'query-atom-dot'
+            wrap.appendChild(dot)
+            const copy = document.createElement('span')
+            copy.className = 'query-atom-copy'
+            const badge = document.createElement('span')
+            badge.className = 'query-atom-live'
+            badge.textContent = view.badge
+            copy.appendChild(badge)
+            const title = document.createElement('span')
+            title.className = 'query-atom-label'
+            title.textContent = view.title
+            copy.appendChild(title)
+            if (view.subtitle) {
+              const subtitle = document.createElement('span')
+              subtitle.className = 'query-atom-subtitle'
+              subtitle.textContent = view.subtitle
+              copy.appendChild(subtitle)
+            }
+            const source = document.createElement('span')
+            source.className = 'query-atom-source'
+            source.textContent = view.sourceLabel
+            copy.appendChild(source)
+            wrap.appendChild(copy)
             return wrap
           },
-          { side: -1, key: `query-cap-${pos}-${label}` },
+          { side: -1, key: `query-cap-${pos}-${view.sourceLabel}` },
         ),
       )
       // the RESULT — verbatim code-fence text is the key (code is not
       // markdown-escaped, so doc text === markdown fence === server
       // src; no Phase-3-style escape mismatch).
-      const entry = map.get(src)
-      if (entry !== undefined) {
-        const v = entry.value
-        const state = v === null ? 'E' : String(v.length)
-        decorations.push(
-          Decoration.widget(
-            pos + node.nodeSize,
-            () => {
-              const el = document.createElement('div')
-              el.setAttribute('contenteditable', 'false')
-              if (v === null) {
-                el.className = 'query-atom-empty'
-                el.textContent = '—'
-                el.title = "couldn't run this query — edit it above"
-              } else {
-                el.className = 'query-atom-result'
-                el.textContent = v // SAFE: text only, no innerHTML
-              }
-              return el
-            },
-            { side: 1, key: `qr-${pos}-${src}-${state}` },
-          ),
-        )
-      }
+      const entry =
+        map.get(src) ?? (unavailableText ? { unavailableText } : undefined)
+      const result = formatQueryViewResult(entry, view)
+      decorations.push(
+        Decoration.widget(
+          pos + node.nodeSize,
+          () => {
+            const el = document.createElement('div')
+            el.setAttribute('contenteditable', 'false')
+            el.className = `query-atom-result query-atom-result--${result.kind}`
+            el.textContent = result.text // SAFE: text only, no innerHTML
+            if (result.kind === 'error') {
+              el.title = 'Edit the live view source above, or ask the agent to fix it.'
+            }
+            return el
+          },
+          {
+            side: 1,
+            key: `qr-${pos}-${src}-${result.kind}-${stableWidgetTextKey(
+              result.text,
+            )}`,
+          },
+        ),
+      )
     }
   })
   return DecorationSet.create(doc as never, decorations)
 }
 
-function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
+function makeQueryBlockPlugin(
+  mapRef: React.RefObject<QueryResultMap>,
+  unavailableTextRef: React.RefObject<string | null>,
+) {
   return new Plugin({
     key: queryBlockKey,
     state: {
       init(_, instance) {
-        return buildQueryDecorations(instance.doc, mapRef.current ?? new Map())
+        return buildQueryDecorations(
+          instance.doc,
+          mapRef.current ?? new Map(),
+          unavailableTextRef.current ?? null,
+        )
       },
       apply(tr, old) {
         if (!tr.docChanged && !tr.getMeta(queryBlockKey)) return old
-        return buildQueryDecorations(tr.doc, mapRef.current ?? new Map())
+        return buildQueryDecorations(
+          tr.doc,
+          mapRef.current ?? new Map(),
+          unavailableTextRef.current ?? null,
+        )
       },
     },
     props: {
@@ -1590,6 +1790,7 @@ type TiptapEditorProps = {
   formulaRef: React.RefObject<FormulaMap>
   formulaTick: number
   queryResultsRef: React.RefObject<QueryResultMap>
+  queryUnavailableTextRef: React.RefObject<string | null>
   queryTick: number
   // D4.8 — wikilink plugin coordination refs + the file list for
   // the autocomplete picker (live, so the picker re-filters as
@@ -1688,6 +1889,7 @@ function TiptapAtomEditor({
   formulaRef,
   formulaTick,
   queryResultsRef,
+  queryUnavailableTextRef,
   queryTick,
   knownFilesRef,
   knownFilesArray,
@@ -2135,16 +2337,12 @@ function TiptapAtomEditor({
             wikilinkPlugin,
             wikilinkClickPlugin,
             atomPillClickPlugin,
-            makeQueryBlockPlugin(queryResultsRef),
+            makeQueryBlockPlugin(queryResultsRef, queryUnavailableTextRef),
             makeCodeBlockChromePlugin(),
             makeCodeBlockContinuationPlugin(),
+            makeInlineAtomPlugin(),
+            makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
           ]
-          if (inlineAtomsEnabled()) {
-            extra.push(
-              makeInlineAtomPlugin(),
-              makeAtomPillPlugin(formulaRef, liveTotalsRef, fileIdMapRef),
-            )
-          }
           return extra
         },
       }),
@@ -2156,6 +2354,7 @@ function TiptapAtomEditor({
       onAsciiClickRef,
       onOpenWikilinkRef,
       queryResultsRef,
+      queryUnavailableTextRef,
     ],
   )
 
@@ -2715,6 +2914,13 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
+  const queryUnavailableTextRef = useRef<string | null>(
+    shareId
+      ? 'Live views are unavailable in shared pages for now.'
+      : disableReactiveResolvers
+        ? 'Live views need a workspace connection.'
+        : null,
+  )
   const [queryTick, setQueryTick] = useState(0)
   useEffect(() => {
     queryResultsRef.current = new Map(
@@ -2722,6 +2928,14 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     )
     setQueryTick((t) => t + 1)
   }, [resolvedQueries])
+  useEffect(() => {
+    queryUnavailableTextRef.current = shareId
+      ? 'Live views are unavailable in shared pages for now.'
+      : disableReactiveResolvers
+        ? 'Live views need a workspace connection.'
+        : null
+    setQueryTick((t) => t + 1)
+  }, [disableReactiveResolvers, shareId])
 
   useImperativeHandle(
     ref,
@@ -2806,6 +3020,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       formulaRef={formulaRef}
       formulaTick={formulaTick}
       queryResultsRef={queryResultsRef}
+      queryUnavailableTextRef={queryUnavailableTextRef}
       queryTick={queryTick}
       knownFilesRef={knownFilesRef}
       knownFilesArray={knownFiles ?? []}

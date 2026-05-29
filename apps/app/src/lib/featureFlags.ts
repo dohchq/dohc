@@ -9,20 +9,16 @@
 //   • import.meta.env.VITE_DOHC_<NAME> === '1'  (build-time)
 // Default OFF ⇒ zero user-facing change until explicitly enabled.
 
-// 3.9.21 — `multiplayer` GRADUATED to default-on (like
-// inline-atoms before it). The gate has been removed from
-// AtomView; the bootstrap → collab → presence pipeline now
-// engages for every markdown atom. If you ever need a
-// per-browser kill switch in dev, add it back to this union
-// and re-thread to AtomView; for now keeping the type
-// minimal.
-export type FeatureFlag = 'inline-atoms'
+// No generic feature flags are active right now. Keep this type as the
+// single place a future flag name would be added.
+export type FeatureFlag = never
 
 export function featureEnabled(name: FeatureFlag): boolean {
+  const flagName = name as string
   try {
     if (
       typeof localStorage !== 'undefined' &&
-      localStorage.getItem(`dohc:${name}`) === '1'
+      localStorage.getItem(`dohc:${flagName}`) === '1'
     ) {
       return true
     }
@@ -30,30 +26,13 @@ export function featureEnabled(name: FeatureFlag): boolean {
     /* localStorage unavailable (SSR / privacy mode) — fall through */
   }
   const env = (import.meta as unknown as { env?: Record<string, string> }).env
-  const key = `VITE_DOHC_${name.toUpperCase().replace(/-/g, '_')}`
+  const key = `VITE_DOHC_${flagName.toUpperCase().replace(/-/g, '_')}`
   return env?.[key] === '1'
 }
 
-// Inline atoms GRADUATED to default-ON at Phase 1 (the wedge depends on
-// the user SEEING values as atoms in the populated dashboard). It
-// shipped flag-gated in Phase 0 (additive, no regression), was then
-// de-risked: parser hardened via subagent+Codex review, 100%
-// conformant on the real model across 3 runs, round-trip
-// browser-verified. Per the re-foundation principle a flagged
-// capability graduates once proven. An explicit kill-switch remains:
-// localStorage `dohc:inline-atoms`='0' or VITE_DOHC_INLINE_ATOMS=0.
-export const inlineAtomsEnabled = (): boolean => {
-  try {
-    if (
-      typeof localStorage !== 'undefined' &&
-      localStorage.getItem('dohc:inline-atoms') === '0'
-    ) {
-      return false
-    }
-  } catch {
-    /* ignore */
-  }
-  const env = (import.meta as unknown as { env?: Record<string, string> }).env
-  if (env?.VITE_DOHC_INLINE_ATOMS === '0') return false
-  return true
-}
+// Inline atoms are no longer a feature flag. `{key: value}` captures and
+// `{= ...}` formulas are the live-data surface of dohc, so disabling them
+// makes ordinary documents lie about what data is live. Keep the function
+// as a compatibility shim for older imports/tests; it must always return
+// true.
+export const inlineAtomsEnabled = (): boolean => true

@@ -12,8 +12,11 @@ lives in `apps/app`.
   formulas that compute live from other files (e.g.
   `{= sum(logs.2025_07_*.billable)}`). Computed values render after the
   token and update as the underlying files change.
+- **Live views** — block-level live lists/tables backed by inspectable
+  fenced `query` source. They are for repeating collections; inline atoms
+  and formulas remain the live scalar/value syntax.
 - **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, queried by `query` blocks.
+  user-declared types, shown through live views.
 - **Folders** — organize atoms; support icons, colors, stars, and
   drag-and-drop move with wikilink-rewrite cascade.
 

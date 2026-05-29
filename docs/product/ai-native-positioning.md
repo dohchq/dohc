@@ -63,7 +63,7 @@ dohc should prioritize primitives that help agents work reliably:
 
 - **Plain-text atoms:** portable markdown and HTML files with stable IDs,
   titles, frontmatter, links, and source history.
-- **Readable dynamic data:** inline atoms, formulas, query blocks, and
+- **Readable dynamic data:** inline atoms, formulas, live views, and
   structured declarations that can be read and written without guessing
   hidden UI state.
 - **Agent navigation tools:** search, links, recents, source citations,

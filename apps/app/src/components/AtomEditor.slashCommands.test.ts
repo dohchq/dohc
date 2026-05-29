@@ -34,6 +34,15 @@ describe('AtomEditor slash commands', () => {
     expect(filterSlashCommands('wiki').map((command) => command.id)).toEqual([
       'wikilink',
     ])
+    expect(filterSlashCommands('view').map((command) => command.id)).toEqual([
+      'query-block',
+    ])
+    expect(
+      filterSlashCommands('view').map((command) => ({
+        label: command.label,
+        hint: command.hint,
+      })),
+    ).toEqual([{ label: 'Live view', hint: 'Show a live list or table' }])
   })
 
   it('detects slash triggers at the tail of the current text block', () => {
