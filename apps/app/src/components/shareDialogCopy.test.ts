@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   getGeneralAccessCopy,
   getGeneralAccessOptions,
+  getShareRoutingHint,
   getShareTargetPlaceholder,
 } from './shareDialogCopy'
 
@@ -82,10 +83,14 @@ describe('share dialog copy', () => {
     expect(samples).not.toMatch(/\b(company|organization|org|team)\b/i)
   })
 
-  it('asks for people by email instead of handle', () => {
-    expect(getShareTargetPlaceholder(true)).toBe('Add people by email')
-    expect(getShareTargetPlaceholder(false)).toBe(
-      'Add people or workspaces by email',
+  it('frames email as routing into a workspace, not as the workspace itself', () => {
+    expect(getShareTargetPlaceholder(true)).toBe('Email address or dohc handle')
+    expect(getShareTargetPlaceholder(false)).toBe('Email address, handle, or workspace')
+    expect(getShareRoutingHint(true)).toBe(
+      'Routed addresses open in their chosen workspace. Unrouted emails wait in the recipient inbox.',
+    )
+    expect(getShareRoutingHint(false)).toBe(
+      'Work emails can route here without making this workspace require an email.',
     )
   })
 })

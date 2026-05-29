@@ -450,6 +450,25 @@ export const myWorkspaces = query({
   args: {},
   handler: async (ctx) => {
     const caller = await requireWorkspace(ctx)
+    const addressRoutes = await ctx.db
+      .query('workspaceAddressRoutes')
+      .withIndex('by_accountWorkspaceId', (q) =>
+        q.eq('accountWorkspaceId', caller),
+      )
+      .collect()
+    const routeForWorkspace = (workspaceId: string) => {
+      const route = addressRoutes.find(
+        (row) => row.targetWorkspaceId === workspaceId,
+      )
+      return route
+        ? {
+            routeId: route._id,
+            email: route.email,
+            normalizedEmail: route.normalizedEmail,
+            targetWorkspaceId: route.targetWorkspaceId,
+          }
+        : null
+    }
     const rows = await ctx.db
       .query('memberships')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', caller))
@@ -461,6 +480,17 @@ export const myWorkspaces = query({
       role: 'owner' | 'member'
       accent: string | null
       inviteCode: string | null
+      addressRoute: {
+        routeId: Id<'workspaceAddressRoutes'>
+        email: string
+        normalizedEmail: string
+        targetWorkspaceId: string
+      } | null
+      billing: {
+        payer: 'personal' | 'workspace'
+        plan: 'free'
+        status: 'active' | 'not_configured'
+      }
     }> = [
       // Personal first — always available; implicit Owner.
       {
@@ -470,6 +500,12 @@ export const myWorkspaces = query({
         role: 'owner',
         accent: null,
         inviteCode: null,
+        addressRoute: routeForWorkspace(caller),
+        billing: {
+          payer: 'personal',
+          plan: 'free',
+          status: 'active',
+        },
       },
     ]
     for (const r of rows) {
@@ -485,6 +521,12 @@ export const myWorkspaces = query({
         // Owner-only: invite code (Members get null — they shouldn't
         // share an invite they don't own). Same gate as `myOrgs`.
         inviteCode: r.role === 'owner' ? org.inviteCode : null,
+        addressRoute: routeForWorkspace(r.orgId),
+        billing: {
+          payer: 'workspace',
+          plan: 'free',
+          status: 'not_configured',
+        },
       })
     }
     return out
@@ -715,8 +757,19 @@ export const orgMembers = query({
       .query('memberships')
       .withIndex('by_org', (q) => q.eq('orgId', orgId))
       .collect()
-    return rows
-      .filter(isActive)
-      .map((r) => ({ workspaceId: r.workspaceId, role: r.role }))
+    const out = []
+    for (const r of rows.filter(isActive)) {
+      const profile = await ctx.db
+        .query('userProfiles')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', r.workspaceId))
+        .first()
+      out.push({
+        workspaceId: r.workspaceId,
+        role: r.role,
+        displayName: profile?.name ?? profile?.email ?? 'Workspace member',
+        email: profile?.email ?? null,
+      })
+    }
+    return out
   },
 })

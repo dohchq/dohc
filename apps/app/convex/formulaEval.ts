@@ -337,12 +337,16 @@ export const evalFormulas = query({
 // edit-grantee's injected `{= sum(salary) }` — resolves to `—`, never
 // leaking the owner's other data. Absence of a grant ⇒ empty result.
 export const evalFormulasShared = query({
-  args: { shareId: v.id('atomShares'), srcs: v.array(v.string()) },
+  args: {
+    shareId: v.id('atomShares'),
+    activeWorkspaceId: v.optional(v.string()),
+    srcs: v.array(v.string()),
+  },
   handler: async (
     ctx,
-    { shareId, srcs },
+    { shareId, activeWorkspaceId, srcs },
   ): Promise<Array<{ src: string; value: FormulaValue }>> => {
-    const access = await resolveShareAccess(ctx, shareId)
+    const access = await resolveShareAccess(ctx, shareId, activeWorkspaceId)
     const uniq = Array.from(new Set(srcs)).slice(0, MAX_FORMULAS)
     const out: Array<{ src: string; value: FormulaValue }> = []
     if (!access || uniq.length === 0) {

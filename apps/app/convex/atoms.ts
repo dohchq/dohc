@@ -535,6 +535,7 @@ export const upsert = mutation({
 export const upsertSharedAtom = mutation({
   args: {
     shareId: v.id('atomShares'),
+    activeWorkspaceId: v.optional(v.string()),
     body: v.string(),
     // The exact body the grantee loaded/last-saved. The guard is a
     // CONTENT compare-and-swap, NOT a timestamp — `updatedAt` is a
@@ -543,8 +544,8 @@ export const upsertSharedAtom = mutation({
     // (codex final review P1). A body compare is collision-proof.
     baseBody: v.string(),
   },
-  handler: async (ctx, { shareId, body, baseBody }) => {
-    const access = await resolveShareAccess(ctx, shareId)
+  handler: async (ctx, { shareId, activeWorkspaceId, body, baseBody }) => {
+    const access = await resolveShareAccess(ctx, shareId, activeWorkspaceId)
     if (!access) throw new Error('You no longer have access to this file.')
     if (access.permission !== 'edit') {
       throw new Error('You only have view access to this file.')

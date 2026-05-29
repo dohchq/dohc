@@ -31,7 +31,160 @@ const bodyAt = (t: ReturnType<typeof convexTest>, path: string) =>
   })
 
 describe('sharing-v1 1a — share grant + gated read', () => {
-  it('owner shares by recipient email, not workspace handle', async () => {
+  it('routes an email share into the recipient-selected workspace, not personal', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Work Routed Doc')
+
+    const { orgId, inviteCode } = await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@acme.test' })
+      .mutation(api.orgs.createOrg, { name: 'Acme Work' })
+    await t
+      .withIdentity({
+        subject: STRANGER,
+        email: 'teammate@acme.test',
+      })
+      .mutation(api.orgs.joinOrg, { inviteCode })
+    await t
+      .withIdentity({
+        subject: GRANTEE,
+        email: 'grantee@acme.test',
+        name: 'Grace at Acme',
+      })
+      .mutation(api.auth.upsertMyProfile, {})
+    await t
+      .withIdentity({
+        subject: GRANTEE,
+        email: 'grantee@acme.test',
+        name: 'Grace at Acme',
+      })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {
+        activeWorkspaceId: orgId,
+      })
+
+    const result = await t
+      .withIdentity({ subject: OWNER, email: 'owner@example.com' })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: '  GRANTEE@acme.test ',
+        permission: 'view',
+      })
+
+    expect(result).toMatchObject({
+      kind: 'share',
+      granteeWorkspaceId: orgId,
+      granteeUserId: GRANTEE,
+    })
+
+    const shareId = result.kind === 'share' ? result.shareId : null
+    expect(shareId).toBeTruthy()
+
+    const personalList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, {})
+    expect(personalList).toHaveLength(0)
+
+    const workList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, { activeWorkspaceId: orgId })
+    expect(workList).toHaveLength(1)
+    expect(workList[0]).toMatchObject({
+      fileId: 'doc',
+      permission: 'view',
+      available: true,
+    })
+
+    const personalGet = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, { shareId: shareId! })
+    expect(personalGet).toBeNull()
+
+    const workGet = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, {
+        shareId: shareId!,
+        activeWorkspaceId: orgId,
+      })
+    expect(workGet?.body).toContain('# Work Routed Doc')
+
+    const teammateGet = await t
+      .withIdentity({ subject: STRANGER })
+      .query(api.atomShares.getSharedAtom, {
+        shareId: shareId!,
+        activeWorkspaceId: orgId,
+      })
+    expect(teammateGet).toBeNull()
+  })
+
+  it('fails closed when an email has duplicate verified workspace routes', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Ambiguous Doc')
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceAddressRoutes', {
+        accountWorkspaceId: GRANTEE,
+        targetWorkspaceId: GRANTEE,
+        email: 'grantee@example.com',
+        normalizedEmail: 'grantee@example.com',
+        status: 'verified',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+      await ctx.db.insert('workspaceAddressRoutes', {
+        accountWorkspaceId: STRANGER,
+        targetWorkspaceId: STRANGER,
+        email: 'grantee@example.com',
+        normalizedEmail: 'grantee@example.com',
+        status: 'verified',
+        createdAt: 2,
+        updatedAt: 2,
+      })
+    })
+
+    await expect(
+      t.withIdentity({ subject: OWNER }).mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: 'grantee@example.com',
+        permission: 'view',
+      }),
+    ).rejects.toThrow(/Ambiguous email routing/i)
+
+    expect(
+      await t
+        .withIdentity({ subject: OWNER })
+        .query(api.atomShares.listMyShares, {}),
+    ).toHaveLength(0)
+  })
+
+  it('refuses to route the current email when duplicate verified routes exist', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceAddressRoutes', {
+        accountWorkspaceId: GRANTEE,
+        targetWorkspaceId: GRANTEE,
+        email: 'grantee@example.com',
+        normalizedEmail: 'grantee@example.com',
+        status: 'verified',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+      await ctx.db.insert('workspaceAddressRoutes', {
+        accountWorkspaceId: STRANGER,
+        targetWorkspaceId: STRANGER,
+        email: 'grantee@example.com',
+        normalizedEmail: 'grantee@example.com',
+        status: 'verified',
+        createdAt: 2,
+        updatedAt: 2,
+      })
+    })
+
+    await expect(
+      t
+        .withIdentity({ subject: GRANTEE, email: 'grantee@example.com' })
+        .mutation(api.auth.routeCurrentEmailToWorkspace, {}),
+    ).rejects.toThrow(/Ambiguous email routing/i)
+  })
+
+  it('owner shares by a routed personal email, not a raw workspace handle', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Email Doc')
 
@@ -42,18 +195,31 @@ describe('sharing-v1 1a — share grant + gated read', () => {
         name: 'Grace Recipient',
       })
       .mutation(api.auth.upsertMyProfile, {})
+    await t
+      .withIdentity({
+        subject: GRANTEE,
+        email: 'grantee@example.com',
+        name: 'Grace Recipient',
+      })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {})
 
-    const shareId = await t
+    const result = await t
       .withIdentity({ subject: OWNER, email: 'owner@example.com' })
       .mutation(api.atomShares.shareAtomByEmail, {
         fileId: 'doc',
         email: '  GRANTEE@example.com ',
         permission: 'view',
       })
+    expect(result).toMatchObject({
+      kind: 'share',
+      granteeWorkspaceId: GRANTEE,
+      granteeUserId: GRANTEE,
+    })
+    const shareId = result.kind === 'share' ? result.shareId : null
 
     const got = await t
       .withIdentity({ subject: GRANTEE })
-      .query(api.atomShares.getSharedAtom, { shareId })
+      .query(api.atomShares.getSharedAtom, { shareId: shareId! })
     expect(got?.body).toContain('# Email Doc')
 
     const ownerShares = await t
@@ -61,22 +227,99 @@ describe('sharing-v1 1a — share grant + gated read', () => {
       .query(api.atomShares.listMyShares, {})
     expect(ownerShares[0]).toMatchObject({
       granteeWorkspaceId: GRANTEE,
+      granteeUserId: GRANTEE,
       granteeEmail: 'grantee@example.com',
       granteeName: 'Grace Recipient',
     })
   })
 
-  it('does not create a share for an unknown email address', async () => {
+  it('keeps an unrouted email share pending instead of granting personal access', async () => {
     const t = convexTest(schema, modules)
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\nx')
 
-    await expect(
-      t.withIdentity({ subject: OWNER }).mutation(api.atomShares.shareAtomByEmail, {
+    const result = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomByEmail, {
         fileId: 'doc',
         email: 'missing@example.com',
         permission: 'view',
-      }),
-    ).rejects.toThrow(/No dohc user found/i)
+      })
+
+    expect(result).toMatchObject({
+      kind: 'pending',
+      email: 'missing@example.com',
+      permission: 'view',
+    })
+    expect(
+      await t
+        .withIdentity({ subject: OWNER })
+        .query(api.atomShares.listMyShares, {}),
+    ).toHaveLength(0)
+
+    const pending = await t
+      .withIdentity({ subject: GRANTEE, email: 'missing@example.com' })
+      .query(api.atomShares.listPendingSharesForCurrentEmail, {})
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({
+      ownerWorkspaceId: OWNER,
+      fileId: 'doc',
+      email: 'missing@example.com',
+      permission: 'view',
+    })
+  })
+
+  it('accepts a pending email share into the chosen active workspace', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Pending Doc')
+    const { orgId } = await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@work.test' })
+      .mutation(api.orgs.createOrg, { name: 'Work Inbox' })
+
+    const result = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: 'grantee@work.test',
+        permission: 'edit',
+      })
+    expect(result.kind).toBe('pending')
+    const pendingShareId =
+      result.kind === 'pending' ? result.pendingShareId : null
+
+    const accepted = await t
+      .withIdentity({
+        subject: GRANTEE,
+        email: 'grantee@work.test',
+        name: 'Grace Work',
+      })
+      .mutation(api.atomShares.acceptPendingShare, {
+        pendingShareId: pendingShareId!,
+        activeWorkspaceId: orgId,
+      })
+
+    expect(accepted).toMatchObject({
+      kind: 'share',
+      granteeWorkspaceId: orgId,
+      granteeUserId: GRANTEE,
+    })
+
+    const personalList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, {})
+    expect(personalList).toHaveLength(0)
+
+    const workList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, { activeWorkspaceId: orgId })
+    expect(workList).toHaveLength(1)
+
+    const got = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, {
+        shareId: accepted.shareId,
+        activeWorkspaceId: orgId,
+      })
+    expect(got?.body).toContain('# Pending Doc')
   })
 
   it('shares by email from the active workspace, not only personal', async () => {
@@ -93,8 +336,11 @@ describe('sharing-v1 1a — share grant + gated read', () => {
     await t
       .withIdentity({ subject: GRANTEE, email: 'grantee@example.com' })
       .mutation(api.auth.upsertMyProfile, {})
+    await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@example.com' })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {})
 
-    const shareId = await t
+    const result = await t
       .withIdentity({ subject: OWNER })
       .mutation(api.atomShares.shareAtomByEmail, {
         activeWorkspaceId: orgId,
@@ -102,6 +348,8 @@ describe('sharing-v1 1a — share grant + gated read', () => {
         email: 'grantee@example.com',
         permission: 'view',
       })
+    expect(result.kind).toBe('share')
+    const shareId = result.kind === 'share' ? result.shareId : null
 
     const ownerShares = await t
       .withIdentity({ subject: OWNER })
@@ -114,7 +362,7 @@ describe('sharing-v1 1a — share grant + gated read', () => {
 
     const got = await t
       .withIdentity({ subject: GRANTEE })
-      .query(api.atomShares.getSharedAtom, { shareId })
+      .query(api.atomShares.getSharedAtom, { shareId: shareId! })
     expect(got?.body).toContain('# Workspace Doc')
   })
 
@@ -254,6 +502,75 @@ describe('sharing-v1 1a — share grant + gated read', () => {
       .withIdentity({ subject: STRANGER })
       .query(api.atomShares.getSharedAtom, { shareId })
     expect(strangerGet).toBeNull()
+  })
+
+  it('workspace-person grants authorize only the routed user, not every org member', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc')
+    const { orgId, inviteCode } = await t
+      .withIdentity({ subject: GRANTEE })
+      .mutation(api.orgs.createOrg, { name: 'Acme Work' })
+    await t
+      .withIdentity({ subject: STRANGER })
+      .mutation(api.orgs.joinOrg, { inviteCode })
+    await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@acme.test' })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {
+        activeWorkspaceId: orgId,
+      })
+
+    const result = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: 'grantee@acme.test',
+        permission: 'view',
+      })
+    expect(result.kind).toBe('share')
+    const shareId = result.kind === 'share' ? result.shareId : null
+
+    const granteeList = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.listSharedWithMe, { activeWorkspaceId: orgId })
+    expect(granteeList).toHaveLength(1)
+    expect(granteeList[0]).toMatchObject({ shareId: shareId!, fileId: 'doc' })
+
+    const granteeGet = await t
+      .withIdentity({ subject: GRANTEE })
+      .query(api.atomShares.getSharedAtom, {
+        shareId: shareId!,
+        activeWorkspaceId: orgId,
+      })
+    expect(granteeGet).toMatchObject({ fileId: 'doc' })
+
+    const memberList = await t
+      .withIdentity({ subject: STRANGER })
+      .query(api.atomShares.listSharedWithMe, { activeWorkspaceId: orgId })
+    expect(memberList).toHaveLength(0)
+
+    const memberGet = await t
+      .withIdentity({ subject: STRANGER })
+      .query(api.atomShares.getSharedAtom, {
+        shareId: shareId!,
+        activeWorkspaceId: orgId,
+      })
+    expect(memberGet).toBeNull()
+  })
+
+  it('direct person-share grants reject org workspace ids', async () => {
+    const t = convexTest(schema, modules)
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc')
+    const { orgId } = await t
+      .withIdentity({ subject: GRANTEE })
+      .mutation(api.orgs.createOrg, { name: 'Acme Work' })
+
+    await expect(
+      t.withIdentity({ subject: OWNER }).mutation(api.atomShares.shareAtom, {
+        fileId: 'doc',
+        granteeWorkspaceId: orgId,
+        permission: 'view',
+      }),
+    ).rejects.toThrow(/workspace share/i)
   })
 
   it('revoke cuts off the grantee', async () => {

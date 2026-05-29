@@ -203,6 +203,41 @@ describe('hocuspocus Convex ACL bridge', () => {
     })
   })
 
+  it('allows a routed workspace-person edit share only for that routed user', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+    const { orgId, inviteCode } = await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@acme.test' })
+      .mutation(api.orgs.createOrg, { name: 'Acme Work' })
+    await t
+      .withIdentity({ subject: STRANGER, email: 'teammate@acme.test' })
+      .mutation(api.orgs.joinOrg, { inviteCode })
+    await t
+      .withIdentity({ subject: GRANTEE, email: 'grantee@acme.test' })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {
+        activeWorkspaceId: orgId,
+      })
+    await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc')
+    await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.atomShares.shareAtomByEmail, {
+        fileId: 'doc',
+        email: 'grantee@acme.test',
+        permission: 'edit',
+      })
+
+    await expect(checkAccess(t, { userId: GRANTEE })).resolves.toEqual({
+      workspaceAuthzVersion: 1,
+      canRead: true,
+      canWrite: true,
+    })
+    await expect(checkAccess(t, { userId: STRANGER })).resolves.toEqual({
+      workspaceAuthzVersion: 1,
+      canRead: false,
+      canWrite: false,
+    })
+  })
+
   it('allows org members to read org shares and denies strangers', async () => {
     const t = convexTest(schema, modules)
     stubServerToken()

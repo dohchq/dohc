@@ -23,6 +23,8 @@ import {
   Building2,
   User as UserIcon,
   KeyRound,
+  Mail,
+  CreditCard,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '../lib/active-workspace'
@@ -46,6 +48,10 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   const changeRole = useMutation(api.orgs.changeRole)
   const leaveOrg = useMutation(api.orgs.leaveOrg)
   const joinOrg = useMutation(api.orgs.joinOrg)
+  const routeCurrentEmailToWorkspace = useMutation(
+    api.auth.routeCurrentEmailToWorkspace,
+  )
+  const me = useQuery(api.auth.whoami)
   const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -114,8 +120,8 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
           <div>
             <h2 className="text-[15px] font-semibold text-ink-strong">Workspaces</h2>
             <p className="mt-1 max-w-[29rem] text-[12px] leading-5 text-ink-dim">
-              Personal stays private. Shared workspaces are for work that needs
-              other people, permissions, and a separate home.
+              One account can carry many homes. Each workspace keeps its own
+              memory, access, agent context, and billing.
             </p>
           </div>
           <button
@@ -161,12 +167,34 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                       )}
                     </div>
                     <p className="mt-0.5 text-[11.5px] text-ink-dim">
-                      Private by default
+                      Private by default · free personal billing
+                    </p>
+                    <p className="mt-1 flex min-w-0 items-center gap-1.5 text-[11.5px] text-ink-faint">
+                      <Mail className="size-3 shrink-0" strokeWidth={2} />
+                      <span className="truncate">
+                        {workspaces[0]?.addressRoute
+                          ? `${workspaces[0].addressRoute.email} routes here`
+                          : 'No email route required'}
+                      </span>
                     </p>
                   </div>
-                  <span className="rounded bg-hover px-1.5 py-px text-[9px] uppercase tracking-wider text-ink-faint">
-                    always you
-                  </span>
+                  {me?.email && !workspaces[0]?.addressRoute ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void routeCurrentEmailToWorkspace({}).catch((e) =>
+                          setErr(e instanceof Error ? e.message : String(e)),
+                        )
+                      }
+                      className="rounded border border-rule px-2 py-1 text-[11px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+                    >
+                      route email
+                    </button>
+                  ) : (
+                    <span className="rounded bg-hover px-1.5 py-px text-[9px] uppercase tracking-wider text-ink-faint">
+                      always you
+                    </span>
+                  )}
                 </li>
                 {orgWorkspaces.map((w) => (
                   <OrgCard
@@ -176,7 +204,15 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                     isActive={activeWorkspaceId === w.workspaceId}
                     isOwner={w.role === 'owner'}
                     inviteCode={w.inviteCode}
+                    addressRoute={w.addressRoute}
+                    billing={w.billing}
+                    currentEmail={me?.email ?? null}
                     currentWorkspaceId={currentWorkspaceId}
+                    onRouteEmail={async () => {
+                      await routeCurrentEmailToWorkspace({
+                        activeWorkspaceId: w.workspaceId,
+                      })
+                    }}
                     onRename={async (name) => {
                       await renameOrg({ orgId: w.workspaceId as Id<'orgs'>, name })
                     }}
@@ -400,7 +436,11 @@ function OrgCard({
   isActive,
   isOwner,
   inviteCode,
+  addressRoute,
+  billing,
+  currentEmail,
   currentWorkspaceId,
+  onRouteEmail,
   onRename,
   onLeave,
   onDelete,
@@ -412,7 +452,18 @@ function OrgCard({
   isActive: boolean
   isOwner: boolean
   inviteCode: string | null
+  addressRoute: {
+    email: string
+    targetWorkspaceId: string
+  } | null
+  billing: {
+    payer: 'personal' | 'workspace'
+    plan: 'free'
+    status: 'active' | 'not_configured'
+  }
+  currentEmail: string | null
   currentWorkspaceId?: string
+  onRouteEmail: () => Promise<void>
   onRename: (name: string) => Promise<void>
   onLeave: () => Promise<void>
   onDelete: () => Promise<void>
@@ -506,7 +557,7 @@ function OrgCard({
                 )}
               </div>
               <p className="mt-0.5 text-[11.5px] text-ink-dim">
-                Shared workspace
+                Shared workspace · {billing.payer === 'workspace' ? 'workspace billing' : 'personal billing'}
               </p>
             </div>
             <span className="rounded bg-hover px-1.5 py-px text-[9px] uppercase tracking-wider text-ink-faint">
@@ -523,22 +574,47 @@ function OrgCard({
       )}
 
       {isOwner && inviteCode && (
-        <div className="mt-3 flex items-center gap-2 pl-11 text-[11.5px]">
-          <span className="text-ink-faint uppercase tracking-wider">invite code</span>
-          <code className="rounded bg-hover px-2 py-0.5 font-mono text-ink">
-            {inviteCode}
-          </code>
-          <button
-            type="button"
-            onClick={() => navigator.clipboard?.writeText(inviteCode)}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-ink-dim hover:text-ink hover:bg-hover transition-colors"
-            title="copy invite code"
-            aria-label="copy invite code"
-          >
-            <Copy className="size-3" strokeWidth={2} />
-          </button>
+        <div className="mt-3 grid gap-2 pl-11 text-[11.5px] sm:grid-cols-2">
+          <div className="flex min-w-0 items-center gap-2 rounded-md bg-hover/60 px-2 py-1.5">
+            <KeyRound className="size-3 shrink-0 text-ink-faint" />
+            <span className="text-ink-faint uppercase tracking-wider">invite</span>
+            <code className="truncate font-mono text-ink">{inviteCode}</code>
+            <button
+              type="button"
+              onClick={() => navigator.clipboard?.writeText(inviteCode)}
+              className="ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-ink-dim hover:text-ink transition-colors"
+              title="copy invite code"
+              aria-label="copy invite code"
+            >
+              <Copy className="size-3" strokeWidth={2} />
+            </button>
+          </div>
+          <div className="flex min-w-0 items-center gap-2 rounded-md bg-hover/60 px-2 py-1.5">
+            <CreditCard className="size-3 shrink-0 text-ink-faint" />
+            <span className="truncate text-ink-dim">
+              {billing.plan} · {billing.status === 'active' ? 'active' : 'not configured'}
+            </span>
+          </div>
         </div>
       )}
+
+      <div className="mt-2 flex items-center gap-2 pl-11 text-[11.5px]">
+        <Mail className="size-3 shrink-0 text-ink-faint" />
+        <span className="min-w-0 flex-1 truncate text-ink-dim">
+          {addressRoute
+            ? `${addressRoute.email} routes to this workspace`
+            : 'No email route required'}
+        </span>
+        {currentEmail && !addressRoute && (
+          <button
+            type="button"
+            onClick={() => safe(onRouteEmail)}
+            className="shrink-0 rounded border border-rule px-2 py-1 text-[11px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+          >
+            route current email
+          </button>
+        )}
+      </div>
 
       <div className="mt-3">
         <h4 className="text-[11px] font-medium uppercase tracking-wider text-ink-faint mb-1.5">
@@ -560,9 +636,14 @@ function OrgCard({
                   className="flex items-center gap-2 text-[12px]"
                 >
                   <UserIcon className="size-3 text-ink-dim shrink-0" strokeWidth={2} />
-                  <code className="truncate font-mono text-[11px] text-ink">
-                    {m.workspaceId}
-                  </code>
+                  <span className="min-w-0 truncate text-[12px] font-medium text-ink">
+                    {m.displayName}
+                  </span>
+                  {m.email && (
+                    <span className="hidden min-w-0 truncate text-[11px] text-ink-faint sm:inline">
+                      {m.email}
+                    </span>
+                  )}
                   <span className="text-ink-faint">{m.role}</span>
                   {isSelf && (
                     <span className="rounded bg-hover px-1.5 py-px text-[9px] uppercase tracking-wider text-ink-faint">

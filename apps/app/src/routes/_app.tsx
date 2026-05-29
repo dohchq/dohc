@@ -305,7 +305,9 @@ function App() {
   // so it costs nothing extra.
   const sharedAtomForMeta = useQuery(
     api.atomShares.getSharedAtom,
-    urlShareId ? { shareId: urlShareId as Id<'atomShares'> } : 'skip',
+    urlShareId
+      ? { shareId: urlShareId as Id<'atomShares'>, activeWorkspaceId }
+      : 'skip',
   )
   const { docTitle, docEmoji } = useMemo<{
     docTitle: string | null | undefined

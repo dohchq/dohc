@@ -5,8 +5,10 @@ import type { Id } from '../../convex/_generated/dataModel'
 import {
   Check,
   ChevronDown,
+  Inbox,
   Link as LinkIcon,
   Lock,
+  Mail,
   Users,
   X,
 } from 'lucide-react'
@@ -15,6 +17,7 @@ import {
   getGeneralAccessCopy,
   getGeneralAccessOptions,
   type GeneralAccessValue,
+  getShareRoutingHint,
   getShareTargetPlaceholder,
 } from './shareDialogCopy'
 
@@ -35,7 +38,15 @@ export function ShareDialog({
   const me = useQuery(api.auth.whoami)
   const myWorkspaces = useQuery(api.orgs.myWorkspaces, {})
   const myShares = useQuery(api.atomShares.listMyShares, { activeWorkspaceId })
+  const myPendingShares = useQuery(api.atomShares.listMyPendingShares, {
+    activeWorkspaceId,
+  })
+  const pendingForCurrentEmail = useQuery(
+    api.atomShares.listPendingSharesForCurrentEmail,
+    {},
+  )
   const shareAtomByEmail = useMutation(api.atomShares.shareAtomByEmail)
+  const acceptPendingShare = useMutation(api.atomShares.acceptPendingShare)
   const shareAtomToOrg = useMutation(api.atomShares.shareAtomToOrg)
   const shareAtomPublic = useMutation(api.atomShares.shareAtomPublic)
   const unshareAtom = useMutation(api.atomShares.unshareAtom)
@@ -64,6 +75,7 @@ export function ShareDialog({
   const permissionMenuRef = useRef<HTMLDivElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [publicShareOverride, setPublicShareOverride] = useState<
     Id<'atomShares'> | null | undefined
@@ -91,6 +103,12 @@ export function ShareDialog({
   const workspaceName = (id: string) =>
     workspaces.find((w) => w.workspaceId === id)?.name ?? 'Workspace'
   const existing = (myShares ?? []).filter((s) => s.fileId === fileId)
+  const pendingExisting = (myPendingShares ?? []).filter(
+    (s) => s.fileId === fileId,
+  )
+  const pendingInbox = (pendingForCurrentEmail ?? []).filter(
+    (s) => s.fileId === fileId && s.available,
+  )
   const publicShare = existing.find((s) => s.publicAccess === true)
   const namedShares = existing.filter((s) => s.publicAccess !== true)
   const publicShareId =
@@ -153,6 +171,7 @@ export function ShareDialog({
     if (busy) return
     setBusy(true)
     setError(null)
+    setNotice(null)
     try {
       if (effectiveShareMode === 'workspace') {
         if (!selectedWorkspaceId) {
@@ -169,15 +188,40 @@ export function ShareDialog({
       } else {
         const granteeEmail = email.trim()
         if (!granteeEmail) return
-        await shareAtomByEmail({
+        const result = await shareAtomByEmail({
           fileId,
           email: granteeEmail,
           permission,
           activeWorkspaceId,
         })
+        if (result.kind === 'pending') {
+          setNotice(
+            `${result.email} has no workspace route yet, so this share is waiting for them to accept.`,
+          )
+        } else {
+          const target = workspaceName(result.granteeWorkspaceId)
+          setNotice(`Shared to ${result.email} in ${target}.`)
+        }
       }
       setEmail('')
       setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function acceptHere(pendingShareId: Id<'pendingAtomShares'>) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await acceptPendingShare({ pendingShareId, activeWorkspaceId })
+      setNotice(
+        `Accepted into ${currentWorkspace?.name ?? 'Personal'} for this account.`,
+      )
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -369,12 +413,69 @@ export function ShareDialog({
               </button>
             </div>
           </div>
+          {effectiveShareMode === 'person' && (
+            <p className="mt-2 text-[11.5px] leading-4 text-ink-faint">
+              {getShareRoutingHint(isPersonalWorkspace)}
+            </p>
+          )}
         </div>
 
         {error && (
           <p className="mt-3 text-[12px] text-danger" role="alert">
             {error}
           </p>
+        )}
+        {notice && (
+          <p className="mt-3 rounded-[6px] border border-rule bg-page px-3 py-2 text-[12px] leading-5 text-ink-dim">
+            {notice}
+          </p>
+        )}
+
+        {pendingInbox.length > 0 && (
+          <section className="mt-5 rounded-[8px] border border-rule bg-page/60 p-3">
+            <div className="flex items-start gap-3">
+              <span className="grid size-9 shrink-0 place-items-center rounded-full bg-surface text-ink-strong">
+                <Inbox className="size-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-[13.5px] font-semibold text-ink-strong">
+                  Waiting for your email
+                </h3>
+                <p className="mt-0.5 text-[11.5px] leading-4 text-ink-dim">
+                  Accept this into the active workspace when that is where it belongs.
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {pendingInbox.map((pending) => (
+                    <li
+                      key={pending.pendingShareId}
+                      className="flex items-center justify-between gap-3 rounded-[6px] bg-surface px-2.5 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-[12.5px] font-medium text-ink-strong">
+                          {pending.title ?? pending.path}
+                        </p>
+                        <p className="truncate text-[11px] text-ink-faint">
+                          Sent to {pending.email}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void acceptHere(
+                            pending.pendingShareId as Id<'pendingAtomShares'>,
+                          )
+                        }
+                        className="shrink-0 rounded-full border border-rule bg-surface px-3 py-1 text-[11.5px] font-semibold text-ink-dim transition-colors hover:border-ink-faint hover:text-ink-strong disabled:opacity-40"
+                      >
+                        Accept here
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </section>
         )}
 
         <section className="mt-6">
@@ -404,11 +505,13 @@ export function ShareDialog({
                   className="grid grid-cols-[36px_minmax(0,1fr)_auto_32px] items-center gap-3 rounded-[6px] py-1"
                 >
                   <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
-                    {s.granteeOrgId ? (
-                      <Users className="size-4" />
-                    ) : (
-                      <span className="text-[12px] font-semibold">P</span>
-                    )}
+                      {s.granteeOrgId ? (
+                        <Users className="size-4" />
+                      ) : s.granteeUserId ? (
+                        <Mail className="size-4" />
+                      ) : (
+                        <span className="text-[12px] font-semibold">P</span>
+                      )}
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-[13px] font-medium text-ink-strong">
@@ -421,7 +524,9 @@ export function ShareDialog({
                     <p className="truncate text-[11.5px] text-ink-faint">
                       {s.granteeOrgId
                         ? 'Workspace'
-                        : (s.granteeEmail ?? 'Person')}
+                        : s.granteeUserId && s.granteeWorkspaceId
+                          ? `${s.granteeEmail ?? 'Address'} -> ${workspaceName(s.granteeWorkspaceId)}`
+                          : (s.granteeEmail ?? 'Person')}
                     </p>
                   </div>
                   <span className="text-[12px] text-ink-dim">
@@ -440,6 +545,29 @@ export function ShareDialog({
                   >
                     <X className="size-4" />
                   </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {pendingExisting.length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1.5">
+              {pendingExisting.map((s) => (
+                <li
+                  key={s.pendingShareId}
+                  className="grid grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 rounded-[6px] py-1"
+                >
+                  <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
+                    <Mail className="size-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium text-ink-strong">
+                      {s.email}
+                    </p>
+                    <p className="truncate text-[11.5px] text-ink-faint">
+                      Waiting for recipient to choose a workspace
+                    </p>
+                  </div>
+                  <span className="text-[12px] text-ink-dim">Pending</span>
                 </li>
               ))}
             </ul>
