@@ -18,6 +18,7 @@ import { requireWorkspace } from './auth'
 import { countActiveOwners, requireRole } from './orgRoles'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 import { ORG_IDENTITY_PATH } from './inlineAtom'
+import { PLACEHOLDER_SEED_MARKER } from './onboarding'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
@@ -524,7 +525,7 @@ export const _seedNewOrg = internalMutation({
 title: ${name}
 ---
 
-<!-- dohc:placeholder-seed -->
+<!-- ${PLACEHOLDER_SEED_MARKER} -->
 
 _What ${name} does — edit this to describe the team's work, how you operate, and how dohc should help._
 
@@ -555,7 +556,7 @@ _What ${name} does — edit this to describe the team's work, how you operate, a
 title: Dashboard
 ---
 
-<!-- dohc:placeholder-seed -->
+<!-- ${PLACEHOLDER_SEED_MARKER} -->
 
 _This is yours — edit anything here directly. For bigger changes, just ask me._
 

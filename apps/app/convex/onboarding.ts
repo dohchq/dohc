@@ -86,7 +86,7 @@ export type OnboardingProgress = {
   dashboardPath: string | null
 }
 
-const PLACEHOLDER_SEED_MARKER = 'dohc:placeholder-seed'
+export const PLACEHOLDER_SEED_MARKER = 'dohc:placeholder-seed'
 
 function isPlaceholderSeed(body: string): boolean {
   return body.includes(PLACEHOLDER_SEED_MARKER)
