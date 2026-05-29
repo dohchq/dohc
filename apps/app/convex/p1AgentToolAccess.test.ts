@@ -233,6 +233,35 @@ describe('P1 — tool wiring (structural)', () => {
     expect(tool).toMatch(/viewerSubject\s*,?\s*\}/)
   })
 
+  it('run_skill and run_command agent tools gate bodies with viewerSubject', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve, dirname } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    const SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
+
+    const toolSource = (name: 'run_skill' | 'run_command') => {
+      const start = SRC.indexOf(`    ${name}: createTool({`)
+      expect(start).toBeGreaterThan(0)
+      const nextTool = SRC.indexOf('\n\n    ', start + 1)
+      expect(nextTool).toBeGreaterThan(start)
+      return SRC.slice(start, nextTool)
+    }
+
+    for (const name of ['run_skill', 'run_command'] as const) {
+      const tool = toolSource(name)
+      const viewerIdx = tool.indexOf(
+        'const viewerSubject = await viewerSubjectFromTool(ctx)',
+      )
+      const getInternalIdx = tool.indexOf('internal.atoms._getInternal')
+      expect(viewerIdx).toBeGreaterThan(0)
+      expect(getInternalIdx).toBeGreaterThan(viewerIdx)
+      expect(tool.slice(getInternalIdx)).toMatch(
+        /_getInternal[\s\S]{0,200}\{[\s\S]{0,250}\bviewerSubject\b[\s\S]{0,250}\}\s*\)/,
+      )
+    }
+  })
+
   it('viewerSubjectFromTool helper + _viewerSubjectForCaller bridge exist', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve, dirname } = await import('node:path')

@@ -1,15 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
-import { Search, FileText, Globe, Sparkles, Star } from 'lucide-react'
+import { Search, FileText, Globe, Sparkles, Star, SquareTerminal } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { normalizeQuery } from '../../convex/searchText'
 
-function ResultIcon({ type }: { type: 'html' | 'skill' | null }) {
+function ResultIcon({ type }: { type: 'html' | 'skill' | 'command' | null }) {
   if (type === 'html')
     return <Globe className="size-3.5 shrink-0 text-ink-faint" strokeWidth={2} />
   if (type === 'skill')
     return (
       <Sparkles className="size-3.5 shrink-0 text-violet-500" strokeWidth={2} />
+    )
+  if (type === 'command')
+    return (
+      <SquareTerminal
+        className="size-3.5 shrink-0 text-accent"
+        strokeWidth={2}
+      />
     )
   return <FileText className="size-3.5 shrink-0 text-ink-faint" strokeWidth={2} />
 }

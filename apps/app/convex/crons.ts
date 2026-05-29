@@ -26,16 +26,4 @@ crons.interval(
   {},
 )
 
-// Phase 4 Unit 4b — the weekly loop. Fan-out enumerates the
-// onboarding table and schedules _reconcile per workspace (batched +
-// self-rescheduling). `crons.interval` per the Convex guidelines
-// (not the weekly helper). Reconcile only ever creates ADVISORY
-// pending proposals — never mutates user data.
-crons.interval(
-  'weekly reconcile loop',
-  { hours: 24 * 7 },
-  internal.loop._reconcileAll,
-  {},
-)
-
 export default crons

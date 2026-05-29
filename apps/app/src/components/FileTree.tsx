@@ -34,6 +34,7 @@ import {
   User,
   Target,
   Building2,
+  SquareTerminal,
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
@@ -1334,6 +1335,11 @@ function TreeRowNode({
             className="size-3.5 shrink-0 opacity-80 text-violet-500"
             strokeWidth={1.8}
           />
+        ) : node.page!.type === 'command' ? (
+          <SquareTerminal
+            className="size-3.5 shrink-0 opacity-80 text-accent"
+            strokeWidth={1.8}
+          />
         ) : (
           <FileText className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         )}
@@ -1477,15 +1483,35 @@ function TreeRowNode({
           // file-org-v1 D4.5 — folders use the lucide folder shape,
           // tinted by the chosen color. (Icons/emojis are files-only.)
           const isContextFolder = node.fullPath === '.context'
+          const isSkillsFolder = node.fullPath === '.skills'
+          const isCommandsFolder = node.fullPath === '.commands'
           const chosenColor = isContextFolder
             ? 'var(--color-accent)'
-            : colorVarFor(node.color)
-          const Base = isContextFolder ? Brain : isExpanded ? FolderOpen : Folder
+            : isSkillsFolder
+              ? 'var(--color-violet-500, #8b5cf6)'
+              : isCommandsFolder
+                ? 'var(--color-accent)'
+                : colorVarFor(node.color)
+          const Base = isContextFolder
+            ? Brain
+            : isSkillsFolder
+              ? Sparkles
+              : isCommandsFolder
+                ? SquareTerminal
+                : isExpanded
+                  ? FolderOpen
+                  : Folder
           return (
             <Base
               className="size-3.5 shrink-0"
               strokeWidth={1.8}
-              style={{ color: chosenColor, opacity: isContextFolder || node.color ? 1 : 0.7 }}
+              style={{
+                color: chosenColor,
+                opacity:
+                  isContextFolder || isSkillsFolder || isCommandsFolder || node.color
+                    ? 1
+                    : 0.7,
+              }}
             />
           )
         })()}

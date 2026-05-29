@@ -1,16 +1,78 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Search, Sparkles } from 'lucide-react'
+import { Search, Sparkles, SquareTerminal } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { OPEN_SKETCH_EVENT } from './AtomEditor'
 
-type Command = {
+type RunnableRow = {
+  path: string
+  label: string
+}
+
+export type CommandPaletteEntry = {
   id: string
   title: string
   hint?: string
-  // P3.2 — when set, an icon (Sparkles) renders alongside the title.
-  kind?: 'skill' | undefined
+  kind?: 'skill' | 'command' | undefined
   run: () => void
+}
+
+export function buildCommandPaletteEntries({
+  savedCommands,
+  skills,
+  onClose,
+  onFireSkill,
+  onFireCommand,
+  onOpenSketch,
+}: {
+  savedCommands: ReadonlyArray<RunnableRow>
+  skills: ReadonlyArray<RunnableRow>
+  onClose: () => void
+  onFireSkill: (path: string) => void
+  onFireCommand: (path: string) => void
+  onOpenSketch: () => void
+}): CommandPaletteEntry[] {
+  const out: CommandPaletteEntry[] = []
+  // Commands first: they're explicit user-fired shortcuts. Skills
+  // follow as reusable process instructions.
+  for (const c of savedCommands) {
+    out.push({
+      id: `command.${c.path}`,
+      title: c.label,
+      hint: `command · ${c.path}`,
+      kind: 'command',
+      run: () => {
+        onClose()
+        onFireCommand(c.path)
+      },
+    })
+  }
+  for (const s of skills) {
+    out.push({
+      id: `skill.${s.path}`,
+      title: s.label,
+      hint: `skill · ${s.path}`,
+      kind: 'skill',
+      run: () => {
+        onClose()
+        // P3+P4 Codex fold F3: dedicated channel — skill
+        // dispatch routes through onFireSkill. Only this
+        // callsite (and only with a real skill path) reaches
+        // the skill-fire dispatch.
+        onFireSkill(s.path)
+      },
+    })
+  }
+  out.push({
+    id: 'sys.insert-ascii-sketch',
+    title: 'Insert ASCII sketch',
+    hint: 'editor · ⌘⇧D',
+    run: () => {
+      onClose()
+      onOpenSketch()
+    },
+  })
+  return out
 }
 
 type Props = {
@@ -22,12 +84,14 @@ type Props = {
   // sendMessage({entry:'skill-fire', prompt: path}) — never through
   // detectSkillFire.
   onFireSkill: (path: string) => void
+  onFireCommand: (path: string) => void
 }
 
 export function CommandPalette({
   open,
   onClose,
   onFireSkill,
+  onFireCommand,
 }: Props) {
   // Track-3 P3.2 — surface the user's saved skills here so the
   // ⌘K palette IS the design's "⌘K palette / slash-command"
@@ -39,45 +103,24 @@ export function CommandPalette({
   // Zero new wiring at this layer; the palette is a discoverable
   // hotkey over the same structural-enforcement chain.
   const skills = useQuery(api.skills.list, {}) ?? []
+  const savedCommands = useQuery(api.skills.listCommands, {}) ?? []
   const [filter, setFilter] = useState('')
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  const commands: Command[] = useMemo(() => {
-    const out: Command[] = []
-    // Skills first (they're the user's OWN saved processes; most
-    // relevant for daily use). System items follow.
-    for (const s of skills) {
-      out.push({
-        id: `skill.${s.path}`,
-        title: s.label,
-        hint: `skill · ${s.path}`,
-        kind: 'skill',
-        run: () => {
-          onClose()
-          // P3+P4 Codex fold F3: dedicated channel — skill
-          // dispatch routes through onFireSkill. Only this
-          // callsite (and only with a real skill path) reaches
-          // the skill-fire dispatch.
-          onFireSkill(s.path)
-        },
-      })
-    }
-    out.push({
-      id: 'sys.insert-ascii-sketch',
-      title: 'Insert ASCII sketch',
-      hint: 'editor · ⌘⇧D',
-      run: () => {
-        onClose()
-        window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT))
-      },
-    })
-    return out
-  }, [
-    skills,
-    onClose,
-    onFireSkill,
-  ])
+  const commands = useMemo(
+    () =>
+      buildCommandPaletteEntries({
+        savedCommands,
+        skills,
+        onClose,
+        onFireCommand,
+        onFireSkill,
+        onOpenSketch: () =>
+          window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT)),
+      }),
+    [savedCommands, skills, onClose, onFireCommand, onFireSkill],
+  )
 
   const filtered = useMemo(() => {
     const q = filter.toLowerCase().trim()
@@ -166,6 +209,13 @@ export function CommandPalette({
                   <span className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-0.5 rounded-r bg-ink-strong" />
                 )}
                 <span className="flex items-center gap-2 min-w-0 flex-1">
+                  {c.kind === 'command' && (
+                    <SquareTerminal
+                      className="size-3 text-accent shrink-0"
+                      strokeWidth={2.2}
+                      aria-hidden
+                    />
+                  )}
                   {c.kind === 'skill' && (
                     <Sparkles
                       className="size-3 text-violet-500 shrink-0"

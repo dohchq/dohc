@@ -174,7 +174,7 @@ async function completeWorkspaceOnboarding(
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
         `(${identityFile}=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-        `Write a populated dashboard and ${identityFile} first.`,
+      `Write a populated dashboard and ${identityFile} first.`,
     )
   }
   if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })

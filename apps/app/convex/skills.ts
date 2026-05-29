@@ -1,7 +1,13 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
-import { isSkillAtomBody, isLegacySkillPath } from './atomId'
+import { canReadAtom } from './atomAccess'
+import {
+  isCommandAtomBody,
+  isSkillAtomBody,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
+} from './atomId'
 
 // Track-3 P3 — public query exposing the user's saved skills to
 // the UI. The ⌘K palette / slash-command surface subscribes here
@@ -38,17 +44,52 @@ export const list = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    // A skill atom either declares `type: skill` in its frontmatter
-    // (the canonical Track-3 form) OR lives at the legacy
-    // `skills/*` path (the compat-window term still recognized
-    // until §6.4.5 cleanup). Both sources project as a `skill`
-    // entry the user can fire from ⌘K.
-    return rows
-      .filter((r) => isSkillAtomBody(r.body) || isLegacySkillPath(r.path))
+    const visible = []
+    for (const r of rows) {
+      if (
+        isWorkspaceSkillPath(r.path) &&
+        isSkillAtomBody(r.body) &&
+        (await canReadAtom(ctx, r._id, identity.subject))
+      ) {
+        visible.push(r)
+      }
+    }
+    return visible
+      .map((r) => ({
+        path: r.path,
+        label: pathDeriveLabel(r.path),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  },
+})
+
+export const listCommands = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const rows = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .collect()
+    const visible = []
+    for (const r of rows) {
+      if (
+        isWorkspaceCommandPath(r.path) &&
+        isCommandAtomBody(r.body) &&
+        (await canReadAtom(ctx, r._id, identity.subject))
+      ) {
+        visible.push(r)
+      }
+    }
+    return visible
       .map((r) => ({
         path: r.path,
         label: pathDeriveLabel(r.path),

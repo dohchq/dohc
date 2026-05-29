@@ -25,8 +25,11 @@ import {
   setFrontmatterIcon,
   isHtmlAtomBody,
   isHtmlPath,
+  isCommandAtomBody,
   isSkillAtomBody,
   isLegacySkillPath,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
   splitFrontmatter,
   joinFrontmatter,
   injectFrontmatterTitle,
@@ -372,7 +375,11 @@ export const list = query({
         type:
           isHtmlPath(r.path) || isHtmlAtomBody(r.body)
             ? ('html' as const)
-            : isSkillAtomBody(r.body) || isLegacySkillPath(r.path)
+            : isCommandAtomBody(r.body) || isWorkspaceCommandPath(r.path)
+              ? ('command' as const)
+              : isSkillAtomBody(r.body) ||
+                  isWorkspaceSkillPath(r.path) ||
+                  isLegacySkillPath(r.path)
               ? ('skill' as const)
               : null,
         // file-org-v1 §3.1 (Track-4 D4.4a) — project the three

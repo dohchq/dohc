@@ -51,6 +51,12 @@ import { internal } from './_generated/api'
 // self-evident from the type. `depth: 0` is semantically equivalent
 // to "row absent", and we DELETE the row in that case (single
 // canonical representation; bounded growth tightened).
+//
+// Commands reuse the same destructive-tool BELT but carry `kind:
+// 'command'` while their body is being interpreted. That one distinct
+// state lets a saved command compose exactly one saved skill; the first
+// `run_skill` atomically upgrades the row to `kind:'skill'`, after
+// which ordinary no-recursion skill rules apply again.
 export const _writeTurnState = internalMutation({
   args: {
     threadId: v.string(),
@@ -73,12 +79,13 @@ export const _writeTurnState = internalMutation({
       return
     }
     if (existing) {
-      await ctx.db.patch(existing._id, { depth })
+      await ctx.db.patch(existing._id, { depth, kind: 'skill' })
     } else {
       await ctx.db.insert('skillTurnState', {
         threadId,
         promptMessageId,
         depth,
+        kind: 'skill',
         startedAt: Date.now(),
       })
     }
@@ -97,12 +104,43 @@ export const _writeTurnState = internalMutation({
 // of them, so storage is fine, but BOTH would return bodies,
 // violating "ONE skill per turn".
 //
-// This mutation is the atomic primitive: in ONE transaction,
-// reads the row; if absent OR depth=0, inserts/patches to
-// depth=1 and returns `{ok: true}`. If present with depth>0,
-// returns `{ok: false}` (the caller refuses to execute that
-// skill's body).
+// This mutation is the atomic primitive: in ONE transaction, reads
+// the row; if absent OR depth=0, inserts/patches to depth=1 and
+// returns `{ok: true}`. If present as a command turn, upgrades it to
+// a skill turn and returns `{ok:true}` (the one-hop command→skill
+// composition path). If present as a skill turn, returns `{ok:false}`
+// (the caller refuses to execute that skill's body).
 export const _beginSkillTurnIfClear = internalMutation({
+  args: {
+    threadId: v.string(),
+    promptMessageId: v.string(),
+  },
+  handler: async (ctx, { threadId, promptMessageId }) => {
+    const existing = await ctx.db
+      .query('skillTurnState')
+      .withIndex('by_thread_msg', (q) =>
+        q.eq('threadId', threadId).eq('promptMessageId', promptMessageId),
+      )
+      .unique()
+    if (existing && existing.depth > 0 && existing.kind !== 'command') {
+      return { ok: false as const, reason: 'already-started' as const }
+    }
+    if (existing) {
+      await ctx.db.patch(existing._id, { depth: 1, kind: 'skill' })
+    } else {
+      await ctx.db.insert('skillTurnState', {
+        threadId,
+        promptMessageId,
+        depth: 1,
+        kind: 'skill',
+        startedAt: Date.now(),
+      })
+    }
+    return { ok: true as const }
+  },
+})
+
+export const _beginCommandTurnIfClear = internalMutation({
   args: {
     threadId: v.string(),
     promptMessageId: v.string(),
@@ -118,12 +156,13 @@ export const _beginSkillTurnIfClear = internalMutation({
       return { ok: false as const, reason: 'already-started' as const }
     }
     if (existing) {
-      await ctx.db.patch(existing._id, { depth: 1 })
+      await ctx.db.patch(existing._id, { depth: 1, kind: 'command' })
     } else {
       await ctx.db.insert('skillTurnState', {
         threadId,
         promptMessageId,
         depth: 1,
+        kind: 'command',
         startedAt: Date.now(),
       })
     }
@@ -160,6 +199,28 @@ export const _readTurnDepth = internalQuery({
       )
       .unique()
     return { depth: row?.depth ?? 0 }
+  },
+})
+
+export const _readTurnState = internalQuery({
+  args: {
+    threadId: v.string(),
+    promptMessageId: v.string(),
+  },
+  handler: async (ctx, { threadId, promptMessageId }) => {
+    const row = await ctx.db
+      .query('skillTurnState')
+      .withIndex('by_thread_msg', (q) =>
+        q.eq('threadId', threadId).eq('promptMessageId', promptMessageId),
+      )
+      .unique()
+    return {
+      depth: row?.depth ?? 0,
+      kind:
+        row && row.depth > 0
+          ? (row.kind ?? ('skill' as const))
+          : null,
+    }
   },
 })
 

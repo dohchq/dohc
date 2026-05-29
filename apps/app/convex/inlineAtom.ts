@@ -411,11 +411,11 @@ export function parseFormulaFromSrc(src: string): InlineAtom | null {
 // blocks. Implementations apply the parser to text nodes only.")
 //
 // The editor gets this from ProseMirror text nodes (skipping code
-// marks). Server-side scanners (live-total rollups, the weekly
-// reconcile) MUST get the SAME guarantee or `{billable: 999}` /
-// `{goal_x: 1}` inside ANY code container becomes phantom data.
+// marks). Server-side scanners for live totals MUST get the SAME
+// guarantee or `{billable: 999}` inside ANY code container becomes
+// phantom data.
 //
-// Phase-4 review (Codex MED): a regex code-masker is whack-a-mole —
+// A regex code-masker is whack-a-mole:
 // it under-masked tilde fences in blockquotes/lists and indented
 // code blocks (exactly the brittle hand-rolled markdown the
 // inline-atom contract exists to avoid). So use the canonical
@@ -437,7 +437,7 @@ type MdNode = {
 
 /**
  * The SINGLE FROZEN parser, run INDEPENDENTLY per CommonMark `text`
- * node — NEVER on a joined string. Phase-4 review (Codex MED): joining
+ * node — NEVER on a joined string. Joining
  * text across inline children (emphasis, links) fabricates/corrupts
  * atoms — `{hours: *6*}` would split into `{hours: ` + `6` + `}` and
  * rejoin into a clean false `hours=6`. By the FROZEN grammar an atom
@@ -449,7 +449,7 @@ type MdNode = {
  *
  * NOTE: returned atom start/end are per-text-node, NOT document
  * offsets — server callers use only kind/key/value (live-total
- * rollups, the weekly reconcile); the editor has its own ProseMirror
+ * rollups); the editor has its own ProseMirror
  * walk and does not call this. This is the single correct entry point
  * for server-side markdown body scanning.
  */
@@ -495,7 +495,7 @@ export function parseInlineAtomsFromMarkdownStrict(md: string): InlineAtom[] {
 }
 
 /** FAIL-SOFT — never throws (returns `[]` on a parse error). The
- *  correct entry point ONLY for own-desk reads (rollups/cron/loop):
+ *  correct entry point ONLY for own-desk live-total reads:
  *  there is no gate there, so over-reading [] is harmless. The
  *  cross-desk gather + structural capture use the WITH-STATUS helper
  *  (which wraps the STRICT parser) so a parse error fails CLOSED. */
@@ -553,7 +553,7 @@ export const ATOM_MAX_PER_NOTE = 2000
  *  note-count + per-note-byte alone permit ~SCAN_CAP×256KB ≈ 1.2GB of
  *  markdown in one resolve transaction. Over-budget ⇒ DROP atom
  *  sources (gather) / overflow (consent) — fail-closed, never a throw
- *  escaping the rollup/loop fail-soft contract. */
+ *  escaping the live-total fail-soft contract. */
 export const ATOM_TOTAL_BYTES_MAX = 8 * 1024 * 1024
 
 /** UTF-8 byte length — the SINGLE accounting both the gather and the

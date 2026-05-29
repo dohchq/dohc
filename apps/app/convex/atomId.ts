@@ -112,6 +112,7 @@ const FM_TYPE_HTML_RE = /^type:[ \t]*['"]?html['"]?[ \t]*\r?$/m
 // line-anchored, case-sensitive lowercase, bare OR single-/double-
 // quoted, optional surrounding spaces. NO trailing comments/arrays.
 const FM_TYPE_SKILL_RE = /^type:[ \t]*['"]?skill['"]?[ \t]*\r?$/m
+const FM_TYPE_COMMAND_RE = /^type:[ \t]*['"]?command['"]?[ \t]*\r?$/m
 
 // Count `type:` line declarations in a frontmatter `fm` block. O(n)
 // over the already-bounded `fm` (splitFrontmatter has the Phase-4
@@ -173,6 +174,13 @@ export function isSkillAtomBody(body: string): boolean {
   return FM_TYPE_SKILL_RE.test(fm)
 }
 
+export function isCommandAtomBody(body: string): boolean {
+  const { fm } = splitFrontmatter(body ?? '')
+  if (!fm) return false
+  if (countTypeLines(fm) !== 1) return false
+  return FM_TYPE_COMMAND_RE.test(fm)
+}
+
 // Track-3 P2c fold (indep F3) — extractors for STRUCTURALLY-
 // BOUNDED enum frontmatter fields exposed via read_atom's INERT
 // preview (§3.1 design lines 467-481). NEVER user-authored prose;
@@ -210,6 +218,14 @@ export function isLegacySkillPath(path: string): boolean {
   return path.startsWith('skills/')
 }
 
+export function isWorkspaceSkillPath(path: string): boolean {
+  return path.startsWith('.skills/')
+}
+
+export function isWorkspaceCommandPath(path: string): boolean {
+  return path.startsWith('.commands/')
+}
+
 // skills-commands-v1 §6.1 — the ONE unified predicate every
 // value-atom scanner uses. EXACTLY mirrors the §6 audited skip:
 // html (view, not a source — §6) OR skill (instructions, not a
@@ -232,6 +248,9 @@ export function isNonDataAtom(path: string, body: string): boolean {
     isHtmlPath(path) ||
     isHtmlAtomBody(body) ||
     isSkillAtomBody(body) ||
+    isCommandAtomBody(body) ||
+    isWorkspaceSkillPath(path) ||
+    isWorkspaceCommandPath(path) ||
     isLegacySkillPath(path)
   )
 }

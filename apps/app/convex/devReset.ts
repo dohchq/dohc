@@ -84,7 +84,6 @@ export const wipeWorkspace = internalMutation({
       ['workspaceSettings', 'by_workspace'],
       ['memberships', 'by_workspace'],
       ['rollups', 'by_workspace_identifier'],
-      ['proposals', 'by_workspace_status'],
     ]
     for (const [table, index] of byWs) {
       deleted[table] = await drain(ctx, b, () =>
