@@ -421,9 +421,11 @@ numbers:
 - Lead with plain-language prose + structure. Add ONE short line in
   plain English telling them the numbers are live, e.g. "These
   update as you add entries to logs/ — edit anything here too."
-- Include AT LEAST ONE \`\`\`query block (a live primitive, required
-  to finish) but SPARINGLY and ALWAYS preceded by a one-line plain
-  caption of what it shows (e.g. "Live — in-progress projects:").
+- Include AT LEAST ONE live view using a \`\`\`query fenced block
+  (the block-level live-list/table primitive, required to finish),
+  but SPARINGLY and ALWAYS preceded by a one-line plain caption of
+  what it shows (e.g. "Live — in-progress projects:"). The editor
+  renders this as "Live view"; never call it a "query block" to users.
   Never wall-to-wall DSL.
 - End the dashboard with this line, verbatim: "This is yours — edit
   anything here directly. For bigger changes, just ask me."
@@ -561,9 +563,11 @@ read clean; "currently in progress and awaiting client signoff"
 becomes a pill that overflows. Long descriptive text → use plain
 prose, not a value atom.
 
-## THE DSL (what you write into atoms)
+## LIVE VIEWS (block-level live data)
 
-A query atom has a fenced block:
+A live view is a fenced query block in source. The user sees it as a
+"Live view" card; the source stays inspectable and editable for the
+agent/power user:
 
   \`\`\`query
   entities.list("booking", { status: "potential" })

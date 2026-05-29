@@ -523,7 +523,7 @@ test('playground adjacent code blocks keep clean block chrome', async ({
   expect(secondToolbarLayout.gap ?? 0).toBeLessThanOrEqual(18)
 })
 
-test('playground query blocks do not call authenticated live resolvers', async ({
+test('playground live views do not call authenticated live resolvers', async ({
   page,
 }) => {
   await page.goto('/playground')
@@ -533,10 +533,10 @@ test('playground query blocks do not call authenticated live resolvers', async (
     .click()
   await page.keyboard.press('End')
   await page.keyboard.press('Enter')
-  await page.keyboard.type('/query')
+  await page.keyboard.type('/view')
 
-  await page.getByRole('option', { name: /query block/i }).click()
+  await page.getByRole('option', { name: /live view/i }).click()
 
-  await expect(page.locator('.query-atom-caption')).toContainText(/query/i)
+  await expect(page.locator('.query-atom-caption')).toContainText(/live view/i)
   await expect(page.locator('body')).not.toContainText('Something went wrong')
 })
