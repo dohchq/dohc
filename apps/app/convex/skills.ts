@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
 import {
   isCommandAtomBody,
   isSkillAtomBody,
@@ -43,12 +44,23 @@ export const list = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    return rows
-      .filter((r) => isWorkspaceSkillPath(r.path) && isSkillAtomBody(r.body))
+    const visible = []
+    for (const r of rows) {
+      if (
+        isWorkspaceSkillPath(r.path) &&
+        isSkillAtomBody(r.body) &&
+        (await canReadAtom(ctx, r._id, identity.subject))
+      ) {
+        visible.push(r)
+      }
+    }
+    return visible
       .map((r) => ({
         path: r.path,
         label: pathDeriveLabel(r.path),
@@ -61,14 +73,23 @@ export const listCommands = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
     const rows = await ctx.db
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    return rows
-      .filter(
-        (r) => isWorkspaceCommandPath(r.path) && isCommandAtomBody(r.body),
-      )
+    const visible = []
+    for (const r of rows) {
+      if (
+        isWorkspaceCommandPath(r.path) &&
+        isCommandAtomBody(r.body) &&
+        (await canReadAtom(ctx, r._id, identity.subject))
+      ) {
+        visible.push(r)
+      }
+    }
+    return visible
       .map((r) => ({
         path: r.path,
         label: pathDeriveLabel(r.path),

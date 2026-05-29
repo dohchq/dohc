@@ -6,6 +6,31 @@ import { internal, api } from './_generated/api'
 import { pathDeriveLabel } from './skills'
 
 const modules = import.meta.glob('./**/*.ts')
+const ALICE = 'user|skills_alice'
+const BOB = 'user|skills_bob'
+
+async function orgWithMembers(t: ReturnType<typeof convexTest>) {
+  const { orgId, inviteCode } = await t
+    .withIdentity({ subject: ALICE, email: 'a@b.test' })
+    .mutation(api.orgs.createOrg, { name: 'Skills Org' })
+  await t
+    .withIdentity({ subject: BOB, email: 'b@b.test' })
+    .mutation(api.orgs.joinOrg, { inviteCode })
+  return orgId
+}
+
+async function atomByPath(
+  t: ReturnType<typeof convexTest>,
+  workspaceId: string,
+  path: string,
+) {
+  return await t.run(async (ctx) =>
+    (await ctx.db.query('atoms').collect()).find(
+      (row: { workspaceId: string; path: string }) =>
+        row.workspaceId === workspaceId && row.path === path,
+    ),
+  )
+}
 
 // Track-3 P3 — `api.skills.list` query lockfile. Used by the
 // chat UI's slash-command detection to render the skill list.
@@ -155,6 +180,32 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       '.skills/team/standup.md',
     ])
   })
+
+  it('filters org skills through atom read access', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await orgWithMembers(t)
+    const asAlice = t.withIdentity({ subject: ALICE, email: 'a@b.test' })
+    const asBob = t.withIdentity({ subject: BOB, email: 'b@b.test' })
+    await asAlice.mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: '.skills/private-review.md',
+      body: '---\ntype: skill\n---\nPrivate skill.',
+    })
+
+    expect(await asAlice.query(api.skills.list, { activeWorkspaceId: orgId }))
+      .toEqual([{ path: '.skills/private-review.md', label: 'private-review' }])
+    expect(await asBob.query(api.skills.list, { activeWorkspaceId: orgId }))
+      .toEqual([])
+
+    const skill = await atomByPath(t, orgId, '.skills/private-review.md')
+    await asAlice.mutation(api.atomAccess.setAtomAccess, {
+      activeWorkspaceId: orgId,
+      atomId: skill!._id,
+      mode: null,
+    })
+    expect(await asBob.query(api.skills.list, { activeWorkspaceId: orgId }))
+      .toEqual([{ path: '.skills/private-review.md', label: 'private-review' }])
+  })
 })
 
 describe('Track-3 P3 — api.skills.listCommands returns user-created commands', () => {
@@ -178,5 +229,34 @@ describe('Track-3 P3 — api.skills.listCommands returns user-created commands',
     expect(res).toEqual([
       { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
     ])
+  })
+
+  it('filters org commands through atom read access', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await orgWithMembers(t)
+    const asAlice = t.withIdentity({ subject: ALICE, email: 'a@b.test' })
+    const asBob = t.withIdentity({ subject: BOB, email: 'b@b.test' })
+    await asAlice.mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: '.commands/private-invoice.md',
+      body: '---\ntype: command\n---\nDraft private invoice.',
+    })
+
+    expect(
+      await asAlice.query(api.skills.listCommands, { activeWorkspaceId: orgId }),
+    ).toEqual([{ path: '.commands/private-invoice.md', label: 'private-invoice' }])
+    expect(
+      await asBob.query(api.skills.listCommands, { activeWorkspaceId: orgId }),
+    ).toEqual([])
+
+    const command = await atomByPath(t, orgId, '.commands/private-invoice.md')
+    await asAlice.mutation(api.atomAccess.setAtomAccess, {
+      activeWorkspaceId: orgId,
+      atomId: command!._id,
+      mode: null,
+    })
+    expect(
+      await asBob.query(api.skills.listCommands, { activeWorkspaceId: orgId }),
+    ).toEqual([{ path: '.commands/private-invoice.md', label: 'private-invoice' }])
   })
 })

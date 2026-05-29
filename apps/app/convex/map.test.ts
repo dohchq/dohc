@@ -181,4 +181,31 @@ describe('map regeneration', () => {
     expect(line.length).toBeLessThan(400)
     expect(line).toContain('...')
   })
+
+  it('regenerates and clears duplicate schedule rows without throwing', async () => {
+    const t = convexTest(schema, modules)
+    await seedNote(t, W, 'notes/a.md', 'Alpha')
+    await t.run(async (ctx) => {
+      await ctx.db.insert('mapRegenSchedule', {
+        workspaceId: W,
+        scheduledFor: 1,
+      })
+      await ctx.db.insert('mapRegenSchedule', {
+        workspaceId: W,
+        scheduledFor: 2,
+      })
+    })
+
+    await expect(
+      t.mutation(internal.map._regenerateMapDebounced, { workspaceId: W }),
+    ).resolves.toMatchObject({ mapRegen: 'written' })
+    expect(await mapBody(t, W)).not.toBeNull()
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', W))
+        .collect(),
+    )
+    expect(rows).toEqual([])
+  })
 })

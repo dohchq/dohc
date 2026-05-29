@@ -1,5 +1,6 @@
 import { internalMutation } from './_generated/server'
 import type { MutationCtx, QueryCtx } from './_generated/server'
+import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { internal } from './_generated/api'
 import { MAP_PATH } from './inlineAtom'
@@ -174,14 +175,41 @@ export const _regenerateMapForWorkspace = internalMutation({
 
 export const REGEN_DEBOUNCE_MS = 2_000
 
+type ScheduleRow = {
+  _id: Id<'mapRegenSchedule'>
+  scheduledFor: number
+  scheduledJobId?: Id<'_scheduled_functions'>
+}
+
+async function loadPreferredScheduleRow(
+  ctx: MutationCtx,
+  workspaceId: string,
+): Promise<{ preferred: ScheduleRow | null; extras: ScheduleRow[] }> {
+  const rows = (await ctx.db
+    .query('mapRegenSchedule')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .take(16)) as ScheduleRow[]
+  const sorted = rows
+    .slice()
+    .sort((a, b) =>
+      b.scheduledFor === a.scheduledFor
+        ? String(b._id).localeCompare(String(a._id))
+        : b.scheduledFor - a.scheduledFor,
+    )
+  return { preferred: sorted[0] ?? null, extras: sorted.slice(1) }
+}
+
 export async function scheduleMapRegen(
   ctx: MutationCtx,
   workspaceId: string,
 ): Promise<void> {
-  const existing = await ctx.db
-    .query('mapRegenSchedule')
-    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-    .unique()
+  const { preferred: existing, extras } = await loadPreferredScheduleRow(
+    ctx,
+    workspaceId,
+  )
+  for (const extra of extras) {
+    await ctx.db.delete(extra._id)
+  }
   const now = Date.now()
   if (existing && existing.scheduledFor > now) return
 
@@ -213,12 +241,15 @@ export async function scheduleMapRegen(
 export const _regenerateMapDebounced = internalMutation({
   args: { workspaceId: v.string() },
   handler: async (ctx, { workspaceId }) => {
-    const row = await ctx.db
-      .query('mapRegenSchedule')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .unique()
+    const { preferred: row, extras } = await loadPreferredScheduleRow(
+      ctx,
+      workspaceId,
+    )
     if (!row) return
     await ctx.db.delete(row._id)
+    for (const extra of extras) {
+      await ctx.db.delete(extra._id)
+    }
     return await regenerateMapForWorkspace(ctx, workspaceId)
   },
 })

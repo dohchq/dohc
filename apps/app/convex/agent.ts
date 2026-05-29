@@ -1431,9 +1431,11 @@ export const dohcAgent = new Agent(components.agent, {
         // begin — we want a non-runnable skill to surface its
         // refusal as a calm tool_result, not as an ATOMIC LATCH
         // that the model paid to acquire.
+        const viewerSubject = await viewerSubjectFromTool(ctx)
         const body = (await ctx.runQuery(internal.atoms._getInternal, {
           workspaceId,
           path,
+          viewerSubject,
         })) as string | null
         if (body === null) {
           return `(skill not found: ${path} — call list_skills to see what exists.)`
@@ -1487,9 +1489,11 @@ export const dohcAgent = new Agent(components.agent, {
             'run_command invariant violation: missing threadId/promptMessageId on tool ctx (agent SDK must set both at start.ts:180).',
           )
         }
+        const viewerSubject = await viewerSubjectFromTool(ctx)
         const body = (await ctx.runQuery(internal.atoms._getInternal, {
           workspaceId,
           path,
+          viewerSubject,
         })) as string | null
         if (body === null) {
           return `(command not found: ${path} — call list_commands to see what exists.)`

@@ -591,13 +591,14 @@ function CopyId({ id }: { id: string }) {
   const [done, setDone] = useState(false)
   return (
     <button
-      onClick={() => {
+      onClick={async () => {
+        if (!navigator.clipboard?.writeText) return
         try {
-          void navigator.clipboard?.writeText(id)
+          await navigator.clipboard.writeText(id)
           setDone(true)
           setTimeout(() => setDone(false), 1500)
         } catch {
-          /* clipboard unavailable — the id is still visible on hover */
+          /* clipboard unavailable or permission denied */
         }
       }}
       title={`workspace id for imports/exports: ${id}`}

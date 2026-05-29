@@ -233,6 +233,26 @@ describe('P1 — tool wiring (structural)', () => {
     expect(tool).toMatch(/viewerSubject\s*,?\s*\}/)
   })
 
+  it('run_skill and run_command agent tools gate bodies with viewerSubject', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve, dirname } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    const SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
+
+    for (const name of ['run_skill', 'run_command']) {
+      const match = SRC.match(
+        new RegExp(
+          `${name}:\\s*createTool\\([\\s\\S]+?inputSchema[\\s\\S]+?execute[\\s\\S]+?_getInternal[\\s\\S]{0,500}?\\)\\)`,
+        ),
+      )
+      expect(match).not.toBeNull()
+      const tool = match?.[0] ?? ''
+      expect(tool).toContain('viewerSubjectFromTool(ctx)')
+      expect(tool).toMatch(/viewerSubject\s*,?\s*\}/)
+    }
+  })
+
   it('viewerSubjectFromTool helper + _viewerSubjectForCaller bridge exist', async () => {
     const { readFileSync } = await import('node:fs')
     const { resolve, dirname } = await import('node:path')
