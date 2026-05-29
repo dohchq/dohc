@@ -32,7 +32,6 @@ import type * as htmlAtoms from "../htmlAtoms.js";
 import type * as inlineAtom from "../inlineAtom.js";
 import type * as liveTotal from "../liveTotal.js";
 import type * as liveTotals from "../liveTotals.js";
-import type * as map from "../map.js";
 import type * as onboarding from "../onboarding.js";
 import type * as orgRoles from "../orgRoles.js";
 import type * as orgs from "../orgs.js";
@@ -79,7 +78,6 @@ declare const fullApi: ApiFromModules<{
   inlineAtom: typeof inlineAtom;
   liveTotal: typeof liveTotal;
   liveTotals: typeof liveTotals;
-  map: typeof map;
   onboarding: typeof onboarding;
   orgRoles: typeof orgRoles;
   orgs: typeof orgs;

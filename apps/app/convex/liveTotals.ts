@@ -92,9 +92,6 @@ export async function resolveLiveTotalValue(
   if (notes.length > NOTE_SCAN_CAP) return null // fail-soft
   const atoms: ValueAtom[] = []
   for (const n of notes) {
-    // `.context/_map.md` is a dohc-GENERATED index that echoes note
-    // text; it is a derived artifact, NEVER a source of truth for value atoms.
-    // Counting it would double-count atoms it copied into summaries.
     if (isNonDataAtom(n.path, n.body ?? '')) continue // §6 unified (Track-3 P1)
     // PROSE ONLY — `{billable: 999}` inside a code block is not data
     // (FROZEN contract).

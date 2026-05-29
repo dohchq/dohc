@@ -11,7 +11,6 @@ import {
   isNonDataAtom,
   countTypeLines,
 } from './atomId'
-import { MAP_PATH } from './inlineAtom'
 
 const modules = import.meta.glob('./**/*.ts')
 
@@ -105,8 +104,7 @@ describe('isLegacySkillPath — top-level `skills/` prefix only', () => {
 })
 
 describe('isNonDataAtom — §6 unified predicate (the 11-site source of truth)', () => {
-  it('matches MAP_PATH, html, skill, command, legacy-skill-path', () => {
-    expect(isNonDataAtom(MAP_PATH, 'anything')).toBe(true)
+  it('matches html, skill, command, legacy-skill-path', () => {
     expect(isNonDataAtom('r.md', HTML)).toBe(true)
     expect(isNonDataAtom('s.md', SKILL)).toBe(true)
     expect(isNonDataAtom('.commands/draft-invoice.md', COMMAND)).toBe(true)
