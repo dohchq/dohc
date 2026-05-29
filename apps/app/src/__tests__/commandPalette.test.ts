@@ -4,10 +4,10 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Track-3 P3.2 — STRUCTURAL coverage of the CommandPalette's
-// skill integration. Component-level behavioral tests would need
+// skills + commands integration. Component-level behavioral tests would need
 // @testing-library/react + jsdom (not currently configured); the
-// SKILL-fire INTEGRATION CHAIN — Palette → onFireSkill('<path>')
-// → pendingSkillFire → sendMessage({entry:'skill-fire'})
+// entry INTEGRATION CHAIN — Palette → onFireCommand/onFireSkill('<path>')
+// → pendingCommandFire/pendingSkillFire → sendMessage({entry})
 // → prepareStep BRACE — is BEHAVIORALLY unit-tested at
 // every other layer (detectSkillFire 10 tests; sendMessage 5
 // tests; prepareStep 9 tests). This file locks the palette's
@@ -19,18 +19,25 @@ const SRC = readFileSync(
   'utf8',
 )
 
-describe('Track-3 P3.2 — CommandPalette wires skills via api.skills.list', () => {
-  it('imports api.skills.list', () => {
+describe('Track-3 P3.2 — CommandPalette wires commands and skills', () => {
+  it('imports api.skills queries', () => {
     expect(SRC).toMatch(
       /import\s+\{[^}]*useQuery[^}]*\}\s+from\s+['"]convex\/react['"]/,
     )
     expect(SRC).toMatch(/import\s+\{[^}]*api[^}]*\}\s+from\s+['"]\.\.\/\.\.\/convex\/_generated\/api['"]/)
   })
 
-  it('subscribes to api.skills.list', () => {
+  it('subscribes to api.skills.list and api.skills.listCommands', () => {
     // Org-plan §5: queries now accept an optional `activeWorkspaceId`
     // — palette passes `{}` (omitted ⇒ caller's personal workspace).
     expect(SRC).toMatch(/useQuery\(api\.skills\.list,\s*\{\}\)/)
+    expect(SRC).toMatch(/useQuery\(api\.skills\.listCommands,\s*\{\}\)/)
+  })
+
+  it('iterates commands and pushes a Command per .commands atom', () => {
+    expect(SRC).toMatch(/for\s*\(const\s+c\s+of\s+savedCommands\)/)
+    expect(SRC).toMatch(/id:\s*`command\.\$\{c\.path\}`/)
+    expect(SRC).toMatch(/onFireCommand\(c\.path\)/)
   })
 
   it('iterates skills and pushes a Command per skill', () => {
@@ -46,8 +53,9 @@ describe('Track-3 P3.2 — CommandPalette wires skills via api.skills.list', () 
     expect(SRC).not.toMatch(/onFirePrompt\(`\/\$\{s\.path\}`\)/)
   })
 
-  it('skill commands tag kind:"skill" for the Sparkles icon', () => {
+  it('skill rows tag kind:"skill" and command rows tag kind:"command"', () => {
     expect(SRC).toMatch(/kind:\s*['"]skill['"]/)
+    expect(SRC).toMatch(/kind:\s*['"]command['"]/)
   })
 
   it('renders Sparkles icon ONLY for kind="skill" rows', () => {
@@ -55,16 +63,18 @@ describe('Track-3 P3.2 — CommandPalette wires skills via api.skills.list', () 
     expect(SRC).toMatch(/<Sparkles/)
   })
 
-  it('skills are reactive — useMemo dep array includes skills', () => {
+  it('skills and commands are reactive — useMemo dep array includes both', () => {
     // Without this, a newly-saved skill would not appear until
     // some other dep changed. After P3+P4 fold the deps were
     // reformatted to multiline; the test pins by token, not
     // by inline-comma layout.
     expect(SRC).toMatch(/useMemo\([\s\S]*?\[[\s\S]*?\bskills\b[\s\S]*?\bonClose\b[\s\S]*?\bonFireSkill\b/)
+    expect(SRC).toMatch(/useMemo\([\s\S]*?\[[\s\S]*?\bsavedCommands\b[\s\S]*?\bonFireCommand\b/)
   })
 
   it('skill hint format is `skill · ${path}` (matches the design canonical-id discipline)', () => {
     expect(SRC).toMatch(/hint:\s*`skill\s*·\s*\$\{s\.path\}`/)
+    expect(SRC).toMatch(/hint:\s*`command\s*·\s*\$\{c\.path\}`/)
   })
 
   it('skill commands close the palette before firing', () => {
@@ -100,7 +110,9 @@ describe('Track-3 P3.2 — CommandPalette wires skills via api.skills.list', () 
     // onFireSkill at the palette callsite must call setChatOpen(true)
     // (the route-level state setter for the chat panel visibility).
     expect(paletteBlock).toMatch(/onFireSkill=\{[\s\S]+?setChatOpen\(true\)/)
+    expect(paletteBlock).toMatch(/onFireCommand=\{[\s\S]+?setChatOpen\(true\)/)
     // pendingSkillFire is set on the dedicated channel:
     expect(paletteBlock).toMatch(/setPendingSkillFire\(path\)/)
+    expect(paletteBlock).toMatch(/setPendingCommandFire\(path\)/)
   })
 })

@@ -5,17 +5,19 @@ import { api, internal } from './_generated/api'
 import schema from './schema'
 import {
   isSkillAtomBody,
+  isCommandAtomBody,
   isHtmlAtomBody,
   isLegacySkillPath,
   isNonDataAtom,
   countTypeLines,
 } from './atomId'
-import { INTENT_PATH } from './inlineAtom'
+import { MAP_PATH } from './inlineAtom'
 
 const modules = import.meta.glob('./**/*.ts')
 
 const W = 'ws_t3p1'
 const SKILL = '---\ntype: skill\nid: weekly.review\n---\nWalk the user through:\n1. read logs.md\n2. summarize'
+const COMMAND = '---\ntype: command\nid: draft.invoice\n---\nRun the invoice workflow now.'
 const HTML = '---\ntype: html\nid: report.q3\n---\n<h1>Report</h1>'
 const MD = '---\nid: notes.q3\n---\n# Notes\nbillable: 999\nThis is plain markdown.'
 
@@ -48,6 +50,20 @@ describe('isSkillAtomBody — §1.2 EXACT grammar parity with isHtmlAtomBody', (
     const t0 = Date.now()
     expect(isSkillAtomBody(evil)).toBe(false)
     expect(Date.now() - t0).toBeLessThan(50)
+  })
+})
+
+describe('isCommandAtomBody — commands are explicit runnable chat entries', () => {
+  it('accepts the same strict type grammar as skills/html', () => {
+    expect(isCommandAtomBody('---\ntype: command\nid: x\n---\nbody')).toBe(true)
+    expect(isCommandAtomBody("---\ntype: 'command'\nid: x\n---\nbody")).toBe(true)
+    expect(isCommandAtomBody('---\ntype: "command"\nid: x\n---\nbody')).toBe(true)
+  })
+
+  it('rejects duplicate type declarations and near misses', () => {
+    expect(isCommandAtomBody('---\ntype: command\ntype: skill\n---\nb')).toBe(false)
+    expect(isCommandAtomBody('---\ntype: Command\n---\nb')).toBe(false)
+    expect(isCommandAtomBody('plain type: command')).toBe(false)
   })
 })
 
@@ -89,9 +105,11 @@ describe('isLegacySkillPath — top-level `skills/` prefix only', () => {
 })
 
 describe('isNonDataAtom — §6 unified predicate (the 11-site source of truth)', () => {
-  it('matches html, skill, legacy-skill-path', () => {
+  it('matches MAP_PATH, html, skill, command, legacy-skill-path', () => {
+    expect(isNonDataAtom(MAP_PATH, 'anything')).toBe(true)
     expect(isNonDataAtom('r.md', HTML)).toBe(true)
     expect(isNonDataAtom('s.md', SKILL)).toBe(true)
+    expect(isNonDataAtom('.commands/draft-invoice.md', COMMAND)).toBe(true)
     expect(isNonDataAtom('skills/legacy.md', 'no frontmatter')).toBe(true)
   })
   it('does NOT match plain md / unrelated paths', () => {
@@ -269,25 +287,5 @@ describe('§6 r1-fold FAIL-1 — data → non-data → data round trip clears st
     )
     // A fresh withhold row exists for `billable` (re-confirm required).
     expect(afterFlipBack.length).toBeGreaterThan(0)
-  })
-})
-
-// ── Track-3 P1 r1-fold (Codex FAIL-2): .context/intent.md authored as
-// type:skill/type:html must NOT extract goal proposals. ──
-
-describe('§6 r1-fold FAIL-2 — loop.ts .context/intent.md skips a non-data body', () => {
-  it('a skill-typed .context/intent.md proposes nothing', async () => {
-    const t = convexTest(schema, modules)
-    await t.mutation(internal.atoms._upsertInternal, {
-      workspaceId: W,
-      path: INTENT_PATH,
-      body: '---\ntype: skill\nid: intent\n---\nExample goal {goal_billable: 40}',
-      source: 'user',
-    })
-    const result = await t.mutation(internal.loop._reconcile, {
-      workspaceId: W,
-    })
-    // result shape: { proposed: number, reason?: string }
-    expect(result.proposed).toBe(0)
   })
 })

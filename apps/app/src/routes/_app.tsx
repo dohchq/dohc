@@ -10,8 +10,7 @@ import { useAuth } from '@workos/authkit-tanstack-react-start/client'
 import {
   MessageSquare,
   MessageSquareOff,
-  Shield,
-  RefreshCw,
+  ArrowLeftRight,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
@@ -24,8 +23,7 @@ import { ActivityBar } from '@/components/ActivityBar'
 import { GraphView } from '@/components/GraphView'
 import type { Id } from '../../convex/_generated/dataModel'
 import { Chat } from '@/components/Chat'
-import { SharingPanel } from '@/components/SharingPanel'
-import { ProposalsPanel } from '@/components/ProposalsPanel'
+import { ImportsExportsPanel } from '@/components/SharingPanel'
 import { CommandPalette } from '@/components/CommandPalette'
 import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
@@ -346,6 +344,9 @@ function App() {
   const [pendingSkillFire, setPendingSkillFire] = useState<string | null>(
     null,
   )
+  const [pendingCommandFire, setPendingCommandFire] = useState<string | null>(
+    null,
+  )
   const [enterEdit, setEnterEdit] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -363,32 +364,17 @@ function App() {
       // localStorage unavailable / quota exceeded — non-fatal.
     }
   }, [chatOpen])
-  // P2 — the consent ("Sharing") panel. A PULL surface (design D5):
-  // ephemeral, default-closed, NOT persisted (a standing-open consent
-  // panel would feel like nagging). Shares the single 3rd grid column
-  // with Chat — exactly ONE is ever open (opening one closes the
-  // other), so the grid never grows to 4 columns.
+  // Imports / Exports panel. A pull surface for controlled data/text
+  // crossing workspace boundaries. Per-document sharing stays in the
+  // document Share button.
   const [sharingOpen, setSharingOpen] = useState(false)
-  // P4 — the advisory loop ("Loop") panel. Ephemeral pull surface
-  // like SharingPanel. The 3rd grid column holds EXACTLY ONE of
-  // {chat, sharing, proposals}: every toggle force-closes the OTHER
-  // TWO (the real build trap is 3 children in a 2-col grid — the
-  // grid ternary below MUST include proposalsOpen in lockstep).
-  const [proposalsOpen, setProposalsOpen] = useState(false)
   const toggleChat = useCallback(() => {
     setChatOpen((c) => !c)
     setSharingOpen(false)
-    setProposalsOpen(false)
   }, [])
   const toggleSharing = useCallback(() => {
     setSharingOpen((s) => !s)
     setChatOpen(false)
-    setProposalsOpen(false)
-  }, [])
-  const toggleProposals = useCallback(() => {
-    setProposalsOpen((p) => !p)
-    setChatOpen(false)
-    setSharingOpen(false)
   }, [])
 
   useEffect(() => {
@@ -421,7 +407,7 @@ function App() {
         e.preventDefault()
         toggleChat()
       }
-      // ⌘⇧S toggles the Sharing (consent) panel.
+      // ⌘⇧S toggles the Imports / Exports panel.
       if (
         (e.metaKey || e.ctrlKey) &&
         e.shiftKey &&
@@ -430,19 +416,10 @@ function App() {
         e.preventDefault()
         toggleSharing()
       }
-      // ⌘⇧L toggles the Loop (advisory proposals) panel.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        e.shiftKey &&
-        e.key.toLowerCase() === 'l'
-      ) {
-        e.preventDefault()
-        toggleProposals()
-      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleChat, toggleSharing, toggleProposals])
+  }, [toggleChat, toggleSharing])
 
   const onRunAction = useCallback((prompt: string) => {
     setPendingPrompt(prompt)
@@ -748,7 +725,7 @@ function App() {
   return (
     <div
       className={`grid h-screen overflow-hidden bg-page text-ink ${
-        chatOpen || sharingOpen || proposalsOpen
+        chatOpen || sharingOpen
           ? 'grid-cols-[48px_260px_1fr_400px]'
           : 'grid-cols-[48px_260px_1fr]'
       }`}
@@ -808,10 +785,7 @@ function App() {
           />
         )
       )}
-      {/* The single 3rd column — EXACTLY ONE of Chat / Sharing /
-       *  Proposals (each toggle force-closes the other two; the grid
-       *  ternary above includes proposalsOpen in lockstep so this is
-       *  never 3 children in a 2-col template). */}
+      {/* The single 3rd column — exactly one of Chat / Imports+Exports. */}
       {chatOpen && (
         <Chat
           threadId={threadId}
@@ -819,61 +793,41 @@ function App() {
           onPendingHandled={() => setPendingPrompt(null)}
           pendingSkillFire={pendingSkillFire}
           onPendingSkillFireHandled={() => setPendingSkillFire(null)}
+          pendingCommandFire={pendingCommandFire}
+          onPendingCommandFireHandled={() => setPendingCommandFire(null)}
         />
       )}
       {sharingOpen && (
-        <SharingPanel
+        <ImportsExportsPanel
           onAskDohc={(p) => {
             setPendingPrompt(p)
             setChatOpen(true)
             setSharingOpen(false)
-            setProposalsOpen(false)
           }}
         />
       )}
-      {proposalsOpen && (
-        <ProposalsPanel
-          onAskDohc={(p) => {
-            setPendingPrompt(p)
-            setChatOpen(true)
-            setSharingOpen(false)
-            setProposalsOpen(false)
-          }}
-        />
-      )}
-      {/* Floating Loop-toggle — sits one row ABOVE the Sharing pill
-       *  (bottom-[100px] vs [60px] vs 5; 40px step, h-9=36px ⇒ 4px
-       *  clearance, no overlap at either right state). ⌘⇧L. */}
-      <button
-        type="button"
-        onClick={toggleProposals}
-        title={proposalsOpen ? 'hide loop (⌘⇧L)' : 'show loop (⌘⇧L)'}
-        aria-label={proposalsOpen ? 'hide loop panel' : 'show loop panel'}
-        className={`fixed bottom-[100px] z-50 inline-flex h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
-          chatOpen || sharingOpen || proposalsOpen
-            ? 'right-[412px]'
-            : 'right-5'
-        }`}
-      >
-        <RefreshCw className="size-3.5" strokeWidth={2} />
-        <span>{proposalsOpen ? 'Hide loop' : 'Loop'}</span>
-      </button>
-      {/* Floating Sharing-toggle — sits one row ABOVE the chat pill so
-       *  the pills never overlap at either right state. ⌘⇧S also
-       *  toggles. (P2 D4 ambient "who's at my windows" affordance.) */}
+      {/* Floating Imports/Exports toggle — separate from per-doc Share. */}
       <button
         type="button"
         onClick={toggleSharing}
-        title={sharingOpen ? 'hide sharing (⌘⇧S)' : 'show sharing (⌘⇧S)'}
-        aria-label={sharingOpen ? 'hide sharing panel' : 'show sharing panel'}
+        title={
+          sharingOpen
+            ? 'hide imports / exports (⌘⇧S)'
+            : 'show imports / exports (⌘⇧S)'
+        }
+        aria-label={
+          sharingOpen
+            ? 'hide imports / exports panel'
+            : 'show imports / exports panel'
+        }
         className={`fixed bottom-[60px] z-50 inline-flex h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
-          chatOpen || sharingOpen || proposalsOpen
+          chatOpen || sharingOpen
             ? 'right-[412px]'
             : 'right-5'
         }`}
       >
-        <Shield className="size-3.5" strokeWidth={2} />
-        <span>{sharingOpen ? 'Hide sharing' : 'Sharing'}</span>
+        <ArrowLeftRight className="size-3.5" strokeWidth={2} />
+        <span>{sharingOpen ? 'Hide panel' : 'Imports / Exports'}</span>
       </button>
       {/* Floating chat-toggle, bottom-right. When a panel is open the
        *  pill slides to sit just outside its left edge so it never
@@ -884,7 +838,7 @@ function App() {
         title={chatOpen ? 'hide chat (⌘\\)' : 'show chat (⌘\\)'}
         aria-label={chatOpen ? 'hide chat panel' : 'show chat panel'}
         className={`fixed bottom-5 z-50 inline-flex h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
-          chatOpen || sharingOpen || proposalsOpen
+          chatOpen || sharingOpen
             ? 'right-[412px]'
             : 'right-5'
         }`}
@@ -913,8 +867,12 @@ function App() {
           // at the type system.
           setChatOpen(true)
           setSharingOpen(false)
-          setProposalsOpen(false)
           setPendingSkillFire(path)
+        }}
+        onFireCommand={(path) => {
+          setChatOpen(true)
+          setSharingOpen(false)
+          setPendingCommandFire(path)
         }}
       />
       {sharePromptFor && (

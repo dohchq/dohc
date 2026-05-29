@@ -5,12 +5,18 @@
  * that allowed silent prod-vs-test drift on refactor).
  */
 import { describe, it, expect } from 'vitest'
-import { detectSkillFire } from '../components/Chat'
+import { detectCommandFire, detectSkillFire } from '../components/Chat'
 
 const skills = [
-  { path: 'skills/weekly-review.md', label: 'weekly-review' },
-  { path: 'skills/team/standup.md', label: 'standup' },
-  { path: 'skills/team/weekly-review.md', label: 'weekly-review' }, // collision
+  { path: '.skills/weekly-review.md', label: 'weekly-review' },
+  { path: '.skills/team/standup.md', label: 'standup' },
+  { path: '.skills/team/weekly-review.md', label: 'weekly-review' }, // collision
+] as const
+
+const commands = [
+  { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
+  { path: '.commands/team/hours.md', label: 'hours' },
+  { path: '.commands/client/hours.md', label: 'hours' },
 ] as const
 
 describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <path> grammar)', () => {
@@ -23,7 +29,7 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
     // skill named "help"; it goes to regular chat.
     expect(detectSkillFire('/standup', skills)).toBeNull()
     expect(detectSkillFire('/help', skills)).toBeNull()
-    expect(detectSkillFire('/skills/weekly-review.md', skills)).toBeNull()
+    expect(detectSkillFire('/.skills/weekly-review.md', skills)).toBeNull()
     expect(detectSkillFire('weekly-review', skills)).toBeNull()
     expect(detectSkillFire('please run weekly-review', skills)).toBeNull()
   })
@@ -35,14 +41,14 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
   })
 
   it('null on case variation (case-sensitive `skill`)', () => {
-    expect(detectSkillFire('/Skill skills/foo.md', skills)).toBeNull()
-    expect(detectSkillFire('/SKILL skills/foo.md', skills)).toBeNull()
+    expect(detectSkillFire('/Skill .skills/foo.md', skills)).toBeNull()
+    expect(detectSkillFire('/SKILL .skills/foo.md', skills)).toBeNull()
   })
 
   it('matches /skill <canonical-path>', () => {
-    const r = detectSkillFire('/skill skills/weekly-review.md', skills)
+    const r = detectSkillFire('/skill .skills/weekly-review.md', skills)
     expect(r).toEqual({
-      matched: { path: 'skills/weekly-review.md', label: 'weekly-review' },
+      matched: { path: '.skills/weekly-review.md', label: 'weekly-review' },
       extras: null,
     })
   })
@@ -50,7 +56,7 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
   it('matches /skill <label> when label is unique', () => {
     const r = detectSkillFire('/skill standup', skills)
     expect(r).toEqual({
-      matched: { path: 'skills/team/standup.md', label: 'standup' },
+      matched: { path: '.skills/team/standup.md', label: 'standup' },
       extras: null,
     })
   })
@@ -61,8 +67,8 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
     expect(r).toHaveProperty('ambiguous')
     if (r && 'ambiguous' in r) {
       expect(r.ambiguous.map((s) => s.path).sort()).toEqual([
-        'skills/team/weekly-review.md',
-        'skills/weekly-review.md',
+        '.skills/team/weekly-review.md',
+        '.skills/weekly-review.md',
       ])
     }
   })
@@ -76,7 +82,7 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
       skills,
     )
     expect(r).toEqual({
-      matched: { path: 'skills/team/standup.md', label: 'standup' },
+      matched: { path: '.skills/team/standup.md', label: 'standup' },
       extras: 'with some context about today',
     })
   })
@@ -95,24 +101,58 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
 
   it('respects leading whitespace before /skill', () => {
     expect(detectSkillFire('  /skill standup', skills)).toEqual({
-      matched: { path: 'skills/team/standup.md', label: 'standup' },
+      matched: { path: '.skills/team/standup.md', label: 'standup' },
       extras: null,
     })
   })
 
   it('exact path wins over label-match (path is canonical)', () => {
     const colliding = [
-      { path: 'skills/foo.md', label: 'foo' },
-      { path: 'skills/bar.md', label: 'foo' }, // colliding label
+      { path: '.skills/foo.md', label: 'foo' },
+      { path: '.skills/bar.md', label: 'foo' }, // colliding label
     ]
-    const r = detectSkillFire('/skill skills/foo.md', colliding)
+    const r = detectSkillFire('/skill .skills/foo.md', colliding)
     expect(r).toEqual({
-      matched: { path: 'skills/foo.md', label: 'foo' },
+      matched: { path: '.skills/foo.md', label: 'foo' },
       extras: null,
     })
   })
 
   it('empty skills list ⇒ no match (graceful)', () => {
     expect(detectSkillFire('/skill anything', [])).toBeNull()
+  })
+})
+
+describe('Commands — detectCommandFire (/<command> grammar)', () => {
+  it('matches a canonical .commands path', () => {
+    expect(detectCommandFire('/.commands/draft-invoice.md', commands)).toEqual({
+      matched: { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
+      extras: null,
+    })
+  })
+
+  it('matches a unique command label and preserves extras', () => {
+    expect(
+      detectCommandFire('/draft-invoice for Acme this week', commands),
+    ).toEqual({
+      matched: { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
+      extras: 'for Acme this week',
+    })
+  })
+
+  it('does not treat /skill as a command', () => {
+    expect(detectCommandFire('/skill .skills/foo.md', commands)).toBeNull()
+  })
+
+  it('surfaces ambiguous label collisions', () => {
+    const r = detectCommandFire('/hours', commands)
+    expect(r).not.toBeNull()
+    expect(r).toHaveProperty('ambiguous')
+    if (r && 'ambiguous' in r) {
+      expect(r.ambiguous.map((c) => c.path).sort()).toEqual([
+        '.commands/client/hours.md',
+        '.commands/team/hours.md',
+      ])
+    }
   })
 })

@@ -88,8 +88,8 @@ describe('_upsertSystem audit — allowlist enforcement', () => {
     expect(actual).toEqual(expected)
   })
 
-  it('loop.ts no longer writes generated context through _upsertSystem', () => {
-    const loopSrc = readFileSync(resolve(CONVEX_DIR, 'loop.ts'), 'utf8')
-    expect(loopSrc).not.toMatch(/internal\.atoms\._upsertSystem\b/)
+  it('map.ts no longer writes generated context through _upsertSystem', () => {
+    const mapSrc = readFileSync(resolve(CONVEX_DIR, 'map.ts'), 'utf8')
+    expect(mapSrc).not.toMatch(/internal\.atoms\._upsertSystem\b/)
   })
 })

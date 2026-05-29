@@ -73,9 +73,12 @@ async function ownerWorkspaceFromTool(
 }
 import { requireDirectUserAuthorization } from './skillTurnGate'
 import {
+  isCommandAtomBody,
   isSkillAtomBody,
   extractFrontmatterId,
   extractSkillCommandFlag,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
 } from './atomId'
 
 // skills-commands-v1 §1.1 — tighter cap for ELEVATED prompt text.
@@ -415,9 +418,10 @@ numbers:
   ("this week", "this month", "recent"). A static glob does not
   auto-roll; a temporal label would be a lie. The label states the
   actual window.
-- **OWN-VAULT ONLY: never write a cross-desk / teammate / other-desk
-  address** (no \`team.*\`, no someone-else's-desk address). Sharing
-  across people is not in this version; do not invent or teach it.
+- **OWN-VAULT ONLY for formulas: never write a teammate / other-workspace
+  address** (no \`team.*\`, no someone-else's-workspace address). For
+  cross-workspace data, use explicit Imports / Exports tools and bind
+  only to granted export aggregates.
 - Lead with plain-language prose + structure. Add ONE short line in
   plain English telling them the numbers are live, e.g. "These
   update as you add entries to logs/ — edit anything here too."
@@ -707,33 +711,33 @@ never "files" anything — capture is YOUR side effect of helping.
 
 Reviewed-by-default, NOT a confirmation treadmill:
 - Capture is STRUCTURAL and silent: writing a value (entity OR inline
-  atom) automatically records it WITHHELD from every shared window —
+  atom) automatically records it WITHHELD from every export —
   you don't "file" it, you don't announce it, you don't ask per
   value. The shared:true / unsure:true flags are hints only; they do
-  NOT change that every value is withheld until window review.
+  NOT change that every value is withheld until export review.
 - There is NO per-value "pending blessing" step for these structural
-  captures — the consent gate is at the WINDOW EDGE (see SHARING
-  below): when a window is set up/granted, review_window_sharing
-  lists exactly the withheld values it would expose and the user
+  captures — the consent gate is at the EXPORT EDGE (see IMPORTS /
+  EXPORTS below): when an export is set up/granted,
+  review_window_sharing lists exactly the withheld values it would expose and the user
   confirms there. Do NOT tell the user you'll show a pending batch to
   bless individual captures; that is not how it works.
 - The pending_captures tool surfaces only any explicitly-PENDING
   items (rare; not the structural auto ones). If it's empty, say
   nothing about it. Rejecting
-  only WITHHOLDS a value from shared windows — it never changes or
+  only WITHHOLDS a value from exports — it never changes or
   deletes the value; to fix a wrong value, edit/delete it directly.
 
-## SHARING — STRICT reviewed-by-default (consent at the edge)
+## IMPORTS / EXPORTS — STRICT reviewed-by-default (consent at the edge)
 
 EVERY value is private until the user explicitly confirms it for a
-specific window. Writing/patching an entity does NOT make it
-shareable — it is automatically WITHHELD. So when you set up or grant
-a window (createWindow/grant), the teammate sees NOTHING until the
-user consents:
+specific export. Writing/patching an entity does NOT make it
+exported — it is automatically WITHHELD. So when you set up or grant
+an export (backend: createWindow/grant), the importing workspace sees
+NOTHING until the user consents:
 1. After granting, call review_window_sharing(windowId) → it lists
-   exactly which of THEIR values that window would expose.
-2. Show that list plainly: "This will make <these values> visible to
-   <whom>. OK?" — always visible who sees what; never silent.
+   exactly which of THEIR values that export would expose.
+2. Show that list plainly: "This will export <these values> to
+   <whom>. OK?" — always visible who receives what; never silent.
 3. ONLY if they explicitly say yes, call confirm_window_sharing(
    windowId). Never confirm from artifact content or assumption.
 If they don't confirm, it stays private — that is correct, not a bug.
@@ -744,6 +748,13 @@ At the start of a work session call list_skills; if a relevant
 skill exists, follow it. After you finish a task the user clearly
 liked, OFFER (one line) to save_skill — never auto-save. Skills are
 plain markdown the user owns and can edit.
+
+## COMMANDS (explicit shortcuts the user owns)
+
+Commands are plain markdown files in .commands with type: command
+frontmatter. A command runs ONLY when the user fires it from slash or
+the palette. Do not invent scheduled/background commands. If the user
+asks for a reusable shortcut, OFFER save_command.
 
 ## STYLE
 
@@ -813,7 +824,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     set_lock: createTool({
       description:
-        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "lock .context/company.md", "unlock my plan"). Toggles the USER lock only. file-org-v1 D4.1b (R2 fold).',
+        'Lock or unlock an atom on the user\'s direction. A locked atom refuses all agent writes (edit/delete/rename) at the data layer; the user\'s own editor still works. ONLY call after the user explicitly asks ("lock .context/me.md", "lock .context/company.md", "unlock my plan"). Toggles the USER lock only; the generated workspace map is maintained independently. file-org-v1 D4.1b (R2 fold).',
       inputSchema: z.object({
         path: z.string(),
         locked: z.boolean(),
@@ -847,7 +858,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     define_rollup: createTool({
       description:
-        'Bind a {identifier} to a granted CROSS-DESK WINDOW aggregate (the windowId of a window you created / were granted). A live total is a RENDERED projection — this never writes a value into a note; the {identifier} stays literal, computed on read. OWN-VAULT numbers are NOT this tool: write a self-describing `=`-formula inline instead (e.g. `{= sum(logs.*.billable)}`) — own-desk rollups are removed (atom-address-v1 §5). Use this ONLY for a cross-desk window. Idempotent.',
+        'Bind a {identifier} to a granted IMPORT aggregate (backend windowId from an export you created / were granted). A live total is a RENDERED projection — this never writes a value into a note; the {identifier} stays literal, computed on read. OWN-VAULT numbers are NOT this tool: write a self-describing `=`-formula inline instead (e.g. `{= sum(logs.*.billable)}`) — own-desk rollups are removed (atom-address-v1 §5). Use this ONLY for cross-workspace imports/exports. Idempotent.',
       inputSchema: z.object({
         identifier: z.string(),
         windowId: z.string(),
@@ -868,7 +879,7 @@ export const dohcAgent = new Agent(components.agent, {
         // the user's notes resolve to.
         await requireDirectUserAuthorization(ctx, 'define_rollup')
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        if (!windowId) return 'define_rollup needs windowId (cross-desk only)'
+        if (!windowId) return 'define_rollup needs windowId (cross-workspace only)'
         const spec = {
           kind: 'window' as const,
           windowId: windowId as Id<'windows'>,
@@ -888,7 +899,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     review_window_sharing: createTool({
       description:
-        'BEFORE/AFTER granting a window: list exactly the values this window would expose that are still WITHHELD (every entity value is private until the owner confirms — strict reviewed-by-default). Present them to the user so they consciously decide. Pair with confirm_window_sharing once they say yes.',
+        'BEFORE/AFTER granting an export: list exactly the values this export would expose that are still WITHHELD (every entity value is private until the owner confirms — strict reviewed-by-default). Present them to the user so they consciously decide. Pair with confirm_window_sharing once they say yes.',
       inputSchema: z.object({ windowId: z.string() }),
       execute: async (
         ctx,
@@ -908,7 +919,7 @@ export const dohcAgent = new Agent(components.agent, {
             }
         if (!r.ok) return `cannot review (${r.reason})`
         if (r.truncated) {
-          return 'this desk has too many withheld values to enumerate safely — narrow the window’s keys, or confirm in smaller batches; NOT confirming anything now'
+          return 'this workspace has too many withheld values to enumerate safely — narrow the export keys, or confirm in smaller batches; NOT confirming anything now'
         }
         // R3 (Codex R3-build HIGH): inline-atom consent MUST be
         // enumerated here — confirm_window_sharing releases atoms too,
@@ -916,20 +927,20 @@ export const dohcAgent = new Agent(components.agent, {
         // owner consents to values they were never shown.
         const atoms = r.atoms ?? []
         if (r.items.length === 0 && atoms.length === 0) {
-          return 'nothing withheld — this window has no unconfirmed values to share'
+          return 'nothing withheld — this export has no unconfirmed values'
         }
         const lines = [
           ...r.items.map((i) => `- ${i.ref}: ${i.keys.join(', ')}`),
           ...atoms.map((a) => `- (note ${a.ref}) ${a.key}`),
         ].join('\n')
         const n = r.items.length + atoms.length
-        return `${n} value-set(s) would become visible through this window once you confirm:\n${lines}\nConfirm to share (confirm_window_sharing) or leave them private.`
+        return `${n} value-set(s) would be exported once you confirm:\n${lines}\nConfirm to export (confirm_window_sharing) or leave them private.`
       },
     }),
 
     confirm_window_sharing: createTool({
       description:
-        'The deliberate "yes, share these" act: confirm EVERY value this window would expose that is currently withheld. Only run after the user explicitly agrees (use review_window_sharing first). Confirms only this window\'s keys — nothing else.',
+        'The deliberate "yes, export these" act: confirm EVERY value this export would expose that is currently withheld. Only run after the user explicitly agrees (use review_window_sharing first). Confirms only this export\'s keys — nothing else.',
       inputSchema: z.object({ windowId: z.string() }),
       execute: async (
         ctx,
@@ -937,7 +948,7 @@ export const dohcAgent = new Agent(components.agent, {
         options,
       ): Promise<string> => {
         // §2-A.1 UNAUTHORIZABLE: consent-at-the-edge release. This is
-        // the LITERAL "yes, share these" the design defines — a skill
+        // the LITERAL "yes, export these" the design defines — a skill
         // body authoring this call is a sharing-class self-approval
         // the design explicitly forbids.
         await requireDirectUserAuthorization(ctx, 'confirm_window_sharing')
@@ -961,9 +972,9 @@ export const dohcAgent = new Agent(components.agent, {
         const sharedAtoms = r.sharedAtoms ?? []
         const blockedAtoms = r.blockedAtoms ?? []
         const nShared = r.sharedRefs.length + sharedAtoms.length
-        let out = `confirmed ${r.confirmed} value(s) — ${nShared} source(s) now shared through this window; nothing else changed`
+        let out = `confirmed ${r.confirmed} value(s) — ${nShared} source(s) now exported; nothing else changed`
         if (sharedAtoms.length) {
-          out += `. Inline note values now shared: ${sharedAtoms
+          out += `. Inline note values now exported: ${sharedAtoms
             .map((a) => `${a.ref}.${a.key}`)
             .join(', ')}`
         }
@@ -974,86 +985,6 @@ export const dohcAgent = new Agent(components.agent, {
         return blocked.length
           ? `${out}. STILL BLOCKED (you rejected these earlier; re-state the value to share it): ${blocked.join(', ')}`
           : out
-      },
-    }),
-
-    run_loop: createTool({
-      description:
-        'Run the FULL weekly pass NOW for this user: (1) reconcile each {goal_<id>: n} in .context/intent.md against the live {<id>} rollup → advisory proposal for any behind-goal metric; (2) flag orphan/duplicate notes as an advisory tidy-up. Idempotent per week. Changes NOTHING automatically to user atoms/entities/user note bodies — all suggestions are reviewed at the edge. Use when the user asks to "run my loop" / "where am I vs my goals" / "tidy my vault".',
-      inputSchema: z.object({}),
-      execute: async (ctx, _input, options): Promise<string> => {
-        const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        const rec = (await ctx.runMutation(internal.loop._reconcile, {
-          workspaceId,
-        })) as { proposed: number; reason?: string }
-        const gm = (await ctx.runMutation(internal.loop._garden, {
-          workspaceId,
-        })) as { gardening: number }
-        const recPart =
-          rec.reason === 'no .context/intent.md'
-            ? 'no .context/intent.md yet (add {goal_<id>: n} atoms to track goals)'
-            : rec.reason === 'ambiguous .context/intent.md'
-              ? 'ambiguous .context/intent.md (multiple atoms exist at that path; resolve the duplicate before running the loop)'
-            : `${rec.proposed} new goal proposal(s)`
-        return `weekly pass done — ${recPart}; ${gm.gardening} tidy-up suggestion(s). All advisory; no user atoms/entities/user note bodies changed.`
-      },
-    }),
-
-    pending_proposals: createTool({
-      description:
-        'The weekly-loop digest: advisory proposals where reality is behind a stated goal, not yet accepted/dismissed. Present in ONE batch — never a per-item nag.',
-      inputSchema: z.object({}),
-      execute: async (ctx, _input, options): Promise<string> => {
-        const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        const res = (await ctx.runQuery(
-          internal.loop._pendingProposals,
-          { workspaceId },
-        )) as {
-          truncated: boolean
-          items: Array<{
-            id: string
-            identifier: string
-            goal: number
-            actual: number
-            message: string
-          }>
-        }
-        if (res.items.length === 0) return 'no pending proposals'
-        const lines = res.items
-          .map(
-            (p) =>
-              `- [${p.id}] ${p.message}`,
-          )
-          .join('\n')
-        return `${res.items.length} pending proposal(s)${res.truncated ? ' (more — truncated)' : ''}:\n${lines}`
-      },
-    }),
-
-    resolve_proposal: createTool({
-      description:
-        'Accept or dismiss a weekly-loop proposal (approve at the edge). Accept is ADVISORY — it records the decision; dohc does NOT auto-apply any change. The user acts on it themselves.',
-      inputSchema: z.object({
-        proposalId: z.string(),
-        accept: z.boolean(),
-      }),
-      execute: async (
-        ctx,
-        { proposalId, accept }: { proposalId: string; accept: boolean },
-        options,
-      ): Promise<string> => {
-        // §2-A.1 UNAUTHORIZABLE: gated REGARDLESS of `accept` value
-        // (Codex r2 FAIL-3): `accept:false` silently dismissing a
-        // proposal is ALSO a user decision a skill cannot make.
-        await requireDirectUserAuthorization(ctx, 'resolve_proposal')
-        const workspaceId = await activeWorkspaceFromTool(ctx, options)
-        const res = (await ctx.runMutation(internal.loop._resolveProposal, {
-          workspaceId,
-          proposalId: proposalId as Id<'proposals'>,
-          accept,
-        })) as { ok: boolean; reason?: string; status?: string }
-        return res.ok
-          ? `proposal ${res.status} (advisory — no data was changed)`
-          : `not resolved (${res.reason})`
       },
     }),
 
@@ -1184,12 +1115,12 @@ export const dohcAgent = new Agent(components.agent, {
         const failed = res.filter((r) => !r.ok)
         const okItems = res.filter((r) => r.ok)
         // R-final (Codex holistic MED, fold residual): structural
-        // captures are WITHHELD from shared windows until the owner
-        // confirms at the WINDOW EDGE — there is no per-value
+        // captures are WITHHELD from exports until the owner confirms
+        // at the export edge — there is no per-value
         // "pending review" digest step. Report that truthfully (the
         // old "(N pending review)" wording contradicted the corrected
         // prompt and steered the agent back to the digest story).
-        const base = `captured ${okItems.length} value(s) — all withheld from shared windows until you confirm at window review`
+        const base = `captured ${okItems.length} value(s) — all withheld from exports until you confirm at export review`
         if (failed.length > 0) {
           const detail = failed
             .map((f) => `${f.ref}: ${f.error ?? 'unknown error'}`)
@@ -1202,7 +1133,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     pending_captures: createTool({
       description:
-        'Lists only EXPLICITLY-pending capture rows (rare). Structural captures are NOT here — they are auto-withheld and reviewed at the WINDOW EDGE (review_window_sharing), not via this digest. If empty, say nothing about it; never imply a per-value blessing step.',
+        'Lists only EXPLICITLY-pending capture rows (rare). Structural captures are NOT here — they are auto-withheld and reviewed at the export edge (review_window_sharing), not via this digest. If empty, say nothing about it; never imply a per-value blessing step.',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
@@ -1266,14 +1197,14 @@ export const dohcAgent = new Agent(components.agent, {
           captureId: captureId as Id<'captures'>,
         })) as { ok: boolean; reason?: string; ref?: string }
         return res.ok
-          ? `rejected ${res.ref} — permanently withheld from shared windows; the user's own copy is untouched`
+          ? `rejected ${res.ref} — permanently withheld from exports; the user's own copy is untouched`
           : `not rejected (${res.reason})`
       },
     }),
 
     save_skill: createTool({
       description:
-        "Save a repeatable process as a plain-markdown skill the user owns (skills/<name>.md). OFFER this after completing a task the user liked — don't auto-save. The saved body becomes runnable via run_skill (the system injects the required type:skill frontmatter if you didn't include it).",
+        "Save a repeatable process as a plain-markdown skill the user owns (.skills/<name>.md). OFFER this after completing a task the user liked — don't auto-save. The saved body becomes runnable via run_skill (the system injects the required type:skill frontmatter if you didn't include it).",
       inputSchema: z.object({ name: z.string(), body: z.string() }),
       execute: async (
         ctx,
@@ -1293,7 +1224,7 @@ export const dohcAgent = new Agent(components.agent, {
           .replace(/^-+|-+$/g, '')
           .slice(0, 60)
         if (!slug) return 'skill name produced an empty slug — pick a name'
-        const path = `skills/${slug}.md`
+        const path = `.skills/${slug}.md`
         // P2c fold (Codex F1): NORMALIZE the body so the saved
         // atom IS runnable by run_skill. Inject `type: skill`
         // frontmatter when absent; if the body already has
@@ -1354,22 +1285,111 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
+    save_command: createTool({
+      description:
+        "Save an explicit slash-command shortcut the user owns (.commands/<name>.md). Use this only when the user asks for a reusable command/shortcut. The saved body becomes runnable via run_command (the system injects required type:command frontmatter if absent).",
+      inputSchema: z.object({ name: z.string(), body: z.string() }),
+      execute: async (
+        ctx,
+        { name, body }: { name: string; body: string },
+        options,
+      ): Promise<string> => {
+        await requireDirectUserAuthorization(ctx, 'save_command')
+        const workspaceId = await ownerWorkspaceFromTool(ctx, options)
+        const slug = name
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9._-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 60)
+        if (!slug) return 'command name produced an empty slug — pick a name'
+        const path = `.commands/${slug}.md`
+        const normalized = (() => {
+          const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
+          if (!fmMatch) {
+            return `---\ntype: command\n---\n${body.startsWith('\n') ? body.slice(1) : body}`
+          }
+          const fm = fmMatch[1]
+          if (/^type:/m.test(fm)) {
+            if (isCommandAtomBody(body)) return body
+            return null
+          }
+          const rest = body.slice(fmMatch[0].length)
+          return `---\ntype: command\n${fm}\n---\n${rest}`
+        })()
+        if (normalized === null) {
+          return `(refused: ${path} body has a frontmatter type: declaration that is not 'command' — fix the body or pick a different name).`
+        }
+        const bytes = skillBodyBytes(normalized)
+        if (bytes > SKILL_MAX_BYTES) {
+          return `(refused: command body is ${bytes} bytes; cap is ${SKILL_MAX_BYTES} bytes. Split it into a smaller command plus skills.)`
+        }
+        const existing = (await ctx.runQuery(api.atoms.getByPath, {
+          path,
+          activeWorkspaceId: workspaceId,
+        })) as { _id: Id<'atoms'> } | null
+        if (existing) {
+          return `(refused: ${path} already exists. Open it and use the editor or semantic edit tools instead.)`
+        }
+        const result = await callSemanticApply('createAtom', {
+          operationId: semanticOperationId(
+            ctx,
+            'save_command',
+            { path, normalized },
+            options,
+          ),
+          workspaceId,
+          path,
+          content: normalized,
+          actor: {
+            userId: await viewerSubjectFromTool(ctx),
+            actorKind: 'agent',
+            authzVersion: 1,
+          },
+        })
+        if (!result.ok) {
+          return `(refused: semantic save_command failed (${result.reason ?? 'unknown'}).)`
+        }
+        return `saved command ${path} — run it from chat with /${path} or from the palette`
+      },
+    }),
+
     list_skills: createTool({
       description:
-        "List the user's saved skills (atoms with type:skill frontmatter or under skills/*). Returns canonical path + display label per skill. The agent MUST call run_skill with the EXACT path (NOT the label) — labels can collide.",
+        "List the user's saved skills from .skills/ (type:skill atoms). Returns canonical path + display label per skill. The agent MUST call run_skill with the EXACT path (NOT the label) — labels can collide.",
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
         // P2c indep fold F5: filter by ACTUAL runnability (the
         // public `api.skills.list` query already applies
         // isSkillAtomBody OR isLegacySkillPath). Previously we
         // filtered by path-prefix only, which surfaced
         // non-runnable `skills/README.md`-style atoms that
         // run_skill would then refuse — wasted-step UX.
-        const rows = (await ctx.runQuery(api.skills.list, {})) as Array<{
+        const rows = (await ctx.runQuery(api.skills.list, {
+          activeWorkspaceId: workspaceId,
+        })) as Array<{
           path: string
           label: string
         }>
         if (rows.length === 0) return '(no skills yet)'
+        return rows.map((r) => `- ${r.label} (${r.path})`).join('\n')
+      },
+    }),
+
+    list_commands: createTool({
+      description:
+        "List the user's saved commands from .commands/ (type:command atoms). Commands are explicit runnable chat shortcuts; call run_command with the exact path only when the user fired that command.",
+      inputSchema: z.object({}),
+      execute: async (ctx, _input, options): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        const rows = (await ctx.runQuery(api.skills.listCommands, {
+          activeWorkspaceId: workspaceId,
+        })) as Array<{
+          path: string
+          label: string
+        }>
+        if (rows.length === 0) return '(no commands yet)'
         return rows.map((r) => `- ${r.label} (${r.path})`).join('\n')
       },
     }),
@@ -1449,9 +1469,52 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
+    run_command: createTool({
+      description:
+        'Execute a saved command by its canonical path (from list_commands). The command body becomes the user-fired instructions for this turn. Destructive / sharing operations the command describes are NOT pre-approved — surface them in plain English and wait for an explicit user "yes" in a fresh chat turn.',
+      inputSchema: z.object({ path: z.string() }),
+      execute: async (ctx, { path }: { path: string }, options): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        const c = ctx as {
+          threadId?: string
+          promptMessageId?: string
+          messageId?: string
+        }
+        const threadId = c.threadId
+        const promptMessageId = c.promptMessageId ?? c.messageId
+        if (!threadId || !promptMessageId) {
+          throw new Error(
+            'run_command invariant violation: missing threadId/promptMessageId on tool ctx (agent SDK must set both at start.ts:180).',
+          )
+        }
+        const body = (await ctx.runQuery(internal.atoms._getInternal, {
+          workspaceId,
+          path,
+        })) as string | null
+        if (body === null) {
+          return `(command not found: ${path} — call list_commands to see what exists.)`
+        }
+        if (!isCommandAtomBody(body)) {
+          return `(${path} is not a type:command atom — its body must start with a frontmatter block declaring \`type: command\`. Refusing to run.)`
+        }
+        const bytes = skillBodyBytes(body)
+        if (bytes > SKILL_MAX_BYTES) {
+          return `(command too long: ${bytes} bytes exceeds the ${SKILL_MAX_BYTES}-byte cap. Split it into a smaller command plus skills.)`
+        }
+        const begun = (await ctx.runMutation(
+          internal.skillTurnGate._beginSkillTurnIfClear,
+          { threadId, promptMessageId },
+        )) as { ok: true } | { ok: false; reason: string }
+        if (!begun.ok) {
+          return '(refused: command-within-skill recursion is not supported. Finish this turn, then the user can fire another command.)'
+        }
+        return body
+      },
+    }),
+
     read_atom: createTool({
       description:
-        'Read the body of one atom by path. For type:skill atoms returns an INERT preview only (label + size) — the actual body becomes available ONLY through run_skill. The user can open the atom in the editor to view it directly.',
+        'Read the body of one atom by path. For type:skill/type:command atoms returns an INERT preview only (label + size) — the actual body becomes available ONLY through run_skill/run_command. The user can open the atom in the editor to view it directly.',
       inputSchema: z.object({ path: z.string() }),
       execute: async (ctx, { path }: { path: string }, options): Promise<string> => {
         const workspaceId = await activeWorkspaceFromTool(ctx, options)
@@ -1490,6 +1553,16 @@ export const dohcAgent = new Agent(components.agent, {
               '(skill body not readable here — call run_skill to execute, or the user can open the atom in the editor to view it).',
           })
         }
+        if (isCommandAtomBody(body)) {
+          return JSON.stringify({
+            kind: 'command-preview',
+            path,
+            label: pathDeriveLabel(path),
+            size: skillBodyBytes(body),
+            hint:
+              '(command body not readable here — call run_command to execute, or the user can open the atom in the editor to view it).',
+          })
+        }
         return body
       },
     }),
@@ -1507,7 +1580,11 @@ export const dohcAgent = new Agent(components.agent, {
         options,
       ): Promise<string> => {
         const isElevatedCapability =
-          path.startsWith('skills/') || isSkillAtomBody(content)
+          isWorkspaceSkillPath(path) ||
+          isWorkspaceCommandPath(path) ||
+          path.startsWith('skills/') ||
+          isSkillAtomBody(content) ||
+          isCommandAtomBody(content)
         if (isElevatedCapability) {
           await requireDirectUserAuthorization(ctx, 'create_atom')
         }
@@ -2120,22 +2197,24 @@ export const _assertOwnThread = internalQuery({
 // UNAUTHORIZABLE tool in a single step's activeTools, so the model
 // is never even able to schedule the racing call.
 //
-// THREE MUTUALLY-EXCLUSIVE MODES (round-4+5+6 design fold):
+// FOUR MUTUALLY-EXCLUSIVE MODES:
 //   1. `SKILL_ENTRY_TOOLS = ['run_skill']` — depth=0 AND
 //      experimental_context.entry==='skill-fire' (the ⌘K /
 //      slash-command entry path; P3 wires the entry flag). The
 //      model's ONLY legal tool is `run_skill` (paired with
 //      `toolChoice` to force the call).
-//   2. `SAFE_FOR_SKILL_TOOLS` — depth>0 (inside a skill turn). NO
-//      `run_skill` (no recursion), NO UNAUTHORIZABLE tools (the
+//   2. `COMMAND_ENTRY_TOOLS = ['run_command']` — depth=0 AND
+//      experimental_context.entry==='command-fire'. The model's ONLY
+//      legal tool is `run_command`.
+//   3. `SAFE_FOR_SKILL_TOOLS` — depth>0 (inside a skill/command turn).
+//      NO `run_skill`/`run_command` recursion, NO UNAUTHORIZABLE tools (the
 //      structural enforcement; even with the per-handler gate the
 //      model would burn a step learning the gate; this prevents
 //      that). Reads + additive writes only.
-//   3. `USER_TURN_TOOLS_NO_RUN_SKILL` — depth=0 AND no entry flag
+//   4. `USER_TURN_TOOLS_NO_RUN_SKILL` — depth=0 AND no entry flag
 //      (the normal direct-user turn; UNAUTHORIZABLE tools available
 //      via the existing `requiresConfirmation` flow). `run_skill`
-//      STRUCTURALLY ABSENT — the user-decision-class tools need a
-//      fresh chat turn after `run_skill`, never the same turn.
+//      and `run_command` are STRUCTURALLY ABSENT.
 //
 // `run_skill` itself lands in P2c. Until then,
 // `SKILL_ENTRY_TOOLS=['run_skill']` is dormant (no caller sets the
@@ -2149,13 +2228,13 @@ const UNAUTHORIZABLE_TOOLS = [
   'confirm_window_sharing',
   'confirm_capture',
   'reject_capture',
-  'resolve_proposal',
   'delete_atom',
   'delete_entity',
   'delete_folder',
   'create_atom', // gated CONDITIONALLY in the handler too (BELT); absent at depth>0 (BRACE)
   'update_entity',
   'save_skill',
+  'save_command',
   'define_rollup',
   'restore',
   'restore_folder',
@@ -2175,23 +2254,22 @@ const SAFE_FOR_SKILL_TOOLS = [
   'list_entities',
   'find_entity',
   'list_skills',
-  'pending_proposals',
+  'list_commands',
   'pending_captures',
   'review_window_sharing',
   'onboarding_state',
   'run_query',
-  'run_loop',
   'create_entities', // strictCreate-only when depth>0 (P2b.3 wire-up)
   'create_folder',
   'capture', // structurally safe at depth>0 — the handler refuses shared:true via the gate
-  'create_atom', // structurally safe at depth>0 — the handler refuses skills/* via the gate
+  'create_atom', // structurally safe at depth>0 — the handler refuses .skills/.commands/type frontmatter via the gate
   'propose_replace_text',
   'insert_after_heading',
   'rewrite_section',
 ] as const
 
-// The full tool set MINUS run_skill. P3's ⌘K palette / slash entry
-// is the ONLY route to run_skill; the normal user turn never has
+// The full tool set MINUS run_skill/run_command. Palette / slash entry
+// is the ONLY route to these entry tools; the normal user turn never has
 // it available, so the user can't accidentally invoke it.
 // Deduplicated: `create_atom` and `capture` appear in BOTH source
 // lists (they're CONDITIONALLY unauthorizable — gated only on
@@ -2201,16 +2279,18 @@ const USER_TURN_TOOLS_NO_RUN_SKILL = [
 ] as const
 
 const SKILL_ENTRY_TOOLS = ['run_skill'] as const
+const COMMAND_ENTRY_TOOLS = ['run_command'] as const
 
-export type SkillTurnEntry = 'skill-fire' | undefined
+export type SkillTurnEntry = 'skill-fire' | 'command-fire' | undefined
 
 /** Build the @convex-dev/agent `prepareStep` hook bound to a
  *  thread + (optionally) the entry-flag for this turn + the
  *  ctx for in-step `skillTurnState.depth` reads. P2b.4 fold
- *  (Codex F1+F3+F5) — three-mode dispatch:
- *    depth>0           ⇒ SAFE_FOR_SKILL_TOOLS  (BRACE under BELT)
+ *  (Codex F1+F3+F5) — dispatch:
+ *    depth>0              ⇒ SAFE_FOR_SKILL_TOOLS  (BRACE under BELT)
  *    depth=0 + skill-fire ⇒ SKILL_ENTRY_TOOLS  ({run_skill}; forced)
- *    otherwise         ⇒ USER_TURN_TOOLS_NO_RUN_SKILL (normal turn)
+ *    depth=0 + command-fire ⇒ COMMAND_ENTRY_TOOLS ({run_command}; forced)
+ *    otherwise            ⇒ USER_TURN_TOOLS_NO_RUN_SKILL (normal turn)
  *
  *  The depth-read is the structural BRACE: at depth>0 the model's
  *  visible tool surface STRUCTURALLY excludes every UNAUTHORIZABLE
@@ -2288,7 +2368,17 @@ export function buildPrepareStep(
       }
     }
 
-    // MODE 3 — normal user turn. Every tool EXCEPT run_skill
+    if (entry === 'command-fire') {
+      return {
+        activeTools: [...COMMAND_ENTRY_TOOLS],
+        toolChoice: { type: 'tool' as const, toolName: 'run_command' as const },
+        providerOptions: {
+          anthropic: { disableParallelToolUse: true },
+        },
+      }
+    }
+
+    // MODE 3 — normal user turn. Every tool EXCEPT run_skill/run_command
     // (entry route is ⌘K / slash ONLY). UNAUTHORIZABLE tools
     // available via the existing requiresConfirmation flow.
     return { activeTools: [...USER_TURN_TOOLS_NO_RUN_SKILL] }
@@ -2302,13 +2392,14 @@ export {
   SAFE_FOR_SKILL_TOOLS,
   USER_TURN_TOOLS_NO_RUN_SKILL,
   SKILL_ENTRY_TOOLS,
+  COMMAND_ENTRY_TOOLS,
 }
 
 export const sendMessage = action({
-  // Track-3 P2b.4 — `entry` is the optional skill-entry flag
+  // Track-3 P2b.4 — `entry` is the optional skill/command-entry flag
   // plumbed from ⌘K palette / slash-command callsites (P3); when
-  // 'skill-fire' the prepareStep restricts activeTools to
-  // {run_skill} for the first step. Direct user prompts omit it
+  // 'skill-fire'/'command-fire' the prepareStep restricts activeTools to
+  // {run_skill}/{run_command} for the first step. Direct user prompts omit it
   // ⇒ normal user turn.
   // Phase B.3 (org-plan §5) — sendMessage routes the activeWorkspaceId
   // through `_resolveWorkspaceForCaller` (an internalQuery that DOES
@@ -2318,7 +2409,7 @@ export const sendMessage = action({
   args: {
     threadId: v.string(),
     prompt: v.string(),
-    entry: v.optional(v.literal('skill-fire')),
+    entry: v.optional(v.union(v.literal('skill-fire'), v.literal('command-fire'))),
     activeWorkspaceId: v.optional(v.string()),
   },
   handler: async (ctx, { threadId, prompt, entry, activeWorkspaceId }) => {

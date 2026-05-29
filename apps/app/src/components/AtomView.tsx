@@ -615,7 +615,7 @@ function AtomShell({
           <span className="font-medium text-ink-strong">
             Marked as a skill by migration.
           </span>{' '}
-          The <code className="text-[11px]">skills/</code> folder is reserved
+          The <code className="text-[11px]">.skills/</code> folder is reserved
           for agent skills — edit this file to keep it (clears this
           notice), or move it elsewhere to restore inline
           <code className="text-[11px]"> {'{key: value}'}</code> captures.

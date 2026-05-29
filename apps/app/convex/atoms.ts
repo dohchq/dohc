@@ -7,6 +7,7 @@ import {
 } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
+import { scheduleMapRegen } from './map'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
 import { recordTrash, recordTrashCoalesced } from './trash'
 import { applyAtomCapture } from './atomCapture'
@@ -25,8 +26,11 @@ import {
   setFrontmatterIcon,
   isHtmlAtomBody,
   isHtmlPath,
+  isCommandAtomBody,
   isSkillAtomBody,
   isLegacySkillPath,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
   splitFrontmatter,
   joinFrontmatter,
   injectFrontmatterTitle,
@@ -372,7 +376,11 @@ export const list = query({
         type:
           isHtmlPath(r.path) || isHtmlAtomBody(r.body)
             ? ('html' as const)
-            : isSkillAtomBody(r.body) || isLegacySkillPath(r.path)
+            : isCommandAtomBody(r.body) || isWorkspaceCommandPath(r.path)
+              ? ('command' as const)
+              : isSkillAtomBody(r.body) ||
+                  isWorkspaceSkillPath(r.path) ||
+                  isLegacySkillPath(r.path)
               ? ('skill' as const)
               : null,
         // file-org-v1 §3.1 (Track-4 D4.4a) — project the three
@@ -667,8 +675,9 @@ export const move = mutation({
       .unique()
 
     // file-org-v1 §2.3 (Track-4 D4.1a) — lock-guard chokepoint #3.
-    // Rename-context message variant. A system atom is part of the system
-    // contract; a userLocked atom is the user's explicit "don't touch this".
+    // Rename-context message variant. A system atom has a path that's
+    // part of the system contract (map regen reads MAP_PATH literally);
+    // a userLocked atom is the user's explicit "don't touch this".
     if (src.systemLocked) throw new SystemLockError(fromPath, 'rename')
     if (src.userLocked) throw new UserLockError(fromPath, 'rename')
 

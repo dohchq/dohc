@@ -7,6 +7,7 @@ import {
 import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteInFolder } from './atomAccess'
+import { scheduleMapRegen } from './map'
 import { recordTrash } from './trash'
 import { snapshotAtomBodyCoalesced } from './atoms'
 import { applyAtomCapture } from './atomCapture'

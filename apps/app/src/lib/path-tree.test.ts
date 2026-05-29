@@ -97,17 +97,23 @@ describe('buildTree — D4.5 sort order (folders → starred → alphabetical)',
 })
 
 describe('nodeLabel — canonical .context files', () => {
-  it('labels the .context folder and active reserved files specially', () => {
+  it('labels reserved dot folders and files specially', () => {
     const tree = buildTree([
       row('.context/_map.md'),
       row('.context/me.md'),
       row('.context/intent.md'),
       row('.context/company.md'),
+      row('.skills/invoice.md'),
+      row('.commands/draft-invoice.md'),
       row('_map.md'),
       row('me.md'),
     ])
     const context = tree.children.find((c) => c.fullPath === '.context')!
+    const skills = tree.children.find((c) => c.fullPath === '.skills')!
+    const commands = tree.children.find((c) => c.fullPath === '.commands')!
     expect(nodeLabel(context)).toBe('.context')
+    expect(nodeLabel(skills)).toBe('Skills')
+    expect(nodeLabel(commands)).toBe('Commands')
     expect(context.children.map((c) => nodeLabel(c))).toEqual([
       '_map',
       'Company',

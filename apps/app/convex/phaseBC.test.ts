@@ -123,6 +123,125 @@ describe('Phase B (org-plan §5) — activeWorkspaceId threading', () => {
   })
 })
 
+describe('Phase C (org-plan §13) — debounced .context/_map.md regen', () => {
+  it('schedules a coalesced map regen on upsert', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+
+    await asA.mutation(api.atoms.upsert, { path: 'a.md', body: 'A' })
+
+    // A schedule row exists, scheduledFor ~2s in the future.
+    const rows = await t.run(async (ctx) => {
+      return await ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .collect()
+    })
+    expect(rows.length).toBe(1)
+    expect(rows[0].scheduledFor).toBeGreaterThan(Date.now())
+    expect(rows[0].scheduledFor).toBeLessThanOrEqual(Date.now() + 2_500)
+  })
+
+  it('rapid edits coalesce to ONE pending schedule (no extra row, scheduledFor stays put)', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+
+    await asA.mutation(api.atoms.upsert, { path: 'a.md', body: 'A' })
+    const first = await t.run(async (ctx) => {
+      const r = await ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .unique()
+      return r?.scheduledFor
+    })
+    // 9 more rapid edits inside the debounce window.
+    for (let i = 0; i < 9; i++) {
+      await asA.mutation(api.atoms.upsert, {
+        path: `a.md`,
+        body: `A v${i}`,
+      })
+    }
+    const after = await t.run(async (ctx) => {
+      return await ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .collect()
+    })
+    // Exactly one row — coalesced.
+    expect(after.length).toBe(1)
+    // scheduledFor unchanged (the second through tenth call no-op'd).
+    expect(after[0].scheduledFor).toBe(first)
+  })
+
+  it('_regenerateMapDebounced deletes the schedule row so the next edit re-arms', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+
+    await asA.mutation(api.atoms.upsert, { path: 'a.md', body: 'A' })
+    // Manually fire the debounced job (simulating scheduler firing).
+    await t.mutation(internal.map._regenerateMapDebounced, { workspaceId: A })
+    const cleared = await t.run(async (ctx) =>
+      ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .collect(),
+    )
+    expect(cleared.length).toBe(0)
+
+    // Next edit re-arms.
+    await asA.mutation(api.atoms.upsert, { path: 'b.md', body: 'B' })
+    const rearmed = await t.run(async (ctx) =>
+      ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .collect(),
+    )
+    expect(rearmed.length).toBe(1)
+  })
+
+  it('schedules are per-workspace (concurrent edits in two workspaces never share)', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    const asB = t.withIdentity({ subject: B })
+    await asA.mutation(api.atoms.upsert, { path: 'a.md', body: 'A' })
+    await asB.mutation(api.atoms.upsert, { path: 'b.md', body: 'B' })
+
+    const all = await t.run(async (ctx) =>
+      ctx.db.query('mapRegenSchedule').collect(),
+    )
+    expect(all.length).toBe(2)
+    const byWs = Object.fromEntries(all.map((r) => [r.workspaceId, r]))
+    expect(byWs[A]).toBeDefined()
+    expect(byWs[B]).toBeDefined()
+  })
+
+  it('atoms.move and atoms.remove both arm the debounced regen', async () => {
+    const t = convexTest(schema, modules)
+    const asA = t.withIdentity({ subject: A })
+    await asA.mutation(api.atoms.upsert, { path: 'a.md', body: 'A' })
+    await t.mutation(internal.map._regenerateMapDebounced, { workspaceId: A })
+
+    await asA.mutation(api.atoms.move, { fromPath: 'a.md', toPath: 'b.md' })
+    let row = await t.run(async (ctx) =>
+      ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .unique(),
+    )
+    expect(row).not.toBeNull()
+    await t.mutation(internal.map._regenerateMapDebounced, { workspaceId: A })
+
+    await asA.mutation(api.atoms.remove, { path: 'b.md' })
+    row = await t.run(async (ctx) =>
+      ctx.db
+        .query('mapRegenSchedule')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .unique(),
+    )
+    expect(row).not.toBeNull()
+  })
+})
+
 describe('Phase B.4 (org-plan §6 / §11-step-4) — onboarding workspace-kind branch', () => {
   it('personal workspace looks for .context/me.md; org workspace looks for .context/company.md', async () => {
     const t = convexTest(schema, modules)

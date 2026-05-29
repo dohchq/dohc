@@ -7,8 +7,8 @@ import { resolveLiveTotal, type ValueAtom } from './liveTotal'
 import { parseInlineAtomsFromMarkdown } from './inlineAtom'
 import { isNonDataAtom } from './atomId'
 
-// Phase 4 — the loop. The Convex adapter that RENDERS a `{identifier}`
-// live-total. UC-3/EF4 (the #1 P4 risk): a live total is a rendered
+// Convex adapter that RENDERS a `{identifier}` live-total. A live total
+// is a rendered
 // PROJECTION — `resolve` is a QUERY (read-only, one snapshot). It
 // NEVER writes a note body / never persists the computed value. The
 // markdown keeps the literal `{identifier}` token forever; the UI
@@ -16,10 +16,9 @@ import { isNonDataAtom } from './atomId'
 // that does not resolve returns `{ value: null }` → the editor
 // renders `___`, never an error string, never a throw.
 //
-// Binding = the explicit `rollups` registry (no convention magic in
-// v0 — the masterplan's explicit-definition model; predictable +
-// auditable). Cross-desk goes through the SAME resolveWindow core
-// (reviewed-by-default + grant already enforced there).
+// Binding = the explicit `rollups` registry: predictable and
+// auditable. Cross-workspace values go through the same resolveWindow
+// core with export grants enforced there.
 
 // FROZEN inline-atom identifier/key grammar (inline-atom-format-v0.md).
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -38,11 +37,9 @@ const specValidator = v.union(
 
 /**
  * Resolve a `{identifier}` live-total FOR a given workspace. Pure
- * read; never writes (UC-3). Extracted so the weekly reconcile
- * (Unit 4b) reuses the EXACT same resolution path — viewer is passed
- * in (from requireWorkspace in the query, or the workspace arg in the
- * trusted internal _reconcile), never re-derived. Returns the number
- * or null (render `___`).
+ * read; never writes. Viewer is passed in from requireWorkspace in
+ * the query or trusted server code, never re-derived. Returns the
+ * number or null (render `___`).
  */
 export async function resolveLiveTotalValue(
   ctx: QueryCtx,
@@ -71,7 +68,7 @@ export async function resolveLiveTotalValue(
     // finite numbers only for sum) — NEVER selected.length or view
     // keys (rename/as collisions, selector!=aggregate key). 0
     // operands ⇒ withheld/empty ⇒ `___`, never a misleading
-    // authoritative 0 (Phase-4 review, Codex HIGH ×2).
+    // authoritative 0.
     const win = await ctx.db.get(binding.spec.windowId)
     const as = win?.shape?.aggregate?.as
     if (!win || typeof as !== 'string') return null
@@ -95,9 +92,12 @@ export async function resolveLiveTotalValue(
   if (notes.length > NOTE_SCAN_CAP) return null // fail-soft
   const atoms: ValueAtom[] = []
   for (const n of notes) {
+    // `.context/_map.md` is a dohc-GENERATED index that echoes note
+    // text; it is a derived artifact, NEVER a source of truth for value atoms.
+    // Counting it would double-count atoms it copied into summaries.
     if (isNonDataAtom(n.path, n.body ?? '')) continue // §6 unified (Track-3 P1)
     // PROSE ONLY — `{billable: 999}` inside a code block is not data
-    // (FROZEN contract; Phase-4 review Codex MED).
+    // (FROZEN contract).
     for (const a of parseInlineAtomsFromMarkdown(n.body ?? '')) {
       if (a.kind === 'value') atoms.push({ key: a.key, value: a.value })
     }

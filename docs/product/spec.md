@@ -20,7 +20,7 @@ lives in `apps/app`.
 ## Surfaces
 
 - **Workspace shell** — activity bar, file tree, document canvas, and an
-  inspector/chat column (exactly one of chat / sharing / loop open).
+  inspector/chat column (exactly one of chat / imports+exports open).
 - **Editor** — Tiptap/Yjs-backed markdown editor with a raw source mode,
   wikilink pills, inline-atom decorations, and ASCII sketches.
 - **HTML atoms** — `.html` atoms render in a sandboxed, server-built
@@ -30,7 +30,11 @@ lives in `apps/app`.
 - **Onboarding** — a short questionnaire seeds the agent's first turn,
   which builds a tailored, populated workspace (dashboard + `me.md`).
 - **Graph** — a force-directed view of atoms and their links.
-- **Sharing** — per-atom shares (view/edit) with consent surfaces.
+- **Imports / Exports** — controlled workspace-to-workspace data/text
+  exchange. Exports publish only selected fields; imports subscribe to
+  fields another workspace exposes.
+- **Document sharing** — per-atom shares (view/edit), separate from
+  imports/exports.
 
 ## Stack
 

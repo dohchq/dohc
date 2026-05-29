@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import {
-  Shield,
+  ArrowLeftRight,
   ChevronDown,
   ChevronRight,
   Check,
@@ -9,17 +9,17 @@ import {
   Plus,
   X,
   Copy,
+  Download,
+  Upload,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 
-// P2 — reviewed-by-default, made visible (the consent surface).
-// Design: docs/strategy/consent-surface-design.md (gate CLEARED v1).
-// This is a PULL surface (D5): the owner opens it on their own
-// schedule. No blocking modal, no per-atom interstitial. It only
-// SHOWS the consequence (D4) and offers a batched, non-blocking
-// share. Every read/write is the public wrapper over the locked
-// engine — the surface cannot desync from the gate.
+// Imports / Exports — controlled workspace-to-workspace data exchange.
+// The backend still calls these "windows": a window is a scoped,
+// consent-gated export, and a granted window appears to another
+// workspace as an import. Per-document sharing is intentionally kept
+// separate in ShareDialog.
 
 type EntityItem = { ref: string; type: string; slug: string; keys: string[] }
 type AtomItem = { kind: 'atom'; ref: string; key: string }
@@ -34,7 +34,7 @@ type OverviewWindow = {
 
 const shortWs = (w: string) => (w.length > 14 ? `${w.slice(0, 12)}…` : w)
 
-export function SharingPanel({
+export function ImportsExportsPanel({
   onAskDohc,
 }: {
   // Frame E / §3 + §5: the truncated state must DEFER to the agent
@@ -47,60 +47,56 @@ export function SharingPanel({
     | undefined
   const sharedWithMe = useQuery(api.windows.windowsSharedWithMe)
   const myId = useQuery(api.windows.whoami)
-  const [tab, setTab] = useState<'mine' | 'onme'>('mine')
+  const [tab, setTab] = useState<'exports' | 'imports'>('exports')
   const [builderOpen, setBuilderOpen] = useState(false)
 
-  // D9 standing glanceable summary (always present, even at zero —
-  // the surface is discoverable BEFORE the first share, so consent
-  // never feels retrofitted / like surveillance).
+  // Standing glanceable summary (always present, even at zero).
   const summary = useMemo(() => {
     if (!overview) return null
-    const windows = overview.length
+    const exports = overview.length
     const waiting = overview.reduce(
       (n, w) => n + w.entities.length + w.atoms.length,
       0,
     )
-    const viewers = new Set(overview.flatMap((w) => w.grantees)).size
-    return { windows, waiting, viewers }
+    const importers = new Set(overview.flatMap((w) => w.grantees)).size
+    return { exports, waiting, importers }
   }, [overview])
 
   return (
     <div className="flex h-screen flex-col border-l border-rule bg-panel">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-rule px-5">
-        <Shield className="size-3.5 text-ink-dim" strokeWidth={2} />
-        <span className="text-[12.5px] font-semibold tracking-tight text-ink-strong">
-          Sharing
-        </span>
+      <header className="shrink-0 border-b border-rule px-5 py-4">
+        <div className="flex items-center gap-2">
+          <ArrowLeftRight className="size-4 text-accent" strokeWidth={2} />
+          <span className="text-[13px] font-semibold tracking-tight text-ink-strong">
+            Imports / Exports
+          </span>
+        </div>
+        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-dim">
+          Exports publish only the fields you choose from this workspace.
+          Imports are fields another workspace exposes to you. Document
+          sharing is still handled from a document's Share button.
+        </p>
       </header>
 
-      {/* Frame A — the never-invisible header / standing summary */}
       <div className="shrink-0 border-b border-rule px-5 py-3">
-        <p className="text-[11.5px] leading-relaxed text-ink-dim">
-          dohc captures as you work.{' '}
-          <span className="text-ink">Nothing is shared until you say so.</span>
-        </p>
         {summary && (
-          <p className="mt-1.5 text-[11px] text-ink-faint">
-            {summary.waiting > 0 ? (
-              <span className="font-medium text-ink-dim">
-                {summary.waiting} value{summary.waiting === 1 ? '' : 's'}
-              </span>
-            ) : (
-              'nothing'
-            )}{' '}
-            waiting across {summary.windows} window
-            {summary.windows === 1 ? '' : 's'} · {summary.viewers} pe
-            {summary.viewers === 1 ? 'rson' : 'ople'} with windows on your
-            desk
-          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <Metric label="exports" value={summary.exports} />
+            <Metric label="waiting" value={summary.waiting} />
+            <Metric label="importers" value={summary.importers} />
+          </div>
         )}
+        <p className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
+          Nothing crosses until an export exists, a workspace is granted,
+          and you approve any newly captured values for that export.
+        </p>
       </div>
 
       <div className="flex shrink-0 gap-1 border-b border-rule px-3 py-2">
         {(
           [
-            ['mine', 'My windows'],
-            ['onme', 'Windows on me'],
+            ['exports', 'Exports'],
+            ['imports', 'Imports'],
           ] as const
         ).map(([k, label]) => (
           <button
@@ -118,22 +114,21 @@ export function SharingPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {tab === 'mine' ? (
+        {tab === 'exports' ? (
           <div className="flex flex-col gap-3">
-            {/* P3 — create + the reciprocal "your id to share" */}
             <div className="flex items-center justify-between gap-2">
               <button
                 onClick={() => setBuilderOpen((v) => !v)}
                 className="inline-flex h-7 items-center gap-1.5 rounded-md border border-rule bg-surface px-2.5 text-[11.5px] font-medium text-ink-dim hover:border-rule-strong hover:text-ink transition-colors"
               >
                 <Plus className="size-3.5" strokeWidth={2.2} />
-                {builderOpen ? 'Close' : 'New window'}
+                {builderOpen ? 'Close' : 'New export'}
               </button>
               {myId && <CopyId id={myId} />}
             </div>
 
             {builderOpen && (
-              <WindowBuilder onClose={() => setBuilderOpen(false)} />
+              <ExportBuilder onClose={() => setBuilderOpen(false)} />
             )}
 
             {overview === undefined ? (
@@ -142,8 +137,8 @@ export function SharingPanel({
               // Frame B — no windows yet (discoverable, not a dead-end)
               !builderOpen && (
                 <Empty
-                  title="You haven't created a window yet."
-                  body="A window shares specific values from your work with one person. Click ＋ New window to make one — nothing leaves your desk until you grant it and review what crosses."
+                  title="No exports yet."
+                  body="Create an export when another workspace should receive specific fields from yours. It is closer to a tiny API than document sharing."
                 />
               )
             ) : (
@@ -163,8 +158,8 @@ export function SharingPanel({
           <Skeleton />
         ) : sharedWithMe.length === 0 ? (
           <Empty
-            title="No one has shared a window with you."
-            body="When someone grants you a window, exactly what you can see appears here — nothing more."
+            title="No imports yet."
+            body="When another workspace grants you an export, the imported fields appear here exactly as exposed — nothing else."
           />
         ) : (
           <div className="flex flex-col gap-3">
@@ -178,17 +173,31 @@ export function SharingPanel({
                     {s.name}
                   </span>
                   <span className="text-[10px] text-ink-faint">
-                    from {shortWs(s.ownerWorkspaceId)}
+                    imported from {shortWs(s.ownerWorkspaceId)}
                   </span>
                 </div>
-                <p className="mt-1 text-[10.5px] text-ink-faint">
-                  exactly what you receive:
+                <p className="mt-1 flex items-center gap-1 text-[10.5px] text-ink-faint">
+                  <Download className="size-3" strokeWidth={2} />
+                  fields available to this workspace
                 </p>
                 <ViewBlock view={s.view} />
               </div>
             ))}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-rule bg-surface px-2.5 py-2">
+      <div className="text-[15px] font-semibold tabular-nums text-ink-strong">
+        {value}
+      </div>
+      <div className="mt-0.5 text-[9.5px] font-medium uppercase tracking-[0.12em] text-ink-faint">
+        {label}
       </div>
     </div>
   )
@@ -226,7 +235,7 @@ function WindowCard({
       return
     }
     if (w.grantees.includes(id)) {
-      setGrantMsg('already shared with them')
+      setGrantMsg('already granted to that workspace')
       return
     }
     setGrantBusy(true)
@@ -235,8 +244,7 @@ function WindowCard({
       await grant({ windowId: w.windowId, viewerWorkspaceId: id })
       setGrantId('')
       setGrantMsg(
-        'Granted. What they actually see is the “Seen as” below — ' +
-          'already-shared values cross now; the rest waits for your review.',
+        'Granted. The import preview below is the source of truth: approved fields cross now; everything else waits here.',
       )
     } catch {
       setGrantMsg('Could not grant — check the id and try again.')
@@ -259,7 +267,7 @@ function WindowCard({
   // the withheld set (`rejected` is still withheld — honest), but it
   // must read as DONE, not still-actionable. Optimistic local mark;
   // the backend stays the source of truth (re-rejecting is an
-  // idempotent no-op, and "Share these" honestly reports it blocked).
+  // idempotent no-op, and "Export these" honestly reports it blocked).
   const [kept, setKept] = useState<ReadonlySet<string>>(() => new Set())
 
   // Every withheld (ref·key) as a stable row, split kept vs pending.
@@ -292,20 +300,20 @@ function WindowCard({
       if (!r.ok) {
         setNote(
           r.reason === 'too-many-to-enumerate'
-            ? 'Too many to share at once — ask dohc to help clear this.'
-            : "This isn't your window.",
+            ? 'Too many to export at once — ask dohc to help clear this.'
+            : "This isn't your export.",
         )
       } else {
-        const shared = r.sharedRefs.length + r.sharedAtoms.length
+        const exported = r.sharedRefs.length + r.sharedAtoms.length
         const blocked = r.blockedRefs.length + r.blockedAtoms.length
         setNote(
           blocked > 0
-            ? `Shared ${shared} · kept back ${blocked} (you marked these private)`
-            : `Shared ${shared} value${shared === 1 ? '' : 's'} →`,
+            ? `Exported ${exported} · kept back ${blocked} (you marked these private)`
+            : `Exported ${exported} value${exported === 1 ? '' : 's'}`,
         )
       }
     } catch {
-      setNote('Something went wrong — nothing was shared. Try again.')
+      setNote('Something went wrong — nothing crossed. Try again.')
     } finally {
       setBusy(false)
     }
@@ -331,17 +339,18 @@ function WindowCard({
   return (
     <div className="rounded-lg border border-rule bg-surface px-3.5 py-3">
       <div className="flex items-start justify-between gap-2">
-        <span className="text-[12px] font-semibold text-ink-strong">
-          {w.name}
+        <span className="flex min-w-0 items-center gap-1.5 text-[12px] font-semibold text-ink-strong">
+          <Upload className="size-3 text-accent" strokeWidth={2} />
+          <span className="truncate">{w.name}</span>
         </span>
         <span className="shrink-0 text-[10px] text-ink-faint">
           {w.grantees.length === 0
-            ? 'not shared with anyone yet'
-            : `shared with ${w.grantees.length}`}
+            ? 'not granted yet'
+            : `granted to ${w.grantees.length}`}
         </span>
       </div>
 
-      {/* P3 Frame J/L — grant / revoke, in-product */}
+      {/* Grant / revoke, in-product */}
       <div className="mt-1.5 flex flex-col gap-1">
         {w.grantees.map((g) => (
           <div
@@ -353,7 +362,7 @@ function WindowCard({
             </span>
             <button
               onClick={() => doRevoke(g)}
-              title="revoke access (immediate, total)"
+              title="revoke this import"
               className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-ink-faint hover:text-danger transition-colors"
             >
               <X className="size-3" strokeWidth={2.4} />
@@ -371,7 +380,7 @@ function WindowCard({
             onKeyDown={(e) => {
               if (e.key === 'Enter') doGrant()
             }}
-            placeholder="paste a person's workspace id…"
+            placeholder="paste importer workspace id…"
             className="min-w-0 flex-1 rounded-md border border-rule bg-surface px-2 py-1 font-mono text-[10.5px] text-ink placeholder:text-ink-faint outline-none focus:border-rule-strong transition-colors"
           />
           <button
@@ -386,10 +395,9 @@ function WindowCard({
           <p className="text-[10.5px] text-ink-faint">{grantMsg}</p>
         )}
         <p className="text-[10px] leading-relaxed text-ink-faint">
-          They give you their id from the "your id" line at the top of
-          their own Sharing panel. After granting, what they actually
-          see is the digest / “Seen as” below — already-shared values
-          cross at once; the rest waits for your review.
+          They copy their workspace id from this panel. Granting creates
+          their import. Already approved fields cross immediately; new
+          captured fields wait here until you approve them for this export.
         </p>
       </div>
 
@@ -399,27 +407,27 @@ function WindowCard({
         // bulk path) via the standard pending-prompt → Chat handoff.
         <div className="mt-2 rounded-md bg-danger-soft px-2.5 py-2">
           <p className="text-[11px] leading-relaxed text-danger">
-            Too many unreviewed values to list safely — this window is
-            paused for everyone until you review it.
+            Too many waiting values to list safely — this export is paused
+            until you review it.
           </p>
           <button
             onClick={() =>
               onAskDohc(
-                `The "${w.name}" window has too many unreviewed ` +
-                  `values to review here. Walk me through what's ` +
-                  `waiting to share for it and help me clear it.`,
+                `The "${w.name}" export has too many unreviewed ` +
+                  `values to review here. Walk me through what is ` +
+                  `waiting to export and help me clear it.`,
               )
             }
             className="mt-1.5 inline-flex h-6 items-center gap-1 rounded-md bg-danger px-2.5 text-[11px] font-medium text-surface hover:opacity-90 transition-opacity"
           >
-            Ask dohc to clear this →
+            Ask dohc to clear this
           </button>
         </div>
       ) : nWithheld === 0 ? (
         // Frame C — nothing waiting
         <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success">
           <Check className="size-3.5" strokeWidth={2.4} />
-          everything you've chosen is shared; nothing waiting.
+          all selected fields are approved; nothing waiting.
         </p>
       ) : (
         // Frame D — the batched, non-blocking digest
@@ -427,7 +435,7 @@ function WindowCard({
           <p className="text-[11px] text-ink-dim">
             dohc captured{' '}
             <span className="font-medium text-ink">{nWithheld}</span> value
-            {nWithheld === 1 ? '' : 's'} this window would show.
+            {nWithheld === 1 ? '' : 's'} this export would expose.
           </p>
           <ul className="mt-1.5 flex flex-col gap-1">
             {pendingRows.map((r) => (
@@ -460,11 +468,11 @@ function WindowCard({
               disabled={busy}
               className="mt-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface hover:bg-ink disabled:opacity-50 transition-colors"
             >
-              {busy ? 'sharing…' : `Share these ${nPending}`}
+              {busy ? 'exporting…' : `Export these ${nPending}`}
             </button>
           ) : (
             <p className="mt-2.5 text-[11px] text-ink-faint">
-              all kept private — nothing will cross this window.
+              all kept private — nothing will cross this export.
             </p>
           )}
         </div>
@@ -474,7 +482,7 @@ function WindowCard({
         <p className="mt-2 text-[11px] font-medium text-ink-dim">{note}</p>
       )}
 
-      {/* D4 "Seen as:" — the consequence, not the rule */}
+      {/* Preview the consequence, not the rule. */}
       {!w.truncated && (
         <div className="mt-2.5 border-t border-rule pt-2">
           <button
@@ -486,7 +494,7 @@ function WindowCard({
             ) : (
               <ChevronRight className="size-3" strokeWidth={2.2} />
             )}
-            Seen as — what a viewer actually gets
+            Preview import — what the other workspace gets
           </button>
           {seenAsOpen && <SeenAs windowId={w.windowId} />}
         </div>
@@ -529,7 +537,7 @@ function SeenAs({ windowId }: { windowId: Id<'windows'> }) {
   if (!preview.ok)
     return (
       <p className="mt-1.5 text-[10.5px] text-ink-faint">
-        nothing crosses yet — share values above to see this fill in.
+        nothing crosses yet — approve fields above to see this fill in.
       </p>
     )
   return <ViewBlock view={preview.view} />
@@ -579,9 +587,6 @@ function Empty({ title, body }: { title: string; body: string }) {
   )
 }
 
-// P3 — the reciprocal of granting: to be windowed in, you hand
-// someone this id. whoami returns ONLY your own id (inert: only a
-// window's own owner can grant it).
 function CopyId({ id }: { id: string }) {
   const [done, setDone] = useState(false)
   return (
@@ -595,21 +600,18 @@ function CopyId({ id }: { id: string }) {
           /* clipboard unavailable — the id is still visible on hover */
         }
       }}
-      title={`your id to share: ${id}`}
+      title={`workspace id for imports/exports: ${id}`}
       className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-rule bg-surface px-2 text-[10.5px] font-medium text-ink-faint hover:border-rule-strong hover:text-ink-dim transition-colors"
     >
       <Copy className="size-3" strokeWidth={2} />
-      {done ? 'copied' : 'your id'}
+      {done ? 'copied' : 'workspace id'}
     </button>
   )
 }
 
-// P3 Frame G/H — the inline window builder (no modal; pull surface).
-// createWindow validates ≥1 key server-side; Create is ALSO disabled
-// client-side so it never throws in the user's face. The new window
-// then appears as a WindowCard whose existing digest / "Seen as:"
-// shows the REAL consequence (never a hard-coded claim).
-function WindowBuilder({ onClose }: { onClose: () => void }) {
+// Inline export builder. createWindow validates at least one key
+// server-side; Create is also disabled client-side for a calmer UI.
+function ExportBuilder({ onClose }: { onClose: () => void }) {
   const ak = useQuery(api.windows.availableKeys) as
     | { keys: string[]; truncated: boolean }
     | undefined
@@ -638,16 +640,16 @@ function WindowBuilder({ onClose }: { onClose: () => void }) {
       </div>
     )
 
-  // Frame G — nothing windowable yet (not a blank picker / dead-end)
+  // Nothing exportable yet (not a blank picker / dead-end)
   if (ak.keys.length === 0)
     return (
       <div className="rounded-lg border border-rule bg-surface px-3.5 py-4">
         <p className="text-[12px] font-medium text-ink-dim">
-          Nothing to window yet
+          Nothing exportable yet
         </p>
         <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-          Windows share specific values from your work. Do a little
-          work with dohc first — the values you create show up here.
+          Exports use captured fields from your workspace. Do a little
+          work with dohc first — the fields you create show up here.
         </p>
         <button
           onClick={onClose}
@@ -680,9 +682,9 @@ function WindowBuilder({ onClose }: { onClose: () => void }) {
         rename: Object.keys(rename).length ? rename : undefined,
         aggregate,
       })
-      onClose() // it now appears as a WindowCard (reactive)
+      onClose() // it now appears as an export card (reactive)
     } catch {
-      setErr('Could not create the window — try again.')
+      setErr('Could not create the export — try again.')
     } finally {
       setBusy(false)
     }
@@ -693,7 +695,7 @@ function WindowBuilder({ onClose }: { onClose: () => void }) {
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="window name (e.g. “hours for my manager”)"
+        placeholder="export name (e.g. “hours for my manager”)"
         className="rounded-md border border-rule bg-page px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint outline-none focus:border-rule-strong transition-colors"
       />
       <div>
@@ -800,13 +802,12 @@ function WindowBuilder({ onClose }: { onClose: () => void }) {
           disabled={!canCreate}
           className="inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface hover:bg-ink disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {busy ? 'creating…' : 'Create window'}
+          {busy ? 'creating…' : 'Create export'}
         </button>
       </div>
       <p className="text-[10px] leading-relaxed text-ink-faint">
-        Creating shares nothing by itself. You then grant a person and
-        review what crosses — already-confirmed values cross at once;
-        the rest waits for your review.
+        Creating exports nothing by itself. You then grant a workspace and
+        approve exactly which fields cross.
       </p>
     </div>
   )

@@ -1,7 +1,12 @@
 import { v } from 'convex/values'
 import { query } from './_generated/server'
 import { requireWorkspace } from './auth'
-import { isSkillAtomBody, isLegacySkillPath } from './atomId'
+import {
+  isCommandAtomBody,
+  isSkillAtomBody,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
+} from './atomId'
 
 // Track-3 P3 — public query exposing the user's saved skills to
 // the UI. The ⌘K palette / slash-command surface subscribes here
@@ -42,13 +47,28 @@ export const list = query({
       .query('atoms')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .collect()
-    // A skill atom either declares `type: skill` in its frontmatter
-    // (the canonical Track-3 form) OR lives at the legacy
-    // `skills/*` path (the compat-window term still recognized
-    // until §6.4.5 cleanup). Both sources project as a `skill`
-    // entry the user can fire from ⌘K.
     return rows
-      .filter((r) => isSkillAtomBody(r.body) || isLegacySkillPath(r.path))
+      .filter((r) => isWorkspaceSkillPath(r.path) && isSkillAtomBody(r.body))
+      .map((r) => ({
+        path: r.path,
+        label: pathDeriveLabel(r.path),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  },
+})
+
+export const listCommands = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .collect()
+    return rows
+      .filter(
+        (r) => isWorkspaceCommandPath(r.path) && isCommandAtomBody(r.body),
+      )
       .map((r) => ({
         path: r.path,
         label: pathDeriveLabel(r.path),

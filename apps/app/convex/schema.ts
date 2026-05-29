@@ -525,14 +525,12 @@ export default defineSchema({
     .index('by_viewer', ['viewerWorkspaceId'])
     .index('by_window_viewer', ['windowId', 'viewerWorkspaceId']),
 
-  // Phase 4 — the loop. The binding registry for a `{identifier}`
-  // live-total. ADDITIVE; no readers until liveTotals.resolve. A live
-  // total is a RENDERED PROJECTION (UC-3/EF4): this table only records
-  // HOW to compute it, NEVER the computed value. One binding per
-  // (workspace, identifier). `ownDesk` = sum/count the caller's own
-  // value-atoms (markdown is truth, parsed by the FROZEN parser);
-  // `window` = a Phase-3 cross-desk window aggregate (reviewed-by-
-  // default + grant already enforced by resolveWindow).
+  // Binding registry for a `{identifier}` live-total. A live total is
+  // a rendered projection: this table only records how to compute it,
+  // never the computed value. One binding per (workspace, identifier).
+  // `ownDesk` = sum/count the caller's own value-atoms; `window` =
+  // a cross-workspace import/export aggregate with grants enforced by
+  // resolveWindow.
   rollups: defineTable({
     workspaceId: v.string(),
     identifier: v.string(),
@@ -548,53 +546,6 @@ export default defineSchema({
       }),
     ),
   }).index('by_workspace_identifier', ['workspaceId', 'identifier']),
-
-  // Phase 4 Unit 4b — the weekly loop. An ADVISORY reconcile proposal
-  // (intent vs reality). NOT a capture (recordCapture VERIFIES an
-  // atom/entity target — an insight has none); this mirrors the
-  // reviewed-by-default PATTERN without overloading that table.
-  //
-  // Phase-4 review (Codex HIGH): the row stores ONLY the workspace's
-  // OWN data (goal, from its own .context/intent.md) + a marker. It does NOT
-  // persist `actual`/`message` — a cross-desk live-total cached here
-  // would survive grant revocation and leak (sharing-and-lenses.md:
-  // live totals roll up "through permitted windows"; markdown is the
-  // truth, "not a database underneath"). `actual` is re-resolved LIVE
-  // and fully grant-gated at digest time (_pendingProposals); a
-  // revoked/withheld/caught-up proposal silently drops. Accept is
-  // ADVISORY ONLY — never auto-applies (masterplan non-goal).
-  // Idempotent per (workspace, period, identifier).
-  //
-  // Unit 4c: also carries `kind:'gardening'` proposals (orphan/dup
-  // notes). `goal` is metric-only (optional). `summary` is
-  // gardening-only and is SAFE to persist — it describes the
-  // workspace's OWN note structure (paths), never a cross-desk value
-  // (the Codex-HIGH cache concern was cross-desk live-totals only).
-  // Both kinds are re-evaluated LIVE at digest time and dropped when
-  // no longer applicable.
-  proposals: defineTable({
-    workspaceId: v.string(),
-    period: v.string(), // epoch-week bucket (stable idempotency key)
-    identifier: v.string(),
-    // OPTIONAL on purpose (evolve-not-rewrite / widen-migrate-narrow:
-    // a required field would reject any pre-existing row on deploy).
-    // Absent ⇒ treated as 'metric' by readers (the original shape).
-    kind: v.optional(v.union(v.literal('metric'), v.literal('gardening'))),
-    goal: v.optional(v.number()), // metric only — own .context/intent.md goal
-    summary: v.optional(v.string()), // gardening only — own note paths
-    status: v.union(
-      v.literal('pending'),
-      v.literal('accepted'),
-      v.literal('dismissed'),
-    ),
-    createdAt: v.number(),
-  })
-    .index('by_workspace_status', ['workspaceId', 'status'])
-    .index('by_workspace_period_identifier', [
-      'workspaceId',
-      'period',
-      'identifier',
-    ]),
 
   // v2 atomSuggestions sidecar. Semantic agent tools write proposed
   // edits here; the editor subscribes and renders inline bubbles.

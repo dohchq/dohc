@@ -16,10 +16,13 @@ import {
 import {
   deriveTitle,
   extractFrontmatterId,
+  isCommandAtomBody,
   isHtmlAtomBody,
   isHtmlPath,
   isLegacySkillPath,
   isSkillAtomBody,
+  isWorkspaceCommandPath,
+  isWorkspaceSkillPath,
 } from './atomId'
 
 // Top-N relevance results scanned from the index, and how many we return.
@@ -32,15 +35,16 @@ export type SearchResult = {
   path: string
   fileId: string | null
   title: string
-  type: 'html' | 'skill' | null
+  type: 'html' | 'skill' | 'command' | null
   updatedAt: number
   starred: boolean
   snippet: SnippetPart[]
 }
 
-function atomType(a: Doc<'atoms'>): 'html' | 'skill' | null {
+function atomType(a: Doc<'atoms'>): 'html' | 'skill' | 'command' | null {
   if (isHtmlPath(a.path) || isHtmlAtomBody(a.body)) return 'html'
-  if (isSkillAtomBody(a.body) || isLegacySkillPath(a.path)) return 'skill'
+  if (isCommandAtomBody(a.body) || isWorkspaceCommandPath(a.path)) return 'command'
+  if (isSkillAtomBody(a.body) || isWorkspaceSkillPath(a.path) || isLegacySkillPath(a.path)) return 'skill'
   return null
 }
 

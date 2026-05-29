@@ -40,7 +40,6 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'confirm_window_sharing',
   'confirm_capture',
   'reject_capture',
-  'resolve_proposal',
   // Destructive class (post-confirm-prompt)
   'delete_atom',
   'delete_entity',
@@ -50,6 +49,7 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'update_entity',
   // Self-modifying / sharing class
   'save_skill',
+  'save_command',
   'define_rollup',
   // Resurrection class
   'restore',
@@ -142,10 +142,10 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
   'confirm_window_sharing',
   'confirm_capture',
   'reject_capture',
-  'resolve_proposal',
   'restore',
   'restore_folder',
   'save_skill',
+  'save_command',
   'update_entity',
   // file-org-v1 D4.1b ATOMIC — set_lock gate is at the top of the
   // handler (no early-return branch; no conditional input).
@@ -253,13 +253,12 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'list_entities',
   'find_entity',
   'list_skills',
-  'pending_proposals',
+  'list_commands',
   'pending_captures',
   'review_window_sharing',
   'onboarding_state',
-  // sanity-check / advisory
+  // sanity-check
   'run_query',
-  'run_loop',
   // explicitly-additive writes (no overwrite path)
   'create_entities', // gated via mutation-level strictCreate (P2b.2 BRACE) — no `requireDirectUserAuthorization` needed at the tool layer; the depth-read + strictCreate mode is the structural enforcement
   'create_folder',
@@ -277,6 +276,7 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   // UNAUTHORIZABLE tools trip the gate (BELT). Gating run_skill
   // itself would defeat the whole §2-A model.
   'run_skill',
+  'run_command',
 ])
 
 describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches ADDITIONS too)', () => {
@@ -311,12 +311,13 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
     // test pass) is itself flagged here.
     const expectedSafe = new Set([
       'list_atoms', 'read_atom', 'list_trash', 'list_entities',
-      'find_entity', 'list_skills',
-      'pending_proposals', 'pending_captures', 'review_window_sharing',
-      'onboarding_state', 'run_query', 'run_loop',
+      'find_entity', 'list_skills', 'list_commands',
+      'pending_captures', 'review_window_sharing',
+      'onboarding_state', 'run_query',
       'create_entities', 'create_folder',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
+      'run_command',
       'write_atom', // retired v1 tool: always refuses
       'suggest_in_doc', // retired v1 tool: always refuses
     ])

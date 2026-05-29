@@ -8,6 +8,7 @@ import type { QueryCtx, MutationCtx } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { v } from 'convex/values'
 import { requireWorkspace } from './auth'
+import { regenerateMap } from './map'
 import { ORG_IDENTITY_PATH, PERSONAL_IDENTITY_PATH } from './inlineAtom'
 // Track-3 P1 §6 retrofit: a skill or html atom's example ```query
 // block falsely satisfied "vault has a populated dashboard" and
@@ -163,8 +164,23 @@ async function completeWorkspaceOnboarding(
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
         `(${identityFile}=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-        `Write a populated dashboard and ${identityFile} first.`,
+      `Write a populated dashboard and ${identityFile} first.`,
     )
+  }
+  // ai-os-ideas #1 (the Map): a finished onboarding gets a living
+  // navigable index, server-guaranteed (not prompt-hope), reusing
+  // the map's deterministic builder. regenerateMap handles its
+  // KNOWN conditions (dup/overflow/not-owned) but its upsert (+ the
+  // capture pipeline it triggers) can still throw for other
+  // reasons. The Map is an ENHANCEMENT; finishing onboarding is the
+  // make-or-break wedge — map-gen must NEVER abort finish. Wrap it:
+  // on any failure, degrade silently (later edits regenerate
+  // .context/_map.md anyway). Catching internally does NOT roll back this
+  // mutation's transaction in Convex (only a thrown handler does).
+  try {
+    await regenerateMap(ctx, workspaceId)
+  } catch {
+    /* never block finish on the optional Map */
   }
   if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
   else

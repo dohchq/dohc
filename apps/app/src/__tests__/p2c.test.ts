@@ -53,39 +53,39 @@ describe('Track-3 P2c — SKILL_MAX_BYTES + pathDeriveLabel pure helpers', () =>
   })
 
   it('pathDeriveLabel: strips dirs + .md extension', () => {
-    expect(pathDeriveLabel('skills/weekly-review.md')).toBe('weekly-review')
-    expect(pathDeriveLabel('skills/team/standup.md')).toBe('standup')
+    expect(pathDeriveLabel('.skills/weekly-review.md')).toBe('weekly-review')
+    expect(pathDeriveLabel('.skills/team/standup.md')).toBe('standup')
     expect(pathDeriveLabel('me.md')).toBe('me')
   })
 
   it('pathDeriveLabel: case-insensitive .md strip', () => {
-    expect(pathDeriveLabel('skills/foo.MD')).toBe('foo')
-    expect(pathDeriveLabel('skills/foo.Md')).toBe('foo')
+    expect(pathDeriveLabel('.skills/foo.MD')).toBe('foo')
+    expect(pathDeriveLabel('.skills/foo.Md')).toBe('foo')
   })
 
   it('pathDeriveLabel: preserves dotted basenames before the .md ext', () => {
-    expect(pathDeriveLabel('skills/weekly-review.q3.md')).toBe(
+    expect(pathDeriveLabel('.skills/weekly-review.q3.md')).toBe(
       'weekly-review.q3',
     )
   })
 
   it('pathDeriveLabel: collision case — same label at different paths', () => {
-    // Design line 511: `skills/team/weekly-review.md` and
-    // `skills/client/weekly-review.md` both label as
+    // `.skills/team/weekly-review.md` and
+    // `.skills/client/weekly-review.md` both label as
     // `weekly-review`. The agent MUST use canonical path, not
     // label, as the identifier (run_skill({path})).
-    expect(pathDeriveLabel('skills/team/weekly-review.md')).toBe(
+    expect(pathDeriveLabel('.skills/team/weekly-review.md')).toBe(
       'weekly-review',
     )
-    expect(pathDeriveLabel('skills/client/weekly-review.md')).toBe(
+    expect(pathDeriveLabel('.skills/client/weekly-review.md')).toBe(
       'weekly-review',
     )
   })
 
   it('pathDeriveLabel is a PURE function (no side effects)', () => {
-    const before = 'skills/foo.md'
+    const before = '.skills/foo.md'
     pathDeriveLabel(before)
-    expect(before).toBe('skills/foo.md') // input unchanged
+    expect(before).toBe('.skills/foo.md') // input unchanged
   })
 
   it('skillBodyBytes: counts UTF-8 bytes, not chars (P2c fold Codex F2)', () => {
@@ -220,7 +220,7 @@ describe('Track-3 P2c — list_skills returns label + path (for collision disamb
   it('list_skills delegates to api.skills.list (P2c indep fold F5 — filters non-skill atoms)', () => {
     // P2c indep fold F5: list_skills now uses api.skills.list
     // which filters by isSkillAtomBody OR isLegacySkillPath —
-    // non-skill atoms under skills/* (e.g. README.md) are
+    // non-skill atoms under .skills/* (e.g. README.md) are
     // EXCLUDED from the listing so the model doesn't suggest
     // unrunnable skills to run_skill.
     expect(listSkillsBody).toMatch(/api\.skills\.list/)

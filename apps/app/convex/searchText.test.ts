@@ -21,7 +21,8 @@ describe('isAtomSearchable', () => {
     expect(isAtomSearchable('clients/Acme.md')).toBe(true)
     expect(isAtomSearchable('me.md')).toBe(true)
     expect(isAtomSearchable('intent.md')).toBe(true)
-    expect(isAtomSearchable('skills/email.md')).toBe(true)
+    expect(isAtomSearchable('.skills/email.md')).toBe(true)
+    expect(isAtomSearchable('.commands/draft-invoice.md')).toBe(true)
   })
 })
 

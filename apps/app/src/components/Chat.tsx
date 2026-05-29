@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
-import { Send } from 'lucide-react'
+import { Send, Sparkles, SquareTerminal } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
@@ -22,10 +22,13 @@ import { useSetChatBusy } from '../lib/chat-busy'
 // or via palette click (palette uses the dedicated onFireSkill
 // channel, not detectSkillFire — see CommandPalette.tsx).
 const SKILL_COMMAND_RE = /^\/skill\s+([\w./-]+)(?:\s+([\s\S]+))?$/
+const COMMAND_FIRE_RE = /^\/([\w./-]+)(?:\s+([\s\S]+))?$/
+
+type RunnableRef = { path: string; label: string }
 
 export function detectSkillFire(
   prompt: string,
-  skills: ReadonlyArray<{ path: string; label: string }>,
+  skills: ReadonlyArray<RunnableRef>,
 ):
   | { matched: { path: string; label: string }; extras: string | null }
   | { ambiguous: ReadonlyArray<{ path: string; label: string }> }
@@ -46,6 +49,27 @@ export function detectSkillFire(
   return null
 }
 
+export function detectCommandFire(
+  prompt: string,
+  commands: ReadonlyArray<RunnableRef>,
+):
+  | { matched: RunnableRef; extras: string | null }
+  | { ambiguous: ReadonlyArray<RunnableRef> }
+  | null {
+  const trimmed = prompt.trim()
+  const m = trimmed.match(COMMAND_FIRE_RE)
+  if (!m) return null
+  if (m[1] === 'skill') return null
+  const token = m[1]
+  const extras = m[2]?.trim() || null
+  const byPath = commands.find((c) => c.path === token)
+  if (byPath) return { matched: byPath, extras }
+  const byLabel = commands.filter((c) => c.label === token)
+  if (byLabel.length === 1) return { matched: byLabel[0], extras }
+  if (byLabel.length > 1) return { ambiguous: byLabel }
+  return null
+}
+
 type Props = {
   threadId: string | null
   pendingPrompt?: string | null
@@ -57,6 +81,8 @@ type Props = {
   // onPendingSkillFireHandled.
   pendingSkillFire?: string | null
   onPendingSkillFireHandled?: () => void
+  pendingCommandFire?: string | null
+  onPendingCommandFireHandled?: () => void
 }
 
 export function Chat({
@@ -65,15 +91,18 @@ export function Chat({
   onPendingHandled,
   pendingSkillFire,
   onPendingSkillFireHandled,
+  pendingCommandFire,
+  onPendingCommandFireHandled,
 }: Props) {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [slashCursor, setSlashCursor] = useState(0)
   const sendMessage = useAction(api.agent.sendMessage)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
-  // collect; filtered to type:skill or skills/* path).
+  // collect; filtered to type:skill under .skills/).
   // org-plan §5: active workspace threaded through skills + the
   // (org-plan §5 non-defaultable) listMessages thread surface. The
   // agent.sendMessage action remains personal-default for now (an
@@ -81,6 +110,8 @@ export function Chat({
   // binds to a workspace via threadRefs, which is the long-term fix).
   const activeWorkspaceId = useActiveWorkspaceId()
   const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
+  const savedCommands =
+    useQuery(api.skills.listCommands, { activeWorkspaceId }) ?? []
 
   const messagesQuery = useUIMessages(
     api.agent.listMessages,
@@ -134,6 +165,7 @@ export function Chat({
     // firing; unmatched slash-prefixes pass through as a normal
     // prompt (the model sees the literal "/" prefix and replies).
     const match = detectSkillFire(prompt, skills)
+    const commandMatch = match ? null : detectCommandFire(prompt, savedCommands)
     setSending(true)
     if (!promptOverride) setInput('')
     try {
@@ -164,6 +196,26 @@ export function Chat({
           threadId,
           prompt: promptText,
           entry: 'skill-fire',
+          activeWorkspaceId,
+        })
+        return
+      }
+      if (commandMatch && 'ambiguous' in commandMatch) {
+        const list = commandMatch.ambiguous.map((c) => c.path).join('\n  ')
+        setInput(
+          `${prompt}\n\n[multiple commands match this label — pick one of:]\n  ${list}`,
+        )
+        setSending(false)
+        return
+      }
+      if (commandMatch && 'matched' in commandMatch) {
+        const promptText = commandMatch.extras
+          ? `${commandMatch.matched.path}\n\n${commandMatch.extras}`
+          : commandMatch.matched.path
+        await sendMessage({
+          threadId,
+          prompt: promptText,
+          entry: 'command-fire',
           activeWorkspaceId,
         })
         return
@@ -213,6 +265,60 @@ export function Chat({
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingSkillFire, threadId])
+
+  useEffect(() => {
+    if (!pendingCommandFire || !threadId || sending || busy) return
+    const path = pendingCommandFire
+    onPendingCommandFireHandled?.()
+    setSending(true)
+    void (async () => {
+      try {
+        await sendMessage({
+          threadId,
+          prompt: path,
+          entry: 'command-fire',
+          activeWorkspaceId,
+        })
+      } catch (e) {
+        console.error(e)
+      } finally {
+        setSending(false)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCommandFire, threadId])
+
+  const slashQuery = useMemo(() => {
+    const m = input.match(/^\s*\/([^\s]*)$/)
+    return m ? m[1].toLowerCase() : null
+  }, [input])
+
+  const slashItems = useMemo(() => {
+    if (slashQuery === null) return []
+    const rows = [
+      ...savedCommands.map((c) => ({ ...c, kind: 'command' as const })),
+      ...skills.map((s) => ({ ...s, kind: 'skill' as const })),
+    ]
+    if (!slashQuery) return rows
+    return rows.filter(
+      (r) =>
+        r.label.toLowerCase().includes(slashQuery) ||
+        r.path.toLowerCase().includes(slashQuery),
+    )
+  }, [savedCommands, skills, slashQuery])
+
+  useEffect(() => {
+    setSlashCursor((c) => Math.min(c, Math.max(0, slashItems.length - 1)))
+  }, [slashItems.length])
+
+  function fireSlashItem(item: (typeof slashItems)[number]) {
+    setInput('')
+    if (item.kind === 'command') {
+      void submit(`/${item.path}`)
+    } else {
+      void submit(`/skill ${item.path}`)
+    }
+  }
 
   return (
     <aside className="flex h-screen flex-col bg-panel border-l border-rule">
@@ -265,6 +371,29 @@ export function Chat({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (slashItems.length > 0) {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setSlashCursor((c) => Math.min(slashItems.length - 1, c + 1))
+                  return
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setSlashCursor((c) => Math.max(0, c - 1))
+                  return
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setInput('')
+                  return
+                }
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  const item = slashItems[slashCursor] ?? slashItems[0]
+                  if (item) fireSlashItem(item)
+                  return
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
                 submit()
@@ -275,9 +404,46 @@ export function Chat({
             rows={3}
             className="w-full resize-none bg-transparent px-3 pt-3 pb-9 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint outline-none disabled:text-ink-faint"
           />
+          {slashQuery !== null && slashItems.length > 0 && (
+            <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal">
+              <div className="border-b border-rule px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+                Commands & Skills
+              </div>
+              <div className="max-h-72 overflow-y-auto py-1">
+                {slashItems.map((item, i) => {
+                  const active = i === slashCursor
+                  const Icon = item.kind === 'command' ? SquareTerminal : Sparkles
+                  return (
+                    <button
+                      key={`${item.kind}.${item.path}`}
+                      type="button"
+                      onMouseEnter={() => setSlashCursor(i)}
+                      onClick={() => fireSlashItem(item)}
+                      className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
+                        active ? 'bg-hover text-ink-strong' : 'text-ink-dim hover:bg-hover hover:text-ink'
+                      }`}
+                    >
+                      <Icon
+                        className={`size-3.5 shrink-0 ${
+                          item.kind === 'command' ? 'text-accent' : 'text-violet-500'
+                        }`}
+                        strokeWidth={2}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">
+                        {item.label}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">
+                        {item.kind} · {item.path}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           <div className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
             <span className="text-[10px] text-ink-faint">
-              ⏎ send · ⇧⏎ newline
+              / commands · ⏎ send · ⇧⏎ newline
             </span>
             <button
               onClick={() => submit()}

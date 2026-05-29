@@ -12,10 +12,11 @@ const modules = import.meta.glob('./**/*.ts')
 
 describe('Track-3 P3 — pathDeriveLabel (mirror of agent.ts; lockstep enforced)', () => {
   it('strips dirs + .md extension (case-insensitive)', () => {
-    expect(pathDeriveLabel('skills/foo.md')).toBe('foo')
-    expect(pathDeriveLabel('skills/team/standup.md')).toBe('standup')
+    expect(pathDeriveLabel('.skills/foo.md')).toBe('foo')
+    expect(pathDeriveLabel('.skills/team/standup.md')).toBe('standup')
+    expect(pathDeriveLabel('.commands/draft-invoice.md')).toBe('draft-invoice')
     expect(pathDeriveLabel('me.md')).toBe('me')
-    expect(pathDeriveLabel('skills/foo.MD')).toBe('foo')
+    expect(pathDeriveLabel('.skills/foo.MD')).toBe('foo')
   })
 
   // P3+P4 indep fold F5: explicit cross-module parity lockstep.
@@ -28,14 +29,15 @@ describe('Track-3 P3 — pathDeriveLabel (mirror of agent.ts; lockstep enforced)
       '/',
       '.md',
       '/.md',
-      'skills/.md',
-      'skills/foo.md',
-      'skills/team/standup.md',
-      'skills/team/weekly-review.q3.md',
+      '.skills/.md',
+      '.skills/foo.md',
+      '.skills/team/standup.md',
+      '.commands/draft-invoice.md',
+      '.skills/team/weekly-review.q3.md',
       'me.md',
-      'skills/MIXED.MD',
+      '.skills/MIXED.MD',
       'no-ext',
-      'skills/中文.md', // Unicode
+      '.skills/中文.md', // Unicode
     ]
     for (const input of inputs) {
       expect(pathDeriveLabel(input)).toBe(agentLabel(input))
@@ -61,31 +63,33 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
     // Seed a workspace via the standard route — write an atom that
     // declares type:skill in frontmatter.
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/weekly-review.md',
+      path: '.skills/weekly-review.md',
       body: '---\ntype: skill\n---\n\nRun the weekly review.',
     })
     const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
     expect(res[0]).toMatchObject({
-      path: 'skills/weekly-review.md',
+      path: '.skills/weekly-review.md',
       label: 'weekly-review',
     })
   })
 
-  it('includes legacy skills/* atoms (compat-window)', async () => {
+  it('includes dot-folder .skills atoms only when they declare type:skill', async () => {
     const t = convexTest(schema, modules)
     const ti = t.withIdentity({ subject: 'user|123', email: 'a@b.test' })
-    // A legacy skill (no frontmatter type:skill) at skills/*.md
-    // STILL projects as a skill via isLegacySkillPath.
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/legacy-skill.md',
-      body: '# Legacy\n\nThis is a legacy skill without frontmatter.',
+      path: '.skills/not-runnable.md',
+      body: '# Plain note\n\nThis is just documentation.',
+    })
+    await ti.mutation(api.atoms.upsert, {
+      path: '.skills/real-skill.md',
+      body: '---\ntype: skill\n---\nReusable instructions.',
     })
     const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
     expect(res[0]).toMatchObject({
-      path: 'skills/legacy-skill.md',
-      label: 'legacy-skill',
+      path: '.skills/real-skill.md',
+      label: 'real-skill',
     })
   })
 
@@ -101,27 +105,27 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
       body: '---\ntype: html\n---\n<h1>Dashboard</h1>',
     })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/real-skill.md',
+      path: '.skills/real-skill.md',
       body: '---\ntype: skill\n---\nDo a thing.',
     })
     const res = await ti.query(api.skills.list, {})
     expect(res).toHaveLength(1)
-    expect(res[0].path).toBe('skills/real-skill.md')
+    expect(res[0].path).toBe('.skills/real-skill.md')
   })
 
   it('sorts results by label (deterministic UI order)', async () => {
     const t = convexTest(schema, modules)
     const ti = t.withIdentity({ subject: 'user|123', email: 'a@b.test' })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/zebra.md',
+      path: '.skills/zebra.md',
       body: '---\ntype: skill\n---\nx',
     })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/alpha.md',
+      path: '.skills/alpha.md',
       body: '---\ntype: skill\n---\nx',
     })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/mike.md',
+      path: '.skills/mike.md',
       body: '---\ntype: skill\n---\nx',
     })
     const res = await ti.query(api.skills.list, {})
@@ -132,11 +136,11 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
     const t = convexTest(schema, modules)
     const ti = t.withIdentity({ subject: 'user|123', email: 'a@b.test' })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/team/standup.md',
+      path: '.skills/team/standup.md',
       body: '---\ntype: skill\n---\nx',
     })
     await ti.mutation(api.atoms.upsert, {
-      path: 'skills/client/standup.md',
+      path: '.skills/client/standup.md',
       body: '---\ntype: skill\n---\nx',
     })
     const res = await ti.query(api.skills.list, {})
@@ -147,8 +151,32 @@ describe('Track-3 P3 — api.skills.list returns the user`s saved skills', () =>
     // collision via `ambiguous` branch.
     const paths = res.map((r) => r.path).sort()
     expect(paths).toEqual([
-      'skills/client/standup.md',
-      'skills/team/standup.md',
+      '.skills/client/standup.md',
+      '.skills/team/standup.md',
+    ])
+  })
+})
+
+describe('Track-3 P3 — api.skills.listCommands returns user-created commands', () => {
+  it('returns type:command atoms from .commands only', async () => {
+    const t = convexTest(schema, modules)
+    const ti = t.withIdentity({ subject: 'user|123', email: 'a@b.test' })
+    await ti.mutation(api.atoms.upsert, {
+      path: '.commands/draft-invoice.md',
+      body: '---\ntype: command\n---\nDraft an invoice using my invoice skill.',
+    })
+    await ti.mutation(api.atoms.upsert, {
+      path: '.commands/readme.md',
+      body: '# Just docs',
+    })
+    await ti.mutation(api.atoms.upsert, {
+      path: '.skills/invoice.md',
+      body: '---\ntype: skill\n---\nHow invoices work.',
+    })
+
+    const res = await ti.query(api.skills.listCommands, {})
+    expect(res).toEqual([
+      { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
     ])
   })
 })

@@ -8,6 +8,7 @@ import {
   SAFE_FOR_SKILL_TOOLS,
   USER_TURN_TOOLS_NO_RUN_SKILL,
   SKILL_ENTRY_TOOLS,
+  COMMAND_ENTRY_TOOLS,
 } from '../../convex/agent'
 
 // Track-3 P2b.4 — prepareStep.activeTools three-mode invariant +
@@ -30,19 +31,19 @@ const AGENT_SRC = readFileSync(
 )
 
 describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive modes)', () => {
-  it('UNAUTHORIZABLE_TOOLS is exactly the §2-A.1 list (16 ops after plugin removal)', () => {
+  it('UNAUTHORIZABLE_TOOLS is exactly the §2-A.1 list', () => {
     const expected = new Set([
       'finish_onboarding',
       'confirm_window_sharing',
       'confirm_capture',
       'reject_capture',
-      'resolve_proposal',
       'delete_atom',
       'delete_entity',
       'delete_folder',
       'create_atom',
       'update_entity',
       'save_skill',
+      'save_command',
       'define_rollup',
       'restore',
       'restore_folder',
@@ -60,14 +61,19 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     expect([...SKILL_ENTRY_TOOLS]).toEqual(['run_skill'])
   })
 
-  it('SAFE_FOR_SKILL_TOOLS does NOT contain run_skill (no skill-within-skill recursion)', () => {
+  it('COMMAND_ENTRY_TOOLS is exactly {run_command}', () => {
+    expect([...COMMAND_ENTRY_TOOLS]).toEqual(['run_command'])
+  })
+
+  it('SAFE_FOR_SKILL_TOOLS does NOT contain run_skill/run_command (no recursion)', () => {
     expect(SAFE_FOR_SKILL_TOOLS).not.toContain('run_skill')
+    expect(SAFE_FOR_SKILL_TOOLS).not.toContain('run_command')
   })
 
   it('SAFE_FOR_SKILL_TOOLS overlaps UNAUTHORIZABLE only on CONDITIONAL tools (create_atom + capture)', () => {
     // create_atom and capture are CONDITIONALLY unauthorizable —
-    // gated only on elevated inputs (confirm:true / skills/* /
-    // type:skill / shared:true). At
+    // gated only on elevated inputs (confirm:true / .skills/.commands /
+    // type:skill/type:command / shared:true). At
     // depth>0 the SAFE_FOR_SKILL_TOOLS set still contains them
     // because the BELT in the handler refuses elevated calls
     // (any non-elevated call is genuinely safe). This narrow
@@ -79,8 +85,9 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     expect(intersection.sort()).toEqual(['capture', 'create_atom'])
   })
 
-  it('USER_TURN_TOOLS_NO_RUN_SKILL does NOT contain run_skill (entry route is ⌘K/slash ONLY)', () => {
+  it('USER_TURN_TOOLS_NO_RUN_SKILL does NOT contain run_skill/run_command (entry route is palette/slash ONLY)', () => {
     expect(USER_TURN_TOOLS_NO_RUN_SKILL).not.toContain('run_skill')
+    expect(USER_TURN_TOOLS_NO_RUN_SKILL).not.toContain('run_command')
   })
 
   it('USER_TURN_TOOLS_NO_RUN_SKILL is the union of UNAUTHORIZABLE + SAFE (every tool except run_skill)', () => {
@@ -93,12 +100,13 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     )
   })
 
-  it('three modes are MUTUALLY EXCLUSIVE — SKILL_ENTRY_TOOLS disjoint from the others', () => {
+  it('entry modes are MUTUALLY EXCLUSIVE — entry tools are disjoint from the others', () => {
     const skillEntry = new Set<string>(SKILL_ENTRY_TOOLS)
+    const commandEntry = new Set<string>(COMMAND_ENTRY_TOOLS)
     const safeForSkill = new Set<string>(SAFE_FOR_SKILL_TOOLS)
     const userTurn = new Set<string>(USER_TURN_TOOLS_NO_RUN_SKILL)
-    // SKILL_ENTRY_TOOLS = {run_skill}; the others MUST NOT contain it.
-    for (const t of skillEntry) {
+    // Entry tools are only reachable from explicit palette/slash dispatch.
+    for (const t of [...skillEntry, ...commandEntry]) {
       expect(safeForSkill.has(t)).toBe(false)
       expect(userTurn.has(t)).toBe(false)
     }
@@ -135,6 +143,23 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
       // _beginSkillTurnIfClear. The model can never EMIT two
       // run_skill calls in one step; even if a future model
       // tried, the atomic latch refuses the second.
+      providerOptions: {
+        anthropic: { disableParallelToolUse: true },
+      },
+    })
+  })
+
+  it('depth=0 + entry="command-fire" ⇒ activeTools=[run_command] + toolChoice + providerOptions disableParallelToolUse', async () => {
+    const fn = buildPrepareStep(
+      makeFakeCtx(0),
+      'thread-T',
+      'msg-M',
+      'command-fire',
+    )
+    const out = await fn({ messages: [], stepNumber: 0 })
+    expect(out).toEqual({
+      activeTools: ['run_command'],
+      toolChoice: { type: 'tool', toolName: 'run_command' },
       providerOptions: {
         anthropic: { disableParallelToolUse: true },
       },
@@ -184,6 +209,20 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
       [...SAFE_FOR_SKILL_TOOLS].sort(),
     )
     // No toolChoice override at depth>0.
+    expect(out.toolChoice).toBeUndefined()
+  })
+
+  it('depth>0 OVERRIDES entry="command-fire" (no re-firing run_command in the same turn)', async () => {
+    const fn = buildPrepareStep(
+      makeFakeCtx(1),
+      'thread-T',
+      'msg-M',
+      'command-fire',
+    )
+    const out = await fn({ messages: [], stepNumber: 0 })
+    expect(out.activeTools.sort()).toEqual(
+      [...SAFE_FOR_SKILL_TOOLS].sort(),
+    )
     expect(out.toolChoice).toBeUndefined()
   })
 
@@ -242,9 +281,9 @@ describe('Track-3 P2b.4 — sendMessage lifecycle (saveMessage → clear → str
     return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
   })()
 
-  it('sendMessage args include `entry: v.optional(v.literal("skill-fire"))`', () => {
+  it('sendMessage args include `entry: v.optional(v.union("skill-fire", "command-fire"))`', () => {
     expect(sendMessageBody).toMatch(
-      /entry:\s*v\.optional\(\s*v\.literal\(['"]skill-fire['"]\)\s*\)/,
+      /entry:\s*v\.optional\(\s*v\.union\(\s*v\.literal\(['"]skill-fire['"]\),\s*v\.literal\(['"]command-fire['"]\)\s*\)\s*\)/,
     )
   })
 
