@@ -264,7 +264,7 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingSkillFire, threadId])
+  }, [pendingSkillFire, threadId, sending, busy])
 
   useEffect(() => {
     if (!pendingCommandFire || !threadId || sending || busy) return
@@ -312,12 +312,13 @@ export function Chat({
   }, [slashItems.length])
 
   function fireSlashItem(item: (typeof slashItems)[number]) {
-    setInput('')
+    if (!threadId || sending || busy) return
     if (item.kind === 'command') {
       void submit(`/${item.path}`)
     } else {
       void submit(`/skill ${item.path}`)
     }
+    setInput('')
   }
 
   return (
