@@ -18,6 +18,7 @@ import { requireWorkspace } from './auth'
 import { countActiveOwners, requireRole } from './orgRoles'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 import { ORG_IDENTITY_PATH } from './inlineAtom'
+import { PLACEHOLDER_SEED_MARKER } from './onboarding'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
@@ -491,7 +492,7 @@ export const myWorkspaces = query({
 })
 
 // H-2 (multiplayer-and-h-followups §4 A2) — seed a freshly-created org
-// with a starter `.context/company.md` + dashboard + an `onboarding` row so the
+// with a starter `.context/company.md` + dashboard so the
 // agent's first turn in the new workspace has something to operate
 // against (instead of an empty void). Called from `createOrgWithBridge`
 // after the Convex insert + WorkOS sync. Internal (the bridge is the
@@ -502,7 +503,7 @@ export const myWorkspaces = query({
 // dialog post-create) will refine it from the team's context. The
 // starter exists so:
 //  - `onboarding.progressOf` finds .context/company.md and reports hasMe:true
-//    once the agent fills it in, satisfying the never-end-empty floor.
+//    once the agent fills it in (placeholder seed files are ignored).
 //  - The user lands on a real page when navigated to /w/<orgId>/p/<companyMdFileId>
 //    instead of an empty workspace state.
 //  - The dashboard has a query block from day one (the live primitive
@@ -514,19 +515,7 @@ export const _seedNewOrg = internalMutation({
     if (!org) throw new Error('Org not found for seeding.')
     const name = org.name
 
-    // 1) onboarding row — the gate's source of truth for "is this
-    //    workspace NEW / IN_PROGRESS / DONE". Without it the gate
-    //    treats the workspace as NEW forever; the wedge UI would
-    //    re-fire on every visit.
-    const existing = await ctx.db
-      .query('onboarding')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', orgId as string))
-      .first()
-    if (!existing) {
-      await ctx.db.insert('onboarding', { workspaceId: orgId as string })
-    }
-
-    // 2) .context/company.md — the team identity atom. Pre-fills the org name +
+    // 1) .context/company.md — the team identity atom. Pre-fills the org name +
     //    leaves clear seams the agent (and the team) edit on first
     //    pass. Title via frontmatter (Notion-style per SYSTEM_PROMPT).
     await ctx.runMutation(internal.atoms._upsertInternal, {
@@ -535,6 +524,8 @@ export const _seedNewOrg = internalMutation({
       body: `---
 title: ${name}
 ---
+
+<!-- ${PLACEHOLDER_SEED_MARKER} -->
 
 _What ${name} does — edit this to describe the team's work, how you operate, and how dohc should help._
 
@@ -553,7 +544,7 @@ _What ${name} does — edit this to describe the team's work, how you operate, a
       source: 'agent',
     })
 
-    // 3) dashboard.md — the live-primitive starter. The query block
+    // 2) dashboard.md — the live-primitive starter. The query block
     //    is the minimum the prompt requires before `finish_onboarding`
     //    (a real query, not wall-to-wall DSL). Lists the team's recent
     //    files so the dashboard is non-empty even before the agent
@@ -564,6 +555,8 @@ _What ${name} does — edit this to describe the team's work, how you operate, a
       body: `---
 title: Dashboard
 ---
+
+<!-- ${PLACEHOLDER_SEED_MARKER} -->
 
 _This is yours — edit anything here directly. For bigger changes, just ask me._
 

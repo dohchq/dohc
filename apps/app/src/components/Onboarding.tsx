@@ -25,6 +25,7 @@ import { useActiveWorkspaceId } from '@/lib/active-workspace'
 // the source of truth; the client cannot fake completion.
 
 type Props = { state: 'NEW' | 'IN_PROGRESS' }
+type WorkspaceKind = 'personal' | 'org'
 
 // ── the questionnaire (drives dohc's first turn) ────────────────────
 type Q = {
@@ -35,61 +36,118 @@ type Q = {
   options?: string[]
 }
 
-// ONE hardcoded opener — instant, zero latency. Its answer SEEDS the
-// model that tailors the rest to this specific person.
-const SEED_Q: Q = {
-  id: 'work',
-  q: 'What kind of work do you do?',
-  help: 'This tailors everything that follows.',
-  kind: 'single',
-  options: [
-    'Freelancer / consultant',
-    'Founder / running a business',
-    'Lead / manager',
-    'Maker / creative',
-    'Researcher / analyst',
-    'Student / academic',
-  ],
+// ONE hardcoded opener — instant, zero latency. Its answer is the
+// setup request, not a demographics survey. It SEEDS the model that
+// tailors the rest around the system the user wants dohc to build.
+function seedQuestion(kind: WorkspaceKind): Q {
+  if (kind === 'org') {
+    return {
+      id: 'setup',
+      q: 'What should this team workspace run first?',
+      help: 'Pick the shared workflow people should land in.',
+      kind: 'single',
+      options: [
+        'Project status hub',
+        'Client delivery system',
+        'Sales pipeline / CRM',
+        'Hiring loop',
+        'Weekly meeting workspace',
+        'Company wiki',
+      ],
+    }
+  }
+  return {
+    id: 'setup',
+    q: 'What should dohc set up for you first?',
+    help: 'Skip the template hunt. Pick the system you wish already existed.',
+    kind: 'single',
+    options: [
+      'Project manager',
+      'Personal finance tracker',
+      'Client pipeline / CRM',
+      'Notes and research vault',
+      'Content calendar',
+      'Life admin system',
+    ],
+  }
+}
+
+function realMaterialQuestion(kind: WorkspaceKind): Q {
+  return {
+    id: 'real_material',
+    q: 'Add anything you already have',
+    help:
+      kind === 'org'
+        ? 'Paste meeting notes, project lists, client details, team rituals, or the workflow mess this workspace should organize.'
+        : 'Paste notes, lists, CSV rows, goals, client details, or the mess you were about to turn into a template.',
+    kind: 'free',
+  }
 }
 
 // Safety net: if the model is slow / errors / returns junk, the
 // make-or-break wedge must NEVER dead-end — fall back to this solid
 // static set. The dynamic path is a pure enhancement over this.
-const FALLBACK_QS: Q[] = [
-  {
-    id: 'fb_focus',
-    q: 'What should dohc keep on top of for you?',
-    help: 'Pick any that fit.',
-    kind: 'multi',
-    options: [
-      'Clients & projects',
-      'Time & billable hours',
-      'Goals & deadlines',
-      'Money & invoices',
-      'Notes & knowledge',
-      'People & contacts',
-      'Tasks & follow-ups',
-    ],
-  },
-  {
-    id: 'fb_pain',
-    q: 'What bites you most often?',
-    kind: 'single',
-    options: [
-      'Things slip through the cracks',
-      'Status is scattered across tools',
-      "I don't know where I stand vs my goals",
-      'Too much manual filing & admin',
-      'Hard to share the right slice with others',
-    ],
-  },
-  {
-    id: 'fb_now',
-    q: 'Anything you’re working on right now dohc should know about?',
-    help: 'Optional — a sentence is plenty.',
-    kind: 'free',
-  },
-]
+function fallbackQs(kind: WorkspaceKind): Q[] {
+  const middle =
+    kind === 'org'
+      ? [
+          {
+            id: 'fb_focus',
+            q: 'What should this shared system make easier?',
+            help: 'Pick any that fit.',
+            kind: 'multi' as const,
+            options: [
+              'Status updates',
+              'Ownership and handoffs',
+              'Client work',
+              'Decisions and notes',
+              'Deadlines',
+              'Repeatable processes',
+            ],
+          },
+          {
+            id: 'fb_success',
+            q: 'What should the first dashboard make obvious?',
+            kind: 'single' as const,
+            options: [
+              'What needs attention',
+              'Who owns what',
+              'What changed recently',
+              'What is blocked',
+              'What is due next',
+            ],
+          },
+        ]
+      : [
+          {
+            id: 'fb_focus',
+            q: 'What should this setup keep on top of?',
+            help: 'Pick any that fit.',
+            kind: 'multi' as const,
+            options: [
+              'Projects',
+              'Money',
+              'Notes and research',
+              'People and follow-ups',
+              'Deadlines',
+              'Habits or routines',
+            ],
+          },
+          {
+            id: 'fb_success',
+            q: 'What should the first dashboard make obvious?',
+            kind: 'single' as const,
+            options: [
+              'What to do next',
+              'Where things stand',
+              'What changed recently',
+              'What is slipping',
+              'What is working',
+            ],
+          },
+        ]
+  return [...middle, realMaterialQuestion(kind)]
+}
 
 type Answers = Record<string, { picks: string[]; other: string }>
 
@@ -102,25 +160,33 @@ const answerText = (x?: { picks: string[]; other: string }) => {
 
 // Generic over WHATEVER questions were asked (AI-tailored OR fallback)
 // — the brief is just the answered Q→A pairs + the build directive.
-function composeIntro(ordered: Q[], a: Answers): string {
+function composeIntro(
+  ordered: Q[],
+  a: Answers,
+  kind: WorkspaceKind,
+): string {
   const lines = ordered
     .map((q) => {
       const v = answerText(a[q.id])
       return v ? `• ${q.q.replace(/[?\s]+$/, '')}: ${v}` : null
     })
     .filter((x): x is string => x !== null)
+  const identityPath =
+    kind === 'org' ? '.context/company.md' : '.context/me.md'
   return [
-    'Here’s me, so you can set up my workspace:',
+    kind === 'org'
+      ? 'Here’s the shared system this workspace should run:'
+      : 'Here’s the setup I want dohc to build:',
     ...lines,
     '',
-    'Set it up now — build me a populated dashboard and my profile (.context/me.md). Don’t re-ask what I just answered; if a realistic example helps make it concrete, use one that fits my work.',
+    `Set it up now — build a populated, source-backed dashboard, starter files with real inline data, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, create a modest starter that fits the setup and make the next capture action obvious.`,
   ].join('\n')
 }
 
 // STRICT client-side validation, mirroring the server zod EXACTLY
 // (questions.length === 3; kind ∈ {single,multi}; 3–6 string options;
 // q ≥ 3 chars). ANY deviation ⇒ null ⇒ the caller uses the curated
-// FALLBACK_QS. A malformed-but-resolved model response must degrade
+// fallbackQs(). A malformed-but-resolved model response must degrade
 // to the clean baseline — never a coerced/half-baked AI set (Codex).
 function sanitizeQs(raw: unknown): Q[] | null {
   if (!raw || typeof raw !== 'object') return null
@@ -171,6 +237,7 @@ export function Onboarding({ state }: Props) {
   // now (the action limitation; thread→workspace binding is the
   // long-term fix).
   const activeWorkspaceId = useActiveWorkspaceId()
+  const workspaceKind: WorkspaceKind = activeWorkspaceId ? 'org' : 'personal'
   const ensureThread = useMutation(api.agent.ensureThread)
   const startOnboarding = useAction(api.agent.startOnboarding)
   const defer = useMutation(api.onboarding.defer)
@@ -260,14 +327,14 @@ export function Onboarding({ state }: Props) {
       setSending(true)
       if (!override) setInput('')
       try {
-        await sendMessage({ threadId, prompt })
+        await sendMessage({ threadId, prompt, activeWorkspaceId })
       } catch (e) {
         console.error(e)
       } finally {
         setSending(false)
       }
     },
-    [input, threadId, sending, sendMessage],
+    [input, threadId, sending, sendMessage, activeWorkspaceId],
   )
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -360,18 +427,21 @@ export function Onboarding({ state }: Props) {
             <DohcLogo size="lg" />
           </div>
           <h1 className="mt-10 text-[27px] font-semibold tracking-tight leading-[1.2] text-ink-strong">
-            Let’s set up your workspace.
+            {workspaceKind === 'org'
+              ? 'Set up the first shared system.'
+              : 'Skip the setup work.'}
           </h1>
           <p className="mx-auto mt-3 max-w-[360px] text-[13.5px] leading-relaxed text-ink-dim">
-            A handful of quick questions so dohc builds around how you
-            actually work. About a minute — then it does the rest.
+            {workspaceKind === 'org'
+              ? 'Pick one workflow this team should run in dohc. It will build the files, dashboard, and first operating rhythm.'
+              : 'Tell dohc the Notion, Sheets, or Obsidian-style setup you wanted. It builds the living version around you.'}
           </p>
           <button
             onClick={() => setPhase('questions')}
             className="group mt-10 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-ink-strong text-[14px] font-medium tracking-wide text-surface shadow-sm transition-all hover:-translate-y-px hover:shadow-md"
           >
             <Sparkles className="size-4" strokeWidth={2} />
-            Set up my workspace
+            {workspaceKind === 'org' ? 'Set up this workflow' : 'Build my setup'}
             <ArrowRight
               className="size-4 transition-transform group-hover:translate-x-0.5"
               strokeWidth={2}
@@ -392,6 +462,7 @@ export function Onboarding({ state }: Props) {
   if (phase === 'questions') {
     return (
       <Questionnaire
+        workspaceKind={workspaceKind}
         onCancel={() => setPhase('intro')}
         onDone={(intro) => {
           introRef.current = intro
@@ -486,7 +557,11 @@ export function Onboarding({ state }: Props) {
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-5 py-5">
-          <BuildChecklist progress={progress} status={status} />
+          <BuildChecklist
+            progress={progress}
+            status={status}
+            workspaceKind={workspaceKind}
+          />
 
           {heroAtom && (
             <Card title="Your dashboard, taking shape">
@@ -498,6 +573,11 @@ export function Onboarding({ state }: Props) {
 
           {meAtom && (
             <MeCard
+              title={
+                workspaceKind === 'org'
+                  ? 'What dohc learned about this workspace'
+                  : 'What dohc learned about you'
+              }
               path={meAtom.path}
               body={meAtom.body}
               onSave={(next) =>
@@ -558,9 +638,11 @@ export function Onboarding({ state }: Props) {
 // fallback set ⇒ the make-or-break wedge can NEVER stall or dead-end;
 // the dynamic path is a pure enhancement over a guaranteed baseline.
 function Questionnaire({
+  workspaceKind,
   onDone,
   onCancel,
 }: {
+  workspaceKind: WorkspaceKind
   onDone: (intro: string) => void
   onCancel: () => void
 }) {
@@ -576,10 +658,12 @@ function Questionnaire({
   // transition settles; terminal branches lock-then-unmount.
   const busyRef = useRef(false)
 
-  const ordered: Q[] = rest ? [SEED_Q, ...rest] : [SEED_Q]
-  // Stable dot count (AI returns exactly 3 by schema; fallback is 3)
-  // so the progress bar never jumps when the tailored set arrives.
-  const total = 1 + (rest?.length ?? FALLBACK_QS.length)
+  const seed = seedQuestion(workspaceKind)
+  const fallback = fallbackQs(workspaceKind)
+  const ordered: Q[] = rest ? [seed, ...rest] : [seed]
+  // Stable dot count (AI returns 3 by schema + our real-material
+  // anchor; fallback mirrors that shape) so progress never jumps.
+  const total = 1 + (rest?.length ?? fallback.length)
   const q = ordered[Math.min(Math.max(i, 0), ordered.length - 1)]
   const a = answers[q.id] ?? { picks: [], other: '' }
   const isLast = !!rest && i === ordered.length - 1
@@ -598,8 +682,8 @@ function Questionnaire({
     }, 160)
   }
 
-  // seed → tailored set: one model call, 14s hard timeout, static
-  // fallback. Never throws into the UI; never blocks the wedge.
+  // setup request → tailored set: one model call, 14s hard timeout,
+  // static fallback. Never throws into the UI; never blocks the wedge.
   const runTailor = (seed: string) => {
     setTailoring(true)
     seededWithRef.current = seed
@@ -616,7 +700,7 @@ function Questionnaire({
       } catch {
         qs = null
       }
-      setRest(qs ?? FALLBACK_QS)
+      setRest(qs ? [...qs, realMaterialQuestion(workspaceKind)] : fallback)
       setTailoring(false)
       setI(1)
       setShown(true)
@@ -631,13 +715,13 @@ function Questionnaire({
     // the lock is never released (correct — no second fire).
     if (dir === -1 && i === 0) return onCancel()
     if (dir === 1 && isLast)
-      return onDone(composeIntro(ordered, answers))
+      return onDone(composeIntro(ordered, answers, workspaceKind))
     // leaving the seed question (forward): tailor (or, if already
     // tailored for this exact seed, just advance).
     if (dir === 1 && i === 0) {
-      const seed = answerText(answers[SEED_Q.id])
-      if (rest && seed === seededWithRef.current) return advance(1)
-      return runTailor(seed)
+      const seedAnswer = answerText(answers[seed.id])
+      if (rest && seedAnswer === seededWithRef.current) return advance(1)
+      return runTailor(seedAnswer)
     }
     advance(dir)
   }
@@ -928,6 +1012,7 @@ function Card({
 function BuildChecklist({
   progress,
   status,
+  workspaceKind,
 }: {
   progress:
     | {
@@ -938,6 +1023,7 @@ function BuildChecklist({
     | undefined
     | null
   status: string
+  workspaceKind: WorkspaceKind
 }) {
   const live = status === 'building' || status === 'connecting'
   const n = progress?.entityCount ?? 0
@@ -946,8 +1032,12 @@ function BuildChecklist({
       done: n > 0,
       label:
         n > 0
-          ? `Organized ${n >= 200 ? '200+' : n} thing${n === 1 ? '' : 's'} from your work`
-          : 'Pulling structure out of your work',
+          ? workspaceKind === 'org'
+            ? `Organized ${n >= 200 ? '200+' : n} shared thing${n === 1 ? '' : 's'} from this workflow`
+            : `Organized ${n >= 200 ? '200+' : n} thing${n === 1 ? '' : 's'} from your work`
+          : workspaceKind === 'org'
+            ? 'Pulling structure out of this workflow'
+            : 'Pulling structure out of your work',
     },
     {
       done: !!progress?.hasDashboardWithQuery,
@@ -958,8 +1048,12 @@ function BuildChecklist({
     {
       done: !!progress?.hasMe,
       label: progress?.hasMe
-        ? 'Saved your profile'
-        : 'Learning how you work',
+        ? workspaceKind === 'org'
+          ? 'Saved the workspace brief'
+          : 'Saved your profile'
+        : workspaceKind === 'org'
+          ? 'Learning how this workspace should run'
+          : 'Learning how you work',
     },
   ]
   return (
@@ -996,10 +1090,12 @@ function BuildChecklist({
 // dohc may keep refining it — we keep showing its latest UNTIL the
 // user edits, then stop clobbering them. Save = real atoms.upsert.
 function MeCard({
+  title,
   path,
   body,
   onSave,
 }: {
+  title: string
   path: string
   body: string
   onSave: (next: string) => Promise<void>
@@ -1029,7 +1125,7 @@ function MeCard({
     <div className="rounded-xl border border-rule bg-surface px-3.5 py-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-ink-faint">
-          What dohc learned about you
+          {title}
         </p>
         {!editing && (
           <button

@@ -85,6 +85,12 @@ export type OnboardingProgress = {
   dashboardPath: string | null
 }
 
+export const PLACEHOLDER_SEED_MARKER = 'dohc:placeholder-seed'
+
+function isPlaceholderSeed(body: string): boolean {
+  return body.includes(PLACEHOLDER_SEED_MARKER)
+}
+
 /** org-plan §6 / §11-step-4 — workspace-kind branch. A workspace is an
  *  org iff its id matches a row in `orgs`; otherwise it's personal
  *  (workspaceId === WorkOS subject). Cached per call.
@@ -125,9 +131,14 @@ export async function progressOf(
   const identityFile = (await isOrgWorkspace(ctx, workspaceId))
     ? ORG_IDENTITY_PATH
     : PERSONAL_IDENTITY_PATH
-  const me = atoms.find((a) => a.path === identityFile)
+  const me = atoms.find(
+    (a) => a.path === identityFile && !isPlaceholderSeed(a.body),
+  )
   const dashboards = atoms.filter(
-    (a) => !isNonDataAtom(a.path, a.body) && a.body.includes('```query'),
+    (a) =>
+      !isPlaceholderSeed(a.body) &&
+      !isNonDataAtom(a.path, a.body) &&
+      a.body.includes('```query'),
   )
   // Prefer a hero-named artifact (dashboard/workspace/home/work/...),
   // else the first ```query atom — dohc writes exactly one hero.

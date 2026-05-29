@@ -9,7 +9,7 @@ const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_a2_alice'
 
 describe('_seedNewOrg (H-2 / A2)', () => {
-  it('seeds onboarding row + .context/company.md + dashboard.md with the org name', async () => {
+  it('seeds .context/company.md + dashboard.md with the org name without completing the setup wedge', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
 
@@ -21,16 +21,11 @@ describe('_seedNewOrg (H-2 / A2)', () => {
     })
     await t.mutation(internal.orgs._seedNewOrg, { orgId })
 
-    // Onboarding row exists for the new org.
-    const onboardingRow = await t.run(async (ctx) =>
-      ctx.db
-        .query('onboarding')
-        .withIndex('by_workspace', (q) => q.eq('workspaceId', orgId))
-        .first(),
-    )
-    expect(onboardingRow).not.toBeNull()
-    expect(onboardingRow?.completedAt).toBeUndefined()
-    expect(onboardingRow?.deferredAt).toBeUndefined()
+    // The org should still enter the setup-first onboarding wedge.
+    // Seed files are placeholders, not proof that the team has told
+    // dohc what shared system to build.
+    expect(await t.query(internal.onboarding._state, { workspaceId: orgId }))
+      .toBe('NEW')
 
     // .context/company.md exists in the org workspace with the org
     // name in frontmatter + body. It is agent-owned but not
@@ -64,7 +59,7 @@ describe('_seedNewOrg (H-2 / A2)', () => {
     expect(dashboardMd?.body).toContain('Acme Inc')
   })
 
-  it('is idempotent: re-seeding does not duplicate the onboarding row', async () => {
+  it('is idempotent: re-seeding does not create an onboarding row', async () => {
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
     const { orgId } = await asA.mutation(api.orgs.createOrg, {
@@ -73,21 +68,21 @@ describe('_seedNewOrg (H-2 / A2)', () => {
     await t.mutation(internal.orgs._seedNewOrg, { orgId })
     await t.mutation(internal.orgs._seedNewOrg, { orgId })
 
-    // Only one onboarding row even after two seeds.
+    // The agent begins onboarding when the user enters the wedge.
+    // Re-seeding placeholders must not silently flip NEW to IN_PROGRESS.
     const rows = await t.run(async (ctx) =>
       ctx.db
         .query('onboarding')
         .withIndex('by_workspace', (q) => q.eq('workspaceId', orgId))
         .collect(),
     )
-    expect(rows.length).toBe(1)
+    expect(rows.length).toBe(0)
   })
 
-  it('progressOf finds the seeded .context/company.md as the identity atom (H-1 + H-2 integration)', async () => {
-    // H-1 (A1) made progressOf branch on workspace kind (looks for
-    // .context/company.md in orgs vs .context/me.md in personal).
-    // H-2 (A2) seeds .context/company.md. End-to-end: a freshly-created + seeded org reports
-    // hasMe:true via the org branch.
+  it('progressOf ignores placeholder seed files until the team setup is real', async () => {
+    // H-2 seeds starter files so the workspace is not visually empty,
+    // but they must not satisfy the never-end-empty floor. The team
+    // still needs the setup-first wedge to shape a real shared system.
     const t = convexTest(schema, modules)
     const asA = t.withIdentity({ subject: A })
     const { orgId } = await asA.mutation(api.orgs.createOrg, {
@@ -98,9 +93,9 @@ describe('_seedNewOrg (H-2 / A2)', () => {
       const { progressOf } = await import('./onboarding')
       return await progressOf(ctx, orgId)
     })
-    expect(progress.hasMe).toBe(true)
-    expect(progress.mePath).toBe('.context/company.md')
-    expect(progress.hasDashboardWithQuery).toBe(true)
-    expect(progress.dashboardPath).toBe('dashboard.md')
+    expect(progress.hasMe).toBe(false)
+    expect(progress.mePath).toBeNull()
+    expect(progress.hasDashboardWithQuery).toBe(false)
+    expect(progress.dashboardPath).toBeNull()
   })
 })
