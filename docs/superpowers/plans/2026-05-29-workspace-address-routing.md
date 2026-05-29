@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Backend Routing Tables And Tests
+## Task 1: Backend Routing Tables And Tests
 
 **Files:**
 - Modify: `apps/app/convex/schema.ts`
@@ -25,7 +25,7 @@
 - [x] Add pending-share list and accept mutations.
 - [x] Run `pnpm --filter @dohc/app test convex/atomShares.test.ts`.
 
-### Task 2: Workspace Identity Projection
+## Task 2: Workspace Identity Projection
 
 **Files:**
 - Modify: `apps/app/convex/orgs.ts`
@@ -36,7 +36,7 @@
 - [x] Test that workspaces can exist with no route and that members do not render as raw ids when a profile exists.
 - [x] Run `pnpm --filter @dohc/app test convex/orgs.test.ts`.
 
-### Task 3: Share Copy And Dialog UX
+## Task 3: Share Copy And Dialog UX
 
 **Files:**
 - Modify: `apps/app/src/components/shareDialogCopy.ts`
@@ -48,7 +48,7 @@
 - [x] Add pending inbox rows for the signed-in email.
 - [x] Run `pnpm --filter @dohc/app test src/components/shareDialogCopy.test.ts`.
 
-### Task 4: Workspace Management UX
+## Task 4: Workspace Management UX
 
 **Files:**
 - Modify: `apps/app/src/components/WorkspaceManagementDialog.tsx`
@@ -58,7 +58,7 @@
 - [x] Add a route-current-email action for each workspace.
 - [x] Replace raw member ids with member profile labels.
 
-### Task 5: Verification
+## Task 5: Verification
 
 **Files:**
 - No new production files.

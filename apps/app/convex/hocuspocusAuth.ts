@@ -130,11 +130,20 @@ async function computeAtomAccess(
     )
     .collect()
 
+  const membershipCache = new Map<string, boolean>()
   for (const grant of ownerGrants) {
     if (!grant.granteeWorkspaceId || grant.granteeUserId !== userId) continue
     const targetIsPersonal = grant.granteeWorkspaceId === userId
-    const targetIsJoinedOrg =
-      !targetIsPersonal && (await isMember(ctx, grant.granteeWorkspaceId, userId))
+    let targetIsJoinedOrg = false
+    if (!targetIsPersonal) {
+      if (!membershipCache.has(grant.granteeWorkspaceId)) {
+        membershipCache.set(
+          grant.granteeWorkspaceId,
+          await isMember(ctx, grant.granteeWorkspaceId, userId),
+        )
+      }
+      targetIsJoinedOrg = membershipCache.get(grant.granteeWorkspaceId) === true
+    }
     if (targetIsPersonal || targetIsJoinedOrg) {
       access = mergeGrant(access, grant.permission, atom)
     }

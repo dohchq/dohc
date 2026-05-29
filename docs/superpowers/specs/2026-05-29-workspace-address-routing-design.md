@@ -29,8 +29,7 @@ New behavior:
 
 - `shareAtomByEmail` first looks for a verified route.
 - If a route exists, the grant goes to the route's target workspace.
-- If no route exists but a legacy user profile exists, it falls back to that profile's personal workspace for backward compatibility.
-- If neither exists, it creates or updates a pending share and returns a pending result.
+- If there is no verified route, it creates or updates a pending share and returns a pending result.
 - A user can list pending shares for their current sign-in email.
 - A user can accept a pending share into personal or an active workspace they belong to.
 

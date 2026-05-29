@@ -104,6 +104,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     saving,
     save,
     shareId,
+    activeWorkspaceId,
   ])
 
   const { title, isHtml } = useMemo(() => {

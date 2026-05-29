@@ -162,13 +162,19 @@ async function addressRouteByEmail(ctx: QueryCtx | MutationCtx, email: string) {
   if (!normalizedEmail || !normalizedEmail.includes('@')) {
     throw new Error('Enter an email address.')
   }
-  const route = await ctx.db
+  const routes = await ctx.db
     .query('workspaceAddressRoutes')
     .withIndex('by_normalizedEmail', (q) =>
       q.eq('normalizedEmail', normalizedEmail),
     )
-    .first()
-  return route?.status === 'verified' ? route : null
+    .collect()
+  const verified = routes.filter((route) => route.status === 'verified')
+  if (verified.length > 1) {
+    throw new Error(
+      'Ambiguous email routing. Please re-verify your email route.',
+    )
+  }
+  return verified[0] ?? null
 }
 
 async function upsertPendingShareByEmail(
@@ -251,6 +257,14 @@ async function shareAtomWithWorkspace(
     (!granteeUserId || granteeUserId === owner)
   ) {
     throw new Error('Cannot share a file with yourself.')
+  }
+  if (!granteeUserId) {
+    const orgTarget = await ctx.db.get(granteeWorkspaceId as Id<'orgs'>)
+    if (orgTarget) {
+      throw new Error(
+        'Use workspace share or email routing for workspace shares.',
+      )
+    }
   }
   // The caller must actually OWN the fileId (a bound index row).
   const mine = await ownerAtomByFileId(ctx, owner, fileId)

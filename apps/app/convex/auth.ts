@@ -213,10 +213,16 @@ export const routeCurrentEmailToWorkspace = mutation({
     }
 
     const now = Date.now()
-    const existing = await ctx.db
+    const existingRoutes = await ctx.db
       .query('workspaceAddressRoutes')
       .withIndex('by_normalizedEmail', (q) => q.eq('normalizedEmail', email))
-      .first()
+      .collect()
+    if (existingRoutes.length > 1) {
+      throw new Error(
+        'Ambiguous email routing. Please re-verify your email route.',
+      )
+    }
+    const existing = existingRoutes[0] ?? null
 
     const patch = {
       accountWorkspaceId: identity.subject,
