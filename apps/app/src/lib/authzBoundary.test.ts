@@ -139,6 +139,8 @@ function publicFnsTakingWorkspace(
     // directly into a db query as a workspaceId) and silently pass
     // CI. The exemption now requires one of:
     //   - `requireWorkspace(ctx, activeWorkspaceId)`  (mutation/query)
+    //   - `resolveShareAccess(ctx, shareId, activeWorkspaceId)` (shared-doc
+    //     reads/writes; resolver calls requireWorkspace with that active id)
     //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
     //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
     //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
@@ -152,6 +154,9 @@ function publicFnsTakingWorkspace(
         body,
       ) ||
       /requireRole\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
+      ) ||
+      /resolveShareAccess\s*\(\s*ctx\s*,[\s\S]{0,80}(?:args\.)?activeWorkspaceId\s*\)/.test(
         body,
       )
     // Strip BOTH optional + required shapes of activeWorkspaceId when

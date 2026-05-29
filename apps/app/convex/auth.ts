@@ -192,3 +192,82 @@ export const upsertMyProfile = mutation({
     }
   },
 })
+
+export const routeCurrentEmailToWorkspace = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const email = normalizeEmail(identity.email ?? '')
+    if (!email || !email.includes('@')) {
+      throw new Error('Sign in with an email address before routing it.')
+    }
+
+    const targetWorkspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    let label: string | undefined
+    if (targetWorkspaceId !== identity.subject) {
+      const org = await ctx.db.get(targetWorkspaceId as Id<'orgs'>)
+      label = org?.name
+    }
+
+    const now = Date.now()
+    const existing = await ctx.db
+      .query('workspaceAddressRoutes')
+      .withIndex('by_normalizedEmail', (q) => q.eq('normalizedEmail', email))
+      .first()
+
+    const patch = {
+      accountWorkspaceId: identity.subject,
+      targetWorkspaceId,
+      email,
+      normalizedEmail: email,
+      label,
+      status: 'verified' as const,
+      updatedAt: now,
+    }
+
+    if (existing) {
+      await ctx.db.patch(existing._id, patch)
+      return {
+        routeId: existing._id,
+        email,
+        targetWorkspaceId,
+        accountWorkspaceId: identity.subject,
+      }
+    }
+
+    const routeId = await ctx.db.insert('workspaceAddressRoutes', {
+      ...patch,
+      createdAt: now,
+    })
+    return {
+      routeId,
+      email,
+      targetWorkspaceId,
+      accountWorkspaceId: identity.subject,
+    }
+  },
+})
+
+export const myAddressRoutes = query({
+  args: {},
+  handler: async (ctx) => {
+    const accountWorkspaceId = await requireWorkspace(ctx)
+    const rows = await ctx.db
+      .query('workspaceAddressRoutes')
+      .withIndex('by_accountWorkspaceId', (q) =>
+        q.eq('accountWorkspaceId', accountWorkspaceId),
+      )
+      .collect()
+    return rows.map((row) => ({
+      routeId: row._id,
+      email: row.email,
+      normalizedEmail: row.normalizedEmail,
+      targetWorkspaceId: row.targetWorkspaceId,
+      label: row.label ?? null,
+      status: row.status,
+    }))
+  },
+})

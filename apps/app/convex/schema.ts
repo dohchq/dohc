@@ -151,6 +151,11 @@ export default defineSchema({
     //   publicAccess       — anyone signed in with the shareId may read it.
     // resolveShareAccess branches on which is present.
     granteeWorkspaceId: v.optional(v.string()),
+    // Optional account/user principal for a person-in-workspace share.
+    // If present, the caller must both activate `granteeWorkspaceId`
+    // AND authenticate as this user. This lets `ice@company.com`
+    // route to "Ice in Company" without granting every Company member.
+    granteeUserId: v.optional(v.string()),
     granteeOrgId: v.optional(v.string()),
     publicAccess: v.optional(v.boolean()),
     permission: v.union(v.literal('view'), v.literal('edit')),
@@ -171,6 +176,12 @@ export default defineSchema({
       'granteeWorkspaceId',
       'fileId',
     ])
+    .index('by_owner_grantee_user_fileId', [
+      'ownerWorkspaceId',
+      'granteeWorkspaceId',
+      'granteeUserId',
+      'fileId',
+    ])
     .index('by_owner_org_fileId', ['ownerWorkspaceId', 'granteeOrgId', 'fileId']),
 
   userProfiles: defineTable({
@@ -182,6 +193,56 @@ export default defineSchema({
   })
     .index('by_workspace', ['workspaceId'])
     .index('by_normalizedEmail', ['normalizedEmail']),
+
+  // Account/workspace routing. A workspace can exist with no email;
+  // this table only says "when this verified address is used as a
+  // sharing target, route it to this workspace profile for this
+  // authenticated account." One route per normalized email keeps the
+  // MVP obvious: changing the route changes the door for future shares.
+  workspaceAddressRoutes: defineTable({
+    accountWorkspaceId: v.string(), // the signed-in human's personal workspace id
+    targetWorkspaceId: v.string(), // personal or org workspace receiving routed shares
+    email: v.string(),
+    normalizedEmail: v.string(),
+    label: v.optional(v.string()),
+    status: v.union(v.literal('verified')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_normalizedEmail', ['normalizedEmail'])
+    .index('by_accountWorkspaceId', ['accountWorkspaceId'])
+    .index('by_targetWorkspaceId', ['targetWorkspaceId'])
+    .index('by_accountWorkspaceId_and_targetWorkspaceId', [
+      'accountWorkspaceId',
+      'targetWorkspaceId',
+    ]),
+
+  // Shares addressed to an email that has no workspace route yet. This
+  // is deliberately not access: it is an inbox item that the matching
+  // signed-in email can accept into a chosen workspace.
+  pendingAtomShares: defineTable({
+    ownerWorkspaceId: v.string(),
+    fileId: v.string(),
+    email: v.string(),
+    normalizedEmail: v.string(),
+    permission: v.union(v.literal('view'), v.literal('edit')),
+    status: v.union(v.literal('pending'), v.literal('accepted')),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    acceptedByWorkspaceId: v.optional(v.string()),
+    acceptedByUserId: v.optional(v.string()),
+    acceptedShareId: v.optional(v.id('atomShares')),
+    acceptedAt: v.optional(v.number()),
+  })
+    .index('by_normalizedEmail_status', ['normalizedEmail', 'status'])
+    .index('by_owner_fileId', ['ownerWorkspaceId', 'fileId'])
+    .index('by_owner_fileId_email_status', [
+      'ownerWorkspaceId',
+      'fileId',
+      'normalizedEmail',
+      'status',
+    ]),
 
   // sharing-v1 1c — app-level "company"/org. A workspace creates an
   // org (becomes owner) and others join by the invite code. Members

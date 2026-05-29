@@ -129,6 +129,17 @@ async function computeAtomAccess(
       q.eq('ownerWorkspaceId', workspaceId).eq('fileId', atomId),
     )
     .collect()
+
+  for (const grant of ownerGrants) {
+    if (!grant.granteeWorkspaceId || grant.granteeUserId !== userId) continue
+    const targetIsPersonal = grant.granteeWorkspaceId === userId
+    const targetIsJoinedOrg =
+      !targetIsPersonal && (await isMember(ctx, grant.granteeWorkspaceId, userId))
+    if (targetIsPersonal || targetIsJoinedOrg) {
+      access = mergeGrant(access, grant.permission, atom)
+    }
+  }
+
   for (const grant of ownerGrants) {
     if (!grant.granteeOrgId) continue
     if (await isMember(ctx, grant.granteeOrgId, userId)) {

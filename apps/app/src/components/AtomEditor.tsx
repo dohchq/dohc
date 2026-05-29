@@ -2677,7 +2677,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   const resolvedFormulasShared = useQuery(
     api.formulaEval.evalFormulasShared,
     !disableReactiveResolvers && shareId && formulaSrcs.length
-      ? { shareId, srcs: formulaSrcs }
+      ? { shareId, activeWorkspaceId, srcs: formulaSrcs }
       : 'skip',
   )
   const resolvedFormulas = shareId ? resolvedFormulasShared : resolvedFormulasOwn

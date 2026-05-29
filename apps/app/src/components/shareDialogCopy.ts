@@ -3,8 +3,14 @@ export type GeneralAccessValue = 'restricted' | 'link' | 'workspace'
 
 export function getShareTargetPlaceholder(isPersonalWorkspace: boolean): string {
   return isPersonalWorkspace
-    ? 'Add people by email'
-    : 'Add people or workspaces by email'
+    ? 'Email address or dohc handle'
+    : 'Email address, handle, or workspace'
+}
+
+export function getShareRoutingHint(isPersonalWorkspace: boolean): string {
+  return isPersonalWorkspace
+    ? 'Routed addresses open in their chosen workspace. Unrouted emails wait in the recipient inbox.'
+    : 'Work emails can route here without making this workspace require an email.'
 }
 
 export function getGeneralAccessCopy({

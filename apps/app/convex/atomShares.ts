@@ -27,6 +27,7 @@ import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 
 export type AccessContext = {
   viewerWorkspaceId: string
+  viewerUserId: string
   ownerWorkspaceId: string
   fileId: string
   permission: 'view' | 'edit'
@@ -41,8 +42,12 @@ export type AccessContext = {
 export async function resolveShareAccess(
   ctx: QueryCtx | MutationCtx,
   shareId: Id<'atomShares'>,
+  activeWorkspaceId?: string,
 ): Promise<AccessContext | null> {
-  const viewer = await requireWorkspace(ctx)
+  const identity = await ctx.auth.getUserIdentity()
+  if (!identity) return null
+  const viewer = await requireWorkspace(ctx, activeWorkspaceId)
+  const viewerUserId = identity.subject
   const row = await ctx.db.get(shareId)
   if (!row) return null
   // The dependency set (for scoped formula resolution) = the cells
@@ -65,6 +70,11 @@ export async function resolveShareAccess(
   } else if (row.granteeWorkspaceId) {
     // ── person-to-person share — caller must BE the grantee.
     if (row.granteeWorkspaceId !== viewer) return null
+    // Legacy direct person-shares have no granteeUserId and are scoped
+    // to the recipient's personal workspace only. Workspace-wide org
+    // sharing must use `granteeOrgId` via shareAtomToOrg.
+    if (!row.granteeUserId && viewer !== viewerUserId) return null
+    if (row.granteeUserId && row.granteeUserId !== viewerUserId) return null
     const grants = await ctx.db
       .query('atomShares')
       .withIndex('by_grantee', (q) =>
@@ -73,7 +83,11 @@ export async function resolveShareAccess(
       .collect()
     sharedFileIds = new Set(
       grants
-        .filter((g) => g.ownerWorkspaceId === row.ownerWorkspaceId)
+        .filter(
+          (g) =>
+            g.ownerWorkspaceId === row.ownerWorkspaceId &&
+            (g.granteeUserId ?? null) === (row.granteeUserId ?? null),
+        )
         .map((g) => g.fileId),
     )
   } else if (row.granteeOrgId) {
@@ -93,6 +107,7 @@ export async function resolveShareAccess(
   }
   return {
     viewerWorkspaceId: viewer,
+    viewerUserId,
     ownerWorkspaceId: row.ownerWorkspaceId,
     fileId: row.fileId,
     permission: row.permission,
@@ -142,17 +157,77 @@ async function userProfileByWorkspaceId(
     .first()
 }
 
-async function userProfileByEmail(ctx: QueryCtx | MutationCtx, email: string) {
+async function addressRouteByEmail(ctx: QueryCtx | MutationCtx, email: string) {
   const normalizedEmail = normalizeEmail(email)
   if (!normalizedEmail || !normalizedEmail.includes('@')) {
     throw new Error('Enter an email address.')
   }
-  return await ctx.db
-    .query('userProfiles')
+  const route = await ctx.db
+    .query('workspaceAddressRoutes')
     .withIndex('by_normalizedEmail', (q) =>
       q.eq('normalizedEmail', normalizedEmail),
     )
     .first()
+  return route?.status === 'verified' ? route : null
+}
+
+async function upsertPendingShareByEmail(
+  ctx: MutationCtx,
+  {
+    owner,
+    fileId,
+    email,
+    permission,
+  }: {
+    owner: string
+    fileId: string
+    email: string
+    permission: 'view' | 'edit'
+  },
+) {
+  const normalizedEmail = normalizeEmail(email)
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    throw new Error('Enter an email address.')
+  }
+  const mine = await ownerAtomByFileId(ctx, owner, fileId)
+  if (!mine) {
+    throw new Error(`You don't own a file with id "${fileId}".`)
+  }
+  const now = Date.now()
+  const existing = await ctx.db
+    .query('pendingAtomShares')
+    .withIndex('by_owner_fileId_email_status', (q) =>
+      q
+        .eq('ownerWorkspaceId', owner)
+        .eq('fileId', fileId)
+        .eq('normalizedEmail', normalizedEmail)
+        .eq('status', 'pending'),
+    )
+    .first()
+  if (existing) {
+    if (
+      existing.permission !== permission ||
+      existing.email !== normalizedEmail
+    ) {
+      await ctx.db.patch(existing._id, {
+        email: normalizedEmail,
+        permission,
+        updatedAt: now,
+      })
+    }
+    return existing._id
+  }
+  return await ctx.db.insert('pendingAtomShares', {
+    ownerWorkspaceId: owner,
+    fileId,
+    email: normalizedEmail,
+    normalizedEmail,
+    permission,
+    status: 'pending',
+    createdBy: owner,
+    createdAt: now,
+    updatedAt: now,
+  })
 }
 
 async function shareAtomWithWorkspace(
@@ -161,15 +236,20 @@ async function shareAtomWithWorkspace(
     owner,
     fileId,
     granteeWorkspaceId,
+    granteeUserId,
     permission,
   }: {
     owner: string
     fileId: string
     granteeWorkspaceId: string
+    granteeUserId?: string
     permission: 'view' | 'edit'
   },
 ): Promise<Id<'atomShares'>> {
-  if (granteeWorkspaceId === owner) {
+  if (
+    granteeWorkspaceId === owner &&
+    (!granteeUserId || granteeUserId === owner)
+  ) {
     throw new Error('Cannot share a file with yourself.')
   }
   // The caller must actually OWN the fileId (a bound index row).
@@ -177,15 +257,26 @@ async function shareAtomWithWorkspace(
   if (!mine) {
     throw new Error(`You don't own a file with id "${fileId}".`)
   }
-  const existing = await ctx.db
-    .query('atomShares')
-    .withIndex('by_owner_grantee_fileId', (q) =>
-      q
-        .eq('ownerWorkspaceId', owner)
-        .eq('granteeWorkspaceId', granteeWorkspaceId)
-        .eq('fileId', fileId),
-    )
-    .first()
+  const existing = granteeUserId
+    ? await ctx.db
+        .query('atomShares')
+        .withIndex('by_owner_grantee_user_fileId', (q) =>
+          q
+            .eq('ownerWorkspaceId', owner)
+            .eq('granteeWorkspaceId', granteeWorkspaceId)
+            .eq('granteeUserId', granteeUserId)
+            .eq('fileId', fileId),
+        )
+        .first()
+    : await ctx.db
+        .query('atomShares')
+        .withIndex('by_owner_grantee_fileId', (q) =>
+          q
+            .eq('ownerWorkspaceId', owner)
+            .eq('granteeWorkspaceId', granteeWorkspaceId)
+            .eq('fileId', fileId),
+        )
+        .first()
   if (existing) {
     if (existing.permission !== permission) {
       await ctx.db.patch(existing._id, { permission })
@@ -196,6 +287,7 @@ async function shareAtomWithWorkspace(
     ownerWorkspaceId: owner,
     fileId,
     granteeWorkspaceId,
+    ...(granteeUserId ? { granteeUserId } : {}),
     permission,
     createdBy: owner,
     createdAt: Date.now(),
@@ -207,6 +299,7 @@ async function scheduleShareAudienceDisconnect(
   row: {
     ownerWorkspaceId: string
     granteeWorkspaceId?: string
+    granteeUserId?: string
     granteeOrgId?: string
     publicAccess?: boolean
   },
@@ -214,7 +307,7 @@ async function scheduleShareAudienceDisconnect(
   if (row.granteeWorkspaceId) {
     await scheduleHocuspocusDisconnect(ctx, {
       workspaceId: row.ownerWorkspaceId,
-      userId: row.granteeWorkspaceId,
+      userId: row.granteeUserId ?? row.granteeWorkspaceId,
     })
     return
   }
@@ -271,16 +364,41 @@ export const shareAtomByEmail = mutation({
   },
   handler: async (ctx, { fileId, email, permission, activeWorkspaceId }) => {
     const owner = await requireWorkspace(ctx, activeWorkspaceId)
-    const profile = await userProfileByEmail(ctx, email)
-    if (!profile) {
-      throw new Error('No dohc user found for that email yet.')
+    const normalizedEmail = normalizeEmail(email)
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      throw new Error('Enter an email address.')
     }
-    return await shareAtomWithWorkspace(ctx, {
+    const route = await addressRouteByEmail(ctx, normalizedEmail)
+    if (route) {
+      const shareId = await shareAtomWithWorkspace(ctx, {
+        owner,
+        fileId,
+        granteeWorkspaceId: route.targetWorkspaceId,
+        granteeUserId: route.accountWorkspaceId,
+        permission,
+      })
+      return {
+        kind: 'share' as const,
+        shareId,
+        granteeWorkspaceId: route.targetWorkspaceId,
+        granteeUserId: route.accountWorkspaceId,
+        email: route.email,
+        permission,
+      }
+    }
+
+    const pendingShareId = await upsertPendingShareByEmail(ctx, {
       owner,
       fileId,
-      granteeWorkspaceId: profile.workspaceId,
+      email: normalizedEmail,
       permission,
     })
+    return {
+      kind: 'pending' as const,
+      pendingShareId,
+      email: normalizedEmail,
+      permission,
+    }
   },
 })
 
@@ -408,6 +526,117 @@ export async function cascadeDeleteSharesForFileId(
   }
 }
 
+export const listPendingSharesForCurrentEmail = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const normalizedEmail = normalizeEmail(identity.email ?? '')
+    if (!normalizedEmail || !normalizedEmail.includes('@')) return []
+    const rows = await ctx.db
+      .query('pendingAtomShares')
+      .withIndex('by_normalizedEmail_status', (q) =>
+        q.eq('normalizedEmail', normalizedEmail).eq('status', 'pending'),
+      )
+      .collect()
+    const out: Array<{
+      pendingShareId: Id<'pendingAtomShares'>
+      ownerWorkspaceId: string
+      fileId: string
+      email: string
+      path: string
+      title: string | null
+      permission: 'view' | 'edit'
+      available: boolean
+      createdAt: number
+    }> = []
+    for (const row of rows) {
+      const atom = await ownerAtomByFileId(ctx, row.ownerWorkspaceId, row.fileId)
+      out.push({
+        pendingShareId: row._id,
+        ownerWorkspaceId: row.ownerWorkspaceId,
+        fileId: row.fileId,
+        email: row.email,
+        path: atom?.path ?? row.fileId,
+        title: atom ? deriveTitle(atom.body, atom.path) : null,
+        permission: row.permission,
+        available: atom !== null,
+        createdAt: row.createdAt,
+      })
+    }
+    return out
+  },
+})
+
+export const listMyPendingShares = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const owner = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('pendingAtomShares')
+      .withIndex('by_owner_fileId', (q) => q.eq('ownerWorkspaceId', owner))
+      .collect()
+    return rows
+      .filter((row) => row.status === 'pending')
+      .map((row) => ({
+        pendingShareId: row._id,
+        fileId: row.fileId,
+        email: row.email,
+        permission: row.permission,
+        createdAt: row.createdAt,
+      }))
+  },
+})
+
+export const acceptPendingShare = mutation({
+  args: {
+    pendingShareId: v.id('pendingAtomShares'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { pendingShareId, activeWorkspaceId }) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const normalizedEmail = normalizeEmail(identity.email ?? '')
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      throw new Error('Sign in with the email this share was sent to.')
+    }
+
+    const row = await ctx.db.get(pendingShareId)
+    if (!row || row.status !== 'pending') {
+      throw new Error('This pending share is no longer available.')
+    }
+    if (row.normalizedEmail !== normalizedEmail) {
+      throw new Error('Sign in with the email this share was sent to.')
+    }
+
+    const targetWorkspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const shareId = await shareAtomWithWorkspace(ctx, {
+      owner: row.ownerWorkspaceId,
+      fileId: row.fileId,
+      granteeWorkspaceId: targetWorkspaceId,
+      granteeUserId: identity.subject,
+      permission: row.permission,
+    })
+    await ctx.db.patch(row._id, {
+      status: 'accepted',
+      acceptedByWorkspaceId: targetWorkspaceId,
+      acceptedByUserId: identity.subject,
+      acceptedShareId: shareId,
+      acceptedAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+    return {
+      kind: 'share' as const,
+      shareId,
+      pendingShareId,
+      granteeWorkspaceId: targetWorkspaceId,
+      granteeUserId: identity.subject,
+      email: row.email,
+      permission: row.permission,
+    }
+  },
+})
+
 // ── Viewer: what's shared with me ───────────────────────────────────
 // SEPARATE from atoms.list (never widen that query). Returns metadata
 // for each file shared TO the caller, resolving each owner atom's
@@ -415,11 +644,17 @@ export async function cascadeDeleteSharesForFileId(
 export const listSharedWithMe = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
     const viewer = await requireWorkspace(ctx, activeWorkspaceId)
-    const grants = await ctx.db
+    const grants = (await ctx.db
       .query('atomShares')
       .withIndex('by_grantee', (q) => q.eq('granteeWorkspaceId', viewer))
-      .collect()
+      .collect()).filter(
+      (g) =>
+        g.granteeUserId === identity.subject ||
+        (!g.granteeUserId && viewer === identity.subject),
+    )
     const out: Array<{
       shareId: Id<'atomShares'>
       ownerWorkspaceId: string
@@ -428,6 +663,7 @@ export const listSharedWithMe = query({
       title: string | null
       permission: 'view' | 'edit'
       available: boolean
+      granteeUserId: string | null
     }> = []
     for (const g of grants) {
       const atom = await ownerAtomByFileId(ctx, g.ownerWorkspaceId, g.fileId)
@@ -439,6 +675,7 @@ export const listSharedWithMe = query({
         title: atom ? deriveTitle(atom.body, atom.path) : null,
         permission: g.permission,
         available: atom !== null, // owner may have deleted/renamed-away
+        granteeUserId: g.granteeUserId ?? null,
       })
     }
     return out
@@ -456,8 +693,9 @@ export const listMyShares = query({
       .collect()
     const out = []
     for (const r of rows) {
-      const profile = r.granteeWorkspaceId
-        ? await userProfileByWorkspaceId(ctx, r.granteeWorkspaceId)
+      const profileWorkspaceId = r.granteeUserId ?? r.granteeWorkspaceId
+      const profile = profileWorkspaceId
+        ? await userProfileByWorkspaceId(ctx, profileWorkspaceId)
         : null
       out.push({
         shareId: r._id,
@@ -465,6 +703,7 @@ export const listMyShares = query({
         // exactly one is set — the owner's manage view labels the
         // audience (person vs workspace vs public link) from these.
         granteeWorkspaceId: r.granteeWorkspaceId ?? null,
+        granteeUserId: r.granteeUserId ?? null,
         granteeEmail: profile?.email ?? null,
         granteeName: profile?.name ?? null,
         granteeOrgId: r.granteeOrgId ?? null,
@@ -495,9 +734,12 @@ export const listSharedFileIds = query({
 // Read a shared atom's RAW body (the editor resolves formulas
 // separately via evalFormulasShared, which is scoped). Gated.
 export const getSharedAtom = query({
-  args: { shareId: v.id('atomShares') },
-  handler: async (ctx, { shareId }) => {
-    const access = await resolveShareAccess(ctx, shareId)
+  args: {
+    shareId: v.id('atomShares'),
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { shareId, activeWorkspaceId }) => {
+    const access = await resolveShareAccess(ctx, shareId, activeWorkspaceId)
     if (!access) return null
     const atom = await ownerAtomByFileId(
       ctx,

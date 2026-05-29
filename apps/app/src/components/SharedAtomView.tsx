@@ -6,6 +6,7 @@ import type { Id } from '../../convex/_generated/dataModel'
 import { parseFrontmatter } from '../lib/frontmatter'
 import { splitFrontmatter, joinFrontmatter, isHtmlPath, isHtmlAtomBody } from '../lib/atomId'
 import { AtomEditor } from './AtomEditor'
+import { useActiveWorkspaceId } from '@/lib/active-workspace'
 
 // sharing-v1 1a/1b — view OR collaboratively edit an atom shared WITH
 // the current user. Formulas resolve through evalFormulasShared
@@ -15,7 +16,11 @@ import { AtomEditor } from './AtomEditor'
 // for collaborative markdown so a CRDT merge cannot become a false conflict.
 export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
   const { user } = useAuth()
-  const shared = useQuery(api.atomShares.getSharedAtom, { shareId })
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const shared = useQuery(api.atomShares.getSharedAtom, {
+    shareId,
+    activeWorkspaceId,
+  })
   const save = useMutation(api.atoms.upsertSharedAtom)
   const legacyAutosaveEnabled = false
 
@@ -73,7 +78,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     const body = draft
     const t = setTimeout(() => {
       setSaving(true)
-      void save({ shareId, body, baseBody: base })
+      void save({ shareId, activeWorkspaceId, body, baseBody: base })
         .then(() => {
           remoteBodyRef.current = body // the just-written body is the new base
           setSaveError(null)

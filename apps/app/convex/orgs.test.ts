@@ -157,9 +157,65 @@ describe('org workspace lifecycle (Phase 3)', () => {
       name: 'Acme Inc',
       role: 'owner',
     })
+    expect(aWs[0]).toMatchObject({
+      addressRoute: null,
+      billing: { payer: 'personal', plan: 'free' },
+    })
+    expect(aWs[1]).toMatchObject({
+      addressRoute: null,
+      billing: { payer: 'workspace', plan: 'free' },
+    })
 
     const bWs = await t.withIdentity({ subject: B }).query(api.orgs.myWorkspaces, {})
     expect(bWs[1]).toMatchObject({ workspaceId: orgId, role: 'member' })
+  })
+
+  it('myWorkspaces shows an optional email route without requiring one', async () => {
+    const t = convexTest(schema, modules)
+    const { orgId } = await t
+      .withIdentity({ subject: A, email: 'alice@acme.test' })
+      .mutation(api.orgs.createOrg, { name: 'Acme Ops' })
+
+    const before = await t
+      .withIdentity({ subject: A, email: 'alice@acme.test' })
+      .query(api.orgs.myWorkspaces, {})
+    expect(before.find((w) => w.workspaceId === orgId)?.addressRoute).toBeNull()
+
+    await t
+      .withIdentity({ subject: A, email: 'alice@acme.test' })
+      .mutation(api.auth.routeCurrentEmailToWorkspace, {
+        activeWorkspaceId: orgId,
+      })
+
+    const after = await t
+      .withIdentity({ subject: A, email: 'alice@acme.test' })
+      .query(api.orgs.myWorkspaces, {})
+    expect(after.find((w) => w.workspaceId === A)?.addressRoute).toBeNull()
+    expect(after.find((w) => w.workspaceId === orgId)?.addressRoute).toMatchObject({
+      email: 'alice@acme.test',
+      targetWorkspaceId: orgId,
+    })
+  })
+
+  it('orgMembers returns profile labels so the UI does not show raw ids', async () => {
+    const t = convexTest(schema, modules)
+    const { orgId } = await makeOrgWithMember(t)
+    await t
+      .withIdentity({ subject: A, email: 'alice@example.com', name: 'Alice Founder' })
+      .mutation(api.auth.upsertMyProfile, {})
+    await t
+      .withIdentity({ subject: B, email: 'bob@example.com', name: 'Bob Builder' })
+      .mutation(api.auth.upsertMyProfile, {})
+
+    const members = await t.withIdentity({ subject: A }).query(api.orgs.orgMembers, { orgId })
+    expect(members?.find((m) => m.workspaceId === A)).toMatchObject({
+      displayName: 'Alice Founder',
+      email: 'alice@example.com',
+    })
+    expect(members?.find((m) => m.workspaceId === B)).toMatchObject({
+      displayName: 'Bob Builder',
+      email: 'bob@example.com',
+    })
   })
 
   it('multiple Owners allowed; last Owner cannot leave/be demoted/be removed', async () => {
