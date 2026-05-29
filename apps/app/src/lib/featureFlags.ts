@@ -9,20 +9,16 @@
 //   • import.meta.env.VITE_DOHC_<NAME> === '1'  (build-time)
 // Default OFF ⇒ zero user-facing change until explicitly enabled.
 
-// 3.9.21 — `multiplayer` GRADUATED to default-on (like
-// inline-atoms before it). The gate has been removed from
-// AtomView; the bootstrap → collab → presence pipeline now
-// engages for every markdown atom. If you ever need a
-// per-browser kill switch in dev, add it back to this union
-// and re-thread to AtomView; for now keeping the type
-// minimal.
-export type FeatureFlag = 'inline-atoms'
+// No generic feature flags are active right now. Keep this type as the
+// single place a future flag name would be added.
+export type FeatureFlag = never
 
 export function featureEnabled(name: FeatureFlag): boolean {
+  const flagName = name as string
   try {
     if (
       typeof localStorage !== 'undefined' &&
-      localStorage.getItem(`dohc:${name}`) === '1'
+      localStorage.getItem(`dohc:${flagName}`) === '1'
     ) {
       return true
     }
@@ -30,7 +26,7 @@ export function featureEnabled(name: FeatureFlag): boolean {
     /* localStorage unavailable (SSR / privacy mode) — fall through */
   }
   const env = (import.meta as unknown as { env?: Record<string, string> }).env
-  const key = `VITE_DOHC_${name.toUpperCase().replace(/-/g, '_')}`
+  const key = `VITE_DOHC_${flagName.toUpperCase().replace(/-/g, '_')}`
   return env?.[key] === '1'
 }
 

@@ -23,6 +23,11 @@ describe('live view chrome', () => {
       sourceLabel: 'entities.list("person")',
       emptyText: 'No people yet.',
     })
+    expect(describeQueryView('entities.find("project")')).toMatchObject({
+      title: 'Project',
+      loadingText: 'Loading project...',
+      emptyText: 'Project not found.',
+    })
   })
 
   it('turns query result states into calm user-facing messages', () => {

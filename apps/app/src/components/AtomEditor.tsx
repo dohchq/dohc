@@ -914,7 +914,7 @@ function pluralizeResource(resource: string): { title: string; lower: string } {
 function singularResourceTitle(resource: string): string {
   const clean = resource.replace(/[_-]+/g, ' ').trim().toLowerCase()
   if (!clean) return 'Item'
-  if (clean === 'person' || clean === 'people') return 'People'
+  if (clean === 'person' || clean === 'people') return 'Person'
   return titleCaseWords(clean)
 }
 
@@ -962,10 +962,11 @@ export function describeQueryView(src: string): QueryViewDescriptor | null {
   if (parsed.namespace === 'entities') {
     const plural = pluralizeResource(parsed.resource)
     const singular = singularResourceTitle(parsed.resource)
+    const isFind = parsed.verb === 'find'
     const title =
       parsed.verb === 'count'
         ? `${singular} count`
-        : parsed.verb === 'find'
+        : isFind
           ? singular
           : plural.title
     return {
@@ -973,10 +974,14 @@ export function describeQueryView(src: string): QueryViewDescriptor | null {
       title,
       subtitle: filters,
       sourceLabel: text,
-      loadingText: `Loading ${plural.lower}...`,
-      emptyText: filters
-        ? `No matching ${plural.lower} yet.`
-        : `No ${plural.lower} yet.`,
+      loadingText: isFind
+        ? `Loading ${singular.toLowerCase()}...`
+        : `Loading ${plural.lower}...`,
+      emptyText: isFind
+        ? `${singular} not found.`
+        : filters
+          ? `No matching ${plural.lower} yet.`
+          : `No ${plural.lower} yet.`,
       errorText: "This live view couldn't update.",
     }
   }
@@ -1049,6 +1054,14 @@ export function formatQueryViewResult(
   return { kind: 'result', text: entry.value }
 }
 
+function stableWidgetTextKey(text: string): string {
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0
+  }
+  return `${text.length}:${hash >>> 0}`
+}
+
 // Mirror of the ascii-block plugin for `language: query`: tame the
 // glaring Tiptap code-block chrome and prepend a calm human caption so
 // a query reads as an intentional live query element, not scary DSL
@@ -1074,6 +1087,7 @@ type QueryResultMap = Map<string, QueryResultEntry>
 function buildQueryDecorations(
   doc: unknown,
   map: QueryResultMap,
+  unavailableText: string | null,
 ): DecorationSet {
   const decorations: Decoration[] = []
   ;(doc as DocLike).descendants((node, pos) => {
@@ -1122,13 +1136,14 @@ function buildQueryDecorations(
             wrap.appendChild(copy)
             return wrap
           },
-          { side: -1, key: `query-cap-${pos}-${view.title}-${view.subtitle ?? ''}` },
+          { side: -1, key: `query-cap-${pos}-${view.sourceLabel}` },
         ),
       )
       // the RESULT — verbatim code-fence text is the key (code is not
       // markdown-escaped, so doc text === markdown fence === server
       // src; no Phase-3-style escape mismatch).
-      const entry = map.get(src)
+      const entry =
+        map.get(src) ?? (unavailableText ? { unavailableText } : undefined)
       const result = formatQueryViewResult(entry, view)
       decorations.push(
         Decoration.widget(
@@ -1143,7 +1158,12 @@ function buildQueryDecorations(
             }
             return el
           },
-          { side: 1, key: `qr-${pos}-${src}-${result.kind}-${result.text.length}` },
+          {
+            side: 1,
+            key: `qr-${pos}-${src}-${result.kind}-${stableWidgetTextKey(
+              result.text,
+            )}`,
+          },
         ),
       )
     }
@@ -1151,16 +1171,27 @@ function buildQueryDecorations(
   return DecorationSet.create(doc as never, decorations)
 }
 
-function makeQueryBlockPlugin(mapRef: React.RefObject<QueryResultMap>) {
+function makeQueryBlockPlugin(
+  mapRef: React.RefObject<QueryResultMap>,
+  unavailableTextRef: React.RefObject<string | null>,
+) {
   return new Plugin({
     key: queryBlockKey,
     state: {
       init(_, instance) {
-        return buildQueryDecorations(instance.doc, mapRef.current ?? new Map())
+        return buildQueryDecorations(
+          instance.doc,
+          mapRef.current ?? new Map(),
+          unavailableTextRef.current ?? null,
+        )
       },
       apply(tr, old) {
         if (!tr.docChanged && !tr.getMeta(queryBlockKey)) return old
-        return buildQueryDecorations(tr.doc, mapRef.current ?? new Map())
+        return buildQueryDecorations(
+          tr.doc,
+          mapRef.current ?? new Map(),
+          unavailableTextRef.current ?? null,
+        )
       },
     },
     props: {
@@ -1759,6 +1790,7 @@ type TiptapEditorProps = {
   formulaRef: React.RefObject<FormulaMap>
   formulaTick: number
   queryResultsRef: React.RefObject<QueryResultMap>
+  queryUnavailableTextRef: React.RefObject<string | null>
   queryTick: number
   // D4.8 — wikilink plugin coordination refs + the file list for
   // the autocomplete picker (live, so the picker re-filters as
@@ -1857,6 +1889,7 @@ function TiptapAtomEditor({
   formulaRef,
   formulaTick,
   queryResultsRef,
+  queryUnavailableTextRef,
   queryTick,
   knownFilesRef,
   knownFilesArray,
@@ -2304,7 +2337,7 @@ function TiptapAtomEditor({
             wikilinkPlugin,
             wikilinkClickPlugin,
             atomPillClickPlugin,
-            makeQueryBlockPlugin(queryResultsRef),
+            makeQueryBlockPlugin(queryResultsRef, queryUnavailableTextRef),
             makeCodeBlockChromePlugin(),
             makeCodeBlockContinuationPlugin(),
             makeInlineAtomPlugin(),
@@ -2321,6 +2354,7 @@ function TiptapAtomEditor({
       onAsciiClickRef,
       onOpenWikilinkRef,
       queryResultsRef,
+      queryUnavailableTextRef,
     ],
   )
 
@@ -2880,22 +2914,28 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       : 'skip',
   )
   const queryResultsRef = useRef<QueryResultMap>(new Map())
+  const queryUnavailableTextRef = useRef<string | null>(
+    shareId
+      ? 'Live views are unavailable in shared pages for now.'
+      : disableReactiveResolvers
+        ? 'Live views need a workspace connection.'
+        : null,
+  )
   const [queryTick, setQueryTick] = useState(0)
   useEffect(() => {
-    if (querySrcs.length && (disableReactiveResolvers || shareId)) {
-      const unavailableText = shareId
-        ? 'Live views are unavailable in shared pages for now.'
-        : 'Live views need a workspace connection.'
-      queryResultsRef.current = new Map(
-        querySrcs.map((src) => [src, { unavailableText }]),
-      )
-    } else {
-      queryResultsRef.current = new Map(
-        (resolvedQueries ?? []).map((e) => [e.src, { value: e.value }]),
-      )
-    }
+    queryResultsRef.current = new Map(
+      (resolvedQueries ?? []).map((e) => [e.src, { value: e.value }]),
+    )
     setQueryTick((t) => t + 1)
-  }, [resolvedQueries, querySrcs, disableReactiveResolvers, shareId])
+  }, [resolvedQueries])
+  useEffect(() => {
+    queryUnavailableTextRef.current = shareId
+      ? 'Live views are unavailable in shared pages for now.'
+      : disableReactiveResolvers
+        ? 'Live views need a workspace connection.'
+        : null
+    setQueryTick((t) => t + 1)
+  }, [disableReactiveResolvers, shareId])
 
   useImperativeHandle(
     ref,
@@ -2980,6 +3020,7 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
       formulaRef={formulaRef}
       formulaTick={formulaTick}
       queryResultsRef={queryResultsRef}
+      queryUnavailableTextRef={queryUnavailableTextRef}
       queryTick={queryTick}
       knownFilesRef={knownFilesRef}
       knownFilesArray={knownFiles ?? []}
