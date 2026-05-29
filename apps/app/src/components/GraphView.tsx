@@ -18,6 +18,25 @@ type FGNode = GraphNode & { id: string; origin: 'personal' | 'shared' | 'workspa
 type FGData = { nodes: FGNode[]; links: GraphEdge[] }
 const EMPTY_FG: FGData = { nodes: [], links: [] }
 
+// react-force-graph renders nodeLabel/linkLabel strings as HTML (float-tooltip
+// sets them via .html()), so any user-authored value interpolated into a tooltip
+// MUST be escaped — titles and {atom} values come from docs that can be shared,
+// so an unescaped tooltip is a stored-XSS vector for other viewers. Only field
+// values pass through here; the fixed scaffolding (origin words, "Import /
+// Export", <br>) is trusted.
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) =>
+    c === '&'
+      ? '&amp;'
+      : c === '<'
+        ? '&lt;'
+        : c === '>'
+          ? '&gt;'
+          : c === '"'
+            ? '&quot;'
+            : '&#39;',
+  )
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ForceGraphComponent = ComponentType<any>
 
@@ -429,7 +448,9 @@ export function GraphView({
               if (n.kind === 'shared' && n.shareId) onOpenShared(n.shareId)
               else onOpenAtom(n.path)
             }}
-            // tooltip — sharing origin + title + the cell's {} data atoms
+            // tooltip — sharing origin + title + the cell's {} data atoms.
+            // Rendered as HTML by float-tooltip, so user values are escaped and
+            // lines are joined with <br> (the origin word + braces are trusted).
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             nodeLabel={(node: any) => {
               const n = node as FGNode
@@ -441,18 +462,19 @@ export function GraphView({
                     : 'Public in workspace'
               const atoms = n.atoms
                 .slice(0, 8)
-                .map((a) => `{${a.key}: ${a.value}}`)
+                .map((a) => `{${escapeHtml(a.key)}: ${escapeHtml(a.value)}}`)
                 .join(' ')
-              return `${origin}\n${n.title}${atoms ? `\n${atoms}` : ''}`
+              return `${origin}<br>${escapeHtml(n.title)}${atoms ? `<br>${atoms}` : ''}`
             }}
             // edge tooltip — names the relationship; data edges read
-            // exporter → importer (the direction the value flows).
+            // exporter → importer (the direction the value flows). Titles are
+            // user content, so escape before composing the HTML tooltip.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             linkLabel={(l: any) => {
               if (l.kind !== 'formula') return 'Wikilink'
-              const ex = titleById.get(idOf(l.source)) ?? ''
-              const im = titleById.get(idOf(l.target)) ?? ''
-              return `Import / Export\n${ex} → ${im}`
+              const ex = escapeHtml(titleById.get(idOf(l.source)) ?? '')
+              const im = escapeHtml(titleById.get(idOf(l.target)) ?? '')
+              return `Import / Export<br>${ex} → ${im}`
             }}
             // Two connection types, obviously different:
             //  • wikilink ([[ ]]) — faint, thin, UNDIRECTED hairline.
