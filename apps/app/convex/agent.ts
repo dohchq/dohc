@@ -2412,7 +2412,7 @@ export const sendMessage = action({
 // AND throttled every delta — stops the instant this process dies,
 // so a hard kill recovers by staleness, never a permanent trap).
 // design: docs/strategy/onboarding-wedge-design.md v5.1.
-// P1 — DYNAMIC questionnaire. One hardcoded opener (work type) is
+// P1 — DYNAMIC questionnaire. One hardcoded opener (desired setup) is
 // answered client-side; its answer seeds this one-shot, schema-locked
 // model call that returns 3 follow-up MC questions TAILORED to that
 // person. Not in the onboarding thread (a meta step — no transcript
@@ -2447,19 +2447,20 @@ export const generateQuestions = action({
     }>
   }> => {
     await requireWorkspace(ctx)
-    const work = seed.trim().slice(0, 200) || 'a knowledge worker'
+    const setup = seed.trim().slice(0, 200) || 'a personal operating system'
     const { object } = await generateObject({
       model: anthropic('claude-sonnet-4-6'),
       schema: TailoredQuestions,
       temperature: 0.5,
       prompt: `dohc is a calm personal workspace: it captures someone's real work as structured data and builds them a live dashboard + profile.
 
-A new user just told us their work is: "${work}".
+A new user wants dohc to set up: "${setup}".
+This is the setup request, not their job title.
 
-Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a populated workspace for THIS person specifically. Rules:
-- Each question is a single- or multi-select with 3–6 CONCRETE options drawn from the real vocabulary of "${work}" (name actual things they'd track / tools / rituals / units — not generic "productivity" filler).
-- The 3 questions must cover DISTINCT dimensions — pick the 3 highest-signal of: what they need to keep on top of · their cadence/rhythm · their biggest recurring friction · who they answer to / share with.
-- Do NOT ask them to restate their job. No yes/no. No "other" option (the UI adds a free-text box itself). Keep each question and option tight (a few words).
+Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a populated setup for THIS request specifically. Rules:
+- Each question is a single- or multi-select with 3–6 CONCRETE options drawn from the real vocabulary of "${setup}" (name actual things they'd track / categories / views / rituals / units — not generic "productivity" filler).
+- The 3 questions must cover DISTINCT dimensions — pick the 3 highest-signal of: source material · dashboard view · capture rhythm · categories/statuses · sharing/review needs.
+- Do NOT ask them to restate the setup. Do NOT ask their job. No yes/no. No "other" option (the UI adds a free-text box itself). Keep each question and option tight (a few words).
 - "multi" only when more than one answer is genuinely normal; else "single".`,
     })
     return object
