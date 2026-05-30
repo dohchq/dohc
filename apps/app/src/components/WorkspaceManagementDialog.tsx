@@ -477,6 +477,9 @@ function OrgCard({
   const [renaming, setRenaming] = useState(false)
   const [nextName, setNextName] = useState(name)
   const [opErr, setOpErr] = useState<string | null>(null)
+  const [dangerConfirm, setDangerConfirm] = useState<
+    'delete' | 'leave' | null
+  >(null)
 
   async function safe(fn: () => Promise<unknown>) {
     setOpErr(null)
@@ -694,44 +697,67 @@ function OrgCard({
         )}
       </div>
 
-      <div className="mt-3 pt-2 border-t border-rule/50 flex justify-end">
-        {isOwner ? (
-          <button
-            type="button"
-            onClick={() =>
-              safe(async () => {
-                if (
-                  !window.confirm(
-                    `Delete ${name}? This archives the workspace and removes it for every member.`,
-                  )
-                )
-                  return
-                await onDelete()
-              })
-            }
-            className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
-          >
-            <Trash2 className="size-3" strokeWidth={2} />
-            delete workspace
-          </button>
+      <div className="mt-3 border-t border-rule/50 pt-2">
+        {dangerConfirm ? (
+          <div className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2">
+            <div className="flex items-start gap-2">
+              <Trash2 className="mt-0.5 size-3.5 shrink-0 text-danger" strokeWidth={2} />
+              <div className="min-w-0 flex-1">
+                <div className="text-[12px] font-medium text-ink-strong">
+                  {dangerConfirm === 'delete'
+                    ? `Delete ${name}?`
+                    : `Leave ${name}?`}
+                </div>
+                <div className="mt-0.5 text-[11.5px] leading-snug text-ink-dim">
+                  {dangerConfirm === 'delete'
+                    ? 'This archives the workspace and removes it for every member.'
+                    : "You'll need a fresh invite to rejoin."}
+                </div>
+              </div>
+            </div>
+            <div className="mt-2 flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setDangerConfirm(null)}
+                className="rounded-md px-2 py-1 text-[11.5px] text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  safe(async () => {
+                    if (dangerConfirm === 'delete') await onDelete()
+                    else await onLeave()
+                  })
+                }
+                className="rounded-md bg-danger px-2 py-1 text-[11.5px] font-medium text-surface transition-colors hover:opacity-90"
+              >
+                {dangerConfirm === 'delete' ? 'Delete' : 'Leave'}
+              </button>
+            </div>
+          </div>
         ) : (
-          <button
-            type="button"
-            onClick={() =>
-              safe(async () => {
-                if (
-                  !window.confirm(
-                    `Leave ${name}? You'll need a fresh invite to rejoin.`,
-                  )
-                )
-                  return
-                await onLeave()
-              })
-            }
-            className="text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
-          >
-            leave workspace
-          </button>
+          <div className="flex justify-end">
+            {isOwner ? (
+              <button
+                type="button"
+                onClick={() => setDangerConfirm('delete')}
+                className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+              >
+                <Trash2 className="size-3" strokeWidth={2} />
+                delete workspace
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setDangerConfirm('leave')}
+                className="text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+              >
+                leave workspace
+              </button>
+            )}
+          </div>
         )}
       </div>
     </li>

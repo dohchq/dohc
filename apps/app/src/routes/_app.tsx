@@ -38,6 +38,7 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
+import { NoticeProvider, useNotice } from '@/components/NoticeCenter'
 import {
   ActiveWorkspaceProvider,
   useActiveWorkspaceId,
@@ -58,12 +59,14 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   return (
-    <ActiveWorkspaceProvider>
-      <ChatBusyProvider>
-        <Home />
-        <Outlet />
-      </ChatBusyProvider>
-    </ActiveWorkspaceProvider>
+    <NoticeProvider>
+      <ActiveWorkspaceProvider>
+        <ChatBusyProvider>
+          <Home />
+          <Outlet />
+        </ChatBusyProvider>
+      </ActiveWorkspaceProvider>
+    </NoticeProvider>
   )
 }
 
@@ -216,6 +219,7 @@ function SignInPrompt() {
 
 function App() {
   const { user } = useAuth()
+  const notice = useNotice()
   // org-plan §5 Phase B — every read/write is scoped to the active
   // workspace. undefined ⇒ caller's personal workspace (the v0 default;
   // back-compat preserved by requireWorkspace(ctx, undefined)).
@@ -722,8 +726,7 @@ function App() {
     const filesArr = files ?? []
     const exists = filesArr.some((f: { path: string }) => f.path === clean)
     if (exists) {
-      window.alert(`Page already exists: ${clean}`)
-      return
+      throw new Error(`Page already exists: ${clean}`)
     }
     // D4.18/D4.22 — pre-seed the page TITLE (the typed name's leaf,
     // sans extension) into the frontmatter `title:` property so the
@@ -739,27 +742,20 @@ function App() {
   async function createFolderWithName(name: string) {
     const clean = name.trim().replace(/^\/+|\/+$/g, '')
     if (!clean) return
-    try {
-      await createFolder({ path: clean, activeWorkspaceId })
-    } catch (e) {
-      window.alert(`Couldn't create folder: ${(e as Error).message}`)
-    }
+    await createFolder({ path: clean, activeWorkspaceId })
   }
 
-  // file-org-v1 D4.4a — L/S keyboard shortcut handlers + click-
-  // affordance handlers. R3 fold (Codex FAIL-5 / indep FAIL-3):
-  // these handlers now RETHROW after alerting, so callers (the
-  // FileTree's .then()/.catch() announcement pattern + the
-  // FolderPicker's onCommit catch) see the failure and can react
-  // (announce nothing on the keyboard path; render an error
-  // message in the picker). The window.alert remains as the UX
-  // for the keyboard path (the live region is polite + easy to
-  // miss for sighted users; the alert is loud).
+  // file-org-v1 D4.4a — L/S keyboard shortcut handlers + click affordance
+  // handlers. Failures rethrow so FileTree can roll back optimistic state;
+  // the app-level notice is the sighted-user feedback for tiny toggles.
   async function toggleLockAtPath(path: string, currentlyLocked: boolean) {
     try {
       await setLockAtom({ path, locked: !currentlyLocked, activeWorkspaceId })
     } catch (e) {
-      window.alert(`Couldn't ${currentlyLocked ? 'unlock' : 'lock'}: ${(e as Error).message}`)
+      notice.error(
+        `Couldn't ${currentlyLocked ? 'unlock' : 'lock'} file`,
+        (e as Error).message,
+      )
       throw e
     }
   }
@@ -767,7 +763,10 @@ function App() {
     try {
       await setStarAtom({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
-      window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'}: ${(e as Error).message}`)
+      notice.error(
+        `Couldn't ${currentlyStarred ? 'unfavorite' : 'favorite'} file`,
+        (e as Error).message,
+      )
       throw e
     }
   }
@@ -775,7 +774,10 @@ function App() {
     try {
       await setFolderStar({ path, starred: !currentlyStarred, activeWorkspaceId })
     } catch (e) {
-      window.alert(`Couldn't ${currentlyStarred ? 'unstar' : 'star'} folder: ${(e as Error).message}`)
+      notice.error(
+        `Couldn't ${currentlyStarred ? 'unfavorite' : 'favorite'} folder`,
+        (e as Error).message,
+      )
       throw e
     }
   }
@@ -798,8 +800,6 @@ function App() {
 
   // file-org-v1 D4.7 — drag-and-drop move handlers. The component
   // computed planDrop and now just needs the right mutation.
-  // Alert + rethrow on failure (consistent with other DnD-adjacent
-  // handlers — toggleLock/star/folderStar).
   async function moveFileByDrop(fromPath: string, toPath: string) {
     // D4.7c — flush any pending autosave for the open atom so the
     // wikilink cascade sees the latest body.
@@ -810,17 +810,13 @@ function App() {
       // across the move, so `activePath` re-derives to `toPath`
       // automatically when `files` refreshes.
       if (result.linkUpdates > 0) {
-        window.setTimeout(
-          () =>
-            window.alert(
-              `Moved ${fromPath} → ${toPath}\n` +
-                `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across your workspace.`,
-            ),
-          0,
+        notice.success(
+          'Moved file',
+          `Updated ${result.linkUpdates} wikilink${result.linkUpdates === 1 ? '' : 's'} across your workspace.`,
         )
       }
     } catch (e) {
-      window.alert(`Couldn't move file: ${(e as Error).message}`)
+      notice.error(`Couldn't move file`, (e as Error).message)
       throw e
     }
   }
@@ -833,68 +829,43 @@ function App() {
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
     } catch (e) {
-      window.alert(`Couldn't move folder: ${(e as Error).message}`)
+      notice.error(`Couldn't move folder`, (e as Error).message)
       throw e
     }
   }
 
   async function deleteFileByPath(path: string) {
-    const ok = window.confirm(`Delete ${path}?\n\nThis can't be undone.`)
-    if (!ok) return
-    try {
-      await removeAtom({ path, activeWorkspaceId })
-      // D4.30 — if we just deleted the open atom, clear the URL.
-      if (activePath === path) clearOpenAtom({ replace: true })
-    } catch (e) {
-      window.alert(`Couldn't delete: ${(e as Error).message}`)
-    }
+    await removeAtom({ path, activeWorkspaceId })
+    // D4.30 — if we just deleted the open atom, clear the URL.
+    if (activePath === path) clearOpenAtom({ replace: true })
   }
 
-  async function renameFileByPath(path: string) {
-    const next = window.prompt(
-      `Rename to (full path, .md will be added if missing):`,
-      path,
-    )
-    if (!next) return
+  async function renameFileByPath(path: string, next: string) {
     let target = next.trim().replace(/^\/+/, '')
     if (!target) return
     if (!/\.[a-z0-9]+$/i.test(target)) target += '.md'
     if (target === path) return
     // D4.7c — flush autosave so the cascade reads the latest body.
     await pendingSaveRef.current?.()
-    try {
-      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
-      // D4.30 — no URL change; fileId is stable, activePath
-      // re-derives to `target` automatically.
-      // D4.8 — link-cascade alert removed; the rewrite is silent.
-    } catch (e) {
-      window.alert(`Rename failed: ${(e as Error).message}`)
-    }
+    await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+    // D4.30 — no URL change; fileId is stable, activePath
+    // re-derives to `target` automatically.
+    // D4.8 — link-cascade notice omitted; the rename row is the active surface.
   }
 
-  async function renameFolderByPath(path: string) {
-    const next = window.prompt(`Rename folder to:`, path)
-    if (!next) return
+  async function renameFolderByPath(path: string, next: string) {
     const target = next.trim().replace(/^\/+|\/+$/g, '')
     if (!target || target === path) return
     // D4.7c — flush autosave before cascade.
     await pendingSaveRef.current?.()
-    try {
-      await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
-      // D4.30 — no URL change: every moved atom keeps its fileId
-      // (folders.move reconciles the index), so the open atom's
-      // `activePath` re-derives to its new path automatically.
-      // D4.8 — link-cascade alert removed; the rewrite is silent.
-    } catch (e) {
-      window.alert(`Couldn't rename folder: ${(e as Error).message}`)
-    }
+    await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
+    // D4.30 — no URL change: every moved atom keeps its fileId
+    // (folders.move reconciles the index), so the open atom's
+    // `activePath` re-derives to its new path automatically.
+    // D4.8 — link-cascade notice omitted; the rename row is the active surface.
   }
 
   async function deleteFolderByPath(path: string) {
-    const ok = window.confirm(
-      `Delete folder "${path}" and everything inside it?\n\nThis removes all nested folders and atoms. Can't be undone.`,
-    )
-    if (!ok) return
     try {
       const { atomCount, folderCount } = await removeFolder({
         path,
@@ -904,13 +875,12 @@ function App() {
       if (activePath && (activePath === path || activePath.startsWith(`${path}/`))) {
         clearOpenAtom({ replace: true })
       }
-      window.setTimeout(() => {
-        window.alert(
-          `Deleted folder "${path}" — ${atomCount} atom(s), ${folderCount} folder row(s).`,
-        )
-      }, 0)
+      notice.success(
+        'Deleted folder',
+        `${atomCount} atom${atomCount === 1 ? '' : 's'}, ${folderCount} folder row${folderCount === 1 ? '' : 's'} removed.`,
+      )
     } catch (e) {
-      window.alert(`Couldn't delete folder: ${(e as Error).message}`)
+      throw e
     }
   }
 

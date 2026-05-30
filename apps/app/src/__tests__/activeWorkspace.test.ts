@@ -125,8 +125,11 @@ describe('WorkspaceManagementDialog (Members admin + create/join + rename)', () 
     )
   })
 
-  it('confirms before destructive leave (no silent offboarding)', () => {
-    expect(DIALOG_SRC).toMatch(/window\.confirm/)
+  it('confirms inline before destructive leave or deletion', () => {
+    expect(DIALOG_SRC).toMatch(/dangerConfirm/)
+    expect(DIALOG_SRC).toMatch(/Leave \$\{name\}\?/)
+    expect(DIALOG_SRC).toMatch(/Delete \$\{name\}\?/)
+    expect(DIALOG_SRC).toMatch(/You'll need a fresh invite to rejoin/)
   })
 
   it('uses delete workspace for owner-level workspace deletion instead of removing yourself', () => {
