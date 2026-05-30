@@ -1,7 +1,18 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
-import { Send, Sparkles, SquareTerminal } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  Folder,
+  FolderPlus,
+  FolderX,
+  Plus,
+  Search,
+  Send,
+  Sparkles,
+  SquareTerminal,
+} from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
@@ -25,6 +36,7 @@ const SKILL_COMMAND_RE = /^\/skill\s+([\w./-]+)(?:\s+([\s\S]+))?$/
 const COMMAND_FIRE_RE = /^\/([\w./-]+)(?:\s+([\s\S]+))?$/
 
 type RunnableRef = { path: string; label: string }
+type EnvironmentOption = { value: string | null; label: string }
 
 export function detectSkillFire(
   prompt: string,
@@ -72,6 +84,13 @@ export function detectCommandFire(
 
 type Props = {
   threadId: string | null
+  projectPath?: string | null
+  projectOptions?: EnvironmentOption[]
+  folderOptions?: string[]
+  onProjectPathChange?: (projectPath: string | null) => void
+  onCreateProject?: (mode: 'scratch' | 'existing') => void
+  onEnsureThread?: (projectPath: string | null) => Promise<string>
+  mode?: 'side' | 'primary'
   pendingPrompt?: string | null
   onPendingHandled?: () => void
   // P3+P4 Codex fold F2+F3: dedicated channel for programmatic
@@ -87,6 +106,13 @@ type Props = {
 
 export function Chat({
   threadId,
+  projectPath = null,
+  projectOptions = [],
+  folderOptions = [],
+  onProjectPathChange,
+  onCreateProject,
+  onEnsureThread,
+  mode = 'side',
   pendingPrompt,
   onPendingHandled,
   pendingSkillFire,
@@ -97,6 +123,9 @@ export function Chat({
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [slashCursor, setSlashCursor] = useState(0)
+  const [environmentOpen, setEnvironmentOpen] = useState(false)
+  const [environmentQuery, setEnvironmentQuery] = useState('')
+  const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const sendMessage = useAction(api.agent.sendMessage)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -115,7 +144,7 @@ export function Chat({
 
   const messagesQuery = useUIMessages(
     api.agent.listMessages,
-    threadId ? { threadId, activeWorkspaceId } : 'skip',
+    threadId ? { threadId, activeWorkspaceId, projectPath } : 'skip',
     { initialNumItems: 50, stream: true },
   )
 
@@ -156,7 +185,7 @@ export function Chat({
 
   async function submit(promptOverride?: string) {
     const prompt = (promptOverride ?? input).trim()
-    if (!prompt || !threadId || sending || busy) return
+    if (!prompt || sending || busy) return
     // Track-3 P3 — slash-command routing. A leading `/<token>`
     // that resolves to a saved skill flips this turn into
     // skill-fire mode (the prepareStep BRACE restricts step 0's
@@ -167,7 +196,6 @@ export function Chat({
     const match = detectSkillFire(prompt, skills)
     const commandMatch = match ? null : detectCommandFire(prompt, savedCommands)
     setSending(true)
-    if (!promptOverride) setInput('')
     try {
       if (match && 'ambiguous' in match) {
         // Surface the collision as a local UI nudge — do NOT fire
@@ -180,6 +208,10 @@ export function Chat({
         setSending(false)
         return
       }
+      const activeThreadId =
+        threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+      if (!activeThreadId) return
+      if (!promptOverride) setInput('')
       if (match && 'matched' in match) {
         // P3+P4 indep fold F4: preserve user extras as
         // context the model sees AFTER run_skill returns the
@@ -193,10 +225,11 @@ export function Chat({
           ? `${match.matched.path}\n\n${match.extras}`
           : match.matched.path
         await sendMessage({
-          threadId,
+          threadId: activeThreadId,
           prompt: promptText,
           entry: 'skill-fire',
           activeWorkspaceId,
+          projectPath,
         })
         return
       }
@@ -213,14 +246,20 @@ export function Chat({
           ? `${commandMatch.matched.path}\n\n${commandMatch.extras}`
           : commandMatch.matched.path
         await sendMessage({
-          threadId,
+          threadId: activeThreadId,
           prompt: promptText,
           entry: 'command-fire',
           activeWorkspaceId,
+          projectPath,
         })
         return
       }
-      await sendMessage({ threadId, prompt, activeWorkspaceId })
+      await sendMessage({
+        threadId: activeThreadId,
+        prompt,
+        activeWorkspaceId,
+        projectPath,
+      })
     } catch (e) {
       console.error(e)
     } finally {
@@ -229,7 +268,7 @@ export function Chat({
   }
 
   useEffect(() => {
-    if (!pendingPrompt || !threadId || sending || busy) return
+    if (!pendingPrompt || (!threadId && !onEnsureThread) || sending || busy) return
     submit(pendingPrompt)
     onPendingHandled?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -243,7 +282,7 @@ export function Chat({
   // immediately (clears parent state via the handler callback
   // BEFORE the await) so a stale value cannot replay on remount.
   useEffect(() => {
-    if (!pendingSkillFire || !threadId || sending || busy) return
+    if (!pendingSkillFire || (!threadId && !onEnsureThread) || sending || busy) return
     const path = pendingSkillFire
     // Claim the dispatch SYNCHRONOUSLY so a re-render or remount
     // sees a cleared pendingSkillFire and does not replay.
@@ -251,11 +290,15 @@ export function Chat({
     setSending(true)
     void (async () => {
       try {
+        const activeThreadId =
+          threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+        if (!activeThreadId) return
         await sendMessage({
-          threadId,
+          threadId: activeThreadId,
           prompt: path,
           entry: 'skill-fire',
           activeWorkspaceId,
+          projectPath,
         })
       } catch (e) {
         console.error(e)
@@ -264,20 +307,24 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingSkillFire, threadId, sending, busy])
+  }, [pendingSkillFire, threadId, sending, busy, onEnsureThread, projectPath])
 
   useEffect(() => {
-    if (!pendingCommandFire || !threadId || sending || busy) return
+    if (!pendingCommandFire || (!threadId && !onEnsureThread) || sending || busy) return
     const path = pendingCommandFire
     onPendingCommandFireHandled?.()
     setSending(true)
     void (async () => {
       try {
+        const activeThreadId =
+          threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+        if (!activeThreadId) return
         await sendMessage({
-          threadId,
+          threadId: activeThreadId,
           prompt: path,
           entry: 'command-fire',
           activeWorkspaceId,
+          projectPath,
         })
       } catch (e) {
         console.error(e)
@@ -286,7 +333,7 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingCommandFire, threadId, sending, busy])
+  }, [pendingCommandFire, threadId, sending, busy, onEnsureThread, projectPath])
 
   const slashQuery = useMemo(() => {
     const m = input.match(/^\s*\/([^\s]*)$/)
@@ -312,7 +359,7 @@ export function Chat({
   }, [slashItems.length])
 
   function fireSlashItem(item: (typeof slashItems)[number]) {
-    if (!threadId || sending || busy) return
+    if ((!threadId && !onEnsureThread) || sending || busy) return
     if (item.kind === 'command') {
       void submit(`/${item.path}`)
     } else {
@@ -321,13 +368,47 @@ export function Chat({
     setInput('')
   }
 
+  const primary = mode === 'primary'
+  const canSend = Boolean(threadId || onEnsureThread)
+  const uniqueProjectOptions = useMemo(() => {
+    const seen = new Set<string>()
+    return projectOptions.filter((option) => {
+      if (option.value === null) return false
+      const key = option.value ?? ''
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [projectOptions])
+  const filteredProjectOptions = useMemo(() => {
+    const q = environmentQuery.trim().toLowerCase()
+    if (!q) return uniqueProjectOptions
+    return uniqueProjectOptions.filter((option) =>
+      option.label.toLowerCase().includes(q),
+    )
+  }, [environmentQuery, uniqueProjectOptions])
+  const selectedProjectLabel =
+    projectPath ??
+    (primary ? "Don't work in a project" : 'Workspace chat')
+  const canEditEnvironment = !threadId && !sending && !busy
+
   return (
-    <aside className="flex h-screen flex-col bg-panel border-l border-rule">
-      <header className="flex h-11 items-center justify-between px-4 border-b border-rule">
+    <aside
+      className={`flex h-screen flex-col ${
+        primary
+          ? 'bg-page'
+          : 'bg-panel border-l border-rule'
+      }`}
+    >
+      <header
+        className={`flex items-center justify-between border-b border-rule ${
+          primary ? 'h-14 px-6' : 'h-11 px-4'
+        }`}
+      >
         <div className="flex items-center gap-2 text-ink-dim">
           <DohcMark size={14} />
           <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
-            dohc
+            {primary ? 'Agent' : 'dohc'}
           </span>
         </div>
         {busy && (
@@ -340,23 +421,37 @@ export function Chat({
 
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4"
+        className={`flex-1 overflow-y-auto flex flex-col gap-4 ${
+          primary
+            ? 'mx-auto w-full max-w-[780px] px-7 py-7'
+            : 'px-4 py-4'
+        }`}
       >
         {uiMessages.length === 0 && (
-          <div className="flex flex-col items-start gap-2">
+          <div
+            className={`flex flex-col items-start gap-2 ${
+              primary ? 'pt-[18vh]' : ''
+            }`}
+          >
             <div className="flex items-center gap-1.5">
               <span className="size-1.5 rounded-full bg-ink-dim" />
               <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
                 dohc
               </span>
             </div>
-            <p className="text-[18px] text-ink-strong leading-snug tracking-tight font-semibold">
-              What can I help you with?
+            <p
+              className={`text-ink-strong leading-snug tracking-tight font-semibold ${
+                primary ? 'text-[30px]' : 'text-[18px]'
+              }`}
+            >
+              {primary
+                ? 'What should we build in dohc?'
+                : 'What can I help you with?'}
             </p>
             <p className="text-[12.5px] text-ink-dim leading-relaxed mt-1">
-              Ask me to find something, draft a document, or organize
-              your pages. I'll show my sources and what I changed, so
-              you can always check the work.
+              {primary
+                ? 'Tell dohc what should move forward. It will read sources, change files, and leave the work inspectable.'
+                : "Ask me to find something, draft a document, or organize your pages. I'll show my sources and what I changed, so you can always check the work."}
             </p>
           </div>
         )}
@@ -365,8 +460,145 @@ export function Chat({
         ))}
       </div>
 
-      <div className="px-3 pb-3 pt-1">
-        <div className="relative rounded-xl border border-rule bg-elevated focus-within:border-rule-strong transition-colors shadow-xs">
+      <div className={primary ? 'mx-auto w-full max-w-[780px] px-7 pb-6 pt-1' : 'px-3 pb-3 pt-1'}>
+        <div
+          className={`relative border border-rule bg-elevated focus-within:border-rule-strong transition-colors shadow-xs ${
+            primary ? 'rounded-2xl shadow-md' : 'rounded-xl'
+          }`}
+        >
+          {primary && !threadId && (
+            <div className="relative border-b border-rule bg-panel/60 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!canEditEnvironment) return
+                    setEnvironmentOpen((open) => !open)
+                    setCreateProjectOpen(false)
+                  }}
+                  disabled={!canEditEnvironment}
+                  className="inline-flex h-8 max-w-[260px] items-center gap-2 rounded-full border border-rule bg-elevated px-3 text-[12.5px] font-medium text-ink shadow-xs hover:bg-hover disabled:cursor-default disabled:text-ink-faint"
+                  title={
+                    canEditEnvironment
+                      ? 'Choose project environment'
+                      : 'Environment is fixed for this chat'
+                  }
+                >
+                  <Folder className="size-3.5 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                  <span className="min-w-0 truncate">{selectedProjectLabel}</span>
+                  <ChevronDown className="size-3.5 shrink-0 text-ink-faint" strokeWidth={1.8} />
+                </button>
+                <span className="text-[11px] text-ink-faint">Environment</span>
+              </div>
+              {environmentOpen && canEditEnvironment && (
+                <>
+                <div
+                  className="fixed inset-0 z-20"
+                  onClick={() => {
+                    setEnvironmentOpen(false)
+                    setCreateProjectOpen(false)
+                  }}
+                />
+                <div className="absolute bottom-[calc(100%+8px)] left-3 z-30 w-[392px] max-w-[calc(100vw-24px)] rounded-xl border border-rule bg-elevated p-2 shadow-modal">
+                  <label className="flex h-9 items-center gap-2 rounded-lg border border-rule bg-panel px-2.5 text-ink-dim focus-within:border-rule-strong">
+                    <Search className="size-3.5 shrink-0" strokeWidth={1.8} />
+                    <input
+                      value={environmentQuery}
+                      onChange={(e) => setEnvironmentQuery(e.target.value)}
+                      placeholder="Search projects"
+                      className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint"
+                    />
+                  </label>
+                  <div className="mt-2 max-h-56 overflow-y-auto">
+                    {filteredProjectOptions.length === 0 ? (
+                      <div className="px-2.5 py-3 text-[12px] text-ink-faint">
+                        No project chats yet.
+                      </div>
+                    ) : (
+                      filteredProjectOptions.map((option) => (
+                        <button
+                          key={option.value ?? '__none__'}
+                          type="button"
+                          onClick={() => {
+                            onProjectPathChange?.(option.value)
+                            setEnvironmentOpen(false)
+                            setCreateProjectOpen(false)
+                            setEnvironmentQuery('')
+                          }}
+                          className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover"
+                        >
+                          <Folder className="size-4 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                          {projectPath === option.value && (
+                            <Check className="size-4 shrink-0 text-accent" strokeWidth={2} />
+                          )}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <div className="relative mt-2 border-t border-rule pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setCreateProjectOpen((open) => !open)}
+                      className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover"
+                    >
+                      <FolderPlus className="size-4 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                      <span className="min-w-0 flex-1 truncate">Add new project</span>
+                      <ChevronDown className="size-3.5 shrink-0 -rotate-90 text-ink-faint" strokeWidth={1.8} />
+                    </button>
+                    {createProjectOpen && (
+                      <div className="absolute left-[calc(100%+8px)] top-2 z-40 w-64 rounded-xl border border-rule bg-elevated p-1.5 shadow-modal">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEnvironmentOpen(false)
+                            setCreateProjectOpen(false)
+                            setEnvironmentQuery('')
+                            onCreateProject?.('scratch')
+                          }}
+                          className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover"
+                        >
+                          <Plus className="size-4 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                          <span className="truncate">Start from scratch</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={folderOptions.length === 0}
+                          onClick={() => {
+                            setEnvironmentOpen(false)
+                            setCreateProjectOpen(false)
+                            setEnvironmentQuery('')
+                            onCreateProject?.('existing')
+                          }}
+                          className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover disabled:text-ink-faint disabled:hover:bg-transparent"
+                        >
+                          <Folder className="size-4 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                          <span className="truncate">Use an existing folder</span>
+                        </button>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onProjectPathChange?.(null)
+                        setEnvironmentOpen(false)
+                        setCreateProjectOpen(false)
+                        setEnvironmentQuery('')
+                      }}
+                      className="mt-1 flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover"
+                    >
+                      <FolderX className="size-4 shrink-0 text-ink-dim" strokeWidth={1.8} />
+                      <span className="min-w-0 flex-1 truncate">Don't work in a project</span>
+                      {projectPath === null && (
+                        <Check className="size-4 shrink-0 text-accent" strokeWidth={2} />
+                      )}
+                    </button>
+                  </div>
+                </div>
+                </>
+              )}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             value={input}
@@ -400,10 +632,14 @@ export function Chat({
                 submit()
               }
             }}
-            placeholder={threadId ? 'Ask dohc to find, draft, or organize something…' : 'Starting up…'}
-            disabled={!threadId}
-            rows={3}
-            className="w-full resize-none bg-transparent px-3 pt-3 pb-9 text-[13px] leading-relaxed text-ink placeholder:text-ink-faint outline-none disabled:text-ink-faint"
+            placeholder={canSend ? 'Ask dohc to find, draft, or organize something…' : 'Starting up…'}
+            disabled={!canSend}
+            rows={primary ? 4 : 3}
+            className={`w-full resize-none bg-transparent text-ink placeholder:text-ink-faint outline-none disabled:text-ink-faint ${
+              primary
+                ? 'px-4 pb-10 pt-4 text-[14px] leading-relaxed'
+                : 'px-3 pt-3 pb-9 text-[13px] leading-relaxed'
+            }`}
           />
           {slashQuery !== null && slashItems.length > 0 && (
             <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal">
@@ -448,7 +684,7 @@ export function Chat({
             </span>
             <button
               onClick={() => submit()}
-              disabled={!threadId || sending || busy || !input.trim()}
+              disabled={!canSend || sending || busy || !input.trim()}
               className="inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-2.5 text-[11.5px] font-medium text-surface hover:bg-ink disabled:bg-ink-ghost disabled:cursor-not-allowed transition-colors"
             >
               <Send className="size-3" strokeWidth={2.2} />

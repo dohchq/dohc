@@ -74,9 +74,11 @@ export function harvestFormulaSrcs(body: string): string[] {
 export function HtmlAtomFrame({
   atomId,
   body,
+  compact = false,
 }: {
   atomId: string | null
   body: string
+  compact?: boolean
 }) {
   // Harvest in an effect (client-only ⇒ SSR-safe; no SSR/hydration
   // memo divergence — srcs feed a subscription, not rendered markup).
@@ -183,7 +185,11 @@ export function HtmlAtomFrame({
   }
 
   return (
-    <div className="relative w-full min-h-[70vh] rounded-md overflow-hidden border border-rule bg-page">
+    <div
+      className={`relative w-full rounded-md overflow-hidden border border-rule bg-page ${
+        compact ? 'h-[280px]' : 'min-h-[70vh]'
+      }`}
+    >
       {([0, 1] as const).map((buf) => (
         <iframe
           key={buf}

@@ -317,11 +317,20 @@ export default defineSchema({
     .index('by_workspace', ['workspaceId'])
     .index('by_workspace_path', ['workspaceId', 'path']),
 
-  // One agent thread per workspace. Persisted so reloads keep history.
+  // Agent chat history. A row binds an Agent component thread to a
+  // workspace, optionally scoped to a top-level project folder. The
+  // threadId stays the durable ownership handle; title/updatedAt power
+  // the Codex-style chat history rail.
   threadRefs: defineTable({
     workspaceId: v.string(),
     threadId: v.string(),
-  }).index('by_workspace', ['workspaceId']),
+    projectPath: v.optional(v.string()),
+    title: v.optional(v.string()),
+    updatedAt: v.optional(v.number()),
+    pinnedAt: v.optional(v.number()),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
   // infer "ONBOARDING vs MAINTENANCE" from `list_atoms` being empty —

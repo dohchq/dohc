@@ -19,8 +19,30 @@ const B = 'ws_b'
 
 const seedThreads = (t: ReturnType<typeof convexTest>) =>
   t.run(async (ctx) => {
-    await ctx.db.insert('threadRefs', { workspaceId: A, threadId: 'tA' })
-    await ctx.db.insert('threadRefs', { workspaceId: B, threadId: 'tB' })
+    await ctx.db.insert('threadRefs', {
+      workspaceId: A,
+      threadId: 'tA',
+      updatedAt: 10,
+    })
+    await ctx.db.insert('threadRefs', {
+      workspaceId: B,
+      threadId: 'tB',
+      updatedAt: 10,
+    })
+    await ctx.db.insert('threadRefs', {
+      workspaceId: A,
+      threadId: 'tA-dohc',
+      projectPath: 'dohc/research',
+      title: 'dohc planning',
+      updatedAt: 20,
+    })
+    await ctx.db.insert('threadRefs', {
+      workspaceId: A,
+      threadId: 'tA-context',
+      projectPath: '.context',
+      title: '.context chat',
+      updatedAt: 30,
+    })
   })
 
 describe('agent thread ownership — fail-closed (C1)', () => {
@@ -34,6 +56,142 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     expect(await check(B, 'tA')).toBe(false)
     expect(await check(A, 'guessed')).toBe(false) // forged/guessed id
     expect(await check('ws_nomap', 'tA')).toBe(false) // no threadRefs row
+  })
+
+  it('_assertOwnThread: project scope is exact when supplied', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    const check = (
+      workspaceId: string,
+      threadId: string,
+      projectPath: string | null,
+    ) =>
+      t.query(internal.agent._assertOwnThread, {
+        workspaceId,
+        threadId,
+        projectPath,
+      })
+    expect(await check(A, 'tA', null)).toBe(true)
+    expect(await check(A, 'tA', 'dohc/research')).toBe(false)
+    expect(await check(A, 'tA-dohc', 'dohc')).toBe(false)
+    expect(await check(A, 'tA-dohc', 'dohc/research')).toBe(true)
+    expect(await check(A, 'tA-dohc', 'opnft-fun')).toBe(false)
+    expect(await check(B, 'tA-dohc', 'dohc/research')).toBe(false)
+  })
+
+  it('listThreads returns real workspace chat history grouped by project path', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.map((r) => r.threadId)).toEqual(['tA-dohc', 'tA'])
+    expect(rows[0]).toMatchObject({
+      threadId: 'tA-dohc',
+      projectPath: 'dohc/research',
+      title: 'dohc planning',
+    })
+    expect(rows[1]).toMatchObject({
+      threadId: 'tA',
+      projectPath: null,
+    })
+    expect(rows.some((r) => r.threadId === 'tB')).toBe(false)
+    expect(rows.some((r) => r.threadId === 'tA-context')).toBe(false)
+  })
+
+  it('setThreadPinned moves a chat to the top without changing ownership', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.setThreadPinned, {
+        threadId: 'tA',
+        pinned: true,
+      })
+    let rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows[0].threadId).toBe('tA')
+    expect(typeof rows[0].pinnedAt).toBe('number')
+
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.setThreadPinned, {
+        threadId: 'tA',
+        pinned: false,
+      })
+    rows = await t.withIdentity({ subject: A }).query(api.agent.listThreads, {})
+    expect(rows[0].threadId).toBe('tA-dohc')
+    expect(rows.find((r) => r.threadId === 'tA')?.pinnedAt).toBe(null)
+  })
+
+  it('deleteThread removes only a thread owned by the caller workspace', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.deleteThread, {
+        threadId: 'tA-dohc',
+      })
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.some((r) => r.threadId === 'tA-dohc')).toBe(false)
+    expect(rows.some((r) => r.threadId === 'tA')).toBe(true)
+
+    await expect(
+      t.withIdentity({ subject: A }).mutation(api.agent.deleteThread, {
+        threadId: 'tB',
+      }),
+    ).rejects.toThrow(/does not belong/)
+  })
+
+  it('renameThread updates only the caller-owned chat title', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.renameThread, {
+        threadId: 'tA-dohc',
+        title: 'Research cockpit',
+      })
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.find((r) => r.threadId === 'tA-dohc')?.title).toBe(
+      'Research cockpit',
+    )
+
+    await expect(
+      t.withIdentity({ subject: A }).mutation(api.agent.renameThread, {
+        threadId: 'tB',
+        title: 'Nope',
+      }),
+    ).rejects.toThrow(/does not belong/)
+  })
+
+  it('renameProject retargets caller-owned project chat scopes without exposing internal folders', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.renameProject, {
+        fromProjectPath: 'dohc/research',
+        toProjectPath: 'dohc',
+      })
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.find((r) => r.threadId === 'tA-dohc')?.projectPath).toBe(
+      'dohc',
+    )
+
+    await expect(
+      t.withIdentity({ subject: A }).mutation(api.agent.renameProject, {
+        fromProjectPath: 'dohc',
+        toProjectPath: '.context',
+      }),
+    ).rejects.toThrow(/Internal folders/)
   })
 
   it('listMessages DENIES a thread the caller does not own', async () => {
@@ -62,6 +220,20 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/does not belong/)
   })
 
+  it('listMessages DENIES a valid same-workspace thread under the wrong project scope', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await expect(
+      t
+        .withIdentity({ subject: A })
+        .query(api.agent.listMessages, {
+          threadId: 'tA-dohc',
+          projectPath: 'opnft-fun',
+          paginationOpts: { numItems: 5, cursor: null },
+        }),
+    ).rejects.toThrow(/does not belong/)
+  })
+
   it('sendMessage DENIES injecting into a thread the caller does not own', async () => {
     const t = convexTest(schema, modules)
     await seedThreads(t)
@@ -74,34 +246,24 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/does not belong/)
   })
 
-  it('duplicate threadRefs (same-user tab race) ⇒ TOLERATE the canonical (earliest), never brick the owner; cross-tenant still denied (P1 design v2)', async () => {
+  it('multiple threadRefs for one workspace are legitimate chat history; cross-tenant stays denied', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
-      // two rows for ONE workspace (the ensureThread race). 'tA1' is
-      // inserted first ⇒ canonical (by_workspace index is
-      // _creationTime-ascending; ensureThread converges to it).
       await ctx.db.insert('threadRefs', { workspaceId: A, threadId: 'tA1' })
       await ctx.db.insert('threadRefs', { workspaceId: A, threadId: 'tA2' })
     })
-    // v2: the owner's OWN first run must NOT be bricked by a dup —
-    // the canonical (earliest) thread is accepted. The OLD behaviour
-    // denied BOTH, fail-closed-bricking the make-or-break first run.
     expect(
       await t.query(internal.agent._assertOwnThread, {
         workspaceId: A,
         threadId: 'tA1',
       }),
     ).toBe(true)
-    // a stale/non-canonical dup id is still denied (the client must
-    // use the threadId ensureThread returns — the canonical one).
     expect(
       await t.query(internal.agent._assertOwnThread, {
         workspaceId: A,
         threadId: 'tA2',
       }),
-    ).toBe(false)
-    // C1 PRESERVED: a FOREIGN id is still denied even WITH
-    // same-workspace dups present (cross-tenant fail-closed).
+    ).toBe(true)
     expect(
       await t.query(internal.agent._assertOwnThread, {
         workspaceId: A,
@@ -114,15 +276,6 @@ describe('agent thread ownership — fail-closed (C1)', () => {
         threadId: 'tA1',
       }),
     ).toBe(false)
-    // listMessages on a non-canonical dup id still throws controlled.
-    await expect(
-      t
-        .withIdentity({ subject: A })
-        .query(api.agent.listMessages, {
-          threadId: 'tA2',
-          paginationOpts: { numItems: 5, cursor: null },
-        }),
-    ).rejects.toThrow(/does not belong/)
   })
 
   it('unauthenticated listMessages throws (no anonymous thread read)', async () => {

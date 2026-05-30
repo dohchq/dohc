@@ -11,7 +11,13 @@ import { generateObject } from 'ai'
 import { v } from 'convex/values'
 import { paginationOptsValidator } from 'convex/server'
 import { z } from 'zod'
-import { action, mutation, query, internalQuery } from './_generated/server'
+import {
+  action,
+  mutation,
+  query,
+  internalQuery,
+  internalMutation,
+} from './_generated/server'
 import { components, internal, api } from './_generated/api'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
@@ -319,7 +325,7 @@ overrides as you read it:
 - The starter setup (\`§ONBOARDING → 1\`) is for the TEAM: \`.context/company.md\`
   captures what ${orgName} does + how the team works, starter files cover
   the team's domains (e.g. \`clients/\`, \`projects/\`, \`runbooks/\`), the
-  dashboard surfaces team-wide metrics from those files.
+  \`home.html\` cockpit surfaces team-wide status from those files.
 - "Portable identity atom: who they are" → read as "Identity atom: what
   ${orgName} does, how the team operates, and how the team wants dohc
   to operate."
@@ -363,38 +369,67 @@ ALWAYS call onboarding_state FIRST, every conversation.
                 EXPLICITLY ask to "set up" / "finish setting up" —
                 then resume onboarding where it makes sense.
 
-## ONBOARDING — the 10-minute wow (questionnaire-first; never empty)
+## ONBOARDING — the Setup Run (questionnaire-first; never empty)
 
 The user ALREADY answered a short structured questionnaire — their
 answers are your FIRST user message (a brief). Do NOT re-interrogate.
 Do NOT re-ask what they answered. From the brief, immediately build a
-tailored STARTER SETUP made for THEM — real, not an empty template.
-The vault MUST contain a populated dashboard AND a .context/me.md before you
-call finish_onboarding (hard floor).
+tailored Setup Run made for THEM — real, not an empty template.
 
-### 1 — BUILD A TAILORED STARTER (a scaffold, not an empty vault)
+No fake productivity theater: if the brief lacks context, create only
+modest source files that honestly match what they gave you, make gaps
+explicit in the Setup Run, and give one concrete next capture action.
+Never invent a busy life, fake clients, fake deadlines, fake metrics,
+or a giant operating system to make the workspace look impressive.
+
+The vault MUST contain all of this before you call finish_onboarding
+(hard floor):
+- the identity atom: .context/me.md
+- at least one real markdown SOURCE atom holding user-owned context/data
+- a polished, source-backed cockpit: home.html
+- an inspectable run note: .runs/setup.md
+
+### 1 — BUILD SOURCES FIRST (a scaffold, not an empty vault)
 
 From the brief, create a small COHERENT starter setup for their work
 — templates, not dogma:
 - \`.context/me.md\` — a PORTABLE identity atom: who they are, how they work,
   what bites them, how they want dohc to operate. You re-read this
   every session. Plain prose the USER owns.
-- 1–3 role-appropriate starter FILES they can grow into (e.g.
+- 1–3 role-appropriate SOURCE FILES they can grow into (e.g.
   \`logs/\`, \`projects/\`, \`clients/\`, and optionally
   \`.context/intent.md\` with one real goal) — ONLY what fits their
   brief. **Non-context files hold the real DATA**: put genuine
   \`{key: value}\` inline atoms in them
   (e.g. a log entry with \`{billable: 4.5}\`, a project with
   \`{budget: 8000} {status: active}\`). Modest and real.
-- a hero \`dashboard.md\` that is CONNECTED to those files — see §2.
+- Do not create filler files. If all you know is "I want a project
+  cockpit", create one humble project/source file and mark what you
+  still need in \`.runs/setup.md\`.
 
-### 2 — THE DASHBOARD IS A CONNECTED, INVITING, EDITABLE DOCUMENT
+### 2 — BUILD home.html AS THE PRIMARY COCKPIT VIEW
 
 This is the make-or-break "whoa, it's actually wired to my stuff"
-moment. The dashboard must pull LIVE from the §1 files, not restate
-numbers:
+moment. Build \`home.html\` as the first landing surface. It is a
+polished source-backed cockpit, not the source of truth. The markdown
+source atoms from §1 are what the user/agent edits; \`home.html\`
+reads from them live.
+
+Rules for \`home.html\`:
+- The path is exactly \`home.html\` unless the user explicitly asked
+  for a different named cockpit.
+- Include frontmatter with \`type: html\` and a \`sources:\` list
+  naming the markdown source atoms the view reads.
+- Use inline CSS for layout. Keep it calm and scannable. No JavaScript.
+- Use formulas such as \`{= count(projects.* status = active)}\` or
+  \`{= sum(logs.*.billable)}\` so the view is LIVE. Do not hardcode
+  a metric in HTML if it should come from source markdown.
+- If context is missing, show "what I know / what I need / next
+  capture" in the view instead of fake data.
+
+Formula rules still apply:
 - For each headline number, write an \`=\`-FORMULA inline, directly
-  in the prose — NO define_rollup, no separate identifier (own-vault
+  in the HTML text — NO define_rollup, no separate identifier (own-vault
   numbers are self-describing now). A formula is a brace beginning
   with \`=\`: \`{= sum(<file-address>.<key>)}\`. The LAST segment is
   the EXACT \`{key: n}\` atom key you wrote in §1; the segments
@@ -422,30 +457,47 @@ numbers:
   address** (no \`team.*\`, no someone-else's-workspace address). For
   cross-workspace data, use explicit Imports / Exports tools and bind
   only to granted export aggregates.
-- Lead with plain-language prose + structure. Add ONE short line in
-  plain English telling them the numbers are live, e.g. "These
-  update as you add entries to logs/ — edit anything here too."
-- Include AT LEAST ONE fenced \`\`\`query block in source. The editor
-  renders it as a "Live view" card (the block-level live-list/table
-  primitive, required to finish). Use it SPARINGLY and ALWAYS precede
-  it with a one-line plain caption of what it shows (e.g. "Live —
-  in-progress projects:"). When talking to users, always call these
-  rendered instances "Live views", never "query blocks".
-  Never wall-to-wall DSL.
-- End the dashboard with this line, verbatim: "This is yours — edit
-  anything here directly. For bigger changes, just ask me."
+### 3 — WRITE THE SETUP RUN NOTE
 
-### 3 — HAND OFF
+Create \`.runs/setup.md\`. This is the inspectable run primitive:
+it tells the user what dohc did, where the truth lives, and what is
+missing. It must be short and useful, with these headings exactly:
+
+\`\`\`md
+# Setup Run
+
+## Objective
+<what the user asked dohc to make obvious>
+
+## Sources
+- .context/me.md — how dohc should operate for this user
+- <source markdown path> — <why it exists>
+
+## View
+- home.html — <what it presents>
+
+## What I Know
+- <truth from the brief/source files>
+
+## What I Need
+- <missing context, or "Nothing urgent yet">
+
+## Next Action
+<one low-friction capture/action the user can do next>
+\`\`\`
+
+### 4 — HAND OFF
 
 Show .context/me.md back in one line: "here's what I learned about you — it's
-yours, edit it anytime." If the dashboard uses a dated-window
+yours, edit it anytime." If the cockpit uses a dated-window
 formula, your handoff MUST also state, in one plain line, that it is
 a FIXED window the user (or you, on ask) re-points each period —
 e.g. "the numbers show July; say 'roll it to August' or edit the
 date." (A static window does not auto-advance; disclose it, never
-let it silently decay.) Only when the vault has a populated dashboard
-AND .context/me.md: call finish_onboarding, then ONE line on what they can do
-next (edit the dashboard directly, or ask you to extend it).
+let it silently decay.) Only when the vault has the identity atom,
+source markdown, source-backed \`home.html\`, and \`.runs/setup.md\`:
+call finish_onboarding, then ONE line on what they can do next
+(open home.html, edit a source file, or ask you to extend the run).
 
 ## PAGE TITLE & PROPERTIES (frontmatter, Notion-style)
 
@@ -816,7 +868,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     finish_onboarding: createTool({
       description:
-        'Mark onboarding DONE. ONLY call once the vault has a populated dashboard AND the identity atom (.context/me.md in personal, .context/company.md in org) (never end empty).',
+        'Mark onboarding DONE. ONLY call once the vault has the identity atom (.context/me.md in personal, .context/company.md in org), at least one source markdown atom, a source-backed home.html cockpit, and .runs/setup.md (never end empty).',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         // §2-A.1 UNAUTHORIZABLE: state-flip (user-decision class).
@@ -2062,40 +2114,288 @@ export const dohcAgent = new Agent(components.agent, {
   },
 })
 
+const projectPathArg = v.optional(v.union(v.string(), v.null()))
+
+function normalizeProjectPath(projectPath?: string | null): string | undefined {
+  const clean = (projectPath ?? '').trim().replace(/^\/+|\/+$/g, '')
+  if (!clean) return undefined
+  return clean
+}
+
+function isInternalProjectPath(projectPath?: string | null) {
+  const clean = normalizeProjectPath(projectPath)
+  if (!clean) return false
+  return clean.split('/').some((segment) => segment.startsWith('.'))
+}
+
+function threadScopeMatches(
+  row: { projectPath?: string },
+  projectPath: string | undefined,
+) {
+  return (row.projectPath ?? undefined) === projectPath
+}
+
+async function threadBelongsToWorkspace(
+  ctx: any,
+  workspaceId: string,
+  threadId: string,
+  projectPath?: string | null,
+) {
+  const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+  if (rows.length < 1) return false
+  if (projectPath === undefined) return true
+  const scopedProjectPath = normalizeProjectPath(projectPath)
+  return rows.some((row: { projectPath?: string }) =>
+    threadScopeMatches(row, scopedProjectPath),
+  )
+}
+
+function fallbackThreadTitle(projectPath: string | undefined) {
+  return projectPath ? `${projectPath} chat` : 'Workspace chat'
+}
+
+function titleFromPrompt(prompt: string) {
+  const line = prompt
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean)
+  if (!line) return undefined
+  return line.replace(/\s+/g, ' ').slice(0, 80)
+}
+
+async function threadRefRowsForWorkspaceThread(
+  ctx: any,
+  workspaceId: string,
+  threadId: string,
+) {
+  return await ctx.db
+    .query('threadRefs')
+    .withIndex('by_workspace_thread', (q: any) =>
+      q.eq('workspaceId', workspaceId).eq('threadId', threadId),
+    )
+    .collect()
+}
+
 export const ensureThread = mutation({
   // Phase B.3 (org-plan §5 — NON-DEFAULTABLE thread surface).
-  // Frontend callers (_app.tsx + Onboarding) thread `activeWorkspaceId`
-  // from `useActiveWorkspaceId()`. The thread is workspace-keyed via
-  // threadRefs.by_workspace — switching workspace creates / returns a
-  // DIFFERENT thread, so org chats stay isolated from personal chats.
-  args: { activeWorkspaceId: v.optional(v.string()) },
-  handler: async (ctx, { activeWorkspaceId }) => {
+  // Frontend callers thread `activeWorkspaceId` from
+  // useActiveWorkspaceId(). The row is workspace-keyed and optionally
+  // project-keyed, so folder-specific chats still stay inside the
+  // same server-derived workspace boundary.
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    projectPath: projectPathArg,
+  },
+  handler: async (ctx, { activeWorkspaceId, projectPath }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    // P1 design v2: CONVERGE to one canonical row. Two racing tabs
-    // (same user) can each miss the row and both insert (separate
-    // txns, no DB uniqueness). by_workspace is workspace-keyed so
-    // every row here is THIS workspace's (never cross-tenant). The
-    // canonical row is the earliest (index returns _creationTime-
-    // ascending); delete the rest IN THIS mutation so the transient
-    // 2-row state can't persist and brick `_assertOwnThread`/
-    // `listMessages`. Readers also tolerate (earliest-of-N) so a
-    // direct send/list during the race window never fail-closed-
-    // bricks the make-or-break first run.
+    const scopedProjectPath = normalizeProjectPath(projectPath)
+    if (isInternalProjectPath(scopedProjectPath)) {
+      throw new Error('Internal folders cannot be project chats')
+    }
     const rows = await ctx.db
       .query('threadRefs')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(8)
-    if (rows.length >= 1) {
-      for (let i = 1; i < rows.length; i++) await ctx.db.delete(rows[i]._id)
-      return rows[0].threadId
-    }
+      .take(200)
+    const scoped = rows
+      .filter((row) => threadScopeMatches(row, scopedProjectPath))
+      .sort(
+        (a, b) =>
+          (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
+      )
+    if (scoped.length >= 1) return scoped[0].threadId
 
     const { threadId } = await dohcAgent.createThread(ctx, {
       userId: workspaceId,
-      title: 'dohc',
+      title: fallbackThreadTitle(scopedProjectPath),
     })
-    await ctx.db.insert('threadRefs', { workspaceId, threadId })
+    await ctx.db.insert('threadRefs', {
+      workspaceId,
+      threadId,
+      ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
+      title: fallbackThreadTitle(scopedProjectPath),
+      updatedAt: Date.now(),
+    })
     return threadId
+  },
+})
+
+export const createThread = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    projectPath: projectPathArg,
+    title: v.optional(v.string()),
+  },
+  handler: async (ctx, { activeWorkspaceId, projectPath, title }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const scopedProjectPath = normalizeProjectPath(projectPath)
+    if (isInternalProjectPath(scopedProjectPath)) {
+      throw new Error('Internal folders cannot be project chats')
+    }
+    const cleanTitle =
+      title?.trim().replace(/\s+/g, ' ').slice(0, 80) ||
+      fallbackThreadTitle(scopedProjectPath)
+    const { threadId } = await dohcAgent.createThread(ctx, {
+      userId: workspaceId,
+      title: cleanTitle,
+    })
+    await ctx.db.insert('threadRefs', {
+      workspaceId,
+      threadId,
+      ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
+      title: cleanTitle,
+      updatedAt: Date.now(),
+    })
+    return threadId
+  },
+})
+
+export const listThreads = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('threadRefs')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .take(200)
+    return rows
+      .filter((row) => !isInternalProjectPath(row.projectPath))
+      .sort(
+        (a, b) =>
+          (b.pinnedAt ? 1 : 0) - (a.pinnedAt ? 1 : 0) ||
+          (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0) ||
+          (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
+      )
+      .map((row) => ({
+        threadId: row.threadId,
+        projectPath: row.projectPath ?? null,
+        title: row.title ?? fallbackThreadTitle(row.projectPath),
+        updatedAt: row.updatedAt ?? row._creationTime,
+        pinnedAt: row.pinnedAt ?? null,
+      }))
+  },
+})
+
+export const setThreadPinned = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+    pinned: v.boolean(),
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId, pinned }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    for (const row of rows) {
+      const { _id, _creationTime, pinnedAt, ...rest } = row
+      void _creationTime
+      void pinnedAt
+      await ctx.db.replace(_id, {
+        ...rest,
+        ...(pinned ? { pinnedAt: Date.now() } : {}),
+      })
+    }
+  },
+})
+
+export const deleteThread = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    for (const row of rows) await ctx.db.delete(row._id)
+  },
+})
+
+export const renameThread = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+    title: v.string(),
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId, title }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const cleanTitle = title.trim().replace(/\s+/g, ' ').slice(0, 80)
+    if (!cleanTitle) throw new Error('chat title required')
+    const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    for (const row of rows) {
+      await ctx.db.patch(row._id, {
+        title: cleanTitle,
+        updatedAt: Date.now(),
+      })
+    }
+  },
+})
+
+export const renameProject = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    fromProjectPath: v.string(),
+    toProjectPath: v.string(),
+  },
+  handler: async (
+    ctx,
+    { activeWorkspaceId, fromProjectPath, toProjectPath },
+  ) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const from = normalizeProjectPath(fromProjectPath)
+    const to = normalizeProjectPath(toProjectPath)
+    if (!from || !to) throw new Error('project path required')
+    if (isInternalProjectPath(from) || isInternalProjectPath(to)) {
+      throw new Error('Internal folders cannot be project chats')
+    }
+    if (from === to) return
+    const rows = await ctx.db
+      .query('threadRefs')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .take(200)
+    const projectRows = rows.filter((row) => row.projectPath === from)
+    if (projectRows.length < 1) throw new Error('project does not exist')
+    for (const row of projectRows) {
+      const wasFallback =
+        !row.title || row.title === fallbackThreadTitle(row.projectPath)
+      await ctx.db.patch(row._id, {
+        projectPath: to,
+        updatedAt: Date.now(),
+        ...(wasFallback ? { title: fallbackThreadTitle(to) } : {}),
+      })
+    }
+  },
+})
+
+export const _touchThread = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    threadId: v.string(),
+    titleHint: v.optional(v.string()),
+  },
+  handler: async (ctx, { workspaceId, threadId, titleHint }) => {
+    const rows = await ctx.db
+      .query('threadRefs')
+      .withIndex('by_workspace_thread', (q) =>
+        q.eq('workspaceId', workspaceId).eq('threadId', threadId),
+      )
+      .collect()
+    const cleanTitle = titleHint ? titleFromPrompt(titleHint) : undefined
+    for (const row of rows) {
+      await ctx.db.patch(row._id, {
+        updatedAt: Date.now(),
+        ...((!row.title || row.title === fallbackThreadTitle(row.projectPath)) &&
+        cleanTitle
+          ? { title: cleanTitle }
+          : {}),
+      })
+    }
   },
 })
 
@@ -2180,20 +2480,24 @@ export const _resolveOwnerWorkspaceForCaller = internalQuery({
 // this an authed user could read another user's entire dohc chat
 // (capture summaries, entity data) or inject into their thread.
 export const _assertOwnThread = internalQuery({
-  args: { workspaceId: v.string(), threadId: v.string() },
-  handler: async (ctx, { workspaceId, threadId }) => {
-    // P1 design v2: TOLERATE the transient 2-row race window — the
-    // canonical row is the earliest (index = _creationTime-asc), and
-    // ensureThread converges to it. Only the caller's own workspace
-    // rows can appear (workspace-keyed index), so a foreign threadId
-    // can NEVER equal the canonical ⇒ still fail-closed cross-tenant.
-    // A stale/non-canonical dup id also denies (client must use the
-    // threadId ensureThread returns). 0 rows ⇒ deny.
-    const rows = await ctx.db
-      .query('threadRefs')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(8)
-    return rows.length >= 1 && rows[0].threadId === threadId
+  args: {
+    workspaceId: v.string(),
+    threadId: v.string(),
+    projectPath: projectPathArg,
+  },
+  handler: async (ctx, { workspaceId, threadId, projectPath }) => {
+    // Chat history means a workspace may now have many legitimate
+    // threadRefs. Authorization is therefore row existence, not "the
+    // earliest canonical row": if the threadId is not registered in
+    // THIS workspace, deny. When the caller supplies a projectPath,
+    // also require that exact folder scope so project chats cannot be
+    // accidentally rendered under another project.
+    return await threadBelongsToWorkspace(
+      ctx,
+      workspaceId,
+      threadId,
+      projectPath,
+    )
   },
 })
 
@@ -2435,8 +2739,12 @@ export const sendMessage = action({
     prompt: v.string(),
     entry: v.optional(v.union(v.literal('skill-fire'), v.literal('command-fire'))),
     activeWorkspaceId: v.optional(v.string()),
+    projectPath: projectPathArg,
   },
-  handler: async (ctx, { threadId, prompt, entry, activeWorkspaceId }) => {
+  handler: async (
+    ctx,
+    { threadId, prompt, entry, activeWorkspaceId, projectPath },
+  ) => {
     const workspaceId: string = await ctx.runQuery(
       internal.agent._resolveWorkspaceForCaller,
       { activeWorkspaceId },
@@ -2444,6 +2752,7 @@ export const sendMessage = action({
     const ok = await ctx.runQuery(internal.agent._assertOwnThread, {
       workspaceId,
       threadId,
+      projectPath,
     })
     if (!ok) throw new Error('thread does not belong to this workspace')
 
@@ -2483,6 +2792,11 @@ export const sendMessage = action({
       threadId,
       prompt,
     })
+    await ctx.runMutation(internal.agent._touchThread, {
+      workspaceId,
+      threadId,
+      titleHint: prompt,
+    })
     await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
       threadId,
       promptMessageId: messageId,
@@ -2510,6 +2824,7 @@ export const sendMessage = action({
           threadId,
           promptMessageId: messageId,
           activeWorkspaceId: workspaceId,
+          projectPath: normalizeProjectPath(projectPath),
         },
       } as any,
       { saveStreamDeltas: true },
@@ -2719,19 +3034,21 @@ export const listMessages = query({
     paginationOpts: paginationOptsValidator,
     streamArgs: v.optional(vStreamArgs),
     activeWorkspaceId: v.optional(v.string()),
+    projectPath: projectPathArg,
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     const workspaceId = await requireWorkspace(ctx, args.activeWorkspaceId)
-    // Same fail-closed gate as sendMessage (C1), with the P1 design
-    // v2 read-side tolerance: canonical = earliest of N (workspace-
-    // keyed ⇒ same-tenant; ensureThread converges to it). A foreign
-    // or stale/non-canonical id never equals rows[0] ⇒ deny. 0 ⇒ deny.
-    const rows = await ctx.db
-      .query('threadRefs')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(8)
-    if (rows.length < 1 || rows[0].threadId !== args.threadId) {
+    // Same fail-closed gate as sendMessage (C1): threadId must be
+    // registered inside the active workspace, and projectPath must
+    // match when the caller has selected a project chat.
+    const ok = await threadBelongsToWorkspace(
+      ctx,
+      workspaceId,
+      args.threadId,
+      args.projectPath,
+    )
+    if (!ok) {
       throw new Error('thread does not belong to this workspace')
     }
     const paginated = await listUIMessages(ctx, components.agent, args)
