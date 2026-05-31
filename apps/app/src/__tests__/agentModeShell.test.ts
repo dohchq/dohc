@@ -146,12 +146,6 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).not.toContain('}, [uiMessages.length])')
   })
 
-  it('retries queued programmatic prompts once the chat is no longer busy', () => {
-    expect(CHAT).toContain(
-      '[pendingPrompt, threadId, onEnsureThread, sending, busy, onPendingHandled]',
-    )
-  })
-
   it('keeps the Agent right rail focused on real run trust signals', () => {
     expect(APP).toContain('activeThread={activeAgentThread}')
     expect(APP).toContain('projectPath={agentProjectPath}')

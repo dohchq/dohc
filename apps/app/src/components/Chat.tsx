@@ -70,6 +70,31 @@ type ComposerBannerItem = {
   onDismiss?: () => void
 }
 
+export function runPendingPromptHandoff({
+  pendingPrompt,
+  threadId,
+  canEnsureThread,
+  sending,
+  busy,
+  submit,
+  onPendingHandled,
+}: {
+  pendingPrompt?: string | null
+  threadId: string | null
+  canEnsureThread: boolean
+  sending: boolean
+  busy: boolean
+  submit: (prompt: string) => void
+  onPendingHandled?: () => void
+}): boolean {
+  if (!pendingPrompt || (!threadId && !canEnsureThread) || sending || busy) {
+    return false
+  }
+  submit(pendingPrompt)
+  onPendingHandled?.()
+  return true
+}
+
 export function detectComposerTrigger(
   text: string,
   cursorInput: number,
@@ -401,9 +426,15 @@ export function Chat({
   }
 
   useEffect(() => {
-    if (!pendingPrompt || (!threadId && !onEnsureThread) || sending || busy) return
-    submit(pendingPrompt)
-    onPendingHandled?.()
+    runPendingPromptHandoff({
+      pendingPrompt,
+      threadId,
+      canEnsureThread: Boolean(onEnsureThread),
+      sending,
+      busy,
+      submit,
+      onPendingHandled,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPrompt, threadId, onEnsureThread, sending, busy, onPendingHandled])
 
