@@ -253,6 +253,55 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/Internal folders/)
   })
 
+  it('renameProject moves matching folder state and chat scopes in one mutation', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('folders', {
+        workspaceId: A,
+        path: 'dohc',
+        createdAt: 1,
+      })
+      await ctx.db.insert('folders', {
+        workspaceId: A,
+        path: 'dohc/research',
+        createdAt: 2,
+      })
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 'project-thread',
+        projectPath: 'dohc',
+        title: 'dohc chat',
+        updatedAt: 10,
+      })
+    })
+
+    await t.withIdentity({ subject: A }).mutation(api.agent.renameProject, {
+      fromProjectPath: 'dohc',
+      toProjectPath: 'product',
+    })
+
+    const folders = await t.run((ctx) =>
+      ctx.db
+        .query('folders')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .collect(),
+    )
+    expect(folders.map((folder) => folder.path).sort()).toEqual([
+      'product',
+      'product/research',
+    ])
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows).toEqual([
+      expect.objectContaining({
+        threadId: 'project-thread',
+        projectPath: 'product',
+        title: 'product chat',
+      }),
+    ])
+  })
+
   it('renameProject reaches project rows beyond a large workspace history', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {

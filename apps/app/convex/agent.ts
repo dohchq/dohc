@@ -22,6 +22,7 @@ import { components, internal, api } from './_generated/api'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { requiresConfirmation } from './confirmTier'
+import { moveFolderImpl } from './folders'
 import type { ToolCtx } from '@convex-dev/agent'
 
 // org-plan §5 + Jenny round-2 C-1 fix — the agent's tool handlers need
@@ -2440,6 +2441,8 @@ export const renameProject = mutation({
     { activeWorkspaceId, fromProjectPath, toProjectPath },
   ) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    const viewerSubject = identity?.subject ?? ''
     const from = normalizeProjectPath(fromProjectPath)
     const to = normalizeProjectPath(toProjectPath)
     if (!from || !to) throw new Error('project path required')
@@ -2453,6 +2456,7 @@ export const renameProject = mutation({
       from,
     )
     if (projectRows.length < 1) throw new Error('project does not exist')
+    await moveFolderImpl(ctx, workspaceId, from, to, viewerSubject)
     for (const row of projectRows) {
       const wasFallback =
         !row.title || row.title === fallbackThreadTitle(row.projectPath)

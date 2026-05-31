@@ -97,7 +97,16 @@ export function AgentRunRail({
     <aside className="flex h-screen w-[340px] shrink-0 flex-col border-l border-rule bg-panel px-4 py-5">
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
         <RailSection title="Progress" Icon={ListChecks}>
-          <EmptyLine label="No active run" />
+          {activeThread ? (
+            <div className="rounded-md border border-rule bg-page px-2.5 py-2 text-[11.5px] leading-snug text-ink-dim">
+              <span className="block truncate font-medium text-ink-strong">
+                {activeThread.title}
+              </span>
+              <span className="mt-0.5 block text-ink-faint">Chat active</span>
+            </div>
+          ) : (
+            <EmptyLine label="No active run" />
+          )}
         </RailSection>
 
         <RailSection title="Environment" Icon={Folder}>

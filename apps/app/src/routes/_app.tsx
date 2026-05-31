@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   createFileRoute,
   useNavigate,
@@ -45,6 +45,7 @@ import {
 } from '@/lib/active-workspace'
 import { ChatBusyProvider } from '@/lib/chat-busy'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
+import { useDialogFocus } from '../lib/dialog-focus'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
 // PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
@@ -641,13 +642,6 @@ function App() {
         throw new Error('Internal dot-folders cannot be project chats.')
       }
       await pendingSaveRef.current?.()
-      if (projectFolderOptions.includes(projectPath)) {
-        await moveFolder({
-          fromPath: projectPath,
-          toPath: target,
-          activeWorkspaceId,
-        })
-      }
       await renameAgentProjectMut({
         activeWorkspaceId,
         fromProjectPath: projectPath,
@@ -658,8 +652,6 @@ function App() {
     [
       activeWorkspaceId,
       agentProjectPath,
-      moveFolder,
-      projectFolderOptions,
       renameAgentProjectMut,
     ],
   )
@@ -1326,6 +1318,12 @@ function AgentProjectDialog({
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const titleId = useId()
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const { dialogRef, onDialogKeyDown } = useDialogFocus<HTMLElement>({
+    initialFocusRef: inputRef,
+    onEscape: onClose,
+  })
   const filteredFolders = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return folderOptions
@@ -1355,9 +1353,19 @@ function AgentProjectDialog({
         type="button"
         className="absolute inset-0 cursor-default"
         onClick={onClose}
+        tabIndex={-1}
+        aria-hidden="true"
         aria-label="close project dialog"
       />
-      <section className="relative w-[420px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal">
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
+        className="relative w-[420px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal"
+      >
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             {mode === 'scratch' ? (
@@ -1365,7 +1373,10 @@ function AgentProjectDialog({
             ) : (
               <Folder className="size-4 shrink-0 text-accent" strokeWidth={1.8} />
             )}
-            <h3 className="truncate text-[14px] font-semibold text-ink-strong">
+            <h3
+              id={titleId}
+              className="truncate text-[14px] font-semibold text-ink-strong"
+            >
               {title}
             </h3>
           </div>
@@ -1385,12 +1396,11 @@ function AgentProjectDialog({
               Project folder
             </label>
             <input
-              autoFocus
+              ref={inputRef}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') void commit(value)
-                if (e.key === 'Escape') onClose()
               }}
               placeholder="dohc"
               className="mt-2 h-9 w-full rounded-md border border-rule bg-page px-2.5 text-[13px] text-ink outline-none placeholder:text-ink-faint focus:border-rule-strong"
@@ -1404,12 +1414,9 @@ function AgentProjectDialog({
             <label className="flex h-9 items-center gap-2 rounded-md border border-rule bg-page px-2.5 text-ink-dim focus-within:border-rule-strong">
               <Search className="size-3.5 shrink-0" strokeWidth={1.8} />
               <input
-                autoFocus
+                ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') onClose()
-                }}
                 placeholder="Search folders"
                 className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint"
               />

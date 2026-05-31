@@ -1,4 +1,4 @@
-import { useState, type ComponentType } from 'react'
+import { useId, useRef, useState, type ComponentType } from 'react'
 import {
   Folder,
   FolderOpen,
@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { useDialogFocus } from '../lib/dialog-focus'
 
 type FolderLike = { path: string }
 type FileLike = { path: string }
@@ -622,6 +623,12 @@ function RenameDialog({
   const [value, setValue] = useState(initialValue)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const titleId = useId()
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const { dialogRef, onDialogKeyDown } = useDialogFocus<HTMLElement>({
+    initialFocusRef: inputRef,
+    onEscape: onClose,
+  })
 
   async function commit() {
     const clean = value.trim()
@@ -645,20 +652,31 @@ function RenameDialog({
         type="button"
         className="absolute inset-0 cursor-default"
         onClick={onClose}
+        tabIndex={-1}
+        aria-hidden="true"
         aria-label="close dialog"
       />
-      <section className="relative w-[360px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal">
-        <h3 className="text-[14px] font-semibold text-ink-strong">{title}</h3>
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
+        className="relative w-[360px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal"
+      >
+        <h3 id={titleId} className="text-[14px] font-semibold text-ink-strong">
+          {title}
+        </h3>
         <label className="mt-4 block text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
           {label}
         </label>
         <input
-          autoFocus
+          ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void commit()
-            if (e.key === 'Escape') onClose()
           }}
           className="mt-2 h-9 w-full rounded-md border border-rule bg-page px-2.5 text-[13px] text-ink outline-none focus:border-rule-strong"
         />
@@ -704,6 +722,13 @@ function ConfirmDialog({
 }) {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const titleId = useId()
+  const bodyId = useId()
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  const { dialogRef, onDialogKeyDown } = useDialogFocus<HTMLElement>({
+    initialFocusRef: cancelRef,
+    onEscape: onClose,
+  })
 
   async function commit() {
     setSaving(true)
@@ -722,11 +747,26 @@ function ConfirmDialog({
         type="button"
         className="absolute inset-0 cursor-default"
         onClick={onClose}
+        tabIndex={-1}
+        aria-hidden="true"
         aria-label="close dialog"
       />
-      <section className="relative w-[360px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal">
-        <h3 className="text-[14px] font-semibold text-ink-strong">{title}</h3>
-        <p className="mt-2 text-[12.5px] leading-relaxed text-ink-dim">{body}</p>
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+        tabIndex={-1}
+        onKeyDown={onDialogKeyDown}
+        className="relative w-[360px] max-w-full rounded-lg border border-rule bg-elevated p-4 shadow-modal"
+      >
+        <h3 id={titleId} className="text-[14px] font-semibold text-ink-strong">
+          {title}
+        </h3>
+        <p id={bodyId} className="mt-2 text-[12.5px] leading-relaxed text-ink-dim">
+          {body}
+        </p>
         {error && (
           <p className="mt-3 rounded-md border border-danger/30 bg-danger-soft px-2 py-1.5 text-[11.5px] text-danger">
             {error}
@@ -734,6 +774,7 @@ function ConfirmDialog({
         )}
         <div className="mt-4 flex justify-end gap-2">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onClose}
             className="h-8 rounded-md border border-rule bg-elevated px-3 text-[12.5px] font-medium text-ink-dim hover:bg-hover hover:text-ink"

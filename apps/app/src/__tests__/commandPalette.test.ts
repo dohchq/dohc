@@ -1,15 +1,19 @@
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { buildCommandPaletteEntries } from '../components/CommandPalette'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { useQuery } from 'convex/react'
+import {
+  buildCommandPaletteEntries,
+  CommandPalette,
+} from '../components/CommandPalette'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { firePaletteCommand, firePaletteSkill } from '../lib/palette-fire'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const COMMAND_PALETTE_SRC = readFileSync(
-  resolve(__dirname, '../components/CommandPalette.tsx'),
-  'utf8',
-)
+vi.mock('convex/react', () => ({ useQuery: vi.fn() }))
+vi.mock('../lib/active-workspace', () => ({ useActiveWorkspaceId: vi.fn() }))
+
+const useQueryMock = vi.mocked(useQuery as any)
+const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
 
 const skills = [
   { path: '.skills/weekly-review.md', label: 'weekly-review' },
@@ -20,6 +24,11 @@ const savedCommands = [
   { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
   { path: '.commands/log-hours.md', label: 'log-hours' },
 ]
+
+beforeEach(() => {
+  useQueryMock.mockReset()
+  useActiveWorkspaceIdMock.mockReset()
+})
 
 function entries(log: string[] = []) {
   return buildCommandPaletteEntries({
@@ -139,13 +148,36 @@ describe('CommandPalette entry behavior', () => {
 
 describe('CommandPalette workspace wiring', () => {
   it('queries skills and commands in the active workspace', () => {
-    expect(COMMAND_PALETTE_SRC).toMatch(/useActiveWorkspaceId/)
-    expect(COMMAND_PALETTE_SRC).toMatch(
-      /api\.skills\.list,\s*\{\s*activeWorkspaceId\s*\}/,
+    const calls: { args: unknown }[] = []
+    useActiveWorkspaceIdMock.mockReturnValue('ws_active')
+    useQueryMock.mockImplementation((_ref: unknown, args: unknown) => {
+      calls.push({ args })
+      if (calls.length === 1) {
+        return [{ path: '.skills/active.md', label: 'active-skill' }]
+      }
+      if (calls.length === 2) {
+        return [{ path: '.commands/active.md', label: 'active-command' }]
+      }
+      return []
+    })
+
+    const html = renderToStaticMarkup(
+      createElement(CommandPalette, {
+        open: true,
+        onClose: () => {},
+        onFireSkill: () => {},
+        onFireCommand: () => {},
+        onPromptAgent: () => {},
+        onOpenAtom: () => {},
+      }),
     )
-    expect(COMMAND_PALETTE_SRC).toMatch(
-      /api\.skills\.listCommands,\s*\{\s*activeWorkspaceId\s*\}/,
-    )
+
+    expect(calls.map((call) => call.args)).toEqual([
+      { activeWorkspaceId: 'ws_active' },
+      { activeWorkspaceId: 'ws_active' },
+    ])
+    expect(html).toContain('active-command')
+    expect(html).toContain('active-skill')
   })
 })
 

@@ -483,15 +483,17 @@ function OrgCard({
     'delete' | 'leave' | null
   >(null)
 
-  async function safe(fn: () => Promise<unknown>) {
-    if (opBusyRef.current) return
+  async function safe(fn: () => Promise<unknown>): Promise<boolean> {
+    if (opBusyRef.current) return false
     opBusyRef.current = true
     setOpBusy(true)
     setOpErr(null)
     try {
       await fn()
+      return true
     } catch (e) {
       setOpErr(e instanceof Error ? e.message : String(e))
+      return false
     } finally {
       opBusyRef.current = false
       setOpBusy(false)
@@ -514,8 +516,9 @@ function OrgCard({
                 setRenaming(false)
                 return
               }
-              await safe(() => onRename(clean))
-              setRenaming(false)
+              if (await safe(() => onRename(clean))) {
+                setRenaming(false)
+              }
             }}
           >
             <input

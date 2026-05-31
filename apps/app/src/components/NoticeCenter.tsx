@@ -41,14 +41,10 @@ const NoticeContext = createContext<NoticeApi | null>(null)
 
 export function useNotice(): NoticeApi {
   const ctx = useContext(NoticeContext)
-  return (
-    ctx ?? {
-      notify: () => {},
-      success: () => {},
-      error: () => {},
-      info: () => {},
-    }
-  )
+  if (!ctx) {
+    throw new Error('useNotice must be used within a NoticeProvider')
+  }
+  return ctx
 }
 
 export function NoticeProvider({ children }: { children: ReactNode }) {

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { onboardingWorkspaceReady } from '../lib/onboarding-ready'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ONBOARDING_SRC = readFileSync(
@@ -14,6 +15,17 @@ describe('Onboarding ready handoff', () => {
     expect(ONBOARDING_SRC).toMatch(/api\.onboarding\.completeIfReady/)
     expect(ONBOARDING_SRC).toMatch(/completeIfReady\(\{\s*activeWorkspaceId\s*\}/)
     expect(ONBOARDING_SRC).toMatch(/workspaceReady[\s\S]{0,300}completeIfReady/)
+  })
+
+  it('keeps client readiness aligned with the server source invariant', () => {
+    const base = {
+      hasMe: true,
+      hasCockpitView: true,
+      hasSetupRun: true,
+    }
+
+    expect(onboardingWorkspaceReady({ ...base, sourceCount: 0 })).toBe(false)
+    expect(onboardingWorkspaceReady({ ...base, sourceCount: 1 })).toBe(true)
   })
 
   it('previews and edits ready artifacts in the active workspace', () => {

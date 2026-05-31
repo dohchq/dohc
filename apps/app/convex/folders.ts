@@ -193,11 +193,11 @@ export const move = mutation({
     // — undefined ⇒ no gate (system caller back-compat).
     const identity = await ctx.auth.getUserIdentity()
     const viewerSubject = identity?.subject ?? ''
-    return await moveImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
+    return await moveFolderImpl(ctx, workspaceId, fromPath, toPath, viewerSubject)
   },
 })
 
-async function moveImpl(
+export async function moveFolderImpl(
   ctx: any,
   workspaceId: string,
   fromPath: string,

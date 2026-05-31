@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   useCallback,
+  useId,
 } from 'react'
 import {
   ChevronDown,
@@ -53,6 +54,7 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
+import { useDialogFocus } from '../lib/dialog-focus'
 
 type Props = {
   files: FileRow[]
@@ -1308,7 +1310,7 @@ function InlineRenameRow({
             }
           }}
           onBlur={() => {
-            if (!error && !busy) onCancel()
+            if (!error && !busy) void onCommit(value)
           }}
           spellCheck={false}
           className="flex-1 bg-transparent border-none outline-none font-mono text-[12px] text-ink placeholder:text-ink-faint disabled:opacity-60"
@@ -1973,6 +1975,16 @@ function RowActions({
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const titleId = useId()
+  const descriptionId = useId()
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  const { dialogRef, onDialogKeyDown } = useDialogFocus<HTMLDivElement>({
+    open: confirmOpen,
+    initialFocusRef: cancelRef,
+    onEscape: () => {
+      if (!busy) setConfirmOpen(false)
+    },
+  })
 
   async function confirmDelete() {
     if (busy) return
@@ -2030,12 +2042,20 @@ function RowActions({
         <>
           <div
             className="fixed inset-0 z-30 cursor-default"
+            aria-hidden="true"
             onClick={(e) => {
               e.stopPropagation()
               if (!busy) setConfirmOpen(false)
             }}
           />
           <div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
+            tabIndex={-1}
+            onKeyDown={onDialogKeyDown}
             className="absolute right-0 top-6 z-40 block w-64 rounded-lg border border-rule bg-elevated p-2.5 text-left shadow-md"
             onClick={(e) => e.stopPropagation()}
           >
@@ -2045,10 +2065,16 @@ function RowActions({
                 strokeWidth={2}
               />
               <div className="min-w-0">
-                <div className="block truncate text-[12.5px] font-medium text-ink-strong">
+                <div
+                  id={titleId}
+                  className="block truncate text-[12.5px] font-medium text-ink-strong"
+                >
                   {deleteTitle}
                 </div>
-                <div className="mt-0.5 block text-[11.5px] leading-snug text-ink-dim">
+                <div
+                  id={descriptionId}
+                  className="mt-0.5 block text-[11.5px] leading-snug text-ink-dim"
+                >
                   {deleteDescription}
                 </div>
               </div>
@@ -2063,6 +2089,7 @@ function RowActions({
             )}
             <div className="mt-2 flex justify-end gap-1.5">
               <button
+                ref={cancelRef}
                 type="button"
                 disabled={busy}
                 onClick={() => setConfirmOpen(false)}

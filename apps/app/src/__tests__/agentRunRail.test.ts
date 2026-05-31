@@ -94,5 +94,6 @@ describe('AgentRunRail scope', () => {
     expect(html).toContain('Scope')
     expect(html).toContain('dohc')
     expect(html).not.toContain('opnft-fun')
+    expect(html).not.toContain('No active run')
   })
 })

@@ -17,6 +17,7 @@ import { HtmlAtomFrame } from '@/components/HtmlAtomFrame'
 import { Markdown } from '@/components/Markdown'
 import { extractFrontmatterId, isHtmlPath } from '@/lib/atomId'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import { onboardingWorkspaceReady } from '../lib/onboarding-ready'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
@@ -317,8 +318,7 @@ export function Onboarding({ state }: Props) {
     [messages],
   )
   const composerReady = hasCompletedAssistant && !busy
-  const workspaceReady =
-    !!progress?.hasMe && !!progress?.hasCockpitView && !!progress?.hasSetupRun
+  const workspaceReady = onboardingWorkspaceReady(progress)
 
   // ── composer ───────────────────────────────────────────────────
   const [input, setInput] = useState('')
