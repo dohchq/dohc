@@ -153,6 +153,8 @@ describe('Agent / Files shell mode', () => {
     expect(AGENT_RUN_RAIL).toContain('projectPath')
     expect(AGENT_RUN_RAIL).toContain('isWithinProject')
     expect(AGENT_RUN_RAIL).toContain('agentRailChangeSummary')
+    expect(AGENT_RUN_RAIL).toContain('activeThread?.createdAt')
+    expect(AGENT_RUN_RAIL).toContain('Files touched since this chat started')
     expect(AGENT_RUN_RAIL).toContain('Changes')
     expect(AGENT_RUN_RAIL).toContain('No active run')
     expect(AGENT_RUN_RAIL).not.toContain('Current workspace')

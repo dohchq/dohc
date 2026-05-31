@@ -17,6 +17,7 @@ type ActiveThread = {
   threadId: string
   title: string
   projectPath: string | null
+  createdAt: number
   updatedAt: number
   pinnedAt?: number | null
 }
@@ -88,7 +89,7 @@ export function AgentRunRail({
   const changes = agentRailChangeSummary(
     files,
     activeProjectPath,
-    activeThread?.updatedAt ?? null,
+    activeThread?.createdAt ?? null,
   )
   const scopeLabel = activeProjectPath ?? 'Whole workspace'
 
@@ -105,7 +106,7 @@ export function AgentRunRail({
               Icon={FileDiff}
               label="Changes"
               value={<ChangesValue changes={changes} />}
-              title="Files touched since this chat's latest turn started"
+              title="Files touched since this chat started"
             />
             <MetricRow
               Icon={Folder}

@@ -1010,7 +1010,9 @@ function ShareSkillButton({ body }: { body: string }) {
                 type="button"
                 onClick={async () => {
                   try {
-                    await navigator.clipboard?.writeText(fallbackText)
+                    const writeText = navigator.clipboard?.writeText
+                    if (!writeText) throw new Error('Clipboard unavailable')
+                    await writeText.call(navigator.clipboard, fallbackText)
                     setFallbackText(null)
                     setCopied(true)
                     setTimeout(() => setCopied(false), 1800)

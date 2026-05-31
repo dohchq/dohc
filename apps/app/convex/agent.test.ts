@@ -99,6 +99,37 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     expect(rows.some((r) => r.threadId === 'tA-context')).toBe(false)
   })
 
+  it('listThreads does not drop visible chats after many internal threadRefs', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 205; i++) {
+        await ctx.db.insert('threadRefs', {
+          workspaceId: A,
+          threadId: `internal-${i}`,
+          projectPath: `.internal/${i}`,
+          title: `Internal ${i}`,
+          updatedAt: i,
+        })
+      }
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 'visible-project-chat',
+        projectPath: 'dohc',
+        title: 'Visible project chat',
+        updatedAt: 999,
+      })
+    })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.map((r) => r.threadId)).toEqual(['visible-project-chat'])
+    expect(rows[0]).toMatchObject({
+      projectPath: 'dohc',
+      title: 'Visible project chat',
+    })
+  })
+
   it('setThreadPinned moves a chat to the top without changing ownership', async () => {
     const t = convexTest(schema, modules)
     await seedThreads(t)
@@ -192,6 +223,42 @@ describe('agent thread ownership — fail-closed (C1)', () => {
         toProjectPath: '.context',
       }),
     ).rejects.toThrow(/Internal folders/)
+  })
+
+  it('renameProject reaches project rows beyond a large workspace history', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 205; i++) {
+        await ctx.db.insert('threadRefs', {
+          workspaceId: A,
+          threadId: `archive-${i}`,
+          projectPath: `.archive/${i}`,
+          updatedAt: i,
+        })
+      }
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 'deep-project',
+        projectPath: 'dohc/research',
+        updatedAt: 999,
+      })
+    })
+
+    await t.withIdentity({ subject: A }).mutation(api.agent.renameProject, {
+      fromProjectPath: 'dohc/research',
+      toProjectPath: 'dohc',
+    })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows).toEqual([
+      expect.objectContaining({
+        threadId: 'deep-project',
+        projectPath: 'dohc',
+        title: 'dohc chat',
+      }),
+    ])
   })
 
   it('listMessages DENIES a thread the caller does not own', async () => {

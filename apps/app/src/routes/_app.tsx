@@ -343,6 +343,7 @@ function App() {
         threadId: thread.threadId,
         projectPath: thread.projectPath,
         title: thread.title,
+        createdAt: thread.createdAt,
         updatedAt: thread.updatedAt,
         pinnedAt: thread.pinnedAt,
       })),

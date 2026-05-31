@@ -32,7 +32,7 @@ describe('AgentRunRail scope', () => {
     expect(isWithinProject('dohcness/notes.md', 'dohc')).toBe(false)
   })
 
-  it('counts only files changed in the active scope since the latest turn started', () => {
+  it('counts only files changed in the active scope since the chat started', () => {
     const files = [
       { path: 'dohc/new.md', updatedAt: 150, source: 'agent' },
       { path: 'dohc/manual.md', updatedAt: 170, source: 'user' },

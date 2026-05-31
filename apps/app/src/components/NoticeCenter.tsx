@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -52,13 +53,15 @@ export function useNotice(): NoticeApi {
 
 export function NoticeProvider({ children }: { children: ReactNode }) {
   const [notices, setNotices] = useState<Notice[]>([])
+  const nextNoticeId = useRef(0)
 
   const remove = useCallback((id: number) => {
     setNotices((current) => current.filter((notice) => notice.id !== id))
   }, [])
 
   const notify = useCallback((input: NoticeInput) => {
-    const id = Date.now() + Math.floor(Math.random() * 1000)
+    nextNoticeId.current += 1
+    const id = nextNoticeId.current
     const next: Notice = {
       id,
       tone: input.tone ?? 'info',
@@ -66,7 +69,7 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
       detail: input.detail,
       timeoutMs: input.timeoutMs ?? (input.tone === 'danger' ? 6500 : 4200),
     }
-    setNotices((current) => [...current.slice(-2), next])
+    setNotices((current) => [...current.slice(-1), next])
   }, [])
 
   const api = useMemo<NoticeApi>(
@@ -87,7 +90,7 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
           <NoticeCard
             key={notice.id}
             notice={notice}
-            onClose={() => remove(notice.id)}
+            onClose={remove}
           />
         ))}
       </div>
@@ -100,12 +103,12 @@ function NoticeCard({
   onClose,
 }: {
   notice: Notice
-  onClose: () => void
+  onClose: (id: number) => void
 }) {
   useEffect(() => {
-    const id = window.setTimeout(onClose, notice.timeoutMs)
-    return () => window.clearTimeout(id)
-  }, [notice.timeoutMs, onClose])
+    const timeoutId = window.setTimeout(() => onClose(notice.id), notice.timeoutMs)
+    return () => window.clearTimeout(timeoutId)
+  }, [notice.id, notice.timeoutMs, onClose])
 
   const Icon =
     notice.tone === 'success'
@@ -139,7 +142,7 @@ function NoticeCard({
       </div>
       <button
         type="button"
-        onClick={onClose}
+        onClick={() => onClose(notice.id)}
         className="inline-flex size-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-hover hover:text-ink"
         aria-label="Dismiss notice"
       >

@@ -144,11 +144,11 @@ describe('R1 route file structure', () => {
 
     for (const [file, routePath] of viewRoutes) {
       const src = readFileSync(resolve(ROUTES, file), 'utf8')
-      expect(src).toMatch(
-        new RegExp(
-          `createFileRoute\\(['"]${routePath.replace(/\$/g, '\\$')}['"]\\)`,
-        ),
-      )
+      const expectedSingle = `createFileRoute('${routePath}')`
+      const expectedDouble = `createFileRoute("${routePath}")`
+      expect(
+        src.includes(expectedSingle) || src.includes(expectedDouble),
+      ).toBe(true)
     }
   })
 })

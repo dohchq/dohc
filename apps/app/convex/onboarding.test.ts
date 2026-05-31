@@ -12,6 +12,14 @@ import { internal, api } from './_generated/api'
 
 const modules = import.meta.glob('./**/*.ts')
 const W = 'ws_test'
+const COMPLETE_SETUP_RUN =
+  '# Setup Run\n\n' +
+  '## Objective\nBuild a cockpit.\n\n' +
+  '## Sources\n- projects/acme.md\n\n' +
+  '## View\n- home.html\n\n' +
+  '## What I Know\n- Acme is active.\n\n' +
+  '## What I Need\n- Nothing urgent yet.\n\n' +
+  '## Next Action\nAdd detail.'
 
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
@@ -92,7 +100,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     await seedAtom(
       t,
       '.runs/setup.md',
-      '# Setup Run\n\n## Objective\nBuild the cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd one real project detail.',
+      COMPLETE_SETUP_RUN,
     )
     await expect(
       t.mutation(internal.onboarding._complete, { workspaceId: W }),
@@ -119,6 +127,31 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     ).rejects.toThrow(/setup run/i)
   })
 
+  it('_complete THROWS when setup run is missing the inspectable handoff sections', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<section>Active projects: {= count(projects.* status = active)}</section>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild the project cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd the next project checkpoint.',
+    )
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/setup run/i)
+  })
+
   it('_complete SUCCEEDS only with identity, sources, home.html, and setup run → DONE', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
@@ -136,7 +169,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     await seedAtom(
       t,
       '.runs/setup.md',
-      '# Setup Run\n\n## Objective\nBuild the project cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd the next project checkpoint.',
+      COMPLETE_SETUP_RUN,
     )
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
@@ -207,7 +240,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(
       t,
       '.runs/setup.md',
-      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+      COMPLETE_SETUP_RUN,
     )
     await t.run((ctx) =>
       ctx.db.insert('entities', {
@@ -253,7 +286,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(
       t,
       '.runs/setup.md',
-      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+      COMPLETE_SETUP_RUN,
     )
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
@@ -276,7 +309,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(
       t,
       '.runs/setup.md',
-      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+      COMPLETE_SETUP_RUN,
     )
 
     await asW(t).mutation(api.onboarding.completeIfReady, {})

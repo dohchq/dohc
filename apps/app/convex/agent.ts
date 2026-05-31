@@ -2205,6 +2205,39 @@ async function threadRefRowsForWorkspaceThread(
     .collect()
 }
 
+async function threadRefRowsForWorkspaceProject(
+  ctx: any,
+  workspaceId: string,
+  projectPath: string | undefined,
+) {
+  const rows = []
+  const query =
+    projectPath === undefined
+      ? ctx.db
+          .query('threadRefs')
+          .withIndex('by_workspace', (q: any) =>
+            q.eq('workspaceId', workspaceId),
+          )
+      : ctx.db
+          .query('threadRefs')
+          .withIndex('by_workspace_project', (q: any) =>
+            q.eq('workspaceId', workspaceId).eq('projectPath', projectPath),
+          )
+  for await (const row of query) {
+    if (threadScopeMatches(row, projectPath)) rows.push(row)
+  }
+  return rows
+}
+
+async function threadRefRowsForWorkspace(ctx: any, workspaceId: string) {
+  const rows = []
+  const query = ctx.db
+    .query('threadRefs')
+    .withIndex('by_workspace', (q: any) => q.eq('workspaceId', workspaceId))
+  for await (const row of query) rows.push(row)
+  return rows
+}
+
 export const ensureThread = mutation({
   // Phase B.3 (org-plan §5 — NON-DEFAULTABLE thread surface).
   // Frontend callers thread `activeWorkspaceId` from
@@ -2221,12 +2254,12 @@ export const ensureThread = mutation({
     if (isInternalProjectPath(scopedProjectPath)) {
       throw new Error('Internal folders cannot be project chats')
     }
-    const rows = await ctx.db
-      .query('threadRefs')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(200)
+    const rows = await threadRefRowsForWorkspaceProject(
+      ctx,
+      workspaceId,
+      scopedProjectPath,
+    )
     const scoped = rows
-      .filter((row) => threadScopeMatches(row, scopedProjectPath))
       .sort(
         (a, b) =>
           (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
@@ -2282,10 +2315,7 @@ export const listThreads = query({
   args: { activeWorkspaceId: v.optional(v.string()) },
   handler: async (ctx, { activeWorkspaceId }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const rows = await ctx.db
-      .query('threadRefs')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(200)
+    const rows = await threadRefRowsForWorkspace(ctx, workspaceId)
     return rows
       .filter((row) => !isInternalProjectPath(row.projectPath))
       .sort(
@@ -2299,6 +2329,7 @@ export const listThreads = query({
         projectPath: row.projectPath ?? null,
         title: row.title ?? fallbackThreadTitle(row.projectPath),
         updatedAt: row.updatedAt ?? row._creationTime,
+        createdAt: row._creationTime,
         pinnedAt: row.pinnedAt ?? null,
       }))
   },
@@ -2384,11 +2415,11 @@ export const renameProject = mutation({
       throw new Error('Internal folders cannot be project chats')
     }
     if (from === to) return
-    const rows = await ctx.db
-      .query('threadRefs')
-      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
-      .take(200)
-    const projectRows = rows.filter((row) => row.projectPath === from)
+    const projectRows = await threadRefRowsForWorkspaceProject(
+      ctx,
+      workspaceId,
+      from,
+    )
     if (projectRows.length < 1) throw new Error('project does not exist')
     for (const row of projectRows) {
       const wasFallback =

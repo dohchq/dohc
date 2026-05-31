@@ -38,6 +38,17 @@ describe('chat activity presentation', () => {
     })
   })
 
+  it('capitalizes the first work summary fragment even without file edits', () => {
+    const calls = [
+      { type: 'tool-read_atom', input: { path: 'notes/plan.md' } },
+      { type: 'tool-search', input: { query: 'agent view' } },
+    ]
+
+    expect(agentWorkTraceSummary(calls).label).toBe(
+      'Read 1 file, searched 1 time',
+    )
+  })
+
   it('derives compact labels and expandable payloads for individual tools', () => {
     const presentation = toolCallPresentation({
       type: 'tool-exec_command',

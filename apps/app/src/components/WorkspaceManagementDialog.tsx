@@ -477,16 +477,24 @@ function OrgCard({
   const [renaming, setRenaming] = useState(false)
   const [nextName, setNextName] = useState(name)
   const [opErr, setOpErr] = useState<string | null>(null)
+  const [opBusy, setOpBusy] = useState(false)
+  const opBusyRef = useRef(false)
   const [dangerConfirm, setDangerConfirm] = useState<
     'delete' | 'leave' | null
   >(null)
 
   async function safe(fn: () => Promise<unknown>) {
+    if (opBusyRef.current) return
+    opBusyRef.current = true
+    setOpBusy(true)
     setOpErr(null)
     try {
       await fn()
     } catch (e) {
       setOpErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      opBusyRef.current = false
+      setOpBusy(false)
     }
   }
 
@@ -514,12 +522,15 @@ function OrgCard({
               type="text"
               value={nextName}
               onChange={(e) => setNextName(e.target.value)}
+              disabled={opBusy}
               autoFocus
-              className="min-w-0 flex-1 rounded border border-rule bg-panel px-2 py-1.5 text-[12.5px] text-ink focus:outline-none focus:border-accent"
+              className="min-w-0 flex-1 rounded border border-rule bg-panel px-2 py-1.5 text-[12.5px] text-ink focus:outline-none focus:border-accent disabled:cursor-not-allowed disabled:text-ink-faint"
             />
             <button
               type="submit"
-              className="rounded border border-rule px-2 py-1.5 text-[11.5px] text-ink hover:bg-hover transition-colors"
+              disabled={opBusy}
+              aria-busy={opBusy}
+              className="rounded border border-rule px-2 py-1.5 text-[11.5px] text-ink transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:text-ink-faint"
             >
               save
             </button>
@@ -529,7 +540,8 @@ function OrgCard({
                 setRenaming(false)
                 setNextName(name)
               }}
-              className="rounded px-2 py-1.5 text-[11.5px] text-ink-dim hover:text-ink transition-colors"
+              disabled={opBusy}
+              className="rounded px-2 py-1.5 text-[11.5px] text-ink-dim transition-colors hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint"
             >
               cancel
             </button>
@@ -612,7 +624,9 @@ function OrgCard({
           <button
             type="button"
             onClick={() => safe(onRouteEmail)}
-            className="shrink-0 rounded border border-rule px-2 py-1 text-[11px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+            disabled={opBusy}
+            aria-busy={opBusy}
+            className="shrink-0 rounded border border-rule px-2 py-1 text-[11px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint"
           >
             route current email
           </button>
@@ -661,7 +675,9 @@ function OrgCard({
                           onClick={() =>
                             safe(() => onChangeRole(m.workspaceId, 'owner'))
                           }
-                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+                          disabled={opBusy}
+                          aria-busy={opBusy}
+                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint"
                           title="promote to owner"
                         >
                           <UserCog className="size-3" strokeWidth={2} />
@@ -673,7 +689,9 @@ function OrgCard({
                           onClick={() =>
                             safe(() => onChangeRole(m.workspaceId, 'member'))
                           }
-                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-ink hover:bg-hover transition-colors"
+                          disabled={opBusy}
+                          aria-busy={opBusy}
+                          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint"
                           title="demote to member"
                         >
                           demote
@@ -682,7 +700,9 @@ function OrgCard({
                       <button
                         type="button"
                         onClick={() => safe(() => onRemove(m.workspaceId))}
-                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim hover:text-red-500 hover:bg-hover transition-colors"
+                        disabled={opBusy}
+                        aria-busy={opBusy}
+                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-dim transition-colors hover:bg-hover hover:text-red-500 disabled:cursor-not-allowed disabled:text-ink-faint"
                         title="remove from workspace"
                         aria-label="remove member"
                       >
@@ -719,7 +739,8 @@ function OrgCard({
               <button
                 type="button"
                 onClick={() => setDangerConfirm(null)}
-                className="rounded-md px-2 py-1 text-[11.5px] text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+                disabled={opBusy}
+                className="rounded-md px-2 py-1 text-[11.5px] text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:text-ink-faint"
               >
                 Cancel
               </button>
@@ -731,9 +752,11 @@ function OrgCard({
                     else await onLeave()
                   })
                 }
-                className="rounded-md bg-danger px-2 py-1 text-[11.5px] font-medium text-surface transition-colors hover:opacity-90"
+                disabled={opBusy}
+                aria-busy={opBusy}
+                className="rounded-md bg-danger px-2 py-1 text-[11.5px] font-medium text-surface transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {dangerConfirm === 'delete' ? 'Delete' : 'Leave'}
+                {opBusy ? 'Working' : dangerConfirm === 'delete' ? 'Delete' : 'Leave'}
               </button>
             </div>
           </div>
@@ -743,7 +766,8 @@ function OrgCard({
               <button
                 type="button"
                 onClick={() => setDangerConfirm('delete')}
-                className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+                disabled={opBusy}
+                className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-dim transition-colors hover:text-red-500 disabled:cursor-not-allowed disabled:text-ink-faint"
               >
                 <Trash2 className="size-3" strokeWidth={2} />
                 delete workspace
@@ -752,7 +776,8 @@ function OrgCard({
               <button
                 type="button"
                 onClick={() => setDangerConfirm('leave')}
-                className="text-[11.5px] text-ink-dim hover:text-red-500 transition-colors"
+                disabled={opBusy}
+                className="text-[11.5px] text-ink-dim transition-colors hover:text-red-500 disabled:cursor-not-allowed disabled:text-ink-faint"
               >
                 leave workspace
               </button>

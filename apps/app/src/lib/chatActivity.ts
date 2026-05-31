@@ -166,12 +166,12 @@ export function agentWorkTraceSummary(
     pluralFragment('searched', byKind.search, 'time'),
     pluralFragment('ran', byKind.command, 'command'),
     pluralFragment('used', byKind.other, 'tool'),
-  ].filter(Boolean)
+  ].filter((fragment): fragment is string => Boolean(fragment))
 
   return {
     total: parts.length,
     byKind,
-    label: fragments.join(', ') || 'Used tools',
+    label: sentenceLabel(fragments) || 'Used tools',
   }
 }
 
@@ -205,6 +205,15 @@ function pluralFragment(
 ): string | null {
   if (count === 0) return null
   return `${verb} ${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+function sentenceLabel(fragments: string[]): string {
+  if (fragments.length === 0) return ''
+  return [capitalizeFirst(fragments[0]), ...fragments.slice(1)].join(', ')
+}
+
+function capitalizeFirst(value: string): string {
+  return value ? `${value[0].toUpperCase()}${value.slice(1)}` : value
 }
 
 function humanizeToolName(toolName: string): string {

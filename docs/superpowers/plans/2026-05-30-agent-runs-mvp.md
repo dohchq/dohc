@@ -13,8 +13,8 @@
 ### Task 1: Lock The New Onboarding Floor With Tests
 
 **Files:**
-- Modify: `/home/ice/dev/dohc/apps/app/convex/onboarding.test.ts`
-- Modify: `/home/ice/dev/dohc/apps/app/src/__tests__/onboardingSetupFirst.test.ts`
+- Modify: `apps/app/convex/onboarding.test.ts`
+- Modify: `apps/app/src/__tests__/onboardingSetupFirst.test.ts`
 
 - [ ] **Step 1: Write failing backend expectations**
 
@@ -38,8 +38,8 @@ Expected: tests fail because the product still accepts a markdown dashboard and 
 ### Task 2: Implement Setup Run Progress And Completion
 
 **Files:**
-- Modify: `/home/ice/dev/dohc/apps/app/convex/onboarding.ts`
-- Modify: `/home/ice/dev/dohc/apps/app/convex/agent.ts`
+- Modify: `apps/app/convex/onboarding.ts`
+- Modify: `apps/app/convex/agent.ts`
 
 - [ ] **Step 1: Extend `OnboardingProgress`**
 
@@ -74,12 +74,12 @@ Expected: targeted tests pass.
 ### Task 3: Add Agent Mode To The Shell
 
 **Files:**
-- Create: `/home/ice/dev/dohc/apps/app/src/components/AgentRunRail.tsx`
-- Modify: `/home/ice/dev/dohc/apps/app/src/components/ActivityBar.tsx`
-- Modify: `/home/ice/dev/dohc/apps/app/src/components/Chat.tsx`
-- Modify: `/home/ice/dev/dohc/apps/app/src/components/HtmlAtomFrame.tsx`
-- Modify: `/home/ice/dev/dohc/apps/app/src/routes/_app.tsx`
-- Add: `/home/ice/dev/dohc/apps/app/src/__tests__/agentModeShell.test.ts`
+- Create: `apps/app/src/components/AgentRunRail.tsx`
+- Modify: `apps/app/src/components/ActivityBar.tsx`
+- Modify: `apps/app/src/components/Chat.tsx`
+- Modify: `apps/app/src/components/HtmlAtomFrame.tsx`
+- Modify: `apps/app/src/routes/_app.tsx`
+- Add: `apps/app/src/__tests__/agentModeShell.test.ts`
 
 - [ ] **Step 1: Write failing shell test**
 
@@ -87,7 +87,9 @@ Assert the activity bar exposes Agent, Files, and Graph; `_app.tsx` renders an A
 
 - [ ] **Step 2: Add ActivityBar Agent item**
 
-Extend `ActivityView` to `agent | atom | graph`, using a lucide chat/agent icon and keeping the existing rail shape.
+Expose Agent beside Files and Graph, with shareable public routes for `/agent`,
+`/files`, and `/graph`. Keep any existing internal Files implementation key as
+a compatibility detail rather than a user-facing contract.
 
 - [ ] **Step 3: Make Chat reusable as primary or side panel**
 

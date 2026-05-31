@@ -21,6 +21,7 @@ export type AgentThreadSummary = {
   threadId: string
   projectPath: string | null
   title: string
+  createdAt: number
   updatedAt: number
   pinnedAt: number | null
 }

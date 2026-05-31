@@ -330,6 +330,7 @@ export default defineSchema({
     pinnedAt: v.optional(v.number()),
   })
     .index('by_workspace', ['workspaceId'])
+    .index('by_workspace_project', ['workspaceId', 'projectPath'])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to

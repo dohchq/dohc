@@ -163,6 +163,8 @@ function isCompleteSetupRun(path: string, body: string): boolean {
     /^##\s+objective\b/im.test(rest) &&
     /^##\s+sources?\b/im.test(rest) &&
     /^##\s+view\b/im.test(rest) &&
+    /^##\s+what i know\b/im.test(rest) &&
+    /^##\s+what i need\b/im.test(rest) &&
     /^##\s+next action\b/im.test(rest)
   )
 }
@@ -274,7 +276,7 @@ async function completeWorkspaceOnboarding(
   }
   if (!p.hasSetupRun) {
     throw new Error(
-      'cannot finish onboarding: setup run missing. Write .runs/setup.md with objective, sources, view, and next action first.',
+      'cannot finish onboarding: setup run missing. Write .runs/setup.md with objective, sources, view, what I know, what I need, and next action first.',
     )
   }
   if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
