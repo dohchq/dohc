@@ -273,6 +273,13 @@ describe('agent thread ownership — fail-closed (C1)', () => {
         title: 'dohc chat',
         updatedAt: 10,
       })
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 'research-thread',
+        projectPath: 'dohc/research',
+        title: 'dohc/research chat',
+        updatedAt: 11,
+      })
     })
 
     await t
@@ -295,13 +302,20 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     const rows = await t
       .withIdentity({ subject: A })
       .query(api.agent.listThreads, {})
-    expect(rows).toEqual([
-      expect.objectContaining({
-        threadId: 'project-thread',
-        projectPath: 'product',
-        title: 'product chat',
-      }),
-    ])
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          threadId: 'project-thread',
+          projectPath: 'product',
+          title: 'product chat',
+        }),
+        expect.objectContaining({
+          threadId: 'research-thread',
+          projectPath: 'product/research',
+          title: 'product/research chat',
+        }),
+      ]),
+    )
   })
 
   it('renameProject reaches project rows beyond a large workspace history', async () => {

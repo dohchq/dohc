@@ -2241,6 +2241,33 @@ async function threadRefRowsForWorkspaceProject(
   return rows
 }
 
+async function threadRefRowsForWorkspaceProjectSubtree(
+  ctx: any,
+  workspaceId: string,
+  projectPath: string,
+) {
+  const rows = []
+  const prefix = `${projectPath}/`
+  const hi = `${projectPath}￿`
+  const query = ctx.db
+    .query('threadRefs')
+    .withIndex('by_workspace_project', (q: any) =>
+      q
+        .eq('workspaceId', workspaceId)
+        .gte('projectPath', projectPath)
+        .lt('projectPath', hi),
+    )
+  for await (const row of query) {
+    if (
+      row.projectPath === projectPath ||
+      row.projectPath?.startsWith(prefix)
+    ) {
+      rows.push(row)
+    }
+  }
+  return rows
+}
+
 async function threadRefRowsForWorkspace(
   ctx: any,
   workspaceId: string,
@@ -2458,20 +2485,31 @@ async function renameProjectAndMoveFolderImpl(
     throw new Error('Internal folders cannot be project chats')
   }
   if (from === to) return
-  const projectRows = await threadRefRowsForWorkspaceProject(
+  const projectRows = await threadRefRowsForWorkspaceProjectSubtree(
     ctx,
     workspaceId,
     from,
   )
-  if (projectRows.length < 1) throw new Error('project does not exist')
+  if (
+    !projectRows.some(
+      (row: { projectPath?: string }) => row.projectPath === from,
+    )
+  ) {
+    throw new Error('project does not exist')
+  }
   await moveFolderImpl(ctx, workspaceId, from, to, viewerSubject)
+  const updatedAt = Date.now()
   for (const row of projectRows) {
+    const nextProjectPath =
+      row.projectPath === from
+        ? to
+        : `${to}${row.projectPath.slice(from.length)}`
     const wasFallback =
       !row.title || row.title === fallbackThreadTitle(row.projectPath)
     await ctx.db.patch(row._id, {
-      projectPath: to,
-      updatedAt: Date.now(),
-      ...(wasFallback ? { title: fallbackThreadTitle(to) } : {}),
+      projectPath: nextProjectPath,
+      updatedAt,
+      ...(wasFallback ? { title: fallbackThreadTitle(nextProjectPath) } : {}),
     })
   }
 }
