@@ -1,132 +1,118 @@
 import {
-  Check,
-  Circle,
-  FileText,
-  GitBranch,
-  PanelsTopLeft,
-  Share2,
+  FileDiff,
+  Folder,
+  ListChecks,
 } from 'lucide-react'
+import type { ReactNode } from 'react'
+import type { LucideIcon } from 'lucide-react'
 
-type FileRow = {
+export type AgentRailFileRow = {
   path: string
   type?: 'html' | 'skill' | 'command' | null
+  updatedAt?: number
+  source?: string
 }
 
-function isRunPath(path: string): boolean {
-  return /^\.?runs\//i.test(path)
+type ActiveThread = {
+  threadId: string
+  title: string
+  projectPath: string | null
+  updatedAt: number
+  pinnedAt?: number | null
 }
 
-function isSourcePath(file: FileRow): boolean {
-  return (
-    file.type !== 'html' &&
-    !file.path.startsWith('.context/') &&
-    !file.path.startsWith('.skills/') &&
-    !file.path.startsWith('.commands/') &&
-    !isRunPath(file.path)
+function normalizeProjectPath(projectPath: string | null): string | null {
+  const normalized = projectPath?.trim().replace(/^\/+|\/+$/g, '') ?? ''
+  return normalized.length > 0 ? normalized : null
+}
+
+export function isWithinProject(
+  path: string,
+  projectPath: string | null,
+): boolean {
+  const normalized = normalizeProjectPath(projectPath)
+  if (!normalized) return true
+  return path === normalized || path.startsWith(`${normalized}/`)
+}
+
+export function agentRailScopedFiles(
+  files: AgentRailFileRow[],
+  projectPath: string | null,
+): AgentRailFileRow[] {
+  const activeProjectPath = normalizeProjectPath(projectPath)
+  return activeProjectPath
+    ? files.filter((file) => isWithinProject(file.path, activeProjectPath))
+    : files
+}
+
+export function agentRailChangeSummary(
+  files: AgentRailFileRow[],
+  projectPath: string | null,
+  since: number | null,
+): {
+  changedCount: number
+  agentCount: number
+  userCount: number
+  changedPaths: string[]
+} {
+  if (since === null) {
+    return {
+      changedCount: 0,
+      agentCount: 0,
+      userCount: 0,
+      changedPaths: [],
+    }
+  }
+  const changed = agentRailScopedFiles(files, projectPath).filter(
+    (file) => (file.updatedAt ?? 0) >= since,
   )
-}
-
-function isCockpitPath(file: FileRow): boolean {
-  return file.type === 'html' && /(^|\/)(home|dashboard|cockpit)\.html$/i.test(file.path)
-}
-
-function first<T>(items: T[], n: number): T[] {
-  return items.slice(0, n)
+  return {
+    changedCount: changed.length,
+    agentCount: changed.filter((file) => (file.source ?? 'agent') !== 'user')
+      .length,
+    userCount: changed.filter((file) => file.source === 'user').length,
+    changedPaths: changed.map((file) => file.path),
+  }
 }
 
 export function AgentRunRail({
   files,
-  chatDockOpen,
+  activeThread,
+  projectPath,
 }: {
-  files: FileRow[]
-  chatDockOpen: boolean
+  files: AgentRailFileRow[]
+  activeThread: ActiveThread | null
+  projectPath: string | null
 }) {
-  const sourceFiles = files.filter(isSourcePath)
-  const cockpit = files.find(isCockpitPath)
-  const setupRun = files.find((f) => /^\.?runs\/setup\.md$/i.test(f.path))
-  const reviewSignals = files.filter((f) =>
-    /(^|\/)(review|reviews|inbox|pending)\b/i.test(f.path),
+  const activeProjectPath = normalizeProjectPath(projectPath)
+  const changes = agentRailChangeSummary(
+    files,
+    activeProjectPath,
+    activeThread?.updatedAt ?? null,
   )
-
-  const progress = [
-    {
-      label: 'Sources',
-      done: sourceFiles.length > 0,
-      detail:
-        sourceFiles.length > 0
-          ? `${sourceFiles.length} source${sourceFiles.length === 1 ? '' : 's'}`
-          : 'waiting',
-    },
-    {
-      label: 'Cockpit',
-      done: !!cockpit,
-      detail: cockpit?.path ?? 'home.html',
-    },
-    {
-      label: 'Run',
-      done: !!setupRun,
-      detail: setupRun?.path ?? '.runs/setup.md',
-    },
-  ]
+  const scopeLabel = activeProjectPath ?? 'Whole workspace'
 
   return (
-    <aside className="flex h-screen w-[340px] shrink-0 flex-col border-l border-rule bg-panel">
-      <div className="border-b border-rule px-4 py-3.5">
-        <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
-          Run
-        </p>
-        <h2 className="mt-1 text-[14px] font-semibold tracking-tight text-ink-strong">
-          Current workspace
-        </h2>
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
-        <RailSection title="Progress" Icon={GitBranch}>
-          <div className="flex flex-col gap-2.5">
-            {progress.map((item) => (
-              <div key={item.label} className="flex items-start gap-2.5">
-                <span className="mt-0.5 grid size-4 shrink-0 place-items-center">
-                  {item.done ? (
-                    <Check className="size-3.5 text-success" strokeWidth={2.6} />
-                  ) : (
-                    <Circle className="size-3.5 text-ink-ghost" strokeWidth={2} />
-                  )}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[12px] font-medium text-ink-strong">
-                    {item.label}
-                  </p>
-                  <p className="truncate font-mono text-[10.5px] text-ink-faint">
-                    {item.detail}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
+    <aside className="flex h-screen w-[340px] shrink-0 flex-col border-l border-rule bg-panel px-4 py-5">
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
+        <RailSection title="Progress" Icon={ListChecks}>
+          <EmptyLine label="No active run" />
         </RailSection>
 
-        <RailSection title="Sources" Icon={FileText}>
-          {sourceFiles.length > 0 ? (
-            <PathList paths={first(sourceFiles.map((f) => f.path), 6)} />
-          ) : (
-            <EmptyLine label="No sources yet" />
-          )}
-        </RailSection>
-
-        <RailSection title="Review" Icon={PanelsTopLeft}>
-          {reviewSignals.length > 0 ? (
-            <PathList paths={first(reviewSignals.map((f) => f.path), 4)} />
-          ) : (
-            <EmptyLine label="No review items" />
-          )}
-        </RailSection>
-
-        <RailSection title="Collaboration" Icon={Share2}>
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-rule bg-surface px-3 py-2">
-            <span className="text-[12px] text-ink-dim">Side chat</span>
-            <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-ink-faint">
-              {chatDockOpen ? 'docked' : 'files mode'}
-            </span>
+        <RailSection title="Environment" Icon={Folder}>
+          <div className="flex flex-col gap-1.5">
+            <MetricRow
+              Icon={FileDiff}
+              label="Changes"
+              value={<ChangesValue changes={changes} />}
+              title="Files touched since this chat's latest turn started"
+            />
+            <MetricRow
+              Icon={Folder}
+              label="Scope"
+              value={scopeLabel}
+              title="Current chat scope"
+            />
           </div>
         </RailSection>
       </div>
@@ -140,8 +126,8 @@ function RailSection({
   children,
 }: {
   title: string
-  Icon: typeof FileText
-  children: React.ReactNode
+  Icon: LucideIcon
+  children: ReactNode
 }) {
   return (
     <section>
@@ -156,24 +142,54 @@ function RailSection({
   )
 }
 
-function PathList({ paths }: { paths: string[] }) {
+function MetricRow({
+  Icon,
+  label,
+  value,
+  title,
+}: {
+  Icon: LucideIcon
+  label: string
+  value: ReactNode
+  title: string
+}) {
   return (
-    <div className="flex flex-col gap-1.5">
-      {paths.map((path) => (
-        <div
-          key={path}
-          className="truncate rounded-md border border-rule bg-surface px-2.5 py-1.5 font-mono text-[10.5px] text-ink-dim"
-        >
-          {path}
-        </div>
-      ))}
+    <div
+      className="flex min-w-0 items-center gap-2.5 rounded-md px-0.5 py-1"
+      title={title}
+    >
+      <Icon className="size-3.5 shrink-0 text-ink-faint" strokeWidth={2} />
+      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-ink-strong">
+        {label}
+      </span>
+      <span className="min-w-0 max-w-[150px] truncate text-right font-mono text-[11px] text-ink-faint">
+        {value}
+      </span>
     </div>
+  )
+}
+
+function ChangesValue({
+  changes,
+}: {
+  changes: ReturnType<typeof agentRailChangeSummary>
+}) {
+  if (changes.changedCount === 0) {
+    return <span className="text-ink-faint">none</span>
+  }
+  return (
+    <span className="inline-flex items-center justify-end gap-1">
+      <span className="text-success">+{changes.changedCount}</span>
+      <span className="text-ink-faint">
+        file{changes.changedCount === 1 ? '' : 's'}
+      </span>
+    </span>
   )
 }
 
 function EmptyLine({ label }: { label: string }) {
   return (
-    <div className="rounded-md border border-dashed border-rule px-2.5 py-2 text-[11.5px] text-ink-faint">
+    <div className="rounded-md border border-dashed border-rule px-2.5 py-2 text-[11.5px] leading-snug text-ink-faint">
       {label}
     </div>
   )

@@ -71,6 +71,16 @@ function AppLayout() {
 }
 
 type View = 'agent' | 'atom' | 'graph'
+type FilesDestination =
+  | { kind: 'atom'; id: string }
+  | { kind: 'shared'; id: string }
+
+export function viewFromPathname(pathname: string): View | null {
+  const match = /^(?:\/w\/[^/]+)?\/(agent|files|graph)\/?$/.exec(pathname)
+  if (!match) return null
+  if (match[1] === 'files') return 'atom'
+  return match[1] as 'agent' | 'graph'
+}
 
 // Display name for a file path: the leaf, sans a single extension
 // (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
@@ -291,7 +301,9 @@ function App() {
     const m = /^(?:\/w\/[^/]+)?\/shared\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
+  const urlView = viewFromPathname(location.pathname)
   const navigate = useNavigate()
+  const lastFilesDestinationRef = useRef<FilesDestination | null>(null)
   // Optimistic override: the path we want shown RIGHT NOW, taking
   // precedence over the (possibly stale, just-refreshing) URL→files
   // derivation. Set when opening/creating/renaming/moving the open
@@ -321,8 +333,28 @@ function App() {
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>(() =>
-    urlFileId || urlShareId || initialOpenPathRef.current ? 'atom' : 'agent',
+    urlView ??
+    (urlFileId || urlShareId || initialOpenPathRef.current ? 'atom' : 'agent'),
   )
+
+  const chatThreads = useMemo<AgentThreadSummary[]>(
+    () =>
+      (agentThreads ?? []).map((thread) => ({
+        threadId: thread.threadId,
+        projectPath: thread.projectPath,
+        title: thread.title,
+        updatedAt: thread.updatedAt,
+        pinnedAt: thread.pinnedAt,
+      })),
+    [agentThreads],
+  )
+  const activeAgentThread = useMemo(
+    () =>
+      chatThreads.find((thread) => thread.threadId === threadId) ?? null,
+    [chatThreads, threadId],
+  )
+  const agentDocTitle =
+    activeAgentThread?.title?.trim() || (threadId ? 'Workspace chat' : 'New chat')
 
   // Notion-style browser tab: reflect the open surface in the title +
   // favicon. This shell is the single owner — the open page lives in
@@ -340,7 +372,7 @@ function App() {
     docTitle: string | null | undefined
     docEmoji: string | null | undefined
   }>(() => {
-    if (view === 'agent') return { docTitle: 'Agent', docEmoji: null }
+    if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
     if (urlShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
@@ -365,7 +397,7 @@ function App() {
       docTitle: (f?.title && f.title.trim()) || leafName(activePath),
       docEmoji: f?.icon ?? null,
     }
-  }, [view, urlShareId, sharedAtomForMeta, activePath, files])
+  }, [view, agentDocTitle, urlShareId, sharedAtomForMeta, activePath, files])
   useDocumentMeta({ title: docTitle, emoji: docEmoji })
 
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
@@ -400,32 +432,85 @@ function App() {
   // crossing workspace boundaries. Per-document sharing stays in the
   // document Share button.
   const [sharingOpen, setSharingOpen] = useState(false)
+
+  useEffect(() => {
+    if (urlFileId) {
+      lastFilesDestinationRef.current = { kind: 'atom', id: urlFileId }
+    } else if (urlShareId) {
+      lastFilesDestinationRef.current = { kind: 'shared', id: urlShareId }
+    }
+  }, [urlFileId, urlShareId])
+
+  const navigateToView = useCallback(
+    (next: View, opts?: { replace?: boolean }) => {
+      if (next === view && (urlView || urlFileId || urlShareId)) return
+      setView(next)
+      if (next === 'agent') {
+        setSharingOpen(false)
+        void navigate({
+          to: '/w/$wsId/agent',
+          params: { wsId: activeWorkspaceId ?? 'me' },
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
+      if (next === 'graph') {
+        setSharingOpen(false)
+        void navigate({
+          to: '/w/$wsId/graph',
+          params: { wsId: activeWorkspaceId ?? 'me' },
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
+
+      const destination =
+        urlFileId
+          ? ({ kind: 'atom', id: urlFileId } as const)
+          : urlShareId
+          ? ({ kind: 'shared', id: urlShareId } as const)
+          : lastFilesDestinationRef.current
+
+      if (destination?.kind === 'atom') {
+        void navigate({
+          to: '/w/$wsId/p/$atomId',
+          params: { wsId: activeWorkspaceId ?? 'me', atomId: destination.id },
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
+      if (destination?.kind === 'shared') {
+        void navigate({
+          to: '/w/$wsId/shared/$shareId',
+          params: { wsId: activeWorkspaceId ?? 'me', shareId: destination.id },
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
+      void navigate({
+        to: '/w/$wsId/files',
+        params: { wsId: activeWorkspaceId ?? 'me' },
+        replace: opts?.replace ?? false,
+      })
+    },
+    [activeWorkspaceId, navigate, urlFileId, urlShareId, urlView, view],
+  )
+
   const toggleChat = useCallback(() => {
     if (view === 'agent') {
-      setView('atom')
+      navigateToView('atom')
       setChatOpen(true)
       setSharingOpen(false)
       return
     }
     setChatOpen((c) => !c)
     setSharingOpen(false)
-  }, [view])
+  }, [navigateToView, view])
   const toggleSharing = useCallback(() => {
     setSharingOpen((s) => !s)
     setChatOpen(false)
   }, [])
 
-  const chatThreads = useMemo<AgentThreadSummary[]>(
-    () =>
-      (agentThreads ?? []).map((thread) => ({
-        threadId: thread.threadId,
-        projectPath: thread.projectPath,
-        title: thread.title,
-        updatedAt: thread.updatedAt,
-        pinnedAt: thread.pinnedAt,
-      })),
-    [agentThreads],
-  )
   const projectFolderOptions = useMemo(
     () => availableProjectFolders(folders ?? [], files ?? []),
     [folders, files],
@@ -455,17 +540,15 @@ function App() {
     setAgentDraft(true)
     setAgentProjectPath(projectPath)
     setThreadId(null)
-    setView('agent')
-    setSharingOpen(false)
-  }, [])
+    navigateToView('agent')
+  }, [navigateToView])
 
   const selectAgentThread = useCallback((thread: AgentThreadSummary) => {
     setAgentProjectPath(thread.projectPath)
     setThreadId(thread.threadId)
     setAgentDraft(false)
-    setView('agent')
-    setSharingOpen(false)
-  }, [])
+    navigateToView('agent')
+  }, [navigateToView])
 
   const ensureAgentThreadForSend = useCallback(
     async (projectPath: string | null) => {
@@ -476,11 +559,10 @@ function App() {
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
-      setView('agent')
-      setSharingOpen(false)
+      navigateToView('agent')
       return id as string
     },
-    [createAgentThread, activeWorkspaceId],
+    [createAgentThread, activeWorkspaceId, navigateToView],
   )
 
   const createAgentProject = useCallback((mode: 'scratch' | 'existing') => {
@@ -617,9 +699,8 @@ function App() {
 
   const onRunAction = useCallback((prompt: string) => {
     setPendingPrompt(prompt)
-    setView('agent')
-    setSharingOpen(false)
-  }, [])
+    navigateToView('agent')
+  }, [navigateToView])
 
   // D4.33 — open an atom by PATH. Show it immediately (optimistic
   // override) AND, if its rename-proof fileId is known, push it into
@@ -638,6 +719,7 @@ function App() {
       setOptimisticPath(path)
       const fid = (files ?? []).find((f) => f.path === path)?.fileId
       if (fid) {
+        lastFilesDestinationRef.current = { kind: 'atom', id: fid }
         // R1 — navigate to the new workspace-scoped URL. `me` sentinel
         // for personal (activeWorkspaceId === undefined ⇒ /w/me/...);
         // the literal org id for org workspaces (/w/<orgId>/...).
@@ -655,9 +737,10 @@ function App() {
   const clearOpenAtom = useCallback(
     (opts?: { replace?: boolean }) => {
       setOptimisticPath(null)
-      // R1 — workspace home, not bare root. Stays in the active workspace.
+      lastFilesDestinationRef.current = null
+      // Stay in the Files surface after deleting/clearing the open atom.
       void navigate({
-        to: '/w/$wsId',
+        to: '/w/$wsId/files',
         params: { wsId: activeWorkspaceId ?? 'me' },
         replace: opts?.replace ?? false,
       })
@@ -670,6 +753,7 @@ function App() {
     (sid: string) => {
       setOptimisticPath(null)
       setView('atom')
+      lastFilesDestinationRef.current = { kind: 'shared', id: sid }
       // R1 — workspace-scoped share URL.
       void navigate({
         to: '/w/$wsId/shared/$shareId',
@@ -686,6 +770,7 @@ function App() {
     if (!optimisticPath || !files) return
     const fid = files.find((f) => f.path === optimisticPath)?.fileId
     if (fid && urlFileId !== fid) {
+      lastFilesDestinationRef.current = { kind: 'atom', id: fid }
       // R1 — workspace-scoped URL.
       void navigate({
         to: '/w/$wsId/p/$atomId',
@@ -705,11 +790,13 @@ function App() {
     }
   }, [optimisticPath, derivedFromUrl])
 
-  // Back/forward landing on an atom should show the atom view (the
-  // `view` panel state is independent of the URL).
+  // Back/forward landing on a first-class route should update the shell
+  // surface too. File/share routes are Files; the explicit view routes
+  // cover Agent, Files-home, and Graph.
   useEffect(() => {
-    if (urlFileId) setView('atom')
-  }, [urlFileId])
+    const routedView = urlView ?? (urlFileId || urlShareId ? 'atom' : null)
+    if (routedView) setView(routedView)
+  }, [urlView, urlFileId, urlShareId])
 
   async function createAtom(path: string, body = '') {
     await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
@@ -898,10 +985,7 @@ function App() {
     >
       <ActivityBar
         view={view}
-        onSelect={(v) => {
-          setView(v)
-          if (v === 'agent') setSharingOpen(false)
-        }}
+        onSelect={navigateToView}
       />
       {view === 'agent' ? (
         <>
@@ -922,12 +1006,16 @@ function App() {
           />
           <AgentWorkspace
             threadId={threadId}
+            activeThread={activeAgentThread}
             projectPath={agentProjectPath}
             projectOptions={agentProjectOptions}
             folderOptions={projectFolderOptions}
             onProjectPathChange={setAgentProjectPath}
             onCreateProject={createAgentProject}
             onEnsureThread={ensureAgentThreadForSend}
+            onToggleThreadPinned={toggleAgentThreadPinned}
+            onRenameThread={renameAgentChat}
+            onDeleteThread={deleteAgentChat}
             pendingPrompt={pendingPrompt}
             onPendingHandled={() => setPendingPrompt(null)}
             pendingSkillFire={pendingSkillFire}
@@ -935,7 +1023,11 @@ function App() {
             pendingCommandFire={pendingCommandFire}
             onPendingCommandFireHandled={() => setPendingCommandFire(null)}
           />
-          <AgentRunRail files={files ?? []} chatDockOpen={chatOpen} />
+          <AgentRunRail
+            files={files ?? []}
+            activeThread={activeAgentThread}
+            projectPath={agentProjectPath}
+          />
         </>
       ) : (
         <>
@@ -1084,6 +1176,13 @@ function App() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
+        onOpenAtom={(path) => openAtom(path)}
+        onPromptAgent={(prompt) => {
+          navigateToView('agent')
+          setChatOpen(true)
+          setSharingOpen(false)
+          setPendingPrompt(prompt)
+        }}
         onFireSkill={(path) => {
           // P3+P4 Codex fold F2+F3: dedicated channel for
           // programmatic skill-fire. Does NOT pass through
@@ -1091,7 +1190,7 @@ function App() {
           // directly via sendMessage({entry:'skill-fire'})).
           // The structural enforcement is now route-checked
           // at the type system.
-          setView('agent')
+          navigateToView('agent')
           firePaletteSkill(path, {
             setChatOpen,
             setSharingOpen,
@@ -1099,7 +1198,7 @@ function App() {
           })
         }}
         onFireCommand={(path) => {
-          setView('agent')
+          navigateToView('agent')
           firePaletteCommand(path, {
             setChatOpen,
             setSharingOpen,
@@ -1123,12 +1222,16 @@ function App() {
 
 function AgentWorkspace({
   threadId,
+  activeThread,
   projectPath,
   projectOptions,
   folderOptions,
   onProjectPathChange,
   onCreateProject,
   onEnsureThread,
+  onToggleThreadPinned,
+  onRenameThread,
+  onDeleteThread,
   pendingPrompt,
   onPendingHandled,
   pendingSkillFire,
@@ -1137,12 +1240,19 @@ function AgentWorkspace({
   onPendingCommandFireHandled,
 }: {
   threadId: string | null
+  activeThread: AgentThreadSummary | null
   projectPath: string | null
   projectOptions: Array<{ value: string | null; label: string }>
   folderOptions: string[]
   onProjectPathChange: (projectPath: string | null) => void
   onCreateProject: (mode: 'scratch' | 'existing') => void
   onEnsureThread: (projectPath: string | null) => Promise<string>
+  onToggleThreadPinned: (thread: AgentThreadSummary) => void | Promise<void>
+  onRenameThread: (
+    thread: AgentThreadSummary,
+    title: string,
+  ) => void | Promise<void>
+  onDeleteThread: (thread: AgentThreadSummary) => void | Promise<void>
   pendingPrompt: string | null
   onPendingHandled: () => void
   pendingSkillFire: string | null
@@ -1150,17 +1260,42 @@ function AgentWorkspace({
   pendingCommandFire: string | null
   onPendingCommandFireHandled: () => void
 }) {
+  const onToggleThreadPinnedForHeader = useCallback(() => {
+    if (!activeThread) return
+    return onToggleThreadPinned(activeThread)
+  }, [activeThread, onToggleThreadPinned])
+
+  const onRenameThreadForHeader = useCallback(
+    (title: string) => {
+      if (!activeThread) return
+      return onRenameThread(activeThread, title)
+    },
+    [activeThread, onRenameThread],
+  )
+
+  const onDeleteThreadForHeader = useCallback(() => {
+    if (!activeThread) return
+    return onDeleteThread(activeThread)
+  }, [activeThread, onDeleteThread])
+
   return (
     <main className="min-w-0 bg-page">
       <Chat
         mode="primary"
         threadId={threadId}
+        threadTitle={activeThread?.title ?? null}
+        threadPinned={activeThread ? activeThread.pinnedAt !== null : false}
         projectPath={projectPath}
         projectOptions={projectOptions}
         folderOptions={folderOptions}
         onProjectPathChange={onProjectPathChange}
         onCreateProject={onCreateProject}
         onEnsureThread={onEnsureThread}
+        onToggleThreadPinned={
+          activeThread ? onToggleThreadPinnedForHeader : undefined
+        }
+        onRenameThread={activeThread ? onRenameThreadForHeader : undefined}
+        onDeleteThread={activeThread ? onDeleteThreadForHeader : undefined}
         pendingPrompt={pendingPrompt}
         onPendingHandled={onPendingHandled}
         pendingSkillFire={pendingSkillFire}

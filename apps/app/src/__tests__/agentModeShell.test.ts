@@ -11,6 +11,7 @@ const APP = read('routes/_app.tsx')
 const ACTIVITY = read('components/ActivityBar.tsx')
 const CHAT = read('components/Chat.tsx')
 const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
+const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -84,5 +85,81 @@ describe('Agent / Files shell mode', () => {
 
   it('removes the environment selector once a chat thread exists', () => {
     expect(CHAT).toContain('primary && !threadId')
+  })
+
+  it('uses the active chat title and thread menu in the primary chat header', () => {
+    expect(APP).toContain('activeAgentThread')
+    expect(APP).toContain('threadTitle={activeThread?.title ?? null}')
+    expect(APP).toContain('onRenameThreadForHeader')
+    expect(APP).toContain('onDeleteThreadForHeader')
+    expect(CHAT).toContain('threadTitle?: string | null')
+    expect(CHAT).toContain('HeaderThreadMenu')
+    expect(CHAT).toContain("threadTitle?.trim() || (threadId ? 'Workspace chat' : 'New chat')")
+    expect(CHAT).not.toContain("{primary ? 'Agent' : 'dohc'}")
+  })
+
+  it('uses the active chat title as the Agent document metadata title', () => {
+    expect(APP).toContain('agentDocTitle')
+    expect(APP).toContain("activeAgentThread?.title?.trim() || (threadId ? 'Workspace chat' : 'New chat')")
+    expect(APP).toContain("if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }")
+    expect(APP).not.toContain("if (view === 'agent') return { docTitle: 'Agent', docEmoji: null }")
+  })
+
+  it('polishes the primary Agent chat window into a focused work surface', () => {
+    expect(CHAT).toContain('EmptyChatState')
+    expect(CHAT).toContain('ScrollToBottomButton')
+    expect(CHAT).toContain('MessageActions')
+    expect(CHAT).toContain('AgentContextPill')
+    expect(CHAT).toContain('ComposerBannerStack')
+    expect(CHAT).toContain('ComposerStatusStrip')
+    expect(CHAT).toContain('ContextWindowMeter')
+    expect(CHAT).toContain('composerError')
+    expect(CHAT).toContain('onSelectPrompt')
+    expect(CHAT).toContain('Copy message')
+    expect(CHAT).toContain('Choose a first move')
+    expect(CHAT).toContain('AgentWorkTrace')
+    expect(CHAT).toContain('Worked for')
+    expect(CHAT).toContain('toolCallPresentation')
+    expect(CHAT).toContain('formatWorkedDuration')
+    expect(CHAT).toContain('ToolActivityIcon')
+    expect(CHAT).toContain('toolCalls')
+    expect(CHAT).not.toContain('ToolCallStrip')
+  })
+
+  it('uses T3-style composer triggers for commands and skills', () => {
+    expect(CHAT).toContain('detectComposerTrigger')
+    expect(CHAT).toContain('replaceTextRange')
+    expect(CHAT).toContain('SKILL_TOKEN_RE')
+    expect(CHAT).toContain('Ask anything, $use skills, or / for commands')
+    expect(CHAT).toContain("label=\"/ commands\"")
+    expect(CHAT).toContain("label=\"$ skills\"")
+    expect(CHAT).toContain("composerTrigger.kind === 'command' ? 'Commands' : 'Skills'")
+    expect(CHAT).not.toContain('Commands & Skills')
+  })
+
+  it('keeps the Agent stream pinned only while the user is already at the bottom', () => {
+    expect(CHAT).toContain('stickToBottomRef')
+    expect(CHAT).toContain('ResizeObserver')
+    expect(CHAT).toContain('scrollContentRef')
+    expect(CHAT).toContain('isNearScrollBottom')
+    expect(CHAT).toContain('stickToBottomRef.current')
+    expect(CHAT).not.toContain('}, [uiMessages.length])')
+  })
+
+  it('keeps the Agent right rail focused on real run trust signals', () => {
+    expect(APP).toContain('activeThread={activeAgentThread}')
+    expect(APP).toContain('projectPath={agentProjectPath}')
+    expect(AGENT_RUN_RAIL).toContain('activeThread')
+    expect(AGENT_RUN_RAIL).toContain('projectPath')
+    expect(AGENT_RUN_RAIL).toContain('isWithinProject')
+    expect(AGENT_RUN_RAIL).toContain('agentRailChangeSummary')
+    expect(AGENT_RUN_RAIL).toContain('Changes')
+    expect(AGENT_RUN_RAIL).toContain('No active run')
+    expect(AGENT_RUN_RAIL).not.toContain('Current workspace')
+    expect(AGENT_RUN_RAIL).not.toContain('Working files')
+    expect(AGENT_RUN_RAIL).not.toContain('Review queue')
+    expect(AGENT_RUN_RAIL).not.toContain('Session')
+    expect(AGENT_RUN_RAIL).not.toContain('title="Sources"')
+    expect(AGENT_RUN_RAIL).not.toContain('title="Collaboration"')
   })
 })

@@ -90,4 +90,18 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(AGENT_SRC).toContain('.context/company.md in org')
     expect(AGENT_SRC).toContain('"lock .context/company.md"')
   })
+
+  it('teaches the current dohc system model before task execution', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('## CURRENT DOHC SYSTEM MAP')
+    expect(personal).toContain('AI-native workspace, not a note-taking app')
+    expect(personal).toContain('Agent is the primary work surface')
+    expect(personal).toContain('not every folder is a project')
+    expect(personal).toContain('project-scoped or no-project')
+    expect(personal).toContain('Markdown atoms are the inspectable source')
+    expect(personal).toContain('HTML atoms are polished presentation views')
+    expect(personal).toContain('build source first, view second')
+    expect(personal).toContain('show what changed, what is known, what is missing')
+    expect(personal).toContain('respect locks, sharing boundaries, skill-turn gates, and review gates')
+  })
 })

@@ -1,42 +1,130 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
 import {
+  AlertCircle,
   Check,
+  CheckCircle2,
   ChevronDown,
+  Clipboard,
+  CornerDownLeft,
+  FileText,
   Folder,
   FolderPlus,
   FolderX,
+  MoreHorizontal,
+  Pencil,
+  Pin,
   Plus,
   Search,
   Send,
   Sparkles,
   SquareTerminal,
+  Trash2,
+  X,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { useSetChatBusy } from '../lib/chat-busy'
+import {
+  agentWorkTraceSummary,
+  formatToolPayload,
+  formatWorkedDuration,
+  isToolActivityPart,
+  toolCallPresentation,
+  type ToolActivityKind,
+  type ToolActivityPart,
+} from '../lib/chatActivity'
 
-// Track-3 P3 — slash-command detection. EXACT design-pinned
-// grammar (skills-commands-v1 §3.3 line 317):
-//   SKILL_COMMAND_RE = /^\/skill\s+([\w./-]+)(?:\s+(.*))?$/
-// `/skill <path>` fires the skill; `/skill` alone, `/Skill ...`,
-// or any other `/<token>` form is REGULAR CHAT (the model
-// receives the prompt verbatim). The strict literal keyword
-// `skill` removes the UX surprise where typing `/help` would
-// silently fire a skill named "help" — indep P3+P4 review F3.
-//
-// Discovery still happens via the ⌘K palette (shows labels +
-// paths); fire happens via the explicit `/skill <path>` typed
-// or via palette click (palette uses the dedicated onFireSkill
-// channel, not detectSkillFire — see CommandPalette.tsx).
-const SKILL_COMMAND_RE = /^\/skill\s+([\w./-]+)(?:\s+([\s\S]+))?$/
+// T3-style composer grammar:
+//   /command  => saved slash command, only at the start of the line
+//   $skill    => saved skill, inline in the prompt
+// Selecting from the composer menu inserts the token; it does not
+// immediately submit. Sending resolves $skill or /command tokens into
+// the agent entrypoint while preserving the user's full prompt as brief.
+const SKILL_TOKEN_RE = /(?:^|\s)\$([\w./:-]+)(?=\s|$)/
 const COMMAND_FIRE_RE = /^\/([\w./-]+)(?:\s+([\s\S]+))?$/
+const STREAM_STICKY_BOTTOM_PX = 80
+const SCROLL_TO_BOTTOM_BUTTON_PX = 180
 
 type RunnableRef = { path: string; label: string }
 type EnvironmentOption = { value: string | null; label: string }
+type ChatActionResult = void | Promise<void>
+type IconComponent = typeof Folder
+type ComposerMenuItem = RunnableRef & { kind: 'command' | 'skill' }
+type ComposerTrigger = {
+  kind: ComposerMenuItem['kind']
+  query: string
+  rangeStart: number
+  rangeEnd: number
+}
+type ComposerBannerItem = {
+  id: string
+  tone: 'danger' | 'info'
+  icon: ReactNode
+  title: string
+  description?: string
+  dismissLabel?: string
+  onDismiss?: () => void
+}
+
+export function detectComposerTrigger(
+  text: string,
+  cursorInput: number,
+): ComposerTrigger | null {
+  const cursor = Math.max(0, Math.min(cursorInput, text.length))
+  const beforeCursor = text.slice(0, cursor)
+  const lineStart = beforeCursor.lastIndexOf('\n') + 1
+  const linePrefix = text.slice(lineStart, cursor)
+  const commandMatch = /^\/([^\s]*)$/.exec(linePrefix)
+  if (commandMatch) {
+    return {
+      kind: 'command',
+      query: commandMatch[1],
+      rangeStart: lineStart,
+      rangeEnd: cursor,
+    }
+  }
+
+  const tokenStartMatch = /(?:^|\s)(\S*)$/.exec(beforeCursor)
+  const token = tokenStartMatch?.[1] ?? ''
+  if (token.startsWith('$')) {
+    return {
+      kind: 'skill',
+      query: token.slice(1),
+      rangeStart: cursor - token.length,
+      rangeEnd: cursor,
+    }
+  }
+
+  return null
+}
+
+export function replaceTextRange(
+  text: string,
+  rangeStart: number,
+  rangeEnd: number,
+  replacement: string,
+): { text: string; cursor: number } {
+  const safeStart = Math.max(0, Math.min(rangeStart, text.length))
+  let safeEnd = Math.max(safeStart, Math.min(rangeEnd, text.length))
+  if (replacement.endsWith(' ') && text[safeEnd] === ' ') safeEnd += 1
+  return {
+    text: `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`,
+    cursor: safeStart + replacement.length,
+  }
+}
+
+export function composerTokenForRunnable(
+  _kind: ComposerMenuItem['kind'],
+  item: RunnableRef,
+  rows: ReadonlyArray<RunnableRef>,
+): string {
+  const sameLabelCount = rows.filter((row) => row.label === item.label).length
+  return sameLabelCount > 1 ? item.path : item.label
+}
 
 export function detectSkillFire(
   prompt: string,
@@ -46,10 +134,10 @@ export function detectSkillFire(
   | { ambiguous: ReadonlyArray<{ path: string; label: string }> }
   | null {
   const trimmed = prompt.trim()
-  const m = trimmed.match(SKILL_COMMAND_RE)
+  const m = trimmed.match(SKILL_TOKEN_RE)
   if (!m) return null
   const token = m[1]
-  const extras = m[2]?.trim() || null // P3+P4 indep fold F4
+  const extras = trimmed || null
   // Exact path match wins (unambiguous canonical identifier).
   const byPath = skills.find((s) => s.path === token)
   if (byPath) return { matched: byPath, extras }
@@ -84,12 +172,17 @@ export function detectCommandFire(
 
 type Props = {
   threadId: string | null
+  threadTitle?: string | null
+  threadPinned?: boolean
   projectPath?: string | null
   projectOptions?: EnvironmentOption[]
   folderOptions?: string[]
   onProjectPathChange?: (projectPath: string | null) => void
   onCreateProject?: (mode: 'scratch' | 'existing') => void
   onEnsureThread?: (projectPath: string | null) => Promise<string>
+  onToggleThreadPinned?: () => ChatActionResult
+  onRenameThread?: (title: string) => ChatActionResult
+  onDeleteThread?: () => ChatActionResult
   mode?: 'side' | 'primary'
   pendingPrompt?: string | null
   onPendingHandled?: () => void
@@ -106,12 +199,17 @@ type Props = {
 
 export function Chat({
   threadId,
+  threadTitle = null,
+  threadPinned = false,
   projectPath = null,
   projectOptions = [],
   folderOptions = [],
   onProjectPathChange,
   onCreateProject,
   onEnsureThread,
+  onToggleThreadPinned,
+  onRenameThread,
+  onDeleteThread,
   mode = 'side',
   pendingPrompt,
   onPendingHandled,
@@ -122,13 +220,18 @@ export function Chat({
 }: Props) {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
-  const [slashCursor, setSlashCursor] = useState(0)
+  const [composerError, setComposerError] = useState<string | null>(null)
+  const [composerCursor, setComposerCursor] = useState(0)
+  const [composerMenuCursor, setComposerMenuCursor] = useState(0)
   const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [environmentQuery, setEnvironmentQuery] = useState('')
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const sendMessage = useAction(api.agent.sendMessage)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const scrollContentRef = useRef<HTMLDivElement | null>(null)
+  const stickToBottomRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
   // collect; filtered to type:skill under .skills/).
@@ -176,16 +279,43 @@ export function Chat({
     return () => setChatBusy(false)
   }, [busy, setChatBusy])
 
-  useEffect(() => {
+  function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+    stickToBottomRef.current = true
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
-      behavior: 'smooth',
+      behavior,
     })
-  }, [uiMessages])
+    setShowScrollToBottom(false)
+  }
+
+  function updateScrollAffordance() {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = isNearScrollBottom(el)
+    setShowScrollToBottom(distanceFromBottom > SCROLL_TO_BOTTOM_BUTTON_PX)
+  }
+
+  useEffect(() => {
+    if (stickToBottomRef.current) scrollToBottom('smooth')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, uiMessages.length])
+
+  useEffect(() => {
+    const content = scrollContentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) scrollToBottom('auto')
+    })
+    observer.observe(content)
+    return () => observer.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId])
 
   async function submit(promptOverride?: string) {
     const prompt = (promptOverride ?? input).trim()
     if (!prompt || sending || busy) return
+    setComposerError(null)
     // Track-3 P3 — slash-command routing. A leading `/<token>`
     // that resolves to a saved skill flips this turn into
     // skill-fire mode (the prepareStep BRACE restricts step 0's
@@ -205,6 +335,7 @@ export function Chat({
         setInput(
           `${prompt}\n\n[multiple skills match this label — pick one of:]\n  ${list}`,
         )
+        setComposerError('Multiple skills match that label. Pick the exact path to run.')
         setSending(false)
         return
       }
@@ -238,6 +369,7 @@ export function Chat({
         setInput(
           `${prompt}\n\n[multiple commands match this label — pick one of:]\n  ${list}`,
         )
+        setComposerError('Multiple commands match that label. Pick the exact path to run.')
         setSending(false)
         return
       }
@@ -261,6 +393,7 @@ export function Chat({
         projectPath,
       })
     } catch (e) {
+      setComposerError(formatComposerError(e))
       console.error(e)
     } finally {
       setSending(false)
@@ -290,6 +423,7 @@ export function Chat({
     setSending(true)
     void (async () => {
       try {
+        setComposerError(null)
         const activeThreadId =
           threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
         if (!activeThreadId) return
@@ -301,6 +435,7 @@ export function Chat({
           projectPath,
         })
       } catch (e) {
+        setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
         setSending(false)
@@ -316,6 +451,7 @@ export function Chat({
     setSending(true)
     void (async () => {
       try {
+        setComposerError(null)
         const activeThreadId =
           threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
         if (!activeThreadId) return
@@ -327,6 +463,7 @@ export function Chat({
           projectPath,
         })
       } catch (e) {
+        setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
         setSending(false)
@@ -335,37 +472,59 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCommandFire, threadId, sending, busy, onEnsureThread, projectPath])
 
-  const slashQuery = useMemo(() => {
-    const m = input.match(/^\s*\/([^\s]*)$/)
-    return m ? m[1].toLowerCase() : null
-  }, [input])
+  const composerTrigger = useMemo(
+    () => detectComposerTrigger(input, composerCursor),
+    [composerCursor, input],
+  )
 
-  const slashItems = useMemo(() => {
-    if (slashQuery === null) return []
-    const rows = [
-      ...savedCommands.map((c) => ({ ...c, kind: 'command' as const })),
-      ...skills.map((s) => ({ ...s, kind: 'skill' as const })),
-    ]
-    if (!slashQuery) return rows
+  const composerMenuItems = useMemo<ComposerMenuItem[]>(() => {
+    if (!composerTrigger) return []
+    const query = composerTrigger.query.toLowerCase()
+    const rows =
+      composerTrigger.kind === 'command'
+        ? savedCommands.map((c) => ({ ...c, kind: 'command' as const }))
+        : skills.map((s) => ({ ...s, kind: 'skill' as const }))
+    if (!query) return rows
     return rows.filter(
       (r) =>
-        r.label.toLowerCase().includes(slashQuery) ||
-        r.path.toLowerCase().includes(slashQuery),
+        r.label.toLowerCase().includes(query) ||
+        r.path.toLowerCase().includes(query),
     )
-  }, [savedCommands, skills, slashQuery])
+  }, [composerTrigger, savedCommands, skills])
 
   useEffect(() => {
-    setSlashCursor((c) => Math.min(c, Math.max(0, slashItems.length - 1)))
-  }, [slashItems.length])
+    setComposerMenuCursor((c) =>
+      Math.min(c, Math.max(0, composerMenuItems.length - 1)),
+    )
+  }, [composerMenuItems.length])
 
-  function fireSlashItem(item: (typeof slashItems)[number]) {
-    if ((!threadId && !onEnsureThread) || sending || busy) return
-    if (item.kind === 'command') {
-      void submit(`/${item.path}`)
-    } else {
-      void submit(`/skill ${item.path}`)
-    }
-    setInput('')
+  function updateComposerCursor(target: HTMLTextAreaElement | null) {
+    if (!target) return
+    setComposerCursor(target.selectionStart ?? target.value.length)
+  }
+
+  function selectComposerItem(item: ComposerMenuItem) {
+    if (!composerTrigger) return
+    const token = composerTokenForRunnable(
+      item.kind,
+      item,
+      item.kind === 'command' ? savedCommands : skills,
+    )
+    const replacement =
+      item.kind === 'command' ? `/${token} ` : `$${token} `
+    const next = replaceTextRange(
+      input,
+      composerTrigger.rangeStart,
+      composerTrigger.rangeEnd,
+      replacement,
+    )
+    setInput(next.text)
+    setComposerCursor(next.cursor)
+    setComposerError(null)
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(next.cursor, next.cursor)
+    })
   }
 
   const primary = mode === 'primary'
@@ -391,79 +550,132 @@ export function Chat({
     projectPath ??
     (primary ? "Don't work in a project" : 'Workspace chat')
   const canEditEnvironment = !threadId && !sending && !busy
+  const headerTitle =
+    primary
+      ? threadTitle?.trim() || (threadId ? 'Workspace chat' : 'New chat')
+      : 'dohc'
+  const showHeaderMenu =
+    primary &&
+    Boolean(threadId) &&
+    Boolean(onToggleThreadPinned || onRenameThread || onDeleteThread)
+  const contextLabel = projectPath ?? 'No project'
+
+  function selectStarterPrompt(prompt: string) {
+    setInput(prompt)
+    setComposerError(null)
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  const composerBannerItems: ComposerBannerItem[] = composerError
+    ? [
+        {
+          id: 'composer-error',
+          tone: 'danger',
+          icon: <AlertCircle className="size-4" strokeWidth={2} />,
+          title: 'That turn did not send',
+          description: composerError,
+          dismissLabel: 'Dismiss send error',
+          onDismiss: () => setComposerError(null),
+        },
+      ]
+    : []
 
   return (
     <aside
       className={`flex h-screen flex-col ${
         primary
-          ? 'bg-page'
+          ? 'bg-page [background-image:linear-gradient(90deg,var(--dohc-grid)_1px,transparent_1px),linear-gradient(0deg,var(--dohc-grid)_1px,transparent_1px)] [background-size:42px_42px]'
           : 'bg-panel border-l border-rule'
       }`}
     >
       <header
-        className={`flex items-center justify-between border-b border-rule ${
-          primary ? 'h-14 px-6' : 'h-11 px-4'
+        className={`flex items-center justify-between border-b border-rule bg-page/92 backdrop-blur ${
+          primary ? 'h-14 px-6' : 'h-11 px-4 bg-panel'
         }`}
       >
-        <div className="flex items-center gap-2 text-ink-dim">
-          <DohcMark size={14} />
-          <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
-            {primary ? 'Agent' : 'dohc'}
-          </span>
-        </div>
-        {busy && (
-          <span className="flex items-center gap-1.5 text-[10.5px] text-ink-faint">
-            <span className="size-1.5 rounded-full bg-ink-dim animate-pulse" />
-            thinking…
-          </span>
-        )}
-      </header>
-
-      <div
-        ref={scrollRef}
-        className={`flex-1 overflow-y-auto flex flex-col gap-4 ${
-          primary
-            ? 'mx-auto w-full max-w-[780px] px-7 py-7'
-            : 'px-4 py-4'
-        }`}
-      >
-        {uiMessages.length === 0 && (
-          <div
-            className={`flex flex-col items-start gap-2 ${
-              primary ? 'pt-[18vh]' : ''
-            }`}
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-ink-dim" />
-              <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
-                dohc
-              </span>
-            </div>
-            <p
-              className={`text-ink-strong leading-snug tracking-tight font-semibold ${
-                primary ? 'text-[30px]' : 'text-[18px]'
-              }`}
+        {primary ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="min-w-0 truncate text-[14px] font-semibold tracking-tight text-ink-strong"
+              title={headerTitle}
             >
-              {primary
-                ? 'What should we build in dohc?'
-                : 'What can I help you with?'}
-            </p>
-            <p className="text-[12.5px] text-ink-dim leading-relaxed mt-1">
-              {primary
-                ? 'Tell dohc what should move forward. It will read sources, change files, and leave the work inspectable.'
-                : "Ask me to find something, draft a document, or organize your pages. I'll show my sources and what I changed, so you can always check the work."}
-            </p>
+              {headerTitle}
+            </span>
+            {showHeaderMenu && (
+              <HeaderThreadMenu
+                title={headerTitle}
+                pinned={threadPinned}
+                onTogglePinned={onToggleThreadPinned}
+                onRenameThread={onRenameThread}
+                onDeleteThread={onDeleteThread}
+              />
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-ink-dim">
+            <DohcMark size={14} />
+            <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
+              {headerTitle}
+            </span>
           </div>
         )}
-        {uiMessages.map((m) => (
-          <MessageView key={m.key} message={m} />
-        ))}
+        <div className="ml-3 flex shrink-0 items-center gap-2">
+          {primary && (
+            <AgentContextPill
+              label={contextLabel}
+              icon={projectPath ? Folder : FolderX}
+            />
+          )}
+          {busy && (
+            <span className="flex items-center gap-1.5 rounded-full border border-rule bg-elevated px-2.5 py-1 text-[10.5px] font-medium text-ink-faint shadow-xs">
+              <span className="size-1.5 rounded-full bg-success animate-pulse" />
+              thinking
+            </span>
+          )}
+        </div>
+      </header>
+
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={updateScrollAffordance}
+          className={`h-full overflow-y-auto ${
+            primary
+              ? 'px-7 py-8'
+              : 'px-4 py-4'
+          }`}
+        >
+          <div
+            ref={scrollContentRef}
+            className={`mx-auto flex w-full flex-col ${
+              primary ? 'max-w-[820px] gap-5' : 'gap-4'
+            }`}
+          >
+            {uiMessages.length === 0 && (
+              <EmptyChatState
+                primary={primary}
+                onSelectPrompt={selectStarterPrompt}
+              />
+            )}
+            {uiMessages.map((m, index) => (
+              <MessageView
+                key={m.key}
+                message={m}
+                previousMessage={uiMessages[index - 1] ?? null}
+                primary={primary}
+              />
+            ))}
+          </div>
+        </div>
+        {primary && showScrollToBottom && (
+          <ScrollToBottomButton onClick={() => scrollToBottom()} />
+        )}
       </div>
 
-      <div className={primary ? 'mx-auto w-full max-w-[780px] px-7 pb-6 pt-1' : 'px-3 pb-3 pt-1'}>
+      <div className={primary ? 'mx-auto w-full max-w-[820px] px-7 pb-6 pt-1' : 'px-3 pb-3 pt-1'}>
         <div
-          className={`relative border border-rule bg-elevated focus-within:border-rule-strong transition-colors shadow-xs ${
-            primary ? 'rounded-2xl shadow-md' : 'rounded-xl'
+          className={`relative overflow-visible border border-rule bg-elevated/96 focus-within:border-rule-strong transition-[border,box-shadow,background] shadow-xs backdrop-blur ${
+            primary ? 'rounded-[18px] shadow-lg focus-within:shadow-modal' : 'rounded-xl'
           }`}
         >
           {primary && !threadId && (
@@ -599,31 +811,49 @@ export function Chat({
               )}
             </div>
           )}
+          <ComposerBannerStack items={composerBannerItems} />
           <textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value)
+              updateComposerCursor(e.currentTarget)
+              if (composerError) setComposerError(null)
+            }}
+            onClick={(e) => updateComposerCursor(e.currentTarget)}
+            onKeyUp={(e) => updateComposerCursor(e.currentTarget)}
+            onSelect={(e) => updateComposerCursor(e.currentTarget)}
             onKeyDown={(e) => {
-              if (slashItems.length > 0) {
+              if (composerMenuItems.length > 0) {
                 if (e.key === 'ArrowDown') {
                   e.preventDefault()
-                  setSlashCursor((c) => Math.min(slashItems.length - 1, c + 1))
+                  setComposerMenuCursor((c) =>
+                    Math.min(composerMenuItems.length - 1, c + 1),
+                  )
                   return
                 }
                 if (e.key === 'ArrowUp') {
                   e.preventDefault()
-                  setSlashCursor((c) => Math.max(0, c - 1))
+                  setComposerMenuCursor((c) => Math.max(0, c - 1))
                   return
                 }
                 if (e.key === 'Escape') {
                   e.preventDefault()
-                  setInput('')
+                  const next = replaceTextRange(
+                    input,
+                    composerTrigger?.rangeStart ?? composerCursor,
+                    composerTrigger?.rangeEnd ?? composerCursor,
+                    '',
+                  )
+                  setInput(next.text)
+                  setComposerCursor(next.cursor)
                   return
                 }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  const item = slashItems[slashCursor] ?? slashItems[0]
-                  if (item) fireSlashItem(item)
+                  const item =
+                    composerMenuItems[composerMenuCursor] ?? composerMenuItems[0]
+                  if (item) selectComposerItem(item)
                   return
                 }
               }
@@ -632,30 +862,40 @@ export function Chat({
                 submit()
               }
             }}
-            placeholder={canSend ? 'Ask dohc to find, draft, or organize something…' : 'Starting up…'}
+            placeholder={
+              canSend
+                ? 'Ask anything, $use skills, or / for commands'
+                : 'Starting up…'
+            }
             disabled={!canSend}
-            rows={primary ? 4 : 3}
+            rows={primary ? 3 : 3}
             className={`w-full resize-none bg-transparent text-ink placeholder:text-ink-faint outline-none disabled:text-ink-faint ${
               primary
-                ? 'px-4 pb-10 pt-4 text-[14px] leading-relaxed'
+                ? 'min-h-[132px] px-4 pb-12 pt-4 text-[14.5px] leading-relaxed'
                 : 'px-3 pt-3 pb-9 text-[13px] leading-relaxed'
             }`}
           />
-          {slashQuery !== null && slashItems.length > 0 && (
+          {composerTrigger && composerMenuItems.length > 0 && (
             <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal">
-              <div className="border-b border-rule px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
-                Commands & Skills
+              <div className="flex items-center justify-between gap-3 border-b border-rule px-3 py-2">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+                  {composerTrigger.kind === 'command' ? 'Commands' : 'Skills'}
+                </span>
+                <span className="font-mono text-[10.5px] text-ink-faint">
+                  {composerTrigger.kind === 'command' ? '/' : '$'}
+                  {composerTrigger.query}
+                </span>
               </div>
               <div className="max-h-72 overflow-y-auto py-1">
-                {slashItems.map((item, i) => {
-                  const active = i === slashCursor
+                {composerMenuItems.map((item, i) => {
+                  const active = i === composerMenuCursor
                   const Icon = item.kind === 'command' ? SquareTerminal : Sparkles
                   return (
                     <button
                       key={`${item.kind}.${item.path}`}
                       type="button"
-                      onMouseEnter={() => setSlashCursor(i)}
-                      onClick={() => fireSlashItem(item)}
+                      onMouseEnter={() => setComposerMenuCursor(i)}
+                      onClick={() => selectComposerItem(item)}
                       className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
                         active ? 'bg-hover text-ink-strong' : 'text-ink-dim hover:bg-hover hover:text-ink'
                       }`}
@@ -670,7 +910,10 @@ export function Chat({
                         {item.label}
                       </span>
                       <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">
-                        {item.kind} · {item.path}
+                        {item.kind === 'command' ? '/' : '$'}
+                        {item.label}
+                        {' · '}
+                        {item.path}
                       </span>
                     </button>
                   )
@@ -678,17 +921,26 @@ export function Chat({
               </div>
             </div>
           )}
-          <div className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
-            <span className="text-[10px] text-ink-faint">
-              / commands · ⏎ send · ⇧⏎ newline
-            </span>
+          <div className="absolute bottom-2.5 left-3 right-2.5 flex items-center justify-between gap-3">
+            <ComposerStatusStrip
+              primary={primary}
+              busy={busy}
+              sending={sending}
+              messageCount={uiMessages.length}
+              projectPath={projectPath}
+              skillCount={skills.length}
+              commandCount={savedCommands.length}
+            />
             <button
               onClick={() => submit()}
               disabled={!canSend || sending || busy || !input.trim()}
-              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-2.5 text-[11.5px] font-medium text-surface hover:bg-ink disabled:bg-ink-ghost disabled:cursor-not-allowed transition-colors"
+              className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
+                primary ? 'size-9' : 'size-7'
+              }`}
+              title={sending || busy ? 'Sending' : 'Send message'}
+              aria-label={sending || busy ? 'Sending' : 'Send message'}
             >
-              <Send className="size-3" strokeWidth={2.2} />
-              send
+              <Send className={primary ? 'size-4' : 'size-3.5'} strokeWidth={2.2} />
             </button>
           </div>
         </div>
@@ -697,83 +949,827 @@ export function Chat({
   )
 }
 
-function MessageView({ message }: { message: UIMessage }) {
-  if (message.role === 'system') return null
-  const isUser = message.role === 'user'
+function formatComposerError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message
+  return 'dohc could not complete this turn. Try again in a moment.'
+}
+
+function isNearScrollBottom(
+  el: HTMLElement,
+  threshold = STREAM_STICKY_BOTTOM_PX,
+): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+}
+
+function ComposerBannerStack({ items }: { items: ComposerBannerItem[] }) {
+  if (items.length === 0) return null
 
   return (
-    <div className="flex flex-col items-start gap-1.5">
-      <div className="flex items-center gap-1.5">
-        <span
-          className={`size-1.5 rounded-full ${
-            isUser ? 'bg-ink-faint' : 'bg-ink-dim'
-          }`}
-        />
-        <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
-          {isUser ? 'you' : 'dohc'}
-        </span>
-      </div>
-      <div className="max-w-full break-words">
-        {(() => {
-          const text = message.parts
-            .filter((p) => p.type === 'text')
-            .map((p) => (p as { text?: string }).text ?? '')
-            .join('')
-          if (!text.trim()) return null
-          // dohc writes markdown — render it as a document, not raw
-          // text. The user's own turns stay plain.
-          return isUser ? (
-            <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
-              {text}
-            </div>
-          ) : (
-            <Markdown>{text}</Markdown>
-          )
-        })()}
-        <div className="mt-1 flex flex-wrap gap-1">
-          {message.parts.map((part, i) => {
-            if (part.type === 'reasoning' || part.type === 'text') return null
-            if (!part.type?.startsWith('tool-')) return null
-            const p = part as unknown as {
-              type: string
-              toolName?: string
-              state?: string
-              input?: unknown
-            }
-            const toolName = p.toolName ?? p.type.replace(/^tool-/, '')
-            const input = p.input as Record<string, unknown> | undefined
-            const summary = summarizeInput(toolName, input)
-            return (
-              <div
-                key={i}
-                className="inline-flex items-center gap-1.5 rounded-md border border-rule bg-panel px-2 py-1 font-mono text-[11px] text-ink-dim"
+    <div className="space-y-2 border-b border-rule bg-panel/50 px-3 py-2">
+      {items.map((item) => {
+        const tone =
+          item.tone === 'danger'
+            ? 'border-danger/30 bg-danger-soft text-danger'
+            : 'border-rule bg-panel text-ink-dim'
+        return (
+          <div
+            key={item.id}
+            className={`flex min-w-0 items-start gap-2 rounded-lg border px-3 py-2 shadow-xs ${tone}`}
+          >
+            <span className="mt-0.5 shrink-0">{item.icon}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12.5px] font-semibold leading-snug">
+                {item.title}
+              </span>
+              {item.description && (
+                <span className="mt-0.5 block text-[11.5px] leading-snug opacity-85">
+                  {item.description}
+                </span>
+              )}
+            </span>
+            {item.onDismiss && (
+              <button
+                type="button"
+                onClick={item.onDismiss}
+                className="grid size-6 shrink-0 place-items-center rounded-md opacity-70 transition hover:bg-elevated/60 hover:opacity-100"
+                aria-label={item.dismissLabel ?? 'Dismiss'}
+                title={item.dismissLabel ?? 'Dismiss'}
               >
-                <span className="size-1 rounded-full bg-success" />
-                <span className="text-ink">{toolName}</span>
-                {summary && <span className="text-ink-faint">{summary}</span>}
-                {p.state && p.state !== 'output-available' && (
-                  <em className="text-ink-faint not-italic">({p.state})</em>
+                <X className="size-3.5" strokeWidth={2} />
+              </button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ComposerStatusStrip({
+  primary,
+  busy,
+  sending,
+  messageCount,
+  projectPath,
+  skillCount,
+  commandCount,
+}: {
+  primary: boolean
+  busy: boolean
+  sending: boolean
+  messageCount: number
+  projectPath: string | null
+  skillCount: number
+  commandCount: number
+}) {
+  return (
+    <div className="-m-1 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <ComposerControlPill
+        icon={SquareTerminal}
+        label="/ commands"
+        compactLabel="/"
+      />
+      <ComposerControlPill icon={Sparkles} label="$ skills" compactLabel="$" />
+      {primary && <ContextWindowMeter messageCount={messageCount} />}
+      {primary && (
+        <ComposerStatusPill
+          icon={projectPath ? Folder : FolderX}
+          label={projectPath ?? 'No project'}
+        />
+      )}
+      {primary && skillCount > 0 && (
+        <ComposerStatusPill icon={Sparkles} label={`${skillCount} skills`} />
+      )}
+      {primary && commandCount > 0 && (
+        <ComposerStatusPill
+          icon={SquareTerminal}
+          label={`${commandCount} commands`}
+        />
+      )}
+      {sending || busy ? (
+        <span className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-faint">
+          <span className="size-1.5 rounded-full bg-success animate-pulse" />
+          {sending ? 'sending' : 'thinking'}
+        </span>
+      ) : (
+        primary && (
+          <ComposerControlPill
+            icon={CornerDownLeft}
+            label="Enter"
+            compactLabel="send"
+          />
+        )
+      )}
+    </div>
+  )
+}
+
+function ComposerStatusPill({
+  icon: Icon,
+  label,
+}: {
+  icon: IconComponent
+  label: string
+}) {
+  return (
+    <span
+      className="inline-flex h-7 max-w-[190px] shrink-0 items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-faint"
+      title={label}
+    >
+      <Icon className="size-3 shrink-0" strokeWidth={1.8} />
+      <span className="min-w-0 truncate">{label}</span>
+    </span>
+  )
+}
+
+function ContextWindowMeter({ messageCount }: { messageCount: number }) {
+  const cap = 50
+  const percent = Math.min(100, Math.round((messageCount / cap) * 100))
+  const radius = 8.5
+  const circumference = 2 * Math.PI * radius
+  const dashOffset = circumference - (percent / 100) * circumference
+
+  return (
+    <span
+      className="inline-grid size-7 shrink-0 place-items-center rounded-full border border-rule bg-panel/70 text-[8px] font-semibold text-ink-faint"
+      title={`${messageCount} messages loaded in this thread`}
+      aria-label={`${messageCount} messages loaded in this thread`}
+    >
+      <span className="relative grid size-6 place-items-center">
+        <svg
+          viewBox="0 0 24 24"
+          className="absolute inset-0 size-6 -rotate-90"
+          aria-hidden="true"
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r={radius}
+            fill="none"
+            stroke="var(--color-rule)"
+            strokeWidth="2.4"
+          />
+          <circle
+            cx="12"
+            cy="12"
+            r={radius}
+            fill="none"
+            stroke="var(--color-ink-faint)"
+            strokeDasharray={circumference}
+            strokeDashoffset={dashOffset}
+            strokeLinecap="round"
+            strokeWidth="2.4"
+            className="transition-[stroke-dashoffset] duration-300"
+          />
+        </svg>
+        <span className="relative">{Math.min(99, messageCount)}</span>
+      </span>
+    </span>
+  )
+}
+
+function HeaderThreadMenu({
+  title,
+  pinned,
+  onTogglePinned,
+  onRenameThread,
+  onDeleteThread,
+}: {
+  title: string
+  pinned: boolean
+  onTogglePinned?: () => ChatActionResult
+  onRenameThread?: (title: string) => ChatActionResult
+  onDeleteThread?: () => ChatActionResult
+}) {
+  const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState<'menu' | 'rename' | 'delete'>('menu')
+  const [value, setValue] = useState(title)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    setMode('menu')
+    setValue(title)
+    setError(null)
+  }, [open, title])
+
+  async function runAction(action: () => ChatActionResult) {
+    setBusy(true)
+    setError(null)
+    try {
+      await action()
+      setOpen(false)
+    } catch (e) {
+      setError((e as Error).message || 'Something went wrong.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function commitRename() {
+    const clean = value.trim()
+    if (!clean) {
+      setError('Chat name is required.')
+      return
+    }
+    if (!onRenameThread) return
+    await runAction(() => onRenameThread(clean))
+  }
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="grid size-7 place-items-center rounded-md text-ink-faint transition-colors hover:bg-hover hover:text-ink focus-visible:bg-hover focus-visible:text-ink"
+        title="Chat actions"
+        aria-label="chat actions"
+        aria-expanded={open}
+      >
+        <MoreHorizontal className="size-4" strokeWidth={2} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-8 z-30 w-60 overflow-hidden rounded-lg border border-rule bg-elevated p-1 shadow-modal">
+            {mode === 'menu' && (
+              <>
+                {onTogglePinned && (
+                  <HeaderThreadMenuButton
+                    icon={Pin}
+                    label={pinned ? 'Unpin chat' : 'Pin chat'}
+                    disabled={busy}
+                    onClick={() => void runAction(onTogglePinned)}
+                  />
                 )}
+                {onRenameThread && (
+                  <HeaderThreadMenuButton
+                    icon={Pencil}
+                    label="Rename chat"
+                    disabled={busy}
+                    onClick={() => setMode('rename')}
+                  />
+                )}
+                {onDeleteThread && (
+                  <HeaderThreadMenuButton
+                    icon={Trash2}
+                    label="Delete chat"
+                    danger
+                    disabled={busy}
+                    onClick={() => setMode('delete')}
+                  />
+                )}
+              </>
+            )}
+
+            {mode === 'rename' && (
+              <div className="p-2">
+                <label className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+                  Chat name
+                </label>
+                <input
+                  autoFocus
+                  value={value}
+                  onChange={(e) => {
+                    setValue(e.target.value)
+                    setError(null)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitRename()
+                    if (e.key === 'Escape') setMode('menu')
+                  }}
+                  className="mt-2 h-8 w-full rounded-md border border-rule bg-page px-2 text-[12.5px] text-ink outline-none focus:border-rule-strong"
+                />
+                <div className="mt-2 flex justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setMode('menu')}
+                    disabled={busy}
+                    className="h-7 rounded-md px-2.5 text-[12px] font-medium text-ink-dim hover:bg-hover hover:text-ink disabled:text-ink-faint"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void commitRename()}
+                    disabled={busy}
+                    className="h-7 rounded-md bg-ink-strong px-2.5 text-[12px] font-medium text-surface hover:bg-ink disabled:bg-ink-ghost"
+                  >
+                    Save
+                  </button>
+                </div>
               </div>
-            )
-          })}
+            )}
+
+            {mode === 'delete' && onDeleteThread && (
+              <div className="p-2">
+                <p className="text-[12.5px] font-medium text-ink-strong">
+                  Delete this chat?
+                </p>
+                <p className="mt-1 text-[11.5px] leading-snug text-ink-dim">
+                  This removes it from your history.
+                </p>
+                <div className="mt-3 flex justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setMode('menu')}
+                    disabled={busy}
+                    className="h-7 rounded-md px-2.5 text-[12px] font-medium text-ink-dim hover:bg-hover hover:text-ink disabled:text-ink-faint"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runAction(onDeleteThread)}
+                    disabled={busy}
+                    className="h-7 rounded-md bg-danger px-2.5 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <p
+                role="alert"
+                className="m-1 mt-0 rounded-md border border-danger/30 bg-danger-soft px-2 py-1.5 text-[11.5px] leading-snug text-danger"
+              >
+                {error}
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function HeaderThreadMenuButton({
+  icon: Icon,
+  label,
+  danger = false,
+  disabled = false,
+  onClick,
+}: {
+  icon: IconComponent
+  label: string
+  danger?: boolean
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-[12.5px] font-medium hover:bg-hover disabled:text-ink-faint disabled:hover:bg-transparent ${
+        danger ? 'text-danger' : 'text-ink'
+      }`}
+    >
+      <Icon className="size-3.5 shrink-0 text-ink-dim" strokeWidth={1.8} />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+function AgentContextPill({
+  icon: Icon,
+  label,
+}: {
+  icon: IconComponent
+  label: string
+}) {
+  return (
+    <span className="hidden max-w-[240px] items-center gap-1.5 rounded-full border border-rule bg-elevated px-2.5 py-1 text-[10.5px] font-medium text-ink-faint shadow-xs md:inline-flex">
+      <Icon className="size-3.5 shrink-0" strokeWidth={1.8} />
+      <span className="min-w-0 truncate">{label}</span>
+    </span>
+  )
+}
+
+function ComposerControlPill({
+  icon: Icon,
+  label,
+  compactLabel,
+}: {
+  icon: IconComponent
+  label: string
+  compactLabel?: string
+}) {
+  return (
+    <span className="inline-flex h-7 items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-faint">
+      <Icon className="size-3 shrink-0" strokeWidth={1.8} />
+      <span className="hidden sm:inline">{label}</span>
+      {compactLabel && <span className="sm:hidden">{compactLabel}</span>}
+    </span>
+  )
+}
+
+function ScrollToBottomButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="absolute bottom-4 left-1/2 z-10 inline-flex h-8 -translate-x-1/2 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3 text-[11.5px] font-medium text-ink-dim shadow-md backdrop-blur transition hover:border-rule-strong hover:bg-hover hover:text-ink"
+    >
+      <ChevronDown className="size-3.5" strokeWidth={2} />
+      latest
+    </button>
+  )
+}
+
+function EmptyChatState({
+  primary,
+  onSelectPrompt,
+}: {
+  primary: boolean
+  onSelectPrompt: (prompt: string) => void
+}) {
+  if (!primary) {
+    return (
+      <div className="flex flex-col items-start gap-2 pt-1">
+        <div className="flex items-center gap-1.5">
+          <DohcMark size={14} />
+          <span className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-semibold">
+            dohc
+          </span>
+        </div>
+        <p className="text-[18px] font-semibold leading-snug tracking-tight text-ink-strong">
+          What can I help you with?
+        </p>
+      </div>
+    )
+  }
+
+  const starters = [
+    {
+      title: 'Build my project cockpit',
+      prompt:
+        'Build a source-backed project cockpit for this work. Start by asking only for the context you actually need.',
+    },
+    {
+      title: 'Review this workspace',
+      prompt:
+        'Review this workspace and tell me what is clear, what is missing, and what the next useful action should be.',
+    },
+    {
+      title: 'Turn notes into a plan',
+      prompt:
+        'Turn my loose notes into a practical plan with decisions, open questions, and next actions.',
+    },
+    {
+      title: 'Create a dashboard',
+      prompt:
+        'Create a polished dashboard from the available source files. If there is not enough source context, say what to capture first.',
+    },
+  ]
+
+  return (
+    <div className="flex min-h-[44vh] flex-col justify-center">
+      <div className="max-w-[640px]">
+        <div className="inline-flex items-center gap-2 rounded-full border border-rule bg-elevated px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-faint shadow-xs">
+          <DohcMark size={14} />
+          agent workspace
+        </div>
+        <h2 className="mt-5 text-[34px] font-semibold leading-[1.05] tracking-tight text-ink-strong">
+          What should we build in dohc?
+        </h2>
+        <div className="mt-7">
+          <p className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+            Choose a first move
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {starters.map((starter) => (
+              <button
+                key={starter.title}
+                type="button"
+                onClick={() => onSelectPrompt(starter.prompt)}
+                className="group flex min-h-[70px] items-start gap-3 rounded-lg border border-rule bg-elevated/82 p-3 text-left shadow-xs transition-[border,background,transform,box-shadow] hover:-translate-y-0.5 hover:border-rule-strong hover:bg-surface hover:shadow-md"
+              >
+                <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-rule bg-panel text-ink-dim transition-colors group-hover:text-ink">
+                  <Sparkles className="size-3.5" strokeWidth={1.8} />
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold text-ink-strong">
+                    {starter.title}
+                  </span>
+                  <span className="mt-1 line-clamp-2 block text-[11.5px] leading-snug text-ink-faint">
+                    {starter.prompt}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
-function summarizeInput(
-  tool: string,
-  input?: Record<string, unknown>,
-): string | null {
-  if (!input) return null
-  if (typeof input.path === 'string') return input.path
-  if (typeof input.type === 'string' && typeof input.slug === 'string') {
-    return `${input.type}/${input.slug}`
+function messageText(message: UIMessage): string {
+  return message.parts
+    .filter((p) => p.type === 'text')
+    .map((p) => (p as { text?: string }).text ?? '')
+    .join('')
+}
+
+function MessageView({
+  message,
+  previousMessage = null,
+  primary = false,
+}: {
+  message: UIMessage
+  previousMessage?: UIMessage | null
+  primary?: boolean
+}) {
+  const streaming = (message as { status?: string }).status === 'streaming'
+  const now = useNow(streaming)
+  if (message.role === 'system') return null
+  const isUser = message.role === 'user'
+  const text = messageText(message)
+  const toolCalls = message.parts.filter(
+    (part) =>
+      part.type !== 'reasoning' &&
+      part.type !== 'text' &&
+      isToolActivityPart(part),
+  ) as ToolActivityPart[]
+  const workedDurationMs = !isUser
+    ? workedDurationForMessage(message, previousMessage, now)
+    : null
+
+  if (!text.trim() && toolCalls.length === 0) return null
+
+  return (
+    <div
+      className={`group/message flex w-full ${
+        isUser ? 'justify-end' : 'justify-start'
+      }`}
+    >
+      <div
+        className={`min-w-0 ${
+          isUser
+            ? primary
+              ? 'max-w-[76%]'
+              : 'max-w-[88%]'
+            : 'max-w-full flex-1'
+        }`}
+      >
+        <div
+          className={`mb-1.5 flex items-center gap-1.5 px-1 ${
+            isUser ? 'justify-end' : 'justify-start'
+          }`}
+        >
+          {!isUser && <DohcMark size={13} />}
+          <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+            {isUser ? 'you' : 'dohc'}
+          </span>
+          {streaming && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-ink-faint">
+              <span className="size-1 rounded-full bg-success animate-pulse" />
+              writing
+            </span>
+          )}
+        </div>
+
+        <div
+          className={
+            isUser
+              ? 'rounded-lg border border-rule bg-elevated px-3.5 py-2.5 shadow-xs'
+              : primary
+                ? 'rounded-lg border border-rule bg-surface/72 px-4 py-3 shadow-xs'
+                : 'rounded-lg border border-rule bg-elevated/50 px-3 py-2.5'
+          }
+        >
+          {!isUser && toolCalls.length > 0 && (
+            <AgentWorkTrace
+              toolCalls={toolCalls}
+              durationMs={workedDurationMs}
+              streaming={streaming}
+              compact={!primary}
+              hasText={Boolean(text.trim())}
+            />
+          )}
+          {text.trim() && (
+            isUser ? (
+              <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
+                {text}
+              </div>
+            ) : (
+              <Markdown>{text}</Markdown>
+            )
+          )}
+        </div>
+
+        {text.trim() && (
+          <MessageActions text={text} align={isUser ? 'right' : 'left'} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AgentWorkTrace({
+  toolCalls,
+  durationMs,
+  streaming,
+  compact,
+  hasText,
+}: {
+  toolCalls: ToolActivityPart[]
+  durationMs: number | null
+  streaming: boolean
+  compact: boolean
+  hasText: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const summary = agentWorkTraceSummary(toolCalls)
+  const duration = formatWorkedDuration(durationMs)
+  const label = streaming ? `Working for ${duration}` : `Worked for ${duration}`
+
+  return (
+    <div
+      className={`${
+        hasText ? 'mb-4 border-b border-rule pb-3' : ''
+      } ${compact ? 'text-[11px]' : 'text-[12px]'}`}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="group/trace inline-flex max-w-full items-center gap-2 rounded-md px-1 py-1 text-left text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+        aria-expanded={open}
+      >
+        <span className="truncate font-medium">{label}</span>
+        <ChevronDown
+          className={`size-3 shrink-0 transition-transform ${
+            open ? 'rotate-180' : ''
+          }`}
+          strokeWidth={1.8}
+        />
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center gap-2 text-ink-faint">
+            <span className="h-px min-w-4 flex-1 bg-rule" />
+            <span className="truncate font-medium">{summary.label}</span>
+            <span className="h-px min-w-4 flex-1 bg-rule" />
+          </div>
+          <div className="space-y-1.5">
+            {toolCalls.map((part, index) => (
+              <ToolTraceDetails key={toolTraceKey(part, index)} part={part} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ToolTraceDetails({ part }: { part: ToolActivityPart }) {
+  const presentation = toolCallPresentation(part)
+  const inputPayload = formatToolPayload(presentation.input)
+  const outputPayload =
+    presentation.errorText ?? formatToolPayload(presentation.output)
+
+  return (
+    <details className="group/tool rounded-md border border-transparent open:border-rule open:bg-panel/55">
+      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1 text-ink-dim transition-colors hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
+        <ToolActivityIcon kind={presentation.kind} />
+        <span className="shrink-0 font-medium text-ink">
+          {presentation.label}
+        </span>
+        {presentation.detail && (
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">
+            {presentation.detail}
+          </span>
+        )}
+        {presentation.state && presentation.state !== 'output-available' && (
+          <span className="shrink-0 rounded-full border border-rule bg-elevated px-1.5 py-0.5 text-[10px] font-medium text-ink-faint">
+            {presentation.state}
+          </span>
+        )}
+        <ChevronDown
+          className="size-3 shrink-0 text-ink-faint transition-transform group-open/tool:rotate-180"
+          strokeWidth={1.8}
+        />
+      </summary>
+      <div className="space-y-2 px-2 pb-2 pt-1">
+        <ToolPayloadBlock label="Tool" value={presentation.toolName} />
+        {inputPayload && <ToolPayloadBlock label="Input" value={inputPayload} />}
+        {outputPayload && (
+          <ToolPayloadBlock
+            label={presentation.errorText ? 'Error' : 'Output'}
+            value={outputPayload}
+          />
+        )}
+      </div>
+    </details>
+  )
+}
+
+function ToolPayloadBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-rule bg-page/70">
+      <div className="border-b border-rule px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+        {label}
+      </div>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-2 py-2 font-mono text-[11px] leading-relaxed text-ink-dim">
+        {value}
+      </pre>
+    </div>
+  )
+}
+
+function workedDurationForMessage(
+  message: UIMessage,
+  previousMessage: UIMessage | null,
+  now: number,
+): number | null {
+  const previousTime =
+    previousMessage?.role === 'user'
+      ? (previousMessage as { _creationTime?: number })._creationTime
+      : null
+  const assistantTime = (message as { _creationTime?: number })._creationTime
+  if (typeof previousTime !== 'number') return null
+  const status = (message as { status?: string }).status
+  const end = status === 'streaming' ? now : assistantTime
+  if (typeof end !== 'number') return null
+  return Math.max(0, end - previousTime)
+}
+
+function useNow(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!enabled) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [enabled])
+  return now
+}
+
+function toolTraceKey(part: ToolActivityPart, index: number): string {
+  const callId =
+    typeof (part as { toolCallId?: unknown }).toolCallId === 'string'
+      ? (part as { toolCallId: string }).toolCallId
+      : null
+  return callId ?? `${part.type ?? 'tool'}-${index}`
+}
+
+function ToolActivityIcon({ kind }: { kind: ToolActivityKind }) {
+  const Icon =
+    kind === 'command'
+      ? SquareTerminal
+      : kind === 'search'
+        ? Search
+        : kind === 'file_change'
+          ? Pencil
+          : kind === 'read'
+            ? FileText
+            : Sparkles
+  return <Icon className="size-3 shrink-0 text-ink-faint" strokeWidth={1.8} />
+}
+
+function MessageActions({
+  text,
+  align,
+}: {
+  text: string
+  align: 'left' | 'right'
+}) {
+  const [copied, setCopied] = useState(false)
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1300)
+    } catch {
+      setCopied(false)
+    }
   }
-  if (Array.isArray(input.items)) return `(${input.items.length} items)`
-  if (typeof input.src === 'string') return input.src.slice(0, 60)
-  if (typeof input.type === 'string') return String(input.type)
-  return null
+
+  return (
+    <div
+      className={`mt-1 flex opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 ${
+        align === 'right' ? 'justify-end' : 'justify-start'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[10.5px] font-medium text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+        title="Copy message"
+        aria-label="Copy message"
+      >
+        {copied ? (
+          <CheckCircle2 className="size-3 text-success" strokeWidth={2} />
+        ) : (
+          <Clipboard className="size-3" strokeWidth={1.8} />
+        )}
+        <span>{copied ? 'copied' : 'copy'}</span>
+      </button>
+    </div>
+  )
 }

@@ -21,6 +21,9 @@ import { Route as AppWWsIdRouteImport } from './routes/_app.w.$wsId'
 import { Route as AppSharedShareIdRouteImport } from './routes/_app.shared.$shareId'
 import { Route as AppPAtomIdRouteImport } from './routes/_app.p.$atomId'
 import { Route as AppWWsIdIndexRouteImport } from './routes/_app.w.$wsId.index'
+import { Route as AppWWsIdGraphRouteImport } from './routes/_app.w.$wsId.graph'
+import { Route as AppWWsIdFilesRouteImport } from './routes/_app.w.$wsId.files'
+import { Route as AppWWsIdAgentRouteImport } from './routes/_app.w.$wsId.agent'
 import { Route as AppWWsIdSharedShareIdRouteImport } from './routes/_app.w.$wsId.shared.$shareId'
 import { Route as AppWWsIdPAtomIdRouteImport } from './routes/_app.w.$wsId.p.$atomId'
 
@@ -83,6 +86,21 @@ const AppWWsIdIndexRoute = AppWWsIdIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppWWsIdRoute,
 } as any)
+const AppWWsIdGraphRoute = AppWWsIdGraphRouteImport.update({
+  id: '/graph',
+  path: '/graph',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
+const AppWWsIdFilesRoute = AppWWsIdFilesRouteImport.update({
+  id: '/files',
+  path: '/files',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
+const AppWWsIdAgentRoute = AppWWsIdAgentRouteImport.update({
+  id: '/agent',
+  path: '/agent',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
 const AppWWsIdSharedShareIdRoute = AppWWsIdSharedShareIdRouteImport.update({
   id: '/shared/$shareId',
   path: '/shared/$shareId',
@@ -105,6 +123,9 @@ export interface FileRoutesByFullPath {
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/w/$wsId/agent': typeof AppWWsIdAgentRoute
+  '/w/$wsId/files': typeof AppWWsIdFilesRoute
+  '/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/w/$wsId/': typeof AppWWsIdIndexRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
@@ -119,6 +140,9 @@ export interface FileRoutesByTo {
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/w/$wsId/agent': typeof AppWWsIdAgentRoute
+  '/w/$wsId/files': typeof AppWWsIdFilesRoute
+  '/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/w/$wsId': typeof AppWWsIdIndexRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
@@ -136,6 +160,9 @@ export interface FileRoutesById {
   '/api/auth/callback': typeof ApiAuthCallbackRoute
   '/api/auth/sign-in': typeof ApiAuthSignInRoute
   '/api/auth/sign-out': typeof ApiAuthSignOutRoute
+  '/_app/w/$wsId/agent': typeof AppWWsIdAgentRoute
+  '/_app/w/$wsId/files': typeof AppWWsIdFilesRoute
+  '/_app/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/_app/w/$wsId/': typeof AppWWsIdIndexRoute
   '/_app/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/_app/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
@@ -153,6 +180,9 @@ export interface FileRouteTypes {
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/w/$wsId/agent'
+    | '/w/$wsId/files'
+    | '/w/$wsId/graph'
     | '/w/$wsId/'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
@@ -167,6 +197,9 @@ export interface FileRouteTypes {
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/w/$wsId/agent'
+    | '/w/$wsId/files'
+    | '/w/$wsId/graph'
     | '/w/$wsId'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
@@ -183,6 +216,9 @@ export interface FileRouteTypes {
     | '/api/auth/callback'
     | '/api/auth/sign-in'
     | '/api/auth/sign-out'
+    | '/_app/w/$wsId/agent'
+    | '/_app/w/$wsId/files'
+    | '/_app/w/$wsId/graph'
     | '/_app/w/$wsId/'
     | '/_app/w/$wsId/p/$atomId'
     | '/_app/w/$wsId/shared/$shareId'
@@ -284,6 +320,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppWWsIdIndexRouteImport
       parentRoute: typeof AppWWsIdRoute
     }
+    '/_app/w/$wsId/graph': {
+      id: '/_app/w/$wsId/graph'
+      path: '/graph'
+      fullPath: '/w/$wsId/graph'
+      preLoaderRoute: typeof AppWWsIdGraphRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/files': {
+      id: '/_app/w/$wsId/files'
+      path: '/files'
+      fullPath: '/w/$wsId/files'
+      preLoaderRoute: typeof AppWWsIdFilesRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/agent': {
+      id: '/_app/w/$wsId/agent'
+      path: '/agent'
+      fullPath: '/w/$wsId/agent'
+      preLoaderRoute: typeof AppWWsIdAgentRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
     '/_app/w/$wsId/shared/$shareId': {
       id: '/_app/w/$wsId/shared/$shareId'
       path: '/shared/$shareId'
@@ -302,12 +359,18 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppWWsIdRouteChildren {
+  AppWWsIdAgentRoute: typeof AppWWsIdAgentRoute
+  AppWWsIdFilesRoute: typeof AppWWsIdFilesRoute
+  AppWWsIdGraphRoute: typeof AppWWsIdGraphRoute
   AppWWsIdIndexRoute: typeof AppWWsIdIndexRoute
   AppWWsIdPAtomIdRoute: typeof AppWWsIdPAtomIdRoute
   AppWWsIdSharedShareIdRoute: typeof AppWWsIdSharedShareIdRoute
 }
 
 const AppWWsIdRouteChildren: AppWWsIdRouteChildren = {
+  AppWWsIdAgentRoute: AppWWsIdAgentRoute,
+  AppWWsIdFilesRoute: AppWWsIdFilesRoute,
+  AppWWsIdGraphRoute: AppWWsIdGraphRoute,
   AppWWsIdIndexRoute: AppWWsIdIndexRoute,
   AppWWsIdPAtomIdRoute: AppWWsIdPAtomIdRoute,
   AppWWsIdSharedShareIdRoute: AppWWsIdSharedShareIdRoute,

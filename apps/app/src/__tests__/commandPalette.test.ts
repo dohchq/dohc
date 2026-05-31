@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { buildCommandPaletteEntries } from '../components/CommandPalette'
 import { firePaletteCommand, firePaletteSkill } from '../lib/palette-fire'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const COMMAND_PALETTE_SRC = readFileSync(
+  resolve(__dirname, '../components/CommandPalette.tsx'),
+  'utf8',
+)
 
 const skills = [
   { path: '.skills/weekly-review.md', label: 'weekly-review' },
@@ -19,6 +28,8 @@ function entries(log: string[] = []) {
     onClose: () => log.push('close'),
     onFireCommand: (path) => log.push(`command:${path}`),
     onFireSkill: (path) => log.push(`skill:${path}`),
+    onPromptAgent: (prompt) => log.push(`prompt:${prompt}`),
+    onOpenAtom: (path) => log.push(`open:${path}`),
     onOpenSketch: () => log.push('sketch'),
   })
 }
@@ -59,7 +70,19 @@ describe('CommandPalette entry behavior', () => {
         id: 'sys.insert-ascii-sketch',
         title: 'Insert ASCII sketch',
         hint: 'editor · ⌘⇧D',
-        kind: undefined,
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-skill',
+        title: 'Create reusable skill',
+        hint: 'agent · save a process',
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-command',
+        title: 'Create slash command',
+        hint: 'agent · save a shortcut',
+        kind: 'system',
       },
     ])
   })
@@ -80,6 +103,49 @@ describe('CommandPalette entry behavior', () => {
     const log: string[] = []
     entries(log).find((entry) => entry.id === 'sys.insert-ascii-sketch')?.run()
     expect(log).toEqual(['close', 'sketch'])
+  })
+
+  it('skill and command creation entries route through agent prompts', () => {
+    const log: string[] = []
+    entries(log).find((entry) => entry.id === 'sys.create-skill')?.run()
+    entries(log).find((entry) => entry.id === 'sys.create-command')?.run()
+    expect(log).toEqual([
+      'close',
+      expect.stringContaining('prompt:Help me turn'),
+      'close',
+      expect.stringContaining('prompt:Help me create'),
+    ])
+  })
+
+  it('saved command and skill entries expose their editable atom path', () => {
+    expect(
+      entries()
+        .filter((entry) => entry.kind === 'command' || entry.kind === 'skill')
+        .map(({ editPath }) => editPath),
+    ).toEqual([
+      '.commands/draft-invoice.md',
+      '.commands/log-hours.md',
+      '.skills/weekly-review.md',
+      '.skills/invoice.md',
+    ])
+  })
+
+  it('saved command and skill edit actions close the palette and open the source atom', () => {
+    const log: string[] = []
+    entries(log).find((entry) => entry.id === 'skill..skills/invoice.md')?.edit?.()
+    expect(log).toEqual(['close', 'open:.skills/invoice.md'])
+  })
+})
+
+describe('CommandPalette workspace wiring', () => {
+  it('queries skills and commands in the active workspace', () => {
+    expect(COMMAND_PALETTE_SRC).toMatch(/useActiveWorkspaceId/)
+    expect(COMMAND_PALETTE_SRC).toMatch(
+      /api\.skills\.list,\s*\{\s*activeWorkspaceId\s*\}/,
+    )
+    expect(COMMAND_PALETTE_SRC).toMatch(
+      /api\.skills\.listCommands,\s*\{\s*activeWorkspaceId\s*\}/,
+    )
   })
 })
 
