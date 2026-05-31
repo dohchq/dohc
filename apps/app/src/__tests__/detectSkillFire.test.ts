@@ -5,7 +5,13 @@
  * that allowed silent prod-vs-test drift on refactor).
  */
 import { describe, it, expect } from 'vitest'
-import { detectCommandFire, detectSkillFire } from '../components/Chat'
+import {
+  composerTokenForRunnable,
+  detectCommandFire,
+  detectComposerTrigger,
+  detectSkillFire,
+  replaceTextRange,
+} from '../components/Chat'
 
 const skills = [
   { path: '.skills/weekly-review.md', label: 'weekly-review' },
@@ -19,50 +25,158 @@ const commands = [
   { path: '.commands/client/hours.md', label: 'hours' },
 ] as const
 
-describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <path> grammar)', () => {
-  it('null when prompt has no leading /skill (P3+P4 indep fold F3)', () => {
-    // The old `/<token>` grammar would have matched these as
-    // skill-fires; the fold REVERTS to the design-pinned
-    // `/skill <path>` strict grammar (skills-commands-v1 line
-    // 317 SKILL_COMMAND_RE). A user typing `/help` (a near-
-    // universal "chat help" idiom) no longer silently fires a
-    // skill named "help"; it goes to regular chat.
-    expect(detectSkillFire('/standup', skills)).toBeNull()
-    expect(detectSkillFire('/help', skills)).toBeNull()
-    expect(detectSkillFire('/.skills/weekly-review.md', skills)).toBeNull()
-    expect(detectSkillFire('weekly-review', skills)).toBeNull()
-    expect(detectSkillFire('please run weekly-review', skills)).toBeNull()
+describe('T3-style composer triggers', () => {
+  it('detects /command only at the start of the current line', () => {
+    expect(detectComposerTrigger('/dra', 4)).toEqual({
+      kind: 'command',
+      query: 'dra',
+      rangeStart: 0,
+      rangeEnd: 4,
+    })
+    expect(detectComposerTrigger('Please run /dra', 'Please run /dra'.length)).toBeNull()
   })
 
-  it('null when /skill has no path argument', () => {
-    expect(detectSkillFire('/skill', skills)).toBeNull()
-    expect(detectSkillFire('/skill ', skills)).toBeNull()
-    expect(detectSkillFire('/skill   ', skills)).toBeNull()
-  })
-
-  it('null on case variation (case-sensitive `skill`)', () => {
-    expect(detectSkillFire('/Skill .skills/foo.md', skills)).toBeNull()
-    expect(detectSkillFire('/SKILL .skills/foo.md', skills)).toBeNull()
-  })
-
-  it('matches /skill <canonical-path>', () => {
-    const r = detectSkillFire('/skill .skills/weekly-review.md', skills)
-    expect(r).toEqual({
-      matched: { path: '.skills/weekly-review.md', label: 'weekly-review' },
-      extras: null,
+  it('detects $skill at the cursor as an inline token', () => {
+    const text = 'Use $stand'
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: 'skill',
+      query: 'stand',
+      rangeStart: 'Use '.length,
+      rangeEnd: text.length,
     })
   })
 
-  it('matches /skill <label> when label is unique', () => {
-    const r = detectSkillFire('/skill standup', skills)
+  it('replaces a composer trigger with a trailing-space token', () => {
+    expect(replaceTextRange('Use $sta today', 4, 8, '$standup ')).toEqual({
+      text: 'Use $standup today',
+      cursor: 'Use $standup '.length,
+    })
+  })
+
+  it('uses canonical paths for duplicate labels selected from the menu', () => {
+    expect(
+      composerTokenForRunnable(
+        'skill',
+        { path: '.skills/team/weekly-review.md', label: 'weekly-review' },
+        skills,
+      ),
+    ).toBe('.skills/team/weekly-review.md')
+    expect(
+      composerTokenForRunnable(
+        'command',
+        { path: '.commands/draft-invoice.md', label: 'draft-invoice' },
+        commands,
+      ),
+    ).toBe('draft-invoice')
+  })
+
+  it('returns null when cursor is at position 0 with no trigger character', () => {
+    expect(detectComposerTrigger('hello world', 0)).toBeNull()
+  })
+
+  it('detects /command with cursor at exact end of command text', () => {
+    const text = '/invoice'
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: 'command',
+      query: 'invoice',
+      rangeStart: 0,
+      rangeEnd: text.length,
+    })
+  })
+
+  it('detects $ at start of text as a skill trigger', () => {
+    const text = '$standup'
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: 'skill',
+      query: 'standup',
+      rangeStart: 0,
+      rangeEnd: text.length,
+    })
+  })
+
+  it('clamps cursor beyond text length to text length', () => {
+    const text = '/cmd'
+    // cursor beyond length should be treated the same as at-end
+    expect(detectComposerTrigger(text, 9999)).toEqual({
+      kind: 'command',
+      query: 'cmd',
+      rangeStart: 0,
+      rangeEnd: text.length,
+    })
+  })
+
+  it('detects /command on second line when cursor is on that line', () => {
+    const text = 'Some context\n/weekly'
+    const cursor = text.length
+    expect(detectComposerTrigger(text, cursor)).toEqual({
+      kind: 'command',
+      query: 'weekly',
+      rangeStart: 'Some context\n'.length,
+      rangeEnd: cursor,
+    })
+  })
+
+  it('replaceTextRange handles out-of-bounds rangeStart by clamping to 0', () => {
+    const result = replaceTextRange('hello', -5, 2, 'X')
+    expect(result.text).toBe('Xllo')
+    expect(result.cursor).toBe(1)
+  })
+
+  it('replaceTextRange inserts at the end when rangeStart equals text length', () => {
+    const result = replaceTextRange('hello', 5, 5, ' world')
+    expect(result.text).toBe('hello world')
+    expect(result.cursor).toBe(11)
+  })
+
+  it('composerTokenForRunnable uses label when it is unique in the list', () => {
+    const singleSkill = [{ path: '.skills/standup.md', label: 'standup' }]
+    expect(
+      composerTokenForRunnable('skill', singleSkill[0], singleSkill),
+    ).toBe('standup')
+  })
+
+  it('composerTokenForRunnable uses path when same label appears more than once', () => {
+    const colliding = [
+      { path: '.skills/a/standup.md', label: 'standup' },
+      { path: '.skills/b/standup.md', label: 'standup' },
+    ]
+    expect(
+      composerTokenForRunnable('skill', colliding[0], colliding),
+    ).toBe('.skills/a/standup.md')
+  })
+})
+
+describe('Skills — detectSkillFire ($skill grammar, T3-style)', () => {
+
+    expect(detectSkillFire('/standup', skills)).toBeNull()
+    expect(detectSkillFire('/help', skills)).toBeNull()
+    expect(detectSkillFire('/.skills/weekly-review.md', skills)).toBeNull()
+    expect(detectSkillFire('please run weekly-review', skills)).toBeNull()
+  })
+
+  it('null when $ has no skill token', () => {
+    expect(detectSkillFire('$', skills)).toBeNull()
+    expect(detectSkillFire('Use $ ', skills)).toBeNull()
+  })
+
+  it('matches $<canonical-path>', () => {
+    const r = detectSkillFire('$.skills/weekly-review.md', skills)
+    expect(r).toEqual({
+      matched: { path: '.skills/weekly-review.md', label: 'weekly-review' },
+      extras: '$.skills/weekly-review.md',
+    })
+  })
+
+  it('matches $<label> when label is unique', () => {
+    const r = detectSkillFire('$standup', skills)
     expect(r).toEqual({
       matched: { path: '.skills/team/standup.md', label: 'standup' },
-      extras: null,
+      extras: '$standup',
     })
   })
 
   it('surfaces ambiguous on label collision', () => {
-    const r = detectSkillFire('/skill weekly-review', skills)
+    const r = detectSkillFire('$weekly-review', skills)
     expect(r).not.toBeNull()
     expect(r).toHaveProperty('ambiguous')
     if (r && 'ambiguous' in r) {
@@ -73,37 +187,27 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
     }
   })
 
-  it('extras AFTER the path are PRESERVED (P3+P4 indep fold F4)', () => {
-    // Old behavior discarded extras silently; the fold preserves
-    // them so the model sees the user's brief at step 1+ (after
-    // run_skill returns the body).
+  it('preserves the full prompt as extras so inline skill use keeps user context', () => {
     const r = detectSkillFire(
-      '/skill standup with some context about today',
+      'Use $standup with some context about today',
       skills,
     )
     expect(r).toEqual({
       matched: { path: '.skills/team/standup.md', label: 'standup' },
-      extras: 'with some context about today',
+      extras: 'Use $standup with some context about today',
     })
   })
 
   it('extras across multiple lines are preserved', () => {
     const r = detectSkillFire(
-      '/skill standup\nLine 2.\nLine 3.',
+      '$standup\nLine 2.\nLine 3.',
       skills,
     )
-    expect(r && 'matched' in r ? r.extras : null).toBe('Line 2.\nLine 3.')
+    expect(r && 'matched' in r ? r.extras : null).toBe('$standup\nLine 2.\nLine 3.')
   })
 
   it('null when path matches nothing', () => {
-    expect(detectSkillFire('/skill nonexistent', skills)).toBeNull()
-  })
-
-  it('respects leading whitespace before /skill', () => {
-    expect(detectSkillFire('  /skill standup', skills)).toEqual({
-      matched: { path: '.skills/team/standup.md', label: 'standup' },
-      extras: null,
-    })
+    expect(detectSkillFire('$nonexistent', skills)).toBeNull()
   })
 
   it('exact path wins over label-match (path is canonical)', () => {
@@ -111,15 +215,15 @@ describe('Track-3 P3.1 + P3+P4 fold — detectSkillFire (DESIGN-PINNED /skill <p
       { path: '.skills/foo.md', label: 'foo' },
       { path: '.skills/bar.md', label: 'foo' }, // colliding label
     ]
-    const r = detectSkillFire('/skill .skills/foo.md', colliding)
+    const r = detectSkillFire('$.skills/foo.md', colliding)
     expect(r).toEqual({
       matched: { path: '.skills/foo.md', label: 'foo' },
-      extras: null,
+      extras: '$.skills/foo.md',
     })
   })
 
   it('empty skills list ⇒ no match (graceful)', () => {
-    expect(detectSkillFire('/skill anything', [])).toBeNull()
+    expect(detectSkillFire('$anything', [])).toBeNull()
   })
 })
 

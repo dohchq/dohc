@@ -69,7 +69,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete THROWS with .context/me.md but no query dashboard', async () => {
+  it('_complete THROWS with .context/me.md but no source-backed cockpit', async () => {
     const t = convexTest(schema, modules)
     await seedAtom(t, '.context/me.md', '# Me\nfreelance designer')
     await expect(
@@ -77,22 +77,66 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete THROWS with a query dashboard but no .context/me.md', async () => {
+  it('_complete THROWS with a cockpit but no .context/me.md', async () => {
     const t = convexTest(schema, modules)
-    await seedAtom(t, 'dashboard.md', '# Dash\n```query\nentities.list("x")\n```')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<section>Active projects: {= count(projects.* status = active)}</section>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild the cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd one real project detail.',
+    )
     await expect(
       t.mutation(internal.onboarding._complete, { workspaceId: W }),
     ).rejects.toThrow(/not populated/)
   })
 
-  it('_complete SUCCEEDS only with .context/me.md AND a populated dashboard → DONE', async () => {
+  it('_complete THROWS with identity + cockpit but no setup run', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
     await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
     await seedAtom(
       t,
-      'dashboard.md',
-      '# Workspace\n{hours: 13}\n```query\nentities.list("booking")\n```',
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<section>Active projects: {= count(projects.* status = active)}</section>',
+    )
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/setup run/i)
+  })
+
+  it('_complete SUCCEEDS only with identity, sources, home.html, and setup run → DONE', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<section><h1>Home</h1><p>Active projects: {= count(projects.* status = active)}</p></section>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild the project cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd the next project checkpoint.',
     )
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
@@ -145,11 +189,26 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       entityCount: 0,
       hasMe: false,
       hasDashboardWithQuery: false,
+      hasCockpitView: false,
+      hasSetupRun: false,
+      sourceCount: 0,
       mePath: null,
       dashboardPath: null,
+      cockpitPath: null,
+      runPath: null,
     })
     await seedAtom(t, '.context/me.md', '# Me')
-    await seedAtom(t, 'dashboard.md', '```query\nentities.list("x")\n```')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+    )
     await t.run((ctx) =>
       ctx.db.insert('entities', {
         workspaceId: W,
@@ -163,8 +222,13 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       entityCount: 1,
       hasMe: true,
       hasDashboardWithQuery: true,
+      hasCockpitView: true,
+      hasSetupRun: true,
+      sourceCount: 1,
       mePath: '.context/me.md',
-      dashboardPath: 'dashboard.md',
+      dashboardPath: 'home.html',
+      cockpitPath: 'home.html',
+      runPath: '.runs/setup.md',
     })
   })
 
@@ -180,7 +244,17 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DEFERRED')
     // a deferred user who genuinely finishes still reaches DONE (DONE>DEFERRED)
     await seedAtom(t, '.context/me.md', '# Me')
-    await seedAtom(t, 'd.md', '```query\nx\n```')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+    )
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
   })
@@ -191,8 +265,18 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
     await seedAtom(
       t,
-      'dashboard.md',
-      '# Workspace\n```query\nentities.list("booking")\n```',
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
     )
 
     await asW(t).mutation(api.onboarding.completeIfReady, {})
@@ -208,6 +292,104 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       asW(t).mutation(api.onboarding.completeIfReady, {}),
     ).rejects.toThrow(/not populated/)
     expect(await asW(t).query(api.onboarding.state, {})).toBe('IN_PROGRESS')
+  })
+})
+
+describe('source-backed cockpit and setup run heuristics', () => {
+  it('_complete THROWS when home.html has sources metadata but no live view formula', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    // home.html has sources frontmatter but no {= formula or ```query
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active projects: many</p>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n\n## View\n- home.html\n\n## Next Action\nAdd detail.',
+    )
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/not populated/)
+  })
+
+  it('_complete THROWS when .runs/setup.md is missing required sections', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    // Missing ## View and ## Next Action sections
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.\n\n## Sources\n- projects/acme.md\n',
+    )
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/setup run/i)
+  })
+
+  it('progress sourceCount excludes the identity file, .context/ files, and .runs/ files', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me\ndesigner {rate: 150}')
+    await seedAtom(t, '.context/company.md', '# Company\n{type: startup}')
+    await seedAtom(t, '.runs/setup.md', '# Setup Run\n\n## Objective\nX\n\n## Sources\nS\n\n## View\nV\n\n## Next Action\nN')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(t, 'clients/beta.md', '# Beta\n{budget: 5000}')
+    const progress = await asW(t).query(api.onboarding.progress, {})
+    // Only projects/acme.md and clients/beta.md count as source atoms
+    expect(progress.sourceCount).toBe(2)
+  })
+
+  it('progress cockpitPath prefers home.html over dashboard.html', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me\n{rate: 100}')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(
+      t,
+      'dashboard.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    const progress = await asW(t).query(api.onboarding.progress, {})
+    expect(progress.cockpitPath).toBe('home.html')
+  })
+
+  it('progress runPath is null when no complete .runs/setup.md exists', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me\n{rate: 100}')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    // No .runs/setup.md seeded
+    const progress = await asW(t).query(api.onboarding.progress, {})
+    expect(progress.hasSetupRun).toBe(false)
+    expect(progress.runPath).toBeNull()
+  })
+
+  it('progress reports hasSetupRun=false when setup.md is incomplete', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me\n{rate: 100}')
+    // Incomplete setup run: missing ## View and ## Next Action
+    await seedAtom(
+      t,
+      '.runs/setup.md',
+      '# Setup Run\n\n## Objective\nBuild a cockpit.',
+    )
+    const progress = await asW(t).query(api.onboarding.progress, {})
+    expect(progress.hasSetupRun).toBe(false)
+    expect(progress.runPath).toBeNull()
   })
 })
 
