@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import {
+  AgentRunRail,
   agentRailChangeSummary,
   agentRailScopedFiles,
   isWithinProject,
@@ -61,5 +64,35 @@ describe('AgentRunRail scope', () => {
       userCount: 0,
       changedPaths: [],
     })
+  })
+
+  it('renders chat-start scoped change signals for the active project', () => {
+    const html = renderToStaticMarkup(
+      createElement(AgentRunRail, {
+        projectPath: 'dohc',
+        activeThread: {
+          threadId: 'thread-1',
+          title: 'dohc run',
+          projectPath: 'dohc',
+          createdAt: 100,
+          updatedAt: 250,
+          pinnedAt: null,
+        },
+        files: [
+          { path: 'dohc/new.md', updatedAt: 150, source: 'agent' },
+          { path: 'dohc/manual.md', updatedAt: 170, source: 'user' },
+          { path: 'dohc/old.md', updatedAt: 90, source: 'agent' },
+          { path: 'opnft-fun/plan.md', updatedAt: 180, source: 'agent' },
+        ],
+      }),
+    )
+
+    expect(html).toContain('Changes')
+    expect(html).toContain('Files touched since this chat started')
+    expect(html).toContain('+2')
+    expect(html).toContain('files')
+    expect(html).toContain('Scope')
+    expect(html).toContain('dohc')
+    expect(html).not.toContain('opnft-fun')
   })
 })

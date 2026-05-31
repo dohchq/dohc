@@ -106,6 +106,17 @@ export function skillBodyBytes(body: string): number {
   return TEXT_ENCODER.encode(body).byteLength
 }
 
+const DEFAULT_THREAD_LIST_LIMIT = 80
+const MAX_THREAD_LIST_LIMIT = 100
+const THREAD_LIST_SCAN_MULTIPLIER = 4
+
+function threadListLimit(limit?: number): number {
+  if (typeof limit !== 'number' || !Number.isFinite(limit)) {
+    return DEFAULT_THREAD_LIST_LIMIT
+  }
+  return Math.max(1, Math.min(MAX_THREAD_LIST_LIMIT, Math.floor(limit)))
+}
+
 // skills-commands-v1 §3.1 — DETERMINISTIC label derivation for
 // elevated-atom previews (NO user-authored prose). Pure function
 // of path; basename minus .md ext. Round-5 FAIL-2 fold.
@@ -2229,13 +2240,29 @@ async function threadRefRowsForWorkspaceProject(
   return rows
 }
 
-async function threadRefRowsForWorkspace(ctx: any, workspaceId: string) {
-  const rows = []
-  const query = ctx.db
+async function threadRefRowsForWorkspace(
+  ctx: any,
+  workspaceId: string,
+  limit: number,
+) {
+  const rowsById = new Map<string, any>()
+  const scanLimit = Math.max(limit * THREAD_LIST_SCAN_MULTIPLIER, limit)
+  const recentRows = await ctx.db
     .query('threadRefs')
-    .withIndex('by_workspace', (q: any) => q.eq('workspaceId', workspaceId))
-  for await (const row of query) rows.push(row)
-  return rows
+    .withIndex('by_workspace_updated_at', (q: any) =>
+      q.eq('workspaceId', workspaceId),
+    )
+    .order('desc')
+    .take(scanLimit)
+  const pinnedRows = await ctx.db
+    .query('threadRefs')
+    .withIndex('by_workspace_pinned_at_updated_at', (q: any) =>
+      q.eq('workspaceId', workspaceId),
+    )
+    .order('desc')
+    .take(scanLimit)
+  for (const row of [...pinnedRows, ...recentRows]) rowsById.set(row._id, row)
+  return [...rowsById.values()]
 }
 
 export const ensureThread = mutation({
@@ -2312,10 +2339,14 @@ export const createThread = mutation({
 })
 
 export const listThreads = query({
-  args: { activeWorkspaceId: v.optional(v.string()) },
-  handler: async (ctx, { activeWorkspaceId }) => {
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, { activeWorkspaceId, limit }) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const rows = await threadRefRowsForWorkspace(ctx, workspaceId)
+    const boundedLimit = threadListLimit(limit)
+    const rows = await threadRefRowsForWorkspace(ctx, workspaceId, boundedLimit)
     return rows
       .filter((row) => !isInternalProjectPath(row.projectPath))
       .sort(
@@ -2324,6 +2355,7 @@ export const listThreads = query({
           (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0) ||
           (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
       )
+      .slice(0, boundedLimit)
       .map((row) => ({
         threadId: row.threadId,
         projectPath: row.projectPath ?? null,

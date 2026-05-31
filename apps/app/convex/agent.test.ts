@@ -130,6 +130,34 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     })
   })
 
+  it('listThreads returns a bounded recent page for large chat histories', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 90; i++) {
+        await ctx.db.insert('threadRefs', {
+          workspaceId: A,
+          threadId: `visible-${i}`,
+          projectPath: i % 2 === 0 ? 'dohc' : undefined,
+          title: `Visible ${i}`,
+          updatedAt: 1_000 + i,
+        })
+      }
+    })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows).toHaveLength(80)
+    expect(rows.at(0)).toMatchObject({
+      threadId: 'visible-89',
+      title: 'Visible 89',
+    })
+    expect(rows.at(-1)).toMatchObject({
+      threadId: 'visible-10',
+      title: 'Visible 10',
+    })
+  })
+
   it('setThreadPinned moves a chat to the top without changing ownership', async () => {
     const t = convexTest(schema, modules)
     await seedThreads(t)

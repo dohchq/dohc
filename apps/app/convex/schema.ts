@@ -331,6 +331,12 @@ export default defineSchema({
   })
     .index('by_workspace', ['workspaceId'])
     .index('by_workspace_project', ['workspaceId', 'projectPath'])
+    .index('by_workspace_updated_at', ['workspaceId', 'updatedAt'])
+    .index('by_workspace_pinned_at_updated_at', [
+      'workspaceId',
+      'pinnedAt',
+      'updatedAt',
+    ])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
