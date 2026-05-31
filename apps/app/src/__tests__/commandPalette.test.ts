@@ -2,6 +2,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { useQuery } from 'convex/react'
+import { getFunctionName } from 'convex/server'
 import {
   buildCommandPaletteEntries,
   CommandPalette,
@@ -148,14 +149,20 @@ describe('CommandPalette entry behavior', () => {
 
 describe('CommandPalette workspace wiring', () => {
   it('queries skills and commands in the active workspace', () => {
-    const calls: { args: unknown }[] = []
+    const calls: { name: string; args: unknown }[] = []
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
-    useQueryMock.mockImplementation((_ref: unknown, args: unknown) => {
-      calls.push({ args })
-      if (calls.length === 1) {
+    useQueryMock.mockImplementation((ref: unknown, args: unknown) => {
+      const name = getFunctionName(ref as never)
+      const activeWorkspaceId =
+        typeof args === 'object' && args !== null
+          ? (args as { activeWorkspaceId?: unknown }).activeWorkspaceId
+          : undefined
+      calls.push({ name, args })
+      if (activeWorkspaceId !== 'ws_active') return []
+      if (name === 'skills:list') {
         return [{ path: '.skills/active.md', label: 'active-skill' }]
       }
-      if (calls.length === 2) {
+      if (name === 'skills:listCommands') {
         return [{ path: '.commands/active.md', label: 'active-command' }]
       }
       return []
@@ -172,10 +179,24 @@ describe('CommandPalette workspace wiring', () => {
       }),
     )
 
-    expect(calls.map((call) => call.args)).toEqual([
-      { activeWorkspaceId: 'ws_active' },
-      { activeWorkspaceId: 'ws_active' },
-    ])
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { name: 'skills:list', args: { activeWorkspaceId: 'ws_active' } },
+        {
+          name: 'skills:listCommands',
+          args: { activeWorkspaceId: 'ws_active' },
+        },
+      ]),
+    )
+    expect(
+      calls.every(
+        (call) =>
+          typeof call.args === 'object' &&
+          call.args !== null &&
+          (call.args as { activeWorkspaceId?: unknown }).activeWorkspaceId ===
+            'ws_active',
+      ),
+    ).toBe(true)
     expect(html).toContain('active-command')
     expect(html).toContain('active-skill')
   })

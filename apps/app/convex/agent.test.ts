@@ -253,7 +253,7 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/Internal folders/)
   })
 
-  it('renameProject moves matching folder state and chat scopes in one mutation', async () => {
+  it('renameProjectAndMoveFolder moves matching folder state and chat scopes in one mutation', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
       await ctx.db.insert('folders', {
@@ -275,10 +275,12 @@ describe('agent thread ownership — fail-closed (C1)', () => {
       })
     })
 
-    await t.withIdentity({ subject: A }).mutation(api.agent.renameProject, {
-      fromProjectPath: 'dohc',
-      toProjectPath: 'product',
-    })
+    await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.renameProjectAndMoveFolder, {
+        fromProjectPath: 'dohc',
+        toProjectPath: 'product',
+      })
 
     const folders = await t.run((ctx) =>
       ctx.db

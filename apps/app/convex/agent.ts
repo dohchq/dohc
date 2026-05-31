@@ -2430,43 +2430,60 @@ export const renameThread = mutation({
   },
 })
 
-export const renameProject = mutation({
-  args: {
-    activeWorkspaceId: v.optional(v.string()),
-    fromProjectPath: v.string(),
-    toProjectPath: v.string(),
+const renameProjectArgs = {
+  activeWorkspaceId: v.optional(v.string()),
+  fromProjectPath: v.string(),
+  toProjectPath: v.string(),
+}
+
+async function renameProjectAndMoveFolderImpl(
+  ctx: any,
+  {
+    activeWorkspaceId,
+    fromProjectPath,
+    toProjectPath,
+  }: {
+    activeWorkspaceId?: string
+    fromProjectPath: string
+    toProjectPath: string
   },
-  handler: async (
+) {
+  const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+  const identity = await ctx.auth.getUserIdentity()
+  const viewerSubject = identity?.subject ?? ''
+  const from = normalizeProjectPath(fromProjectPath)
+  const to = normalizeProjectPath(toProjectPath)
+  if (!from || !to) throw new Error('project path required')
+  if (isInternalProjectPath(from) || isInternalProjectPath(to)) {
+    throw new Error('Internal folders cannot be project chats')
+  }
+  if (from === to) return
+  const projectRows = await threadRefRowsForWorkspaceProject(
     ctx,
-    { activeWorkspaceId, fromProjectPath, toProjectPath },
-  ) => {
-    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
-    const identity = await ctx.auth.getUserIdentity()
-    const viewerSubject = identity?.subject ?? ''
-    const from = normalizeProjectPath(fromProjectPath)
-    const to = normalizeProjectPath(toProjectPath)
-    if (!from || !to) throw new Error('project path required')
-    if (isInternalProjectPath(from) || isInternalProjectPath(to)) {
-      throw new Error('Internal folders cannot be project chats')
-    }
-    if (from === to) return
-    const projectRows = await threadRefRowsForWorkspaceProject(
-      ctx,
-      workspaceId,
-      from,
-    )
-    if (projectRows.length < 1) throw new Error('project does not exist')
-    await moveFolderImpl(ctx, workspaceId, from, to, viewerSubject)
-    for (const row of projectRows) {
-      const wasFallback =
-        !row.title || row.title === fallbackThreadTitle(row.projectPath)
-      await ctx.db.patch(row._id, {
-        projectPath: to,
-        updatedAt: Date.now(),
-        ...(wasFallback ? { title: fallbackThreadTitle(to) } : {}),
-      })
-    }
-  },
+    workspaceId,
+    from,
+  )
+  if (projectRows.length < 1) throw new Error('project does not exist')
+  await moveFolderImpl(ctx, workspaceId, from, to, viewerSubject)
+  for (const row of projectRows) {
+    const wasFallback =
+      !row.title || row.title === fallbackThreadTitle(row.projectPath)
+    await ctx.db.patch(row._id, {
+      projectPath: to,
+      updatedAt: Date.now(),
+      ...(wasFallback ? { title: fallbackThreadTitle(to) } : {}),
+    })
+  }
+}
+
+export const renameProjectAndMoveFolder = mutation({
+  args: renameProjectArgs,
+  handler: renameProjectAndMoveFolderImpl,
+})
+
+export const renameProject = mutation({
+  args: renameProjectArgs,
+  handler: renameProjectAndMoveFolderImpl,
 })
 
 export const _touchThread = internalMutation({

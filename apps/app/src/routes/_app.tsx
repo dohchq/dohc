@@ -250,7 +250,9 @@ function App() {
   const setAgentThreadPinned = useMutation(api.agent.setThreadPinned)
   const deleteAgentThread = useMutation(api.agent.deleteThread)
   const renameAgentThreadMut = useMutation(api.agent.renameThread)
-  const renameAgentProjectMut = useMutation(api.agent.renameProject)
+  const renameAgentProjectAndMoveFolderMut = useMutation(
+    api.agent.renameProjectAndMoveFolder,
+  )
   const agentThreads = useQuery(api.agent.listThreads, { activeWorkspaceId })
   const upsertAtom = useMutation(api.atoms.upsert)
   const removeAtom = useMutation(api.atoms.remove)
@@ -642,7 +644,7 @@ function App() {
         throw new Error('Internal dot-folders cannot be project chats.')
       }
       await pendingSaveRef.current?.()
-      await renameAgentProjectMut({
+      await renameAgentProjectAndMoveFolderMut({
         activeWorkspaceId,
         fromProjectPath: projectPath,
         toProjectPath: target,
@@ -652,7 +654,7 @@ function App() {
     [
       activeWorkspaceId,
       agentProjectPath,
-      renameAgentProjectMut,
+      renameAgentProjectAndMoveFolderMut,
     ],
   )
 

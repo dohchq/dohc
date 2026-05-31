@@ -15,9 +15,15 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+export function isDialogFocusableCandidate(el: HTMLElement): boolean {
+  return (
+    !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true'
+  )
+}
+
 function focusableWithin(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    .filter((el) => !el.hasAttribute('disabled') && !el.getAttribute('aria-hidden'))
+    .filter(isDialogFocusableCandidate)
 }
 
 export function useDialogFocus<T extends HTMLElement = HTMLElement>({
