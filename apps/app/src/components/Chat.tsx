@@ -405,7 +405,7 @@ export function Chat({
     submit(pendingPrompt)
     onPendingHandled?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingPrompt, threadId])
+  }, [pendingPrompt, threadId, onEnsureThread, sending, busy, onPendingHandled])
 
   // P3+P4 Codex fold F2+F3: dedicated channel for programmatic
   // skill-fire (CommandPalette skill rows route here). Bypasses
