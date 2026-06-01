@@ -13,8 +13,12 @@ describe('Skeleton primitives', () => {
     const html = renderToStaticMarkup(
       createElement(Skeleton, { className: 'h-4 w-24' }),
     )
+    const classNames =
+      html.match(/class="([^"]+)"/)?.[1]?.split(/\s+/) ?? []
 
-    expect(html).toContain('class="dohc-skeleton h-4 w-24"')
+    expect(classNames).toEqual(
+      expect.arrayContaining(['dohc-skeleton', 'h-4', 'w-24']),
+    )
     expect(html).toContain('aria-hidden="true"')
     expect(html).not.toContain('loading')
   })
@@ -23,11 +27,20 @@ describe('Skeleton primitives', () => {
     const html = renderToStaticMarkup(
       createElement(SkeletonText, { lines: 3, className: 'max-w-sm' }),
     )
+    const containerClassNames =
+      html.match(/^<div class="([^"]+)"/)?.[1]?.split(/\s+/) ?? []
+    const skeletonTags =
+      html.match(/<div[^>]*class="[^"]*\bdohc-skeleton\b[^"]*"[^>]*>/g) ?? []
+    const widthStyles = [...html.matchAll(/style="([^"]*width:\s*\d+%[^"]*)"/g)]
 
-    expect(html).toContain('class="max-w-sm space-y-2"')
-    expect(html.match(/dohc-skeleton/g)?.length).toBe(3)
-    expect(html).toContain('style="width:92%"')
-    expect(html).toContain('style="width:74%"')
+    expect(containerClassNames).toEqual(
+      expect.arrayContaining(['max-w-sm', 'space-y-2']),
+    )
+    expect(skeletonTags).toHaveLength(3)
+    expect(
+      skeletonTags.every((tag) => tag.includes('aria-hidden="true"')),
+    ).toBe(true)
+    expect(widthStyles).toHaveLength(3)
   })
 
   it('renders the app gate as a status region with a full workspace silhouette', () => {

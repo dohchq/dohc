@@ -135,7 +135,6 @@ export function AgentChatSidebar({
   onOpenSearch: () => void
   user: SidebarUser
   loading?: boolean
-  loading?: boolean
 }) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(

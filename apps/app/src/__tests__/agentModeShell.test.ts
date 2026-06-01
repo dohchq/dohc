@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { agentSelectionToConvexArgs } from '../components/AgentModelPicker'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const read = (path: string) =>
@@ -12,7 +13,6 @@ const ACTIVITY = read('components/ActivityBar.tsx')
 const CHAT = read('components/Chat.tsx')
 const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
 const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
-const AGENT_MODEL_PICKER = read('components/AgentModelPicker.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -134,9 +134,10 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('selectedAgentThreadSnapshot?.threadId === threadId')
     expect(APP).toContain('if (threadId && selectedAgentThreadSnapshot?.threadId === threadId)')
     expect(CHAT).toContain('messagesLoadingFirstPage')
-    expect(CHAT).toContain('uiMessages.length === 0 && messagesLoadingFirstPage')
-    expect(CHAT).toContain('uiMessages.length === 0 && !messagesLoadingFirstPage')
-    expect(CHAT).toContain('ChatLoadingState')
+    expect(CHAT).toContain('messagesLoadingFirstPage ? (')
+    expect(CHAT).toContain('<ChatMessagesSkeleton primary={primary} />')
+    expect(CHAT).toContain(': uiMessages.length === 0 ? (')
+    expect(CHAT).not.toContain('ChatLoadingState')
   })
 
   it('polishes the primary Agent chat window into a focused work surface', () => {
@@ -179,24 +180,28 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).not.toContain('Commands & Skills')
   })
 
-  it('adds a compact multi-provider model picker to the composer', () => {
-    expect(APP).toContain('api.agent.listAgentProviders')
-    expect(APP).toContain('setAgentWorkspaceDefault')
-    expect(APP).toContain('agentProviderId')
-    expect(APP).toContain('agentSelectionFromThread')
-    expect(CHAT).toContain('AgentModelPicker')
-    expect(CHAT).toContain('agentProviderId: agentSelection.providerId')
-    expect(CHAT).toContain('agentModel: agentSelection.model')
-    expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection)')
-    expect(AGENT_CHAT_SIDEBAR).toContain('agentProviderId?: string | null')
-    expect(AGENT_MODEL_PICKER).toContain('Provider')
-    expect(AGENT_MODEL_PICKER).toContain('Reasoning')
-    expect(AGENT_MODEL_PICKER).toContain('Search models')
-    expect(AGENT_MODEL_PICKER).toContain('Default')
-    expect(AGENT_MODEL_PICKER).toContain('Recommended')
-    expect(AGENT_MODEL_PICKER).toContain('Set key')
-    expect(AGENT_MODEL_PICKER).not.toContain('<select')
-    expect(AGENT_MODEL_PICKER).not.toContain('>Rec<')
+  it('maps multi-provider picker selections to Convex args without undefined fields', () => {
+    expect(
+      agentSelectionToConvexArgs({
+        providerId: 'openai',
+        model: 'gpt-5.5',
+        reasoningEffort: 'high',
+      }),
+    ).toEqual({
+      agentProviderId: 'openai',
+      agentModel: 'gpt-5.5',
+      agentReasoningEffort: 'high',
+    })
+
+    expect(
+      agentSelectionToConvexArgs({
+        providerId: 'anthropic',
+        model: 'claude-haiku-4-5',
+      }),
+    ).toEqual({
+      agentProviderId: 'anthropic',
+      agentModel: 'claude-haiku-4-5',
+    })
   })
 
   it('keeps the Agent stream pinned only while the user is already at the bottom', () => {

@@ -28,6 +28,7 @@ import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
 import {
   AgentModelPicker,
+  agentSelectionToConvexArgs,
   type AgentModelPickerSelection,
   type AgentProviderSnapshot,
 } from './AgentModelPicker'
@@ -489,11 +490,7 @@ export function Chat({
   )
 
   const agentSelectionPayload = agentSelection
-    ? {
-        agentProviderId: agentSelection.providerId,
-        agentModel: agentSelection.model,
-        agentReasoningEffort: agentSelection.reasoningEffort,
-      }
+    ? agentSelectionToConvexArgs(agentSelection)
     : {}
 
   async function ensureActiveThread() {

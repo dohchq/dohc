@@ -23,6 +23,18 @@ export type AgentModelPickerSelection = {
   reasoningEffort?: AgentReasoningEffort
 }
 
+export function agentSelectionToConvexArgs(
+  selection: AgentModelPickerSelection,
+) {
+  return {
+    agentProviderId: selection.providerId,
+    agentModel: selection.model,
+    ...(selection.reasoningEffort
+      ? { agentReasoningEffort: selection.reasoningEffort }
+      : {}),
+  }
+}
+
 export type AgentModelPickerModel = {
   id: string
   label: string

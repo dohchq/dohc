@@ -21,6 +21,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.77",
     "@ai-sdk/openai": "3.0.67",
+    "@ai-sdk/provider": "3.0.10",
     "@convex-dev/agent": "0.6.1",
     "@convex-dev/workos-authkit": "^0.2.2",
     "@dohc/brand": "workspace:*",
@@ -41,6 +42,7 @@
     "@tiptap/extension-table-row": "^3.23.6",
     "@tiptap/extensions": "^3.23.6",
     "@tiptap/markdown": "^3.23.6",
+    "@tiptap/pm": "^3.23.6",
     "@tiptap/react": "^3.23.6",
     "@tiptap/starter-kit": "^3.23.6",
     "@workos-inc/node": "^8.0.0",
@@ -56,6 +58,7 @@
     "js-yaml": "^4.1.1",
     "lowlight": "^3.3.0",
     "lucide-react": "^1.14.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "nitro": "3.0.260429-beta",
     "prismjs": "^1.30.0",
     "react": "^19.2.5",

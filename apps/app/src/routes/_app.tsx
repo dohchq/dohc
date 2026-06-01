@@ -32,9 +32,10 @@ import {
   type AgentThreadSummary,
 } from '@/components/AgentChatSidebar'
 import { AgentRunRail } from '@/components/AgentRunRail'
-import type {
-  AgentModelPickerSelection,
-  AgentProviderSnapshot,
+import {
+  agentSelectionToConvexArgs,
+  type AgentModelPickerSelection,
+  type AgentProviderSnapshot,
 } from '@/components/AgentModelPicker'
 import { GraphView } from '@/components/GraphView'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -493,9 +494,7 @@ function App() {
       try {
         await setAgentWorkspaceDefault({
           activeWorkspaceId,
-          agentProviderId: selection.providerId,
-          agentModel: selection.model,
-          agentReasoningEffort: selection.reasoningEffort,
+          ...agentSelectionToConvexArgs(selection),
         })
         setAgentDraftSelection(selection)
         notice.success('Default model updated', selection.model)
@@ -736,11 +735,7 @@ function App() {
         activeWorkspaceId,
         projectPath,
         ...(chosenSelection
-          ? {
-              agentProviderId: chosenSelection.providerId,
-              agentModel: chosenSelection.model,
-              agentReasoningEffort: chosenSelection.reasoningEffort,
-            }
+          ? agentSelectionToConvexArgs(chosenSelection)
           : {}),
       })
       if (chosenSelection) setAgentSelectionOverride(chosenSelection)

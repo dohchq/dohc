@@ -4,6 +4,7 @@ import {
   assertAgentSelectionReady,
   listAgentProviderSnapshots,
   resolveAgentSelection,
+  toStoredAgentSelection,
   validateAgentSelection,
 } from './agentProviders'
 
@@ -96,6 +97,39 @@ describe('agent provider registry', () => {
       providerId: 'openai',
       model: 'gpt-5.5',
       reasoningEffort: 'high',
+    })
+  })
+
+  it('does not add reasoning defaults to non-reasoning models', () => {
+    expect(
+      resolveAgentSelection(null, null, {
+        agentProviderId: 'anthropic',
+        agentModel: 'claude-haiku-4-5',
+      }),
+    ).toEqual({
+      providerId: 'anthropic',
+      model: 'claude-haiku-4-5',
+    })
+  })
+
+  it('rejects invalid explicit request providers in strict resolution', () => {
+    expect(() =>
+      resolveAgentSelection(null, null, {
+        agentProviderId: 'not-real',
+        agentModel: 'gpt-5.5',
+      }),
+    ).toThrow(/Unknown provider "not-real"/)
+  })
+
+  it('omits stored reasoning effort when no reasoning was selected', () => {
+    expect(
+      toStoredAgentSelection({
+        providerId: 'anthropic',
+        model: 'claude-haiku-4-5',
+      }),
+    ).toEqual({
+      agentProviderId: 'anthropic',
+      agentModel: 'claude-haiku-4-5',
     })
   })
 

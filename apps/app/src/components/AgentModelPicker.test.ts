@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AgentModelPicker,
+  agentSelectionToConvexArgs,
   type AgentProviderSnapshot,
 } from './AgentModelPicker'
 
@@ -186,6 +187,61 @@ describe('AgentModelPicker', () => {
 
     expect(document.body.textContent).toContain('272k context')
     expect(document.body.textContent).toContain('up to 1m')
+  })
+
+  it('renders provider/model controls without falling back to native selects', async () => {
+    const onSetDefault = vi.fn()
+
+    act(() => {
+      root.render(
+        React.createElement(AgentModelPicker, {
+          providers,
+          selection: {
+            providerId: 'openai',
+            model: 'gpt-5.5',
+            reasoningEffort: 'xhigh',
+          },
+          onChange: vi.fn(),
+          onSetDefault,
+        }),
+      )
+    })
+
+    await click(container.querySelector('button[aria-label="Choose model"]'))
+
+    expect(document.body.textContent).toContain('Provider')
+    expect(document.body.textContent).toContain('Reasoning')
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).not.toBeNull()
+    expect(document.body.textContent).toContain('Default')
+    expect(document.body.textContent).toContain('Recommended')
+    expect(document.body.textContent).toContain('Set key')
+    expect(document.body.querySelector('select')).toBeNull()
+  })
+
+  it('builds Convex selection args without undefined reasoning fields', () => {
+    expect(
+      agentSelectionToConvexArgs({
+        providerId: 'anthropic',
+        model: 'claude-haiku-4-5',
+      }),
+    ).toEqual({
+      agentProviderId: 'anthropic',
+      agentModel: 'claude-haiku-4-5',
+    })
+
+    expect(
+      agentSelectionToConvexArgs({
+        providerId: 'openai',
+        model: 'gpt-5.5',
+        reasoningEffort: 'high',
+      }),
+    ).toEqual({
+      agentProviderId: 'openai',
+      agentModel: 'gpt-5.5',
+      agentReasoningEffort: 'high',
+    })
   })
 
   it('renders the picker layer in a body portal so fixed positioning uses the viewport', async () => {

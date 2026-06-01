@@ -154,6 +154,48 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     })
   })
 
+  it('setAgentWorkspaceDefault stores non-reasoning models without a reasoning field', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test')
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-test')
+    const t = convexTest(schema, modules)
+
+    await t.withIdentity({ subject: A }).mutation(api.agent.setAgentWorkspaceDefault, {
+      agentProviderId: 'openai',
+      agentModel: 'gpt-5.5',
+      agentReasoningEffort: 'high',
+    })
+    await t.withIdentity({ subject: A }).mutation(api.agent.setAgentWorkspaceDefault, {
+      agentProviderId: 'anthropic',
+      agentModel: 'claude-haiku-4-5',
+    })
+
+    const settings = await t.run(async (ctx) =>
+      await ctx.db
+        .query('workspaceSettings')
+        .withIndex('by_workspace', (q) => q.eq('workspaceId', A))
+        .first(),
+    )
+    expect(settings).toMatchObject({
+      workspaceId: A,
+      agentProviderId: 'anthropic',
+      agentModel: 'claude-haiku-4-5',
+    })
+    expect(settings).not.toHaveProperty('agentReasoningEffort')
+
+    const providers = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listAgentProviders, {})
+
+    expect(providers.workspaceDefault).toEqual({
+      providerId: 'anthropic',
+      model: 'claude-haiku-4-5',
+    })
+    expect(providers.effectiveDefault).toEqual({
+      providerId: 'anthropic',
+      model: 'claude-haiku-4-5',
+    })
+  })
+
   it('listThreads does not drop visible chats after many internal threadRefs', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
