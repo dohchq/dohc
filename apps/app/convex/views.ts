@@ -207,6 +207,15 @@ async function visibleAtomsForPackage(
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .take(ATOM_SCAN_CAP + 1)
+  if (raw.length > ATOM_SCAN_CAP) {
+    // TODO: replace this bounded workspace scan with a prefix-aware index
+    // or paginated scan so resolveViewDescriptor cannot miss late package files.
+    console.warn('[views.visibleAtomsForPackage] workspace atom scan truncated', {
+      workspaceId,
+      packageRoot,
+      atomScanCap: ATOM_SCAN_CAP,
+    })
+  }
   const bounded = raw.length > ATOM_SCAN_CAP ? raw.slice(0, ATOM_SCAN_CAP) : raw
   const prefix = `${packageRoot}/`
   const atoms: Doc<'atoms'>[] = []

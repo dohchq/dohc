@@ -76,6 +76,11 @@ describe('view SDK protocol validation', () => {
       op: 'dohc.exports.list',
       args: { selector: 'billable' },
     })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '7',
+      op: 'dohc.sources.list',
+      args: { source: '.', activeWorkspaceId: 'ws_other' },
+    })).toBeNull()
   })
 
   it('rejects prototype-shaped payloads before they reach Convex calls', () => {

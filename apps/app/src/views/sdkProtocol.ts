@@ -58,26 +58,41 @@ function stringArray(value: unknown): value is string[] | undefined {
   )
 }
 
+function hasOnlyKeys(args: Record<string, unknown>, allowed: string[]): boolean {
+  const allowedKeys = new Set(allowed)
+  return Object.keys(args).every((key) => allowedKeys.has(key))
+}
+
 function validateArgs(op: ViewRpcOp, args: Record<string, unknown>): boolean {
   switch (op) {
     case 'dohc.sources.list':
-      return optionalString(args.source)
+      return hasOnlyKeys(args, ['source']) && optionalString(args.source)
     case 'dohc.atom.get':
     case 'dohc.source.open':
-      return typeof args.path === 'string' && args.path.trim().length > 0
+      return (
+        hasOnlyKeys(args, ['path']) &&
+        typeof args.path === 'string' &&
+        args.path.trim().length > 0
+      )
     case 'dohc.fields.query':
-      return optionalString(args.source) && stringArray(args.keys)
+      return (
+        hasOnlyKeys(args, ['source', 'keys']) &&
+        optionalString(args.source) &&
+        stringArray(args.keys)
+      )
     case 'dohc.imports.list':
     case 'dohc.exports.list':
       return Object.keys(args).length === 0
     case 'dohc.agent.run':
       return (
+        hasOnlyKeys(args, ['prompt', 'sources']) &&
         typeof args.prompt === 'string' &&
         args.prompt.trim().length > 0 &&
         stringArray(args.sources)
       )
     case 'dohc.patch.propose':
       return (
+        hasOnlyKeys(args, ['path', 'summary', 'patch']) &&
         typeof args.path === 'string' &&
         args.path.trim().length > 0 &&
         typeof args.summary === 'string' &&

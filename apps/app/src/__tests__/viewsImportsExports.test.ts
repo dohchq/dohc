@@ -23,22 +23,6 @@ describe('views imports/exports integration', () => {
     ])
   })
 
-  it('does not let view code choose a cross-workspace sharing target', async () => {
-    const calls: Array<{ op: string; args: unknown }> = []
-    const dohc = createDohcClient(async (op, args) => {
-      calls.push({ op, args })
-      return { ok: true, rows: [] }
-    })
-
-    await dohc.imports.list()
-    await dohc.exports.list()
-
-    expect(calls).toEqual([
-      { op: 'dohc.imports.list', args: {} },
-      { op: 'dohc.exports.list', args: {} },
-    ])
-  })
-
   it('only exposes read-side sharing helpers to views', () => {
     const dohc = createDohcClient(async () => ({ ok: true }))
 

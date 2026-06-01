@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConvex } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
@@ -28,6 +28,12 @@ export function viewActionDetail(
   }
 }
 
+export function viewWorkspaceArgs(
+  activeWorkspaceId: string | undefined,
+): { activeWorkspaceId?: string } {
+  return activeWorkspaceId === undefined ? {} : { activeWorkspaceId }
+}
+
 export function ViewRuntimeHost({
   packageRoot,
   scopePath,
@@ -51,6 +57,10 @@ export function ViewRuntimeHost({
   // Undefined intentionally means the caller's personal workspace; Convex
   // requireWorkspace(ctx, undefined) derives that server-side from auth.
   const activeWorkspaceId = useActiveWorkspaceId()
+  const workspaceArgs = useMemo(
+    () => viewWorkspaceArgs(activeWorkspaceId),
+    [activeWorkspaceId],
+  )
   const [timedOut, setTimedOut] = useState(false)
 
   useEffect(() => {
@@ -83,8 +93,8 @@ export function ViewRuntimeHost({
               request.id,
               await convex.query(api.viewData.listSources, {
                 packageRoot,
-                activeWorkspaceId,
                 ...request.args,
+                ...workspaceArgs,
               }),
             )
           case 'dohc.atom.get':
@@ -92,8 +102,8 @@ export function ViewRuntimeHost({
               request.id,
               await convex.query(api.viewData.getAtom, {
                 packageRoot,
-                activeWorkspaceId,
                 ...request.args,
+                ...workspaceArgs,
               }),
             )
           case 'dohc.fields.query':
@@ -101,8 +111,8 @@ export function ViewRuntimeHost({
               request.id,
               await convex.query(api.viewData.queryFields, {
                 packageRoot,
-                activeWorkspaceId,
                 ...request.args,
+                ...workspaceArgs,
               }),
             )
           case 'dohc.imports.list':
@@ -110,7 +120,7 @@ export function ViewRuntimeHost({
               request.id,
               await convex.query(api.viewData.listImports, {
                 packageRoot,
-                activeWorkspaceId,
+                ...workspaceArgs,
               }),
             )
           case 'dohc.exports.list':
@@ -118,14 +128,14 @@ export function ViewRuntimeHost({
               request.id,
               await convex.query(api.viewData.listExports, {
                 packageRoot,
-                activeWorkspaceId,
+                ...workspaceArgs,
               }),
             )
           case 'dohc.source.open': {
             const result = await convex.query(api.viewData.getAtom, {
               packageRoot,
-              activeWorkspaceId,
               path: request.args.path,
+              ...workspaceArgs,
             })
             if (result.ok) onOpenSource(result.atom.path)
             return makeViewRpcSuccess(request.id, result)
@@ -170,13 +180,13 @@ export function ViewRuntimeHost({
       }
     },
     [
-      activeWorkspaceId,
       convex,
       onOpenSource,
       onRunAgent,
       packageRoot,
       recordAction,
       scopePath,
+      workspaceArgs,
       writeScopes,
     ],
   )

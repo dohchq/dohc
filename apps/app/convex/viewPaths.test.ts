@@ -42,8 +42,12 @@ describe('.views path semantics', () => {
   it('detects source paths and package roots separately', () => {
     expect(isViewPath('clients/acme/.views/overview/src/App.tsx')).toBe(true)
     expect(isViewPath('clients/acme/views/overview/src/App.tsx')).toBe(false)
+    expect(isViewPath('clients/acme/.views/overview/src/\u0000App.tsx')).toBe(false)
+    expect(isViewPath('clients/.views/a/.views/b/src/App.tsx')).toBe(false)
     expect(isViewPackageRoot('clients/acme/.views/overview')).toBe(true)
     expect(isViewPackageRoot('clients/acme/.views/overview/src/App.tsx')).toBe(false)
+    expect(isViewPackageRoot('clients/acme/.views/overview/\u0000')).toBe(false)
+    expect(isViewPackageRoot('clients/.views/a/.views/b')).toBe(false)
   })
 
   it('derives calm titles from view folder names', () => {

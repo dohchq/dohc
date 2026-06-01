@@ -8,6 +8,7 @@ import {
 import {
   canWriteRequestedPath,
   viewActionDetail,
+  viewWorkspaceArgs,
   VIEW_ACTION_EVENT,
   VIEW_START_TIMEOUT_MS,
 } from '../views/ViewRuntimeHost'
@@ -61,6 +62,11 @@ describe('folder views performance and safety guards', () => {
       operation: 'dohc.patch.propose',
       target: 'tasks.md',
     })
+  })
+
+  it('omits personal workspace args instead of sending explicit undefined', () => {
+    expect(viewWorkspaceArgs(undefined)).toEqual({})
+    expect(viewWorkspaceArgs('ws_active')).toEqual({ activeWorkspaceId: 'ws_active' })
   })
 
   it('keeps the bundle output budget explicit for the runtime frame', () => {
