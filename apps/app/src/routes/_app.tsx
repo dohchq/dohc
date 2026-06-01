@@ -236,8 +236,8 @@ function SignInPrompt() {
         </h1>
 
         <p className="mx-auto mt-3 max-w-[300px] text-center text-[13.5px] leading-relaxed text-ink-dim">
-          dohc keeps your documents, sources, and drafts in one calm
-          place — clear, traceable, and yours.
+          dohc keeps your documents, sources, and drafts in one calm place —
+          clear, traceable, and yours.
         </p>
 
         <a
@@ -290,7 +290,9 @@ function App() {
   const agentProviderInfo = useQuery(api.agent.listAgentProviders, {
     activeWorkspaceId,
   })
-  const setAgentWorkspaceDefault = useMutation(api.agent.setAgentWorkspaceDefault)
+  const setAgentWorkspaceDefault = useMutation(
+    api.agent.setAgentWorkspaceDefault,
+  )
   const upsertAtom = useMutation(api.atoms.upsert)
   const removeAtom = useMutation(api.atoms.remove)
   const moveAtom = useMutation(api.atoms.move)
@@ -315,6 +317,8 @@ function App() {
     useState<AgentModelPickerSelection | null>(null)
   const [agentSelectionOverride, setAgentSelectionOverride] =
     useState<AgentModelPickerSelection | null>(null)
+  const [selectedAgentThreadSnapshot, setSelectedAgentThreadSnapshot] =
+    useState<AgentThreadSummary | null>(null)
   const [projectDialogMode, setProjectDialogMode] = useState<
     'scratch' | 'existing' | null
   >(null)
@@ -388,11 +392,12 @@ function App() {
       ? (files.find((f) => f.fileId === urlFileId)?.path ?? null)
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
-  const [view, setView] = useState<View>(() =>
-    urlView ??
-    (urlFileId || urlShareId || initialOpenPathRef.current
-      ? 'atom'
-      : 'views'),
+  const [view, setView] = useState<View>(
+    () =>
+      urlView ??
+      (urlFileId || urlShareId || initialOpenPathRef.current
+        ? 'atom'
+        : 'views'),
   )
 
   const chatThreads = useMemo<AgentThreadSummary[]>(
@@ -410,10 +415,17 @@ function App() {
       })),
     [agentThreads],
   )
+  const queryActiveAgentThread = useMemo(
+    () => chatThreads.find((thread) => thread.threadId === threadId) ?? null,
+    [chatThreads, threadId],
+  )
   const activeAgentThread = useMemo(
     () =>
-      chatThreads.find((thread) => thread.threadId === threadId) ?? null,
-    [chatThreads, threadId],
+      queryActiveAgentThread ??
+      (selectedAgentThreadSnapshot?.threadId === threadId
+        ? selectedAgentThreadSnapshot
+        : null),
+    [queryActiveAgentThread, selectedAgentThreadSnapshot, threadId],
   )
   const agentProviders = useMemo(
     () => (agentProviderInfo?.providers ?? []) as AgentProviderSnapshot[],
@@ -429,7 +441,8 @@ function App() {
     (agentDraft ? agentDraftSelection : null) ??
     agentEffectiveDefault
   const agentDocTitle =
-    activeAgentThread?.title?.trim() || (threadId ? 'Workspace chat' : 'New chat')
+    activeAgentThread?.title?.trim() ||
+    (threadId ? 'Workspace chat' : 'New chat')
 
   useEffect(() => {
     setAgentSelectionOverride(null)
@@ -437,7 +450,18 @@ function App() {
 
   useEffect(() => {
     setAgentDraftSelection(null)
+    setSelectedAgentThreadSnapshot(null)
   }, [activeWorkspaceId])
+
+  useEffect(() => {
+    if (!selectedAgentThreadSnapshot) return
+    if (
+      selectedAgentThreadSnapshot.threadId !== threadId ||
+      queryActiveAgentThread
+    ) {
+      setSelectedAgentThreadSnapshot(null)
+    }
+  }, [queryActiveAgentThread, selectedAgentThreadSnapshot, threadId])
 
   const updateAgentSelection = useCallback(
     (selection: AgentModelPickerSelection) => {
@@ -489,8 +513,7 @@ function App() {
       // null ⇒ gone/forbidden: fall back to the brand default.
       if (sharedAtomForMeta === undefined)
         return { docTitle: undefined, docEmoji: undefined }
-      if (sharedAtomForMeta === null)
-        return { docTitle: null, docEmoji: null }
+      if (sharedAtomForMeta === null) return { docTitle: null, docEmoji: null }
       const { meta } = parseFrontmatter(sharedAtomForMeta.body)
       const title =
         (typeof meta.title === 'string' && meta.title.trim()) ||
@@ -515,9 +538,7 @@ function App() {
   // for programmatic skill-fire dispatches. Palette skill clicks
   // route here (NOT through pendingPrompt), so only a real skill
   // palette row can become a skill-fire.
-  const [pendingSkillFire, setPendingSkillFire] = useState<string | null>(
-    null,
-  )
+  const [pendingSkillFire, setPendingSkillFire] = useState<string | null>(null)
   const [pendingCommandFire, setPendingCommandFire] = useState<string | null>(
     null,
   )
@@ -583,10 +604,9 @@ function App() {
         return
       }
 
-      const destination =
-        urlFileId
-          ? ({ kind: 'atom', id: urlFileId } as const)
-          : urlShareId
+      const destination = urlFileId
+        ? ({ kind: 'atom', id: urlFileId } as const)
+        : urlShareId
           ? ({ kind: 'shared', id: urlShareId } as const)
           : lastFilesDestinationRef.current
 
@@ -646,30 +666,48 @@ function App() {
   }, [agentProjectPath, chatThreads])
 
   useEffect(() => {
-    if (agentDraft) return
-    if (threadId && chatThreads.some((thread) => thread.threadId === threadId)) {
+    if (agentDraft || agentThreads === undefined) return
+    if (threadId && selectedAgentThreadSnapshot?.threadId === threadId) return
+    if (
+      threadId &&
+      chatThreads.some((thread) => thread.threadId === threadId)
+    ) {
       return
     }
     const first = chatThreads[0] ?? null
     setThreadId(first?.threadId ?? null)
     setAgentProjectPath(first?.projectPath ?? null)
-  }, [agentDraft, chatThreads, threadId])
+  }, [
+    agentDraft,
+    agentThreads,
+    chatThreads,
+    selectedAgentThreadSnapshot,
+    threadId,
+  ])
 
-  const startAgentDraft = useCallback((projectPath: string | null = null) => {
-    setAgentDraft(true)
-    setAgentProjectPath(projectPath)
-    setThreadId(null)
-    setAgentSelectionOverride(null)
-    navigateToView('agent')
-  }, [navigateToView])
+  const startAgentDraft = useCallback(
+    (projectPath: string | null = null) => {
+      setAgentDraft(true)
+      setAgentProjectPath(projectPath)
+      setThreadId(null)
+      setAgentSelectionOverride(null)
+      setSelectedAgentThreadSnapshot(null)
+      navigateToView('agent')
+    },
+    [navigateToView],
+  )
 
-  const selectAgentThread = useCallback((thread: AgentThreadSummary) => {
-    setAgentProjectPath(thread.projectPath)
-    setThreadId(thread.threadId)
-    setAgentDraft(false)
-    setAgentSelectionOverride(null)
-    navigateToView('agent')
-  }, [navigateToView])
+  const selectAgentThread = useCallback(
+    (thread: AgentThreadSummary) => {
+      setSelectedAgentThreadSnapshot(thread)
+      setAgentProjectPath(thread.projectPath)
+      setThreadId(thread.threadId)
+      setAgentDraft(false)
+      setAgentSelectionOverride(null)
+      navigateToView('agent')
+    },
+    [navigateToView],
+  )
 
   const ensureAgentThreadForSend = useCallback(
     async (
@@ -689,6 +727,7 @@ function App() {
           : {}),
       })
       if (chosenSelection) setAgentSelectionOverride(chosenSelection)
+      setSelectedAgentThreadSnapshot(null)
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
@@ -705,7 +744,8 @@ function App() {
   const commitAgentProject = useCallback(
     async (mode: 'scratch' | 'existing', rawPath: string) => {
       const projectPath = rawPath.trim().replace(/^\/+|\/+$/g, '')
-      if (!projectPath) return { ok: false, error: 'Project folder is required.' }
+      if (!projectPath)
+        return { ok: false, error: 'Project folder is required.' }
       if (projectPath.split('/').some((segment) => segment.startsWith('.'))) {
         return {
           ok: false,
@@ -746,6 +786,7 @@ function App() {
         threadId: thread.threadId,
       })
       if (thread.threadId === threadId) {
+        setSelectedAgentThreadSnapshot(null)
         setAgentProjectPath(null)
         setThreadId(null)
         setAgentDraft(true)
@@ -780,11 +821,7 @@ function App() {
       })
       if (agentProjectPath === projectPath) setAgentProjectPath(target)
     },
-    [
-      activeWorkspaceId,
-      agentProjectPath,
-      renameAgentProjectAndMoveFolderMut,
-    ],
+    [activeWorkspaceId, agentProjectPath, renameAgentProjectAndMoveFolderMut],
   )
 
   useEffect(() => {
@@ -821,10 +858,13 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [toggleChat, toggleSharing])
 
-  const onRunAction = useCallback((prompt: string) => {
-    setPendingPrompt(prompt)
-    navigateToView('agent')
-  }, [navigateToView])
+  const onRunAction = useCallback(
+    (prompt: string) => {
+      setPendingPrompt(prompt)
+      navigateToView('agent')
+    },
+    [navigateToView],
+  )
 
   // D4.33 — open an atom by PATH. Show it immediately (optimistic
   // override) AND, if its rename-proof fileId is known, push it into
@@ -963,8 +1003,7 @@ function App() {
     // sans extension) into the frontmatter `title:` property so the
     // user doesn't retype it. HTML pages get the same treatment now —
     // the filename becomes their title, in metadata + above the page.
-    const leaf =
-      name.trim().replace(/\/+$/, '').split('/').pop() ?? clean
+    const leaf = name.trim().replace(/\/+$/, '').split('/').pop() ?? clean
     const title = leaf.replace(/\.[a-z0-9]+$/i, '').trim()
     const body = title ? applyFrontmatter('', { title }) : ''
     await createAtom(clean, body)
@@ -992,7 +1031,11 @@ function App() {
   }
   async function toggleStarAtPath(path: string, currentlyStarred: boolean) {
     try {
-      await setStarAtom({ path, starred: !currentlyStarred, activeWorkspaceId })
+      await setStarAtom({
+        path,
+        starred: !currentlyStarred,
+        activeWorkspaceId,
+      })
     } catch (e) {
       notice.error(
         `Couldn't ${currentlyStarred ? 'unfavorite' : 'favorite'} file`,
@@ -1001,9 +1044,16 @@ function App() {
       throw e
     }
   }
-  async function toggleFolderStarAtPath(path: string, currentlyStarred: boolean) {
+  async function toggleFolderStarAtPath(
+    path: string,
+    currentlyStarred: boolean,
+  ) {
     try {
-      await setFolderStar({ path, starred: !currentlyStarred, activeWorkspaceId })
+      await setFolderStar({
+        path,
+        starred: !currentlyStarred,
+        activeWorkspaceId,
+      })
     } catch (e) {
       notice.error(
         `Couldn't ${currentlyStarred ? 'unfavorite' : 'favorite'} folder`,
@@ -1103,7 +1153,10 @@ function App() {
         activeWorkspaceId,
       })
       // D4.30 — if the open atom was inside the deleted folder, clear the URL.
-      if (activePath && (activePath === path || activePath.startsWith(`${path}/`))) {
+      if (
+        activePath &&
+        (activePath === path || activePath.startsWith(`${path}/`))
+      ) {
         clearOpenAtom({ replace: true })
       }
       notice.success(
@@ -1123,14 +1176,11 @@ function App() {
         view === 'agent'
           ? 'grid-cols-[48px_260px_minmax(0,1fr)_340px]'
           : panelOpen
-          ? 'grid-cols-[48px_260px_1fr_400px]'
-          : 'grid-cols-[48px_260px_1fr]'
+            ? 'grid-cols-[48px_260px_1fr_400px]'
+            : 'grid-cols-[48px_260px_1fr]'
       }`}
     >
-      <ActivityBar
-        view={view}
-        onSelect={navigateToView}
-      />
+      <ActivityBar view={view} onSelect={navigateToView} />
       {view === 'agent' ? (
         <>
           <AgentChatSidebar
@@ -1147,6 +1197,7 @@ function App() {
             onRenameThread={renameAgentChat}
             onRenameProject={renameAgentProject}
             onOpenSearch={() => setSearchOpen(true)}
+            user={user}
           />
           <AgentWorkspace
             threadId={threadId}
@@ -1183,6 +1234,8 @@ function App() {
             selectedPackageRoot={selectedViewPackageRoot}
             onOpenView={openView}
             onOpenSource={(path) => openAtom(path)}
+            onOpenSearch={() => setSearchOpen(true)}
+            user={user}
           />
           <ViewFrame
             packageRoot={selectedViewPackageRoot}
@@ -1253,27 +1306,25 @@ function App() {
           />
           {view === 'graph' ? (
             <GraphView onOpenAtom={openAtom} onOpenShared={openShared} />
+          ) : urlShareId ? (
+            // key by shareId → fresh state per share (no stale draft
+            // reuse when switching shared files; codex P1).
+            <SharedAtomView
+              key={urlShareId}
+              shareId={urlShareId as Id<'atomShares'>}
+            />
           ) : (
-            urlShareId ? (
-              // key by shareId → fresh state per share (no stale draft
-              // reuse when switching shared files; codex P1).
-              <SharedAtomView
-                key={urlShareId}
-                shareId={urlShareId as Id<'atomShares'>}
-              />
-            ) : (
-              <AtomView
-                path={activePath}
-                files={files ?? []}
-                onRunAction={onRunAction}
-                onOpenAtom={openAtom}
-                onOpenView={openView}
-                onShare={(fid) => setSharePromptFor(fid)}
-                enterEdit={enterEdit}
-                onEnteredEdit={() => setEnterEdit(false)}
-                pendingSaveRef={pendingSaveRef}
-              />
-            )
+            <AtomView
+              path={activePath}
+              files={files ?? []}
+              onRunAction={onRunAction}
+              onOpenAtom={openAtom}
+              onOpenView={openView}
+              onShare={(fid) => setSharePromptFor(fid)}
+              enterEdit={enterEdit}
+              onEnteredEdit={() => setEnterEdit(false)}
+              pendingSaveRef={pendingSaveRef}
+            />
           )}
           {/* The single 3rd column — exactly one of Chat / Imports+Exports. */}
           {chatOpen && (
@@ -1333,11 +1384,7 @@ function App() {
         }
         className={`fixed bottom-[60px] z-50 h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
           view === 'agent' ? 'hidden' : 'inline-flex'
-        } ${
-          chatOpen || sharingOpen
-            ? 'right-[412px]'
-            : 'right-5'
-        }`}
+        } ${chatOpen || sharingOpen ? 'right-[412px]' : 'right-5'}`}
       >
         <ArrowLeftRight className="size-3.5" strokeWidth={2} />
         <span>{sharingOpen ? 'Hide panel' : 'Imports / Exports'}</span>
@@ -1352,11 +1399,7 @@ function App() {
         aria-label={chatOpen ? 'hide chat panel' : 'show chat panel'}
         className={`fixed bottom-5 z-50 h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
           view === 'agent' ? 'hidden' : 'inline-flex'
-        } ${
-          chatOpen || sharingOpen
-            ? 'right-[412px]'
-            : 'right-5'
-        }`}
+        } ${chatOpen || sharingOpen ? 'right-[412px]' : 'right-5'}`}
       >
         {chatOpen ? (
           <MessageSquareOff className="size-3.5" strokeWidth={2} />
@@ -1458,7 +1501,9 @@ function AgentWorkspace({
   agentProviders: AgentProviderSnapshot[]
   agentSelection: AgentModelPickerSelection | null
   onAgentSelectionChange: (selection: AgentModelPickerSelection) => void
-  onSetAgentDefault: (selection: AgentModelPickerSelection) => void | Promise<void>
+  onSetAgentDefault: (
+    selection: AgentModelPickerSelection,
+  ) => void | Promise<void>
   pendingPrompt: string | null
   onPendingHandled: () => void
   pendingSkillFire: string | null
@@ -1586,9 +1631,15 @@ function AgentProjectDialog({
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             {mode === 'scratch' ? (
-              <FolderPlus className="size-4 shrink-0 text-accent" strokeWidth={1.8} />
+              <FolderPlus
+                className="size-4 shrink-0 text-accent"
+                strokeWidth={1.8}
+              />
             ) : (
-              <Folder className="size-4 shrink-0 text-accent" strokeWidth={1.8} />
+              <Folder
+                className="size-4 shrink-0 text-accent"
+                strokeWidth={1.8}
+              />
             )}
             <h3
               id={titleId}

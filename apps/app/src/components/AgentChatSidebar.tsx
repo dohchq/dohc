@@ -7,12 +7,15 @@ import {
   MoreHorizontal,
   Pencil,
   Pin,
-  Plus,
-  Search,
   SquarePen,
   Trash2,
 } from 'lucide-react'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import {
+  SidebarAccountFooter,
+  SidebarHeader,
+  type SidebarUser,
+} from './SidebarChrome'
 import { useDialogFocus } from '../lib/dialog-focus'
 
 type FolderLike = { path: string }
@@ -110,6 +113,7 @@ export function AgentChatSidebar({
   onRenameThread,
   onRenameProject,
   onOpenSearch,
+  user,
 }: {
   files: ReadonlyArray<FileLike>
   folders: ReadonlyArray<FolderLike>
@@ -127,6 +131,7 @@ export function AgentChatSidebar({
   ) => SidebarActionResult
   onRenameProject: (projectPath: string, nextPath: string) => SidebarActionResult
   onOpenSearch: () => void
+  user: SidebarUser
 }) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
@@ -157,29 +162,11 @@ export function AgentChatSidebar({
 
   return (
     <aside className="flex h-screen min-w-0 flex-col overflow-hidden border-r border-rule bg-panel">
-      <div className="border-b border-rule px-3 py-3">
-        <button
-          type="button"
-          onClick={() => onNewThread(activeProjectPath)}
-          className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] font-medium text-ink hover:bg-hover"
-        >
-          <Plus className="size-4 text-ink-dim" strokeWidth={2} />
-          <span className="min-w-0 flex-1 truncate">New chat</span>
-          <span className="max-w-[92px] truncate rounded-md bg-elevated px-1.5 py-0.5 text-[10px] font-normal text-ink-faint">
-            {activeScopeLabel}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={onOpenSearch}
-          className="mt-1 flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] font-medium text-ink-dim hover:bg-hover hover:text-ink"
-        >
-          <Search className="size-4" strokeWidth={2} />
-          <span className="truncate">Search</span>
-        </button>
-      </div>
-
-      <WorkspaceSwitcher />
+      <SidebarHeader
+        onOpenSearch={onOpenSearch}
+        onCreate={() => onNewThread(activeProjectPath)}
+        createLabel={`new chat in ${activeScopeLabel}`}
+      />
 
       <div className="flex-1 overflow-y-auto px-3 py-4">
         <div className="group/projects relative mb-2 flex items-center justify-between px-1">
@@ -405,6 +392,9 @@ export function AgentChatSidebar({
         </div>
       </div>
 
+      <WorkspaceSwitcher />
+      <SidebarAccountFooter user={user} />
+
       {renameTarget && (
         <RenameDialog
           title={
@@ -486,32 +476,37 @@ function ThreadButton({
 }) {
   return (
     <div
-      className={`group/thread relative flex h-8 w-full items-center gap-1 rounded-md px-2 text-left transition-colors ${
+      className={`group/thread relative flex h-8 w-full cursor-pointer items-center gap-1 rounded-md px-2 text-left transition-colors ${
         active
           ? 'bg-hover text-ink-strong'
           : 'text-ink-dim hover:bg-hover hover:text-ink'
       }`}
     >
-      {active && (
-        <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r bg-ink-strong" />
-      )}
       <button
         type="button"
         onClick={onClick}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-      >
+        className="absolute inset-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft"
+        aria-label={`Open chat ${thread.title}`}
+      />
+      {active && (
+        <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r bg-ink-strong" />
+      )}
+      <span className="pointer-events-none relative z-[1] flex min-w-0 flex-1 items-center gap-2 text-left">
         <MessageSquare className="size-3.5 shrink-0" strokeWidth={1.8} />
         <span className="min-w-0 flex-1 truncate text-[12.5px]">
           {thread.title}
         </span>
-      </button>
+      </span>
       {thread.pinnedAt !== null && (
-        <Pin className="size-3 shrink-0 text-accent" strokeWidth={2} />
+        <Pin
+          className="pointer-events-none relative z-[1] size-3 shrink-0 text-accent group-hover/thread:hidden group-focus-within/thread:hidden"
+          strokeWidth={2}
+        />
       )}
-      <span className="shrink-0 text-[10.5px] text-ink-faint group-hover/thread:hidden group-focus-within/thread:hidden">
+      <span className="pointer-events-none relative z-[1] shrink-0 text-[10.5px] text-ink-faint group-hover/thread:hidden group-focus-within/thread:hidden">
         {ageLabel(thread.updatedAt)}
       </span>
-      <span className="ml-auto hidden items-center gap-0.5 group-hover/thread:flex group-focus-within/thread:flex">
+      <span className="relative z-10 ml-auto hidden items-center gap-0.5 group-hover/thread:flex group-focus-within/thread:flex">
         <button
           type="button"
           onClick={(e) => {

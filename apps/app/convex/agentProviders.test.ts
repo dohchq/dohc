@@ -34,6 +34,31 @@ describe('agent provider registry', () => {
     expect(providers[1].defaultReasoningEffort).toBe('high')
   })
 
+  it('publishes t3code-style per-model context stats instead of one blanket default', () => {
+    const providers = listAgentProviderSnapshots()
+    const openai = providers.find((provider) => provider.providerId === 'openai')
+    const anthropic = providers.find((provider) => provider.providerId === 'anthropic')
+
+    expect(
+      openai?.models.find((model) => model.id === 'gpt-5.3-codex-spark'),
+    ).toMatchObject({
+      contextWindowTokens: 128_000,
+      maxContextWindowTokens: 128_000,
+      effectiveContextWindowPercent: 95,
+    })
+    expect(openai?.models.find((model) => model.id === 'gpt-5.4')).toMatchObject({
+      contextWindowTokens: 272_000,
+      maxContextWindowTokens: 1_000_000,
+      effectiveContextWindowPercent: 95,
+    })
+    expect(
+      anthropic?.models.find((model) => model.id === 'claude-opus-4-8'),
+    ).toMatchObject({
+      contextWindowTokens: 200_000,
+      maxContextWindowTokens: 1_000_000,
+    })
+  })
+
   it('surfaces missing-key status instead of hiding provider diagnostics', () => {
     vi.stubEnv('OPENAI_API_KEY', '')
     vi.stubEnv('ANTHROPIC_API_KEY', '')

@@ -9,7 +9,7 @@
  * This file is the brand source of truth. The app re-exports it from
  * apps/app/src/components/DohcLogo.tsx. */
 
-import type { CSSProperties, ReactNode } from 'react'
+import React, { type CSSProperties, type ReactNode } from 'react'
 
 /** Master viewBox aspect ratio (96 x 104). */
 const MARK_RATIO = 104 / 96

@@ -23,6 +23,8 @@ const providers: AgentProviderSnapshot[] = [
       {
         id: 'gpt-5.5',
         label: 'GPT-5.5',
+        contextWindowTokens: 272_000,
+        maxContextWindowTokens: 272_000,
         supportsReasoning: true,
         reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
         recommended: true,
@@ -30,6 +32,8 @@ const providers: AgentProviderSnapshot[] = [
       {
         id: 'gpt-5.4',
         label: 'GPT-5.4',
+        contextWindowTokens: 272_000,
+        maxContextWindowTokens: 1_000_000,
         supportsReasoning: true,
         reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
       },
@@ -47,6 +51,8 @@ const providers: AgentProviderSnapshot[] = [
       {
         id: 'claude-opus-4-8',
         label: 'Claude Opus 4.8',
+        contextWindowTokens: 200_000,
+        maxContextWindowTokens: 1_000_000,
         supportsReasoning: true,
         reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
         recommended: true,
@@ -59,6 +65,13 @@ async function click(element: Element | null) {
   expect(element).not.toBeNull()
   await act(async () => {
     element!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+}
+
+async function pointerDown(element: Element | null) {
+  expect(element).not.toBeNull()
+  await act(async () => {
+    element!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
   })
 }
 
@@ -139,6 +152,27 @@ describe('AgentModelPicker', () => {
     expect(document.body.textContent).toContain('Set key')
   })
 
+  it('shows per-model context stats in the model list', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AgentModelPicker, {
+          providers,
+          selection: {
+            providerId: 'openai',
+            model: 'gpt-5.5',
+            reasoningEffort: 'xhigh',
+          },
+          onChange: vi.fn(),
+        }),
+      )
+    })
+
+    await click(container.querySelector('button[aria-label="Choose model"]'))
+
+    expect(document.body.textContent).toContain('272k context')
+    expect(document.body.textContent).toContain('up to 1m')
+  })
+
   it('renders the picker layer in a body portal so fixed positioning uses the viewport', async () => {
     act(() => {
       root.render(
@@ -210,5 +244,40 @@ describe('AgentModelPicker', () => {
     )
     expect(popover?.style.left).toBe('24px')
     expect(popover?.style.bottom).toBe('90px')
+  })
+
+  it('closes from document-level outside clicks even when the clicked surface is above the backdrop', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AgentModelPicker, {
+          providers,
+          selection: {
+            providerId: 'openai',
+            model: 'gpt-5.5',
+            reasoningEffort: 'xhigh',
+          },
+          onChange: vi.fn(),
+        }),
+      )
+    })
+
+    const outsideButton = document.createElement('button')
+    outsideButton.textContent = 'Outside layer'
+    outsideButton.style.position = 'fixed'
+    outsideButton.style.zIndex = '100'
+    document.body.appendChild(outsideButton)
+
+    await click(container.querySelector('button[aria-label="Choose model"]'))
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).not.toBeNull()
+
+    await pointerDown(outsideButton)
+
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).toBeNull()
+
+    outsideButton.remove()
   })
 })

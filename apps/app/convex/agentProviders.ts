@@ -31,6 +31,9 @@ export type AgentSelectionInput = {
 export type AgentProviderModel = {
   id: string
   label: string
+  contextWindowTokens: number
+  maxContextWindowTokens?: number
+  effectiveContextWindowPercent?: number
   supportsReasoning: boolean
   reasoningEfforts: AgentReasoningEffort[]
   recommended?: boolean
@@ -73,6 +76,31 @@ const ANTHROPIC_REASONING: AgentReasoningEffort[] = [
   'xhigh',
 ]
 
+const OPENAI_EFFECTIVE_CONTEXT_PERCENT = 95
+const OPENAI_128K_CONTEXT = {
+  contextWindowTokens: 128_000,
+  maxContextWindowTokens: 128_000,
+  effectiveContextWindowPercent: OPENAI_EFFECTIVE_CONTEXT_PERCENT,
+}
+const OPENAI_272K_CONTEXT = {
+  contextWindowTokens: 272_000,
+  maxContextWindowTokens: 272_000,
+  effectiveContextWindowPercent: OPENAI_EFFECTIVE_CONTEXT_PERCENT,
+}
+const OPENAI_1M_CONTEXT = {
+  contextWindowTokens: 272_000,
+  maxContextWindowTokens: 1_000_000,
+  effectiveContextWindowPercent: OPENAI_EFFECTIVE_CONTEXT_PERCENT,
+}
+const ANTHROPIC_200K_CONTEXT = {
+  contextWindowTokens: 200_000,
+  maxContextWindowTokens: 200_000,
+}
+const ANTHROPIC_1M_CONTEXT = {
+  contextWindowTokens: 200_000,
+  maxContextWindowTokens: 1_000_000,
+}
+
 const PROVIDERS: AgentProviderDefinition[] = [
   {
     providerId: 'openai',
@@ -86,6 +114,7 @@ const PROVIDERS: AgentProviderDefinition[] = [
       {
         id: 'gpt-5.5',
         label: 'GPT-5.5',
+        ...OPENAI_272K_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
         recommended: true,
@@ -93,30 +122,35 @@ const PROVIDERS: AgentProviderDefinition[] = [
       {
         id: 'gpt-5.4',
         label: 'GPT-5.4',
+        ...OPENAI_1M_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
       },
       {
         id: 'gpt-5.4-mini',
         label: 'GPT-5.4 Mini',
+        ...OPENAI_272K_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
       },
       {
         id: 'gpt-5.3-codex',
         label: 'GPT-5.3 Codex',
+        ...OPENAI_272K_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
       },
       {
         id: 'gpt-5.3-codex-spark',
         label: 'GPT-5.3 Codex Spark',
+        ...OPENAI_128K_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
       },
       {
         id: 'gpt-5.2',
         label: 'GPT-5.2',
+        ...OPENAI_272K_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: OPENAI_REASONING,
       },
@@ -134,6 +168,7 @@ const PROVIDERS: AgentProviderDefinition[] = [
       {
         id: 'claude-opus-4-8',
         label: 'Claude Opus 4.8',
+        ...ANTHROPIC_1M_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: ANTHROPIC_REASONING,
         recommended: true,
@@ -141,24 +176,28 @@ const PROVIDERS: AgentProviderDefinition[] = [
       {
         id: 'claude-opus-4-7',
         label: 'Claude Opus 4.7',
+        ...ANTHROPIC_1M_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-opus-4-6',
         label: 'Claude Opus 4.6',
+        ...ANTHROPIC_1M_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-sonnet-4-6',
         label: 'Claude Sonnet 4.6',
+        ...ANTHROPIC_1M_CONTEXT,
         supportsReasoning: true,
         reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-haiku-4-5',
         label: 'Claude Haiku 4.5',
+        ...ANTHROPIC_200K_CONTEXT,
         supportsReasoning: false,
         reasoningEfforts: [],
       },

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useId, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
 import {
@@ -52,12 +53,29 @@ const SKILL_TOKEN_RE = /(?:^|\s)\$([\w./:-]+)(?=\s|$)/
 const COMMAND_FIRE_RE = /^\/([\w./-]+)(?:\s+([\s\S]+))?$/
 const STREAM_STICKY_BOTTOM_PX = 80
 const SCROLL_TO_BOTTOM_BUTTON_PX = 180
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
+const AUTO_COMPACT_TARGET_RATIO = 0.85
+const SYSTEM_AND_TOOL_CONTEXT_ESTIMATE_TOKENS = 3_000
+const MESSAGE_CONTEXT_OVERHEAD_TOKENS = 12
+const APPROX_CHARS_PER_TOKEN = 4
 
 type RunnableRef = { path: string; label: string }
 type EnvironmentOption = { value: string | null; label: string }
 type ChatActionResult = void | Promise<void>
 type IconComponent = typeof Folder
-type ComposerMenuItem = RunnableRef & { kind: 'command' | 'skill' }
+type ComposerStarterCommand = RunnableRef & {
+  kind: 'command'
+  source: 'starter'
+  command: string
+  description: string
+  prompt: string
+}
+type ComposerWorkspaceMenuItem = RunnableRef & {
+  kind: 'command' | 'skill'
+  source: 'workspace'
+  description?: string
+}
+type ComposerMenuItem = ComposerStarterCommand | ComposerWorkspaceMenuItem
 type ComposerTrigger = {
   kind: ComposerMenuItem['kind']
   query: string
@@ -72,6 +90,57 @@ type ComposerBannerItem = {
   description?: string
   dismissLabel?: string
   onDismiss?: () => void
+}
+
+const BUILTIN_COMPOSER_COMMANDS: readonly ComposerStarterCommand[] = [
+  {
+    kind: 'command',
+    source: 'starter',
+    command: 'cockpit',
+    path: 'builtin:cockpit',
+    label: 'Build my project cockpit',
+    description: 'Start a source-backed cockpit from the files here.',
+    prompt:
+      'Build a source-backed project cockpit for this work. Start by asking only for the context you actually need.',
+  },
+  {
+    kind: 'command',
+    source: 'starter',
+    command: 'review',
+    path: 'builtin:review-workspace',
+    label: 'Review this workspace',
+    description: 'Find what is clear, missing, and worth doing next.',
+    prompt:
+      'Review this workspace and tell me what is clear, what is missing, and what the next useful action should be.',
+  },
+  {
+    kind: 'command',
+    source: 'starter',
+    command: 'plan',
+    path: 'builtin:plan',
+    label: 'Turn notes into a plan',
+    description: 'Convert loose notes into decisions and next actions.',
+    prompt:
+      'Turn my loose notes into a practical plan with decisions, open questions, and next actions.',
+  },
+  {
+    kind: 'command',
+    source: 'starter',
+    command: 'dashboard',
+    path: 'builtin:dashboard',
+    label: 'Create a dashboard',
+    description: 'Build a source-backed dashboard from available context.',
+    prompt:
+      'Create a polished dashboard from the available source files. If there is not enough source context, say what to capture first.',
+  },
+]
+
+export type ContextWindowUsage = {
+  estimatedTokens: number
+  contextWindowTokens: number
+  compactAtTokens: number
+  percent: number
+  isEstimate: boolean
 }
 
 export function runPendingPromptHandoff({
@@ -155,6 +224,49 @@ export function composerTokenForRunnable(
   return sameLabelCount > 1 ? item.path : item.label
 }
 
+function composerMenuItemMatches(item: ComposerMenuItem, query: string): boolean {
+  const values = [
+    item.label,
+    item.path,
+    item.description ?? '',
+    item.kind === 'command' && item.source === 'starter' ? item.command : '',
+  ]
+  return values.some((value) => value.toLowerCase().includes(query))
+}
+
+export function buildComposerMenuItems(
+  composerTrigger: ComposerTrigger | null,
+  savedCommands: ReadonlyArray<RunnableRef>,
+  skills: ReadonlyArray<RunnableRef>,
+): ComposerMenuItem[] {
+  if (!composerTrigger) return []
+  const rows: ComposerMenuItem[] =
+    composerTrigger.kind === 'command'
+      ? [
+          ...BUILTIN_COMPOSER_COMMANDS,
+          ...savedCommands.map(
+            (command): ComposerWorkspaceMenuItem => ({
+              ...command,
+              kind: 'command',
+              source: 'workspace',
+              description: command.path,
+            }),
+          ),
+        ]
+      : skills.map(
+          (skill): ComposerWorkspaceMenuItem => ({
+            ...skill,
+            kind: 'skill',
+            source: 'workspace',
+            description: skill.path,
+          }),
+        )
+
+  const query = composerTrigger.query.trim().toLowerCase()
+  if (!query) return rows
+  return rows.filter((row) => composerMenuItemMatches(row, query))
+}
+
 export function detectSkillFire(
   prompt: string,
   skills: ReadonlyArray<RunnableRef>,
@@ -197,6 +309,63 @@ export function detectCommandFire(
   if (byLabel.length === 1) return { matched: byLabel[0], extras }
   if (byLabel.length > 1) return { ambiguous: byLabel }
   return null
+}
+
+function estimateTextTokens(text: string): number {
+  if (!text.trim()) return 0
+  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN)
+}
+
+export function estimateContextTokensFromMessages(
+  messages: ReadonlyArray<UIMessage>,
+): number {
+  const threadTokens = messages.reduce((total, message) => {
+    const text = message.text || messageText(message)
+    return total + MESSAGE_CONTEXT_OVERHEAD_TOKENS + estimateTextTokens(text)
+  }, 0)
+  if (threadTokens === 0) return 0
+  return SYSTEM_AND_TOOL_CONTEXT_ESTIMATE_TOKENS + threadTokens
+}
+
+function selectedContextWindowTokens(
+  providers: ReadonlyArray<AgentProviderSnapshot>,
+  selection: AgentModelPickerSelection | null,
+): number {
+  const provider = providers.find(
+    (candidate) => candidate.providerId === selection?.providerId,
+  )
+  const model = provider?.models.find(
+    (candidate) => candidate.id === selection?.model,
+  )
+  return model?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS
+}
+
+export function buildEstimatedContextWindowUsage({
+  messages,
+  providers,
+  selection,
+}: {
+  messages: ReadonlyArray<UIMessage>
+  providers: ReadonlyArray<AgentProviderSnapshot>
+  selection: AgentModelPickerSelection | null
+}): ContextWindowUsage {
+  const contextWindowTokens = selectedContextWindowTokens(providers, selection)
+  const compactAtTokens = Math.round(
+    contextWindowTokens * AUTO_COMPACT_TARGET_RATIO,
+  )
+  const estimatedTokens = estimateContextTokensFromMessages(messages)
+  const percent =
+    compactAtTokens > 0
+      ? Math.min(100, Math.round((estimatedTokens / compactAtTokens) * 100))
+      : 0
+
+  return {
+    estimatedTokens,
+    contextWindowTokens,
+    compactAtTokens,
+    percent,
+    isEstimate: true,
+  }
 }
 
 type Props = {
@@ -290,6 +459,9 @@ export function Chat({
     threadId ? { threadId, activeWorkspaceId, projectPath } : 'skip',
     { initialNumItems: 50, stream: true },
   )
+  const messagesLoadingFirstPage = Boolean(
+    threadId && (!messagesQuery || messagesQuery.status === 'LoadingFirstPage'),
+  )
 
   const uiMessages: UIMessage[] = useMemo(() => {
     if (!messagesQuery || messagesQuery.status === 'LoadingFirstPage') return []
@@ -304,6 +476,15 @@ export function Chat({
           (m as { status?: string }).status === 'streaming',
       ),
     [uiMessages],
+  )
+  const contextUsage = useMemo(
+    () =>
+      buildEstimatedContextWindowUsage({
+        messages: uiMessages,
+        providers: agentProviders,
+        selection: agentSelection,
+      }),
+    [agentProviders, agentSelection, uiMessages],
   )
 
   const agentSelectionPayload = agentSelection
@@ -543,18 +724,7 @@ export function Chat({
   )
 
   const composerMenuItems = useMemo<ComposerMenuItem[]>(() => {
-    if (!composerTrigger) return []
-    const query = composerTrigger.query.toLowerCase()
-    const rows =
-      composerTrigger.kind === 'command'
-        ? savedCommands.map((c) => ({ ...c, kind: 'command' as const }))
-        : skills.map((s) => ({ ...s, kind: 'skill' as const }))
-    if (!query) return rows
-    return rows.filter(
-      (r) =>
-        r.label.toLowerCase().includes(query) ||
-        r.path.toLowerCase().includes(query),
-    )
+    return buildComposerMenuItems(composerTrigger, savedCommands, skills)
   }, [composerTrigger, savedCommands, skills])
 
   useEffect(() => {
@@ -570,6 +740,23 @@ export function Chat({
 
   function selectComposerItem(item: ComposerMenuItem) {
     if (!composerTrigger) return
+    if (item.kind === 'command' && item.source === 'starter') {
+      const next = replaceTextRange(
+        input,
+        composerTrigger.rangeStart,
+        composerTrigger.rangeEnd,
+        item.prompt,
+      )
+      setInput(next.text)
+      setComposerCursor(next.cursor)
+      setComposerError(null)
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus()
+        textareaRef.current?.setSelectionRange(next.cursor, next.cursor)
+      })
+      return
+    }
+
     const token = composerTokenForRunnable(
       item.kind,
       item,
@@ -716,7 +903,10 @@ export function Chat({
               primary ? 'max-w-[820px] gap-5' : 'gap-4'
             }`}
           >
-            {uiMessages.length === 0 && (
+            {uiMessages.length === 0 && messagesLoadingFirstPage && (
+              <ChatLoadingState primary={primary} />
+            )}
+            {uiMessages.length === 0 && !messagesLoadingFirstPage && (
               <EmptyChatState
                 primary={primary}
                 onSelectPrompt={selectStarterPrompt}
@@ -889,8 +1079,9 @@ export function Chat({
             onKeyUp={(e) => updateComposerCursor(e.currentTarget)}
             onSelect={(e) => updateComposerCursor(e.currentTarget)}
             onKeyDown={(e) => {
-              if (composerMenuItems.length > 0) {
+              if (composerTrigger) {
                 if (e.key === 'ArrowDown') {
+                  if (composerMenuItems.length === 0) return
                   e.preventDefault()
                   setComposerMenuCursor((c) =>
                     Math.min(composerMenuItems.length - 1, c + 1),
@@ -898,6 +1089,7 @@ export function Chat({
                   return
                 }
                 if (e.key === 'ArrowUp') {
+                  if (composerMenuItems.length === 0) return
                   e.preventDefault()
                   setComposerMenuCursor((c) => Math.max(0, c - 1))
                   return
@@ -916,6 +1108,7 @@ export function Chat({
                 }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
+                  if (composerMenuItems.length === 0) return
                   const item =
                     composerMenuItems[composerMenuCursor] ?? composerMenuItems[0]
                   if (item) selectComposerItem(item)
@@ -940,7 +1133,7 @@ export function Chat({
                 : 'px-3 pt-3 pb-9 text-[13px] leading-relaxed'
             }`}
           />
-          {composerTrigger && composerMenuItems.length > 0 && (
+          {composerTrigger && (
             <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-20 overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal">
               <div className="flex items-center justify-between gap-3 border-b border-rule px-3 py-2">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
@@ -952,37 +1145,70 @@ export function Chat({
                 </span>
               </div>
               <div className="max-h-72 overflow-y-auto py-1">
-                {composerMenuItems.map((item, i) => {
-                  const active = i === composerMenuCursor
-                  const Icon = item.kind === 'command' ? SquareTerminal : Sparkles
-                  return (
-                    <button
-                      key={`${item.kind}.${item.path}`}
-                      type="button"
-                      onMouseEnter={() => setComposerMenuCursor(i)}
-                      onClick={() => selectComposerItem(item)}
-                      className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
-                        active ? 'bg-hover text-ink-strong' : 'text-ink-dim hover:bg-hover hover:text-ink'
-                      }`}
-                    >
-                      <Icon
-                        className={`size-3.5 shrink-0 ${
-                          item.kind === 'command' ? 'text-accent' : 'text-violet-500'
+                {composerMenuItems.length > 0 ? (
+                  composerMenuItems.map((item, i) => {
+                    const active = i === composerMenuCursor
+                    const Icon =
+                      item.kind === 'skill' || item.source === 'starter'
+                        ? Sparkles
+                        : SquareTerminal
+                    const hint =
+                      item.kind === 'command'
+                        ? item.source === 'starter'
+                          ? `/${item.command}`
+                          : `/${composerTokenForRunnable('command', item, savedCommands)}`
+                        : `$${composerTokenForRunnable('skill', item, skills)}`
+                    return (
+                      <button
+                        key={`${item.kind}.${item.path}`}
+                        type="button"
+                        onMouseEnter={() => setComposerMenuCursor(i)}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectComposerItem(item)}
+                        className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${
+                          active
+                            ? 'bg-hover text-ink-strong'
+                            : 'text-ink-dim hover:bg-hover hover:text-ink'
                         }`}
-                        strokeWidth={2}
-                      />
-                      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">
-                        {item.label}
-                      </span>
-                      <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">
-                        {item.kind === 'command' ? '/' : '$'}
-                        {item.label}
-                        {' · '}
-                        {item.path}
-                      </span>
-                    </button>
-                  )
-                })}
+                      >
+                        <Icon
+                          className={`size-4 shrink-0 ${
+                            item.kind === 'skill'
+                              ? 'text-violet-500'
+                              : 'text-accent'
+                          }`}
+                          strokeWidth={2}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12.5px] font-semibold">
+                            {item.label}
+                          </span>
+                          <span className="mt-0.5 block truncate text-[11px] text-ink-faint">
+                            {item.description}
+                          </span>
+                        </span>
+                        <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">
+                          {hint}
+                        </span>
+                      </button>
+                    )
+                  })
+                ) : (
+                  <div className="px-3 py-3">
+                    <p className="text-[12px] font-medium text-ink-dim">
+                      {composerTrigger.kind === 'skill'
+                        ? composerTrigger.query
+                          ? 'No matching skills'
+                          : 'No saved skills yet'
+                        : 'No matching commands'}
+                    </p>
+                    <p className="mt-1 text-[11px] leading-snug text-ink-faint">
+                      {composerTrigger.kind === 'skill'
+                        ? 'Saved skills will appear here when this workspace has them.'
+                        : 'Try a shorter command name.'}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -992,6 +1218,7 @@ export function Chat({
               busy={busy}
               sending={sending}
               messageCount={uiMessages.length}
+              contextUsage={contextUsage}
               projectPath={projectPath}
               skillCount={skills.length}
               commandCount={savedCommands.length}
@@ -1079,6 +1306,7 @@ function ComposerStatusStrip({
   busy,
   sending,
   messageCount,
+  contextUsage,
   projectPath,
   skillCount,
   commandCount,
@@ -1091,6 +1319,7 @@ function ComposerStatusStrip({
   busy: boolean
   sending: boolean
   messageCount: number
+  contextUsage: ContextWindowUsage
   projectPath: string | null
   skillCount: number
   commandCount: number
@@ -1111,6 +1340,7 @@ function ComposerStatusStrip({
       {primary && (
         <ContextWindowMeter
           messageCount={messageCount}
+          usage={contextUsage}
           projectPath={projectPath}
           skillCount={skillCount}
           commandCount={commandCount}
@@ -1150,45 +1380,212 @@ function ComposerStatusPill({
   )
 }
 
-function ContextWindowMeter({
+const CONTEXT_TOOLTIP_WIDTH = 240
+const CONTEXT_TOOLTIP_EDGE_GAP = 12
+const CONTEXT_TOOLTIP_TRIGGER_GAP = 10
+
+type ContextTooltipFrame = {
+  left: number
+  top?: number
+  bottom?: number
+}
+
+function contextTooltipFrameForTrigger(
+  rect: DOMRect,
+  viewportWidth: number,
+  viewportHeight: number,
+): ContextTooltipFrame {
+  const width = Math.min(
+    CONTEXT_TOOLTIP_WIDTH,
+    viewportWidth - CONTEXT_TOOLTIP_EDGE_GAP * 2,
+  )
+  const maxLeft = Math.max(
+    CONTEXT_TOOLTIP_EDGE_GAP,
+    viewportWidth - width - CONTEXT_TOOLTIP_EDGE_GAP,
+  )
+  const left = Math.round(
+    Math.min(
+      Math.max(CONTEXT_TOOLTIP_EDGE_GAP, rect.left + rect.width / 2 - width / 2),
+      maxLeft,
+    ),
+  )
+
+  if (rect.top > viewportHeight / 2) {
+    return {
+      left,
+      bottom: Math.round(
+        viewportHeight - rect.top + CONTEXT_TOOLTIP_TRIGGER_GAP,
+      ),
+    }
+  }
+
+  return {
+    left,
+    top: Math.round(rect.bottom + CONTEXT_TOOLTIP_TRIGGER_GAP),
+  }
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const value = tokens / 1_000_000
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}m`
+  }
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`
+  return String(tokens)
+}
+
+export function ContextWindowMeter({
   messageCount,
+  usage,
   projectPath,
   skillCount,
   commandCount,
 }: {
   messageCount: number
+  usage: ContextWindowUsage
   projectPath: string | null
   skillCount: number
   commandCount: number
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const [detailsPreview, setDetailsPreview] = useState(false)
-  const cap = 50
-  const percent = Math.min(100, Math.round((messageCount / cap) * 100))
+  const [tooltipFrame, setTooltipFrame] = useState<ContextTooltipFrame | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const radius = 8.5
   const circumference = 2 * Math.PI * radius
-  const dashOffset = circumference - (percent / 100) * circumference
-  const showDetails = detailsOpen || detailsPreview
+  const dashOffset = circumference - (usage.percent / 100) * circumference
+  const strokeColor =
+    usage.percent >= 90
+      ? 'var(--color-danger)'
+      : usage.percent >= 70
+      ? 'var(--color-warning)'
+      : 'var(--color-ink-faint)'
   const tooltipId = useId()
-  const summary = `${messageCount} messages loaded in this thread`
+  const messageLabel = messageCount === 1 ? 'message' : 'messages'
+  const compactPercent = Math.round(AUTO_COMPACT_TARGET_RATIO * 100)
+  const estimatedLabel = `~${formatTokenCount(usage.estimatedTokens)}`
+  const compactAtLabel = formatTokenCount(usage.compactAtTokens)
+  const contextWindowLabel = formatTokenCount(usage.contextWindowTokens)
+  const summary = `${estimatedLabel} of ${compactAtLabel} tokens before auto compact`
+  const countLabel = `${usage.percent}%`
+
+  function updateTooltipFrame() {
+    if (typeof window === 'undefined') return
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setTooltipFrame(
+      contextTooltipFrameForTrigger(rect, window.innerWidth, window.innerHeight),
+    )
+  }
+
+  useEffect(() => {
+    if (!detailsOpen || typeof window === 'undefined') return
+    updateTooltipFrame()
+    window.addEventListener('resize', updateTooltipFrame)
+    window.addEventListener('scroll', updateTooltipFrame, true)
+    return () => {
+      window.removeEventListener('resize', updateTooltipFrame)
+      window.removeEventListener('scroll', updateTooltipFrame, true)
+    }
+  }, [detailsOpen])
+
+  useEffect(() => {
+    if (!detailsOpen || typeof document === 'undefined') return
+
+    function closeFromOutsidePointer(event: PointerEvent) {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      const path =
+        typeof event.composedPath === 'function' ? event.composedPath() : []
+      const insideTrigger =
+        triggerRef.current &&
+        (triggerRef.current.contains(target) || path.includes(triggerRef.current))
+
+      if (!insideTrigger) setDetailsOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeFromOutsidePointer, true)
+    return () => {
+      document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
+    }
+  }, [detailsOpen])
+
+  const detailsPanel =
+    detailsOpen && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            id={tooltipId}
+            role="tooltip"
+            className={`pointer-events-none fixed z-50 w-60 rounded-lg border border-rule-strong bg-elevated p-2.5 text-left shadow-md transition-[opacity,transform] duration-150 ${
+              detailsOpen ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0'
+            }`}
+            style={{
+              left: tooltipFrame?.left ?? CONTEXT_TOOLTIP_EDGE_GAP,
+              ...(tooltipFrame?.top !== undefined
+                ? { top: tooltipFrame.top }
+                : { bottom: tooltipFrame?.bottom ?? 72 }),
+            }}
+          >
+            <span className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+              Context window
+            </span>
+            <span className="mt-2 grid gap-1 text-[11.5px] leading-snug">
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Used</span>
+                <span className="font-medium text-ink">
+                  {estimatedLabel} / {compactAtLabel} tokens
+                </span>
+              </span>
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Auto compact</span>
+                <span className="font-medium text-ink">
+                  {compactPercent}% of {contextWindowLabel}
+                </span>
+              </span>
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Thread</span>
+                <span className="font-medium text-ink">
+                  {messageCount} {messageLabel} loaded
+                </span>
+              </span>
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Project</span>
+                <span className="min-w-0 truncate text-right font-medium text-ink">
+                  {projectPath ?? 'None'}
+                </span>
+              </span>
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Skills</span>
+                <span className="font-medium text-ink">{skillCount}</span>
+              </span>
+              <span className="flex items-center justify-between gap-3">
+                <span className="text-ink-faint">Commands</span>
+                <span className="font-medium text-ink">{commandCount}</span>
+              </span>
+              {usage.isEstimate && (
+                <span className="mt-1 border-t border-rule pt-1 text-[10.5px] leading-snug text-ink-faint">
+                  Estimate from loaded chat text until server token accounting is wired.
+                </span>
+              )}
+            </span>
+          </div>,
+          document.body,
+        )
+      : null
 
   return (
     <span className="relative inline-flex shrink-0">
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setDetailsOpen((open) => !open)}
-        onMouseEnter={() => setDetailsPreview(true)}
-        onMouseLeave={() => setDetailsPreview(false)}
-        onFocus={() => setDetailsPreview(true)}
-        onBlur={() => {
-          setDetailsPreview(false)
-          setDetailsOpen(false)
+        onClick={() => {
+          updateTooltipFrame()
+          setDetailsOpen((open) => !open)
         }}
         className="inline-grid size-7 place-items-center rounded-full border border-rule bg-panel/70 text-[8px] font-semibold text-ink-faint transition-[border,background,color,transform] hover:border-rule-strong hover:bg-hover hover:text-ink focus-visible:border-rule-strong focus-visible:bg-hover focus-visible:text-ink focus-visible:outline-none active:scale-95"
-        title="Context details"
-        aria-label={`Context details: ${summary}`}
+        title="Context window"
+        aria-label={`Context window: ${summary}`}
         aria-expanded={detailsOpen}
-        aria-describedby={showDetails ? tooltipId : undefined}
+        aria-describedby={detailsOpen ? tooltipId : undefined}
       >
         <span className="relative grid size-6 place-items-center">
           <svg
@@ -1209,50 +1606,18 @@ function ContextWindowMeter({
               cy="12"
               r={radius}
               fill="none"
-              stroke="var(--color-ink-faint)"
+              stroke={strokeColor}
               strokeDasharray={circumference}
               strokeDashoffset={dashOffset}
               strokeLinecap="round"
               strokeWidth="2.4"
-              className="transition-[stroke-dashoffset] duration-300"
+              className="transition-[stroke-dashoffset,stroke] duration-300"
             />
           </svg>
-          <span className="relative">{Math.min(99, messageCount)}</span>
+          <span className="relative text-[7.5px]">{countLabel}</span>
         </span>
       </button>
-      <span
-        id={tooltipId}
-        role="tooltip"
-        className={`pointer-events-none absolute bottom-[calc(100%+10px)] left-1/2 z-30 w-60 -translate-x-1/2 rounded-lg border border-rule-strong bg-elevated p-2.5 text-left shadow-modal transition-[opacity,transform] duration-150 ${
-          showDetails ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0'
-        }`}
-      >
-        <span className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
-          Context details
-        </span>
-        <span className="mt-2 grid gap-1 text-[11.5px] leading-snug">
-          <span className="flex items-center justify-between gap-3">
-            <span className="text-ink-faint">Thread</span>
-            <span className="font-medium text-ink">
-              {messageCount} / {cap} messages
-            </span>
-          </span>
-          <span className="flex items-center justify-between gap-3">
-            <span className="text-ink-faint">Project</span>
-            <span className="min-w-0 truncate text-right font-medium text-ink">
-              {projectPath ?? 'None'}
-            </span>
-          </span>
-          <span className="flex items-center justify-between gap-3">
-            <span className="text-ink-faint">Skills</span>
-            <span className="font-medium text-ink">{skillCount}</span>
-          </span>
-          <span className="flex items-center justify-between gap-3">
-            <span className="text-ink-faint">Commands</span>
-            <span className="font-medium text-ink">{commandCount}</span>
-          </span>
-        </span>
-      </span>
+      {detailsPanel}
     </span>
   )
 }
@@ -1488,6 +1853,71 @@ function ScrollToBottomButton({ onClick }: { onClick: () => void }) {
       <ChevronDown className="size-3.5" strokeWidth={2} />
       latest
     </button>
+  )
+}
+
+function ChatLoadingState({ primary }: { primary: boolean }) {
+  if (!primary) {
+    return (
+      <div
+        aria-label="Loading chat messages"
+        className="flex animate-pulse flex-col gap-4 pt-1"
+      >
+        <div className="flex justify-end">
+          <div className="w-[76%] rounded-lg border border-rule bg-elevated px-3 py-2.5 shadow-xs">
+            <span className="block h-2 w-[72%] rounded-full bg-ink-ghost/70" />
+            <span className="mt-2 block h-2 w-[46%] rounded-full bg-ink-ghost/55" />
+          </div>
+        </div>
+        <div className="flex justify-start">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1.5 flex items-center gap-1.5 px-1">
+              <DohcMark size={13} />
+              <span className="h-2 w-10 rounded-full bg-ink-ghost/65" />
+            </div>
+            <div className="rounded-lg border border-rule bg-elevated/50 px-3 py-2.5">
+              <span className="block h-2 w-24 rounded-full bg-ink-ghost/50" />
+              <span className="mt-3 block h-2 w-full rounded-full bg-ink-ghost/65" />
+              <span className="mt-2 block h-2 w-[82%] rounded-full bg-ink-ghost/55" />
+              <span className="mt-2 block h-2 w-[54%] rounded-full bg-ink-ghost/45" />
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      aria-label="Loading chat messages"
+      className="flex animate-pulse flex-col gap-5"
+    >
+      <div className="flex justify-end">
+        <div className="max-w-[76%] rounded-lg border border-rule bg-elevated px-3.5 py-2.5 shadow-xs">
+          <span className="block h-2.5 w-56 max-w-full rounded-full bg-ink-ghost/70" />
+          <span className="mt-2.5 block h-2.5 w-36 max-w-full rounded-full bg-ink-ghost/50" />
+        </div>
+      </div>
+      <div className="flex justify-start">
+        <div className="min-w-0 flex-1">
+          <div className="mb-1.5 flex items-center gap-1.5 px-1">
+            <DohcMark size={13} />
+            <span className="h-2 w-12 rounded-full bg-ink-ghost/65" />
+          </div>
+          <div className="rounded-lg border border-rule bg-surface/72 px-4 py-3 shadow-xs">
+            <div className="mb-4 border-b border-rule pb-3">
+              <span className="block h-2.5 w-28 rounded-full bg-ink-ghost/50" />
+              <span className="mt-3 block h-2 w-[62%] rounded-full bg-ink-ghost/42" />
+            </div>
+            <span className="block h-2.5 w-[94%] rounded-full bg-ink-ghost/70" />
+            <span className="mt-2.5 block h-2.5 w-[86%] rounded-full bg-ink-ghost/60" />
+            <span className="mt-2.5 block h-2.5 w-[72%] rounded-full bg-ink-ghost/50" />
+            <span className="mt-5 block h-2.5 w-[78%] rounded-full bg-ink-ghost/60" />
+            <span className="mt-2.5 block h-2.5 w-[48%] rounded-full bg-ink-ghost/45" />
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

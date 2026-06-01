@@ -24,14 +24,10 @@ import {
   Plus,
   Trash2,
   AlertTriangle,
-  Moon,
-  Sun,
-  Monitor,
   Lock,
   Star,
   Palette,
   Share2,
-  Search,
   Brain,
   User,
   Target,
@@ -40,9 +36,8 @@ import {
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
-import { DohcMark } from './DohcLogo'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
-import { useTheme } from '@/lib/use-theme'
+import { SidebarAccountFooter, SidebarHeader } from './SidebarChrome'
 import {
   buildTree,
   nodeLabel,
@@ -116,6 +111,7 @@ type Props = {
   onOpenShared?: (shareId: string) => void
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
+  allowCreate?: boolean
 }
 
 // Optional tree-level presence context. v2 live presence is owned by
@@ -197,9 +193,17 @@ function TreeSection({
           className="flex flex-1 items-center gap-1 py-1 text-left text-ink-faint hover:text-ink-dim transition-colors"
         >
           {open ? (
-            <ChevronDown className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+            <ChevronDown
+              className="size-3 shrink-0"
+              strokeWidth={2.5}
+              aria-hidden
+            />
           ) : (
-            <ChevronRight className="size-3 shrink-0" strokeWidth={2.5} aria-hidden />
+            <ChevronRight
+              className="size-3 shrink-0"
+              strokeWidth={2.5}
+              aria-hidden
+            />
           )}
           <span
             id={`${id}-label`}
@@ -249,6 +253,7 @@ export function FileTree({
   activeShareId,
   onOpenShared,
   onOpenSearch,
+  allowCreate = true,
 }: Props) {
   // v2: sidebar presence is intentionally quiet for now. Editor carets are the
   // primary live-collaboration UI, and removed v1 Convex presence rows should
@@ -260,8 +265,6 @@ export function FileTree({
   )
 
   const tree = useMemo(() => buildTree(files, folders), [files, folders])
-  const label = user?.firstName || user?.email?.split('@')[0] || 'signed in'
-
   // Collapsible-section open state, persisted per section (mirrors the
   // chat-open localStorage pattern in _app.tsx). Personal + Shared
   // both default open.
@@ -421,8 +424,7 @@ export function FileTree({
       const f = folders.find((x) =>
         typeof x === 'string' ? x === path : x.path === path,
       )
-      const isStarred =
-        typeof f === 'string' ? false : f?.starred === true
+      const isStarred = typeof f === 'string' ? false : f?.starred === true
       if (f !== undefined && isStarred === intended) {
         pendingFolderStars.current.delete(path)
         mutated = true
@@ -586,8 +588,7 @@ export function FileTree({
       pendingFolderStars.current.set(path, willStar)
       bumpPending()
       void onToggleFolderStar(path, current).then(
-        () =>
-          setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
+        () => setAnnouncement(willStar ? 'folder starred' : 'folder unstarred'),
         () => {
           setAnnouncement('')
           pendingFolderStars.current.delete(path)
@@ -720,9 +721,10 @@ export function FileTree({
   const [pendingBusy, setPendingBusy] = useState(false)
   const [pendingError, setPendingError] = useState<string | null>(null)
   const [newOpen, setNewOpen] = useState(false)
-  const [renameTarget, setRenameTarget] = useState<
-    { kind: 'page' | 'folder'; path: string } | null
-  >(null)
+  const [renameTarget, setRenameTarget] = useState<{
+    kind: 'page' | 'folder'
+    path: string
+  } | null>(null)
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState<string | null>(null)
 
@@ -753,7 +755,8 @@ export function FileTree({
     // we prepend targetDir. This matches VSCode: type "alpha" in
     // "team" → "team/alpha"; type "other/beta" → "other/beta"
     // (the typed path wins because it already has structure).
-    const path = name.includes('/') || targetDir === '' ? name : `${targetDir}/${name}`
+    const path =
+      name.includes('/') || targetDir === '' ? name : `${targetDir}/${name}`
     setPendingBusy(true)
     setPendingError(null)
     try {
@@ -819,352 +822,334 @@ export function FileTree({
 
   return (
     <PresenceContext.Provider value={presentPathSet}>
-    <aside className="flex h-screen flex-col bg-panel border-r border-rule overflow-hidden">
-      {/* file-org-v1 D4.4b — ARIA-live region for lock/star toggle
+      <aside className="flex h-screen flex-col bg-panel border-r border-rule overflow-hidden">
+        {/* file-org-v1 D4.4b — ARIA-live region for lock/star toggle
           announcements. Visually hidden (1px square, overflow-
           hidden); aria-live="polite" so the screen reader queues
           the announcement without interrupting. */}
-      <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        className="sr-only"
-        style={{
-          position: 'absolute',
-          width: 1,
-          height: 1,
-          padding: 0,
-          margin: -1,
-          overflow: 'hidden',
-          clip: 'rect(0,0,0,0)',
-          whiteSpace: 'nowrap',
-          border: 0,
-        }}
-      >
-        {announcement}
-      </div>
-      {/* file-org-v1 D4.5b — FolderPicker dialog (renders when
-          pickerFolder is non-null). */}
-      {pickerFolder && onSetFolderMeta && (
-        <FolderPicker
-          path={pickerFolder.path}
-          initial={pickerFolder.initial}
-          onClose={() => setPickerFolder(null)}
-          onCommit={async (next) => {
-            await onSetFolderMeta(pickerFolder.path, next)
-            setAnnouncement(`folder customized: ${pickerFolder.path}`)
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+          style={{
+            position: 'absolute',
+            width: 1,
+            height: 1,
+            padding: 0,
+            margin: -1,
+            overflow: 'hidden',
+            clip: 'rect(0,0,0,0)',
+            whiteSpace: 'nowrap',
+            border: 0,
           }}
-        />
-      )}
-      {/* emoji-icons — file icon EmojiPicker (renders when pickerFile
-          is non-null). */}
-      {pickerFile && onSetFileIcon && (
-        <EmojiPicker
-          title="Choose a file icon"
-          current={pickerFile.current}
-          onPick={async (emoji) => {
-            await onSetFileIcon(pickerFile.path, emoji)
-            setPickerFile(null)
-          }}
-          onClear={async () => {
-            await onSetFileIcon(pickerFile.path, '')
-            setPickerFile(null)
-          }}
-          onClose={() => setPickerFile(null)}
-        />
-      )}
-      {/* Brand header — drop-lobe mark + lowercase wordmark. */}
-      <header className="flex items-center justify-between px-4 pt-4 pb-3">
-        <div className="flex items-center gap-2 text-accent">
-          <DohcMark size={20} />
-          <span className="text-[16px] font-semibold tracking-tight leading-none text-ink-strong">
-            dohc
-          </span>
-        </div>
-        <div className="flex items-center gap-0.5">
-          {onOpenSearch && (
-            <button
-              type="button"
-              onClick={onOpenSearch}
-              className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
-              title="search (⌘⇧F)"
-              aria-label="search pages"
-            >
-              <Search className="size-4" strokeWidth={2} />
-            </button>
-          )}
-          <div className="relative">
-          <button
-            onClick={() => setNewOpen((v) => !v)}
-            className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim hover:text-ink hover:bg-hover transition-colors"
-            title="new page or folder"
-            aria-label="new"
-          >
-            <Plus className="size-4" strokeWidth={2} />
-          </button>
-          {newOpen && (
-            <>
-              <div
-                className="fixed inset-0 z-30"
-                onClick={() => setNewOpen(false)}
-              />
-              <div className="absolute right-0 top-9 z-40 w-44 rounded-lg border border-rule bg-elevated shadow-md py-1">
-                <button
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-[12.5px] text-ink hover:bg-hover transition-colors"
-                  onClick={() => {
-                    beginPending('page')
-                    setNewOpen(false)
-                  }}
-                >
-                  <FilePlus className="size-3.5 text-ink-dim" strokeWidth={2} />
-                  <span>New page</span>
-                  {targetDir && (
-                    <span className="ml-auto font-mono text-[10px] text-ink-faint truncate max-w-[80px]">
-                      in {targetDir}
-                    </span>
-                  )}
-                </button>
-                <button
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-[12.5px] text-ink hover:bg-hover transition-colors"
-                  onClick={() => {
-                    beginPending('folder')
-                    setNewOpen(false)
-                  }}
-                >
-                  <FolderPlus
-                    className="size-3.5 text-ink-dim"
-                    strokeWidth={2}
-                  />
-                  <span>New folder</span>
-                  {targetDir && (
-                    <span className="ml-auto font-mono text-[10px] text-ink-faint truncate max-w-[80px]">
-                      in {targetDir}
-                    </span>
-                  )}
-                </button>
-              </div>
-            </>
-          )}
-          </div>
-        </div>
-      </header>
-
-      {/* org-plan §9 Phase D — workspace switcher. Compact dropdown
-          between the brand header and the file sections; "Personal"
-          when no org is active, otherwise the active org's name. */}
-      <WorkspaceSwitcher />
-
-      {/* Sections — VSCode-explorer style. */}
-      <div className="flex-1 overflow-y-auto pb-3">
-        <TreeSection
-          id="filetree-personal"
-          label="Personal workspace"
-          open={openPersonal}
-          onToggle={() => setOpenPersonal((v) => !v)}
         >
-          {/* pt-1 so the topmost row's focus ring isn't clipped. */}
-          <div className="px-1.5 pt-1">
-        {/* D4.6b — PendingRow renders INLINE at the target folder's
+          {announcement}
+        </div>
+        {/* file-org-v1 D4.5b — FolderPicker dialog (renders when
+          pickerFolder is non-null). */}
+        {pickerFolder && onSetFolderMeta && (
+          <FolderPicker
+            path={pickerFolder.path}
+            initial={pickerFolder.initial}
+            onClose={() => setPickerFolder(null)}
+            onCommit={async (next) => {
+              await onSetFolderMeta(pickerFolder.path, next)
+              setAnnouncement(`folder customized: ${pickerFolder.path}`)
+            }}
+          />
+        )}
+        {/* emoji-icons — file icon EmojiPicker (renders when pickerFile
+          is non-null). */}
+        {pickerFile && onSetFileIcon && (
+          <EmojiPicker
+            title="Choose a file icon"
+            current={pickerFile.current}
+            onPick={async (emoji) => {
+              await onSetFileIcon(pickerFile.path, emoji)
+              setPickerFile(null)
+            }}
+            onClear={async () => {
+              await onSetFileIcon(pickerFile.path, '')
+              setPickerFile(null)
+            }}
+            onClose={() => setPickerFile(null)}
+          />
+        )}
+        <SidebarHeader
+          onOpenSearch={onOpenSearch}
+          createControl={
+            allowCreate ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setNewOpen((v) => !v)}
+                  className="inline-flex size-7 items-center justify-center rounded-md text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+                  title="new page or folder"
+                  aria-label="new"
+                >
+                  <Plus className="size-4" strokeWidth={2} />
+                </button>
+                {newOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-30"
+                      onClick={() => setNewOpen(false)}
+                    />
+                    <div className="absolute right-0 top-9 z-40 w-44 rounded-lg border border-rule bg-elevated py-1 shadow-md">
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-[12.5px] text-ink transition-colors hover:bg-hover"
+                        onClick={() => {
+                          beginPending('page')
+                          setNewOpen(false)
+                        }}
+                      >
+                        <FilePlus
+                          className="size-3.5 text-ink-dim"
+                          strokeWidth={2}
+                        />
+                        <span>New page</span>
+                        {targetDir && (
+                          <span className="ml-auto max-w-[80px] truncate font-mono text-[10px] text-ink-faint">
+                            in {targetDir}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-[12.5px] text-ink transition-colors hover:bg-hover"
+                        onClick={() => {
+                          beginPending('folder')
+                          setNewOpen(false)
+                        }}
+                      >
+                        <FolderPlus
+                          className="size-3.5 text-ink-dim"
+                          strokeWidth={2}
+                        />
+                        <span>New folder</span>
+                        {targetDir && (
+                          <span className="ml-auto max-w-[80px] truncate font-mono text-[10px] text-ink-faint">
+                            in {targetDir}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : null
+          }
+        />
+
+        {/* Sections — VSCode-explorer style. */}
+        <div className="flex-1 overflow-y-auto pb-3">
+          <TreeSection
+            id="filetree-personal"
+            label="Personal workspace"
+            open={openPersonal}
+            onToggle={() => setOpenPersonal((v) => !v)}
+          >
+            {/* pt-1 so the topmost row's focus ring isn't clipped. */}
+            <div className="px-1.5 pt-1">
+              {/* D4.6b — PendingRow renders INLINE at the target folder's
             depth (VSCode-style). The root case (targetDir === '')
             still renders at the top of the tree container; the
             nested case (targetDir !== '') renders INSIDE the
             matching folder's children — see TreeRowNode. */}
-        {pending && targetDir === '' && (
-          <PendingRow
-            kind={pending}
-            indent={8}
-            onCommit={commitPending}
-            busy={pendingBusy}
-            error={pendingError}
-            onInput={() => setPendingError(null)}
-          />
-        )}
+              {pending && targetDir === '' && (
+                <PendingRow
+                  kind={pending}
+                  indent={8}
+                  onCommit={commitPending}
+                  busy={pendingBusy}
+                  error={pendingError}
+                  onInput={() => setPendingError(null)}
+                />
+              )}
 
-        {tree.children.length === 0 && !pending ? (
-          <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
-            No pages yet — hit{' '}
-            <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">⌘K</kbd>{' '}
-            or the <Plus className="inline size-3 -mt-0.5" /> button to start.
-          </div>
-        ) : (
-          <div
-            role="tree"
-            aria-label="personal workspace"
-            onKeyDown={onTreeKeyDown}
-            // D4.7 — root drop zone. Dropping on empty space in the
-            // tree container (not on any row) moves the source to
-            // workspace root. The row-level onDrop calls
-            // stopPropagation, so this only fires on truly empty
-            // areas.
-            onDragOver={(e) => {
-              // D4.7b — the row-level onDragOver calls
-              // stopPropagation, so this only fires when the cursor
-              // is over EMPTY SPACE within the tree (not on any
-              // row). That's the root drop zone.
-              if (
-                e.dataTransfer.types.includes('application/dohc-tree-row')
-              ) {
-                e.preventDefault()
-                e.dataTransfer.dropEffect = 'move'
-                if (dragOverPath !== '') setDragOverPath('')
-              }
-            }}
-            onDragLeave={(e) => {
-              // Only clear when cursor truly leaves the tree
-              // container. The contains-check on relatedTarget
-              // handles bubbled leaves from descendant rows.
-              if (
-                !(e.currentTarget as HTMLElement).contains(
-                  e.relatedTarget as Node | null,
-                )
-              ) {
-                setDragOverPath(null)
-              }
-            }}
-            onDrop={(e) => {
-              void handleDrop(e, '')
-            }}
-            style={{
-              outline:
-                dragOverPath === ''
-                  ? '1px dashed var(--color-accent-2)'
-                  : 'none',
-              outlineOffset: '-2px',
-              borderRadius: 6,
-            }}
-          >
-            {tree.children.map((child) => (
-              <TreeRowNode
-                key={child.fullPath}
-                node={child}
-                depth={0}
-                activePath={activePath}
-                expanded={expanded}
-                viewIsAtom={view === 'atom'}
-                focusedPath={focusedPath}
-                setFocusedPath={setFocusedPath}
-                setRowRef={setRowRef}
-                onOpen={onOpen}
-                onToggle={toggle}
-                onDeleteFolder={onDeleteFolder}
-                onRenameFolder={onRenameFolder}
-                onDeleteFile={onDeleteFile}
-                onRenameFile={onRenameFile}
-                renameTarget={renameTarget}
-                renameBusy={renameBusy}
-                renameError={renameError}
-                onBeginRename={beginRename}
-                onRenameCommit={commitRename}
-                onRenameCancel={cancelRename}
-                onRenameInput={() => setRenameError(null)}
-                onOpenPicker={
-                  onSetFolderMeta
-                    ? (n) =>
-                        setPickerFolder({
-                          path: n.fullPath,
-                          initial: {
-                            icon: n.icon ?? null,
-                            color: n.color ?? null,
-                            starred: n.starred === true,
-                          },
-                        })
-                    : undefined
-                }
-                onOpenFileIcon={
-                  onSetFileIcon
-                    ? (path, current) => setPickerFile({ path, current })
-                    : undefined
-                }
-                onToggleFileStar={onToggleStar ? toggleFileStar : undefined}
-                starredOf={starredOf}
-                onToggleFolderStar={
-                  onToggleFolderStar ? toggleFolderStar : undefined
-                }
-                folderStarredOf={folderStarredOf}
-                dragOverPath={dragOverPath}
-                setDragOverPath={setDragOverPath}
-                handleDrop={handleDrop}
-                pendingKind={pending}
-                pendingTargetDir={targetDir}
-                onPendingCommit={commitPending}
-                pendingBusy={pendingBusy}
-                pendingError={pendingError}
-                onPendingInput={() => setPendingError(null)}
-                sharedByMeIds={sharedByMeIds}
-              />
-            ))}
-          </div>
-        )}
-          </div>
-        </TreeSection>
+              {tree.children.length === 0 && !pending ? (
+                <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
+                  No pages yet — hit{' '}
+                  <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">
+                    ⌘K
+                  </kbd>{' '}
+                  {allowCreate ? (
+                    <>
+                      or the <Plus className="inline size-3 -mt-0.5" /> button
+                      to start.
+                    </>
+                  ) : (
+                    <>to start.</>
+                  )}
+                </div>
+              ) : (
+                <div
+                  role="tree"
+                  aria-label="personal workspace"
+                  onKeyDown={onTreeKeyDown}
+                  // D4.7 — root drop zone. Dropping on empty space in the
+                  // tree container (not on any row) moves the source to
+                  // workspace root. The row-level onDrop calls
+                  // stopPropagation, so this only fires on truly empty
+                  // areas.
+                  onDragOver={(e) => {
+                    // D4.7b — the row-level onDragOver calls
+                    // stopPropagation, so this only fires when the cursor
+                    // is over EMPTY SPACE within the tree (not on any
+                    // row). That's the root drop zone.
+                    if (
+                      e.dataTransfer.types.includes('application/dohc-tree-row')
+                    ) {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'move'
+                      if (dragOverPath !== '') setDragOverPath('')
+                    }
+                  }}
+                  onDragLeave={(e) => {
+                    // Only clear when cursor truly leaves the tree
+                    // container. The contains-check on relatedTarget
+                    // handles bubbled leaves from descendant rows.
+                    if (
+                      !(e.currentTarget as HTMLElement).contains(
+                        e.relatedTarget as Node | null,
+                      )
+                    ) {
+                      setDragOverPath(null)
+                    }
+                  }}
+                  onDrop={(e) => {
+                    void handleDrop(e, '')
+                  }}
+                  style={{
+                    outline:
+                      dragOverPath === ''
+                        ? '1px dashed var(--color-accent-2)'
+                        : 'none',
+                    outlineOffset: '-2px',
+                    borderRadius: 6,
+                  }}
+                >
+                  {tree.children.map((child) => (
+                    <TreeRowNode
+                      key={child.fullPath}
+                      node={child}
+                      depth={0}
+                      activePath={activePath}
+                      expanded={expanded}
+                      viewIsAtom={view === 'atom'}
+                      focusedPath={focusedPath}
+                      setFocusedPath={setFocusedPath}
+                      setRowRef={setRowRef}
+                      onOpen={onOpen}
+                      onToggle={toggle}
+                      onDeleteFolder={onDeleteFolder}
+                      onRenameFolder={onRenameFolder}
+                      onDeleteFile={onDeleteFile}
+                      onRenameFile={onRenameFile}
+                      renameTarget={renameTarget}
+                      renameBusy={renameBusy}
+                      renameError={renameError}
+                      onBeginRename={beginRename}
+                      onRenameCommit={commitRename}
+                      onRenameCancel={cancelRename}
+                      onRenameInput={() => setRenameError(null)}
+                      onOpenPicker={
+                        onSetFolderMeta
+                          ? (n) =>
+                              setPickerFolder({
+                                path: n.fullPath,
+                                initial: {
+                                  icon: n.icon ?? null,
+                                  color: n.color ?? null,
+                                  starred: n.starred === true,
+                                },
+                              })
+                          : undefined
+                      }
+                      onOpenFileIcon={
+                        onSetFileIcon
+                          ? (path, current) => setPickerFile({ path, current })
+                          : undefined
+                      }
+                      onToggleFileStar={
+                        onToggleStar ? toggleFileStar : undefined
+                      }
+                      starredOf={starredOf}
+                      onToggleFolderStar={
+                        onToggleFolderStar ? toggleFolderStar : undefined
+                      }
+                      folderStarredOf={folderStarredOf}
+                      dragOverPath={dragOverPath}
+                      setDragOverPath={setDragOverPath}
+                      handleDrop={handleDrop}
+                      pendingKind={pending}
+                      pendingTargetDir={targetDir}
+                      onPendingCommit={commitPending}
+                      pendingBusy={pendingBusy}
+                      pendingError={pendingError}
+                      onPendingInput={() => setPendingError(null)}
+                      sharedByMeIds={sharedByMeIds}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </TreeSection>
 
-        {/* sharing-v1 1a — "Shared with me". Always shown so the surface
+          {/* sharing-v1 1a — "Shared with me". Always shown so the surface
             is discoverable, with a calm empty state when nothing's shared. */}
-        <TreeSection
-          id="filetree-shared"
-          label="Shared with me"
-          open={openShared}
-          onToggle={() => setOpenShared((v) => !v)}
-          divider
-        >
-          <div className="px-1.5 pb-1">
-            {(sharedWithMe?.length ?? 0) === 0 && (
-              <p className="px-2 py-1 text-[11.5px] leading-relaxed text-ink-faint">
-                Nothing shared with you yet.
-              </p>
-            )}
-          {(sharedWithMe ?? []).map((s) => {
-            const leaf =
-              s.title ||
-              s.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ||
-              s.fileId
-            return (
-              <button
-                key={s.shareId}
-                onClick={() => s.available && onOpenShared?.(s.shareId)}
-                disabled={!s.available}
-                title={s.available ? leaf : 'no longer available'}
-                className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
-                  activeShareId === s.shareId
-                    ? 'bg-hover text-ink-strong font-medium'
-                    : 'text-ink-dim hover:text-ink hover:bg-hover'
-                } ${!s.available ? 'opacity-40 cursor-default' : ''}`}
-              >
-                <Share2 className="size-3.5 shrink-0" strokeWidth={2} />
-                <span className="truncate">{leaf}</span>
-                {s.permission === 'edit' && (
-                  <span className="ml-auto text-[9px] text-ink-faint">edit</span>
-                )}
-              </button>
-            )
-          })}
-          </div>
-        </TreeSection>
-      </div>
-
-      {/* Footer */}
-      <footer className="border-t border-rule px-3 py-2.5 flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <div
-            className="flex flex-1 items-center gap-2 min-w-0"
-            title={user?.email ?? ''}
+          <TreeSection
+            id="filetree-shared"
+            label="Shared with me"
+            open={openShared}
+            onToggle={() => setOpenShared((v) => !v)}
+            divider
           >
-            <span className="size-2 rounded-full bg-success shrink-0" />
-            <span className="truncate text-[11.5px] text-ink-dim">
-              {label}
-            </span>
-          </div>
-          <ThemeToggleButton />
-          <a
-            href="/api/auth/sign-out"
-            className="text-[10.5px] text-ink-faint hover:text-ink-dim transition-colors"
-            title="sign out"
-          >
-            sign out
-          </a>
+            <div className="px-1.5 pb-1">
+              {(sharedWithMe?.length ?? 0) === 0 && (
+                <p className="px-2 py-1 text-[11.5px] leading-relaxed text-ink-faint">
+                  Nothing shared with you yet.
+                </p>
+              )}
+              {(sharedWithMe ?? []).map((s) => {
+                const leaf =
+                  s.title ||
+                  s.path
+                    .replace(/\.[a-z0-9]+$/i, '')
+                    .split('/')
+                    .pop() ||
+                  s.fileId
+                return (
+                  <button
+                    key={s.shareId}
+                    onClick={() => s.available && onOpenShared?.(s.shareId)}
+                    disabled={!s.available}
+                    title={s.available ? leaf : 'no longer available'}
+                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] transition-colors ${
+                      activeShareId === s.shareId
+                        ? 'bg-hover text-ink-strong font-medium'
+                        : 'text-ink-dim hover:text-ink hover:bg-hover'
+                    } ${!s.available ? 'opacity-40 cursor-default' : ''}`}
+                  >
+                    <Share2 className="size-3.5 shrink-0" strokeWidth={2} />
+                    <span className="truncate">{leaf}</span>
+                    {s.permission === 'edit' && (
+                      <span className="ml-auto text-[9px] text-ink-faint">
+                        edit
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </TreeSection>
         </div>
-      </footer>
-    </aside>
+
+        <WorkspaceSwitcher />
+        <SidebarAccountFooter user={user} />
+      </aside>
     </PresenceContext.Provider>
   )
 }
@@ -1240,7 +1225,10 @@ function PendingRow({
         )}
       </div>
       {error && (
-        <div role="alert" className="pb-1 pl-5 text-[11px] leading-snug text-danger">
+        <div
+          role="alert"
+          className="pb-1 pl-5 text-[11px] leading-snug text-danger"
+        >
           {error}
         </div>
       )}
@@ -1322,7 +1310,10 @@ function InlineRenameRow({
         )}
       </div>
       {error && (
-        <div role="alert" className="pb-1 pl-5 text-[11px] leading-snug text-danger">
+        <div
+          role="alert"
+          className="pb-1 pl-5 text-[11px] leading-snug text-danger"
+        >
           {error}
         </div>
       )}
@@ -1404,10 +1395,7 @@ function TreeRowNode({
   // file-org-v1 D4.7 — DnD state + handler from the parent.
   dragOverPath: string | null
   setDragOverPath: (path: string | null) => void
-  handleDrop: (
-    e: React.DragEvent,
-    targetParentDir: string,
-  ) => Promise<void>
+  handleDrop: (e: React.DragEvent, targetParentDir: string) => Promise<void>
   // file-org-v1 D4.6b — pending-create slot. When pendingKind is
   // non-null AND pendingTargetDir matches this folder's fullPath,
   // render the PendingRow inline at the top of this folder's
@@ -1554,7 +1542,10 @@ function TreeRowNode({
             strokeWidth={1.8}
           />
         ) : (
-          <FileText className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
+          <FileText
+            className="size-3.5 shrink-0 opacity-70"
+            strokeWidth={1.8}
+          />
         )}
         <span className="truncate text-[12.5px] font-medium">{label}</span>
         {/* Optional sidebar presence dot. */}
@@ -1572,9 +1563,7 @@ function TreeRowNode({
         {showLock && (
           <Lock
             className={`size-3 shrink-0 ${
-              node.page!.systemLocked
-                ? 'text-violet-500'
-                : 'text-ink-faint'
+              node.page!.systemLocked ? 'text-violet-500' : 'text-ink-faint'
             }`}
             strokeWidth={2}
             aria-label={
@@ -1723,10 +1712,7 @@ function TreeRowNode({
           e.dataTransfer.effectAllowed = 'move'
           e.dataTransfer.setData(
             'application/dohc-tree-row',
-            JSON.stringify({
-              path: node.fullPath,
-              kind: 'folder',
-            } satisfies DragSource),
+            JSON.stringify({ path: node.fullPath, kind: 'folder' } satisfies DragSource),
           )
         }}
         onDragOver={(e) => {
@@ -1796,14 +1782,19 @@ function TreeRowNode({
               style={{
                 color: chosenColor,
                 opacity:
-                  isContextFolder || isSkillsFolder || isCommandsFolder || node.color
+                  isContextFolder ||
+                  isSkillsFolder ||
+                  isCommandsFolder ||
+                  node.color
                     ? 1
                     : 0.7,
               }}
             />
           )
         })()}
-        <span className="truncate text-[12.5px] font-medium ml-0.5">{label}</span>
+        <span className="truncate text-[12.5px] font-medium ml-0.5">
+          {label}
+        </span>
         {/* file-org-v1 D4.5 — folder star icon (next to label,
             before the row-actions menu). Mirrors the leaf-row
             star treatment for consistency. */}
@@ -1828,9 +1819,7 @@ function TreeRowNode({
         <RowActions
           onRename={() => onBeginRename('folder', node.fullPath)}
           onDelete={() => onDeleteFolder(node.fullPath)}
-          onCustomize={
-            onOpenPicker ? () => onOpenPicker(node) : undefined
-          }
+          onCustomize={onOpenPicker ? () => onOpenPicker(node) : undefined}
           customizeLabel={`customize folder ${node.fullPath}`}
           renameLabel={`rename folder ${node.fullPath}`}
           deleteLabel={`delete folder ${node.fullPath}`}
@@ -2110,22 +2099,5 @@ function RowActions({
         </>
       )}
     </div>
-  )
-}
-
-function ThemeToggleButton() {
-  const { theme, cycle } = useTheme()
-  const Icon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor
-  const next =
-    theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'
-  return (
-    <button
-      onClick={cycle}
-      title={`theme: ${theme} · click for ${next}`}
-      aria-label="cycle theme"
-      className="flex size-6 items-center justify-center rounded-md text-ink-faint hover:text-ink hover:bg-hover transition-colors"
-    >
-      <Icon className="size-3.5" strokeWidth={2} />
-    </button>
   )
 }

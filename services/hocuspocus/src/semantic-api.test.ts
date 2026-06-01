@@ -2,9 +2,15 @@ import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { encodeDocName } from './doc-name.js'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { createSemanticApiHandler, semanticOperationKey } from './semantic-api.js'
+import {
+  createSemanticApiHandler,
+  semanticOperationKey,
+} from './semantic-api.js'
 import { createAnchorsForText } from './suggestions.js'
-import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
+import {
+  MemoryYDocPersistenceBackend,
+  PostgresYDocStore,
+} from './persistence.js'
 
 const documentName = encodeDocName({
   workspaceId: 'workspace_1',
@@ -41,7 +47,10 @@ function makeHandler(
   return { acl, backend, handler, store }
 }
 
-function request(body: Record<string, unknown>, token = 'admin-token'): Request {
+function request(
+  body: Record<string, unknown>,
+  token = 'admin-token',
+): Request {
   return new Request('http://localhost/apply/replaceRange', {
     method: 'POST',
     headers: {
@@ -53,6 +62,25 @@ function request(body: Record<string, unknown>, token = 'admin-token'): Request 
 }
 
 describe('semantic apply API', () => {
+  it('authenticates a non-mutating semantic write preflight route', async () => {
+    const { acl, handler } = makeHandler()
+
+    const response = await handler(
+      new Request('http://localhost/apply/preflight', {
+        method: 'GET',
+        headers: { authorization: 'Bearer admin-token' },
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      semanticWrites: true,
+    })
+    expect(acl.canWriteAtom).not.toHaveBeenCalled()
+    expect(acl.createAtom).not.toHaveBeenCalled()
+  })
+
   it('rejects semantic writes without the admin token', async () => {
     const { handler } = makeHandler()
 
@@ -99,9 +127,9 @@ describe('semantic apply API', () => {
       deduped: true,
     })
     expect(backend.updatesFor(documentName)).toHaveLength(1)
-    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toContain(
-      'Hello earth.',
-    )
+    await expect(
+      store.loadDocument(documentName).then(yDocToMarkdown),
+    ).resolves.toContain('Hello earth.')
   })
 
   it('returns stale-intent without appending an update', async () => {
@@ -135,17 +163,20 @@ describe('semantic apply API', () => {
     })
     expect(backend.updatesFor(documentName)).toHaveLength(0)
     await expect(
-      store.getSemanticOperation(semanticOperationKey(documentName, 'op_stale')),
+      store.getSemanticOperation(
+        semanticOperationKey(documentName, 'op_stale'),
+      ),
     ).resolves.toBeNull()
   })
 
   it('uses Postgres-safe semantic operation keys', () => {
-    const key = semanticOperationKey('create:workspace_1:notes/new.md', 'op:1/2')
+    const key = semanticOperationKey(
+      'create:workspace_1:notes/new.md',
+      'op:1/2',
+    )
 
     expect(key).not.toContain('\0')
-    expect(key).toBe(
-      'create%3Aworkspace_1%3Anotes%2Fnew.md::op%3A1%2F2',
-    )
+    expect(key).toBe('create%3Aworkspace_1%3Anotes%2Fnew.md::op%3A1%2F2')
   })
 
   it('serializes duplicate operationIds through the persistence layer', async () => {
@@ -176,8 +207,12 @@ describe('semantic apply API', () => {
     ])
 
     expect(responses.every((response) => response.status === 200)).toBe(true)
-    const payloads = await Promise.all(responses.map((response) => response.json()))
-    expect(payloads.filter((payload) => payload.deduped === true)).toHaveLength(1)
+    const payloads = await Promise.all(
+      responses.map((response) => response.json()),
+    )
+    expect(payloads.filter((payload) => payload.deduped === true)).toHaveLength(
+      1,
+    )
     expect(backend.updatesFor(documentName)).toHaveLength(1)
   })
 
@@ -210,9 +245,9 @@ describe('semantic apply API', () => {
     expect(response.status).toBe(200)
     expect(backend.updatesFor(documentName)).toHaveLength(1)
     expect(yDocToMarkdown(liveDoc)).toContain('Hello earth.')
-    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toContain(
-      'Hello earth.',
-    )
+    await expect(
+      store.loadDocument(documentName).then(yDocToMarkdown),
+    ).resolves.toContain('Hello earth.')
   })
 
   it('inserts text at a resolved Y.RelativePosition anchor', async () => {
@@ -246,9 +281,9 @@ describe('semantic apply API', () => {
 
     expect(response.status).toBe(200)
     expect(backend.updatesFor(documentName)).toHaveLength(1)
-    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toContain(
-      'Hello brave world.',
-    )
+    await expect(
+      store.loadDocument(documentName).then(yDocToMarkdown),
+    ).resolves.toContain('Hello brave world.')
   })
 
   it('creates Y.RelativePosition anchors from live document text', async () => {
@@ -313,9 +348,9 @@ describe('semantic apply API', () => {
 
     expect(response.status).toBe(200)
     expect(backend.updatesFor(documentName)).toHaveLength(1)
-    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toMatch(
-      /# Intro\s+Inserted note\.\s+Old body\./,
-    )
+    await expect(
+      store.loadDocument(documentName).then(yDocToMarkdown),
+    ).resolves.toMatch(/# Intro\s+Inserted note\.\s+Old body\./)
   })
 
   it('creates a Convex atom and initializes its canonical Y.Doc snapshot', async () => {

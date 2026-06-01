@@ -20,6 +20,9 @@ export type AgentModelPickerSelection = {
 export type AgentModelPickerModel = {
   id: string
   label: string
+  contextWindowTokens?: number
+  maxContextWindowTokens?: number
+  effectiveContextWindowPercent?: number
   supportsReasoning: boolean
   reasoningEfforts: AgentReasoningEffort[]
   recommended?: boolean
@@ -95,6 +98,27 @@ function modelLabel(
   return model?.label ?? selection?.model ?? 'Model'
 }
 
+function formatContextTokens(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const value = tokens / 1_000_000
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}m`
+  }
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`
+  return String(tokens)
+}
+
+function modelContextLabel(model: AgentModelPickerModel): string | null {
+  if (!model.contextWindowTokens) return null
+  const base = `${formatContextTokens(model.contextWindowTokens)} context`
+  if (
+    model.maxContextWindowTokens &&
+    model.maxContextWindowTokens > model.contextWindowTokens
+  ) {
+    return `${base} · up to ${formatContextTokens(model.maxContextWindowTokens)}`
+  }
+  return base
+}
+
 function selectedProvider(
   providers: ReadonlyArray<AgentProviderSnapshot>,
   selection: AgentModelPickerSelection | null,
@@ -148,6 +172,7 @@ export function AgentModelPicker({
   const [query, setQuery] = useState('')
   const [popoverFrame, setPopoverFrame] = useState<PopoverFrame | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
   const provider = selectedProvider(providers, selection)
   const selectedModel = provider?.models.find((m) => m.id === selection?.model)
   const [focusedProviderId, setFocusedProviderId] = useState<string | null>(null)
@@ -214,15 +239,41 @@ export function AgentModelPicker({
     }
   }, [open])
 
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return
+
+    function closeFromOutsidePointer(event: PointerEvent) {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      const path =
+        typeof event.composedPath === 'function' ? event.composedPath() : []
+      const insideTrigger =
+        triggerRef.current &&
+        (triggerRef.current.contains(target) || path.includes(triggerRef.current))
+      const insidePopover =
+        popoverRef.current &&
+        (popoverRef.current.contains(target) || path.includes(popoverRef.current))
+
+      if (!insideTrigger && !insidePopover) setOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeFromOutsidePointer, true)
+    return () => {
+      document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
+    }
+  }, [open])
+
   const filteredModels = useMemo(() => {
     const q = query.trim().toLowerCase()
     const models = activeProvider?.models ?? []
     if (!q) return models
     return models.filter((model) => {
       const providerLabel = activeProvider?.displayName.toLowerCase() ?? ''
+      const contextLabel = modelContextLabel(model)?.toLowerCase() ?? ''
       return (
         model.label.toLowerCase().includes(q) ||
         model.id.toLowerCase().includes(q) ||
+        contextLabel.includes(q) ||
         providerLabel.includes(q)
       )
     })
@@ -271,6 +322,7 @@ export function AgentModelPicker({
             onClick={() => setOpen(false)}
           />
           <div
+            ref={popoverRef}
             className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
             style={{
               left: popoverFrame?.left ?? 14,
@@ -399,21 +451,29 @@ export function AgentModelPicker({
                       selection?.providerId === activeProvider?.providerId &&
                       selection?.model === model.id
                     const disabledModel = !activeProviderReady
+                    const contextLabel = modelContextLabel(model)
                     return (
                       <button
                         key={model.id}
                         type="button"
                         onClick={() => choose(model)}
                         disabled={disabledModel}
-                        className={`flex h-10 w-full items-center gap-2 rounded-lg px-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${
+                        className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${
                           checked
                             ? 'bg-hover text-ink-strong'
                             : 'text-ink-dim hover:bg-hover hover:text-ink'
                         }`}
                       >
                         <Zap className="size-3.5 shrink-0 text-ink-faint" strokeWidth={1.8} />
-                        <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
-                          {model.label}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[13px] font-medium">
+                            {model.label}
+                          </span>
+                          {contextLabel && (
+                            <span className="mt-0.5 block truncate text-[10.5px] font-medium text-ink-faint">
+                              {contextLabel}
+                            </span>
+                          )}
                         </span>
                         {model.recommended && (
                           <span className="rounded-md border border-rule bg-panel px-1.5 py-0.5 text-[9.5px] font-semibold text-ink-faint">

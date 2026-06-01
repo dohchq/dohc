@@ -2,6 +2,12 @@ import { FilePenLine, Loader2, PanelsTopLeft } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import {
+  SidebarAccountFooter,
+  SidebarHeader,
+  type SidebarUser,
+} from './SidebarChrome'
 
 type ViewRow = {
   packageRoot: string
@@ -10,7 +16,9 @@ type ViewRow = {
   entryPath: string
 }
 
-function groupViews(views: ViewRow[]): Array<{ scopePath: string; views: ViewRow[] }> {
+function groupViews(
+  views: ViewRow[],
+): Array<{ scopePath: string; views: ViewRow[] }> {
   const grouped = new Map<string, ViewRow[]>()
   for (const view of views) {
     const key = view.scopePath || ''
@@ -30,10 +38,14 @@ export function ViewsSidebar({
   selectedPackageRoot,
   onOpenView,
   onOpenSource,
+  onOpenSearch,
+  user,
 }: {
   selectedPackageRoot: string | null
   onOpenView: (packageRoot: string) => void
   onOpenSource: (path: string) => void
+  onOpenSearch?: () => void
+  user?: SidebarUser
 }) {
   const activeWorkspaceId = useActiveWorkspaceId()
   const result = useQuery(api.views.list, { activeWorkspaceId })
@@ -42,23 +54,31 @@ export function ViewsSidebar({
 
   return (
     <aside className="flex h-screen min-w-0 flex-col border-r border-rule bg-panel">
-      <div className="flex h-12 items-center justify-between border-b border-rule px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <PanelsTopLeft className="size-4 shrink-0 text-ink-dim" strokeWidth={1.9} />
-          <h2 className="truncate text-[13px] font-semibold text-ink-strong">
-            Views
-          </h2>
-        </div>
-        {result === undefined ? (
-          <Loader2 className="size-3.5 animate-spin text-ink-faint" aria-label="loading views" />
-        ) : (
-          <span className="font-mono text-[10.5px] text-ink-faint">
-            {views.length}
-          </span>
-        )}
-      </div>
+      <SidebarHeader onOpenSearch={onOpenSearch} />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        <div className="mb-2 flex items-center justify-between px-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <PanelsTopLeft
+              className="size-4 shrink-0 text-ink-dim"
+              strokeWidth={1.9}
+            />
+            <h2 className="truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+              Views
+            </h2>
+          </div>
+          {result === undefined ? (
+            <Loader2
+              className="size-3.5 animate-spin text-ink-faint"
+              aria-label="loading views"
+            />
+          ) : (
+            <span className="font-mono text-[10.5px] text-ink-faint">
+              {views.length}
+            </span>
+          )}
+        </div>
+
         {result !== undefined && views.length === 0 ? (
           <div className="px-2 py-8 text-center text-[12px] leading-relaxed text-ink-faint">
             No views yet.
@@ -110,6 +130,9 @@ export function ViewsSidebar({
           </div>
         ) : null}
       </div>
+
+      <WorkspaceSwitcher />
+      <SidebarAccountFooter user={user ?? null} />
     </aside>
   )
 }
