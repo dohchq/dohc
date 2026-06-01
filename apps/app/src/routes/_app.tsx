@@ -347,9 +347,7 @@ function App() {
     urlView ??
     (urlFileId || urlShareId || initialOpenPathRef.current
       ? 'atom'
-      : initialViewPackageRootRef.current
-        ? 'views'
-        : 'agent'),
+      : 'views'),
   )
 
   const chatThreads = useMemo<AgentThreadSummary[]>(

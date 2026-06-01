@@ -71,7 +71,7 @@ describe('views shell route helpers', () => {
 })
 
 describe('Views activity shell', () => {
-  it('adds Views to the activity bar between Files and Graph', () => {
+  it('puts Views at the top of the activity bar above Agent', () => {
     const html = renderToStaticMarkup(
       createElement(ActivityBar, {
         view: 'views',
@@ -83,11 +83,8 @@ describe('Views activity shell', () => {
     expect(html).toContain('aria-label="Files"')
     expect(html).toContain('aria-label="Views"')
     expect(html).toContain('aria-label="Graph"')
-    expect(html.indexOf('aria-label="Views"')).toBeGreaterThan(
-      html.indexOf('aria-label="Files"'),
-    )
     expect(html.indexOf('aria-label="Views"')).toBeLessThan(
-      html.indexOf('aria-label="Graph"'),
+      html.indexOf('aria-label="Agent"'),
     )
   })
 

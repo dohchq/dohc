@@ -1,7 +1,7 @@
 import { AppWindow, BotMessageSquare, Files, Workflow } from 'lucide-react'
 
 // graph-v1 1c — VSCode-style activity bar (icon rail). Switches the
-// primary view: Agent, Files (explorer + editor), Views, Graph.
+// primary view: Views, Agent, Files (explorer + editor), Graph.
 export type ActivityView = 'agent' | 'atom' | 'views' | 'graph'
 
 const ITEMS: Array<{
@@ -9,9 +9,9 @@ const ITEMS: Array<{
   label: string
   Icon: typeof Files
 }> = [
+  { view: 'views', label: 'Views', Icon: AppWindow },
   { view: 'agent', label: 'Agent', Icon: BotMessageSquare },
   { view: 'atom', label: 'Files', Icon: Files },
-  { view: 'views', label: 'Views', Icon: AppWindow },
   { view: 'graph', label: 'Graph', Icon: Workflow },
 ]
 

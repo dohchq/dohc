@@ -207,6 +207,15 @@ describe('_app.tsx shell recognizes both URL shapes', () => {
       /to:\s*['"]\/w\/\$wsId\/graph['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
     )
   })
+
+  it('defaults an unqualified workspace route to Views rather than Agent', () => {
+    expect(APP_SRC).toMatch(
+      /urlView\s*\?\?[\s\S]{0,220}\?\s*'atom'[\s\S]{0,120}:\s*'views'/,
+    )
+    expect(APP_SRC).not.toMatch(
+      /urlView\s*\?\?[\s\S]{0,220}\?\s*'atom'[\s\S]{0,120}:\s*'agent'/,
+    )
+  })
 })
 
 describe('active-workspace.tsx (R1 hook resolution)', () => {
