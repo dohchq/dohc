@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
 import { useAuth } from '@workos/authkit-tanstack-react-start/client'
-import { Share2, Smile } from 'lucide-react'
+import { AppWindow, Share2, Smile } from 'lucide-react'
 import RSCE from 'react-simple-code-editor'
 import { api } from '../../convex/_generated/api'
 import {
@@ -10,7 +10,8 @@ import {
   setFrontmatterIcon,
 } from '../lib/frontmatter'
 import { EmojiPicker } from './EmojiPicker'
-import { highlightSource } from '../lib/sourceHighlight'
+import { highlightSource, type SourceLang } from '../lib/sourceHighlight'
+import { parseViewPath } from '../lib/viewPaths'
 
 // react-simple-code-editor is CJS (`exports.default = Editor`) with no
 // `__esModule` flag, so under Vite's interop the ESM default import is
@@ -23,7 +24,6 @@ import {
   splitFrontmatter,
   joinFrontmatter,
   extractFrontmatterId,
-  isHtmlAtomBody,
   isHtmlPath,
   isSkillAtomBody,
 } from '../lib/atomId'
@@ -35,16 +35,36 @@ import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEdit
 import { DohcBrandBlock } from './DohcLogo'
 import { AsciiSketchModal } from './AsciiSketchModal'
 import {
+  isSourceFirstPath,
+  shouldRenderHtmlAtomFrame,
+} from '../lib/viewSourceBehavior'
+import {
   findSubpages,
   pathToBreadcrumbs,
   type FileRow,
 } from '../lib/path-tree'
+
+function sourceLangForPath(
+  path: string | null | undefined,
+  isHtml: boolean,
+): SourceLang {
+  if (isHtml) return 'html'
+  const clean = path ?? ''
+  if (/\.tsx$/i.test(clean)) return 'tsx'
+  if (/\.ts$/i.test(clean)) return 'typescript'
+  if (/\.jsx$/i.test(clean)) return 'jsx'
+  if (/\.js$/i.test(clean)) return 'javascript'
+  if (/\.css$/i.test(clean)) return 'css'
+  if (/\.json$/i.test(clean)) return 'json'
+  return 'markdown'
+}
 
 type Props = {
   path: string | null
   files: FileRow[]
   onRunAction: (prompt: string) => void
   onOpenAtom: (path: string) => void
+  onOpenView?: (packageRoot: string) => void
   // sharing-v1 1a — share THIS file (by its rename-proof fileId).
   onShare?: (fileId: string) => void
   enterEdit?: boolean
@@ -64,6 +84,7 @@ export function AtomView({
   files,
   onRunAction,
   onOpenAtom,
+  onOpenView,
   onShare,
   enterEdit,
   onEnteredEdit,
@@ -294,6 +315,7 @@ export function AtomView({
           subpages={subpages}
           allFiles={files}
           onOpenAtom={onOpenAtom}
+          onOpenView={onOpenView}
           autoFocus={!!enterEdit}
           advisory={idAdvisory ?? null}
           migrationNotice={row?.migrationNotice ?? null}
@@ -353,6 +375,7 @@ function AtomShell({
   subpages,
   allFiles,
   onOpenAtom,
+  onOpenView,
   autoFocus,
   advisory,
   migrationNotice,
@@ -373,6 +396,7 @@ function AtomShell({
   // entire vault and mark unknown targets as broken.
   allFiles: FileRow[]
   onOpenAtom: (path: string) => void
+  onOpenView?: (packageRoot: string) => void
   autoFocus: boolean
   advisory: {
     kind: 'collision' | 'suffixed' | null
@@ -432,7 +456,8 @@ function AtomShell({
   // (b2) `sourceMode` swaps the editor for a raw textarea over the
   // FULL body so the user can still SEE and hand-edit the
   // frontmatter/id (manifesto locked-#1: inspectable & hand-editable).
-  const [sourceMode, setSourceMode] = useState(false)
+  const viewInfo = useMemo(() => (path ? parseViewPath(path) : null), [path])
+  const [sourceMode, setSourceMode] = useState(() => isSourceFirstPath(path))
   // D4.28 — raw-source buffer. While in source mode the textarea
   // edits THIS (local), not `draft`, so per-keystroke autosave +
   // id-reconcile don't fire. Synced from `draft` each time source
@@ -511,8 +536,8 @@ function AtomShell({
   // so existing agent-authored html atoms (.md + type: html) keep
   // working. The §2-B route + tree badge mirror this same OR.
   const isHtml = useMemo(
-    () => !!pathIsHtml || isHtmlAtomBody(draft),
-    [pathIsHtml, draft],
+    () => shouldRenderHtmlAtomFrame({ path, pathIsHtml: !!pathIsHtml, draft }),
+    [path, pathIsHtml, draft],
   )
   // D4.11b — prefer the draft's id (honors a live hand-edit in
   // source mode); fall back to the SERVER-saved id when the draft
@@ -635,6 +660,17 @@ function AtomShell({
           button (strips the canonical id + injects an advisory
           source-share line so the recipient owns a clean atom). */}
       <div className="flex justify-end items-center gap-2 -mt-2 mb-1">
+        {viewInfo && onOpenView && (
+          <button
+            type="button"
+            onClick={() => onOpenView(viewInfo.packageRoot)}
+            className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors"
+            title="Open rendered view"
+          >
+            <AppWindow className="size-3" strokeWidth={2} />
+            Open view
+          </button>
+        )}
         {isSkillAtomBody(draft) && <ShareSkillButton body={draft} />}
         {onShare && atomId && (
           <button
@@ -733,7 +769,7 @@ function AtomShell({
         <SourceCodeEditor
           value={sourceDraft}
           onValueChange={setSourceDraft}
-          highlight={(code) => highlightSource(code, isHtml ? 'html' : 'markdown')}
+          highlight={(code) => highlightSource(code, sourceLangForPath(path, isHtml))}
           onBlur={() => onCommitSource?.(sourceDraft)}
           autoFocus
           padding={0}

@@ -21,9 +21,11 @@ import { Route as AppWWsIdRouteImport } from './routes/_app.w.$wsId'
 import { Route as AppSharedShareIdRouteImport } from './routes/_app.shared.$shareId'
 import { Route as AppPAtomIdRouteImport } from './routes/_app.p.$atomId'
 import { Route as AppWWsIdIndexRouteImport } from './routes/_app.w.$wsId.index'
+import { Route as AppWWsIdViewsRouteImport } from './routes/_app.w.$wsId.views'
 import { Route as AppWWsIdGraphRouteImport } from './routes/_app.w.$wsId.graph'
 import { Route as AppWWsIdFilesRouteImport } from './routes/_app.w.$wsId.files'
 import { Route as AppWWsIdAgentRouteImport } from './routes/_app.w.$wsId.agent'
+import { Route as AppWWsIdVViewRefRouteImport } from './routes/_app.w.$wsId.v.$viewRef'
 import { Route as AppWWsIdSharedShareIdRouteImport } from './routes/_app.w.$wsId.shared.$shareId'
 import { Route as AppWWsIdPAtomIdRouteImport } from './routes/_app.w.$wsId.p.$atomId'
 
@@ -86,6 +88,11 @@ const AppWWsIdIndexRoute = AppWWsIdIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppWWsIdRoute,
 } as any)
+const AppWWsIdViewsRoute = AppWWsIdViewsRouteImport.update({
+  id: '/views',
+  path: '/views',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
 const AppWWsIdGraphRoute = AppWWsIdGraphRouteImport.update({
   id: '/graph',
   path: '/graph',
@@ -99,6 +106,11 @@ const AppWWsIdFilesRoute = AppWWsIdFilesRouteImport.update({
 const AppWWsIdAgentRoute = AppWWsIdAgentRouteImport.update({
   id: '/agent',
   path: '/agent',
+  getParentRoute: () => AppWWsIdRoute,
+} as any)
+const AppWWsIdVViewRefRoute = AppWWsIdVViewRefRouteImport.update({
+  id: '/v/$viewRef',
+  path: '/v/$viewRef',
   getParentRoute: () => AppWWsIdRoute,
 } as any)
 const AppWWsIdSharedShareIdRoute = AppWWsIdSharedShareIdRouteImport.update({
@@ -126,7 +138,9 @@ export interface FileRoutesByFullPath {
   '/w/$wsId/agent': typeof AppWWsIdAgentRoute
   '/w/$wsId/files': typeof AppWWsIdFilesRoute
   '/w/$wsId/graph': typeof AppWWsIdGraphRoute
+  '/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/w/$wsId/': typeof AppWWsIdIndexRoute
+  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
@@ -143,7 +157,9 @@ export interface FileRoutesByTo {
   '/w/$wsId/agent': typeof AppWWsIdAgentRoute
   '/w/$wsId/files': typeof AppWWsIdFilesRoute
   '/w/$wsId/graph': typeof AppWWsIdGraphRoute
+  '/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/w/$wsId': typeof AppWWsIdIndexRoute
+  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
@@ -163,7 +179,9 @@ export interface FileRoutesById {
   '/_app/w/$wsId/agent': typeof AppWWsIdAgentRoute
   '/_app/w/$wsId/files': typeof AppWWsIdFilesRoute
   '/_app/w/$wsId/graph': typeof AppWWsIdGraphRoute
+  '/_app/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/_app/w/$wsId/': typeof AppWWsIdIndexRoute
+  '/_app/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/_app/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/_app/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
 }
@@ -183,7 +201,9 @@ export interface FileRouteTypes {
     | '/w/$wsId/agent'
     | '/w/$wsId/files'
     | '/w/$wsId/graph'
+    | '/w/$wsId/views'
     | '/w/$wsId/'
+    | '/w/$wsId/v/$viewRef'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
   fileRoutesByTo: FileRoutesByTo
@@ -200,7 +220,9 @@ export interface FileRouteTypes {
     | '/w/$wsId/agent'
     | '/w/$wsId/files'
     | '/w/$wsId/graph'
+    | '/w/$wsId/views'
     | '/w/$wsId'
+    | '/w/$wsId/v/$viewRef'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
   id:
@@ -219,7 +241,9 @@ export interface FileRouteTypes {
     | '/_app/w/$wsId/agent'
     | '/_app/w/$wsId/files'
     | '/_app/w/$wsId/graph'
+    | '/_app/w/$wsId/views'
     | '/_app/w/$wsId/'
+    | '/_app/w/$wsId/v/$viewRef'
     | '/_app/w/$wsId/p/$atomId'
     | '/_app/w/$wsId/shared/$shareId'
   fileRoutesById: FileRoutesById
@@ -327,6 +351,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppWWsIdGraphRouteImport
       parentRoute: typeof AppWWsIdRoute
     }
+    '/_app/w/$wsId/views': {
+      id: '/_app/w/$wsId/views'
+      path: '/views'
+      fullPath: '/w/$wsId/views'
+      preLoaderRoute: typeof AppWWsIdViewsRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
     '/_app/w/$wsId/files': {
       id: '/_app/w/$wsId/files'
       path: '/files'
@@ -339,6 +370,13 @@ declare module '@tanstack/react-router' {
       path: '/agent'
       fullPath: '/w/$wsId/agent'
       preLoaderRoute: typeof AppWWsIdAgentRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/v/$viewRef': {
+      id: '/_app/w/$wsId/v/$viewRef'
+      path: '/v/$viewRef'
+      fullPath: '/w/$wsId/v/$viewRef'
+      preLoaderRoute: typeof AppWWsIdVViewRefRouteImport
       parentRoute: typeof AppWWsIdRoute
     }
     '/_app/w/$wsId/shared/$shareId': {
@@ -362,7 +400,9 @@ interface AppWWsIdRouteChildren {
   AppWWsIdAgentRoute: typeof AppWWsIdAgentRoute
   AppWWsIdFilesRoute: typeof AppWWsIdFilesRoute
   AppWWsIdGraphRoute: typeof AppWWsIdGraphRoute
+  AppWWsIdViewsRoute: typeof AppWWsIdViewsRoute
   AppWWsIdIndexRoute: typeof AppWWsIdIndexRoute
+  AppWWsIdVViewRefRoute: typeof AppWWsIdVViewRefRoute
   AppWWsIdPAtomIdRoute: typeof AppWWsIdPAtomIdRoute
   AppWWsIdSharedShareIdRoute: typeof AppWWsIdSharedShareIdRoute
 }
@@ -371,7 +411,9 @@ const AppWWsIdRouteChildren: AppWWsIdRouteChildren = {
   AppWWsIdAgentRoute: AppWWsIdAgentRoute,
   AppWWsIdFilesRoute: AppWWsIdFilesRoute,
   AppWWsIdGraphRoute: AppWWsIdGraphRoute,
+  AppWWsIdViewsRoute: AppWWsIdViewsRoute,
   AppWWsIdIndexRoute: AppWWsIdIndexRoute,
+  AppWWsIdVViewRefRoute: AppWWsIdVViewRefRoute,
   AppWWsIdPAtomIdRoute: AppWWsIdPAtomIdRoute,
   AppWWsIdSharedShareIdRoute: AppWWsIdSharedShareIdRoute,
 }

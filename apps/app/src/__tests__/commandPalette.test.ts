@@ -35,9 +35,11 @@ function entries(log: string[] = []) {
   return buildCommandPaletteEntries({
     savedCommands,
     skills,
+    views: [],
     onClose: () => log.push('close'),
     onFireCommand: (path) => log.push(`command:${path}`),
     onFireSkill: (path) => log.push(`skill:${path}`),
+    onOpenView: (packageRoot) => log.push(`view:${packageRoot}`),
     onPromptAgent: (prompt) => log.push(`prompt:${prompt}`),
     onOpenAtom: (path) => log.push(`open:${path}`),
     onOpenSketch: () => log.push('sketch'),
@@ -145,6 +147,76 @@ describe('CommandPalette entry behavior', () => {
     entries(log).find((entry) => entry.id === 'skill..skills/invoice.md')?.edit?.()
     expect(log).toEqual(['close', 'open:.skills/invoice.md'])
   })
+
+  it('view entries open rendered views and edit source through normal atom paths', () => {
+    const log: string[] = []
+    const palette = buildCommandPaletteEntries({
+      savedCommands: [],
+      skills: [],
+      views: [
+        {
+          packageRoot: 'clients/acme/.views/overview',
+          title: 'Overview',
+          entryPath: 'clients/acme/.views/overview/src/App.tsx',
+          scopePath: 'clients/acme',
+        },
+      ],
+      onClose: () => log.push('close'),
+      onFireCommand: () => {},
+      onFireSkill: () => {},
+      onOpenView: (packageRoot) => log.push(`view:${packageRoot}`),
+      onPromptAgent: () => {},
+      onOpenAtom: (path) => log.push(`open:${path}`),
+      onOpenSketch: () => {},
+    })
+
+    expect(palette.map(({ id, title, hint, kind }) => ({
+      id,
+      title,
+      hint,
+      kind,
+    }))).toEqual([
+      {
+        id: 'view.clients/acme/.views/overview',
+        title: 'Open view: Overview',
+        hint: 'view · clients/acme',
+        kind: 'view',
+      },
+      {
+        id: 'view-source.clients/acme/.views/overview',
+        title: 'Edit view source: Overview',
+        hint: 'source · clients/acme/.views/overview/src/App.tsx',
+        kind: 'view',
+      },
+      {
+        id: 'sys.insert-ascii-sketch',
+        title: 'Insert ASCII sketch',
+        hint: 'editor · ⌘⇧D',
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-skill',
+        title: 'Create reusable skill',
+        hint: 'agent · save a process',
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-command',
+        title: 'Create slash command',
+        hint: 'agent · save a shortcut',
+        kind: 'system',
+      },
+    ])
+
+    palette[0]?.run()
+    palette[1]?.run()
+    expect(log).toEqual([
+      'close',
+      'view:clients/acme/.views/overview',
+      'close',
+      'open:clients/acme/.views/overview/src/App.tsx',
+    ])
+  })
 })
 
 describe('CommandPalette workspace wiring', () => {
@@ -165,7 +237,20 @@ describe('CommandPalette workspace wiring', () => {
       if (name === 'skills:listCommands') {
         return [{ path: '.commands/active.md', label: 'active-command' }]
       }
-      return []
+      if (name === 'views:list') {
+        return {
+          views: [
+            {
+              packageRoot: '.views/home',
+              title: 'Home',
+              entryPath: '.views/home/src/App.tsx',
+              scopePath: '',
+            },
+          ],
+          truncated: false,
+        }
+      }
+      return { views: [], truncated: false }
     })
 
     const html = renderToStaticMarkup(
@@ -176,6 +261,7 @@ describe('CommandPalette workspace wiring', () => {
         onFireCommand: () => {},
         onPromptAgent: () => {},
         onOpenAtom: () => {},
+        onOpenView: () => {},
       }),
     )
 
@@ -186,6 +272,7 @@ describe('CommandPalette workspace wiring', () => {
           name: 'skills:listCommands',
           args: { activeWorkspaceId: 'ws_active' },
         },
+        { name: 'views:list', args: { activeWorkspaceId: 'ws_active' } },
       ]),
     )
     expect(
@@ -199,6 +286,7 @@ describe('CommandPalette workspace wiring', () => {
     ).toBe(true)
     expect(html).toContain('active-command')
     expect(html).toContain('active-skill')
+    expect(html).toContain('Open view: Home')
   })
 })
 

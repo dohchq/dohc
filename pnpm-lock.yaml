@@ -104,6 +104,9 @@ importers:
       emoji-mart:
         specifier: ^5.6.0
         version: 5.6.0
+      esbuild:
+        specifier: ^0.28.0
+        version: 0.28.0
       isomorphic-dompurify:
         specifier: 3.14.0
         version: 3.14.0

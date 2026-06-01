@@ -19,6 +19,7 @@ import {
   isNonDataAtom,
   splitFrontmatter,
 } from './atomId'
+import { parseViewPath } from './viewPaths'
 
 function randomLeaseOwner(): string {
   const cryptoApi = globalThis.crypto
@@ -44,7 +45,7 @@ function randomLeaseOwner(): string {
 //    degrades gracefully instead of throwing and bricking onboarding.
 //  - `_complete` enforces "never end empty" SERVER-SIDE (not prompt-
 //    hope): refuses unless the canonical .context identity file AND a
-//    populated dashboard exist.
+//    populated source-backed cockpit exists (`home.html` or `.views/home`).
 //  - the start LEASE is a single-document atomic CAS on THIS row's
 //    own `kickoffAt`, kept fresh by an action-driven heartbeat;
 //    recovery is staleness-only (survives a HARD process kill). No
@@ -129,6 +130,24 @@ function hasLiveViewReference(body: string): boolean {
 
 function isCockpitPath(path: string): boolean {
   return /(^|\/)(home|dashboard|cockpit)\.html$/i.test(path)
+}
+
+function cockpitRank(name: string): number {
+  const clean = name.toLowerCase()
+  if (clean === 'home') return 0
+  if (clean === 'dashboard') return 1
+  if (clean === 'cockpit') return 2
+  return 3
+}
+
+function isViewEntryPath(
+  path: string,
+): { packageRoot: string; viewName: string } | null {
+  const info = parseViewPath(path)
+  if (!info) return null
+  return info.relativePath.toLowerCase() === 'src/app.tsx'
+    ? { packageRoot: info.packageRoot, viewName: info.viewName }
+    : null
 }
 
 function isSourceBackedCockpit(path: string, body: string): boolean {
@@ -218,6 +237,19 @@ export async function progressOf(
   const cockpits = atoms.filter(
     (a) => !isPlaceholderSeed(a.body) && isSourceBackedCockpit(a.path, a.body),
   )
+  const viewCockpitRoots = [
+    ...new Map(
+      atoms
+        .filter((a) => !isPlaceholderSeed(a.body))
+        .map((a) => isViewEntryPath(a.path))
+        .filter((v): v is { packageRoot: string; viewName: string } => v !== null)
+        .map((v) => [v.packageRoot, v]),
+    ).values(),
+  ].sort(
+    (a, b) =>
+      cockpitRank(a.viewName) - cockpitRank(b.viewName) ||
+      a.packageRoot.localeCompare(b.packageRoot),
+  )
   const setupRun = atoms.find((a) => isCompleteSetupRun(a.path, a.body))
   const legacyDashboards = atoms.filter(
     (a) =>
@@ -225,19 +257,24 @@ export async function progressOf(
       !isNonDataAtom(a.path, a.body) &&
       a.body.includes('```query'),
   )
-  const cockpit =
+  const viewCockpit = viewCockpitRoots[0] ?? null
+  const htmlCockpit =
     cockpits.find((a) => /(^|\/)home\.html$/i.test(a.path)) ??
     cockpits.find((a) => /(^|\/)dashboard\.html$/i.test(a.path)) ??
     cockpits[0]
+  const cockpitPath = viewCockpit?.packageRoot ?? htmlCockpit?.path ?? null
   // Compatibility aliases for the first-run handoff. The MVP floor is
-  // now a source-backed HTML cockpit, but older UI callers still read
-  // "dashboard" fields while this surface is being renamed.
-  const legacyHero =
-    cockpit ??
+  // now a source-backed cockpit, but older UI callers still read
+  // "dashboard" fields while this surface is being renamed. The alias
+  // can now be either an atom path (`home.html`) or a view package root
+  // (`.views/home`).
+  const legacyHeroPath =
+    cockpitPath ??
     legacyDashboards.find((a) =>
       /(^|\/)(dashboard|workspace|home|work|tracker)\b/i.test(a.path),
-    ) ??
-    legacyDashboards[0]
+    )?.path ??
+    legacyDashboards[0]?.path ??
+    null
   const entities = await ctx.db
     .query('entities')
     .withIndex('by_workspace_type', (q) => q.eq('workspaceId', workspaceId))
@@ -246,13 +283,13 @@ export async function progressOf(
     entityCount: entities.length,
     hasMe: !!me,
     sourceCount: sourceAtoms.length,
-    hasCockpitView: !!cockpit,
+    hasCockpitView: !!cockpitPath,
     hasSetupRun: !!setupRun,
-    hasDashboardWithQuery: !!cockpit,
+    hasDashboardWithQuery: !!cockpitPath,
     mePath: me?.path ?? null,
-    cockpitPath: cockpit?.path ?? null,
+    cockpitPath,
     runPath: setupRun?.path ?? null,
-    dashboardPath: legacyHero?.path ?? null,
+    dashboardPath: legacyHeroPath,
   }
 }
 
@@ -271,7 +308,7 @@ async function completeWorkspaceOnboarding(
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
         `(${identityFile}=${p.hasMe}, sources=${p.sourceCount}, source-backed-cockpit=${p.hasCockpitView}). ` +
-      `Write source markdown, a populated source-backed home.html, and ${identityFile} first.`,
+      `Write source markdown, a populated source-backed home.html or .views/home, and ${identityFile} first.`,
     )
   }
   if (!p.hasSetupRun) {
@@ -309,8 +346,8 @@ export const _begin = internalMutation({
  * Mark onboarding DONE — ONLY if the vault is genuinely populated.
  * The "never end empty" wedge promise is a DB invariant here,
  * independent of the model: requires the canonical .context identity
- * file AND a ```query dashboard. Throws otherwise so the agent cannot
- * finish empty.
+ * file AND a source-backed cockpit (`home.html` or `.views/home`). Throws
+ * otherwise so the agent cannot finish empty.
  * Reuses `progressOf` so the gate's public `progress` can never lie.
  */
 export const _complete = internalMutation({
@@ -426,7 +463,7 @@ export const defer = mutation({
 
 /** Client recovery for a ready-but-still-IN_PROGRESS workspace.
  *  Fresh shared workspaces are seeded with the identity atom +
- *  dashboard before the client opens them. If the public progress
+ *  cockpit before the client opens them. If the public progress
  *  invariant is already satisfied, the ready handoff can complete
  *  without waiting for an agent tool call. This reuses the exact same
  *  server floor as `_complete`; an empty workspace still cannot fake

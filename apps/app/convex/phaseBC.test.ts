@@ -390,6 +390,12 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           !/resolveShareAccess\s*\(\s*ctx\s*,[\s\S]{0,160}activeWorkspaceId/.test(
             body,
           ) &&
+          // View data APIs route through resolveView, which calls
+          // requireWorkspace(ctx, activeWorkspaceId) before resolving
+          // view/source authorization.
+          !/resolveView\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) &&
           // Action surfaces that explicitly refuse a non-undefined
           // activeWorkspaceId (queries.run still uses this shape — no
           // bridge yet) are also valid — the arg is GATED by the

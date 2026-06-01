@@ -9,6 +9,7 @@ const ONBOARDING_SRC = readFileSync(
   resolve(__dirname, '../../src/components/Onboarding.tsx'),
   'utf8',
 )
+const APP_SRC = readFileSync(resolve(__dirname, '../../src/routes/_app.tsx'), 'utf8')
 
 describe('Onboarding ready handoff', () => {
   it('asks the server to complete a ready workspace instead of waiting forever', () => {
@@ -35,5 +36,12 @@ describe('Onboarding ready handoff', () => {
     expect(ONBOARDING_SRC).toMatch(
       /upsertAtom\(\{[\s\S]{0,120}path:\s*meAtom\.path[\s\S]{0,120}activeWorkspaceId/,
     )
+  })
+
+  it('hands off .views cockpits to the Views activity instead of atom open state', () => {
+    expect(ONBOARDING_SRC).toContain('dohc:onboarding:view')
+    expect(ONBOARDING_SRC).toContain('isViewPackageRoot')
+    expect(APP_SRC).toContain('dohc:onboarding:view')
+    expect(APP_SRC).toMatch(/initialViewPackageRootRef[\s\S]{0,500}openView/)
   })
 })

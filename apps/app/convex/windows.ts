@@ -694,10 +694,18 @@ export const previewWindow = query({
   args: { windowId: v.id('windows') },
   handler: async (ctx, { windowId }): Promise<ResolveResult> => {
     const owner = await requireWorkspace(ctx)
-    const { result } = await resolveWindowOwnerPreview(ctx, windowId, owner)
-    return result
+    return await previewWindowImpl(ctx, windowId, owner)
   },
 })
+
+export async function previewWindowImpl(
+  ctx: QueryCtx,
+  windowId: Id<'windows'>,
+  owner: string,
+): Promise<ResolveResult> {
+  const { result } = await resolveWindowOwnerPreview(ctx, windowId, owner)
+  return result
+}
 
 /** PUBLIC reciprocal "windows on me" (design v1 §4.4 / D4 Frame F):
  *  the windows OTHER people have granted to ME, each with the EXACT

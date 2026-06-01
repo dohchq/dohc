@@ -12,6 +12,7 @@ import {
   decideAtomIdAction,
   reconcileAtomIdIndex,
   isHtmlAtomBody,
+  isNonDataAtom,
   formulaConcreteFileId,
   injectFrontmatterTitle,
   extractLeadingH1,
@@ -395,6 +396,27 @@ describe('isHtmlAtomBody — pure non-data classification', () => {
     const t0 = Date.now()
     expect(isHtmlAtomBody(evil)).toBe(false) // no closing fence ⇒ no fm
     expect(Date.now() - t0).toBeLessThan(50) // splitFrontmatter guard
+  })
+})
+
+describe('isNonDataAtom — folder-local view source classification', () => {
+  it('treats every atom under a .views package as interface code, not data', () => {
+    expect(
+      isNonDataAtom(
+        'clients/acme/.views/overview/src/App.tsx',
+        'const example = "{billable: 999}"',
+      ),
+    ).toBe(true)
+    expect(
+      isNonDataAtom(
+        '.views/home/src/styles.css',
+        '.metric::after { content: "{owed: 1}" }',
+      ),
+    ).toBe(true)
+  })
+
+  it('does not classify ordinary folders named views as non-data', () => {
+    expect(isNonDataAtom('clients/acme/views/overview.md', '{billable: 4}')).toBe(false)
   })
 })
 

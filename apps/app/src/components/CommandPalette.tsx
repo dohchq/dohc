@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
+  AppWindow,
   FilePenLine,
   PencilLine,
   Search,
@@ -17,12 +18,19 @@ type RunnableRow = {
   label: string
 }
 
+type ViewRow = {
+  packageRoot: string
+  title: string
+  entryPath: string
+  scopePath: string
+}
+
 export type CommandPaletteEntry = {
   id: string
   title: string
   hint?: string
-  kind: 'skill' | 'command' | 'system'
-  section: 'Run' | 'Create' | 'Editor'
+  kind: 'skill' | 'command' | 'system' | 'view'
+  section: 'Open' | 'Run' | 'Create' | 'Editor'
   editPath?: string
   edit?: () => void
   keywords?: ReadonlyArray<string>
@@ -38,23 +46,55 @@ const CREATE_COMMAND_PROMPT =
 export function buildCommandPaletteEntries({
   savedCommands,
   skills,
+  views,
   onClose,
   onFireSkill,
   onFireCommand,
+  onOpenView,
   onPromptAgent,
   onOpenAtom,
   onOpenSketch,
 }: {
   savedCommands: ReadonlyArray<RunnableRow>
   skills: ReadonlyArray<RunnableRow>
+  views: ReadonlyArray<ViewRow>
   onClose: () => void
   onFireSkill: (path: string) => void
   onFireCommand: (path: string) => void
+  onOpenView: (packageRoot: string) => void
   onPromptAgent: (prompt: string) => void
   onOpenAtom: (path: string) => void
   onOpenSketch: () => void
 }): CommandPaletteEntry[] {
   const out: CommandPaletteEntry[] = []
+  for (const view of views) {
+    const scope = view.scopePath || 'Workspace'
+    out.push({
+      id: `view.${view.packageRoot}`,
+      title: `Open view: ${view.title}`,
+      hint: `view · ${scope}`,
+      kind: 'view',
+      section: 'Open',
+      keywords: ['dashboard', 'view', view.packageRoot, view.entryPath],
+      run: () => {
+        onClose()
+        onOpenView(view.packageRoot)
+      },
+    })
+    out.push({
+      id: `view-source.${view.packageRoot}`,
+      title: `Edit view source: ${view.title}`,
+      hint: `source · ${view.entryPath}`,
+      kind: 'view',
+      section: 'Open',
+      editPath: view.entryPath,
+      keywords: ['dashboard', 'view', 'source', view.packageRoot, view.entryPath],
+      run: () => {
+        onClose()
+        onOpenAtom(view.entryPath)
+      },
+    })
+  }
   // Commands first: they're explicit user-fired shortcuts. Skills
   // follow as reusable process instructions.
   for (const c of savedCommands) {
@@ -148,6 +188,7 @@ type Props = {
   // detectSkillFire.
   onFireSkill: (path: string) => void
   onFireCommand: (path: string) => void
+  onOpenView: (packageRoot: string) => void
   onPromptAgent: (prompt: string) => void
   onOpenAtom: (path: string) => void
 }
@@ -157,6 +198,7 @@ export function CommandPalette({
   onClose,
   onFireSkill,
   onFireCommand,
+  onOpenView,
   onPromptAgent,
   onOpenAtom,
 }: Props) {
@@ -173,6 +215,8 @@ export function CommandPalette({
   const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
   const savedCommands =
     useQuery(api.skills.listCommands, { activeWorkspaceId }) ?? []
+  const viewsResult = useQuery(api.views.list, { activeWorkspaceId })
+  const views = viewsResult?.views ?? []
   const [filter, setFilter] = useState('')
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -182,9 +226,11 @@ export function CommandPalette({
       buildCommandPaletteEntries({
         savedCommands,
         skills,
+        views,
         onClose,
         onFireCommand,
         onFireSkill,
+        onOpenView,
         onOpenAtom,
         onPromptAgent,
         onOpenSketch: () =>
@@ -193,9 +239,11 @@ export function CommandPalette({
     [
       savedCommands,
       skills,
+      views,
       onClose,
       onFireCommand,
       onFireSkill,
+      onOpenView,
       onOpenAtom,
       onPromptAgent,
     ],
@@ -374,6 +422,15 @@ function PaletteEntryIcon({ entry }: { entry: CommandPaletteEntry }) {
     return (
       <Sparkles
         className="size-3 text-violet-500 shrink-0"
+        strokeWidth={2.2}
+        aria-hidden
+      />
+    )
+  }
+  if (entry.kind === 'view') {
+    return (
+      <AppWindow
+        className="size-3 text-accent shrink-0"
         strokeWidth={2.2}
         aria-hidden
       />

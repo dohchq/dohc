@@ -45,6 +45,8 @@ import type * as skillTurnGate from "../skillTurnGate.js";
 import type * as skills from "../skills.js";
 import type * as skillsMigration from "../skillsMigration.js";
 import type * as trash from "../trash.js";
+import type * as viewData from "../viewData.js";
+import type * as views from "../views.js";
 import type * as windows from "../windows.js";
 
 import type {
@@ -91,6 +93,8 @@ declare const fullApi: ApiFromModules<{
   skills: typeof skills;
   skillsMigration: typeof skillsMigration;
   trash: typeof trash;
+  viewData: typeof viewData;
+  views: typeof views;
   windows: typeof windows;
 }>;
 

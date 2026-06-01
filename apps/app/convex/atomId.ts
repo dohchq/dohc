@@ -27,6 +27,7 @@
 
 import type { MutationCtx } from './_generated/server'
 import { parseInlineAtomsFromMarkdown } from './inlineAtom'
+import { isViewPackageRoot, isViewPath } from './viewPaths'
 
 // ── §1.1 path → candidate file-id (the fixed normalization) ─────────
 // lowercase · drop extension · per `/` segment · `[^a-z0-9_]→_` (this
@@ -226,6 +227,10 @@ export function isWorkspaceCommandPath(path: string): boolean {
   return path.startsWith('.commands/')
 }
 
+export function isWorkspaceViewPath(path: string): boolean {
+  return isViewPath(path) || isViewPackageRoot(path)
+}
+
 // skills-commands-v1 §6.1 — the ONE unified predicate every
 // value-atom scanner uses. EXACTLY mirrors the §6 audited skip:
 // html (view, not a source — §6) OR skill (instructions, not a
@@ -251,6 +256,7 @@ export function isNonDataAtom(path: string, body: string): boolean {
     isCommandAtomBody(body) ||
     isWorkspaceSkillPath(path) ||
     isWorkspaceCommandPath(path) ||
+    isWorkspaceViewPath(path) ||
     isLegacySkillPath(path)
   )
 }

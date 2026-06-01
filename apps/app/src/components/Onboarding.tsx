@@ -17,6 +17,7 @@ import { HtmlAtomFrame } from '@/components/HtmlAtomFrame'
 import { Markdown } from '@/components/Markdown'
 import { extractFrontmatterId, isHtmlPath } from '@/lib/atomId'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import { isViewPackageRoot } from '@/lib/viewPaths'
 import { onboardingWorkspaceReady } from '../lib/onboarding-ready'
 
 // P1 — the onboarding wedge. Design:
@@ -182,7 +183,7 @@ function composeIntro(
       : 'Here’s the Setup Run I want dohc to build:',
     ...lines,
     '',
-    `Set it up now — build source markdown first, then a polished source-backed cockpit at home.html, then an inspectable .runs/setup.md, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, avoid fake productivity theater and make the next capture action obvious.`,
+    `Set it up now — build source markdown first, then a polished source-backed cockpit at home.html or .views/home if the setup needs an interactive app-like cockpit, then an inspectable .runs/setup.md, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, avoid fake productivity theater and make the next capture action obvious.`,
   ].join('\n')
 }
 
@@ -387,9 +388,10 @@ export function Onboarding({ state }: Props) {
     progress?.mePath ? { path: progress.mePath, activeWorkspaceId } : 'skip',
   )
   const cockpitPath = progress?.cockpitPath ?? progress?.dashboardPath ?? null
+  const cockpitIsView = cockpitPath ? isViewPackageRoot(cockpitPath) : false
   const heroAtom = useQuery(
     api.atoms.getByPath,
-    cockpitPath
+    cockpitPath && !cockpitIsView
       ? { path: cockpitPath, activeWorkspaceId }
       : 'skip',
   )
@@ -401,10 +403,13 @@ export function Onboarding({ state }: Props) {
       typeof window !== 'undefined'
     ) {
       try {
-        window.localStorage.setItem(
-          'dohc:onboarding:open',
-          cockpitPath,
-        )
+        if (cockpitIsView) {
+          window.localStorage.setItem('dohc:onboarding:view', cockpitPath)
+          window.localStorage.removeItem('dohc:onboarding:open')
+        } else {
+          window.localStorage.setItem('dohc:onboarding:open', cockpitPath)
+          window.localStorage.removeItem('dohc:onboarding:view')
+        }
       } catch {
         /* private-mode / quota — App shows its normal default */
       }
@@ -418,6 +423,7 @@ export function Onboarding({ state }: Props) {
   }, [
     workspaceReady,
     cockpitPath,
+    cockpitIsView,
     progress?.dashboardPath,
     completeIfReady,
     activeWorkspaceId,
@@ -438,8 +444,8 @@ export function Onboarding({ state }: Props) {
           </h1>
           <p className="mx-auto mt-3 max-w-[360px] text-[13.5px] leading-relaxed text-ink-dim">
             {workspaceKind === 'org'
-              ? 'Pick one workflow this team should run in dohc. It will build the sources, home cockpit, and first operating rhythm.'
-              : 'Tell dohc the Notion, Obsidian, or AI workflow you wanted. It builds the sources and home cockpit around you.'}
+              ? 'Pick one workflow this team should run in dohc. It will build the sources, first cockpit, and operating rhythm.'
+              : 'Tell dohc the Notion, Obsidian, or AI workflow you wanted. It builds the sources and first cockpit around you.'}
           </p>
           <button
             onClick={() => setPhase('questions')}
@@ -1045,8 +1051,8 @@ function BuildChecklist({
     {
       done: !!progress?.hasCockpitView,
       label: progress?.hasCockpitView
-        ? 'Built your home cockpit'
-        : 'Building home.html',
+        ? 'Built your cockpit'
+        : 'Building cockpit',
     },
     {
       done: !!progress?.hasSetupRun,

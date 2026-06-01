@@ -43,3 +43,26 @@ be weakened by rebrand or UI work.
   server-built shell. The shell is fixed and never resolves inline
   `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
   `style-src 'unsafe-inline'; font-src data:` with no network fetches.
+
+## Views
+
+- `.views/` source atoms are interface code, not data sources. Inline
+  `{key: value}` examples inside view source are skipped by capture,
+  live values, and imports/exports scans.
+- View code runs in a sandboxed iframe with `sandbox="allow-scripts"` and
+  without `allow-same-origin`, forms, popups, or top-navigation powers.
+- The iframe receives no Convex URL, cookies, access token, workspace id
+  authority, or raw cross-workspace handles. It talks to dohc through a
+  small `postMessage` SDK.
+- The parent bridge validates message shape before dispatch and attaches
+  `packageRoot` plus the active workspace itself. Browser code cannot
+  choose an identity or widen its workspace.
+- Convex still derives identity server-side with `requireWorkspace`; atom
+  reads still go through atom/folder access checks.
+- Imports/exports windows remain the only cross-workspace field-sharing
+  path exposed to views.
+- View discovery, source reads, SDK rows, and bundles are capped. Oversized
+  views fail with diagnostics instead of rendering.
+- Agent handoffs and proposed patches from view code are reviewed actions,
+  not direct document writes; the parent emits a lightweight local
+  `dohc:view-action` event for those operations.
