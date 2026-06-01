@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { AtomEditor } from '@/components/AtomEditor'
 import { PropertiesPanel } from '@/components/PropertiesPanel'
+import { SkeletonText } from '@/components/Skeleton'
 import { ActiveWorkspaceProvider } from '@/lib/active-workspace'
 import {
   applyFrontmatter,
@@ -101,7 +102,7 @@ function PlaygroundEditor() {
             disableReactiveResolvers
           />
         ) : (
-          <div className="py-8 text-sm text-ink-dim">loading...</div>
+          <SkeletonText lines={5} className="py-8" />
         )}
       </section>
     </main>

@@ -38,6 +38,7 @@ import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { SidebarAccountFooter, SidebarHeader } from './SidebarChrome'
+import { SidebarListSkeleton } from './Skeleton'
 import {
   buildTree,
   nodeLabel,
@@ -112,6 +113,7 @@ type Props = {
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
   allowCreate?: boolean
+  loading?: boolean
 }
 
 // Optional tree-level presence context. v2 live presence is owned by
@@ -254,6 +256,7 @@ export function FileTree({
   onOpenShared,
   onOpenSearch,
   allowCreate = true,
+  loading = false,
 }: Props) {
   // v2: sidebar presence is intentionally quiet for now. Editor carets are the
   // primary live-collaboration UI, and removed v1 Convex presence rows should
@@ -951,152 +954,162 @@ export function FileTree({
             open={openPersonal}
             onToggle={() => setOpenPersonal((v) => !v)}
           >
-            {/* pt-1 so the topmost row's focus ring isn't clipped. */}
-            <div className="px-1.5 pt-1">
-              {/* D4.6b — PendingRow renders INLINE at the target folder's
-            depth (VSCode-style). The root case (targetDir === '')
-            still renders at the top of the tree container; the
-            nested case (targetDir !== '') renders INSIDE the
-            matching folder's children — see TreeRowNode. */}
-              {pending && targetDir === '' && (
-                <PendingRow
-                  kind={pending}
-                  indent={8}
-                  onCommit={commitPending}
-                  busy={pendingBusy}
-                  error={pendingError}
-                  onInput={() => setPendingError(null)}
-                />
-              )}
+	            {/* pt-1 so the topmost row's focus ring isn't clipped. */}
+	            <div className="px-1.5 pt-1">
+	              {/* D4.6b — PendingRow renders INLINE at the target folder's
+	            depth (VSCode-style). The root case (targetDir === '')
+	            still renders at the top of the tree container; the
+	            nested case (targetDir !== '') renders INSIDE the
+	            matching folder's children — see TreeRowNode. */}
+	              {loading ? (
+	                <SidebarListSkeleton groups={1} rowsPerGroup={8} />
+	              ) : (
+	                <>
+	                  {pending && targetDir === '' && (
+	                    <PendingRow
+	                      kind={pending}
+	                      indent={8}
+	                      onCommit={commitPending}
+	                      busy={pendingBusy}
+	                      error={pendingError}
+	                      onInput={() => setPendingError(null)}
+	                    />
+	                  )}
 
-              {tree.children.length === 0 && !pending ? (
-                <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
-                  No pages yet — hit{' '}
-                  <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">
-                    ⌘K
-                  </kbd>{' '}
-                  {allowCreate ? (
-                    <>
-                      or the <Plus className="inline size-3 -mt-0.5" /> button
-                      to start.
-                    </>
-                  ) : (
-                    <>to start.</>
-                  )}
-                </div>
-              ) : (
-                <div
-                  role="tree"
-                  aria-label="personal workspace"
-                  onKeyDown={onTreeKeyDown}
-                  // D4.7 — root drop zone. Dropping on empty space in the
-                  // tree container (not on any row) moves the source to
-                  // workspace root. The row-level onDrop calls
-                  // stopPropagation, so this only fires on truly empty
-                  // areas.
-                  onDragOver={(e) => {
-                    // D4.7b — the row-level onDragOver calls
-                    // stopPropagation, so this only fires when the cursor
-                    // is over EMPTY SPACE within the tree (not on any
-                    // row). That's the root drop zone.
-                    if (
-                      e.dataTransfer.types.includes('application/dohc-tree-row')
-                    ) {
-                      e.preventDefault()
-                      e.dataTransfer.dropEffect = 'move'
-                      if (dragOverPath !== '') setDragOverPath('')
-                    }
-                  }}
-                  onDragLeave={(e) => {
-                    // Only clear when cursor truly leaves the tree
-                    // container. The contains-check on relatedTarget
-                    // handles bubbled leaves from descendant rows.
-                    if (
-                      !(e.currentTarget as HTMLElement).contains(
-                        e.relatedTarget as Node | null,
-                      )
-                    ) {
-                      setDragOverPath(null)
-                    }
-                  }}
-                  onDrop={(e) => {
-                    void handleDrop(e, '')
-                  }}
-                  style={{
-                    outline:
-                      dragOverPath === ''
-                        ? '1px dashed var(--color-accent-2)'
-                        : 'none',
-                    outlineOffset: '-2px',
-                    borderRadius: 6,
-                  }}
-                >
-                  {tree.children.map((child) => (
-                    <TreeRowNode
-                      key={child.fullPath}
-                      node={child}
-                      depth={0}
-                      activePath={activePath}
-                      expanded={expanded}
-                      viewIsAtom={view === 'atom'}
-                      focusedPath={focusedPath}
-                      setFocusedPath={setFocusedPath}
-                      setRowRef={setRowRef}
-                      onOpen={onOpen}
-                      onToggle={toggle}
-                      onDeleteFolder={onDeleteFolder}
-                      onRenameFolder={onRenameFolder}
-                      onDeleteFile={onDeleteFile}
-                      onRenameFile={onRenameFile}
-                      renameTarget={renameTarget}
-                      renameBusy={renameBusy}
-                      renameError={renameError}
-                      onBeginRename={beginRename}
-                      onRenameCommit={commitRename}
-                      onRenameCancel={cancelRename}
-                      onRenameInput={() => setRenameError(null)}
-                      onOpenPicker={
-                        onSetFolderMeta
-                          ? (n) =>
-                              setPickerFolder({
-                                path: n.fullPath,
-                                initial: {
-                                  icon: n.icon ?? null,
-                                  color: n.color ?? null,
-                                  starred: n.starred === true,
-                                },
-                              })
-                          : undefined
-                      }
-                      onOpenFileIcon={
-                        onSetFileIcon
-                          ? (path, current) => setPickerFile({ path, current })
-                          : undefined
-                      }
-                      onToggleFileStar={
-                        onToggleStar ? toggleFileStar : undefined
-                      }
-                      starredOf={starredOf}
-                      onToggleFolderStar={
-                        onToggleFolderStar ? toggleFolderStar : undefined
-                      }
-                      folderStarredOf={folderStarredOf}
-                      dragOverPath={dragOverPath}
-                      setDragOverPath={setDragOverPath}
-                      handleDrop={handleDrop}
-                      pendingKind={pending}
-                      pendingTargetDir={targetDir}
-                      onPendingCommit={commitPending}
-                      pendingBusy={pendingBusy}
-                      pendingError={pendingError}
-                      onPendingInput={() => setPendingError(null)}
-                      sharedByMeIds={sharedByMeIds}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          </TreeSection>
+	                  {tree.children.length === 0 && !pending ? (
+	                    <div className="px-3 py-2 text-[12px] text-ink-faint leading-relaxed">
+	                      No pages yet — hit{' '}
+	                      <kbd className="rounded bg-hover px-1 py-0.5 text-[10px]">
+	                        ⌘K
+	                      </kbd>{' '}
+	                      {allowCreate ? (
+	                        <>
+	                          or the{' '}
+	                          <Plus className="inline size-3 -mt-0.5" /> button
+	                          to start.
+	                        </>
+	                      ) : (
+	                        <>to start.</>
+	                      )}
+	                    </div>
+	                  ) : (
+	                    <div
+	                      role="tree"
+	                      aria-label="personal workspace"
+	                      onKeyDown={onTreeKeyDown}
+	                      // D4.7 — root drop zone. Dropping on empty space in the
+	                      // tree container (not on any row) moves the source to
+	                      // workspace root. The row-level onDrop calls
+	                      // stopPropagation, so this only fires on truly empty
+	                      // areas.
+	                      onDragOver={(e) => {
+	                        // D4.7b — the row-level onDragOver calls
+	                        // stopPropagation, so this only fires when the cursor
+	                        // is over EMPTY SPACE within the tree (not on any
+	                        // row). That's the root drop zone.
+	                        if (
+	                          e.dataTransfer.types.includes(
+	                            'application/dohc-tree-row',
+	                          )
+	                        ) {
+	                          e.preventDefault()
+	                          e.dataTransfer.dropEffect = 'move'
+	                          if (dragOverPath !== '') setDragOverPath('')
+	                        }
+	                      }}
+	                      onDragLeave={(e) => {
+	                        // Only clear when cursor truly leaves the tree
+	                        // container. The contains-check on relatedTarget
+	                        // handles bubbled leaves from descendant rows.
+	                        if (
+	                          !(e.currentTarget as HTMLElement).contains(
+	                            e.relatedTarget as Node | null,
+	                          )
+	                        ) {
+	                          setDragOverPath(null)
+	                        }
+	                      }}
+	                      onDrop={(e) => {
+	                        void handleDrop(e, '')
+	                      }}
+	                      style={{
+	                        outline:
+	                          dragOverPath === ''
+	                            ? '1px dashed var(--color-accent-2)'
+	                            : 'none',
+	                        outlineOffset: '-2px',
+	                        borderRadius: 6,
+	                      }}
+	                    >
+	                      {tree.children.map((child) => (
+	                        <TreeRowNode
+	                          key={child.fullPath}
+	                          node={child}
+	                          depth={0}
+	                          activePath={activePath}
+	                          expanded={expanded}
+	                          viewIsAtom={view === 'atom'}
+	                          focusedPath={focusedPath}
+	                          setFocusedPath={setFocusedPath}
+	                          setRowRef={setRowRef}
+	                          onOpen={onOpen}
+	                          onToggle={toggle}
+	                          onDeleteFolder={onDeleteFolder}
+	                          onRenameFolder={onRenameFolder}
+	                          onDeleteFile={onDeleteFile}
+	                          onRenameFile={onRenameFile}
+	                          renameTarget={renameTarget}
+	                          renameBusy={renameBusy}
+	                          renameError={renameError}
+	                          onBeginRename={beginRename}
+	                          onRenameCommit={commitRename}
+	                          onRenameCancel={cancelRename}
+	                          onRenameInput={() => setRenameError(null)}
+	                          onOpenPicker={
+	                            onSetFolderMeta
+	                              ? (n) =>
+	                                  setPickerFolder({
+	                                    path: n.fullPath,
+	                                    initial: {
+	                                      icon: n.icon ?? null,
+	                                      color: n.color ?? null,
+	                                      starred: n.starred === true,
+	                                    },
+	                                  })
+	                              : undefined
+	                          }
+	                          onOpenFileIcon={
+	                            onSetFileIcon
+	                              ? (path, current) =>
+	                                  setPickerFile({ path, current })
+	                              : undefined
+	                          }
+	                          onToggleFileStar={
+	                            onToggleStar ? toggleFileStar : undefined
+	                          }
+	                          starredOf={starredOf}
+	                          onToggleFolderStar={
+	                            onToggleFolderStar ? toggleFolderStar : undefined
+	                          }
+	                          folderStarredOf={folderStarredOf}
+	                          dragOverPath={dragOverPath}
+	                          setDragOverPath={setDragOverPath}
+	                          handleDrop={handleDrop}
+	                          pendingKind={pending}
+	                          pendingTargetDir={targetDir}
+	                          onPendingCommit={commitPending}
+	                          pendingBusy={pendingBusy}
+	                          pendingError={pendingError}
+	                          onPendingInput={() => setPendingError(null)}
+	                          sharedByMeIds={sharedByMeIds}
+	                        />
+	                      ))}
+	                    </div>
+	                  )}
+	                </>
+	              )}
+	            </div>
+	          </TreeSection>
 
           {/* sharing-v1 1a — "Shared with me". Always shown so the surface
             is discoverable, with a calm empty state when nothing's shared. */}

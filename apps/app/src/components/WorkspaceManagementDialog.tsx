@@ -29,6 +29,7 @@ import {
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '../lib/active-workspace'
 import type { Id } from '../../convex/_generated/dataModel'
+import { CardStackSkeleton, SidebarRowsSkeleton } from './Skeleton'
 
 type Props = {
   open: boolean
@@ -146,9 +147,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
               Your workspaces
             </h3>
             {workspaces === undefined ? (
-              <div className="rounded-lg border border-rule bg-elevated px-3 py-3 text-[12.5px] text-ink-dim">
-                Loading…
-              </div>
+              <CardStackSkeleton cards={2} />
             ) : (
               <ul className="space-y-2">
                 <li className="flex items-center gap-3 rounded-lg border border-rule bg-elevated px-3 py-3">
@@ -641,7 +640,7 @@ function OrgCard({
           Members
         </h4>
         {members === undefined ? (
-          <div className="text-[11.5px] text-ink-dim">Loading…</div>
+          <SidebarRowsSkeleton rows={2} />
         ) : !members ? (
           // null ⇒ caller is no longer a member; the panel should not have
           // landed here, but render defensively rather than crash.

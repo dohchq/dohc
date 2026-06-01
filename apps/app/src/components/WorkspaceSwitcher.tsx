@@ -26,6 +26,7 @@ import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '../lib/active-workspace'
 import { useChatBusy } from '../lib/chat-busy'
 import { WorkspaceManagementDialog } from './WorkspaceManagementDialog'
+import { WorkspaceButtonSkeleton } from './Skeleton'
 
 const MENU_EDGE_GAP = 12
 const MENU_TRIGGER_GAP = 8
@@ -157,14 +158,8 @@ export function WorkspaceSwitcher() {
     if (isStale) setActiveWorkspaceId(undefined)
   }, [isStale, setActiveWorkspaceId])
 
-  // Loading: render a stable empty button-frame (no skeleton churn).
   if (workspaces === undefined) {
-    return (
-      <div
-        className="mx-3 mb-1 h-8 rounded-md bg-hover/40"
-        aria-hidden
-      />
-    )
+    return <WorkspaceButtonSkeleton />
   }
 
   // Resolve the row to display. undefined activeWorkspaceId ⇒ personal

@@ -7,6 +7,7 @@ import { parseFrontmatter } from '../lib/frontmatter'
 import { splitFrontmatter, joinFrontmatter, isHtmlPath, isHtmlAtomBody } from '../lib/atomId'
 import { AtomEditor } from './AtomEditor'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import { DocumentSkeleton } from './Skeleton'
 
 // sharing-v1 1a/1b — view OR collaboratively edit an atom shared WITH
 // the current user. Formulas resolve through evalFormulasShared
@@ -119,11 +120,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
   }, [draft, shared])
 
   if (shared === undefined) {
-    return (
-      <div className="grid h-full place-items-center text-ink-faint text-sm">
-        loading…
-      </div>
-    )
+    return <DocumentSkeleton />
   }
   if (shared === null) {
     return (

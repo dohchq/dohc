@@ -12,6 +12,7 @@ import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { OPEN_SKETCH_EVENT } from './AtomEditor'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
+import { SidebarRowsSkeleton } from './Skeleton'
 
 type RunnableRow = {
   path: string
@@ -212,11 +213,19 @@ export function CommandPalette({
   // Zero new wiring at this layer; the palette is a discoverable
   // hotkey over the same structural-enforcement chain.
   const activeWorkspaceId = useActiveWorkspaceId()
-  const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
-  const savedCommands =
-    useQuery(api.skills.listCommands, { activeWorkspaceId }) ?? []
+  const skillsResult = useQuery(api.skills.list, { activeWorkspaceId })
+  const savedCommandsResult = useQuery(api.skills.listCommands, {
+    activeWorkspaceId,
+  })
   const viewsResult = useQuery(api.views.list, { activeWorkspaceId })
+  const skills = skillsResult ?? []
+  const savedCommands = savedCommandsResult ?? []
   const views = viewsResult?.views ?? []
+  const paletteLoading =
+    open &&
+    (skillsResult === undefined ||
+      savedCommandsResult === undefined ||
+      viewsResult === undefined)
   const [filter, setFilter] = useState('')
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -318,7 +327,9 @@ export function CommandPalette({
           </kbd>
         </div>
         <div className="max-h-[360px] overflow-y-auto py-1.5">
-          {filtered.length === 0 ? (
+          {paletteLoading ? (
+            <SidebarRowsSkeleton rows={6} className="px-2" />
+          ) : filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-[12.5px] text-ink-faint">
               No actions match.
             </div>

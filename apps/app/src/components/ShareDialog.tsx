@@ -20,6 +20,7 @@ import {
   getShareRoutingHint,
   getShareTargetPlaceholder,
 } from './shareDialogCopy'
+import { CardStackSkeleton, Skeleton } from './Skeleton'
 
 // sharing-v1 1a — share a file with another user. The UI accepts an
 // email address, then the server resolves it through the signed-in
@@ -129,6 +130,12 @@ export function ShareDialog({
   const generalAccessOptions = getGeneralAccessOptions(isPersonalWorkspace)
   const canChangeGeneralAccess =
     generalAccess.canChangeGeneralAccess && !!atomAccess
+  const peopleAccessLoading =
+    me === undefined ||
+    myShares === undefined ||
+    myPendingShares === undefined ||
+    pendingForCurrentEmail === undefined
+  const generalAccessLoading = atomAccess === undefined
   const permissionOptions: Array<{
     value: 'view' | 'edit'
     label: string
@@ -497,80 +504,86 @@ export function ShareDialog({
             <span className="shrink-0 text-[12.5px] text-ink-faint">Owner</span>
           </div>
 
-          {namedShares.length > 0 && (
-            <ul className="mt-2 flex flex-col gap-1.5">
-              {namedShares.map((s) => (
-                <li
-                  key={s.shareId}
-                  className="grid grid-cols-[36px_minmax(0,1fr)_auto_32px] items-center gap-3 rounded-[6px] py-1"
-                >
-                  <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
-                      {s.granteeOrgId ? (
-                        <Users className="size-4" />
-                      ) : s.granteeUserId ? (
+          {peopleAccessLoading ? (
+            <CardStackSkeleton cards={1} className="mt-2" />
+          ) : (
+            <>
+              {namedShares.length > 0 && (
+                <ul className="mt-2 flex flex-col gap-1.5">
+                  {namedShares.map((s) => (
+                    <li
+                      key={s.shareId}
+                      className="grid grid-cols-[36px_minmax(0,1fr)_auto_32px] items-center gap-3 rounded-[6px] py-1"
+                    >
+                      <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
+                          {s.granteeOrgId ? (
+                            <Users className="size-4" />
+                          ) : s.granteeUserId ? (
+                            <Mail className="size-4" />
+                          ) : (
+                            <span className="text-[12px] font-semibold">P</span>
+                          )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-medium text-ink-strong">
+                          {s.granteeOrgId
+                            ? workspaceName(s.granteeOrgId)
+                            : (s.granteeName ??
+                              s.granteeEmail ??
+                              s.granteeWorkspaceId)}
+                        </p>
+                        <p className="truncate text-[11.5px] text-ink-faint">
+                          {s.granteeOrgId
+                            ? 'Workspace'
+                            : s.granteeUserId && s.granteeWorkspaceId
+                              ? `${s.granteeEmail ?? 'Address'} -> ${workspaceName(s.granteeWorkspaceId)}`
+                              : (s.granteeEmail ?? 'Person')}
+                        </p>
+                      </div>
+                      <span className="text-[12px] text-ink-dim">
+                        {s.permission === 'edit' ? 'Can edit' : 'Viewer'}
+                      </span>
+                      <button
+                        type="button"
+                        title="Remove access"
+                        onClick={() =>
+                          void unshareAtom({
+                            shareId: s.shareId as Id<'atomShares'>,
+                            activeWorkspaceId,
+                          })
+                        }
+                        className="grid size-8 place-items-center rounded-full text-ink-faint transition-colors hover:bg-page hover:text-danger"
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {pendingExisting.length > 0 && (
+                <ul className="mt-2 flex flex-col gap-1.5">
+                  {pendingExisting.map((s) => (
+                    <li
+                      key={s.pendingShareId}
+                      className="grid grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 rounded-[6px] py-1"
+                    >
+                      <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
                         <Mail className="size-4" />
-                      ) : (
-                        <span className="text-[12px] font-semibold">P</span>
-                      )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-ink-strong">
-                      {s.granteeOrgId
-                        ? workspaceName(s.granteeOrgId)
-                        : (s.granteeName ??
-                          s.granteeEmail ??
-                          s.granteeWorkspaceId)}
-                    </p>
-                    <p className="truncate text-[11.5px] text-ink-faint">
-                      {s.granteeOrgId
-                        ? 'Workspace'
-                        : s.granteeUserId && s.granteeWorkspaceId
-                          ? `${s.granteeEmail ?? 'Address'} -> ${workspaceName(s.granteeWorkspaceId)}`
-                          : (s.granteeEmail ?? 'Person')}
-                    </p>
-                  </div>
-                  <span className="text-[12px] text-ink-dim">
-                    {s.permission === 'edit' ? 'Can edit' : 'Viewer'}
-                  </span>
-                  <button
-                    type="button"
-                    title="Remove access"
-                    onClick={() =>
-                      void unshareAtom({
-                        shareId: s.shareId as Id<'atomShares'>,
-                        activeWorkspaceId,
-                      })
-                    }
-                    className="grid size-8 place-items-center rounded-full text-ink-faint transition-colors hover:bg-page hover:text-danger"
-                  >
-                    <X className="size-4" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {pendingExisting.length > 0 && (
-            <ul className="mt-2 flex flex-col gap-1.5">
-              {pendingExisting.map((s) => (
-                <li
-                  key={s.pendingShareId}
-                  className="grid grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 rounded-[6px] py-1"
-                >
-                  <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-dim">
-                    <Mail className="size-4" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-ink-strong">
-                      {s.email}
-                    </p>
-                    <p className="truncate text-[11.5px] text-ink-faint">
-                      Waiting for recipient to choose a workspace
-                    </p>
-                  </div>
-                  <span className="text-[12px] text-ink-dim">Pending</span>
-                </li>
-              ))}
-            </ul>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-medium text-ink-strong">
+                          {s.email}
+                        </p>
+                        <p className="truncate text-[11.5px] text-ink-faint">
+                          Waiting for recipient to choose a workspace
+                        </p>
+                      </div>
+                      <span className="text-[12px] text-ink-dim">Pending</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </section>
 
@@ -578,6 +591,15 @@ export function ShareDialog({
           <h3 className="text-[15px] font-semibold text-ink-strong">
             General access
           </h3>
+          {generalAccessLoading ? (
+            <div className="mt-3 grid grid-cols-[36px_minmax(0,1fr)] items-center gap-3">
+              <Skeleton className="size-9 rounded-full" />
+              <div className="min-w-0">
+                <Skeleton className="h-3.5 w-36 rounded-full" />
+                <Skeleton className="mt-2 h-2.5 w-64 rounded-full" />
+              </div>
+            </div>
+          ) : (
           <div className="mt-3 grid grid-cols-[36px_minmax(0,1fr)] items-center gap-3">
             <div className="grid size-9 shrink-0 place-items-center rounded-full bg-page text-ink-strong">
               {generalAccess.label === 'Restricted' ? (
@@ -639,6 +661,7 @@ export function ShareDialog({
               </p>
             </div>
           </div>
+          )}
           {generalAccessError && (
             <p className="mt-3 text-[12px] text-danger" role="alert">
               {generalAccessError}

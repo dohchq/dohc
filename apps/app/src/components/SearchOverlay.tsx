@@ -3,6 +3,7 @@ import { useMutation, useQuery } from 'convex/react'
 import { Search, FileText, Globe, Sparkles, Star, SquareTerminal } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { normalizeQuery } from '../../convex/searchText'
+import { SidebarRowsSkeleton } from './Skeleton'
 
 function ResultIcon({ type }: { type: 'html' | 'skill' | 'command' | null }) {
   if (type === 'html')
@@ -68,8 +69,12 @@ export function SearchOverlay({
     return () => window.clearTimeout(id)
   }, [query])
 
-  const results =
-    useQuery(api.search.run, open ? { query: debounced } : 'skip') ?? []
+  const searchResult = useQuery(
+    api.search.run,
+    open ? { query: debounced } : 'skip',
+  )
+  const results = searchResult ?? []
+  const searchLoading = open && searchResult === undefined
   // Mirror the server's branch: < 2 normalized terms ⇒ recent-docs mode
   // (so "???" reads as Recent here too, matching what the server returns).
   const isRecent = normalizeQuery(debounced).length < 2
@@ -136,7 +141,9 @@ export function SearchOverlay({
         )}
 
         <div className="max-h-[420px] overflow-y-auto py-1.5">
-          {results.length === 0 ? (
+          {searchLoading ? (
+            <SidebarRowsSkeleton rows={5} className="px-2" />
+          ) : results.length === 0 ? (
             <div className="px-4 py-8 text-center text-[12.5px] text-ink-faint">
               {isRecent ? 'No pages yet.' : 'No matches.'}
             </div>

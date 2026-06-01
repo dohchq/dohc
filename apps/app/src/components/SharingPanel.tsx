@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
+import { CardStackSkeleton, Skeleton } from './Skeleton'
 
 // Imports / Exports — controlled workspace-to-workspace data exchange.
 // The backend still calls these "windows": a window is a scoped,
@@ -132,7 +133,7 @@ export function ImportsExportsPanel({
             )}
 
             {overview === undefined ? (
-              <Skeleton />
+              <CardStackSkeleton cards={2} />
             ) : overview.length === 0 ? (
               // Frame B — no windows yet (discoverable, not a dead-end)
               !builderOpen && (
@@ -155,7 +156,7 @@ export function ImportsExportsPanel({
             )}
           </div>
         ) : sharedWithMe === undefined ? (
-          <Skeleton />
+          <CardStackSkeleton cards={2} />
         ) : sharedWithMe.length === 0 ? (
           <Empty
             title="No imports yet."
@@ -533,7 +534,7 @@ function SeenAs({ windowId }: { windowId: Id<'windows'> }) {
   // viewer gets — never more (server-enforced, design §4.3).
   const preview = useQuery(api.windows.previewWindow, { windowId })
   if (preview === undefined)
-    return <p className="mt-1.5 text-[10.5px] text-ink-faint">…</p>
+    return <Skeleton className="mt-2 h-2.5 w-24 rounded-full" />
   if (!preview.ok)
     return (
       <p className="mt-1.5 text-[10.5px] text-ink-faint">
@@ -560,19 +561,6 @@ function ViewBlock({
         .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
         .join('\n')}
     </pre>
-  )
-}
-
-function Skeleton() {
-  return (
-    <div className="flex flex-col gap-3">
-      {[0, 1].map((i) => (
-        <div
-          key={i}
-          className="h-20 animate-pulse rounded-lg border border-rule bg-surface"
-        />
-      ))}
-    </div>
   )
 }
 
@@ -637,7 +625,7 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
   if (ak === undefined)
     return (
       <div className="rounded-lg border border-rule bg-surface p-3">
-        <Skeleton />
+        <CardStackSkeleton cards={2} />
       </div>
     )
 

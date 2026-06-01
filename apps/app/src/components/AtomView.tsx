@@ -34,6 +34,7 @@ import { HtmlAtomFrame } from './HtmlAtomFrame'
 import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEditor'
 import { DohcBrandBlock } from './DohcLogo'
 import { AsciiSketchModal } from './AsciiSketchModal'
+import { DocumentSkeleton } from './Skeleton'
 import {
   isSourceFirstPath,
   shouldRenderHtmlAtomFrame,
@@ -293,12 +294,7 @@ export function AtomView({
       {!effectivePath ? (
         <NoFile />
       ) : row === undefined || syncedPath !== effectivePath ? (
-        <div className="doc">
-          <div className="flex items-center gap-2 px-8 py-16 text-ink-faint text-[13px]">
-            <span className="size-1.5 rounded-full bg-ink-dim animate-pulse" />
-            loading…
-          </div>
-        </div>
+        <DocumentSkeleton />
       ) : row === null ? (
         <EmptyAtom path={effectivePath} />
       ) : (
@@ -781,7 +777,7 @@ function AtomShell({
         // ⟨⟩ source toggle above still flips to the raw textarea.
         <HtmlAtomFrame atomId={atomId} body={rest} />
       ) : identity === undefined ? (
-        <div className="py-8 text-sm text-ink-dim">loading…</div>
+        <DocumentSkeleton compact />
       ) : (
         <AtomEditor
           ref={editorRef}
