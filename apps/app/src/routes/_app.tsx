@@ -24,6 +24,8 @@ import { AtomView } from '@/components/AtomView'
 import { SharedAtomView } from '@/components/SharedAtomView'
 import { ShareDialog } from '@/components/ShareDialog'
 import { ActivityBar } from '@/components/ActivityBar'
+import { ViewFrame } from '@/components/ViewFrame'
+import { ViewsSidebar } from '@/components/ViewsSidebar'
 import {
   AgentChatSidebar,
   availableProjectFolders,
@@ -43,8 +45,10 @@ import {
   ActiveWorkspaceProvider,
   useActiveWorkspaceId,
 } from '@/lib/active-workspace'
+import { type AppView as View, viewFromPathname } from '@/lib/appViews'
 import { ChatBusyProvider } from '@/lib/chat-busy'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
+import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { useDialogFocus } from '../lib/dialog-focus'
 
 // D4.33 — pathless layout. The open atom now lives in the URL as a
@@ -71,17 +75,9 @@ function AppLayout() {
   )
 }
 
-type View = 'agent' | 'atom' | 'graph'
 type FilesDestination =
   | { kind: 'atom'; id: string }
   | { kind: 'shared'; id: string }
-
-export function viewFromPathname(pathname: string): View | null {
-  const match = /^(?:\/w\/[^/]+)?\/(agent|files|graph)\/?$/.exec(pathname)
-  if (!match) return null
-  if (match[1] === 'files') return 'atom'
-  return match[1] as 'agent' | 'graph'
-}
 
 // Display name for a file path: the leaf, sans a single extension
 // (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
@@ -304,6 +300,11 @@ function App() {
     const m = /^(?:\/w\/[^/]+)?\/shared\/(.+)$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
+  const urlViewRef = (() => {
+    const m = /^(?:\/w\/[^/]+)?\/v\/([^/]+)\/?$/.exec(location.pathname)
+    return m ? decodeURIComponent(m[1]) : null
+  })()
+  const selectedViewPackageRoot = urlViewRef ? decodeViewRef(urlViewRef) : null
   const urlView = viewFromPathname(location.pathname)
   const navigate = useNavigate()
   const lastFilesDestinationRef = useRef<FilesDestination | null>(null)
@@ -314,9 +315,16 @@ function App() {
   // during the brief window before `files` (a reactive query)
   // refreshes. Cleared once the URL derivation converges to it.
   const initialOpenPathRef = useRef<string | null>(null)
+  const initialViewPackageRootRef = useRef<string | null>(null)
   const [optimisticPath, setOptimisticPath] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
     try {
+      const viewHandoff = window.localStorage.getItem('dohc:onboarding:view')
+      if (viewHandoff) {
+        window.localStorage.removeItem('dohc:onboarding:view')
+        initialViewPackageRootRef.current = viewHandoff
+        return null
+      }
       const handoff = window.localStorage.getItem('dohc:onboarding:open')
       if (handoff) {
         window.localStorage.removeItem('dohc:onboarding:open')
@@ -337,7 +345,11 @@ function App() {
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>(() =>
     urlView ??
-    (urlFileId || urlShareId || initialOpenPathRef.current ? 'atom' : 'agent'),
+    (urlFileId || urlShareId || initialOpenPathRef.current
+      ? 'atom'
+      : initialViewPackageRootRef.current
+        ? 'views'
+        : 'agent'),
   )
 
   const chatThreads = useMemo<AgentThreadSummary[]>(
@@ -378,6 +390,7 @@ function App() {
   }>(() => {
     if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
+    if (view === 'views') return { docTitle: 'Views', docEmoji: null }
     if (urlShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
       // null ⇒ gone/forbidden: fall back to the brand default.
@@ -462,6 +475,15 @@ function App() {
         setSharingOpen(false)
         void navigate({
           to: '/w/$wsId/graph',
+          params: { wsId: activeWorkspaceId ?? 'me' },
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
+      if (next === 'views') {
+        setSharingOpen(false)
+        void navigate({
+          to: '/w/$wsId/views',
           params: { wsId: activeWorkspaceId ?? 'me' },
           replace: opts?.replace ?? false,
         })
@@ -758,6 +780,26 @@ function App() {
     [navigate, activeWorkspaceId],
   )
 
+  const openView = useCallback(
+    (packageRoot: string) => {
+      setView('views')
+      setSharingOpen(false)
+      const viewRef = encodeViewRef(packageRoot)
+      void navigate({
+        to: '/w/$wsId/v/$viewRef',
+        params: { wsId: activeWorkspaceId ?? 'me', viewRef },
+      })
+    },
+    [activeWorkspaceId, navigate],
+  )
+
+  useEffect(() => {
+    const packageRoot = initialViewPackageRootRef.current
+    if (!packageRoot) return
+    initialViewPackageRootRef.current = null
+    openView(packageRoot)
+  }, [openView])
+
   // Bridge: once the optimistic path's file gains a real fileId in
   // `files` (a just-created file), reflect it in the URL — unless
   // the URL already points there.
@@ -1024,6 +1066,46 @@ function App() {
             projectPath={agentProjectPath}
           />
         </>
+      ) : view === 'views' ? (
+        <>
+          <ViewsSidebar
+            selectedPackageRoot={selectedViewPackageRoot}
+            onOpenView={openView}
+            onOpenSource={(path) => openAtom(path)}
+          />
+          <ViewFrame
+            packageRoot={selectedViewPackageRoot}
+            onOpenSource={(path) => openAtom(path)}
+            onRunAgent={onRunAction}
+          />
+          {chatOpen && (
+            <Chat
+              mode="side"
+              threadId={threadId}
+              projectPath={agentProjectPath}
+              projectOptions={agentProjectOptions}
+              folderOptions={projectFolderOptions}
+              onProjectPathChange={setAgentProjectPath}
+              onCreateProject={createAgentProject}
+              onEnsureThread={ensureAgentThreadForSend}
+              pendingPrompt={pendingPrompt}
+              onPendingHandled={() => setPendingPrompt(null)}
+              pendingSkillFire={pendingSkillFire}
+              onPendingSkillFireHandled={() => setPendingSkillFire(null)}
+              pendingCommandFire={pendingCommandFire}
+              onPendingCommandFireHandled={() => setPendingCommandFire(null)}
+            />
+          )}
+          {sharingOpen && (
+            <ImportsExportsPanel
+              onAskDohc={(p) => {
+                setPendingPrompt(p)
+                setChatOpen(true)
+                setSharingOpen(false)
+              }}
+            />
+          )}
+        </>
       ) : (
         <>
           <FileTree
@@ -1070,6 +1152,7 @@ function App() {
                 files={files ?? []}
                 onRunAction={onRunAction}
                 onOpenAtom={openAtom}
+                onOpenView={openView}
                 onShare={(fid) => setSharePromptFor(fid)}
                 enterEdit={enterEdit}
                 onEnteredEdit={() => setEnterEdit(false)}
@@ -1172,6 +1255,7 @@ function App() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onOpenAtom={(path) => openAtom(path)}
+        onOpenView={openView}
         onPromptAgent={(prompt) => {
           navigateToView('agent')
           setChatOpen(true)

@@ -15,6 +15,10 @@ lives in `apps/app`.
 - **Live views** — block-level live lists/tables backed by inspectable
   fenced `query` source. They are for repeating collections; inline atoms
   and formulas remain the live scalar/value syntax.
+- **Folder views** — app-like custom views stored under any folder's
+  `.views/<name>/` package. They use normal web code, but read dohc
+  through a source-backed SDK; the canonical work state remains in atoms,
+  entities, inline values, and imports/exports.
 - **Entities** — a flexible store (people, projects, clients, …) with
   user-declared types, shown through live views.
 - **Folders** — organize atoms; support icons, colors, stars, and
@@ -28,10 +32,14 @@ lives in `apps/app`.
   wikilink pills, inline-atom decorations, and ASCII sketches.
 - **HTML atoms** — `.html` atoms render in a sandboxed, server-built
   shell (zero-network, sanitized).
+- **Views** — folder-local app surfaces over dohc. They live in `.views/`,
+  compile ordinary TypeScript/React/CSS, render in an opaque sandbox, and
+  talk to the workspace only through dohc's SDK.
 - **Chat** — the dohc agent: find, draft, organize; shows sources and
   changes.
 - **Onboarding** — a short questionnaire seeds the agent's first turn,
-  which builds a tailored, populated workspace (dashboard + `me.md`).
+  which builds source atoms, identity context, a setup run, and a first
+  cockpit (`home.html` or `.views/home`).
 - **Graph** — a force-directed view of atoms and their links.
 - **Imports / Exports** — controlled workspace-to-workspace data/text
   exchange. Exports publish only selected fields; imports subscribe to

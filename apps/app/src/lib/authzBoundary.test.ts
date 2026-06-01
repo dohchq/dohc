@@ -141,6 +141,8 @@ function publicFnsTakingWorkspace(
     //   - `requireWorkspace(ctx, activeWorkspaceId)`  (mutation/query)
     //   - `resolveShareAccess(ctx, shareId, activeWorkspaceId)` (shared-doc
     //     reads/writes; resolver calls requireWorkspace with that active id)
+    //   - `resolveView(ctx, activeWorkspaceId, packageRoot)` (view data
+    //     resolver calls requireWorkspace with that active id)
     //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
     //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
     //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
@@ -157,6 +159,9 @@ function publicFnsTakingWorkspace(
         body,
       ) ||
       /resolveShareAccess\s*\(\s*ctx\s*,[\s\S]{0,80}(?:args\.)?activeWorkspaceId\s*\)/.test(
+        body,
+      ) ||
+      /resolveView\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
         body,
       )
     // Strip BOTH optional + required shapes of activeWorkspaceId when
@@ -175,7 +180,11 @@ function publicFnsTakingWorkspace(
       hits.push({
         name,
         kind,
-        authed: /\b(requireWorkspace|requireRole)\s*\(/.test(body),
+        authed:
+          /\b(requireWorkspace|requireRole)\s*\(/.test(body) ||
+          /resolveView\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ),
         serverTokenGated:
           /\bserverToken\b/.test(head) &&
           (/HOCUSPOCUS_CONVEX_SERVER_TOKEN/.test(body) ||
@@ -204,7 +213,11 @@ describe('authz boundary (§6 tripwire — not a proof; see §6b contract)', () 
           (SERVER_TOKEN_ALLOW.has(`${rel}:${h.name}`) && h.serverTokenGated) ||
           (COLLAB_TOKEN_ALLOW.has(`${rel}:${h.name}`) &&
             h.authed &&
-            h.collabTokenMint)
+            h.collabTokenMint) ||
+          // viewData routes activeWorkspaceId through resolveView(),
+          // which calls requireWorkspace(ctx, activeWorkspaceId) before
+          // resolving the view descriptor and source access.
+          (/^viewData\.ts$/.test(rel) && h.authed)
         if (allowed) continue
         offenders.push(`${rel}: ${h.name} (${h.kind})`)
       }

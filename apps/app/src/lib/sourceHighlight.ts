@@ -7,8 +7,22 @@ import Prism from 'prismjs'
 import 'prismjs/components/prism-markup' // html (Prism calls it "markup")
 import 'prismjs/components/prism-yaml' // frontmatter
 import 'prismjs/components/prism-markdown'
+import 'prismjs/components/prism-javascript'
+import 'prismjs/components/prism-typescript'
+import 'prismjs/components/prism-jsx'
+import 'prismjs/components/prism-tsx'
+import 'prismjs/components/prism-css'
+import 'prismjs/components/prism-json'
 
-export type SourceLang = 'html' | 'markdown'
+export type SourceLang =
+  | 'html'
+  | 'markdown'
+  | 'typescript'
+  | 'tsx'
+  | 'javascript'
+  | 'jsx'
+  | 'css'
+  | 'json'
 
 const escapeHtml = (s: string) =>
   s
@@ -17,9 +31,12 @@ const escapeHtml = (s: string) =>
     .replace(/>/g, '&gt;')
 
 function highlightWith(code: string, lang: SourceLang): string {
-  const grammar = lang === 'html' ? Prism.languages.markup : Prism.languages.markdown
+  const grammar =
+    lang === 'html'
+      ? Prism.languages.markup
+      : Prism.languages[lang] ?? Prism.languages.markdown
   if (!grammar) return escapeHtml(code)
-  return Prism.highlight(code, grammar, lang === 'html' ? 'markup' : 'markdown')
+  return Prism.highlight(code, grammar, lang === 'html' ? 'markup' : lang)
 }
 
 /** Highlight an atom body: the leading YAML frontmatter block (if

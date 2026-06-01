@@ -15,14 +15,15 @@ const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
-    expect(ACTIVITY).toMatch(/ActivityView\s*=\s*'agent'\s*\|\s*'atom'\s*\|\s*'graph'/)
+    expect(ACTIVITY).toMatch(/ActivityView\s*=\s*'agent'\s*\|\s*'atom'\s*\|\s*'views'\s*\|\s*'graph'/)
     expect(ACTIVITY).toContain("label: 'Agent'")
     expect(ACTIVITY).toContain("label: 'Files'")
+    expect(ACTIVITY).toContain("label: 'Views'")
     expect(ACTIVITY).toContain("label: 'Graph'")
   })
 
   it('renders a dedicated Agent workspace instead of treating chat as only a dock', () => {
-    expect(APP).toContain("type View = 'agent' | 'atom' | 'graph'")
+    expect(APP).toContain('type AppView as View')
     expect(APP).toContain('<AgentChatSidebar')
     expect(APP).toContain('<AgentWorkspace')
     expect(APP).toContain('<AgentRunRail')

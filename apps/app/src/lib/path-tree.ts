@@ -185,6 +185,7 @@ export function nodeLabel(node: TreeNode): string {
   if (node.fullPath === '.context/company.md') return 'Company'
   if (node.fullPath === '.skills') return 'Skills'
   if (node.fullPath === '.commands') return 'Commands'
+  if (node.segment === '.views') return 'Views'
   if (node.page?.title) return node.page.title
   // D4.16 — strip the rendering extension (.md OR .html) so a
   // titleless file shows its clean name (e.g. `dashboard`, not

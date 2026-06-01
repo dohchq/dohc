@@ -21,6 +21,15 @@ const COMPLETE_SETUP_RUN =
   '## What I Need\n- Nothing urgent yet.\n\n' +
   '## Next Action\nAdd detail.'
 
+const COMPLETE_VIEW_SETUP_RUN =
+  '# Setup Run\n\n' +
+  '## Objective\nBuild an interactive cockpit.\n\n' +
+  '## Sources\n- projects/acme.md\n\n' +
+  '## View\n- .views/home\n\n' +
+  '## What I Know\n- Acme is active.\n\n' +
+  '## What I Need\n- Nothing urgent yet.\n\n' +
+  '## Next Action\nAdd detail.'
+
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
   path: string,
@@ -176,6 +185,29 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
       'DONE',
     )
   })
+
+  it('_complete SUCCEEDS with identity, sources, .views/home, and setup run → DONE', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    await t.mutation(internal.onboarding._complete, { workspaceId: W })
+
+    expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
+      'DONE',
+    )
+  })
 })
 
 // ── P1 design v5.1 — the gate, progress, escape, and the lease ──────
@@ -262,6 +294,26 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       dashboardPath: 'home.html',
       cockpitPath: 'home.html',
       runPath: '.runs/setup.md',
+    })
+  })
+
+  it('progress treats .views/home as the ready cockpit without counting view source as data', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me')
+    await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    expect(await asW(t).query(api.onboarding.progress, {})).toMatchObject({
+      hasCockpitView: true,
+      hasDashboardWithQuery: true,
+      sourceCount: 1,
+      cockpitPath: '.views/home',
+      dashboardPath: '.views/home',
     })
   })
 

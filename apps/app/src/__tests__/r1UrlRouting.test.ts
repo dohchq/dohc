@@ -135,10 +135,12 @@ describe('R1 route file structure', () => {
     expect(src).toMatch(/wsId:\s*['"]me['"]/)
   })
 
-  it('workspace-scoped primary view routes exist for Agent, Files, and Graph', () => {
+  it('workspace-scoped primary view routes exist for Agent, Files, Views, and Graph', () => {
     const viewRoutes = [
       ['_app.w.$wsId.agent.tsx', '/_app/w/$wsId/agent'],
       ['_app.w.$wsId.files.tsx', '/_app/w/$wsId/files'],
+      ['_app.w.$wsId.views.tsx', '/_app/w/$wsId/views'],
+      ['_app.w.$wsId.v.$viewRef.tsx', '/_app/w/$wsId/v/$viewRef'],
       ['_app.w.$wsId.graph.tsx', '/_app/w/$wsId/graph'],
     ] as const
 
@@ -156,6 +158,10 @@ describe('R1 route file structure', () => {
 describe('_app.tsx shell recognizes both URL shapes', () => {
   const APP_SRC = readFileSync(
     resolve(__dirname, '../../src/routes/_app.tsx'),
+    'utf8',
+  )
+  const APP_VIEWS_SRC = readFileSync(
+    resolve(__dirname, '../../src/lib/appViews.ts'),
     'utf8',
   )
 
@@ -185,7 +191,7 @@ describe('_app.tsx shell recognizes both URL shapes', () => {
   })
 
   it('maps primary app surfaces from the path and navigates activity changes into canonical URLs', () => {
-    expect(APP_SRC).toContain('export function viewFromPathname')
+    expect(APP_VIEWS_SRC).toContain('export function viewFromPathname')
     expect(APP_SRC).toContain('viewFromPathname(location.pathname)')
     expect(APP_SRC).toContain('navigateToView')
     expect(APP_SRC).toMatch(
@@ -193,6 +199,9 @@ describe('_app.tsx shell recognizes both URL shapes', () => {
     )
     expect(APP_SRC).toMatch(
       /to:\s*['"]\/w\/\$wsId\/files['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/views['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
     )
     expect(APP_SRC).toMatch(
       /to:\s*['"]\/w\/\$wsId\/graph['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,

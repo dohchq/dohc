@@ -28,9 +28,10 @@ describe('setup-first onboarding wedge', () => {
     expect(ONBOARDING_SRC).toContain('Use the real material I gave you first')
   })
 
-  it('asks for a Setup Run that produces source docs plus home.html', () => {
+  it('asks for a Setup Run that produces source docs plus a first-class cockpit surface', () => {
     expect(ONBOARDING_SRC).toContain('Setup Run')
     expect(ONBOARDING_SRC).toContain('home.html')
+    expect(ONBOARDING_SRC).toContain('.views/home')
     expect(ONBOARDING_SRC).toContain('.runs/setup.md')
     expect(ONBOARDING_SRC).toContain('source-backed cockpit')
   })
@@ -50,6 +51,8 @@ describe('setup-first onboarding wedge', () => {
   it('locks the agent to no-fake-productivity-theater onboarding', () => {
     expect(AGENT_SRC).toContain('No fake productivity theater')
     expect(AGENT_SRC).toContain('home.html')
+    expect(AGENT_SRC).toContain('.views/home')
+    expect(AGENT_SRC).toContain('interactive or app-like')
     expect(AGENT_SRC).toContain('.runs/setup.md')
     expect(AGENT_SRC).toContain('source-backed cockpit')
   })

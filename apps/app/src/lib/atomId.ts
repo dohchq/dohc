@@ -24,6 +24,7 @@ export {
   // the unified §6 non-data predicate. Same one-source discipline.
   isSkillAtomBody,
   isLegacySkillPath,
+  isWorkspaceViewPath,
   isNonDataAtom,
   countTypeLines,
 } from '../../convex/atomId'

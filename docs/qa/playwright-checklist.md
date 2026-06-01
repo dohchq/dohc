@@ -20,9 +20,32 @@ pnpm --filter @dohc/app exec playwright screenshot \
 unauthenticated sign-in · signed-out route · loading · onboarding (new) ·
 onboarding (in-progress) · post-onboarding workspace · no file selected ·
 markdown document · source mode · HTML atom · graph view ·
-chat open · chat closed · share dialog · properties panel · command
-palette · folder picker · dark mode · system-prefers-dark (no explicit
-theme).
+Views activity · rendered folder view · `.views` source file · view build
+diagnostic · chat open · chat closed · share dialog · properties panel ·
+command palette · folder picker · dark mode · system-prefers-dark (no
+explicit theme).
+
+## Folder Views Manual QA
+
+The automated Playwright coverage verifies the sandboxed runtime and SDK
+message loop. The authenticated workspace flow still needs manual QA until
+the e2e harness can seed logged-in Convex workspaces.
+
+1. Create `clients/acme/tasks.md` with `{status: active}` and
+   `{next_action: send proposal}`.
+2. Create `clients/acme/.views/overview/src/App.tsx` with a small React
+   view that calls `dohc.fields.query({ source: '.', keys: ['status',
+   'next_action'] })`.
+3. Open Views, select `clients/acme / Overview`, and confirm the iframe
+   renders the two fields.
+4. Click `Open source` from the view header and confirm Files opens
+   `clients/acme/.views/overview/src/App.tsx` in source mode.
+5. From the source atom, click `Open view` and confirm it returns to the
+   rendered view.
+6. Imports/exports check: grant an export from workspace A to workspace B,
+   confirm the withheld values, and verify a workspace B view using
+   `dohc.imports.list()` shows only granted values. Revoke the grant and
+   verify the import disappears.
 
 ## Checks
 
