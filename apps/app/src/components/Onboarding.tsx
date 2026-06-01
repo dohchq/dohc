@@ -13,8 +13,11 @@ import {
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { DohcLogo } from '@/components/DohcLogo'
+import { HtmlAtomFrame } from '@/components/HtmlAtomFrame'
 import { Markdown } from '@/components/Markdown'
+import { extractFrontmatterId, isHtmlPath } from '@/lib/atomId'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import { onboardingWorkspaceReady } from '../lib/onboarding-ready'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
@@ -176,10 +179,10 @@ function composeIntro(
   return [
     kind === 'org'
       ? 'Here’s the shared system this workspace should run:'
-      : 'Here’s the setup I want dohc to build:',
+      : 'Here’s the Setup Run I want dohc to build:',
     ...lines,
     '',
-    `Set it up now — build a populated, source-backed dashboard, starter files with real inline data, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, create a modest starter that fits the setup and make the next capture action obvious.`,
+    `Set it up now — build source markdown first, then a polished source-backed cockpit at home.html, then an inspectable .runs/setup.md, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, avoid fake productivity theater and make the next capture action obvious.`,
   ].join('\n')
 }
 
@@ -315,7 +318,7 @@ export function Onboarding({ state }: Props) {
     [messages],
   )
   const composerReady = hasCompletedAssistant && !busy
-  const workspaceReady = !!progress?.hasMe && !!progress?.hasDashboardWithQuery
+  const workspaceReady = onboardingWorkspaceReady(progress)
 
   // ── composer ───────────────────────────────────────────────────
   const [input, setInput] = useState('')
@@ -383,23 +386,24 @@ export function Onboarding({ state }: Props) {
     api.atoms.getByPath,
     progress?.mePath ? { path: progress.mePath, activeWorkspaceId } : 'skip',
   )
+  const cockpitPath = progress?.cockpitPath ?? progress?.dashboardPath ?? null
   const heroAtom = useQuery(
     api.atoms.getByPath,
-    progress?.dashboardPath
-      ? { path: progress.dashboardPath, activeWorkspaceId }
+    cockpitPath
+      ? { path: cockpitPath, activeWorkspaceId }
       : 'skip',
   )
   const completingReadyRef = useRef(false)
   useEffect(() => {
     if (
       workspaceReady &&
-      progress?.dashboardPath &&
+      cockpitPath &&
       typeof window !== 'undefined'
     ) {
       try {
         window.localStorage.setItem(
           'dohc:onboarding:open',
-          progress.dashboardPath,
+          cockpitPath,
         )
       } catch {
         /* private-mode / quota — App shows its normal default */
@@ -413,6 +417,7 @@ export function Onboarding({ state }: Props) {
     }
   }, [
     workspaceReady,
+    cockpitPath,
     progress?.dashboardPath,
     completeIfReady,
     activeWorkspaceId,
@@ -428,13 +433,13 @@ export function Onboarding({ state }: Props) {
           </div>
           <h1 className="mt-10 text-[27px] font-semibold tracking-tight leading-[1.2] text-ink-strong">
             {workspaceKind === 'org'
-              ? 'Set up the first shared system.'
-              : 'Skip the setup work.'}
+              ? 'Run the first shared setup.'
+              : 'Start with a Setup Run.'}
           </h1>
           <p className="mx-auto mt-3 max-w-[360px] text-[13.5px] leading-relaxed text-ink-dim">
             {workspaceKind === 'org'
-              ? 'Pick one workflow this team should run in dohc. It will build the files, dashboard, and first operating rhythm.'
-              : 'Tell dohc the Notion, Sheets, or Obsidian-style setup you wanted. It builds the living version around you.'}
+              ? 'Pick one workflow this team should run in dohc. It will build the sources, home cockpit, and first operating rhythm.'
+              : 'Tell dohc the Notion, Obsidian, or AI workflow you wanted. It builds the sources and home cockpit around you.'}
           </p>
           <button
             onClick={() => setPhase('questions')}
@@ -540,7 +545,7 @@ export function Onboarding({ state }: Props) {
             </button>
           ) : (
             <p className="py-3 text-center text-[12px] text-ink-faint">
-              dohc is working — your workspace is taking shape on the
+              dohc is working — your cockpit is taking shape on the
               right →
             </p>
           )}
@@ -552,7 +557,7 @@ export function Onboarding({ state }: Props) {
         <div className="flex items-center gap-2 border-b border-rule px-5 py-4">
           <Sparkles className="size-3.5 text-ink-dim" strokeWidth={2} />
           <span className="text-[12px] font-semibold tracking-tight text-ink-strong">
-            Your workspace, live
+            Your Setup Run, live
           </span>
         </div>
 
@@ -563,13 +568,7 @@ export function Onboarding({ state }: Props) {
             workspaceKind={workspaceKind}
           />
 
-          {heroAtom && (
-            <Card title="Your dashboard, taking shape">
-              <div className="max-h-[300px] overflow-y-auto pr-1">
-                <Markdown variant="compact">{heroAtom.body}</Markdown>
-              </div>
-            </Card>
-          )}
+          {heroAtom && <HeroPreview atom={heroAtom} />}
 
           {meAtom && (
             <MeCard
@@ -615,7 +614,7 @@ export function Onboarding({ state }: Props) {
           {workspaceReady ? (
             <p className="flex items-center gap-1.5 text-[12px] font-medium leading-relaxed text-success">
               <Check className="size-4" strokeWidth={2.4} />
-              Your workspace is ready — opening…
+              Your cockpit is ready — opening…
             </p>
           ) : (
             <button
@@ -929,7 +928,7 @@ function StatusBar({
       spin: false,
     },
     ready: {
-      t: 'Your workspace is ready',
+      t: 'Your cockpit is ready',
       s: 'Opening it now…',
       spin: false,
     },
@@ -1018,6 +1017,9 @@ function BuildChecklist({
     | {
         entityCount: number
         hasMe: boolean
+        sourceCount?: number
+        hasCockpitView?: boolean
+        hasSetupRun?: boolean
         hasDashboardWithQuery: boolean
       }
     | undefined
@@ -1027,23 +1029,30 @@ function BuildChecklist({
 }) {
   const live = status === 'building' || status === 'connecting'
   const n = progress?.entityCount ?? 0
+  const sourceCount = progress?.sourceCount ?? n
   const items = [
     {
-      done: n > 0,
+      done: sourceCount > 0,
       label:
-        n > 0
+        sourceCount > 0
           ? workspaceKind === 'org'
-            ? `Organized ${n >= 200 ? '200+' : n} shared thing${n === 1 ? '' : 's'} from this workflow`
-            : `Organized ${n >= 200 ? '200+' : n} thing${n === 1 ? '' : 's'} from your work`
+            ? `Built ${sourceCount >= 200 ? '200+' : sourceCount} shared source${sourceCount === 1 ? '' : 's'}`
+            : `Built ${sourceCount >= 200 ? '200+' : sourceCount} source${sourceCount === 1 ? '' : 's'}`
           : workspaceKind === 'org'
-            ? 'Pulling structure out of this workflow'
-            : 'Pulling structure out of your work',
+            ? 'Building shared source files'
+            : 'Building source files',
     },
     {
-      done: !!progress?.hasDashboardWithQuery,
-      label: progress?.hasDashboardWithQuery
-        ? 'Built your live dashboard'
-        : 'Building your live dashboard',
+      done: !!progress?.hasCockpitView,
+      label: progress?.hasCockpitView
+        ? 'Built your home cockpit'
+        : 'Building home.html',
+    },
+    {
+      done: !!progress?.hasSetupRun,
+      label: progress?.hasSetupRun
+        ? 'Wrote the Setup Run'
+        : 'Writing .runs/setup.md',
     },
     {
       done: !!progress?.hasMe,
@@ -1082,6 +1091,28 @@ function BuildChecklist({
         </div>
       ))}
     </div>
+  )
+}
+
+function HeroPreview({
+  atom,
+}: {
+  atom: { path: string; body: string }
+}) {
+  const atomId = extractFrontmatterId(atom.body)
+  if (isHtmlPath(atom.path)) {
+    return (
+      <Card title="home.html, taking shape">
+        <HtmlAtomFrame atomId={atomId} body={atom.body} compact />
+      </Card>
+    )
+  }
+  return (
+    <Card title="Your cockpit, taking shape">
+      <div className="max-h-[300px] overflow-y-auto pr-1">
+        <Markdown variant="compact">{atom.body}</Markdown>
+      </div>
+    </Card>
   )
 }
 

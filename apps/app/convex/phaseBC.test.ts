@@ -382,6 +382,14 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           !/runQuery\([\s\S]{0,80}_resolveWorkspaceForCaller[\s\S]{0,200}activeWorkspaceId/.test(
             body,
           ) &&
+          // Shared-atom surfaces route through resolveShareAccess,
+          // which is the shared read/write door and calls
+          // requireWorkspace(ctx, activeWorkspaceId) before checking the
+          // share grant. Treat that helper as equivalent to an inline
+          // requireWorkspace call for this static audit.
+          !/resolveShareAccess\s*\(\s*ctx\s*,[\s\S]{0,160}activeWorkspaceId/.test(
+            body,
+          ) &&
           // Action surfaces that explicitly refuse a non-undefined
           // activeWorkspaceId (queries.run still uses this shape — no
           // bridge yet) are also valid — the arg is GATED by the

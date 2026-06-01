@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   useCallback,
+  useId,
 } from 'react'
 import {
   ChevronDown,
@@ -22,6 +23,7 @@ import {
   Pencil,
   Plus,
   Trash2,
+  AlertTriangle,
   Moon,
   Sun,
   Monitor,
@@ -52,6 +54,7 @@ import {
 import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
 import { colorVarFor } from '@/lib/folderTokens'
 import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
+import { useDialogFocus } from '../lib/dialog-focus'
 
 type Props = {
   files: FileRow[]
@@ -65,9 +68,9 @@ type Props = {
   onCreatePage: (name: string) => Promise<void>
   onCreateFolder: (name: string) => Promise<void>
   onDeleteFolder: (path: string) => Promise<void>
-  onRenameFolder: (path: string) => Promise<void>
+  onRenameFolder: (path: string, nextPath: string) => Promise<void>
   onDeleteFile: (path: string) => Promise<void>
-  onRenameFile: (path: string) => Promise<void>
+  onRenameFile: (path: string, nextPath: string) => Promise<void>
   // file-org-v1 D4.4a — lock + star toggles wired from index.tsx to
   // the api.atoms.setLock + api.atoms.setStar mutations. Optional
   // so the existing index.tsx callsite compiles before it wires
@@ -126,6 +129,10 @@ type Props = {
 // isolation; not a current use case but avoids hard-coded
 // undefined checks at every consumer).
 const PresenceContext = createContext<ReadonlySet<string>>(new Set())
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback
+}
 
 function readSectionOpen(key: string, dflt: boolean): boolean {
   if (typeof window === 'undefined') return dflt
@@ -535,8 +542,7 @@ export function FileTree({
         try {
           await onMoveFile(action.fromPath, action.toPath)
         } catch {
-          // Error already surfaced via parent's window.alert
-          // (the move handlers in index.tsx alert + rethrow).
+          // Error already surfaced via the app-level notice.
         }
         return
       }
@@ -711,7 +717,14 @@ export function FileTree({
   )
 
   const [pending, setPending] = useState<'page' | 'folder' | null>(null)
+  const [pendingBusy, setPendingBusy] = useState(false)
+  const [pendingError, setPendingError] = useState<string | null>(null)
   const [newOpen, setNewOpen] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<
+    { kind: 'page' | 'folder'; path: string } | null
+  >(null)
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState<string | null>(null)
 
   // file-org-v1 D4.5b — FolderPicker state. Non-null ⇒ picker is
   // open against this folder, with optional `initial` (the current
@@ -727,9 +740,11 @@ export function FileTree({
   } | null>(null)
 
   async function commitPending(value: string) {
+    if (pendingBusy) return
     const name = value.trim()
     if (!name) {
       setPending(null)
+      setPendingError(null)
       return
     }
     // D4.6 — prefix with the target dir derived from focusedPath.
@@ -739,11 +754,16 @@ export function FileTree({
     // "team" → "team/alpha"; type "other/beta" → "other/beta"
     // (the typed path wins because it already has structure).
     const path = name.includes('/') || targetDir === '' ? name : `${targetDir}/${name}`
+    setPendingBusy(true)
+    setPendingError(null)
     try {
       if (pending === 'page') await onCreatePage(path)
       else if (pending === 'folder') await onCreateFolder(path)
-    } finally {
       setPending(null)
+    } catch (error) {
+      setPendingError(errorMessage(error, 'Could not create item.'))
+    } finally {
+      setPendingBusy(false)
     }
   }
 
@@ -758,7 +778,43 @@ export function FileTree({
     if (targetDir !== '' && !expanded.has(targetDir)) {
       setExpanded((prev) => new Set(prev).add(targetDir))
     }
+    setPendingError(null)
     setPending(kind)
+  }
+
+  function beginRename(kind: 'page' | 'folder', path: string) {
+    setRenameTarget({ kind, path })
+    setRenameError(null)
+  }
+
+  async function commitRename(nextPath: string) {
+    if (!renameTarget || renameBusy) return
+    const clean = nextPath.trim()
+    if (!clean || clean === renameTarget.path) {
+      setRenameTarget(null)
+      setRenameError(null)
+      return
+    }
+    setRenameBusy(true)
+    setRenameError(null)
+    try {
+      if (renameTarget.kind === 'page') {
+        await onRenameFile(renameTarget.path, clean)
+      } else {
+        await onRenameFolder(renameTarget.path, clean)
+      }
+      setRenameTarget(null)
+    } catch (error) {
+      setRenameError(errorMessage(error, 'Could not rename item.'))
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
+  function cancelRename() {
+    if (renameBusy) return
+    setRenameTarget(null)
+    setRenameError(null)
   }
 
   return (
@@ -918,6 +974,9 @@ export function FileTree({
             kind={pending}
             indent={8}
             onCommit={commitPending}
+            busy={pendingBusy}
+            error={pendingError}
+            onInput={() => setPendingError(null)}
           />
         )}
 
@@ -991,6 +1050,13 @@ export function FileTree({
                 onRenameFolder={onRenameFolder}
                 onDeleteFile={onDeleteFile}
                 onRenameFile={onRenameFile}
+                renameTarget={renameTarget}
+                renameBusy={renameBusy}
+                renameError={renameError}
+                onBeginRename={beginRename}
+                onRenameCommit={commitRename}
+                onRenameCancel={cancelRename}
+                onRenameInput={() => setRenameError(null)}
                 onOpenPicker={
                   onSetFolderMeta
                     ? (n) =>
@@ -1021,6 +1087,9 @@ export function FileTree({
                 pendingKind={pending}
                 pendingTargetDir={targetDir}
                 onPendingCommit={commitPending}
+                pendingBusy={pendingBusy}
+                pendingError={pendingError}
+                onPendingInput={() => setPendingError(null)}
                 sharedByMeIds={sharedByMeIds}
               />
             ))}
@@ -1104,13 +1173,19 @@ function PendingRow({
   kind,
   indent,
   onCommit,
+  busy,
+  error,
+  onInput,
 }: {
   kind: 'page' | 'folder'
   // D4.6b — left padding in pixels. Matches the depth-driven indent
   // used by TreeRowNode (8 + depth * 14) so the input visually
   // aligns with sibling rows at the same level.
   indent: number
-  onCommit: (value: string) => void
+  onCommit: (value: string) => void | Promise<void>
+  busy?: boolean
+  error?: string | null
+  onInput?: () => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
   const [value, setValue] = useState('')
@@ -1121,34 +1196,136 @@ function PendingRow({
 
   return (
     <div
-      className="flex items-center gap-1.5 mr-1 mt-0.5 mb-0.5 rounded-md border border-rule-strong bg-panel py-1 pr-2"
+      className={`mr-1 mt-0.5 mb-0.5 rounded-md border bg-panel pr-2 ${
+        error ? 'border-danger/50' : 'border-rule-strong'
+      }`}
       style={{ paddingLeft: indent }}
     >
-      <span className="size-3.5 shrink-0 text-ink-dim">
-        {kind === 'page' ? (
-          <FileText className="size-3.5" strokeWidth={2} />
-        ) : (
-          <Folder className="size-3.5" strokeWidth={2} />
+      <div className="flex items-center gap-1.5 py-1">
+        <span className="size-3.5 shrink-0 text-ink-dim">
+          {kind === 'page' ? (
+            <FileText className="size-3.5" strokeWidth={2} />
+          ) : (
+            <Folder className="size-3.5" strokeWidth={2} />
+          )}
+        </span>
+        <input
+          ref={ref}
+          value={value}
+          disabled={busy}
+          onChange={(e) => {
+            setValue(e.target.value)
+            onInput?.()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void onCommit(value)
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              void onCommit('')
+            }
+          }}
+          onBlur={() => {
+            if (!error) void onCommit(value)
+          }}
+          placeholder={kind === 'page' ? 'page name' : 'folder name'}
+          spellCheck={false}
+          className="flex-1 bg-transparent border-none outline-none text-[12.5px] text-ink placeholder:text-ink-faint disabled:opacity-60"
+        />
+        {busy && (
+          <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+            saving
+          </span>
         )}
-      </span>
-      <input
-        ref={ref}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault()
-            onCommit(value)
-          } else if (e.key === 'Escape') {
-            e.preventDefault()
-            onCommit('')
-          }
-        }}
-        onBlur={() => onCommit(value)}
-        placeholder={kind === 'page' ? 'page name' : 'folder name'}
-        spellCheck={false}
-        className="flex-1 bg-transparent border-none outline-none text-[12.5px] text-ink placeholder:text-ink-faint"
-      />
+      </div>
+      {error && (
+        <div role="alert" className="pb-1 pl-5 text-[11px] leading-snug text-danger">
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InlineRenameRow({
+  kind,
+  path,
+  indent,
+  busy,
+  error,
+  onCommit,
+  onCancel,
+  onInput,
+}: {
+  kind: 'page' | 'folder'
+  path: string
+  indent: number
+  busy: boolean
+  error: string | null
+  onCommit: (value: string) => void | Promise<void>
+  onCancel: () => void
+  onInput: () => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  const [value, setValue] = useState(path)
+
+  useEffect(() => {
+    ref.current?.focus()
+    ref.current?.select()
+  }, [])
+
+  return (
+    <div
+      role="treeitem"
+      aria-label={`Rename ${path}`}
+      className={`mr-1 mt-0.5 mb-0.5 rounded-md border bg-panel pr-2 ${
+        error ? 'border-danger/50' : 'border-rule-strong'
+      }`}
+      style={{ paddingLeft: indent }}
+    >
+      <div className="flex items-center gap-1.5 py-1">
+        <span className="size-3.5 shrink-0 text-ink-dim">
+          {kind === 'page' ? (
+            <FileText className="size-3.5" strokeWidth={2} />
+          ) : (
+            <Folder className="size-3.5" strokeWidth={2} />
+          )}
+        </span>
+        <input
+          ref={ref}
+          value={value}
+          disabled={busy}
+          onChange={(e) => {
+            setValue(e.target.value)
+            onInput()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void onCommit(value)
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              onCancel()
+            }
+          }}
+          onBlur={() => {
+            if (!error && !busy) void onCommit(value)
+          }}
+          spellCheck={false}
+          className="flex-1 bg-transparent border-none outline-none font-mono text-[12px] text-ink placeholder:text-ink-faint disabled:opacity-60"
+        />
+        {busy && (
+          <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+            renaming
+          </span>
+        )}
+      </div>
+      {error && (
+        <div role="alert" className="pb-1 pl-5 text-[11px] leading-snug text-danger">
+          {error}
+        </div>
+      )}
     </div>
   )
 }
@@ -1168,6 +1345,13 @@ function TreeRowNode({
   onRenameFolder,
   onDeleteFile,
   onRenameFile,
+  renameTarget,
+  renameBusy,
+  renameError,
+  onBeginRename,
+  onRenameCommit,
+  onRenameCancel,
+  onRenameInput,
   onOpenPicker,
   onOpenFileIcon,
   onToggleFileStar,
@@ -1180,6 +1364,9 @@ function TreeRowNode({
   pendingKind,
   pendingTargetDir,
   onPendingCommit,
+  pendingBusy,
+  pendingError,
+  onPendingInput,
   sharedByMeIds,
 }: {
   node: TreeNode
@@ -1193,9 +1380,16 @@ function TreeRowNode({
   onOpen: (path: string) => void
   onToggle: (key: string) => void
   onDeleteFolder: (path: string) => Promise<void>
-  onRenameFolder: (path: string) => Promise<void>
+  onRenameFolder: (path: string, nextPath: string) => Promise<void>
   onDeleteFile: (path: string) => Promise<void>
-  onRenameFile: (path: string) => Promise<void>
+  onRenameFile: (path: string, nextPath: string) => Promise<void>
+  renameTarget: { kind: 'page' | 'folder'; path: string } | null
+  renameBusy: boolean
+  renameError: string | null
+  onBeginRename: (kind: 'page' | 'folder', path: string) => void
+  onRenameCommit: (nextPath: string) => Promise<void>
+  onRenameCancel: () => void
+  onRenameInput: () => void
   // file-org-v1 D4.5b — folder rows only; opens FolderPicker.
   onOpenPicker?: (node: TreeNode) => void
   // emoji-icons — file rows only; opens the EmojiPicker for the file.
@@ -1221,7 +1415,10 @@ function TreeRowNode({
   // top of the tree container (handled in FileTree, not here).
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
-  onPendingCommit: (value: string) => void
+  onPendingCommit: (value: string) => void | Promise<void>
+  pendingBusy: boolean
+  pendingError: string | null
+  onPendingInput: () => void
   sharedByMeIds: ReadonlySet<string>
 }) {
   const isFolder = node.page === null
@@ -1248,12 +1445,28 @@ function TreeRowNode({
     const ContextIcon = contextFileIcon(filePath)
     const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
     const showLock = node.page!.systemLocked || node.page!.userLocked
+    const isRenaming =
+      renameTarget?.kind === 'page' && renameTarget.path === filePath
     // D4.7 — DnD: leaf row is BOTH draggable (the file itself) AND
     // droppable (drop INTO file = drop into file's parent folder).
     const leafParent = filePath.includes('/')
       ? filePath.slice(0, filePath.lastIndexOf('/'))
       : ''
     const isDropTarget = dragOverPath === filePath
+    if (isRenaming) {
+      return (
+        <InlineRenameRow
+          kind="page"
+          path={filePath}
+          indent={indent}
+          busy={renameBusy}
+          error={renameError}
+          onCommit={onRenameCommit}
+          onCancel={onRenameCancel}
+          onInput={onRenameInput}
+        />
+      )
+    }
     return (
       <div
         ref={setRowRef(filePath)}
@@ -1393,8 +1606,8 @@ function TreeRowNode({
           )
         )}
         <RowActions
-          onRename={() => void onRenameFile(filePath)}
-          onDelete={() => void onDeleteFile(filePath)}
+          onRename={() => onBeginRename('page', filePath)}
+          onDelete={() => onDeleteFile(filePath)}
           onCustomize={
             onOpenFileIcon
               ? () => onOpenFileIcon(filePath, node.page!.icon ?? null)
@@ -1404,6 +1617,8 @@ function TreeRowNode({
           customizeIcon={Smile}
           renameLabel={`rename ${filePath}`}
           deleteLabel={`delete ${filePath}`}
+          deleteTitle={`Delete ${label}?`}
+          deleteDescription="This file will be removed from the workspace."
         />
         {/* type suffix — distinguishes html from md independent of the
             (customizable) icon. Right-aligned (Obsidian-style); the
@@ -1421,6 +1636,79 @@ function TreeRowNode({
   // D4.7 — folder row is draggable (the folder itself) AND a drop
   // target (drop INTO the folder).
   const folderIsDropTarget = dragOverPath === node.fullPath
+  const isRenaming =
+    renameTarget?.kind === 'folder' && renameTarget.path === node.fullPath
+  if (isRenaming) {
+    return (
+      <Fragment>
+        <InlineRenameRow
+          kind="folder"
+          path={node.fullPath}
+          indent={indent}
+          busy={renameBusy}
+          error={renameError}
+          onCommit={onRenameCommit}
+          onCancel={onRenameCancel}
+          onInput={onRenameInput}
+        />
+        {isExpanded &&
+          pendingKind !== null &&
+          pendingTargetDir === node.fullPath && (
+            <PendingRow
+              kind={pendingKind}
+              indent={8 + (depth + 1) * 14}
+              onCommit={onPendingCommit}
+              busy={pendingBusy}
+              error={pendingError}
+              onInput={onPendingInput}
+            />
+          )}
+        {isExpanded &&
+          node.children.map((c) => (
+            <TreeRowNode
+              key={c.fullPath}
+              node={c}
+              depth={depth + 1}
+              activePath={activePath}
+              expanded={expanded}
+              viewIsAtom={viewIsAtom}
+              focusedPath={focusedPath}
+              setFocusedPath={setFocusedPath}
+              setRowRef={setRowRef}
+              onOpen={onOpen}
+              onToggle={onToggle}
+              onDeleteFolder={onDeleteFolder}
+              onRenameFolder={onRenameFolder}
+              onDeleteFile={onDeleteFile}
+              onRenameFile={onRenameFile}
+              renameTarget={renameTarget}
+              renameBusy={renameBusy}
+              renameError={renameError}
+              onBeginRename={onBeginRename}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
+              onRenameInput={onRenameInput}
+              onOpenPicker={onOpenPicker}
+              onOpenFileIcon={onOpenFileIcon}
+              onToggleFileStar={onToggleFileStar}
+              starredOf={starredOf}
+              onToggleFolderStar={onToggleFolderStar}
+              folderStarredOf={folderStarredOf}
+              dragOverPath={dragOverPath}
+              setDragOverPath={setDragOverPath}
+              handleDrop={handleDrop}
+              pendingKind={pendingKind}
+              pendingTargetDir={pendingTargetDir}
+              onPendingCommit={onPendingCommit}
+              pendingBusy={pendingBusy}
+              pendingError={pendingError}
+              onPendingInput={onPendingInput}
+              sharedByMeIds={sharedByMeIds}
+            />
+          ))}
+      </Fragment>
+    )
+  }
   return (
     <Fragment>
       <div
@@ -1538,14 +1826,16 @@ function TreeRowNode({
           )
         )}
         <RowActions
-          onRename={() => void onRenameFolder(node.fullPath)}
-          onDelete={() => void onDeleteFolder(node.fullPath)}
+          onRename={() => onBeginRename('folder', node.fullPath)}
+          onDelete={() => onDeleteFolder(node.fullPath)}
           onCustomize={
             onOpenPicker ? () => onOpenPicker(node) : undefined
           }
           customizeLabel={`customize folder ${node.fullPath}`}
           renameLabel={`rename folder ${node.fullPath}`}
           deleteLabel={`delete folder ${node.fullPath}`}
+          deleteTitle={`Delete ${label}?`}
+          deleteDescription="This removes the folder, nested folders, and every page inside."
         />
       </div>
       {/* D4.6b — inline PendingRow at depth+1 when this folder is
@@ -1560,6 +1850,9 @@ function TreeRowNode({
             kind={pendingKind}
             indent={8 + (depth + 1) * 14}
             onCommit={onPendingCommit}
+            busy={pendingBusy}
+            error={pendingError}
+            onInput={onPendingInput}
           />
         )}
       {isExpanded &&
@@ -1590,6 +1883,13 @@ function TreeRowNode({
             onRenameFolder={onRenameFolder}
             onDeleteFile={onDeleteFile}
             onRenameFile={onRenameFile}
+            renameTarget={renameTarget}
+            renameBusy={renameBusy}
+            renameError={renameError}
+            onBeginRename={onBeginRename}
+            onRenameCommit={onRenameCommit}
+            onRenameCancel={onRenameCancel}
+            onRenameInput={onRenameInput}
             onOpenPicker={onOpenPicker}
             onOpenFileIcon={onOpenFileIcon}
             onToggleFileStar={onToggleFileStar}
@@ -1602,6 +1902,9 @@ function TreeRowNode({
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
             onPendingCommit={onPendingCommit}
+            pendingBusy={pendingBusy}
+            pendingError={pendingError}
+            onPendingInput={onPendingInput}
             sharedByMeIds={sharedByMeIds}
           />
         ))}
@@ -1651,9 +1954,11 @@ function RowActions({
   customizeIcon: CustomizeIcon = Palette,
   renameLabel,
   deleteLabel,
+  deleteTitle,
+  deleteDescription,
 }: {
   onRename: () => void
-  onDelete: () => void
+  onDelete: () => void | Promise<void>
   // When set, an extra button: folders → customize (Palette);
   // files → set icon (Smile).
   onCustomize?: () => void
@@ -1664,9 +1969,39 @@ function RowActions({
   }>
   renameLabel: string
   deleteLabel: string
+  deleteTitle: string
+  deleteDescription: string
 }) {
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const titleId = useId()
+  const descriptionId = useId()
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  const { dialogRef, onDialogKeyDown } = useDialogFocus<HTMLDivElement>({
+    open: confirmOpen,
+    initialFocusRef: cancelRef,
+    onEscape: () => {
+      if (!busy) setConfirmOpen(false)
+    },
+  })
+
+  async function confirmDelete() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await onDelete()
+      setConfirmOpen(false)
+    } catch (e) {
+      setError(errorMessage(e, 'Could not delete item.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
-    <span className="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+    <div className="relative ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
       {onCustomize && (
         <button
           onClick={(e) => {
@@ -1694,7 +2029,8 @@ function RowActions({
       <button
         onClick={(e) => {
           e.stopPropagation()
-          onDelete()
+          setError(null)
+          setConfirmOpen(true)
         }}
         title="delete"
         aria-label={deleteLabel}
@@ -1702,7 +2038,78 @@ function RowActions({
       >
         <Trash2 className="size-3" strokeWidth={2} />
       </button>
-    </span>
+      {confirmOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-30 cursor-default"
+            aria-hidden="true"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (!busy) setConfirmOpen(false)
+            }}
+          />
+          <div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
+            tabIndex={-1}
+            onKeyDown={onDialogKeyDown}
+            className="absolute right-0 top-6 z-40 block w-64 rounded-lg border border-rule bg-elevated p-2.5 text-left shadow-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className="mt-0.5 size-3.5 shrink-0 text-danger"
+                strokeWidth={2}
+              />
+              <div className="min-w-0">
+                <div
+                  id={titleId}
+                  className="block truncate text-[12.5px] font-medium text-ink-strong"
+                >
+                  {deleteTitle}
+                </div>
+                <div
+                  id={descriptionId}
+                  className="mt-0.5 block text-[11.5px] leading-snug text-ink-dim"
+                >
+                  {deleteDescription}
+                </div>
+              </div>
+            </div>
+            {error && (
+              <div
+                role="alert"
+                className="mt-2 block rounded-md bg-danger-soft px-2 py-1 text-[11px] leading-snug text-danger"
+              >
+                {error}
+              </div>
+            )}
+            <div className="mt-2 flex justify-end gap-1.5">
+              <button
+                ref={cancelRef}
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmOpen(false)}
+                className="rounded-md px-2 py-1 text-[11.5px] text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void confirmDelete()}
+                className="rounded-md bg-danger px-2 py-1 text-[11.5px] font-medium text-surface transition-colors hover:opacity-90 disabled:opacity-60"
+              >
+                {busy ? 'Deleting' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

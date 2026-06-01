@@ -92,8 +92,8 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     )
   })
 
-  it('ensureThread callers (_app + Onboarding) pass activeWorkspaceId', () => {
-    expect(APP).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)
+  it('thread creation callers (_app + Onboarding) pass activeWorkspaceId', () => {
+    expect(APP).toMatch(/createAgentThread\(\{[\s\S]{0,120}activeWorkspaceId/)
     expect(ONBOARDING).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)
   })
 

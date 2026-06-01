@@ -134,6 +134,23 @@ describe('R1 route file structure', () => {
     expect(src).toMatch(/redirect\(\{[\s\S]{0,200}to:\s*['"]\/w\/\$wsId['"]/)
     expect(src).toMatch(/wsId:\s*['"]me['"]/)
   })
+
+  it('workspace-scoped primary view routes exist for Agent, Files, and Graph', () => {
+    const viewRoutes = [
+      ['_app.w.$wsId.agent.tsx', '/_app/w/$wsId/agent'],
+      ['_app.w.$wsId.files.tsx', '/_app/w/$wsId/files'],
+      ['_app.w.$wsId.graph.tsx', '/_app/w/$wsId/graph'],
+    ] as const
+
+    for (const [file, routePath] of viewRoutes) {
+      const src = readFileSync(resolve(ROUTES, file), 'utf8')
+      const expectedSingle = `createFileRoute('${routePath}')`
+      const expectedDouble = `createFileRoute("${routePath}")`
+      expect(
+        src.includes(expectedSingle) || src.includes(expectedDouble),
+      ).toBe(true)
+    }
+  })
 })
 
 describe('_app.tsx shell recognizes both URL shapes', () => {
@@ -160,9 +177,25 @@ describe('_app.tsx shell recognizes both URL shapes', () => {
     expect(APP_SRC).toMatch(
       /to:\s*['"]\/w\/\$wsId\/shared\/\$shareId['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
     )
-    // home navigation also uses /w/$wsId
+    // Clearing a file keeps the user in Files, rather than falling back
+    // to an ambiguous workspace home URL.
     expect(APP_SRC).toMatch(
-      /to:\s*['"]\/w\/\$wsId['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+      /to:\s*['"]\/w\/\$wsId\/files['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+  })
+
+  it('maps primary app surfaces from the path and navigates activity changes into canonical URLs', () => {
+    expect(APP_SRC).toContain('export function viewFromPathname')
+    expect(APP_SRC).toContain('viewFromPathname(location.pathname)')
+    expect(APP_SRC).toContain('navigateToView')
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/agent['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/files['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
+    )
+    expect(APP_SRC).toMatch(
+      /to:\s*['"]\/w\/\$wsId\/graph['"][\s\S]{0,150}activeWorkspaceId\s*\?\?\s*['"]me['"]/,
     )
   })
 })

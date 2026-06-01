@@ -23,8 +23,8 @@ import {
 } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
-import { useActiveWorkspace } from '@/lib/active-workspace'
-import { useChatBusy } from '@/lib/chat-busy'
+import { useActiveWorkspace } from '../lib/active-workspace'
+import { useChatBusy } from '../lib/chat-busy'
 import { WorkspaceManagementDialog } from './WorkspaceManagementDialog'
 
 export function WorkspaceSwitcher() {

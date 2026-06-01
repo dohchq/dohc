@@ -13,7 +13,12 @@ import { ORG_IDENTITY_PATH, PERSONAL_IDENTITY_PATH } from './inlineAtom'
 // block falsely satisfied "vault has a populated dashboard" and
 // flipped onboarding to MAINTENANCE incorrectly. Skip non-data
 // atoms in the heuristic. (Codex r2 round-2 FAIL-§6.)
-import { isNonDataAtom } from './atomId'
+import {
+  isHtmlAtomBody,
+  isHtmlPath,
+  isNonDataAtom,
+  splitFrontmatter,
+} from './atomId'
 
 function randomLeaseOwner(): string {
   const cryptoApi = globalThis.crypto
@@ -76,12 +81,17 @@ async function onboardingRow(
 export type OnboardingProgress = {
   entityCount: number
   hasMe: boolean
+  sourceCount: number
+  hasCockpitView: boolean
+  hasSetupRun: boolean
   hasDashboardWithQuery: boolean
   // P1 build-review fold (D6/D7 + Frame-6 handoff): the paths so the
   // wedge can SHOW the profile back (editable) + the hero artifact
   // assembling, and open the hero in <App/> at handoff (spec line
   // 263 — never an empty "Pick a page" frame at the wow moment).
   mePath: string | null
+  cockpitPath: string | null
+  runPath: string | null
   dashboardPath: string | null
 }
 
@@ -89,6 +99,74 @@ export const PLACEHOLDER_SEED_MARKER = 'dohc:placeholder-seed'
 
 function isPlaceholderSeed(body: string): boolean {
   return body.includes(PLACEHOLDER_SEED_MARKER)
+}
+
+function isRunPath(path: string): boolean {
+  return /^\.?runs\//i.test(path)
+}
+
+function isSetupRunPath(path: string): boolean {
+  return /^\.?runs\/setup\.md$/i.test(path)
+}
+
+function strippedBody(body: string): string {
+  return splitFrontmatter(body ?? '').rest
+}
+
+function hasSourcesMetadata(body: string): boolean {
+  const { fm } = splitFrontmatter(body ?? '')
+  if (!fm) return false
+  const inner = fm
+    .replace(/^---[ \t]*\r?\n/, '')
+    .replace(/\r?\n---[ \t]*(?:\r?\n)?$/, '')
+  return /^sources:[ \t]*(?:\S.*)?$/m.test(inner)
+}
+
+function hasLiveViewReference(body: string): boolean {
+  const rest = strippedBody(body)
+  return /{\s*=/.test(rest) || /```query\b/.test(rest)
+}
+
+function isCockpitPath(path: string): boolean {
+  return /(^|\/)(home|dashboard|cockpit)\.html$/i.test(path)
+}
+
+function isSourceBackedCockpit(path: string, body: string): boolean {
+  return (
+    (isHtmlPath(path) || isHtmlAtomBody(body)) &&
+    isCockpitPath(path) &&
+    hasSourcesMetadata(body) &&
+    hasLiveViewReference(body)
+  )
+}
+
+function isRealSourceAtom(
+  path: string,
+  body: string,
+  identityFile: string,
+): boolean {
+  return (
+    path !== identityFile &&
+    !path.startsWith('.context/') &&
+    !isRunPath(path) &&
+    !isPlaceholderSeed(body) &&
+    !isNonDataAtom(path, body) &&
+    strippedBody(body).trim().length > 0
+  )
+}
+
+function isCompleteSetupRun(path: string, body: string): boolean {
+  if (!isSetupRunPath(path) || isPlaceholderSeed(body)) return false
+  const rest = strippedBody(body)
+  return (
+    /setup run/i.test(rest) &&
+    /^##\s+objective\b/im.test(rest) &&
+    /^##\s+sources?\b/im.test(rest) &&
+    /^##\s+view\b/im.test(rest) &&
+    /^##\s+what i know\b/im.test(rest) &&
+    /^##\s+what i need\b/im.test(rest) &&
+    /^##\s+next action\b/im.test(rest)
+  )
 }
 
 /** org-plan §6 / §11-step-4 — workspace-kind branch. A workspace is an
@@ -134,18 +212,32 @@ export async function progressOf(
   const me = atoms.find(
     (a) => a.path === identityFile && !isPlaceholderSeed(a.body),
   )
-  const dashboards = atoms.filter(
+  const sourceAtoms = atoms.filter((a) =>
+    isRealSourceAtom(a.path, a.body, identityFile),
+  )
+  const cockpits = atoms.filter(
+    (a) => !isPlaceholderSeed(a.body) && isSourceBackedCockpit(a.path, a.body),
+  )
+  const setupRun = atoms.find((a) => isCompleteSetupRun(a.path, a.body))
+  const legacyDashboards = atoms.filter(
     (a) =>
       !isPlaceholderSeed(a.body) &&
       !isNonDataAtom(a.path, a.body) &&
       a.body.includes('```query'),
   )
-  // Prefer a hero-named artifact (dashboard/workspace/home/work/...),
-  // else the first ```query atom — dohc writes exactly one hero.
-  const hero =
-    dashboards.find((a) =>
+  const cockpit =
+    cockpits.find((a) => /(^|\/)home\.html$/i.test(a.path)) ??
+    cockpits.find((a) => /(^|\/)dashboard\.html$/i.test(a.path)) ??
+    cockpits[0]
+  // Compatibility aliases for the first-run handoff. The MVP floor is
+  // now a source-backed HTML cockpit, but older UI callers still read
+  // "dashboard" fields while this surface is being renamed.
+  const legacyHero =
+    cockpit ??
+    legacyDashboards.find((a) =>
       /(^|\/)(dashboard|workspace|home|work|tracker)\b/i.test(a.path),
-    ) ?? dashboards[0]
+    ) ??
+    legacyDashboards[0]
   const entities = await ctx.db
     .query('entities')
     .withIndex('by_workspace_type', (q) => q.eq('workspaceId', workspaceId))
@@ -153,9 +245,14 @@ export async function progressOf(
   return {
     entityCount: entities.length,
     hasMe: !!me,
-    hasDashboardWithQuery: !!hero,
+    sourceCount: sourceAtoms.length,
+    hasCockpitView: !!cockpit,
+    hasSetupRun: !!setupRun,
+    hasDashboardWithQuery: !!cockpit,
     mePath: me?.path ?? null,
-    dashboardPath: hero?.path ?? null,
+    cockpitPath: cockpit?.path ?? null,
+    runPath: setupRun?.path ?? null,
+    dashboardPath: legacyHero?.path ?? null,
   }
 }
 
@@ -167,14 +264,19 @@ async function completeWorkspaceOnboarding(
   if (row?.completedAt) return null
 
   const p = await progressOf(ctx, workspaceId)
-  if (!p.hasMe || !p.hasDashboardWithQuery) {
+  if (!p.hasMe || p.sourceCount < 1 || !p.hasCockpitView) {
     const identityFile = (await isOrgWorkspace(ctx, workspaceId))
       ? ORG_IDENTITY_PATH
       : PERSONAL_IDENTITY_PATH
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
-        `(${identityFile}=${p.hasMe}, dashboard-with-query=${p.hasDashboardWithQuery}). ` +
-      `Write a populated dashboard and ${identityFile} first.`,
+        `(${identityFile}=${p.hasMe}, sources=${p.sourceCount}, source-backed-cockpit=${p.hasCockpitView}). ` +
+      `Write source markdown, a populated source-backed home.html, and ${identityFile} first.`,
+    )
+  }
+  if (!p.hasSetupRun) {
+    throw new Error(
+      'cannot finish onboarding: setup run missing. Write .runs/setup.md with objective, sources, view, what I know, what I need, and next action first.',
     )
   }
   if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })

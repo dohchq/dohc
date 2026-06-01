@@ -28,6 +28,13 @@ describe('setup-first onboarding wedge', () => {
     expect(ONBOARDING_SRC).toContain('Use the real material I gave you first')
   })
 
+  it('asks for a Setup Run that produces source docs plus home.html', () => {
+    expect(ONBOARDING_SRC).toContain('Setup Run')
+    expect(ONBOARDING_SRC).toContain('home.html')
+    expect(ONBOARDING_SRC).toContain('.runs/setup.md')
+    expect(ONBOARDING_SRC).toContain('source-backed cockpit')
+  })
+
   it('uses team-workflow language for org onboarding surfaces', () => {
     expect(ONBOARDING_SRC).toContain('What should this team workspace run first?')
     expect(ONBOARDING_SRC).toContain('Saved the workspace brief')
@@ -38,5 +45,12 @@ describe('setup-first onboarding wedge', () => {
     expect(AGENT_SRC).toContain('A new user wants dohc to set up:')
     expect(AGENT_SRC).toContain('not their job title')
     expect(AGENT_SRC).not.toContain('A new user just told us their work is:')
+  })
+
+  it('locks the agent to no-fake-productivity-theater onboarding', () => {
+    expect(AGENT_SRC).toContain('No fake productivity theater')
+    expect(AGENT_SRC).toContain('home.html')
+    expect(AGENT_SRC).toContain('.runs/setup.md')
+    expect(AGENT_SRC).toContain('source-backed cockpit')
   })
 })

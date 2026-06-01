@@ -1,6 +1,20 @@
-import { describe, it, expect } from 'vitest'
-import { buildCommandPaletteEntries } from '../components/CommandPalette'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { useQuery } from 'convex/react'
+import { getFunctionName } from 'convex/server'
+import {
+  buildCommandPaletteEntries,
+  CommandPalette,
+} from '../components/CommandPalette'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { firePaletteCommand, firePaletteSkill } from '../lib/palette-fire'
+
+vi.mock('convex/react', () => ({ useQuery: vi.fn() }))
+vi.mock('../lib/active-workspace', () => ({ useActiveWorkspaceId: vi.fn() }))
+
+const useQueryMock = vi.mocked(useQuery as any)
+const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
 
 const skills = [
   { path: '.skills/weekly-review.md', label: 'weekly-review' },
@@ -12,6 +26,11 @@ const savedCommands = [
   { path: '.commands/log-hours.md', label: 'log-hours' },
 ]
 
+beforeEach(() => {
+  useQueryMock.mockReset()
+  useActiveWorkspaceIdMock.mockReset()
+})
+
 function entries(log: string[] = []) {
   return buildCommandPaletteEntries({
     savedCommands,
@@ -19,6 +38,8 @@ function entries(log: string[] = []) {
     onClose: () => log.push('close'),
     onFireCommand: (path) => log.push(`command:${path}`),
     onFireSkill: (path) => log.push(`skill:${path}`),
+    onPromptAgent: (prompt) => log.push(`prompt:${prompt}`),
+    onOpenAtom: (path) => log.push(`open:${path}`),
     onOpenSketch: () => log.push('sketch'),
   })
 }
@@ -59,7 +80,19 @@ describe('CommandPalette entry behavior', () => {
         id: 'sys.insert-ascii-sketch',
         title: 'Insert ASCII sketch',
         hint: 'editor · ⌘⇧D',
-        kind: undefined,
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-skill',
+        title: 'Create reusable skill',
+        hint: 'agent · save a process',
+        kind: 'system',
+      },
+      {
+        id: 'sys.create-command',
+        title: 'Create slash command',
+        hint: 'agent · save a shortcut',
+        kind: 'system',
       },
     ])
   })
@@ -80,6 +113,92 @@ describe('CommandPalette entry behavior', () => {
     const log: string[] = []
     entries(log).find((entry) => entry.id === 'sys.insert-ascii-sketch')?.run()
     expect(log).toEqual(['close', 'sketch'])
+  })
+
+  it('skill and command creation entries route through agent prompts', () => {
+    const log: string[] = []
+    entries(log).find((entry) => entry.id === 'sys.create-skill')?.run()
+    entries(log).find((entry) => entry.id === 'sys.create-command')?.run()
+    expect(log).toEqual([
+      'close',
+      expect.stringContaining('prompt:Help me turn'),
+      'close',
+      expect.stringContaining('prompt:Help me create'),
+    ])
+  })
+
+  it('saved command and skill entries expose their editable atom path', () => {
+    expect(
+      entries()
+        .filter((entry) => entry.kind === 'command' || entry.kind === 'skill')
+        .map(({ editPath }) => editPath),
+    ).toEqual([
+      '.commands/draft-invoice.md',
+      '.commands/log-hours.md',
+      '.skills/weekly-review.md',
+      '.skills/invoice.md',
+    ])
+  })
+
+  it('saved command and skill edit actions close the palette and open the source atom', () => {
+    const log: string[] = []
+    entries(log).find((entry) => entry.id === 'skill..skills/invoice.md')?.edit?.()
+    expect(log).toEqual(['close', 'open:.skills/invoice.md'])
+  })
+})
+
+describe('CommandPalette workspace wiring', () => {
+  it('queries skills and commands in the active workspace', () => {
+    const calls: { name: string; args: unknown }[] = []
+    useActiveWorkspaceIdMock.mockReturnValue('ws_active')
+    useQueryMock.mockImplementation((ref: unknown, args: unknown) => {
+      const name = getFunctionName(ref as never)
+      const activeWorkspaceId =
+        typeof args === 'object' && args !== null
+          ? (args as { activeWorkspaceId?: unknown }).activeWorkspaceId
+          : undefined
+      calls.push({ name, args })
+      if (activeWorkspaceId !== 'ws_active') return []
+      if (name === 'skills:list') {
+        return [{ path: '.skills/active.md', label: 'active-skill' }]
+      }
+      if (name === 'skills:listCommands') {
+        return [{ path: '.commands/active.md', label: 'active-command' }]
+      }
+      return []
+    })
+
+    const html = renderToStaticMarkup(
+      createElement(CommandPalette, {
+        open: true,
+        onClose: () => {},
+        onFireSkill: () => {},
+        onFireCommand: () => {},
+        onPromptAgent: () => {},
+        onOpenAtom: () => {},
+      }),
+    )
+
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { name: 'skills:list', args: { activeWorkspaceId: 'ws_active' } },
+        {
+          name: 'skills:listCommands',
+          args: { activeWorkspaceId: 'ws_active' },
+        },
+      ]),
+    )
+    expect(
+      calls.every(
+        (call) =>
+          typeof call.args === 'object' &&
+          call.args !== null &&
+          (call.args as { activeWorkspaceId?: unknown }).activeWorkspaceId ===
+            'ws_active',
+      ),
+    ).toBe(true)
+    expect(html).toContain('active-command')
+    expect(html).toContain('active-skill')
   })
 })
 

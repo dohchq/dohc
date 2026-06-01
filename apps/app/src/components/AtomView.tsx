@@ -935,15 +935,22 @@ function ActionHeader({
 
 // Track-3 P4 — "Copy share text" button for type:skill atoms.
 // Pure UI shell over the `buildShareText` pure helper + the
-// `api.auth.whoami` query for the sender handle. Click writes
-// the share text to the clipboard; flashes a "Copied!" badge for
-// 1.8s. Failures (no clipboard API, write rejected) fall back to
-// a `prompt()` modal so the user can copy manually.
+// `api.auth.whoami` query for the sender handle. Click writes the share text
+// to the clipboard; failures show an inline copy panel so the user can select
+// the text without leaving the page.
 function ShareSkillButton({ body }: { body: string }) {
   const me = useQuery(api.auth.whoami)
   const [copied, setCopied] = useState(false)
+  const [fallbackText, setFallbackText] = useState<string | null>(null)
+  const fallbackRef = useRef<HTMLTextAreaElement>(null)
   const handle = me?.workspaceId ?? ''
   const disabled = !handle
+
+  useEffect(() => {
+    if (!fallbackText) return
+    fallbackRef.current?.focus()
+    fallbackRef.current?.select()
+  }, [fallbackText])
 
   async function onClick() {
     const text = buildShareText(body, handle)
@@ -954,24 +961,74 @@ function ShareSkillButton({ body }: { body: string }) {
         setTimeout(() => setCopied(false), 1800)
         return
       }
-      // Fallback: show the share text in a prompt the user can copy.
-      // Not pretty but functional on environments without the
-      // Clipboard API (older browsers / non-https origins).
-      window.prompt('Copy this share text:', text)
+      setFallbackText(text)
     } catch {
-      window.prompt('Copy this share text:', text)
+      setFallbackText(text)
     }
   }
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors disabled:cursor-not-allowed disabled:hover:text-ink-faint"
-      title="Copy share text (strips id, adds source-share for provenance — the recipient pastes into a new atom they own)"
-    >
-      {copied ? '✓ copied' : '⤴ share'}
-    </button>
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors disabled:cursor-not-allowed disabled:hover:text-ink-faint"
+        title="Copy share text (strips id, adds source-share for provenance — the recipient pastes into a new atom they own)"
+      >
+        {copied ? '✓ copied' : '⤴ share'}
+      </button>
+      {fallbackText && (
+        <>
+          <span
+            className="fixed inset-0 z-30"
+            onClick={() => setFallbackText(null)}
+          />
+          <span className="absolute right-0 top-7 z-40 block w-80 rounded-lg border border-rule bg-elevated p-3 text-left shadow-md">
+            <span className="block text-[12.5px] font-medium text-ink-strong">
+              Copy share text
+            </span>
+            <span className="mt-0.5 block text-[11.5px] leading-snug text-ink-dim">
+              Clipboard access is unavailable here. The text is selected for
+              manual copy.
+            </span>
+            <textarea
+              ref={fallbackRef}
+              value={fallbackText}
+              readOnly
+              className="mt-2 h-28 w-full resize-none rounded-md border border-rule bg-panel p-2 font-mono text-[11px] leading-snug text-ink outline-none focus:border-accent"
+            />
+            <span className="mt-2 flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setFallbackText(null)}
+                className="rounded-md px-2 py-1 text-[11.5px] text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const writeText = navigator.clipboard?.writeText
+                    if (!writeText) throw new Error('Clipboard unavailable')
+                    await writeText.call(navigator.clipboard, fallbackText)
+                    setFallbackText(null)
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1800)
+                  } catch {
+                    fallbackRef.current?.focus()
+                    fallbackRef.current?.select()
+                  }
+                }}
+                className="rounded-md bg-ink-strong px-2 py-1 text-[11.5px] font-medium text-surface transition-colors hover:bg-ink"
+              >
+                Copy again
+              </button>
+            </span>
+          </span>
+        </>
+      )}
+    </span>
   )
 }

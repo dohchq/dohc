@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Search, Sparkles, SquareTerminal } from 'lucide-react'
+import {
+  Bot,
+  FilePenLine,
+  PencilLine,
+  Search,
+  Sparkles,
+  SquareTerminal,
+} from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { OPEN_SKETCH_EVENT } from './AtomEditor'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
 
 type RunnableRow = {
   path: string
@@ -13,9 +21,19 @@ export type CommandPaletteEntry = {
   id: string
   title: string
   hint?: string
-  kind?: 'skill' | 'command' | undefined
+  kind: 'skill' | 'command' | 'system'
+  section: 'Run' | 'Create' | 'Editor'
+  editPath?: string
+  edit?: () => void
+  keywords?: ReadonlyArray<string>
   run: () => void
 }
+
+const CREATE_SKILL_PROMPT =
+  'Help me turn a recent successful workflow into a reusable dohc skill. Inspect the relevant context, ask for missing details only if needed, draft the skill plainly, and save it with save_skill only after I approve.'
+
+const CREATE_COMMAND_PROMPT =
+  'Help me create a reusable slash command for a task I repeat. Ask what command should do, draft the command body, and save it with save_command only after I approve.'
 
 export function buildCommandPaletteEntries({
   savedCommands,
@@ -23,6 +41,8 @@ export function buildCommandPaletteEntries({
   onClose,
   onFireSkill,
   onFireCommand,
+  onPromptAgent,
+  onOpenAtom,
   onOpenSketch,
 }: {
   savedCommands: ReadonlyArray<RunnableRow>
@@ -30,6 +50,8 @@ export function buildCommandPaletteEntries({
   onClose: () => void
   onFireSkill: (path: string) => void
   onFireCommand: (path: string) => void
+  onPromptAgent: (prompt: string) => void
+  onOpenAtom: (path: string) => void
   onOpenSketch: () => void
 }): CommandPaletteEntry[] {
   const out: CommandPaletteEntry[] = []
@@ -41,6 +63,13 @@ export function buildCommandPaletteEntries({
       title: c.label,
       hint: `command · ${c.path}`,
       kind: 'command',
+      section: 'Run',
+      editPath: c.path,
+      edit: () => {
+        onClose()
+        onOpenAtom(c.path)
+      },
+      keywords: ['slash', 'shortcut', c.path],
       run: () => {
         onClose()
         onFireCommand(c.path)
@@ -53,6 +82,13 @@ export function buildCommandPaletteEntries({
       title: s.label,
       hint: `skill · ${s.path}`,
       kind: 'skill',
+      section: 'Run',
+      editPath: s.path,
+      edit: () => {
+        onClose()
+        onOpenAtom(s.path)
+      },
+      keywords: ['process', 'workflow', s.path],
       run: () => {
         onClose()
         // P3+P4 Codex fold F3: dedicated channel — skill
@@ -67,9 +103,36 @@ export function buildCommandPaletteEntries({
     id: 'sys.insert-ascii-sketch',
     title: 'Insert ASCII sketch',
     hint: 'editor · ⌘⇧D',
+    kind: 'system',
+    section: 'Editor',
+    keywords: ['drawing', 'diagram'],
     run: () => {
       onClose()
       onOpenSketch()
+    },
+  })
+  out.push({
+    id: 'sys.create-skill',
+    title: 'Create reusable skill',
+    hint: 'agent · save a process',
+    kind: 'system',
+    section: 'Create',
+    keywords: ['workflow', 'process', 'repeat', 'save'],
+    run: () => {
+      onClose()
+      onPromptAgent(CREATE_SKILL_PROMPT)
+    },
+  })
+  out.push({
+    id: 'sys.create-command',
+    title: 'Create slash command',
+    hint: 'agent · save a shortcut',
+    kind: 'system',
+    section: 'Create',
+    keywords: ['shortcut', 'slash', 'repeat', 'save'],
+    run: () => {
+      onClose()
+      onPromptAgent(CREATE_COMMAND_PROMPT)
     },
   })
   return out
@@ -85,6 +148,8 @@ type Props = {
   // detectSkillFire.
   onFireSkill: (path: string) => void
   onFireCommand: (path: string) => void
+  onPromptAgent: (prompt: string) => void
+  onOpenAtom: (path: string) => void
 }
 
 export function CommandPalette({
@@ -92,6 +157,8 @@ export function CommandPalette({
   onClose,
   onFireSkill,
   onFireCommand,
+  onPromptAgent,
+  onOpenAtom,
 }: Props) {
   // Track-3 P3.2 — surface the user's saved skills here so the
   // ⌘K palette IS the design's "⌘K palette / slash-command"
@@ -102,8 +169,10 @@ export function CommandPalette({
   // disableParallelToolUse} — the model can only call run_skill.
   // Zero new wiring at this layer; the palette is a discoverable
   // hotkey over the same structural-enforcement chain.
-  const skills = useQuery(api.skills.list, {}) ?? []
-  const savedCommands = useQuery(api.skills.listCommands, {}) ?? []
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
+  const savedCommands =
+    useQuery(api.skills.listCommands, { activeWorkspaceId }) ?? []
   const [filter, setFilter] = useState('')
   const [cursor, setCursor] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -116,10 +185,20 @@ export function CommandPalette({
         onClose,
         onFireCommand,
         onFireSkill,
+        onOpenAtom,
+        onPromptAgent,
         onOpenSketch: () =>
           window.dispatchEvent(new CustomEvent(OPEN_SKETCH_EVENT)),
       }),
-    [savedCommands, skills, onClose, onFireCommand, onFireSkill],
+    [
+      savedCommands,
+      skills,
+      onClose,
+      onFireCommand,
+      onFireSkill,
+      onOpenAtom,
+      onPromptAgent,
+    ],
   )
 
   const filtered = useMemo(() => {
@@ -129,7 +208,9 @@ export function CommandPalette({
       (c) =>
         c.title.toLowerCase().includes(q) ||
         c.id.toLowerCase().includes(q) ||
-        c.hint?.toLowerCase().includes(q),
+        c.hint?.toLowerCase().includes(q) ||
+        c.editPath?.toLowerCase().includes(q) ||
+        c.keywords?.some((keyword) => keyword.toLowerCase().includes(q)),
     )
   }, [filter, commands])
 
@@ -191,49 +272,67 @@ export function CommandPalette({
         <div className="max-h-[360px] overflow-y-auto py-1.5">
           {filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-[12.5px] text-ink-faint">
-              No commands match.
+              No actions match.
             </div>
           ) : (
-            filtered.map((c, i) => (
-              <button
-                key={c.id}
-                onMouseEnter={() => setCursor(i)}
-                onClick={c.run}
-                className={`relative w-full flex items-center justify-between gap-3 px-4 py-2 text-left transition-colors ${
-                  i === cursor
-                    ? 'bg-hover text-ink-strong'
-                    : 'text-ink hover:bg-hover'
-                }`}
-              >
-                {i === cursor && (
-                  <span className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-0.5 rounded-r bg-ink-strong" />
-                )}
-                <span className="flex items-center gap-2 min-w-0 flex-1">
-                  {c.kind === 'command' && (
-                    <SquareTerminal
-                      className="size-3 text-accent shrink-0"
-                      strokeWidth={2.2}
-                      aria-hidden
-                    />
+            filtered.map((c, i) => {
+              const showSection =
+                i === 0 || filtered[i - 1]?.section !== c.section
+              return (
+                <div key={c.id}>
+                  {showSection && (
+                    <div className="px-4 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-ink-faint">
+                      {c.section}
+                    </div>
                   )}
-                  {c.kind === 'skill' && (
-                    <Sparkles
-                      className="size-3 text-violet-500 shrink-0"
-                      strokeWidth={2.2}
-                      aria-hidden
-                    />
-                  )}
-                  <span className="text-[13px] truncate font-medium">
-                    {c.title}
-                  </span>
-                </span>
-                {c.hint && (
-                  <span className="text-[10.5px] text-ink-faint shrink-0 font-mono">
-                    {c.hint}
-                  </span>
-                )}
-              </button>
-            ))
+                  <div
+                    onMouseEnter={() => setCursor(i)}
+                    className={`group relative flex items-center gap-1 px-2 py-0.5 transition-colors ${
+                      i === cursor
+                        ? 'bg-hover text-ink-strong'
+                        : 'text-ink hover:bg-hover'
+                    }`}
+                  >
+                    {i === cursor && (
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-0.5 rounded-r bg-ink-strong" />
+                    )}
+                    <button
+                      type="button"
+                      onClick={c.run}
+                      className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
+                    >
+                      <span className="flex items-center justify-between gap-3">
+                        <span className="flex items-center gap-2 min-w-0 flex-1">
+                          <PaletteEntryIcon entry={c} />
+                          <span className="text-[13px] truncate font-medium">
+                            {c.title}
+                          </span>
+                        </span>
+                        {c.hint && (
+                          <span className="text-[10.5px] text-ink-faint shrink-0 font-mono">
+                            {c.hint}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                    {c.edit && c.editPath && (
+                      <button
+                        type="button"
+                        title={`Open ${c.editPath}`}
+                        aria-label={`Open ${c.editPath}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          c.edit?.()
+                        }}
+                        className="grid size-7 shrink-0 place-items-center rounded-md text-ink-faint opacity-0 transition-opacity hover:bg-elevated hover:text-ink group-hover:opacity-100 focus:opacity-100"
+                      >
+                        <FilePenLine className="size-3.5" strokeWidth={2} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })
           )}
         </div>
         <div className="flex items-center justify-end gap-3 border-t border-rule px-4 py-2 bg-panel">
@@ -258,5 +357,42 @@ export function CommandPalette({
         </div>
       </div>
     </div>
+  )
+}
+
+function PaletteEntryIcon({ entry }: { entry: CommandPaletteEntry }) {
+  if (entry.kind === 'command') {
+    return (
+      <SquareTerminal
+        className="size-3 text-accent shrink-0"
+        strokeWidth={2.2}
+        aria-hidden
+      />
+    )
+  }
+  if (entry.kind === 'skill') {
+    return (
+      <Sparkles
+        className="size-3 text-violet-500 shrink-0"
+        strokeWidth={2.2}
+        aria-hidden
+      />
+    )
+  }
+  if (entry.id === 'sys.insert-ascii-sketch') {
+    return (
+      <PencilLine
+        className="size-3 text-ink-faint shrink-0"
+        strokeWidth={2.2}
+        aria-hidden
+      />
+    )
+  }
+  return (
+    <Bot
+      className="size-3 text-ink-faint shrink-0"
+      strokeWidth={2.2}
+      aria-hidden
+    />
   )
 }
