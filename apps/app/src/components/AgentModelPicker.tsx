@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import {
   Brain,
@@ -173,6 +179,7 @@ export function AgentModelPicker({
   const [popoverFrame, setPopoverFrame] = useState<PopoverFrame | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
+  const [focusedModelId, setFocusedModelId] = useState<string | null>(null)
   const provider = selectedProvider(providers, selection)
   const selectedModel = provider?.models.find((m) => m.id === selection?.model)
   const [focusedProviderId, setFocusedProviderId] = useState<string | null>(null)
@@ -242,6 +249,38 @@ export function AgentModelPicker({
   useEffect(() => {
     if (!open || typeof document === 'undefined') return
 
+    const focusTarget =
+      popoverRef.current?.querySelector<HTMLElement>(
+        'input[placeholder="Search models"]',
+      ) ??
+      popoverRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ) ??
+      popoverRef.current
+    focusTarget?.focus()
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpen(false)
+      triggerRef.current?.focus()
+    }
+
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+      if (
+        document.activeElement instanceof Node &&
+        popoverRef.current?.contains(document.activeElement)
+      ) {
+        triggerRef.current?.focus()
+      }
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return
+
     function closeFromOutsidePointer(event: PointerEvent) {
       const target = event.target
       if (!(target instanceof Node)) return
@@ -279,6 +318,20 @@ export function AgentModelPicker({
     })
   }, [activeProvider, query])
 
+  useEffect(() => {
+    if (!open) return
+    const selectedInList =
+      activeSelectedModel &&
+      filteredModels.some((model) => model.id === activeSelectedModel.id)
+        ? activeSelectedModel.id
+        : null
+    setFocusedModelId((current) =>
+      current && filteredModels.some((model) => model.id === current)
+        ? current
+        : selectedInList ?? filteredModels[0]?.id ?? null,
+    )
+  }, [activeSelectedModel, filteredModels, open])
+
   function choose(model: AgentModelPickerModel) {
     if (!activeProvider || activeProvider.status !== 'ready') return
     onChange(nextSelectionForModel(activeProvider, model, selection))
@@ -291,6 +344,50 @@ export function AgentModelPicker({
         ? selection
         : nextSelectionForModel(activeProvider, activeReasoningModel, selection)
     onChange({ ...base, reasoningEffort })
+  }
+
+  function focusModelAt(index: number) {
+    const model = filteredModels[index]
+    if (!model) return
+    setFocusedModelId(model.id)
+    popoverRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-agent-model-index="${index}"]`)
+      ?.focus()
+  }
+
+  function onPopoverKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setOpen(false)
+      triggerRef.current?.focus()
+      return
+    }
+    if (event.key === 'Tab') {
+      setOpen(false)
+      return
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') {
+      if (event.key === 'Enter' && focusedModelId) {
+        const model = filteredModels.find(
+          (candidate) => candidate.id === focusedModelId,
+        )
+        if (model && document.activeElement?.tagName !== 'INPUT') {
+          event.preventDefault()
+          choose(model)
+        }
+      }
+      return
+    }
+    if (filteredModels.length < 1) return
+    event.preventDefault()
+    const currentIndex = Math.max(
+      0,
+      filteredModels.findIndex((model) => model.id === focusedModelId),
+    )
+    const direction = event.key === 'ArrowDown' ? 1 : -1
+    const nextIndex =
+      (currentIndex + direction + filteredModels.length) % filteredModels.length
+    focusModelAt(nextIndex)
   }
 
   return (
@@ -323,6 +420,7 @@ export function AgentModelPicker({
           />
           <div
             ref={popoverRef}
+            onKeyDown={onPopoverKeyDown}
             className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
             style={{
               left: popoverFrame?.left ?? 14,
@@ -445,21 +543,29 @@ export function AgentModelPicker({
                     </button>
                   )}
                 </div>
-                <div className="max-h-64 overflow-y-auto">
-                  {filteredModels.map((model) => {
+                <div
+                  className="max-h-64 overflow-y-auto"
+                  role="listbox"
+                  aria-label="models"
+                >
+                  {filteredModels.map((model, index) => {
                     const checked =
                       selection?.providerId === activeProvider?.providerId &&
                       selection?.model === model.id
                     const disabledModel = !activeProviderReady
                     const contextLabel = modelContextLabel(model)
+                    const highlighted = model.id === focusedModelId
                     return (
                       <button
                         key={model.id}
                         type="button"
                         onClick={() => choose(model)}
                         disabled={disabledModel}
+                        role="option"
+                        aria-selected={highlighted}
+                        data-agent-model-index={index}
                         className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${
-                          checked
+                          checked || highlighted
                             ? 'bg-hover text-ink-strong'
                             : 'text-ink-dim hover:bg-hover hover:text-ink'
                         }`}

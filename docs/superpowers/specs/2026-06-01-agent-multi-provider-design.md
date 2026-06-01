@@ -10,7 +10,7 @@ This is not a full provider settings center. The MVP does not include provider C
 
 ## Reference
 
-`/home/ice/dev/oss-repos/t3code` is the reference implementation for the interaction model:
+[pingdotgg/t3code](https://github.com/pingdotgg/t3code) is the reference implementation for the interaction model:
 
 - Provider instances are routing keys, separate from provider driver kinds.
 - Models are choices inside a provider instance.

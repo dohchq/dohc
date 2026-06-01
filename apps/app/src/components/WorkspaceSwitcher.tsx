@@ -42,7 +42,9 @@ function menuFrameForTrigger(
   viewportWidth: number,
   viewportHeight: number,
 ): WorkspaceMenuFrame {
-  const width = Math.max(196, Math.min(rect.width, viewportWidth - MENU_EDGE_GAP * 2))
+  const availableWidth = Math.max(0, viewportWidth - MENU_EDGE_GAP * 2)
+  const preferredWidth = Math.max(196, rect.width)
+  const width = Math.min(preferredWidth, availableWidth)
   const maxLeft = Math.max(MENU_EDGE_GAP, viewportWidth - width - MENU_EDGE_GAP)
   const left = Math.round(Math.min(Math.max(MENU_EDGE_GAP, rect.left), maxLeft))
   const availableAbove = Math.max(160, rect.top - MENU_EDGE_GAP - MENU_TRIGGER_GAP)
@@ -114,6 +116,34 @@ export function WorkspaceSwitcher() {
     }
   }, [open])
 
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return
+
+    const focusTarget =
+      popoverRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ) ?? popoverRef.current
+    focusTarget?.focus()
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
+
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+      if (
+        document.activeElement instanceof Node &&
+        popoverRef.current?.contains(document.activeElement)
+      ) {
+        buttonRef.current?.focus()
+      }
+    }
+  }, [open])
+
   // Self-heal: if the persisted activeWorkspaceId points at an org the
   // caller is NOT (or no longer) a member of, reset to personal so the
   // sidebar doesn't get stuck on a workspace whose queries all reject.
@@ -151,6 +181,7 @@ export function WorkspaceSwitcher() {
             ref={popoverRef}
             role="listbox"
             aria-label="workspaces"
+            tabIndex={-1}
             className="fixed z-50 overflow-y-auto rounded-xl border border-rule-strong bg-elevated p-1 shadow-modal"
             style={{
               left: menuFrame?.left ?? MENU_EDGE_GAP,

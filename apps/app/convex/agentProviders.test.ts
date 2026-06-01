@@ -115,6 +115,18 @@ describe('agent provider registry', () => {
     ).toThrow(/does not support reasoning/)
   })
 
+  it('selects non-reasoning models without inheriting a reasoning effort', () => {
+    expect(
+      resolveAgentSelection(null, null, {
+        agentProviderId: 'anthropic',
+        agentModel: 'claude-haiku-4-5',
+      }),
+    ).toEqual({
+      providerId: 'anthropic',
+      model: 'claude-haiku-4-5',
+    })
+  })
+
   it('builds provider-specific no-parallel options for entry steps', () => {
     expect(
       agentProviderOptions(
@@ -149,6 +161,24 @@ describe('agent provider registry', () => {
       ),
     ).toEqual({
       openai: { parallelToolCalls: false, reasoningEffort: 'xhigh' },
+    })
+  })
+
+  it('clamps extra-high reasoning before sending Claude provider options', () => {
+    expect(
+      agentProviderOptions(
+        {
+          providerId: 'anthropic',
+          model: 'claude-opus-4-8',
+          reasoningEffort: 'xhigh',
+        },
+        false,
+      ),
+    ).toEqual({
+      anthropic: {
+        thinking: { type: 'adaptive' },
+        effort: 'high',
+      },
     })
   })
 

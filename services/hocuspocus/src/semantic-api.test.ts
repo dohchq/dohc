@@ -81,6 +81,19 @@ describe('semantic apply API', () => {
     expect(acl.createAtom).not.toHaveBeenCalled()
   })
 
+  it('rejects preflight requests without the admin token', async () => {
+    const { handler } = makeHandler()
+
+    const response = await handler(
+      new Request('http://localhost/apply/preflight', {
+        method: 'GET',
+        headers: { authorization: 'Bearer wrong-token' },
+      }),
+    )
+
+    expect(response.status).toBe(401)
+  })
+
   it('rejects semantic writes without the admin token', async () => {
     const { handler } = makeHandler()
 

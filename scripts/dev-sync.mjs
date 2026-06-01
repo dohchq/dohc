@@ -1,17 +1,25 @@
 import { spawnSync } from 'node:child_process'
 import net from 'node:net'
+import { pathToFileURL } from 'node:url'
 
 const STATE_URL =
   'http://127.0.0.1:1234/document-state?documentName=workspace%2Fdev-smoke%2Fatom%2Fdev-smoke'
-const DEV_JWT_SECRET =
-  process.env.HOCUSPOCUS_JWT_SECRET ??
+const DEFAULT_DEV_JWT_SECRET =
   'dev-jwt-secret-change-me-with-at-least-32-bytes'
-const DEFAULT_DEV_ADMIN_URL = 'http://127.0.0.1:1234'
-const DEFAULT_DEV_ADMIN_TOKEN = 'dev-admin-token-change-me'
-const DEV_ADMIN_URL =
-  process.env.HOCUSPOCUS_ADMIN_URL ?? DEFAULT_DEV_ADMIN_URL
-const DEV_ADMIN_TOKEN =
-  process.env.HOCUSPOCUS_ADMIN_TOKEN ?? DEFAULT_DEV_ADMIN_TOKEN
+export const DEFAULT_DEV_ADMIN_URL = 'http://127.0.0.1:1234'
+export const DEFAULT_DEV_ADMIN_TOKEN = 'dev-admin-token-change-me'
+
+function devJwtSecret(env = process.env) {
+  return env.HOCUSPOCUS_JWT_SECRET ?? DEFAULT_DEV_JWT_SECRET
+}
+
+function devAdminUrl(env = process.env) {
+  return env.HOCUSPOCUS_ADMIN_URL ?? DEFAULT_DEV_ADMIN_URL
+}
+
+function devAdminToken(env = process.env) {
+  return env.HOCUSPOCUS_ADMIN_TOKEN ?? DEFAULT_DEV_ADMIN_TOKEN
+}
 
 async function hocuspocusReady() {
   try {
@@ -66,8 +74,9 @@ function convexEnv(command, args, options = {}) {
   )
 }
 
-function ensureConvexEnvValue(name, value, label) {
-  const current = convexEnv('get', [name])
+function ensureConvexEnvValue(name, value, label, options = {}) {
+  const convexEnvFn = options.convexEnv ?? convexEnv
+  const current = convexEnvFn('get', [name])
   const output = `${current.stdout ?? ''}${current.stderr ?? ''}`
   const currentValue = (current.stdout ?? '').trim()
   if (current.status === 0 && currentValue === value) return
@@ -83,7 +92,7 @@ function ensureConvexEnvValue(name, value, label) {
     return
   }
 
-  const updated = convexEnv('set', [name, value], {
+  const updated = convexEnvFn('set', [name, value], {
     stdio: 'inherit',
   })
   if (updated.status !== 0) {
@@ -91,45 +100,56 @@ function ensureConvexEnvValue(name, value, label) {
   }
 }
 
-function ensureConvexHocuspocusEnv() {
-  if (process.env.DOHC_SKIP_CONVEX_ENV_SYNC === '1') return
+export function ensureConvexHocuspocusEnv(options = {}) {
+  const env = options.env ?? process.env
+  const convexEnvFn = options.convexEnv ?? convexEnv
+  if (env.DOHC_SKIP_CONVEX_ENV_SYNC) return
 
   ensureConvexEnvValue(
     'HOCUSPOCUS_JWT_SECRET',
-    DEV_JWT_SECRET,
+    devJwtSecret(env),
     'collaboration token minting',
+    { convexEnv: convexEnvFn },
   )
   ensureConvexEnvValue(
     'HOCUSPOCUS_ADMIN_URL',
-    DEV_ADMIN_URL,
+    devAdminUrl(env),
     'agent semantic writes',
+    { convexEnv: convexEnvFn },
   )
   ensureConvexEnvValue(
     'HOCUSPOCUS_ADMIN_TOKEN',
-    DEV_ADMIN_TOKEN,
+    devAdminToken(env),
     'agent semantic writes',
+    { convexEnv: convexEnvFn },
   )
 }
 
-ensureConvexHocuspocusEnv()
+export async function main() {
+  ensureConvexHocuspocusEnv()
 
-if (await hocuspocusReady()) {
-  process.exit(0)
+  if (await hocuspocusReady()) {
+    process.exit(0)
+  }
+
+  // A stale pre-compose Hocuspocus container can keep the fixed local name while
+  // serving old code. It has no durable data; Postgres owns the data volume.
+  spawnSync('docker', ['rm', '-f', 'dohc-v2-hocuspocus'], { stdio: 'ignore' })
+
+  const compose = ['compose', '-f', 'docker-compose.dev.yml']
+  if (await portOpen(54329)) {
+    run('docker', [...compose, 'up', '-d', '--build', '--no-deps', 'hocuspocus'])
+  } else {
+    spawnSync('docker', ['rm', '-f', 'dohc-v2-postgres'], { stdio: 'ignore' })
+    run('docker', [...compose, 'up', '-d', '--build', 'postgres', 'hocuspocus'])
+  }
+
+  if (!(await waitForHocuspocusReady())) {
+    console.error('Hocuspocus did not become ready on http://127.0.0.1:1234')
+    process.exit(1)
+  }
 }
 
-// A stale pre-compose Hocuspocus container can keep the fixed local name while
-// serving old code. It has no durable data; Postgres owns the data volume.
-spawnSync('docker', ['rm', '-f', 'dohc-v2-hocuspocus'], { stdio: 'ignore' })
-
-const compose = ['compose', '-f', 'docker-compose.dev.yml']
-if (await portOpen(54329)) {
-  run('docker', [...compose, 'up', '-d', '--build', '--no-deps', 'hocuspocus'])
-} else {
-  spawnSync('docker', ['rm', '-f', 'dohc-v2-postgres'], { stdio: 'ignore' })
-  run('docker', [...compose, 'up', '-d', '--build', 'postgres', 'hocuspocus'])
-}
-
-if (!(await waitForHocuspocusReady())) {
-  console.error('Hocuspocus did not become ready on http://127.0.0.1:1234')
-  process.exit(1)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main()
 }

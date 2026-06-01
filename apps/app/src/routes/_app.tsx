@@ -125,6 +125,17 @@ function agentSelectionFromThread(
   }
 }
 
+function sameAgentSelection(
+  a: AgentModelPickerSelection | null,
+  b: AgentModelPickerSelection | null,
+): boolean {
+  return (
+    a?.providerId === b?.providerId &&
+    a?.model === b?.model &&
+    (a?.reasoningEffort ?? null) === (b?.reasoningEffort ?? null)
+  )
+}
+
 function Home() {
   const { user, loading } = useAuth()
 
@@ -447,6 +458,19 @@ function App() {
   useEffect(() => {
     setAgentSelectionOverride(null)
   }, [activeWorkspaceId, threadId])
+
+  useEffect(() => {
+    if (!agentSelectionOverride || !threadId) return
+    if (!queryActiveAgentThread || !activeThreadSelection) return
+    if (sameAgentSelection(agentSelectionOverride, activeThreadSelection)) {
+      setAgentSelectionOverride(null)
+    }
+  }, [
+    activeThreadSelection,
+    agentSelectionOverride,
+    queryActiveAgentThread,
+    threadId,
+  ])
 
   useEffect(() => {
     setAgentDraftSelection(null)

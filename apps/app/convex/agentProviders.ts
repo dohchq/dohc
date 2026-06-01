@@ -345,17 +345,34 @@ function applySelectionPatch(
     : inferredProvider?.providerId ?? base.providerId
   const provider = providerById(providerId)
   const providerChanged = providerId !== base.providerId
-  const model = requestedModel || (providerChanged ? provider.defaultModel : base.model)
+  const model =
+    requestedModel || (providerChanged ? provider.defaultModel : base.model)
+  const providerModel =
+    provider.models.find((candidate) => candidate.id === model) ?? null
   const reasoningRaw = rawReasoningEffort(patch)?.trim()
   const selection: AgentModelSelection = {
     providerId,
     model,
   }
-  if (isReasoningEffort(reasoningRaw)) {
+
+  if (
+    providerModel?.supportsReasoning &&
+    isReasoningEffort(reasoningRaw) &&
+    providerModel.reasoningEfforts.includes(reasoningRaw)
+  ) {
     selection.reasoningEffort = reasoningRaw
-  } else if (!providerChanged && base.reasoningEffort) {
+  } else if (
+    providerModel?.supportsReasoning &&
+    !providerChanged &&
+    base.reasoningEffort &&
+    providerModel.reasoningEfforts.includes(base.reasoningEffort)
+  ) {
     selection.reasoningEffort = base.reasoningEffort
-  } else if (provider.defaultReasoningEffort) {
+  } else if (
+    providerModel?.supportsReasoning &&
+    provider.defaultReasoningEffort &&
+    providerModel.reasoningEfforts.includes(provider.defaultReasoningEffort)
+  ) {
     selection.reasoningEffort = provider.defaultReasoningEffort
   }
 
@@ -416,7 +433,10 @@ export function agentProviderOptions(
     if (disableParallelTools) anthropicOptions.disableParallelToolUse = true
     if (model.supportsReasoning && selection.reasoningEffort) {
       anthropicOptions.thinking = { type: 'adaptive' }
-      anthropicOptions.effort = selection.reasoningEffort
+      anthropicOptions.effort =
+        model.id.startsWith('claude-') && selection.reasoningEffort === 'xhigh'
+          ? 'high'
+          : selection.reasoningEffort
     }
     return Object.keys(anthropicOptions).length > 0
       ? { anthropic: anthropicOptions }

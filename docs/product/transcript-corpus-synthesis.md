@@ -2,13 +2,16 @@
 
 This document compacts the notes, videos, tweets, and discussion around
 `transcripts/` into one durable product artifact. It is meant to preserve
-the product lessons so the raw transcript folder can be deleted after
-review. It is not a verbatim archive, so keep a separate archive only if
-exact quotes or timestamps matter later.
+the product lessons while keeping the raw `transcripts/` files as durable
+source artifacts. This synthesis is a derived, non-authoritative layer; it
+must not replace the verbatim sources. Store source material in durable
+markdown files as the foundational primitive for dohc workspaces, and keep
+separate archival copies of raw transcripts when exact wording, timestamps,
+or provenance may matter later.
 
 Source corpus covered:
 
-- `transcripts/ anrej-karpathy-claude-code-idea.txt`
+- `transcripts/andrej-karpathy-claude-code-idea.txt`
 - `transcripts/15-minutes-obsidian-guide.txt`
 - `transcripts/does-ai-kill-note-taking-apps.txt`
 - `transcripts/how-i-use-obsidian-and-claude-to-run-my-life.txt`
@@ -18,8 +21,8 @@ Source corpus covered:
 - `transcripts/obsidian-ai-practical-tips.txt`
 - `transcripts/obsidian-llm-wiki.txt`
 - `transcripts/primeagen-obsidian.txt`
-- `transcripts/ultimate-ai-secod-brain.txt`
-- `transcripts/yc-ai-playbood.txt`
+- `transcripts/ultimate-ai-second-brain.txt`
+- `transcripts/yc-ai-playbook.txt`
 
 ## Core thesis
 

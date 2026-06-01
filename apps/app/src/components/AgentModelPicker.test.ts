@@ -75,11 +75,26 @@ async function pointerDown(element: Element | null) {
   })
 }
 
+async function keyDown(element: Element | null, key: string) {
+  expect(element).not.toBeNull()
+  await act(async () => {
+    element!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+  })
+}
+
 function findButtonByText(text: string) {
   return (
     Array.from(document.body.querySelectorAll('button')).find((button) =>
       button.textContent?.includes(text),
     ) ?? null
+  )
+}
+
+function findModelOptionByText(text: string) {
+  return (
+    Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button[role="option"]'),
+    ).find((button) => button.textContent?.includes(text)) ?? null
   )
 }
 
@@ -279,5 +294,68 @@ describe('AgentModelPicker', () => {
     ).toBeNull()
 
     outsideButton.remove()
+  })
+
+  it('supports keyboard navigation, enter selection, escape close, and tab exit', async () => {
+    const onChange = vi.fn()
+
+    act(() => {
+      root.render(
+        React.createElement(AgentModelPicker, {
+          providers,
+          selection: {
+            providerId: 'openai',
+            model: 'gpt-5.5',
+            reasoningEffort: 'xhigh',
+          },
+          onChange,
+        }),
+      )
+    })
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Choose model"]',
+    )
+    await click(trigger)
+
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search models"]',
+    )
+    expect(document.activeElement).toBe(input)
+
+    await keyDown(input, 'ArrowDown')
+
+    const gpt54 = findModelOptionByText('GPT-5.4')
+    expect(gpt54).not.toBeNull()
+    expect(gpt54?.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(gpt54)
+
+    await keyDown(gpt54, 'ArrowUp')
+    const gpt55 = findModelOptionByText('GPT-5.5')
+    expect(gpt55?.getAttribute('aria-selected')).toBe('true')
+
+    await keyDown(gpt55, 'ArrowDown')
+    await keyDown(findModelOptionByText('GPT-5.4'), 'Enter')
+    expect(onChange).toHaveBeenCalledWith({
+      providerId: 'openai',
+      model: 'gpt-5.4',
+      reasoningEffort: 'xhigh',
+    })
+
+    await keyDown(findModelOptionByText('GPT-5.4'), 'Escape')
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+
+    await click(trigger)
+    const reopenedInput = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search models"]',
+    )
+    await keyDown(reopenedInput, 'Tab')
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).toBeNull()
+    expect(document.activeElement).not.toBe(reopenedInput)
   })
 })

@@ -487,6 +487,7 @@ function ThreadButton({
         onClick={onClick}
         className="absolute inset-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft"
         aria-label={`Open chat ${thread.title}`}
+        aria-current={active ? 'page' : undefined}
       />
       {active && (
         <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r bg-ink-strong" />

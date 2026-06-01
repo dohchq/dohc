@@ -1,15 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
+  buildAgentRuntimeSystemPrompt,
   checkSemanticWriteBackend,
   semanticWriteBackendStatusBlock,
   withSemanticWriteBackendStatus,
 } from './agent'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -32,6 +27,9 @@ describe('agent semantic write backend preflight', () => {
     )
     expect(semanticWriteBackendStatusBlock(status)).toContain(
       'Do not say you can create',
+    )
+    expect(semanticWriteBackendStatusBlock(status)).not.toContain(
+      'HOCUSPOCUS_ADMIN_TOKEN',
     )
   })
 
@@ -62,11 +60,37 @@ describe('agent semantic write backend preflight', () => {
     expect(withSemanticWriteBackendStatus('base prompt', status)).toContain(
       'Semantic write backend: online',
     )
+    expect(withSemanticWriteBackendStatus('base prompt', status)).not.toContain(
+      'hocuspocus.local',
+    )
   })
 
-  it('injects the preflight status into each runtime system prompt before streaming', () => {
-    expect(SRC).toContain('checkSemanticWriteBackend()')
-    expect(SRC).toContain('withSemanticWriteBackendStatus(')
-    expect(SRC).toContain('system: systemPrompt')
+  it('builds runtime system prompts with the live preflight status before streaming', async () => {
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', 'http://hocuspocus.local:1234')
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', 'admin-token')
+    const fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, semanticWrites: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetch)
+    const runQuery = vi.fn(async () => ({ kind: 'personal' as const }))
+
+    const prompt = await buildAgentRuntimeSystemPrompt(
+      { runQuery } as never,
+      'workspace_1',
+    )
+
+    expect(runQuery).toHaveBeenCalledWith(expect.anything(), {
+      activeWorkspaceId: 'workspace_1',
+    })
+    expect(fetch).toHaveBeenCalledWith(
+      'http://hocuspocus.local:1234/apply/preflight',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    expect(prompt).toContain('Semantic write backend: online.')
+    expect(prompt).toContain('You are dohc')
   })
 })

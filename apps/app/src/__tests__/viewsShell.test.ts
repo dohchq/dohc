@@ -136,6 +136,11 @@ describe('Views activity shell', () => {
     })
   })
 
+  // This guards shell wiring that is awkward to exercise after static render:
+  // APP_SRC should not pass view-creation props into ViewsSidebar, while
+  // VIEWS_SIDEBAR_SRC remains view-open only and FILE_TREE_SRC keeps the Graph
+  // add control path. If these names change, update the strings with the
+  // equivalent shell boundary rather than deleting the regression.
   it('does not expose add controls in Views while Graph reuses the Files add control', () => {
     expect(APP_SRC).not.toContain('onCreateView=')
     expect(VIEWS_SIDEBAR_SRC).not.toContain('onCreateView')

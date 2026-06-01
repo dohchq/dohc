@@ -19,6 +19,7 @@ import {
 } from './_generated/server'
 import { components, internal, api } from './_generated/api'
 import type { Id } from './_generated/dataModel'
+import type { ActionCtx } from './_generated/server'
 import { requireWorkspace } from './auth'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
@@ -155,6 +156,7 @@ export function pathDeriveLabel(path: string): string {
 }
 
 const SEMANTIC_WRITE_BACKEND_OFFLINE = 'write-backend-offline'
+const SEMANTIC_BACKEND_FETCH_TIMEOUT_MS = 5_000
 
 type HocuspocusSemanticEnv = { url: string; token: string }
 
@@ -174,6 +176,32 @@ function hocuspocusSemanticEnv(): HocuspocusSemanticEnv | null {
   return { url, token }
 }
 
+async function fetchSemanticBackend(
+  input: string | URL,
+  init: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(
+    () => controller.abort(),
+    SEMANTIC_BACKEND_FETCH_TIMEOUT_MS,
+  )
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function semanticBackendErrorDetail(error: unknown): string {
+  if (
+    error instanceof Error &&
+    (error.name === 'AbortError' || /abort/i.test(error.message))
+  ) {
+    return 'Hocuspocus semantic write backend timed out.'
+  }
+  return error instanceof Error ? error.message : 'Hocuspocus is unreachable.'
+}
+
 export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendStatus> {
   const env = hocuspocusSemanticEnv()
   if (!env) {
@@ -187,7 +215,7 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
 
   const url = new URL('/apply/preflight', env.url).toString()
   try {
-    const response = await fetch(url, {
+    const response = await fetchSemanticBackend(url, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${env.token}`,
@@ -221,8 +249,7 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
     return {
       ok: false,
       reason: 'unreachable',
-      detail:
-        error instanceof Error ? error.message : 'Hocuspocus is unreachable.',
+      detail: semanticBackendErrorDetail(error),
     }
   }
 }
@@ -234,14 +261,14 @@ export function semanticWriteBackendStatusBlock(
     return `\
 ## AGENT WRITE BACKEND STATUS
 
-Semantic write backend: online (${status.url}).
+Semantic write backend: online.
 You may use create_atom, save_skill, save_command, and semantic edit tools when the task calls for them.`
   }
 
   return `\
 ## AGENT WRITE BACKEND STATUS
 
-Semantic write backend: offline (${status.detail}).
+Semantic write backend: offline.
 Do not say you can create, update, save, or write atoms/views/skills/commands right now. You may inspect, plan, and explain what you would write, but if the user asks for a write, state that the collaboration/write backend is offline and needs Hocuspocus semantic writes restored.`
 }
 
@@ -285,14 +312,17 @@ async function callSemanticApply(
 
   let response: Response
   try {
-    response = await fetch(new URL(`/apply/${route}`, env.url).toString(), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.token}`,
-        'content-type': 'application/json',
+    response = await fetchSemanticBackend(
+      new URL(`/apply/${route}`, env.url).toString(),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    })
+    )
   } catch {
     return { ok: false, reason: SEMANTIC_WRITE_BACKEND_OFFLINE }
   }
@@ -341,7 +371,7 @@ async function createAnchorsForTextFromHocuspocus(
 
   let response: Response
   try {
-    response = await fetch(
+    response = await fetchSemanticBackend(
       new URL('/apply/createAnchorsForText', env.url).toString(),
       {
         method: 'POST',
@@ -489,6 +519,23 @@ overrides as you read it:
   return (
     orgPreamble +
     SYSTEM_PROMPT.replaceAll('.context/me.md', '.context/company.md')
+  )
+}
+
+type AgentRuntimePromptCtx = Pick<ActionCtx, 'runQuery'>
+
+export async function buildAgentRuntimeSystemPrompt(
+  ctx: AgentRuntimePromptCtx,
+  activeWorkspaceId: string | undefined,
+): Promise<string> {
+  const kindInfo = await ctx.runQuery(
+    internal.agent._resolveWorkspaceKindForCaller,
+    { activeWorkspaceId },
+  )
+  const semanticWriteBackend = await checkSemanticWriteBackend()
+  return withSemanticWriteBackendStatus(
+    buildSystemPrompt(kindInfo),
+    semanticWriteBackend,
   )
 }
 
@@ -2462,6 +2509,7 @@ async function workspaceSettingsRow(ctx: any, workspaceId: string) {
   return await ctx.db
     .query('workspaceSettings')
     .withIndex('by_workspace', (q: any) => q.eq('workspaceId', workspaceId))
+    .order('asc')
     .first()
 }
 
@@ -3345,14 +3393,9 @@ export const sendMessage = action({
     // H-1 (A1) — resolve workspace KIND for the system-prompt builder.
     // Personal ⇒ unchanged SYSTEM_PROMPT (byte-identical to v0).
     // Org ⇒ ORG_PREAMBLE + .context/me.md→.context/company.md substitution.
-    const kindInfo = await ctx.runQuery(
-      internal.agent._resolveWorkspaceKindForCaller,
-      { activeWorkspaceId },
-    )
-    const semanticWriteBackend = await checkSemanticWriteBackend()
-    const systemPrompt = withSemanticWriteBackendStatus(
-      buildSystemPrompt(kindInfo),
-      semanticWriteBackend,
+    const systemPrompt = await buildAgentRuntimeSystemPrompt(
+      ctx,
+      activeWorkspaceId,
     )
     const selection = (await ctx.runQuery(
       internal.agent._resolveAgentSelectionForThread,
@@ -3544,14 +3587,9 @@ export const startOnboarding = action({
     // H-1 (A1) — workspace-kind-aware system prompt; org workspaces
     // get ORG_PREAMBLE + .context/me.md→.context/company.md (so onboarding seeds + asks
     // about the team, not a personal vault).
-    const kindInfo = await ctx.runQuery(
-      internal.agent._resolveWorkspaceKindForCaller,
-      { activeWorkspaceId },
-    )
-    const semanticWriteBackend = await checkSemanticWriteBackend()
-    const systemPrompt = withSemanticWriteBackendStatus(
-      buildSystemPrompt(kindInfo),
-      semanticWriteBackend,
+    const systemPrompt = await buildAgentRuntimeSystemPrompt(
+      ctx,
+      activeWorkspaceId,
     )
     // canonical thread (ensureThread converges any racing dups)
     const threadId: string = await ctx.runMutation(api.agent.ensureThread, {
