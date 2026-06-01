@@ -25,6 +25,9 @@ export type AgentThreadSummary = {
   createdAt: number
   updatedAt: number
   pinnedAt: number | null
+  agentProviderId?: string | null
+  agentModel?: string | null
+  agentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | null
 }
 
 function isUserProjectPath(path: string | null | undefined) {

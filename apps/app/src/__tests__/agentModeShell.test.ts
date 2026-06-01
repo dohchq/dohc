@@ -12,6 +12,7 @@ const ACTIVITY = read('components/ActivityBar.tsx')
 const CHAT = read('components/Chat.tsx')
 const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
 const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
+const AGENT_MODEL_PICKER = read('components/AgentModelPicker.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -136,6 +137,23 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).toContain("label=\"$ skills\"")
     expect(CHAT).toContain("composerTrigger.kind === 'command' ? 'Commands' : 'Skills'")
     expect(CHAT).not.toContain('Commands & Skills')
+  })
+
+  it('adds a compact multi-provider model picker to the composer', () => {
+    expect(APP).toContain('api.agent.listAgentProviders')
+    expect(APP).toContain('setAgentWorkspaceDefault')
+    expect(APP).toContain('agentProviderId')
+    expect(APP).toContain('agentSelectionFromThread')
+    expect(CHAT).toContain('AgentModelPicker')
+    expect(CHAT).toContain('agentProviderId: agentSelection.providerId')
+    expect(CHAT).toContain('agentModel: agentSelection.model')
+    expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection)')
+    expect(AGENT_CHAT_SIDEBAR).toContain('agentProviderId?: string | null')
+    expect(AGENT_MODEL_PICKER).toContain('Provider')
+    expect(AGENT_MODEL_PICKER).toContain('Reasoning')
+    expect(AGENT_MODEL_PICKER).toContain('Search models')
+    expect(AGENT_MODEL_PICKER).toContain('Default')
+    expect(AGENT_MODEL_PICKER).not.toContain('<select')
   })
 
   it('keeps the Agent stream pinned only while the user is already at the bottom', () => {

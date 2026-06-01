@@ -144,6 +144,7 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
       'thread-T',
       'msg-M',
       'skill-fire',
+      { providerId: 'openai', model: 'gpt-5.5', reasoningEffort: 'high' },
     )
     const out = await fn({ messages: [], stepNumber: 0 })
     expect(out).toEqual({
@@ -154,7 +155,7 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
       // run_skill calls in one step; even if a future model
       // tried, the atomic latch refuses the second.
       providerOptions: {
-        anthropic: { disableParallelToolUse: true },
+        openai: { parallelToolCalls: false, reasoningEffort: 'high' },
       },
     })
   })
@@ -165,6 +166,7 @@ describe('Track-3 P2b.4 — buildPrepareStep (three-mode dispatch with depth rea
       'thread-T',
       'msg-M',
       'command-fire',
+      { providerId: 'anthropic', model: 'claude-sonnet-4-6' },
     )
     const out = await fn({ messages: [], stepNumber: 0 })
     expect(out).toEqual({

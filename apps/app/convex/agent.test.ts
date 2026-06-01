@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { api, internal } from './_generated/api'
 
@@ -16,6 +16,10 @@ import { api, internal } from './_generated/api'
 const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_a'
 const B = 'ws_b'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 const seedThreads = (t: ReturnType<typeof convexTest>) =>
   t.run(async (ctx) => {
@@ -97,6 +101,57 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     })
     expect(rows.some((r) => r.threadId === 'tB')).toBe(false)
     expect(rows.some((r) => r.threadId === 'tA-context')).toBe(false)
+  })
+
+  it('listThreads includes each chat thread model selection', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-model',
+        title: 'Model test',
+        agentProviderId: 'openai',
+        agentModel: 'gpt-5.5',
+        agentReasoningEffort: 'medium',
+        updatedAt: 10,
+      })
+    })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+
+    expect(rows[0]).toMatchObject({
+      threadId: 't-model',
+      agentProviderId: 'openai',
+      agentModel: 'gpt-5.5',
+      agentReasoningEffort: 'medium',
+    })
+  })
+
+  it('setAgentWorkspaceDefault validates and stores the workspace default model', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test')
+    const t = convexTest(schema, modules)
+
+    await t.withIdentity({ subject: A }).mutation(api.agent.setAgentWorkspaceDefault, {
+      agentProviderId: 'openai',
+      agentModel: 'gpt-5.5',
+      agentReasoningEffort: 'high',
+    })
+
+    const providers = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listAgentProviders, {})
+
+    expect(providers.workspaceDefault).toMatchObject({
+      providerId: 'openai',
+      model: 'gpt-5.5',
+      reasoningEffort: 'high',
+    })
+    expect(providers.effectiveDefault).toMatchObject({
+      providerId: 'openai',
+      model: 'gpt-5.5',
+    })
   })
 
   it('listThreads does not drop visible chats after many internal threadRefs', async () => {

@@ -326,6 +326,16 @@ export default defineSchema({
     threadId: v.string(),
     projectPath: v.optional(v.string()),
     title: v.optional(v.string()),
+    agentProviderId: v.optional(v.string()),
+    agentModel: v.optional(v.string()),
+    agentReasoningEffort: v.optional(
+      v.union(
+        v.literal('low'),
+        v.literal('medium'),
+        v.literal('high'),
+        v.literal('xhigh'),
+      ),
+    ),
     updatedAt: v.optional(v.number()),
     pinnedAt: v.optional(v.number()),
   })
@@ -477,6 +487,16 @@ export default defineSchema({
 
   workspaceSettings: defineTable({
     workspaceId: v.string(),
+    agentProviderId: v.optional(v.string()),
+    agentModel: v.optional(v.string()),
+    agentReasoningEffort: v.optional(
+      v.union(
+        v.literal('low'),
+        v.literal('medium'),
+        v.literal('high'),
+        v.literal('xhigh'),
+      ),
+    ),
     githubUsername: v.optional(v.string()),
     githubPat: v.optional(v.string()),
     lastGithubSyncAt: v.optional(v.number()),

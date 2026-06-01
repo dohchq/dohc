@@ -26,6 +26,11 @@ import {
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
+import {
+  AgentModelPicker,
+  type AgentModelPickerSelection,
+  type AgentProviderSnapshot,
+} from './AgentModelPicker'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { useSetChatBusy } from '../lib/chat-busy'
 import {
@@ -204,10 +209,17 @@ type Props = {
   folderOptions?: string[]
   onProjectPathChange?: (projectPath: string | null) => void
   onCreateProject?: (mode: 'scratch' | 'existing') => void
-  onEnsureThread?: (projectPath: string | null) => Promise<string>
+  onEnsureThread?: (
+    projectPath: string | null,
+    selection?: AgentModelPickerSelection | null,
+  ) => Promise<string>
   onToggleThreadPinned?: () => ChatActionResult
   onRenameThread?: (title: string) => ChatActionResult
   onDeleteThread?: () => ChatActionResult
+  agentProviders?: AgentProviderSnapshot[]
+  agentSelection?: AgentModelPickerSelection | null
+  onAgentSelectionChange?: (selection: AgentModelPickerSelection) => void
+  onSetAgentDefault?: (selection: AgentModelPickerSelection) => void | Promise<void>
   mode?: 'side' | 'primary'
   pendingPrompt?: string | null
   onPendingHandled?: () => void
@@ -235,6 +247,10 @@ export function Chat({
   onToggleThreadPinned,
   onRenameThread,
   onDeleteThread,
+  agentProviders = [],
+  agentSelection = null,
+  onAgentSelectionChange,
+  onSetAgentDefault,
   mode = 'side',
   pendingPrompt,
   onPendingHandled,
@@ -290,6 +306,23 @@ export function Chat({
       ),
     [uiMessages],
   )
+
+  const agentSelectionPayload = agentSelection
+    ? {
+        agentProviderId: agentSelection.providerId,
+        agentModel: agentSelection.model,
+        agentReasoningEffort: agentSelection.reasoningEffort,
+      }
+    : {}
+
+  async function ensureActiveThread() {
+    return (
+      threadId ??
+      (onEnsureThread
+        ? await onEnsureThread(projectPath, agentSelection)
+        : null)
+    )
+  }
 
   // F1 (multiplayer-and-h-followups §7) — publish busy state up to
   // ChatBusyContext so the WorkspaceSwitcher can disable itself while
@@ -364,8 +397,7 @@ export function Chat({
         setSending(false)
         return
       }
-      const activeThreadId =
-        threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+      const activeThreadId = await ensureActiveThread()
       if (!activeThreadId) return
       if (!promptOverride) setInput('')
       if (match && 'matched' in match) {
@@ -386,6 +418,7 @@ export function Chat({
           entry: 'skill-fire',
           activeWorkspaceId,
           projectPath,
+          ...agentSelectionPayload,
         })
         return
       }
@@ -408,6 +441,7 @@ export function Chat({
           entry: 'command-fire',
           activeWorkspaceId,
           projectPath,
+          ...agentSelectionPayload,
         })
         return
       }
@@ -416,6 +450,7 @@ export function Chat({
         prompt,
         activeWorkspaceId,
         projectPath,
+        ...agentSelectionPayload,
       })
     } catch (e) {
       setComposerError(formatComposerError(e))
@@ -455,8 +490,7 @@ export function Chat({
     void (async () => {
       try {
         setComposerError(null)
-        const activeThreadId =
-          threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+        const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
         await sendMessage({
           threadId: activeThreadId,
@@ -464,6 +498,7 @@ export function Chat({
           entry: 'skill-fire',
           activeWorkspaceId,
           projectPath,
+          ...agentSelectionPayload,
         })
       } catch (e) {
         setComposerError(formatComposerError(e))
@@ -483,8 +518,7 @@ export function Chat({
     void (async () => {
       try {
         setComposerError(null)
-        const activeThreadId =
-          threadId ?? (onEnsureThread ? await onEnsureThread(projectPath) : null)
+        const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
         await sendMessage({
           threadId: activeThreadId,
@@ -492,6 +526,7 @@ export function Chat({
           entry: 'command-fire',
           activeWorkspaceId,
           projectPath,
+          ...agentSelectionPayload,
         })
       } catch (e) {
         setComposerError(formatComposerError(e))
@@ -961,6 +996,10 @@ export function Chat({
               projectPath={projectPath}
               skillCount={skills.length}
               commandCount={savedCommands.length}
+              providers={agentProviders}
+              selection={agentSelection}
+              onSelectionChange={onAgentSelectionChange}
+              onSetDefault={onSetAgentDefault}
             />
             <button
               onClick={() => submit()}
@@ -1044,6 +1083,10 @@ function ComposerStatusStrip({
   projectPath,
   skillCount,
   commandCount,
+  providers,
+  selection,
+  onSelectionChange,
+  onSetDefault,
 }: {
   primary: boolean
   busy: boolean
@@ -1052,9 +1095,20 @@ function ComposerStatusStrip({
   projectPath: string | null
   skillCount: number
   commandCount: number
+  providers: AgentProviderSnapshot[]
+  selection: AgentModelPickerSelection | null
+  onSelectionChange?: (selection: AgentModelPickerSelection) => void
+  onSetDefault?: (selection: AgentModelPickerSelection) => void | Promise<void>
 }) {
   return (
     <div className="-m-1 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <AgentModelPicker
+        providers={providers}
+        selection={selection}
+        disabled={!onSelectionChange || sending || busy}
+        onChange={(next) => onSelectionChange?.(next)}
+        onSetDefault={onSetDefault}
+      />
       <ComposerControlPill
         icon={SquareTerminal}
         label="/ commands"

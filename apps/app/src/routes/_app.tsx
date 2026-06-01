@@ -32,6 +32,10 @@ import {
   type AgentThreadSummary,
 } from '@/components/AgentChatSidebar'
 import { AgentRunRail } from '@/components/AgentRunRail'
+import type {
+  AgentModelPickerSelection,
+  AgentProviderSnapshot,
+} from '@/components/AgentModelPicker'
 import { GraphView } from '@/components/GraphView'
 import type { Id } from '../../convex/_generated/dataModel'
 import { Chat } from '@/components/Chat'
@@ -86,6 +90,39 @@ type FilesDestination =
 function leafName(path: string): string {
   const leaf = path.split('/').pop() ?? path
   return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
+}
+
+function agentSelectionFromApi(
+  selection:
+    | {
+        providerId?: string | null
+        model?: string | null
+        reasoningEffort?: AgentModelPickerSelection['reasoningEffort'] | null
+      }
+    | null
+    | undefined,
+): AgentModelPickerSelection | null {
+  if (!selection?.providerId || !selection.model) return null
+  return {
+    providerId: selection.providerId,
+    model: selection.model,
+    ...(selection.reasoningEffort
+      ? { reasoningEffort: selection.reasoningEffort }
+      : {}),
+  }
+}
+
+function agentSelectionFromThread(
+  thread: AgentThreadSummary | null,
+): AgentModelPickerSelection | null {
+  if (!thread?.agentProviderId || !thread.agentModel) return null
+  return {
+    providerId: thread.agentProviderId,
+    model: thread.agentModel,
+    ...(thread.agentReasoningEffort
+      ? { reasoningEffort: thread.agentReasoningEffort }
+      : {}),
+  }
 }
 
 function Home() {
@@ -250,6 +287,10 @@ function App() {
     api.agent.renameProjectAndMoveFolder,
   )
   const agentThreads = useQuery(api.agent.listThreads, { activeWorkspaceId })
+  const agentProviderInfo = useQuery(api.agent.listAgentProviders, {
+    activeWorkspaceId,
+  })
+  const setAgentWorkspaceDefault = useMutation(api.agent.setAgentWorkspaceDefault)
   const upsertAtom = useMutation(api.atoms.upsert)
   const removeAtom = useMutation(api.atoms.remove)
   const moveAtom = useMutation(api.atoms.move)
@@ -270,6 +311,10 @@ function App() {
   const [threadId, setThreadId] = useState<string | null>(null)
   const [agentProjectPath, setAgentProjectPath] = useState<string | null>(null)
   const [agentDraft, setAgentDraft] = useState(false)
+  const [agentDraftSelection, setAgentDraftSelection] =
+    useState<AgentModelPickerSelection | null>(null)
+  const [agentSelectionOverride, setAgentSelectionOverride] =
+    useState<AgentModelPickerSelection | null>(null)
   const [projectDialogMode, setProjectDialogMode] = useState<
     'scratch' | 'existing' | null
   >(null)
@@ -359,6 +404,9 @@ function App() {
         createdAt: thread.createdAt,
         updatedAt: thread.updatedAt,
         pinnedAt: thread.pinnedAt,
+        agentProviderId: thread.agentProviderId,
+        agentModel: thread.agentModel,
+        agentReasoningEffort: thread.agentReasoningEffort,
       })),
     [agentThreads],
   )
@@ -367,8 +415,55 @@ function App() {
       chatThreads.find((thread) => thread.threadId === threadId) ?? null,
     [chatThreads, threadId],
   )
+  const agentProviders = useMemo(
+    () => (agentProviderInfo?.providers ?? []) as AgentProviderSnapshot[],
+    [agentProviderInfo],
+  )
+  const agentEffectiveDefault = agentSelectionFromApi(
+    agentProviderInfo?.effectiveDefault,
+  )
+  const activeThreadSelection = agentSelectionFromThread(activeAgentThread)
+  const agentSelection =
+    agentSelectionOverride ??
+    activeThreadSelection ??
+    (agentDraft ? agentDraftSelection : null) ??
+    agentEffectiveDefault
   const agentDocTitle =
     activeAgentThread?.title?.trim() || (threadId ? 'Workspace chat' : 'New chat')
+
+  useEffect(() => {
+    setAgentSelectionOverride(null)
+  }, [activeWorkspaceId, threadId])
+
+  useEffect(() => {
+    setAgentDraftSelection(null)
+  }, [activeWorkspaceId])
+
+  const updateAgentSelection = useCallback(
+    (selection: AgentModelPickerSelection) => {
+      setAgentSelectionOverride(selection)
+      if (agentDraft || !threadId) setAgentDraftSelection(selection)
+    },
+    [agentDraft, threadId],
+  )
+
+  const setAgentDefault = useCallback(
+    async (selection: AgentModelPickerSelection) => {
+      try {
+        await setAgentWorkspaceDefault({
+          activeWorkspaceId,
+          agentProviderId: selection.providerId,
+          agentModel: selection.model,
+          agentReasoningEffort: selection.reasoningEffort,
+        })
+        setAgentDraftSelection(selection)
+        notice.success('Default model updated', selection.model)
+      } catch (e) {
+        notice.error(`Couldn't update default model`, (e as Error).message)
+      }
+    },
+    [activeWorkspaceId, notice, setAgentWorkspaceDefault],
+  )
 
   // Notion-style browser tab: reflect the open surface in the title +
   // favicon. This shell is the single owner — the open page lives in
@@ -564,6 +659,7 @@ function App() {
     setAgentDraft(true)
     setAgentProjectPath(projectPath)
     setThreadId(null)
+    setAgentSelectionOverride(null)
     navigateToView('agent')
   }, [navigateToView])
 
@@ -571,22 +667,35 @@ function App() {
     setAgentProjectPath(thread.projectPath)
     setThreadId(thread.threadId)
     setAgentDraft(false)
+    setAgentSelectionOverride(null)
     navigateToView('agent')
   }, [navigateToView])
 
   const ensureAgentThreadForSend = useCallback(
-    async (projectPath: string | null) => {
+    async (
+      projectPath: string | null,
+      selection?: AgentModelPickerSelection | null,
+    ) => {
+      const chosenSelection = selection ?? agentSelection
       const id = await createAgentThread({
         activeWorkspaceId,
         projectPath,
+        ...(chosenSelection
+          ? {
+              agentProviderId: chosenSelection.providerId,
+              agentModel: chosenSelection.model,
+              agentReasoningEffort: chosenSelection.reasoningEffort,
+            }
+          : {}),
       })
+      if (chosenSelection) setAgentSelectionOverride(chosenSelection)
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
       navigateToView('agent')
       return id as string
     },
-    [createAgentThread, activeWorkspaceId, navigateToView],
+    [activeWorkspaceId, agentSelection, createAgentThread, navigateToView],
   )
 
   const createAgentProject = useCallback((mode: 'scratch' | 'existing') => {
@@ -1051,6 +1160,10 @@ function App() {
             onToggleThreadPinned={toggleAgentThreadPinned}
             onRenameThread={renameAgentChat}
             onDeleteThread={deleteAgentChat}
+            agentProviders={agentProviders}
+            agentSelection={agentSelection}
+            onAgentSelectionChange={updateAgentSelection}
+            onSetAgentDefault={setAgentDefault}
             pendingPrompt={pendingPrompt}
             onPendingHandled={() => setPendingPrompt(null)}
             pendingSkillFire={pendingSkillFire}
@@ -1086,6 +1199,10 @@ function App() {
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
               onEnsureThread={ensureAgentThreadForSend}
+              agentProviders={agentProviders}
+              agentSelection={agentSelection}
+              onAgentSelectionChange={updateAgentSelection}
+              onSetAgentDefault={setAgentDefault}
               pendingPrompt={pendingPrompt}
               onPendingHandled={() => setPendingPrompt(null)}
               pendingSkillFire={pendingSkillFire}
@@ -1169,6 +1286,10 @@ function App() {
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
               onEnsureThread={ensureAgentThreadForSend}
+              agentProviders={agentProviders}
+              agentSelection={agentSelection}
+              onAgentSelectionChange={updateAgentSelection}
+              onSetAgentDefault={setAgentDefault}
               pendingPrompt={pendingPrompt}
               onPendingHandled={() => setPendingPrompt(null)}
               pendingSkillFire={pendingSkillFire}
@@ -1309,6 +1430,10 @@ function AgentWorkspace({
   onToggleThreadPinned,
   onRenameThread,
   onDeleteThread,
+  agentProviders,
+  agentSelection,
+  onAgentSelectionChange,
+  onSetAgentDefault,
   pendingPrompt,
   onPendingHandled,
   pendingSkillFire,
@@ -1330,6 +1455,10 @@ function AgentWorkspace({
     title: string,
   ) => void | Promise<void>
   onDeleteThread: (thread: AgentThreadSummary) => void | Promise<void>
+  agentProviders: AgentProviderSnapshot[]
+  agentSelection: AgentModelPickerSelection | null
+  onAgentSelectionChange: (selection: AgentModelPickerSelection) => void
+  onSetAgentDefault: (selection: AgentModelPickerSelection) => void | Promise<void>
   pendingPrompt: string | null
   onPendingHandled: () => void
   pendingSkillFire: string | null
@@ -1373,6 +1502,10 @@ function AgentWorkspace({
         }
         onRenameThread={activeThread ? onRenameThreadForHeader : undefined}
         onDeleteThread={activeThread ? onDeleteThreadForHeader : undefined}
+        agentProviders={agentProviders}
+        agentSelection={agentSelection}
+        onAgentSelectionChange={onAgentSelectionChange}
+        onSetAgentDefault={onSetAgentDefault}
         pendingPrompt={pendingPrompt}
         onPendingHandled={onPendingHandled}
         pendingSkillFire={pendingSkillFire}

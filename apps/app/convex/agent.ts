@@ -6,7 +6,6 @@ import {
   listUIMessages,
   syncStreams,
 } from '@convex-dev/agent'
-import { anthropic } from '@ai-sdk/anthropic'
 import { generateObject } from 'ai'
 import { v } from 'convex/values'
 import { paginationOptsValidator } from 'convex/server'
@@ -24,6 +23,18 @@ import { requireWorkspace } from './auth'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
 import type { ToolCtx } from '@convex-dev/agent'
+import {
+  agentProviderOptions,
+  assertAgentSelectionReady,
+  createAgentLanguageModel,
+  defaultAgentLanguageModel,
+  listAgentProviderSnapshots,
+  resolveAgentSelection,
+  resolveServerDefaultSelection,
+  toStoredAgentSelection,
+  validateAgentSelection,
+  type AgentModelSelection,
+} from './agentProviders'
 
 // org-plan §5 + Jenny round-2 C-1 fix — the agent's tool handlers need
 // to resolve the CALLER's active workspace, NOT the personal default.
@@ -110,6 +121,19 @@ export function skillBodyBytes(body: string): number {
 const DEFAULT_THREAD_LIST_LIMIT = 80
 const MAX_THREAD_LIST_LIMIT = 100
 const THREAD_LIST_SCAN_MULTIPLIER = 4
+const agentReasoningEffortArg = v.optional(
+  v.union(
+    v.literal('low'),
+    v.literal('medium'),
+    v.literal('high'),
+    v.literal('xhigh'),
+  ),
+)
+const agentSelectionArgs = {
+  agentProviderId: v.optional(v.string()),
+  agentModel: v.optional(v.string()),
+  agentReasoningEffort: agentReasoningEffortArg,
+}
 
 function threadListLimit(limit?: number): number {
   if (typeof limit !== 'number' || !Number.isFinite(limit)) {
@@ -918,7 +942,7 @@ asks for a reusable shortcut, OFFER save_command.
 
 export const dohcAgent = new Agent(components.agent, {
   name: 'dohc',
-  languageModel: anthropic('claude-sonnet-4-6'),
+  languageModel: defaultAgentLanguageModel(),
   instructions: SYSTEM_PROMPT,
   stopWhen: stepCountIs(40),
   tools: {
@@ -2270,6 +2294,13 @@ async function threadRefRowsForWorkspaceThread(
     .collect()
 }
 
+async function workspaceSettingsRow(ctx: any, workspaceId: string) {
+  return await ctx.db
+    .query('workspaceSettings')
+    .withIndex('by_workspace', (q: any) => q.eq('workspaceId', workspaceId))
+    .first()
+}
+
 async function threadRefRowsForWorkspaceProject(
   ctx: any,
   workspaceId: string,
@@ -2355,8 +2386,18 @@ export const ensureThread = mutation({
   args: {
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
+    ...agentSelectionArgs,
   },
-  handler: async (ctx, { activeWorkspaceId, projectPath }) => {
+  handler: async (
+    ctx,
+    {
+      activeWorkspaceId,
+      projectPath,
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    },
+  ) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const scopedProjectPath = normalizeProjectPath(projectPath)
     if (isInternalProjectPath(scopedProjectPath)) {
@@ -2378,11 +2419,18 @@ export const ensureThread = mutation({
       userId: workspaceId,
       title: fallbackThreadTitle(scopedProjectPath),
     })
+    const settings = await workspaceSettingsRow(ctx, workspaceId)
+    const selection = resolveAgentSelection(null, settings, {
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    })
     await ctx.db.insert('threadRefs', {
       workspaceId,
       threadId,
       ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
       title: fallbackThreadTitle(scopedProjectPath),
+      ...toStoredAgentSelection(selection),
       updatedAt: Date.now(),
     })
     return threadId
@@ -2394,8 +2442,19 @@ export const createThread = mutation({
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
     title: v.optional(v.string()),
+    ...agentSelectionArgs,
   },
-  handler: async (ctx, { activeWorkspaceId, projectPath, title }) => {
+  handler: async (
+    ctx,
+    {
+      activeWorkspaceId,
+      projectPath,
+      title,
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    },
+  ) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const scopedProjectPath = normalizeProjectPath(projectPath)
     if (isInternalProjectPath(scopedProjectPath)) {
@@ -2408,11 +2467,18 @@ export const createThread = mutation({
       userId: workspaceId,
       title: cleanTitle,
     })
+    const settings = await workspaceSettingsRow(ctx, workspaceId)
+    const selection = resolveAgentSelection(null, settings, {
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    })
     await ctx.db.insert('threadRefs', {
       workspaceId,
       threadId,
       ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
       title: cleanTitle,
+      ...toStoredAgentSelection(selection),
       updatedAt: Date.now(),
     })
     return threadId
@@ -2441,10 +2507,64 @@ export const listThreads = query({
         threadId: row.threadId,
         projectPath: row.projectPath ?? null,
         title: row.title ?? fallbackThreadTitle(row.projectPath),
+        agentProviderId: row.agentProviderId ?? null,
+        agentModel: row.agentModel ?? null,
+        agentReasoningEffort: row.agentReasoningEffort ?? null,
         updatedAt: row.updatedAt ?? row._creationTime,
         createdAt: row._creationTime,
         pinnedAt: row.pinnedAt ?? null,
       }))
+  },
+})
+
+export const listAgentProviders = query({
+  args: { activeWorkspaceId: v.optional(v.string()) },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const settings = await workspaceSettingsRow(ctx, workspaceId)
+    const serverDefault = resolveServerDefaultSelection()
+    const workspaceDefault =
+      settings?.agentProviderId && settings?.agentModel
+        ? resolveAgentSelection(null, settings, null)
+        : null
+    return {
+      providers: listAgentProviderSnapshots(),
+      serverDefault,
+      workspaceDefault,
+      effectiveDefault: resolveAgentSelection(null, settings, null),
+    }
+  },
+})
+
+export const setAgentWorkspaceDefault = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    agentProviderId: v.string(),
+    agentModel: v.string(),
+    agentReasoningEffort: agentReasoningEffortArg,
+  },
+  handler: async (
+    ctx,
+    { activeWorkspaceId, agentProviderId, agentModel, agentReasoningEffort },
+  ) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const selection = validateAgentSelection({
+      providerId: agentProviderId,
+      model: agentModel,
+      reasoningEffort: agentReasoningEffort,
+    } as AgentModelSelection)
+    assertAgentSelectionReady(selection)
+    const settings = await workspaceSettingsRow(ctx, workspaceId)
+    const patch = toStoredAgentSelection(selection)
+    if (settings) {
+      await ctx.db.patch(settings._id, patch)
+      return selection
+    }
+    await ctx.db.insert('workspaceSettings', {
+      workspaceId,
+      ...patch,
+    })
+    return selection
   },
 })
 
@@ -2676,6 +2796,74 @@ export const _resolveOwnerWorkspaceForCaller = internalQuery({
   },
 })
 
+export const _resolveAgentSelectionForThread = internalQuery({
+  args: {
+    workspaceId: v.string(),
+    threadId: v.string(),
+    ...agentSelectionArgs,
+  },
+  handler: async (
+    ctx,
+    {
+      workspaceId,
+      threadId,
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    },
+  ) => {
+    const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    const threadRow = rows.sort(
+      (a: any, b: any) =>
+        (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
+    )[0]
+    const settings = await workspaceSettingsRow(ctx, workspaceId)
+    return resolveAgentSelection(threadRow, settings, {
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    })
+  },
+})
+
+export const _setThreadAgentSelection = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    threadId: v.string(),
+    agentProviderId: v.string(),
+    agentModel: v.string(),
+    agentReasoningEffort: agentReasoningEffortArg,
+  },
+  handler: async (
+    ctx,
+    {
+      workspaceId,
+      threadId,
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    },
+  ) => {
+    const selection = validateAgentSelection({
+      providerId: agentProviderId,
+      model: agentModel,
+      reasoningEffort: agentReasoningEffort,
+    } as AgentModelSelection)
+    const rows = await threadRefRowsForWorkspaceThread(ctx, workspaceId, threadId)
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    const patch = toStoredAgentSelection(selection)
+    for (const row of rows) {
+      await ctx.db.patch(row._id, patch)
+    }
+    return selection
+  },
+})
+
 // R1 / C1 — the chat thread is a cross-person surface OUTSIDE
 // `windows` (tenancy-authz-v0.md §4: there must be NO such path).
 // `threadId` is client-supplied; bind it to the caller's OWN thread
@@ -2833,6 +3021,7 @@ export function buildPrepareStep(
   threadId: string,
   promptMessageId: string | undefined,
   entry: SkillTurnEntry,
+  selection: AgentModelSelection = resolveServerDefaultSelection(),
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): (opts: any) => Promise<any> {
   return async ({
@@ -2883,29 +3072,28 @@ export function buildPrepareStep(
     // action is run_skill (design-strict toolChoice picks the
     // SPECIFIC tool, not just "any tool"). Round-8 minimization.
     // P2c indep fold F2: ALSO disable parallel-tool-use at the
-    // entry step — without it the model is PERMITTED to emit
-    // multiple run_skill calls in one step. The atomic
+    // entry step via provider-specific options — without it the
+    // model is PERMITTED to emit multiple run_skill calls in one
+    // step. The atomic
     // _beginSkillTurnIfClear closes the data race (second call
-    // refused), but disableParallelToolUse closes the wire race
+    // refused), but provider-level no-parallel closes the wire race
     // (no second call ever emitted). Belt-and-braces — the BRACE
     // claim now structurally holds at both layers.
     if (entry === 'skill-fire') {
+      const providerOptions = agentProviderOptions(selection, true)
       return {
         activeTools: [...SKILL_ENTRY_TOOLS],
         toolChoice: { type: 'tool' as const, toolName: 'run_skill' as const },
-        providerOptions: {
-          anthropic: { disableParallelToolUse: true },
-        },
+        ...(providerOptions ? { providerOptions } : {}),
       }
     }
 
     if (entry === 'command-fire') {
+      const providerOptions = agentProviderOptions(selection, true)
       return {
         activeTools: [...COMMAND_ENTRY_TOOLS],
         toolChoice: { type: 'tool' as const, toolName: 'run_command' as const },
-        providerOptions: {
-          anthropic: { disableParallelToolUse: true },
-        },
+        ...(providerOptions ? { providerOptions } : {}),
       }
     }
 
@@ -2944,10 +3132,20 @@ export const sendMessage = action({
     entry: v.optional(v.union(v.literal('skill-fire'), v.literal('command-fire'))),
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
+    ...agentSelectionArgs,
   },
   handler: async (
     ctx,
-    { threadId, prompt, entry, activeWorkspaceId, projectPath },
+    {
+      threadId,
+      prompt,
+      entry,
+      activeWorkspaceId,
+      projectPath,
+      agentProviderId,
+      agentModel,
+      agentReasoningEffort,
+    },
   ) => {
     const workspaceId: string = await ctx.runQuery(
       internal.agent._resolveWorkspaceForCaller,
@@ -2968,6 +3166,17 @@ export const sendMessage = action({
       { activeWorkspaceId },
     )
     const systemPrompt = buildSystemPrompt(kindInfo)
+    const selection = (await ctx.runQuery(
+      internal.agent._resolveAgentSelectionForThread,
+      {
+        workspaceId,
+        threadId,
+        agentProviderId,
+        agentModel,
+        agentReasoningEffort,
+      },
+    )) as AgentModelSelection
+    assertAgentSelectionReady(selection)
 
     // P2b.4 LIFECYCLE: saveMessage → clear → streamText.
     //   1. saveMessage SYNCHRONOUSLY persists the user prompt and
@@ -3001,6 +3210,11 @@ export const sendMessage = action({
       threadId,
       titleHint: prompt,
     })
+    await ctx.runMutation(internal.agent._setThreadAgentSelection, {
+      workspaceId,
+      threadId,
+      ...toStoredAgentSelection(selection),
+    })
     await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
       threadId,
       promptMessageId: messageId,
@@ -3016,8 +3230,9 @@ export const sendMessage = action({
         // `instructions: SYSTEM_PROMPT` is the fallback when `system`
         // isn't provided — kept for completeness.
         system: systemPrompt,
+        model: createAgentLanguageModel(selection),
         promptMessageId: messageId,
-        prepareStep: buildPrepareStep(ctx, threadId, messageId, entry),
+        prepareStep: buildPrepareStep(ctx, threadId, messageId, entry, selection),
         // org-plan §5 + Jenny round-2 C-1 fix: thread activeWorkspaceId
         // INTO the experimental_context so every agent tool can resolve
         // the user's active workspace via `activeWorkspaceFromTool`.
@@ -3029,6 +3244,9 @@ export const sendMessage = action({
           promptMessageId: messageId,
           activeWorkspaceId: workspaceId,
           projectPath: normalizeProjectPath(projectPath),
+          agentProviderId: selection.providerId,
+          agentModel: selection.model,
+          agentReasoningEffort: selection.reasoningEffort,
         },
       } as any,
       { saveStreamDeltas: true },
@@ -3082,8 +3300,10 @@ export const generateQuestions = action({
   }> => {
     await requireWorkspace(ctx)
     const setup = seed.trim().slice(0, 200) || 'a personal operating system'
+    const selection = resolveServerDefaultSelection()
+    assertAgentSelectionReady(selection)
     const { object } = await generateObject({
-      model: anthropic('claude-sonnet-4-6'),
+      model: createAgentLanguageModel(selection),
       schema: TailoredQuestions,
       temperature: 0.5,
       prompt: `dohc is a calm personal workspace: it captures someone's real work as structured data and builds them a live dashboard + profile.
@@ -3137,6 +3357,11 @@ export const startOnboarding = action({
     const threadId: string = await ctx.runMutation(api.agent.ensureThread, {
       activeWorkspaceId,
     })
+    const selection = (await ctx.runQuery(
+      internal.agent._resolveAgentSelectionForThread,
+      { workspaceId, threadId },
+    )) as AgentModelSelection
+    assertAgentSelectionReady(selection)
     // single-document atomic CAS: exactly one concurrent winner;
     // a fresh (heartbeating) run keeps the lease ⇒ losers no-op.
     const { won, owner } = await ctx.runMutation(
@@ -3193,29 +3418,44 @@ export const startOnboarding = action({
         ? {
             // H-1 (A1): per-call system override for onboarding too.
             system: systemPrompt,
+            model: createAgentLanguageModel(selection),
             promptMessageId,
             prepareStep: buildPrepareStep(
               ctx,
               threadId,
               promptMessageId,
               undefined,
+              selection,
             ),
             experimental_context: {
               entry: undefined,
               threadId,
               promptMessageId,
               activeWorkspaceId: workspaceId,
+              agentProviderId: selection.providerId,
+              agentModel: selection.model,
+              agentReasoningEffort: selection.reasoningEffort,
             },
             onStepFinish: () => beat(),
             onChunk: () => beat(),
           }
         : {
             system: systemPrompt,
-            prepareStep: buildPrepareStep(ctx, threadId, undefined, undefined),
+            model: createAgentLanguageModel(selection),
+            prepareStep: buildPrepareStep(
+              ctx,
+              threadId,
+              undefined,
+              undefined,
+              selection,
+            ),
             experimental_context: {
               entry: undefined,
               threadId,
               activeWorkspaceId: workspaceId,
+              agentProviderId: selection.providerId,
+              agentModel: selection.model,
+              agentReasoningEffort: selection.reasoningEffort,
             },
             onStepFinish: () => beat(),
             onChunk: () => beat(),
