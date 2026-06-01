@@ -1,8 +1,9 @@
 import { AppWindow, BotMessageSquare, Files, Workflow } from 'lucide-react'
+import type { AppView } from '../lib/appViews'
 
 // graph-v1 1c — VSCode-style activity bar (icon rail). Switches the
 // primary view: Views, Agent, Files (explorer + editor), Graph.
-export type ActivityView = 'agent' | 'atom' | 'views' | 'graph'
+export type ActivityView = Extract<AppView, 'agent' | 'atom' | 'views' | 'graph'>
 
 const ITEMS: Array<{
   view: ActivityView

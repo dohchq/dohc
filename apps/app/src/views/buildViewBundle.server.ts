@@ -1,5 +1,5 @@
 import { createServerFn } from '@tanstack/react-start'
-import { buildViewBundle } from './buildViewBundle'
+import { buildViewBundle, MAX_VIEW_SOURCE_FILES } from './buildViewBundle'
 
 type BundleViewInput = {
   entry: string
@@ -16,6 +16,9 @@ function validateBundleViewInput(input: unknown): BundleViewInput {
   }
   if (!Array.isArray(value.files)) {
     throw new Error('Invalid view files.')
+  }
+  if (value.files.length > MAX_VIEW_SOURCE_FILES) {
+    throw new Error('Too many view files.')
   }
   return {
     entry: value.entry,

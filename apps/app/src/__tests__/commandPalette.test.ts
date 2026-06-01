@@ -237,7 +237,7 @@ describe('CommandPalette workspace wiring', () => {
       if (name === 'skills:listCommands') {
         return [{ path: '.commands/active.md', label: 'active-command' }]
       }
-      if (calls.length === 3) {
+      if (name === 'views:list') {
         return {
           views: [
             {

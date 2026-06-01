@@ -63,9 +63,88 @@ describe('virtual @dohc/view SDK', () => {
     await expect(dohc.sources.list()).rejects.toThrow('Nope.')
   })
 
-  it('ships a React-friendly virtual module source', () => {
-    expect(VIRTUAL_DOHC_SDK).toContain('export const dohc')
-    expect(VIRTUAL_DOHC_SDK).toContain('useDohcQuery')
-    expect(VIRTUAL_DOHC_SDK).toContain('window.dohc')
+  it('evaluates the virtual module against the runtime window bridge', async () => {
+    const dohc = { atom: { get: async () => ({ ok: true }) } }
+    const success = evaluateVirtualSdk(dohc)
+    const loader = async () => ({ rows: [1] })
+
+    expect(success.exports.dohc).toBe(dohc)
+    expect(success.exports.useDohcQuery('sources', loader)).toEqual({
+      data: null,
+      loading: true,
+      error: null,
+    })
+    expect(success.effectDeps[0]).toEqual(['sources', loader])
+    await flushPromises()
+    expect(success.states.at(-1)).toEqual({
+      data: { rows: [1] },
+      loading: false,
+      error: null,
+    })
+  })
+
+  it('reports virtual query loader failures through hook state', async () => {
+    const failure = evaluateVirtualSdk({})
+
+    failure.exports.useDohcQuery('broken', async () => {
+      throw new Error('No access.')
+    })
+    await flushPromises()
+
+    expect(failure.states.at(-1)).toEqual({
+      data: null,
+      loading: false,
+      error: 'No access.',
+    })
   })
 })
+
+function evaluateVirtualSdk(dohc: unknown) {
+  const exports = {} as {
+    dohc?: unknown
+    useDohcQuery: (key: string, loader: () => Promise<unknown>) => unknown
+  }
+  const states: unknown[] = []
+  const effectDeps: unknown[][] = []
+  let stateSlot: unknown
+
+  function useState(initial: unknown) {
+    stateSlot = typeof initial === 'function' ? initial() : initial
+    states.push(stateSlot)
+    return [
+      stateSlot,
+      (next: unknown) => {
+        stateSlot = typeof next === 'function'
+          ? (next as (current: unknown) => unknown)(stateSlot)
+          : next
+        states.push(stateSlot)
+      },
+    ]
+  }
+
+  function useEffect(effect: () => void | (() => void), deps: unknown[]) {
+    effectDeps.push(deps)
+    effect()
+  }
+
+  const moduleSource = VIRTUAL_DOHC_SDK
+    .replace("import { useEffect, useState } from 'react'", '')
+    .replace('export const dohc = window.dohc', 'exports.dohc = window.dohc')
+    .replace(
+      'export function useDohcQuery',
+      'exports.useDohcQuery = function useDohcQuery',
+    )
+
+  new Function('window', 'useEffect', 'useState', 'exports', moduleSource)(
+    { dohc },
+    useEffect,
+    useState,
+    exports,
+  )
+
+  return { exports, states, effectDeps }
+}
+
+async function flushPromises() {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}

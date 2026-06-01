@@ -57,6 +57,7 @@ button, input, textarea, select {
   let frameScheduled = false
   const pending = new Map()
   window.addEventListener('message', (event) => {
+    if (event.source !== parent) return
     const data = event.data
     if (!data || typeof data !== 'object' || typeof data.id !== 'string') return
     const entry = pending.get(data.id)
@@ -102,7 +103,7 @@ button, input, textarea, select {
 })()
 </script>
 <script>
-${script}
+${escapeScriptContent(script)}
 </script>
 </body>
 </html>`
@@ -114,4 +115,8 @@ function escapeHtml(value: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function escapeScriptContent(value: string): string {
+  return value.replace(/<\/script/gi, '<\\/script')
 }

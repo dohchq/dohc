@@ -30,4 +30,19 @@ describe('view runtime shell', () => {
     expect(html).toContain('&lt;img src=x onerror=1&gt;')
     expect(html).not.toContain('<img src=x onerror=1>')
   })
+
+  it('escapes raw script end tags before interpolation', () => {
+    const html = buildViewShell({
+      title: 'Safe',
+      script: `window.payload = '</script><img src=x onerror=1>'`,
+    })
+
+    expect(html).toContain('<\\/script><img src=x onerror=1>')
+    expect(html).not.toContain("window.payload = '</script>")
+  })
+
+  it('only accepts SDK responses from the parent window', () => {
+    const html = buildViewShell({ title: 'Bridge' })
+    expect(html).toContain('if (event.source !== parent) return')
+  })
 })

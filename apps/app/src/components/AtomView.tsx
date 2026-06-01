@@ -24,7 +24,6 @@ import {
   splitFrontmatter,
   joinFrontmatter,
   extractFrontmatterId,
-  isHtmlAtomBody,
   isHtmlPath,
   isSkillAtomBody,
 } from '../lib/atomId'
@@ -36,15 +35,14 @@ import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEdit
 import { DohcBrandBlock } from './DohcLogo'
 import { AsciiSketchModal } from './AsciiSketchModal'
 import {
+  isSourceFirstPath,
+  shouldRenderHtmlAtomFrame,
+} from '../lib/viewSourceBehavior'
+import {
   findSubpages,
   pathToBreadcrumbs,
   type FileRow,
 } from '../lib/path-tree'
-
-function isSourceFirstPath(path: string | null | undefined): boolean {
-  if (!path) return false
-  return /\.(tsx?|jsx?|css|json)$/i.test(path) || parseViewPath(path) !== null
-}
 
 function sourceLangForPath(
   path: string | null | undefined,
@@ -459,7 +457,6 @@ function AtomShell({
   // FULL body so the user can still SEE and hand-edit the
   // frontmatter/id (manifesto locked-#1: inspectable & hand-editable).
   const viewInfo = useMemo(() => (path ? parseViewPath(path) : null), [path])
-  const isViewSource = viewInfo !== null
   const [sourceMode, setSourceMode] = useState(() => isSourceFirstPath(path))
   // D4.28 — raw-source buffer. While in source mode the textarea
   // edits THIS (local), not `draft`, so per-keystroke autosave +
@@ -539,8 +536,8 @@ function AtomShell({
   // so existing agent-authored html atoms (.md + type: html) keep
   // working. The §2-B route + tree badge mirror this same OR.
   const isHtml = useMemo(
-    () => !isViewSource && (!!pathIsHtml || isHtmlAtomBody(draft)),
-    [isViewSource, pathIsHtml, draft],
+    () => shouldRenderHtmlAtomFrame({ path, pathIsHtml: !!pathIsHtml, draft }),
+    [path, pathIsHtml, draft],
   )
   // D4.11b — prefer the draft's id (honors a live hand-edit in
   // source mode); fall back to the SERVER-saved id when the draft

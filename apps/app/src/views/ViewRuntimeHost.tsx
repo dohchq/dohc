@@ -7,9 +7,26 @@ import {
   makeViewRpcError,
   makeViewRpcSuccess,
   parseViewRpcRequest,
+  type ViewRpcOp,
   type ViewRpcRequest,
   type ViewRpcResponse,
 } from './sdkProtocol'
+
+export const VIEW_START_TIMEOUT_MS = 2500
+export const VIEW_ACTION_EVENT = 'dohc:view-action'
+
+export function viewActionDetail(
+  packageRoot: string,
+  operation: ViewRpcOp,
+  target?: string,
+) {
+  return {
+    packageRoot,
+    operation,
+    target: target ?? null,
+    timestamp: Date.now(),
+  }
+}
 
 export function ViewRuntimeHost({
   packageRoot,
@@ -31,6 +48,8 @@ export function ViewRuntimeHost({
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const startedRef = useRef(false)
   const convex = useConvex()
+  // Undefined intentionally means the caller's personal workspace; Convex
+  // requireWorkspace(ctx, undefined) derives that server-side from auth.
   const activeWorkspaceId = useActiveWorkspaceId()
   const [timedOut, setTimedOut] = useState(false)
 
@@ -39,20 +58,15 @@ export function ViewRuntimeHost({
     setTimedOut(false)
     const timeout = window.setTimeout(() => {
       if (!startedRef.current) setTimedOut(true)
-    }, 2500)
+    }, VIEW_START_TIMEOUT_MS)
     return () => window.clearTimeout(timeout)
   }, [srcDoc])
 
   const recordAction = useCallback(
-    (operation: string, target?: string) => {
+    (operation: ViewRpcOp, target?: string) => {
       window.dispatchEvent(
-        new CustomEvent('dohc:view-action', {
-          detail: {
-            packageRoot,
-            operation,
-            target: target ?? null,
-            timestamp: Date.now(),
-          },
+        new CustomEvent(VIEW_ACTION_EVENT, {
+          detail: viewActionDetail(packageRoot, operation, target),
         }),
       )
     },
@@ -62,6 +76,7 @@ export function ViewRuntimeHost({
   const runRequest = useCallback(
     async (request: ViewRpcRequest): Promise<ViewRpcResponse> => {
       try {
+        const requestId = request.id
         switch (request.op) {
           case 'dohc.sources.list':
             return makeViewRpcSuccess(
@@ -139,6 +154,12 @@ export function ViewRuntimeHost({
             onRunAgent?.(prompt)
             return makeViewRpcSuccess(request.id, { ok: true })
           }
+          default:
+            return makeViewRpcError(
+              requestId,
+              'unsupported-operation',
+              'This view operation is not supported.',
+            )
         }
       } catch {
         return makeViewRpcError(
@@ -204,7 +225,7 @@ export function ViewRuntimeHost({
   )
 }
 
-function canWriteRequestedPath(
+export function canWriteRequestedPath(
   scopePath: string,
   writeScopes: string[],
   requestedPath: string,

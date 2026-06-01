@@ -45,6 +45,39 @@ describe('view SDK protocol validation', () => {
     expect(parseViewRpcRequest({ id: '1', op: 'dohc.sources.list', args: null })).toBeNull()
   })
 
+  it('rejects invalid operation-specific args before host execution', () => {
+    expect(parseViewRpcRequest({
+      id: '1',
+      op: 'dohc.atom.get',
+      args: { path: '   ' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '2',
+      op: 'dohc.source.open',
+      args: { path: '' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '3',
+      op: 'dohc.agent.run',
+      args: { prompt: ' ' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '4',
+      op: 'dohc.fields.query',
+      args: { keys: ['status', 1] },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '5',
+      op: 'dohc.imports.list',
+      args: { workspaceId: 'ws_other' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '6',
+      op: 'dohc.exports.list',
+      args: { selector: 'billable' },
+    })).toBeNull()
+  })
+
   it('rejects prototype-shaped payloads before they reach Convex calls', () => {
     const payload = Object.create({ inherited: true })
     payload.id = '1'

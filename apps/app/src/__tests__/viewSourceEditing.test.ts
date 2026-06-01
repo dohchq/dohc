@@ -1,33 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ATOM_VIEW_SRC = readFileSync(
-  resolve(__dirname, '../components/AtomView.tsx'),
-  'utf8',
-)
-const APP_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
+import {
+  isSourceFirstPath,
+  shouldRenderHtmlAtomFrame,
+  viewPackageRootForSourcePath,
+} from '../lib/viewSourceBehavior'
 
 describe('view source editing contracts', () => {
   it('opens .views source atoms in source mode by default', () => {
-    expect(ATOM_VIEW_SRC).toContain('function isSourceFirstPath')
-    expect(ATOM_VIEW_SRC).toContain("parseViewPath(path) !== null")
-    expect(ATOM_VIEW_SRC).toContain('/\\.(tsx?|jsx?|css|json)$/i')
-    expect(ATOM_VIEW_SRC).toContain('useState(() => isSourceFirstPath(path))')
+    expect(isSourceFirstPath('clients/acme/.views/overview/src/App.tsx')).toBe(true)
+    expect(isSourceFirstPath('clients/acme/.views/overview/src/page.html')).toBe(true)
+    expect(isSourceFirstPath('clients/acme/notes.md')).toBe(false)
   })
 
   it('does not render .html files inside .views as html atoms', () => {
-    expect(ATOM_VIEW_SRC).toContain('const isViewSource = viewInfo !== null')
-    expect(ATOM_VIEW_SRC).toContain(
-      '() => !isViewSource && (!!pathIsHtml || isHtmlAtomBody(draft))',
-    )
+    expect(shouldRenderHtmlAtomFrame({
+      path: 'clients/acme/.views/overview/src/page.html',
+      pathIsHtml: true,
+      draft: '<main>View source</main>',
+    })).toBe(false)
+    expect(shouldRenderHtmlAtomFrame({
+      path: 'clients/acme/home.html',
+      pathIsHtml: true,
+      draft: '<main>HTML atom</main>',
+    })).toBe(true)
   })
 
-  it('shows an Open view affordance for .views package source files', () => {
-    expect(ATOM_VIEW_SRC).toContain('Open view')
-    expect(ATOM_VIEW_SRC).toContain('onOpenView(viewInfo.packageRoot)')
-    expect(APP_SRC).toContain('onOpenView={openView}')
+  it('derives the rendered view target from .views source paths', () => {
+    expect(viewPackageRootForSourcePath(
+      'clients/acme/.views/overview/src/App.tsx',
+    )).toBe('clients/acme/.views/overview')
+    expect(viewPackageRootForSourcePath('clients/acme/tasks.md')).toBeNull()
   })
 })

@@ -8,9 +8,12 @@ import { ViewRuntimeHost } from '../views/ViewRuntimeHost'
 import { buildViewShell } from '../views/viewShell'
 
 type BuildState =
-  | { status: 'idle' | 'building'; key: string | null }
+  | { status: 'idle'; key: null }
+  | { status: 'building'; key: string; previousCode: string | null }
   | { status: 'ready'; key: string; code: string }
   | { status: 'error'; key: string; diagnostics: Array<{ code: string; message: string }> }
+
+const BUILD_DEBOUNCE_MS = 150
 
 export function ViewFrame({
   packageRoot,
@@ -53,37 +56,49 @@ export function ViewFrame({
       return
     }
     let cancelled = false
-    setBuildState({ status: 'building', key: sourceKey })
-    void bundleViewServer({
-      data: { entry: sourceFiles.entry, files: sourceFiles.files },
+    setBuildState((current) => {
+      if (current.status === 'ready' && current.key === sourceKey) return current
+      const previousCode =
+        current.status === 'ready'
+          ? current.code
+          : current.status === 'building' && 'previousCode' in current
+            ? current.previousCode
+            : null
+      return { status: 'building', key: sourceKey, previousCode }
     })
-      .then((result) => {
-        if (cancelled) return
-        if (result.ok) {
-          setBuildState({ status: 'ready', key: sourceKey, code: result.code })
-        } else {
+    const debounce = window.setTimeout(() => {
+      void bundleViewServer({
+        data: { entry: sourceFiles.entry, files: sourceFiles.files },
+      })
+        .then((result) => {
+          if (cancelled) return
+          if (result.ok) {
+            setBuildState({ status: 'ready', key: sourceKey, code: result.code })
+          } else {
+            setBuildState({
+              status: 'error',
+              key: sourceKey,
+              diagnostics: result.diagnostics,
+            })
+          }
+        })
+        .catch(() => {
+          if (cancelled) return
           setBuildState({
             status: 'error',
             key: sourceKey,
-            diagnostics: result.diagnostics,
+            diagnostics: [
+              {
+                code: 'build-failed',
+                message: 'This view could not be bundled safely.',
+              },
+            ],
           })
-        }
-      })
-      .catch(() => {
-        if (cancelled) return
-        setBuildState({
-          status: 'error',
-          key: sourceKey,
-          diagnostics: [
-            {
-              code: 'build-failed',
-              message: 'This view could not be bundled safely.',
-            },
-          ],
         })
-      })
+    }, BUILD_DEBOUNCE_MS)
     return () => {
       cancelled = true
+      window.clearTimeout(debounce)
     }
   }, [sourceFiles, sourceKey])
 
@@ -155,12 +170,16 @@ export function ViewFrame({
     )
   }
 
+  const runtimeCode =
+    buildState.status === 'ready'
+      ? buildState.code
+      : buildState.status === 'building' && 'previousCode' in buildState && buildState.previousCode
+        ? buildState.previousCode
+        : `document.getElementById('root').innerHTML = '<main style="padding:24px;color:#706a60">Loading view...</main>'`
+
   const srcDoc = buildViewShell({
     title: view.title,
-    script:
-      buildState.status === 'ready'
-        ? buildState.code
-        : `document.getElementById('root').innerHTML = '<main style="padding:24px;color:#706a60">Loading view...</main>'`,
+    script: runtimeCode,
   })
 
   return (

@@ -15,7 +15,8 @@ const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
-    expect(ACTIVITY).toMatch(/ActivityView\s*=\s*'agent'\s*\|\s*'atom'\s*\|\s*'views'\s*\|\s*'graph'/)
+    expect(ACTIVITY).toContain("import type { AppView } from '../lib/appViews'")
+    expect(ACTIVITY).toContain("ActivityView = Extract<AppView, 'agent' | 'atom' | 'views' | 'graph'>")
     expect(ACTIVITY).toContain("label: 'Agent'")
     expect(ACTIVITY).toContain("label: 'Files'")
     expect(ACTIVITY).toContain("label: 'Views'")

@@ -31,6 +31,12 @@ describe('.views path semantics', () => {
     expect(parseViewPath('clients/acme/views/overview/src/App.tsx')).toBeNull()
     expect(parseViewPath('.views/home')).toBeNull()
     expect(parseViewPath('clients/acme/.views//src/App.tsx')).toBeNull()
+    expect(parseViewPath('clients/acme/.views/overview/src/\u0000App.tsx')).toBeNull()
+    expect(parseViewPath('clients/.views/a/.views/b/src/App.tsx')).toBeNull()
+    expect(parseViewPath('/.views/home/src/App.tsx')).toMatchObject({
+      packageRoot: '.views/home',
+      relativePath: 'src/App.tsx',
+    })
   })
 
   it('detects source paths and package roots separately', () => {

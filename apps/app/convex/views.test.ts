@@ -216,4 +216,23 @@ describe('api.views.getSourceFiles', () => {
       code: 'too-many-files',
     })
   })
+
+  it('rejects source packages that exceed the UTF-8 byte budget', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(
+      t,
+      W,
+      '.views/heavy/src/App.tsx',
+      '💥'.repeat(132_000),
+    )
+
+    const source = await t.withIdentity({ subject: W }).query(api.views.getSourceFiles, {
+      packageRoot: '.views/heavy',
+    })
+
+    expect(source).toMatchObject({
+      ok: false,
+      code: 'source-too-large',
+    })
+  })
 })

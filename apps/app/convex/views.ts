@@ -15,6 +15,7 @@ const ATOM_SCAN_CAP = 5000
 const VIEW_LIST_CAP = 500
 const SOURCE_FILE_CAP = 100
 const SOURCE_BYTE_CAP = 512 * 1024
+const TEXT_ENCODER = new TextEncoder()
 
 type ConfigStatus =
   | { ok: true }
@@ -196,6 +197,28 @@ async function visibleAtoms(
   return { atoms, truncated }
 }
 
+async function visibleAtomsForPackage(
+  ctx: QueryCtx,
+  workspaceId: string,
+  viewerSubject: string,
+  packageRoot: string,
+): Promise<Doc<'atoms'>[]> {
+  const raw = await ctx.db
+    .query('atoms')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .take(ATOM_SCAN_CAP + 1)
+  const bounded = raw.length > ATOM_SCAN_CAP ? raw.slice(0, ATOM_SCAN_CAP) : raw
+  const prefix = `${packageRoot}/`
+  const atoms: Doc<'atoms'>[] = []
+
+  for (const atom of bounded) {
+    if (!atom.path.startsWith(prefix)) continue
+    if (await canReadAtom(ctx, atom._id, viewerSubject)) atoms.push(atom)
+  }
+
+  return atoms
+}
+
 function descriptorForRoot(
   packageRoot: string,
   atomsByPath: Map<string, Doc<'atoms'>>,
@@ -279,8 +302,12 @@ export async function resolveViewDescriptor(
   packageRoot: string,
 ): Promise<ViewDescriptor | null> {
   if (!isViewPackageRoot(packageRoot)) return null
-  const { views } = await discoverViews(ctx, workspaceId, viewerSubject)
-  return views.find((view) => view.packageRoot === packageRoot) ?? null
+  const atoms = await visibleAtomsForPackage(ctx, workspaceId, viewerSubject, packageRoot)
+  if (atoms.length === 0) return null
+  return descriptorForRoot(
+    packageRoot,
+    new Map(atoms.map((atom) => [atom.path, atom])),
+  )
 }
 
 export const list = query({
@@ -348,7 +375,7 @@ export const getSourceFiles = query({
       if (!relativePath) continue
       if (!(await canReadAtom(ctx, atom._id, viewerSubject))) continue
       files.push({ relativePath, body: atom.body ?? '' })
-      totalBytes += (atom.body ?? '').length
+      totalBytes += TEXT_ENCODER.encode(atom.body ?? '').length
       if (files.length > SOURCE_FILE_CAP) {
         return {
           ok: false,

@@ -68,7 +68,7 @@ export function useDohcQuery(key, loader) {
     return () => {
       cancelled = true
     }
-  }, [key])
+  }, [key, loader])
 
   return state
 }

@@ -1172,7 +1172,7 @@ git commit -m "feat: harden view runtime limits"
 ### Task 14: End-To-End Verification
 
 **Files:**
-- Create: `tests/e2e/views.spec.ts`
+- Create: `apps/app/e2e/views.spec.ts`
 - Modify: `docs/qa/playwright-checklist.md`
 - Modify: `docs/product/spec.md`
 
