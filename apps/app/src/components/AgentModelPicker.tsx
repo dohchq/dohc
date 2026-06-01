@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Brain,
   Check,
@@ -31,6 +32,7 @@ export type AgentProviderSnapshot = {
   status: 'ready' | 'missing_key'
   missingEnvVar: string | null
   defaultModel: string
+  defaultReasoningEffort: AgentReasoningEffort | null
   models: AgentModelPickerModel[]
 }
 
@@ -39,6 +41,49 @@ const REASONING_LABELS: Record<AgentReasoningEffort, string> = {
   medium: 'Medium',
   high: 'High',
   xhigh: 'Extra High',
+}
+
+const POPOVER_EDGE_GAP = 14
+const POPOVER_TRIGGER_GAP = 10
+const POPOVER_MAX_WIDTH = 560
+
+type PopoverFrame = {
+  left: number
+  width: number
+  bottom?: number
+  top?: number
+  placement: 'above' | 'below'
+}
+
+function popoverFrameForTrigger(
+  rect: DOMRect,
+  viewportWidth: number,
+  viewportHeight: number,
+): PopoverFrame {
+  const width = Math.max(
+    0,
+    Math.min(POPOVER_MAX_WIDTH, viewportWidth - POPOVER_EDGE_GAP * 2),
+  )
+  const maxLeft = Math.max(POPOVER_EDGE_GAP, viewportWidth - width - POPOVER_EDGE_GAP)
+  const left = Math.round(
+    Math.min(Math.max(POPOVER_EDGE_GAP, rect.left), maxLeft),
+  )
+
+  if (rect.top > viewportHeight / 2) {
+    return {
+      left,
+      width,
+      bottom: Math.round(viewportHeight - rect.top + POPOVER_TRIGGER_GAP),
+      placement: 'above',
+    }
+  }
+
+  return {
+    left,
+    width,
+    top: Math.round(rect.bottom + POPOVER_TRIGGER_GAP),
+    placement: 'below',
+  }
 }
 
 function modelLabel(
@@ -72,6 +117,9 @@ function nextSelectionForModel(
       ? current?.reasoningEffort &&
         model.reasoningEfforts.includes(current.reasoningEffort)
         ? current.reasoningEffort
+        : provider.defaultReasoningEffort &&
+          model.reasoningEfforts.includes(provider.defaultReasoningEffort)
+        ? provider.defaultReasoningEffort
         : model.reasoningEfforts.includes('xhigh')
         ? 'xhigh'
         : model.reasoningEfforts.at(-1)
@@ -98,11 +146,7 @@ export function AgentModelPicker({
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [popoverFrame, setPopoverFrame] = useState<{
-    left: number
-    bottom: number
-    width: number
-  } | null>(null)
+  const [popoverFrame, setPopoverFrame] = useState<PopoverFrame | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const provider = selectedProvider(providers, selection)
   const selectedModel = provider?.models.find((m) => m.id === selection?.model)
@@ -112,10 +156,47 @@ export function AgentModelPicker({
     provider ??
     providers[0] ??
     null
+  const activeProviderReady = activeProvider?.status === 'ready'
   const activeSelectedModel =
     activeProvider?.providerId === selection?.providerId ? selectedModel : null
+  const activeReasoningModel =
+    activeSelectedModel ??
+    activeProvider?.models.find((model) => model.id === activeProvider.defaultModel) ??
+    activeProvider?.models.find((model) => model.recommended) ??
+    activeProvider?.models[0] ??
+    null
+  const activeReasoningEffort =
+    activeSelectedModel && selection?.reasoningEffort
+      ? selection.reasoningEffort
+      : activeProvider?.defaultReasoningEffort &&
+        activeReasoningModel?.reasoningEfforts.includes(
+          activeProvider.defaultReasoningEffort,
+        )
+      ? activeProvider.defaultReasoningEffort
+      : activeReasoningModel?.reasoningEfforts.includes('xhigh')
+      ? 'xhigh'
+      : activeReasoningModel?.reasoningEfforts.at(-1)
   const readyProviders = providers.filter((p) => p.status === 'ready')
   const canChoose = !disabled && providers.length > 0
+
+  function updatePopoverFrame() {
+    if (typeof window === 'undefined') return
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setPopoverFrame(
+      popoverFrameForTrigger(rect, window.innerWidth, window.innerHeight),
+    )
+  }
+
+  function togglePicker() {
+    if (!canChoose) return
+    if (open) {
+      setOpen(false)
+      return
+    }
+    updatePopoverFrame()
+    setOpen(true)
+  }
 
   useEffect(() => {
     if (!open) return
@@ -124,15 +205,13 @@ export function AgentModelPicker({
 
   useEffect(() => {
     if (!open || typeof window === 'undefined') return
-    const rect = triggerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const width = Math.min(560, window.innerWidth - 28)
-    const left = Math.min(Math.max(14, rect.left), window.innerWidth - width - 14)
-    setPopoverFrame({
-      left,
-      width,
-      bottom: window.innerHeight - rect.top + 8,
-    })
+    updatePopoverFrame()
+    window.addEventListener('resize', updatePopoverFrame)
+    window.addEventListener('scroll', updatePopoverFrame, true)
+    return () => {
+      window.removeEventListener('resize', updatePopoverFrame)
+      window.removeEventListener('scroll', updatePopoverFrame, true)
+    }
   }, [open])
 
   const filteredModels = useMemo(() => {
@@ -152,13 +231,15 @@ export function AgentModelPicker({
   function choose(model: AgentModelPickerModel) {
     if (!activeProvider || activeProvider.status !== 'ready') return
     onChange(nextSelectionForModel(activeProvider, model, selection))
-    setOpen(false)
-    requestAnimationFrame(() => triggerRef.current?.focus())
   }
 
   function updateReasoning(reasoningEffort: AgentReasoningEffort) {
-    if (!selection || !selectedModel?.supportsReasoning) return
-    onChange({ ...selection, reasoningEffort })
+    if (!activeProvider || !activeReasoningModel?.supportsReasoning) return
+    const base =
+      activeSelectedModel && selection
+        ? selection
+        : nextSelectionForModel(activeProvider, activeReasoningModel, selection)
+    onChange({ ...base, reasoningEffort })
   }
 
   return (
@@ -166,7 +247,7 @@ export function AgentModelPicker({
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => canChoose && setOpen((value) => !value)}
+        onClick={togglePicker}
         disabled={!canChoose}
         className="inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-dim shadow-xs transition hover:border-rule-strong hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
         title={
@@ -181,8 +262,10 @@ export function AgentModelPicker({
         <ChevronDown className="size-3 shrink-0 text-ink-faint" strokeWidth={1.9} />
       </button>
 
-      {open && (
-        <>
+      {open &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <>
           <div
             className="fixed inset-0 z-30"
             onClick={() => setOpen(false)}
@@ -191,8 +274,10 @@ export function AgentModelPicker({
             className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
             style={{
               left: popoverFrame?.left ?? 14,
-              bottom: popoverFrame?.bottom ?? 72,
               width: popoverFrame?.width ?? 560,
+              ...(popoverFrame?.placement === 'below'
+                ? { top: popoverFrame.top ?? 72 }
+                : { bottom: popoverFrame?.bottom ?? 72 }),
             }}
           >
             <div className="border-r border-rule bg-panel/60 p-2">
@@ -224,12 +309,14 @@ export function AgentModelPicker({
                       <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">
                         {candidate.displayName}
                       </span>
-                      <span
-                        className={`size-1.5 rounded-full ${
-                          ready ? 'bg-success' : 'bg-ink-ghost'
-                        }`}
-                        title={ready ? 'Ready' : candidate.missingEnvVar ?? 'Missing key'}
-                      />
+                      {!ready && (
+                        <span
+                          className="rounded-full bg-hover px-1.5 py-0.5 text-[9px] font-semibold text-ink-faint"
+                          title={`Set ${candidate.missingEnvVar ?? 'the provider key'}`}
+                        >
+                          Set key
+                        </span>
+                      )}
                     </button>
                   )
                 })}
@@ -252,15 +339,25 @@ export function AgentModelPicker({
                 />
               </label>
 
-              {activeSelectedModel?.supportsReasoning && selection && (
+              {activeProvider && !activeProviderReady && (
+                <div className="mt-2 rounded-lg border border-rule bg-panel/70 px-2.5 py-2 text-[11.5px] leading-snug text-ink-dim">
+                  <span className="font-medium text-ink">
+                    {activeProvider.displayName} needs a server key.
+                  </span>{' '}
+                  Set {activeProvider.missingEnvVar ?? 'the provider key'} to enable
+                  these models.
+                </div>
+              )}
+
+              {activeProviderReady && activeReasoningModel?.supportsReasoning && (
                 <div className="mt-2 rounded-lg border border-rule bg-panel/50 p-1.5">
                   <div className="flex items-center gap-1.5 px-1.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
                     <Brain className="size-3" strokeWidth={1.8} />
                     Reasoning
                   </div>
                   <div className="grid grid-cols-4 gap-1">
-                    {activeSelectedModel.reasoningEfforts.map((effort) => {
-                      const active = selection.reasoningEffort === effort
+                    {activeReasoningModel.reasoningEfforts.map((effort) => {
+                      const active = activeReasoningEffort === effort
                       return (
                         <button
                           key={effort}
@@ -301,7 +398,7 @@ export function AgentModelPicker({
                     const checked =
                       selection?.providerId === activeProvider?.providerId &&
                       selection?.model === model.id
-                    const disabledModel = activeProvider?.status !== 'ready'
+                    const disabledModel = !activeProviderReady
                     return (
                       <button
                         key={model.id}
@@ -319,8 +416,8 @@ export function AgentModelPicker({
                           {model.label}
                         </span>
                         {model.recommended && (
-                          <span className="rounded-md border border-rule bg-panel px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
-                            Rec
+                          <span className="rounded-md border border-rule bg-panel px-1.5 py-0.5 text-[9.5px] font-semibold text-ink-faint">
+                            Recommended
                           </span>
                         )}
                         {checked && (
@@ -338,8 +435,9 @@ export function AgentModelPicker({
               </div>
             </div>
           </div>
-        </>
-      )}
+          </>,
+          document.body,
+        )}
     </div>
   )
 }

@@ -3219,6 +3219,7 @@ export const sendMessage = action({
       threadId,
       promptMessageId: messageId,
     })
+    const providerOptions = agentProviderOptions(selection, false)
     const result = await dohcAgent.streamText(
       ctx,
       { threadId },
@@ -3231,6 +3232,7 @@ export const sendMessage = action({
         // isn't provided — kept for completeness.
         system: systemPrompt,
         model: createAgentLanguageModel(selection),
+        ...(providerOptions ? { providerOptions } : {}),
         promptMessageId: messageId,
         prepareStep: buildPrepareStep(ctx, threadId, messageId, entry, selection),
         // org-plan §5 + Jenny round-2 C-1 fix: thread activeWorkspaceId
@@ -3407,6 +3409,7 @@ export const startOnboarding = action({
         promptMessageId,
       })
     }
+    const providerOptions = agentProviderOptions(selection, false)
     const result = await dohcAgent.streamText(
       ctx,
       { threadId },
@@ -3419,6 +3422,7 @@ export const startOnboarding = action({
             // H-1 (A1): per-call system override for onboarding too.
             system: systemPrompt,
             model: createAgentLanguageModel(selection),
+            ...(providerOptions ? { providerOptions } : {}),
             promptMessageId,
             prepareStep: buildPrepareStep(
               ctx,
@@ -3442,6 +3446,7 @@ export const startOnboarding = action({
         : {
             system: systemPrompt,
             model: createAgentLanguageModel(selection),
+            ...(providerOptions ? { providerOptions } : {}),
             prepareStep: buildPrepareStep(
               ctx,
               threadId,

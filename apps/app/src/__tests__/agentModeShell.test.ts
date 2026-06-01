@@ -133,9 +133,12 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).toContain('replaceTextRange')
     expect(CHAT).toContain('SKILL_TOKEN_RE')
     expect(CHAT).toContain('Ask anything, $use skills, or / for commands')
-    expect(CHAT).toContain("label=\"/ commands\"")
-    expect(CHAT).toContain("label=\"$ skills\"")
     expect(CHAT).toContain("composerTrigger.kind === 'command' ? 'Commands' : 'Skills'")
+    expect(CHAT).not.toContain('label="/ commands"')
+    expect(CHAT).not.toContain('label="$ skills"')
+    expect(CHAT).not.toContain('label="Enter"')
+    expect(CHAT).toContain('Context details')
+    expect(CHAT).toContain('aria-expanded={detailsOpen}')
     expect(CHAT).not.toContain('Commands & Skills')
   })
 
@@ -153,7 +156,10 @@ describe('Agent / Files shell mode', () => {
     expect(AGENT_MODEL_PICKER).toContain('Reasoning')
     expect(AGENT_MODEL_PICKER).toContain('Search models')
     expect(AGENT_MODEL_PICKER).toContain('Default')
+    expect(AGENT_MODEL_PICKER).toContain('Recommended')
+    expect(AGENT_MODEL_PICKER).toContain('Set key')
     expect(AGENT_MODEL_PICKER).not.toContain('<select')
+    expect(AGENT_MODEL_PICKER).not.toContain('>Rec<')
   })
 
   it('keeps the Agent stream pinned only while the user is already at the bottom', () => {

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
+import { useState, useRef, useEffect, useMemo, useId, type ReactNode } from 'react'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
 import {
@@ -7,7 +7,6 @@ import {
   CheckCircle2,
   ChevronDown,
   Clipboard,
-  CornerDownLeft,
   FileText,
   Folder,
   FolderPlus,
@@ -1109,41 +1108,25 @@ function ComposerStatusStrip({
         onChange={(next) => onSelectionChange?.(next)}
         onSetDefault={onSetDefault}
       />
-      <ComposerControlPill
-        icon={SquareTerminal}
-        label="/ commands"
-        compactLabel="/"
-      />
-      <ComposerControlPill icon={Sparkles} label="$ skills" compactLabel="$" />
-      {primary && <ContextWindowMeter messageCount={messageCount} />}
+      {primary && (
+        <ContextWindowMeter
+          messageCount={messageCount}
+          projectPath={projectPath}
+          skillCount={skillCount}
+          commandCount={commandCount}
+        />
+      )}
       {primary && (
         <ComposerStatusPill
           icon={projectPath ? Folder : FolderX}
           label={projectPath ?? 'No project'}
         />
       )}
-      {primary && skillCount > 0 && (
-        <ComposerStatusPill icon={Sparkles} label={`${skillCount} skills`} />
-      )}
-      {primary && commandCount > 0 && (
-        <ComposerStatusPill
-          icon={SquareTerminal}
-          label={`${commandCount} commands`}
-        />
-      )}
-      {sending || busy ? (
+      {(sending || busy) && (
         <span className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-faint">
           <span className="size-1.5 rounded-full bg-success animate-pulse" />
           {sending ? 'sending' : 'thinking'}
         </span>
-      ) : (
-        primary && (
-          <ComposerControlPill
-            icon={CornerDownLeft}
-            label="Enter"
-            compactLabel="send"
-          />
-        )
       )}
     </div>
   )
@@ -1167,47 +1150,108 @@ function ComposerStatusPill({
   )
 }
 
-function ContextWindowMeter({ messageCount }: { messageCount: number }) {
+function ContextWindowMeter({
+  messageCount,
+  projectPath,
+  skillCount,
+  commandCount,
+}: {
+  messageCount: number
+  projectPath: string | null
+  skillCount: number
+  commandCount: number
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [detailsPreview, setDetailsPreview] = useState(false)
   const cap = 50
   const percent = Math.min(100, Math.round((messageCount / cap) * 100))
   const radius = 8.5
   const circumference = 2 * Math.PI * radius
   const dashOffset = circumference - (percent / 100) * circumference
+  const showDetails = detailsOpen || detailsPreview
+  const tooltipId = useId()
+  const summary = `${messageCount} messages loaded in this thread`
 
   return (
-    <span
-      className="inline-grid size-7 shrink-0 place-items-center rounded-full border border-rule bg-panel/70 text-[8px] font-semibold text-ink-faint"
-      title={`${messageCount} messages loaded in this thread`}
-      aria-label={`${messageCount} messages loaded in this thread`}
-    >
-      <span className="relative grid size-6 place-items-center">
-        <svg
-          viewBox="0 0 24 24"
-          className="absolute inset-0 size-6 -rotate-90"
-          aria-hidden="true"
-        >
-          <circle
-            cx="12"
-            cy="12"
-            r={radius}
-            fill="none"
-            stroke="var(--color-rule)"
-            strokeWidth="2.4"
-          />
-          <circle
-            cx="12"
-            cy="12"
-            r={radius}
-            fill="none"
-            stroke="var(--color-ink-faint)"
-            strokeDasharray={circumference}
-            strokeDashoffset={dashOffset}
-            strokeLinecap="round"
-            strokeWidth="2.4"
-            className="transition-[stroke-dashoffset] duration-300"
-          />
-        </svg>
-        <span className="relative">{Math.min(99, messageCount)}</span>
+    <span className="relative inline-flex shrink-0">
+      <button
+        type="button"
+        onClick={() => setDetailsOpen((open) => !open)}
+        onMouseEnter={() => setDetailsPreview(true)}
+        onMouseLeave={() => setDetailsPreview(false)}
+        onFocus={() => setDetailsPreview(true)}
+        onBlur={() => {
+          setDetailsPreview(false)
+          setDetailsOpen(false)
+        }}
+        className="inline-grid size-7 place-items-center rounded-full border border-rule bg-panel/70 text-[8px] font-semibold text-ink-faint transition-[border,background,color,transform] hover:border-rule-strong hover:bg-hover hover:text-ink focus-visible:border-rule-strong focus-visible:bg-hover focus-visible:text-ink focus-visible:outline-none active:scale-95"
+        title="Context details"
+        aria-label={`Context details: ${summary}`}
+        aria-expanded={detailsOpen}
+        aria-describedby={showDetails ? tooltipId : undefined}
+      >
+        <span className="relative grid size-6 place-items-center">
+          <svg
+            viewBox="0 0 24 24"
+            className="absolute inset-0 size-6 -rotate-90"
+            aria-hidden="true"
+          >
+            <circle
+              cx="12"
+              cy="12"
+              r={radius}
+              fill="none"
+              stroke="var(--color-rule)"
+              strokeWidth="2.4"
+            />
+            <circle
+              cx="12"
+              cy="12"
+              r={radius}
+              fill="none"
+              stroke="var(--color-ink-faint)"
+              strokeDasharray={circumference}
+              strokeDashoffset={dashOffset}
+              strokeLinecap="round"
+              strokeWidth="2.4"
+              className="transition-[stroke-dashoffset] duration-300"
+            />
+          </svg>
+          <span className="relative">{Math.min(99, messageCount)}</span>
+        </span>
+      </button>
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className={`pointer-events-none absolute bottom-[calc(100%+10px)] left-1/2 z-30 w-60 -translate-x-1/2 rounded-lg border border-rule-strong bg-elevated p-2.5 text-left shadow-modal transition-[opacity,transform] duration-150 ${
+          showDetails ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0'
+        }`}
+      >
+        <span className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+          Context details
+        </span>
+        <span className="mt-2 grid gap-1 text-[11.5px] leading-snug">
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-ink-faint">Thread</span>
+            <span className="font-medium text-ink">
+              {messageCount} / {cap} messages
+            </span>
+          </span>
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-ink-faint">Project</span>
+            <span className="min-w-0 truncate text-right font-medium text-ink">
+              {projectPath ?? 'None'}
+            </span>
+          </span>
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-ink-faint">Skills</span>
+            <span className="font-medium text-ink">{skillCount}</span>
+          </span>
+          <span className="flex items-center justify-between gap-3">
+            <span className="text-ink-faint">Commands</span>
+            <span className="font-medium text-ink">{commandCount}</span>
+          </span>
+        </span>
       </span>
     </span>
   )
@@ -1430,24 +1474,6 @@ function AgentContextPill({
     <span className="hidden max-w-[240px] items-center gap-1.5 rounded-full border border-rule bg-elevated px-2.5 py-1 text-[10.5px] font-medium text-ink-faint shadow-xs md:inline-flex">
       <Icon className="size-3.5 shrink-0" strokeWidth={1.8} />
       <span className="min-w-0 truncate">{label}</span>
-    </span>
-  )
-}
-
-function ComposerControlPill({
-  icon: Icon,
-  label,
-  compactLabel,
-}: {
-  icon: IconComponent
-  label: string
-  compactLabel?: string
-}) {
-  return (
-    <span className="inline-flex h-7 items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-faint">
-      <Icon className="size-3 shrink-0" strokeWidth={1.8} />
-      <span className="hidden sm:inline">{label}</span>
-      {compactLabel && <span className="sm:hidden">{compactLabel}</span>}
     </span>
   )
 }

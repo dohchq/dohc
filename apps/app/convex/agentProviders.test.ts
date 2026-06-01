@@ -25,7 +25,13 @@ describe('agent provider registry', () => {
       status: 'ready',
     })
     expect(providers[0].models.map((m) => m.id)).toContain('gpt-5.5')
-    expect(providers[1].models.map((m) => m.id)).toContain('claude-opus-4-7')
+    expect(providers[1].models.map((m) => m.id)).toContain('claude-opus-4-8')
+    expect(providers[1].models[0]).toMatchObject({
+      id: 'claude-opus-4-8',
+      recommended: true,
+      supportsReasoning: true,
+    })
+    expect(providers[1].defaultReasoningEffort).toBe('high')
   })
 
   it('surfaces missing-key status instead of hiding provider diagnostics', () => {
@@ -78,7 +84,7 @@ describe('agent provider registry', () => {
     expect(() =>
       validateAgentSelection({
         providerId: 'anthropic',
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5',
         reasoningEffort: 'high',
       }),
     ).toThrow(/does not support reasoning/)
@@ -92,6 +98,23 @@ describe('agent provider registry', () => {
       ),
     ).toEqual({
       anthropic: { disableParallelToolUse: true },
+    })
+
+    expect(
+      agentProviderOptions(
+        {
+          providerId: 'anthropic',
+          model: 'claude-opus-4-8',
+          reasoningEffort: 'high',
+        },
+        true,
+      ),
+    ).toEqual({
+      anthropic: {
+        disableParallelToolUse: true,
+        thinking: { type: 'adaptive' },
+        effort: 'high',
+      },
     })
 
     expect(

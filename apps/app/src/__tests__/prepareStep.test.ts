@@ -310,7 +310,7 @@ describe('Track-3 P2b.4 — sendMessage lifecycle (saveMessage → clear → str
 
   it('sendMessage args include `entry: v.optional(v.union("skill-fire", "command-fire"))`', () => {
     expect(sendMessageBody).toMatch(
-      /entry:\s*v\.optional\(\s*v\.union\(\s*v\.literal\(['"]skill-fire['"]\),\s*v\.literal\(['"]command-fire['"]\)\s*\)\s*\)/,
+      /entry:\s*v\.optional\(\s*v\.union\(\s*v\.literal\(['"]skill-fire['"]\),\s*v\.literal\(['"]command-fire['"]\)\s*,?\s*\)\s*,?\s*\)/,
     )
   })
 

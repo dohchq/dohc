@@ -44,6 +44,7 @@ export type AgentProviderSnapshot = {
   status: 'ready' | 'missing_key'
   missingEnvVar: string | null
   defaultModel: string
+  defaultReasoningEffort: AgentReasoningEffort | null
   models: AgentProviderModel[]
 }
 
@@ -59,6 +60,13 @@ type AgentProviderDefinition = {
 }
 
 const OPENAI_REASONING: AgentReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+]
+
+const ANTHROPIC_REASONING: AgentReasoningEffort[] = [
   'low',
   'medium',
   'high',
@@ -120,26 +128,33 @@ const PROVIDERS: AgentProviderDefinition[] = [
     displayName: 'Anthropic',
     accentColor: '#9a6a45',
     envVar: 'ANTHROPIC_API_KEY',
-    defaultModel: 'claude-sonnet-4-6',
+    defaultModel: 'claude-opus-4-8',
+    defaultReasoningEffort: 'high',
     models: [
+      {
+        id: 'claude-opus-4-8',
+        label: 'Claude Opus 4.8',
+        supportsReasoning: true,
+        reasoningEfforts: ANTHROPIC_REASONING,
+        recommended: true,
+      },
       {
         id: 'claude-opus-4-7',
         label: 'Claude Opus 4.7',
-        supportsReasoning: false,
-        reasoningEfforts: [],
-        recommended: true,
+        supportsReasoning: true,
+        reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-opus-4-6',
         label: 'Claude Opus 4.6',
-        supportsReasoning: false,
-        reasoningEfforts: [],
+        supportsReasoning: true,
+        reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-sonnet-4-6',
         label: 'Claude Sonnet 4.6',
-        supportsReasoning: false,
-        reasoningEfforts: [],
+        supportsReasoning: true,
+        reasoningEfforts: ANTHROPIC_REASONING,
       },
       {
         id: 'claude-haiku-4-5',
@@ -230,6 +245,7 @@ export function listAgentProviderSnapshots(): AgentProviderSnapshot[] {
       status,
       missingEnvVar: status === 'missing_key' ? provider.envVar : null,
       defaultModel: provider.defaultModel,
+      defaultReasoningEffort: provider.defaultReasoningEffort ?? null,
       models: provider.models,
     }
   })
@@ -357,8 +373,14 @@ export function agentProviderOptions(
 ): Record<string, Record<string, unknown>> | undefined {
   const model = modelForSelection(selection)
   if (selection.providerId === 'anthropic') {
-    return disableParallelTools
-      ? { anthropic: { disableParallelToolUse: true } }
+    const anthropicOptions: Record<string, unknown> = {}
+    if (disableParallelTools) anthropicOptions.disableParallelToolUse = true
+    if (model.supportsReasoning && selection.reasoningEffort) {
+      anthropicOptions.thinking = { type: 'adaptive' }
+      anthropicOptions.effort = selection.reasoningEffort
+    }
+    return Object.keys(anthropicOptions).length > 0
+      ? { anthropic: anthropicOptions }
       : undefined
   }
 
