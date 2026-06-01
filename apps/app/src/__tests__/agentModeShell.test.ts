@@ -13,6 +13,8 @@ const ACTIVITY = read('components/ActivityBar.tsx')
 const CHAT = read('components/Chat.tsx')
 const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
 const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
+const AGENT_MODEL_PICKER = read('components/AgentModelPicker.tsx')
+const AGENT_ACCESS = read('lib/agentAccess.ts')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -202,6 +204,39 @@ describe('Agent / Files shell mode', () => {
       agentProviderId: 'anthropic',
       agentModel: 'claude-haiku-4-5',
     })
+  })
+
+  it('adds a compact multi-provider model picker to the composer', () => {
+    expect(APP).toContain('api.agent.listAgentProviders')
+    expect(APP).toContain('setAgentWorkspaceDefault')
+    expect(APP).toContain('agentProviderId')
+    expect(APP).toContain('agentSelectionFromThread')
+    expect(CHAT).toContain('AgentModelPicker')
+    expect(CHAT).toContain('agentProviderId: agentSelection.providerId')
+    expect(CHAT).toContain('agentModel: agentSelection.model')
+    expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection, accessMode)')
+    expect(AGENT_CHAT_SIDEBAR).toContain('agentProviderId?: string | null')
+    expect(AGENT_MODEL_PICKER).toContain('Provider')
+    expect(AGENT_MODEL_PICKER).toContain('Reasoning')
+    expect(AGENT_MODEL_PICKER).toContain('Search models')
+    expect(AGENT_MODEL_PICKER).toContain('Default')
+    expect(AGENT_MODEL_PICKER).toContain('Recommended')
+    expect(AGENT_MODEL_PICKER).toContain('Set key')
+    expect(AGENT_MODEL_PICKER).not.toContain('<select')
+    expect(AGENT_MODEL_PICKER).not.toContain('>Rec<')
+  })
+
+  it('adds dohc-first access permissions to the agent composer', () => {
+    expect(CHAT).toContain('AgentAccessPicker')
+    expect(CHAT).toContain('agentAccessMode: accessMode')
+    expect(CHAT).toContain('AGENT_ACCESS_MODE_OPTIONS')
+    expect(AGENT_ACCESS).toContain('Default permissions')
+    expect(AGENT_ACCESS).toContain('Auto-review')
+    expect(AGENT_ACCESS).toContain('Full access')
+    expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection, accessMode)')
+    expect(APP).toContain('agentAccessMode')
+    expect(APP).toContain('threadAccessMode={activeAgentThread?.agentAccessMode ?? null}')
+    expect(AGENT_CHAT_SIDEBAR).toContain('agentAccessMode?: AgentAccessMode | null')
   })
 
   it('keeps the Agent stream pinned only while the user is already at the bottom', () => {

@@ -336,6 +336,13 @@ export default defineSchema({
         v.literal('xhigh'),
       ),
     ),
+    agentAccessMode: v.optional(
+      v.union(
+        v.literal('default'),
+        v.literal('auto-review'),
+        v.literal('full-access'),
+      ),
+    ),
     updatedAt: v.optional(v.number()),
     pinnedAt: v.optional(v.number()),
   })

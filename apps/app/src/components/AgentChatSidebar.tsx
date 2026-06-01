@@ -18,6 +18,7 @@ import {
 } from './SidebarChrome'
 import { useDialogFocus } from '../lib/dialog-focus'
 import { SidebarRowsSkeleton } from './Skeleton'
+import type { AgentAccessMode } from '../lib/agentAccess'
 
 type FolderLike = { path: string }
 type FileLike = { path: string }
@@ -32,6 +33,7 @@ export type AgentThreadSummary = {
   agentProviderId?: string | null
   agentModel?: string | null
   agentReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | null
+  agentAccessMode?: AgentAccessMode | null
 }
 
 function isUserProjectPath(path: string | null | undefined) {
