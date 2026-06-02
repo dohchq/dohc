@@ -110,11 +110,21 @@ export function createSemanticApiHandler({
 }: SemanticApiHandlerOptions): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url)
-    if (request.method !== 'POST' || !url.pathname.startsWith('/apply/')) {
+    if (!url.pathname.startsWith('/apply/')) {
       return jsonResponse({ ok: false, error: 'not found' }, 404)
     }
     if (request.headers.get('authorization') !== `Bearer ${adminToken}`) {
       return jsonResponse({ ok: false, error: 'unauthorized' }, 401)
+    }
+    if (request.method === 'GET' && url.pathname === '/apply/preflight') {
+      return jsonResponse({
+        ok: true,
+        service: 'dohc-hocuspocus',
+        semanticWrites: true,
+      })
+    }
+    if (request.method !== 'POST') {
+      return jsonResponse({ ok: false, error: 'not found' }, 404)
     }
 
     const body = await readJsonObject(request)
@@ -245,7 +255,10 @@ export function createSemanticApiHandler({
         })
       }
     } else {
-      await store.recordSemanticOperation(operationKey ?? payload.operationId, response)
+      await store.recordSemanticOperation(
+        operationKey ?? payload.operationId,
+        response,
+      )
     }
     logger.info('semantic operation applied', {
       operationId: payload.operationId,
@@ -281,10 +294,7 @@ async function handleCreateAtom({
   }
 
   if (!acl.createAtom) {
-    return jsonResponse(
-      { ok: false, error: 'createAtom unavailable' },
-      503,
-    )
+    return jsonResponse({ ok: false, error: 'createAtom unavailable' }, 503)
   }
 
   const created = await acl.createAtom({
@@ -388,7 +398,10 @@ function applySemanticEdit(
   return applyInsertAfterHeading(doc, payload)
 }
 
-export function semanticOperationKey(scope: string, operationId: string): string {
+export function semanticOperationKey(
+  scope: string,
+  operationId: string,
+): string {
   return `${encodeURIComponent(scope)}::${encodeURIComponent(operationId)}`
 }
 
@@ -447,7 +460,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-async function readJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+async function readJsonObject(
+  request: Request,
+): Promise<Record<string, unknown> | null> {
   try {
     const body = await request.json()
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -627,11 +642,7 @@ function parseCreateAtomPayload(
 }
 
 function parseActor(actor: unknown): SemanticRequestPayload['actor'] | null {
-  if (
-    typeof actor !== 'object' ||
-    actor === null ||
-    Array.isArray(actor)
-  ) {
+  if (typeof actor !== 'object' || actor === null || Array.isArray(actor)) {
     return null
   }
   const record = actor as Record<string, unknown>

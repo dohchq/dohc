@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.77",
+    "@ai-sdk/openai": "3.0.67",
     "@convex-dev/agent": "0.6.1",
     "@convex-dev/workos-authkit": "^0.2.2",
     "@dohc/brand": "workspace:*",

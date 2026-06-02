@@ -9,6 +9,7 @@
  */
 
 import type * as agent from "../agent.js";
+import type * as agentProviders from "../agentProviders.js";
 import type * as atomAccess from "../atomAccess.js";
 import type * as atomCapture from "../atomCapture.js";
 import type * as atomId from "../atomId.js";
@@ -46,6 +47,7 @@ import type * as skills from "../skills.js";
 import type * as skillsMigration from "../skillsMigration.js";
 import type * as trash from "../trash.js";
 import type * as viewData from "../viewData.js";
+import type * as viewPaths from "../viewPaths.js";
 import type * as views from "../views.js";
 import type * as windows from "../windows.js";
 
@@ -57,6 +59,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
+  agentProviders: typeof agentProviders;
   atomAccess: typeof atomAccess;
   atomCapture: typeof atomCapture;
   atomId: typeof atomId;
@@ -94,6 +97,7 @@ declare const fullApi: ApiFromModules<{
   skillsMigration: typeof skillsMigration;
   trash: typeof trash;
   viewData: typeof viewData;
+  viewPaths: typeof viewPaths;
   views: typeof views;
   windows: typeof windows;
 }>;

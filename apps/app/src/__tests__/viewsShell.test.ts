@@ -1,5 +1,8 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from 'convex/react'
 import { ActivityBar } from '../components/ActivityBar'
@@ -11,12 +14,26 @@ import { useActiveWorkspaceId } from '../lib/active-workspace'
 
 vi.mock('convex/react', () => ({
   useQuery: vi.fn(),
+  useAction: () => vi.fn(),
+  useMutation: () => vi.fn(),
   useConvex: () => ({ query: vi.fn() }),
 }))
-vi.mock('../lib/active-workspace', () => ({ useActiveWorkspaceId: vi.fn() }))
+vi.mock('../lib/active-workspace', () => ({
+  useActiveWorkspaceId: vi.fn(),
+  useActiveWorkspace: vi.fn(() => ({
+    activeWorkspaceId: 'ws_active',
+    setActiveWorkspaceId: vi.fn(),
+  })),
+}))
 
 const useQueryMock = vi.mocked(useQuery as any)
 const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const read = (path: string) =>
+  readFileSync(resolve(__dirname, '../../src', path), 'utf8')
+const APP_SRC = read('routes/_app.tsx')
+const FILE_TREE_SRC = read('components/FileTree.tsx')
+const VIEWS_SIDEBAR_SRC = read('components/ViewsSidebar.tsx')
 
 const viewRows = [
   {
@@ -90,7 +107,16 @@ describe('Views activity shell', () => {
 
   it('groups discovered views by scope and exposes source editing', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
-    useQueryMock.mockReturnValue({ views: viewRows, truncated: false })
+    useQueryMock
+      .mockReturnValueOnce({ views: viewRows, truncated: false })
+      .mockReturnValueOnce([
+        {
+          workspaceId: 'ws_active',
+          kind: 'personal',
+          name: 'Personal',
+          role: 'owner',
+        },
+      ])
 
     const html = renderToStaticMarkup(
       createElement(ViewsSidebar, {
@@ -110,21 +136,31 @@ describe('Views activity shell', () => {
     })
   })
 
+  // This guards shell wiring that is awkward to exercise after static render:
+  // APP_SRC should not pass view-creation props into ViewsSidebar, while
+  // VIEWS_SIDEBAR_SRC remains view-open only and FILE_TREE_SRC keeps the Graph
+  // add control path. If these names change, update the strings with the
+  // equivalent shell boundary rather than deleting the regression.
+  it('does not expose add controls in Views while Graph reuses the Files add control', () => {
+    expect(APP_SRC).not.toContain('onCreateView=')
+    expect(VIEWS_SIDEBAR_SRC).not.toContain('onCreateView')
+    expect(FILE_TREE_SRC).toContain('allowCreate = true')
+    expect(APP_SRC).not.toContain("allowCreate={view !== 'graph'}")
+  })
+
   it('renders selected views inside a sandboxed frame shell', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
-    useQueryMock
-      .mockReturnValueOnce(viewRows[1])
-      .mockReturnValueOnce({
-        ok: true,
-        entry: 'src/App.tsx',
-        truncated: false,
-        files: [
-          {
-            relativePath: 'src/App.tsx',
-            body: 'document.getElementById("root").textContent = "Overview"',
-          },
-        ],
-      })
+    useQueryMock.mockReturnValueOnce(viewRows[1]).mockReturnValueOnce({
+      ok: true,
+      entry: 'src/App.tsx',
+      truncated: false,
+      files: [
+        {
+          relativePath: 'src/App.tsx',
+          body: 'document.getElementById("root").textContent = "Overview"',
+        },
+      ],
+    })
 
     const html = renderToStaticMarkup(
       createElement(ViewFrame, {

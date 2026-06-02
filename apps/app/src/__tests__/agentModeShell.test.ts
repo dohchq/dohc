@@ -12,6 +12,7 @@ const ACTIVITY = read('components/ActivityBar.tsx')
 const CHAT = read('components/Chat.tsx')
 const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
 const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
+const AGENT_MODEL_PICKER = read('components/AgentModelPicker.tsx')
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -52,6 +53,22 @@ describe('Agent / Files shell mode', () => {
     expect(AGENT_CHAT_SIDEBAR).toContain('topLevelProjects')
     expect(APP).toContain('api.agent.listThreads')
     expect(APP).toContain('api.agent.createThread')
+  })
+
+  it('does not show a duplicate pinned icon when row actions are visible', () => {
+    expect(AGENT_CHAT_SIDEBAR).toContain(
+      'text-accent group-hover/thread:hidden group-focus-within/thread:hidden',
+    )
+    expect(AGENT_CHAT_SIDEBAR).toContain(
+      "title={thread.pinnedAt === null ? 'Pin chat' : 'Unpin chat'}",
+    )
+  })
+
+  it('makes the full chat row clickable, not only the chat title text', () => {
+    expect(AGENT_CHAT_SIDEBAR).toContain('aria-label={`Open chat ${thread.title}`}')
+    expect(AGENT_CHAT_SIDEBAR).toContain('absolute inset-0 rounded-md')
+    expect(AGENT_CHAT_SIDEBAR).toContain('pointer-events-none relative z-[1]')
+    expect(AGENT_CHAT_SIDEBAR).toContain('relative z-10 ml-auto')
   })
 
   it('keeps new chats as drafts until the first message chooses an environment', () => {
@@ -102,9 +119,24 @@ describe('Agent / Files shell mode', () => {
 
   it('uses the active chat title as the Agent document metadata title', () => {
     expect(APP).toContain('agentDocTitle')
-    expect(APP).toContain("activeAgentThread?.title?.trim() || (threadId ? 'Workspace chat' : 'New chat')")
+    expect(APP).toMatch(
+      /activeAgentThread\?\.title\?\.trim\(\)\s*\|\|\s*\(threadId \? 'Workspace chat' : 'New chat'\)/,
+    )
     expect(APP).toContain("if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }")
     expect(APP).not.toContain("if (view === 'agent') return { docTitle: 'Agent', docEmoji: null }")
+  })
+
+  it('keeps chat switching from flashing through the new-chat draft state', () => {
+    expect(APP).toContain('selectedAgentThreadSnapshot')
+    expect(APP).toContain('agentThreads === undefined')
+    expect(APP).toContain('setSelectedAgentThreadSnapshot(thread)')
+    expect(APP).toContain('queryActiveAgentThread ??')
+    expect(APP).toContain('selectedAgentThreadSnapshot?.threadId === threadId')
+    expect(APP).toContain('if (threadId && selectedAgentThreadSnapshot?.threadId === threadId)')
+    expect(CHAT).toContain('messagesLoadingFirstPage')
+    expect(CHAT).toContain('uiMessages.length === 0 && messagesLoadingFirstPage')
+    expect(CHAT).toContain('uiMessages.length === 0 && !messagesLoadingFirstPage')
+    expect(CHAT).toContain('ChatLoadingState')
   })
 
   it('polishes the primary Agent chat window into a focused work surface', () => {
@@ -133,10 +165,38 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).toContain('replaceTextRange')
     expect(CHAT).toContain('SKILL_TOKEN_RE')
     expect(CHAT).toContain('Ask anything, $use skills, or / for commands')
-    expect(CHAT).toContain("label=\"/ commands\"")
-    expect(CHAT).toContain("label=\"$ skills\"")
     expect(CHAT).toContain("composerTrigger.kind === 'command' ? 'Commands' : 'Skills'")
+    expect(CHAT).toContain('BUILTIN_COMPOSER_COMMANDS')
+    expect(CHAT).toContain('buildComposerMenuItems')
+    expect(CHAT).toContain('No saved skills yet')
+    expect(CHAT).toContain('{composerTrigger && (')
+    expect(CHAT).not.toContain('composerTrigger && composerMenuItems.length > 0')
+    expect(CHAT).not.toContain('label="/ commands"')
+    expect(CHAT).not.toContain('label="$ skills"')
+    expect(CHAT).not.toContain('label="Enter"')
+    expect(CHAT).toContain('Context window')
+    expect(CHAT).toContain('aria-expanded={detailsOpen}')
     expect(CHAT).not.toContain('Commands & Skills')
+  })
+
+  it('adds a compact multi-provider model picker to the composer', () => {
+    expect(APP).toContain('api.agent.listAgentProviders')
+    expect(APP).toContain('setAgentWorkspaceDefault')
+    expect(APP).toContain('agentProviderId')
+    expect(APP).toContain('agentSelectionFromThread')
+    expect(CHAT).toContain('AgentModelPicker')
+    expect(CHAT).toContain('agentProviderId: agentSelection.providerId')
+    expect(CHAT).toContain('agentModel: agentSelection.model')
+    expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection)')
+    expect(AGENT_CHAT_SIDEBAR).toContain('agentProviderId?: string | null')
+    expect(AGENT_MODEL_PICKER).toContain('Provider')
+    expect(AGENT_MODEL_PICKER).toContain('Reasoning')
+    expect(AGENT_MODEL_PICKER).toContain('Search models')
+    expect(AGENT_MODEL_PICKER).toContain('Default')
+    expect(AGENT_MODEL_PICKER).toContain('Recommended')
+    expect(AGENT_MODEL_PICKER).toContain('Set key')
+    expect(AGENT_MODEL_PICKER).not.toContain('<select')
+    expect(AGENT_MODEL_PICKER).not.toContain('>Rec<')
   })
 
   it('keeps the Agent stream pinned only while the user is already at the bottom', () => {

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  buildComposerMenuItems,
   composerTokenForRunnable,
   detectCommandFire,
   detectComposerTrigger,
@@ -68,6 +69,32 @@ describe('T3-style composer triggers', () => {
         commands,
       ),
     ).toBe('draft-invoice')
+  })
+
+  it('keeps slash commands discoverable in an empty workspace', () => {
+    const trigger = detectComposerTrigger('/', 1)
+    const rows = buildComposerMenuItems(trigger, [], [])
+    expect(rows.map((row) => row.label)).toContain('Review this workspace')
+    expect(rows.some((row) => row.kind === 'command')).toBe(true)
+  })
+
+  it('filters built-in and workspace composer menu rows by label, path, and description', () => {
+    const slashRows = buildComposerMenuItems(
+      detectComposerTrigger('/dash', '/dash'.length),
+      commands,
+      skills,
+    )
+    expect(slashRows.map((row) => row.label)).toEqual(['Create a dashboard'])
+
+    const skillRows = buildComposerMenuItems(
+      detectComposerTrigger('Use $team', 'Use $team'.length),
+      commands,
+      skills,
+    )
+    expect(skillRows.map((row) => row.path)).toEqual([
+      '.skills/team/standup.md',
+      '.skills/team/weekly-review.md',
+    ])
   })
 })
 

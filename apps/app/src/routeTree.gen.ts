@@ -140,9 +140,9 @@ export interface FileRoutesByFullPath {
   '/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/w/$wsId/': typeof AppWWsIdIndexRoute
-  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
+  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
 }
 export interface FileRoutesByTo {
   '/playground': typeof PlaygroundRoute
@@ -159,9 +159,9 @@ export interface FileRoutesByTo {
   '/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/w/$wsId': typeof AppWWsIdIndexRoute
-  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
+  '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -181,9 +181,9 @@ export interface FileRoutesById {
   '/_app/w/$wsId/graph': typeof AppWWsIdGraphRoute
   '/_app/w/$wsId/views': typeof AppWWsIdViewsRoute
   '/_app/w/$wsId/': typeof AppWWsIdIndexRoute
-  '/_app/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
   '/_app/w/$wsId/p/$atomId': typeof AppWWsIdPAtomIdRoute
   '/_app/w/$wsId/shared/$shareId': typeof AppWWsIdSharedShareIdRoute
+  '/_app/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -203,9 +203,9 @@ export interface FileRouteTypes {
     | '/w/$wsId/graph'
     | '/w/$wsId/views'
     | '/w/$wsId/'
-    | '/w/$wsId/v/$viewRef'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
+    | '/w/$wsId/v/$viewRef'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/playground'
@@ -222,9 +222,9 @@ export interface FileRouteTypes {
     | '/w/$wsId/graph'
     | '/w/$wsId/views'
     | '/w/$wsId'
-    | '/w/$wsId/v/$viewRef'
     | '/w/$wsId/p/$atomId'
     | '/w/$wsId/shared/$shareId'
+    | '/w/$wsId/v/$viewRef'
   id:
     | '__root__'
     | '/_app'
@@ -243,9 +243,9 @@ export interface FileRouteTypes {
     | '/_app/w/$wsId/graph'
     | '/_app/w/$wsId/views'
     | '/_app/w/$wsId/'
-    | '/_app/w/$wsId/v/$viewRef'
     | '/_app/w/$wsId/p/$atomId'
     | '/_app/w/$wsId/shared/$shareId'
+    | '/_app/w/$wsId/v/$viewRef'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -344,18 +344,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppWWsIdIndexRouteImport
       parentRoute: typeof AppWWsIdRoute
     }
-    '/_app/w/$wsId/graph': {
-      id: '/_app/w/$wsId/graph'
-      path: '/graph'
-      fullPath: '/w/$wsId/graph'
-      preLoaderRoute: typeof AppWWsIdGraphRouteImport
-      parentRoute: typeof AppWWsIdRoute
-    }
     '/_app/w/$wsId/views': {
       id: '/_app/w/$wsId/views'
       path: '/views'
       fullPath: '/w/$wsId/views'
       preLoaderRoute: typeof AppWWsIdViewsRouteImport
+      parentRoute: typeof AppWWsIdRoute
+    }
+    '/_app/w/$wsId/graph': {
+      id: '/_app/w/$wsId/graph'
+      path: '/graph'
+      fullPath: '/w/$wsId/graph'
+      preLoaderRoute: typeof AppWWsIdGraphRouteImport
       parentRoute: typeof AppWWsIdRoute
     }
     '/_app/w/$wsId/files': {
@@ -402,9 +402,9 @@ interface AppWWsIdRouteChildren {
   AppWWsIdGraphRoute: typeof AppWWsIdGraphRoute
   AppWWsIdViewsRoute: typeof AppWWsIdViewsRoute
   AppWWsIdIndexRoute: typeof AppWWsIdIndexRoute
-  AppWWsIdVViewRefRoute: typeof AppWWsIdVViewRefRoute
   AppWWsIdPAtomIdRoute: typeof AppWWsIdPAtomIdRoute
   AppWWsIdSharedShareIdRoute: typeof AppWWsIdSharedShareIdRoute
+  AppWWsIdVViewRefRoute: typeof AppWWsIdVViewRefRoute
 }
 
 const AppWWsIdRouteChildren: AppWWsIdRouteChildren = {
@@ -413,9 +413,9 @@ const AppWWsIdRouteChildren: AppWWsIdRouteChildren = {
   AppWWsIdGraphRoute: AppWWsIdGraphRoute,
   AppWWsIdViewsRoute: AppWWsIdViewsRoute,
   AppWWsIdIndexRoute: AppWWsIdIndexRoute,
-  AppWWsIdVViewRefRoute: AppWWsIdVViewRefRoute,
   AppWWsIdPAtomIdRoute: AppWWsIdPAtomIdRoute,
   AppWWsIdSharedShareIdRoute: AppWWsIdSharedShareIdRoute,
+  AppWWsIdVViewRefRoute: AppWWsIdVViewRefRoute,
 }
 
 const AppWWsIdRouteWithChildren = AppWWsIdRoute._addFileChildren(

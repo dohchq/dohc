@@ -1,12 +1,11 @@
 /**
- * Top-of-sidebar workspace switcher (org-plan §9 Phase D).
+ * Sidebar workspace switcher (org-plan §9 Phase D).
  *
- * Compact dropdown that sits between the brand header and the search
- * box at the top of the FileTree. Shows the active workspace's name;
- * clicking opens a list of "personal + every org I'm an active member
- * of" with a checkmark on the active one. Picking an entry calls
- * `setActiveWorkspaceId` and the rest of the app reactively re-queries
- * with the new workspaceId via `useActiveWorkspaceId()`.
+ * Compact footer control that shows the active workspace's name. Clicking
+ * opens a list of "personal + every org I'm an active member of" with a
+ * checkmark on the active one. Picking an entry calls `setActiveWorkspaceId`
+ * and the rest of the app reactively re-queries with the new workspaceId via
+ * `useActiveWorkspaceId()`.
  *
  * `api.orgs.myWorkspaces` is the single source of truth for the list
  * (personal first, then active orgs). The active entry is matched by
@@ -14,6 +13,7 @@
  * (undefined ⇒ personal entry).
  */
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Check,
   ChevronDown,
@@ -27,11 +27,42 @@ import { useActiveWorkspace } from '../lib/active-workspace'
 import { useChatBusy } from '../lib/chat-busy'
 import { WorkspaceManagementDialog } from './WorkspaceManagementDialog'
 
+const MENU_EDGE_GAP = 12
+const MENU_TRIGGER_GAP = 8
+
+type WorkspaceMenuFrame = {
+  left: number
+  bottom: number
+  width: number
+  maxHeight: number
+}
+
+function menuFrameForTrigger(
+  rect: DOMRect,
+  viewportWidth: number,
+  viewportHeight: number,
+): WorkspaceMenuFrame {
+  const availableWidth = Math.max(0, viewportWidth - MENU_EDGE_GAP * 2)
+  const preferredWidth = Math.max(196, rect.width)
+  const width = Math.min(preferredWidth, availableWidth)
+  const maxLeft = Math.max(MENU_EDGE_GAP, viewportWidth - width - MENU_EDGE_GAP)
+  const left = Math.round(Math.min(Math.max(MENU_EDGE_GAP, rect.left), maxLeft))
+  const availableAbove = Math.max(160, rect.top - MENU_EDGE_GAP - MENU_TRIGGER_GAP)
+
+  return {
+    left,
+    bottom: Math.round(viewportHeight - rect.top + MENU_TRIGGER_GAP),
+    width: Math.round(width),
+    maxHeight: Math.round(availableAbove),
+  }
+}
+
 export function WorkspaceSwitcher() {
   const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
   const workspaces = useQuery(api.orgs.myWorkspaces, {})
   const [open, setOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
+  const [menuFrame, setMenuFrame] = useState<WorkspaceMenuFrame | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
   // F1 — block the switcher while a chat stream is mid-flight. Without
@@ -41,23 +72,76 @@ export function WorkspaceSwitcher() {
   // tooltip; v2 (deferred) is the full abandon-confirm + AbortController.
   const chatBusy = useChatBusy()
 
-  // Click-outside to close. (The same pattern the New + menu in
-  // FileTree uses — fixed overlay catches the click.)
+  function updateMenuFrame() {
+    if (typeof window === 'undefined') return
+    const rect = buttonRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setMenuFrame(menuFrameForTrigger(rect, window.innerWidth, window.innerHeight))
+  }
+
+  // Click-outside to close. The menu is portalled so it can escape the
+  // sidebar's overflow clipping while still behaving like a local popover.
   useEffect(() => {
     if (!open) return
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node
+    const onDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      const path =
+        typeof event.composedPath === 'function' ? event.composedPath() : []
       if (
-        popoverRef.current &&
-        !popoverRef.current.contains(t) &&
-        buttonRef.current &&
-        !buttonRef.current.contains(t)
+        !(
+          popoverRef.current &&
+          (popoverRef.current.contains(target) || path.includes(popoverRef.current))
+        ) &&
+        !(
+          buttonRef.current &&
+          (buttonRef.current.contains(target) || path.includes(buttonRef.current))
+        )
       ) {
         setOpen(false)
       }
     }
-    window.addEventListener('mousedown', onDown)
-    return () => window.removeEventListener('mousedown', onDown)
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [open])
+
+  useEffect(() => {
+    if (!open || typeof window === 'undefined') return
+    updateMenuFrame()
+    window.addEventListener('resize', updateMenuFrame)
+    window.addEventListener('scroll', updateMenuFrame, true)
+    return () => {
+      window.removeEventListener('resize', updateMenuFrame)
+      window.removeEventListener('scroll', updateMenuFrame, true)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return
+
+    const focusTarget =
+      popoverRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ) ?? popoverRef.current
+    focusTarget?.focus()
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setOpen(false)
+      buttonRef.current?.focus()
+    }
+
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+      if (
+        document.activeElement instanceof Node &&
+        popoverRef.current?.contains(document.activeElement)
+      ) {
+        buttonRef.current?.focus()
+      }
+    }
   }, [open])
 
   // Self-heal: if the persisted activeWorkspaceId points at an org the
@@ -77,7 +161,7 @@ export function WorkspaceSwitcher() {
   if (workspaces === undefined) {
     return (
       <div
-        className="mx-3 mt-1 mb-2 h-7 rounded-md border border-rule/60 bg-transparent"
+        className="mx-3 mb-1 h-8 rounded-md bg-hover/40"
         aria-hidden
       />
     )
@@ -90,14 +174,91 @@ export function WorkspaceSwitcher() {
       ? workspaces[0]
       : known ?? workspaces[0]
 
+  const menu =
+    open && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            ref={popoverRef}
+            role="listbox"
+            aria-label="workspaces"
+            tabIndex={-1}
+            className="fixed z-50 overflow-y-auto rounded-xl border border-rule-strong bg-elevated p-1 shadow-modal"
+            style={{
+              left: menuFrame?.left ?? MENU_EDGE_GAP,
+              bottom: menuFrame?.bottom ?? 72,
+              width: menuFrame?.width ?? 220,
+              maxHeight: menuFrame?.maxHeight ?? 320,
+            }}
+          >
+            {workspaces.map((w) => {
+              const isActive = w.workspaceId === active?.workspaceId
+              return (
+                <button
+                  key={w.workspaceId}
+                  type="button"
+                  role="option"
+                  aria-selected={isActive}
+                  onClick={() => {
+                    // Personal entry ⇒ undefined (the back-compat path).
+                    setActiveWorkspaceId(
+                      w.kind === 'personal' ? undefined : w.workspaceId,
+                    )
+                    setOpen(false)
+                  }}
+                  className={`flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] transition-colors ${
+                    isActive
+                      ? 'bg-hover text-ink-strong'
+                      : 'text-ink-dim hover:bg-hover hover:text-ink'
+                  }`}
+                >
+                  {w.kind === 'org' ? (
+                    <Building2 className="size-3.5 shrink-0 text-ink-dim" strokeWidth={2} />
+                  ) : (
+                    <UserIcon className="size-3.5 shrink-0 text-ink-dim" strokeWidth={2} />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-medium">{w.name}</span>
+                  {w.role === 'owner' && (
+                    <span className="rounded-md border border-rule bg-panel px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-ink-faint">
+                      owner
+                    </span>
+                  )}
+                  {isActive && (
+                    <Check
+                      className="size-3.5 shrink-0 text-accent"
+                      strokeWidth={2.5}
+                    />
+                  )}
+                </button>
+              )
+            })}
+            <div className="my-1 h-px bg-rule/60" />
+            <button
+              type="button"
+              className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+              onClick={() => {
+                setManageOpen(true)
+                setOpen(false)
+              }}
+            >
+              <Settings className="size-3.5 shrink-0" strokeWidth={2} />
+              <span className="truncate">Manage workspaces</span>
+            </button>
+          </div>,
+          document.body,
+        )
+      : null
+
   return (
-    <div className="relative mx-3 mt-1 mb-2">
+    <div className="mx-3 mb-1">
       <button
         ref={buttonRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          updateMenuFrame()
+          setOpen((v) => !v)
+        }}
         disabled={chatBusy}
-        className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12.5px] text-ink hover:bg-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+        className="group flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px] font-medium text-ink-dim transition-[background,color] hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-disabled={chatBusy}
@@ -108,79 +269,21 @@ export function WorkspaceSwitcher() {
         }
       >
         {active?.kind === 'org' ? (
-          <Building2 className="size-3.5 shrink-0 text-ink-dim" strokeWidth={2} />
+          <Building2 className="size-3.5 shrink-0 text-ink-faint transition-colors group-hover:text-ink-dim" strokeWidth={2} />
         ) : (
-          <UserIcon className="size-3.5 shrink-0 text-ink-dim" strokeWidth={2} />
+          <UserIcon className="size-3.5 shrink-0 text-ink-faint transition-colors group-hover:text-ink-dim" strokeWidth={2} />
         )}
-        <span className="truncate">{active?.name ?? 'Personal'}</span>
+        <span className="min-w-0 flex-1 truncate text-ink-dim transition-colors group-hover:text-ink">
+          {active?.name ?? 'Personal'}
+        </span>
         <ChevronDown
-          className="ml-auto size-3.5 shrink-0 text-ink-faint group-hover:text-ink-dim transition-colors"
+          className={`size-3.5 shrink-0 text-ink-faint transition-[color,transform] group-hover:text-ink-dim ${
+            open ? 'rotate-180' : ''
+          }`}
           strokeWidth={2}
         />
       </button>
-
-      {open && (
-        <div
-          ref={popoverRef}
-          role="listbox"
-          aria-label="workspaces"
-          className="absolute left-0 right-0 top-9 z-40 rounded-lg border border-rule bg-elevated shadow-md py-1"
-        >
-          {workspaces.map((w) => {
-            const isActive =
-              w.workspaceId === active?.workspaceId
-            return (
-              <button
-                key={w.workspaceId}
-                type="button"
-                role="option"
-                aria-selected={isActive}
-                onClick={() => {
-                  // Personal entry ⇒ undefined (the back-compat path).
-                  setActiveWorkspaceId(
-                    w.kind === 'personal' ? undefined : w.workspaceId,
-                  )
-                  setOpen(false)
-                }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover transition-colors"
-              >
-                {w.kind === 'org' ? (
-                  <Building2 className="size-3.5 text-ink-dim" strokeWidth={2} />
-                ) : (
-                  <UserIcon className="size-3.5 text-ink-dim" strokeWidth={2} />
-                )}
-                <span className="truncate">{w.name}</span>
-                {w.role === 'owner' && (
-                  <span className="ml-1 rounded bg-hover px-1 py-px text-[9px] uppercase tracking-wider text-ink-faint">
-                    owner
-                  </span>
-                )}
-                {isActive && (
-                  <Check
-                    className="ml-auto size-3.5 text-accent"
-                    strokeWidth={2.5}
-                  />
-                )}
-              </button>
-            )
-          })}
-          {/* Separator + the single management affordance. The dialog
-              renders the create-org form at the top of its body, so a
-              dedicated "Create workspace" entry is redundant. */}
-          <div className="my-1 h-px bg-rule/60" />
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink-dim hover:bg-hover transition-colors"
-            onClick={() => {
-              setManageOpen(true)
-              setOpen(false)
-            }}
-          >
-            <Settings className="size-3.5" strokeWidth={2} />
-            <span>Manage workspaces</span>
-          </button>
-        </div>
-      )}
+      {menu}
 
       <WorkspaceManagementDialog
         open={manageOpen}
