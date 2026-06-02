@@ -1,8 +1,22 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import React, { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { agentSelectionToConvexArgs } from '../components/AgentModelPicker'
+import {
+  AgentChatSidebar,
+  type AgentThreadSummary,
+} from '../components/AgentChatSidebar'
+
+vi.mock('../components/WorkspaceSwitcher', () => ({
+  WorkspaceSwitcher: () => null,
+}))
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const read = (path: string) =>
@@ -15,6 +29,51 @@ const AGENT_CHAT_SIDEBAR = read('components/AgentChatSidebar.tsx')
 const AGENT_RUN_RAIL = read('components/AgentRunRail.tsx')
 const AGENT_MODEL_PICKER = read('components/AgentModelPicker.tsx')
 const AGENT_ACCESS = read('lib/agentAccess.ts')
+
+const pinnedThread: AgentThreadSummary = {
+  threadId: 'thread_1',
+  projectPath: null,
+  title: 'Pinned plan',
+  createdAt: Date.now() - 120_000,
+  updatedAt: Date.now() - 60_000,
+  pinnedAt: Date.now() - 30_000,
+}
+
+function renderAgentSidebar(
+  overrides: Partial<React.ComponentProps<typeof AgentChatSidebar>> = {},
+) {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const root: Root = createRoot(container)
+  const props: React.ComponentProps<typeof AgentChatSidebar> = {
+    files: [],
+    folders: [],
+    threads: [pinnedThread],
+    activeThreadId: pinnedThread.threadId,
+    activeProjectPath: null,
+    onSelectThread: vi.fn(),
+    onNewThread: vi.fn(),
+    onCreateProject: vi.fn(),
+    onTogglePinned: vi.fn(),
+    onDeleteThread: vi.fn(),
+    onRenameThread: vi.fn(),
+    onRenameProject: vi.fn(),
+    onOpenSearch: vi.fn(),
+    user: { email: 'ice@example.com', firstName: 'Ice' },
+    ...overrides,
+  }
+  act(() => {
+    root.render(React.createElement(AgentChatSidebar, props))
+  })
+  return { container, props, root }
+}
+
+function cleanupRendered(container: HTMLElement, root: Root) {
+  act(() => {
+    root.unmount()
+  })
+  container.remove()
+}
 
 describe('Agent / Files shell mode', () => {
   it('adds Agent as a first-class primary activity alongside Files and Graph', () => {
@@ -47,7 +106,7 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).toContain('What should we build in dohc?')
   })
 
-  it('adds Codex-style project chat history beside the Agent workspace', () => {
+  it('adds dohc-style project chat history beside the Agent workspace', () => {
     expect(AGENT_CHAT_SIDEBAR).toContain('Projects')
     expect(AGENT_CHAT_SIDEBAR).toContain('Chats')
     expect(AGENT_CHAT_SIDEBAR).toContain('New chat')
@@ -58,19 +117,30 @@ describe('Agent / Files shell mode', () => {
   })
 
   it('does not show a duplicate pinned icon when row actions are visible', () => {
-    expect(AGENT_CHAT_SIDEBAR).toContain(
-      'text-accent group-hover/thread:hidden group-focus-within/thread:hidden',
-    )
-    expect(AGENT_CHAT_SIDEBAR).toContain(
-      "title={thread.pinnedAt === null ? 'Pin chat' : 'Unpin chat'}",
-    )
+    const { container, root } = renderAgentSidebar()
+    try {
+      expect(container.textContent).toContain('Pinned plan')
+      expect(container.querySelectorAll('button[title="Unpin chat"]')).toHaveLength(1)
+    } finally {
+      cleanupRendered(container, root)
+    }
   })
 
   it('makes the full chat row clickable, not only the chat title text', () => {
-    expect(AGENT_CHAT_SIDEBAR).toContain('aria-label={`Open chat ${thread.title}`}')
-    expect(AGENT_CHAT_SIDEBAR).toContain('absolute inset-0 rounded-md')
-    expect(AGENT_CHAT_SIDEBAR).toContain('pointer-events-none relative z-[1]')
-    expect(AGENT_CHAT_SIDEBAR).toContain('relative z-10 ml-auto')
+    const onSelectThread = vi.fn()
+    const { container, root } = renderAgentSidebar({ onSelectThread })
+    try {
+      const openButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open chat Pinned plan"]',
+      )
+      expect(openButton).not.toBeNull()
+      act(() => {
+        openButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      expect(onSelectThread).toHaveBeenCalledWith(pinnedThread)
+    } finally {
+      cleanupRendered(container, root)
+    }
   })
 
   it('keeps new chats as drafts until the first message chooses an environment', () => {
@@ -163,7 +233,7 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).not.toContain('ToolCallStrip')
   })
 
-  it('uses T3-style composer triggers for commands and skills', () => {
+  it('uses slash and dollar composer triggers for commands and skills', () => {
     expect(CHAT).toContain('detectComposerTrigger')
     expect(CHAT).toContain('replaceTextRange')
     expect(CHAT).toContain('SKILL_TOKEN_RE')

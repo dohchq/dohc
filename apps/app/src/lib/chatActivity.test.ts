@@ -7,7 +7,7 @@ import {
 } from './chatActivity'
 
 describe('chat activity presentation', () => {
-  it('formats Codex-style worked duration labels', () => {
+  it('formats agent worked duration labels', () => {
     expect(formatWorkedDuration(800)).toBe('<1s')
     expect(formatWorkedDuration(15_000)).toBe('15s')
     expect(formatWorkedDuration(75_000)).toBe('1m 15s')

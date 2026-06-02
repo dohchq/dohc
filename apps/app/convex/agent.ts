@@ -216,7 +216,7 @@ export function pathDeriveLabel(path: string): string {
 }
 
 const SEMANTIC_WRITE_BACKEND_OFFLINE = 'write-backend-offline'
-const SEMANTIC_BACKEND_FETCH_TIMEOUT_MS = 5_000
+const DEFAULT_HOCUSPOCUS_FETCH_TIMEOUT_MS = 5_000
 
 type HocuspocusSemanticEnv = { url: string; token: string }
 
@@ -236,30 +236,30 @@ function hocuspocusSemanticEnv(): HocuspocusSemanticEnv | null {
   return { url, token }
 }
 
-async function fetchSemanticBackend(
-  input: string | URL,
+function hocuspocusFetchTimeoutMs(): number {
+  const value = Number(process.env.HOCUSPOCUS_ADMIN_TIMEOUT_MS)
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_HOCUSPOCUS_FETCH_TIMEOUT_MS
+}
+
+async function fetchHocuspocusAdmin(
+  url: string,
   init: RequestInit,
 ): Promise<Response> {
+  const timeoutMs = hocuspocusFetchTimeoutMs()
   const controller = new AbortController()
-  const timeout = setTimeout(
-    () => controller.abort(),
-    SEMANTIC_BACKEND_FETCH_TIMEOUT_MS,
-  )
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(input, { ...init, signal: controller.signal })
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Hocuspocus request timed out after ${timeoutMs}ms.`)
+    }
+    throw error
   } finally {
     clearTimeout(timeout)
   }
-}
-
-function semanticBackendErrorDetail(error: unknown): string {
-  if (
-    error instanceof Error &&
-    (error.name === 'AbortError' || /abort/i.test(error.message))
-  ) {
-    return 'Hocuspocus semantic write backend timed out.'
-  }
-  return error instanceof Error ? error.message : 'Hocuspocus is unreachable.'
 }
 
 export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendStatus> {
@@ -275,7 +275,7 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
 
   const url = new URL('/apply/preflight', env.url).toString()
   try {
-    const response = await fetchSemanticBackend(url, {
+    const response = await fetchHocuspocusAdmin(url, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${env.token}`,
@@ -309,7 +309,8 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
     return {
       ok: false,
       reason: 'unreachable',
-      detail: semanticBackendErrorDetail(error),
+      detail:
+        error instanceof Error ? error.message : 'Hocuspocus is unreachable.',
     }
   }
 }
@@ -372,7 +373,7 @@ async function callSemanticApply(
 
   let response: Response
   try {
-    response = await fetchSemanticBackend(
+    response = await fetchHocuspocusAdmin(
       new URL(`/apply/${route}`, env.url).toString(),
       {
         method: 'POST',
@@ -431,7 +432,7 @@ async function createAnchorsForTextFromHocuspocus(
 
   let response: Response
   try {
-    response = await fetchSemanticBackend(
+    response = await fetchHocuspocusAdmin(
       new URL('/apply/createAnchorsForText', env.url).toString(),
       {
         method: 'POST',
@@ -3186,6 +3187,33 @@ export const _setThreadAgentSelection = internalMutation({
       })
     }
     return selection
+  },
+})
+
+export const _resolveAgentAccessModeForThread = internalQuery({
+  args: {
+    workspaceId: v.string(),
+    threadId: v.string(),
+    ...agentAccessArgs,
+  },
+  handler: async (ctx, { workspaceId, threadId, agentAccessMode }) => {
+    const rows = await threadRefRowsForWorkspaceThread(
+      ctx,
+      workspaceId,
+      threadId,
+    )
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    const threadRow = rows.sort(
+      (a: any, b: any) =>
+        (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
+    )[0]
+    return normalizeAgentAccessMode(
+      agentAccessMode !== undefined
+        ? agentAccessMode
+        : threadRow.agentAccessMode,
+    )
   },
 })
 

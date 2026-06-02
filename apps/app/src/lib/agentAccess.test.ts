@@ -7,7 +7,7 @@ import {
 } from './agentAccess'
 
 describe('agent chat access modes', () => {
-  it('matches the Codex-style access menu labels', () => {
+  it('matches the dohc-first access menu labels', () => {
     expect(DEFAULT_AGENT_ACCESS_MODE).toBe('default')
     expect(AGENT_ACCESS_MODE_OPTIONS.map((option) => option.value)).toEqual([
       'default',

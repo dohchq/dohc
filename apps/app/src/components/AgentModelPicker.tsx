@@ -67,6 +67,8 @@ const REASONING_LABELS: Record<AgentReasoningEffort, string> = {
 const POPOVER_EDGE_GAP = 14
 const POPOVER_TRIGGER_GAP = 10
 const POPOVER_MAX_WIDTH = 560
+const POPOVER_FOCUSABLE_SELECTOR =
+  'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
 type PopoverFrame = {
   left: number
@@ -192,6 +194,8 @@ export function AgentModelPicker({
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const [focusedModelId, setFocusedModelId] = useState<string | null>(null)
+  const savedFocusRef = useRef<HTMLElement | null>(null)
+  const restoreFocusOnCloseRef = useRef(false)
   const provider = selectedProvider(providers, selection)
   const selectedModel = provider?.models.find((m) => m.id === selection?.model)
   const [focusedProviderId, setFocusedProviderId] = useState<string | null>(null)
@@ -235,9 +239,11 @@ export function AgentModelPicker({
   function togglePicker() {
     if (!canChoose) return
     if (open) {
+      restoreFocusOnCloseRef.current = true
       setOpen(false)
       return
     }
+    setFocusedProviderId(provider?.providerId ?? providers[0]?.providerId ?? null)
     updatePopoverFrame()
     setOpen(true)
   }
@@ -260,38 +266,22 @@ export function AgentModelPicker({
 
   useEffect(() => {
     if (!open || typeof document === 'undefined') return
+    savedFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : triggerRef.current
 
-    const focusTarget =
-      popoverRef.current?.querySelector<HTMLElement>(
-        'input[placeholder="Search models"]',
-      ) ??
-      popoverRef.current?.querySelector<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      ) ??
-      popoverRef.current
-    focusTarget?.focus()
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setOpen(false)
-      triggerRef.current?.focus()
+    function focusableElements() {
+      return Array.from(
+        popoverRef.current?.querySelectorAll<HTMLElement>(
+          POPOVER_FOCUSABLE_SELECTOR,
+        ) ?? [],
+      ).filter((element) => !element.hasAttribute('disabled'))
     }
 
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => {
-      document.removeEventListener('keydown', onKeyDown, true)
-      if (
-        document.activeElement instanceof Node &&
-        popoverRef.current?.contains(document.activeElement)
-      ) {
-        triggerRef.current?.focus()
-      }
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!open || typeof document === 'undefined') return
+    const focusFrame = window.requestAnimationFrame(() => {
+      focusableElements()[0]?.focus()
+    })
 
     function closeFromOutsidePointer(event: PointerEvent) {
       const target = event.target
@@ -305,12 +295,46 @@ export function AgentModelPicker({
         popoverRef.current &&
         (popoverRef.current.contains(target) || path.includes(popoverRef.current))
 
-      if (!insideTrigger && !insidePopover) setOpen(false)
+      if (!insideTrigger && !insidePopover) {
+        restoreFocusOnCloseRef.current = false
+        setOpen(false)
+      }
+    }
+
+    function closeFromKeyboard(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        restoreFocusOnCloseRef.current = true
+        setOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      if (focusable.length < 1) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
 
     document.addEventListener('pointerdown', closeFromOutsidePointer, true)
+    document.addEventListener('keydown', closeFromKeyboard)
     return () => {
+      window.cancelAnimationFrame(focusFrame)
       document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
+      document.removeEventListener('keydown', closeFromKeyboard)
+      if (restoreFocusOnCloseRef.current) {
+        const restoreTarget = triggerRef.current ?? savedFocusRef.current
+        restoreTarget?.focus()
+      }
+      restoreFocusOnCloseRef.current = false
+      savedFocusRef.current = null
     }
   }, [open])
 
@@ -370,11 +394,12 @@ export function AgentModelPicker({
   function onPopoverKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (event.key === 'Escape') {
       event.preventDefault()
+      restoreFocusOnCloseRef.current = true
       setOpen(false)
-      triggerRef.current?.focus()
       return
     }
     if (event.key === 'Tab') {
+      restoreFocusOnCloseRef.current = true
       setOpen(false)
       return
     }
@@ -426,22 +451,25 @@ export function AgentModelPicker({
         typeof document !== 'undefined' &&
         createPortal(
           <>
-          <div
-            className="fixed inset-0 z-30"
-            onClick={() => setOpen(false)}
-          />
-          <div
-            ref={popoverRef}
-            onKeyDown={onPopoverKeyDown}
-            className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
-            style={{
-              left: popoverFrame?.left ?? 14,
-              width: popoverFrame?.width ?? 560,
-              ...(popoverFrame?.placement === 'below'
-                ? { top: popoverFrame.top ?? 72 }
-                : { bottom: popoverFrame?.bottom ?? 72 }),
-            }}
-          >
+            <div
+              className="fixed inset-0 z-30"
+              onClick={() => {
+                restoreFocusOnCloseRef.current = false
+                setOpen(false)
+              }}
+            />
+            <div
+              ref={popoverRef}
+              onKeyDown={onPopoverKeyDown}
+              className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
+              style={{
+                left: popoverFrame?.left ?? 14,
+                width: popoverFrame?.width ?? 560,
+                ...(popoverFrame?.placement === 'below'
+                  ? { top: popoverFrame.top ?? 72 }
+                  : { bottom: popoverFrame?.bottom ?? 72 }),
+              }}
+            >
             <div className="border-r border-rule bg-panel/60 p-2">
               <div className="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
                 Provider

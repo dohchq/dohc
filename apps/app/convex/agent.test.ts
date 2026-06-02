@@ -176,6 +176,43 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/thread does not belong to this workspace/)
   })
 
+  it('_resolveAgentAccessModeForThread preserves stored mode unless request overrides it', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-access',
+        agentAccessMode: 'auto-review',
+        updatedAt: 10,
+      })
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-default',
+        updatedAt: 20,
+      })
+    })
+
+    await expect(
+      t.query(internal.agent._resolveAgentAccessModeForThread, {
+        workspaceId: A,
+        threadId: 't-access',
+      }),
+    ).resolves.toBe('auto-review')
+    await expect(
+      t.query(internal.agent._resolveAgentAccessModeForThread, {
+        workspaceId: A,
+        threadId: 't-access',
+        agentAccessMode: 'full-access',
+      }),
+    ).resolves.toBe('full-access')
+    await expect(
+      t.query(internal.agent._resolveAgentAccessModeForThread, {
+        workspaceId: A,
+        threadId: 't-default',
+      }),
+    ).resolves.toBe('default')
+  })
+
   it('setAgentWorkspaceDefault validates and stores the workspace default model', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-test')
     const t = convexTest(schema, modules)

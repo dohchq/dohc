@@ -74,15 +74,19 @@ function convexEnv(command, args, options = {}) {
   )
 }
 
-function ensureConvexEnvValue(name, value, label, options = {}) {
-  const convexEnvFn = options.convexEnv ?? convexEnv
+export function ensureConvexEnvValue(name, value, label, runConvexEnv = convexEnv) {
+  const convexEnvFn = runConvexEnv
   const current = convexEnvFn('get', [name])
   const output = `${current.stdout ?? ''}${current.stderr ?? ''}`
   const currentValue = (current.stdout ?? '').trim()
   if (current.status === 0 && currentValue === value) return
 
-  if (current.status === 0 && currentValue && !output.includes('not found')) {
-    console.log(`Updating Convex dev ${name} to match local Hocuspocus`)
+  if (current.status === 0 && !output.includes('not found')) {
+    console.log(
+      currentValue
+        ? `Updating Convex dev ${name} to match local Hocuspocus`
+        : `Setting Convex dev ${name} for local ${label}`,
+    )
   } else if (output.includes('not found')) {
     console.log(`Setting Convex dev ${name} for local ${label}`)
   } else {
@@ -102,26 +106,26 @@ function ensureConvexEnvValue(name, value, label, options = {}) {
 
 export function ensureConvexHocuspocusEnv(options = {}) {
   const env = options.env ?? process.env
-  const convexEnvFn = options.convexEnv ?? convexEnv
+  const convexEnvFn = options.runConvexEnv ?? options.convexEnv ?? convexEnv
   if (env.DOHC_SKIP_CONVEX_ENV_SYNC) return
 
   ensureConvexEnvValue(
     'HOCUSPOCUS_JWT_SECRET',
     devJwtSecret(env),
     'collaboration token minting',
-    { convexEnv: convexEnvFn },
+    convexEnvFn,
   )
   ensureConvexEnvValue(
     'HOCUSPOCUS_ADMIN_URL',
     devAdminUrl(env),
     'agent semantic writes',
-    { convexEnv: convexEnvFn },
+    convexEnvFn,
   )
   ensureConvexEnvValue(
     'HOCUSPOCUS_ADMIN_TOKEN',
     devAdminToken(env),
     'agent semantic writes',
-    { convexEnv: convexEnvFn },
+    convexEnvFn,
   )
 }
 

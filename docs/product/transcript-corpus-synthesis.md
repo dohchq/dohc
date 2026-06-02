@@ -1,3 +1,8 @@
+---
+id: transcript-corpus-synthesis
+title: dohc transcript corpus synthesis
+---
+
 # dohc transcript corpus synthesis
 
 This document compacts the notes, videos, tweets, and discussion around

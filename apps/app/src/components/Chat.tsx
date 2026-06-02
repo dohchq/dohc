@@ -54,7 +54,7 @@ import {
   type ToolActivityPart,
 } from '../lib/chatActivity'
 
-// T3-style composer grammar:
+// Composer grammar:
 //   /command  => saved slash command, only at the start of the line
 //   $skill    => saved skill, inline in the prompt
 // Selecting from the composer menu inserts the token; it does not
@@ -1397,6 +1397,8 @@ function ComposerStatusStrip({
 const ACCESS_POPOVER_WIDTH = 264
 const ACCESS_POPOVER_EDGE_GAP = 12
 const ACCESS_POPOVER_TRIGGER_GAP = 8
+const ACCESS_FOCUSABLE_SELECTOR =
+  'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
 const AGENT_ACCESS_ICONS: Record<AgentAccessMode, IconComponent> = {
   default: Hand,
@@ -1445,7 +1447,7 @@ function accessPopoverFrameForTrigger(
   }
 }
 
-function AgentAccessPicker({
+export function AgentAccessPicker({
   accessMode,
   disabled,
   onChange,
@@ -1458,6 +1460,7 @@ function AgentAccessPicker({
   const [frame, setFrame] = useState<AccessPopoverFrame | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
+  const savedFocusRef = useRef<HTMLElement | null>(null)
   const selected =
     AGENT_ACCESS_MODE_OPTIONS.find((option) => option.value === accessMode) ??
     AGENT_ACCESS_MODE_OPTIONS.find(
@@ -1501,6 +1504,22 @@ function AgentAccessPicker({
 
   useEffect(() => {
     if (!open || typeof document === 'undefined') return
+    savedFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : triggerRef.current
+
+    function focusableElements() {
+      return Array.from(
+        popoverRef.current?.querySelectorAll<HTMLElement>(
+          ACCESS_FOCUSABLE_SELECTOR,
+        ) ?? [],
+      ).filter((element) => !element.hasAttribute('disabled'))
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      focusableElements()[0]?.focus()
+    })
 
     function closeFromOutsidePointer(event: PointerEvent) {
       const target = event.target
@@ -1517,9 +1536,36 @@ function AgentAccessPicker({
       if (!insideTrigger && !insidePopover) setOpen(false)
     }
 
+    function closeFromKeyboard(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      if (focusable.length < 1) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
     document.addEventListener('pointerdown', closeFromOutsidePointer, true)
+    document.addEventListener('keydown', closeFromKeyboard)
     return () => {
+      window.cancelAnimationFrame(focusFrame)
       document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
+      document.removeEventListener('keydown', closeFromKeyboard)
+      const restoreTarget = triggerRef.current ?? savedFocusRef.current
+      restoreTarget?.focus()
+      savedFocusRef.current = null
     }
   }, [open])
 

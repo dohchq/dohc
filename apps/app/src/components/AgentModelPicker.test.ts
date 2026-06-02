@@ -76,10 +76,22 @@ async function pointerDown(element: Element | null) {
   })
 }
 
-async function keyDown(element: Element | null, key: string) {
-  expect(element).not.toBeNull()
+async function keyDown(elementOrKey: Element | string | null, key?: string) {
+  const target =
+    typeof elementOrKey === 'string' ? document : elementOrKey
+  const keyName = typeof elementOrKey === 'string' ? elementOrKey : (key ?? '')
+  expect(target).not.toBeNull()
+  expect(keyName).toBeTruthy()
   await act(async () => {
-    element!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    target!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: keyName, bubbles: true }),
+    )
+  })
+}
+
+async function flushAnimationFrame() {
+  await act(async () => {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
   })
 }
 
@@ -265,6 +277,39 @@ describe('AgentModelPicker', () => {
     expect(
       document.body.querySelector('input[placeholder="Search models"]'),
     ).not.toBeNull()
+  })
+
+  it('moves focus into the picker and returns it to the trigger on Escape', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AgentModelPicker, {
+          providers,
+          selection: {
+            providerId: 'openai',
+            model: 'gpt-5.5',
+            reasoningEffort: 'xhigh',
+          },
+          onChange: vi.fn(),
+        }),
+      )
+    })
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Choose model"]',
+    )
+    trigger?.focus()
+
+    await click(trigger)
+    await flushAnimationFrame()
+
+    expect(document.activeElement).toBe(findButtonByText('OpenAI'))
+
+    await keyDown('Escape')
+
+    expect(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    ).toBeNull()
+    expect(document.activeElement).toBe(trigger)
   })
 
   it('anchors the picker frame to the model trigger instead of centering it on the viewport', async () => {

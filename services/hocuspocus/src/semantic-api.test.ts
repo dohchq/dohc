@@ -81,8 +81,8 @@ describe('semantic apply API', () => {
     expect(acl.createAtom).not.toHaveBeenCalled()
   })
 
-  it('rejects preflight requests without the admin token', async () => {
-    const { handler } = makeHandler()
+  it('rejects semantic write preflight without the admin token', async () => {
+    const { acl, handler } = makeHandler()
 
     const response = await handler(
       new Request('http://localhost/apply/preflight', {
@@ -92,6 +92,12 @@ describe('semantic apply API', () => {
     )
 
     expect(response.status).toBe(401)
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: 'unauthorized',
+    })
+    expect(acl.canWriteAtom).not.toHaveBeenCalled()
+    expect(acl.createAtom).not.toHaveBeenCalled()
   })
 
   it('rejects semantic writes without the admin token', async () => {

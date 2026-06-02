@@ -73,6 +73,10 @@ export function WorkspaceSwitcher() {
   // tooltip; v2 (deferred) is the full abandon-confirm + AbortController.
   const chatBusy = useChatBusy()
 
+  useEffect(() => {
+    if (chatBusy) setOpen(false)
+  }, [chatBusy])
+
   function updateMenuFrame() {
     if (typeof window === 'undefined') return
     const rect = buttonRef.current?.getBoundingClientRect()
@@ -193,14 +197,17 @@ export function WorkspaceSwitcher() {
                   type="button"
                   role="option"
                   aria-selected={isActive}
+                  disabled={chatBusy}
+                  aria-disabled={chatBusy}
                   onClick={() => {
+                    if (chatBusy) return
                     // Personal entry ⇒ undefined (the back-compat path).
                     setActiveWorkspaceId(
                       w.kind === 'personal' ? undefined : w.workspaceId,
                     )
                     setOpen(false)
                   }}
-                  className={`flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] transition-colors ${
+                  className={`flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent ${
                     isActive
                       ? 'bg-hover text-ink-strong'
                       : 'text-ink-dim hover:bg-hover hover:text-ink'
@@ -229,8 +236,11 @@ export function WorkspaceSwitcher() {
             <div className="my-1 h-px bg-rule/60" />
             <button
               type="button"
-              className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink"
+              disabled={chatBusy}
+              aria-disabled={chatBusy}
+              className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] font-medium text-ink-dim transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
               onClick={() => {
+                if (chatBusy) return
                 setManageOpen(true)
                 setOpen(false)
               }}

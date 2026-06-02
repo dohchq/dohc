@@ -743,7 +743,19 @@ function App() {
         ...(accessMode ? { agentAccessMode: accessMode } : {}),
       })
       if (chosenSelection) setAgentSelectionOverride(chosenSelection)
-      setSelectedAgentThreadSnapshot(null)
+      const now = Date.now()
+      setSelectedAgentThreadSnapshot({
+        threadId: id as string,
+        projectPath,
+        title: 'New chat',
+        createdAt: now,
+        updatedAt: now,
+        pinnedAt: null,
+        agentProviderId: chosenSelection?.providerId ?? null,
+        agentModel: chosenSelection?.model ?? null,
+        agentReasoningEffort: chosenSelection?.reasoningEffort ?? null,
+        agentAccessMode: accessMode ?? null,
+      })
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)

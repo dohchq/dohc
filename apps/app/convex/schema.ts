@@ -320,7 +320,7 @@ export default defineSchema({
   // Agent chat history. A row binds an Agent component thread to a
   // workspace, optionally scoped to a top-level project folder. The
   // threadId stays the durable ownership handle; title/updatedAt power
-  // the Codex-style chat history rail.
+  // the dohc chat history rail.
   threadRefs: defineTable({
     workspaceId: v.string(),
     threadId: v.string(),
