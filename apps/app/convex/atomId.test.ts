@@ -16,6 +16,7 @@ import {
   formulaConcreteFileId,
   injectFrontmatterTitle,
   extractLeadingH1,
+  deriveTitle,
 } from './atomId'
 
 // atom-address-v1 Track-1 Phase-1 exit criteria (a) + (b1).
@@ -417,6 +418,24 @@ describe('isNonDataAtom — folder-local view source classification', () => {
 
   it('does not classify ordinary folders named views as non-data', () => {
     expect(isNonDataAtom('clients/acme/views/overview.md', '{billable: 4}')).toBe(false)
+  })
+})
+
+describe('deriveTitle — source code files use their filenames', () => {
+  it('does not derive source-code titles from body text or source frontmatter', () => {
+    expect(
+      deriveTitle(
+        '---\nid: views.workspace.src.app\ntitle: Import React\n---\nimport React from "react"',
+        '.views/workspace/src/App.tsx',
+      ),
+    ).toBeNull()
+    expect(
+      deriveTitle(
+        '---\nid: views.workspace.src.styles\n---\n:root { color: red; }',
+        '.views/workspace/src/styles.css',
+      ),
+    ).toBeNull()
+    expect(deriveTitle('# Plan', 'notes/plan.md')).toBe('Plan')
   })
 })
 

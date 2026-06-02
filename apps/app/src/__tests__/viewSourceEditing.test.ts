@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   isSourceFirstPath,
   shouldRenderHtmlAtomFrame,
   viewPackageRootForSourcePath,
 } from '../lib/viewSourceBehavior'
+
+const ATOM_VIEW_SRC = readFileSync(
+  resolve(__dirname, '../components/AtomView.tsx'),
+  'utf8',
+)
 
 describe('view source editing contracts', () => {
   it('opens .views source atoms in source mode by default', () => {
@@ -30,5 +37,10 @@ describe('view source editing contracts', () => {
       'clients/acme/.views/overview/src/App.tsx',
     )).toBe('clients/acme/.views/overview')
     expect(viewPackageRootForSourcePath('clients/acme/tasks.md')).toBeNull()
+  })
+
+  it('keeps source-first files in the highlighted source editor without a done action', () => {
+    expect(ATOM_VIEW_SRC).toContain('const sourceLocked = isSourceFirstPath(path)')
+    expect(ATOM_VIEW_SRC).not.toContain('✓ done')
   })
 })

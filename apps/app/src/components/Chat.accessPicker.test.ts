@@ -67,9 +67,9 @@ describe('AgentAccessPicker', () => {
     await click(trigger)
     await flushAnimationFrame()
 
-    const defaultOption = Array.from(document.body.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Default permissions'),
-    )
+    const defaultOption = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button[role="option"]'),
+    ).find((button) => button.textContent?.includes('Default permissions'))
     expect(document.activeElement).toBe(defaultOption)
 
     await keyDown('Escape')
@@ -112,5 +112,35 @@ describe('AgentAccessPicker', () => {
     } finally {
       outsideButton.remove()
     }
+  })
+
+  it('lets permission descriptions wrap inside the menu row without the global button outline', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AgentAccessPicker, {
+          accessMode: 'default',
+          disabled: false,
+          onChange: vi.fn(),
+        }),
+      )
+    })
+
+    await click(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Access permissions"]',
+      ),
+    )
+
+    const defaultOption = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button[role="option"]'),
+    ).find((button) => button.textContent?.includes('Default permissions'))
+
+    expect(defaultOption?.className).toContain('whitespace-normal')
+    expect(defaultOption?.className).toContain('outline-none')
+    expect(defaultOption?.className).toContain('focus-visible:ring-1')
+    expect(defaultOption?.getAttribute('aria-selected')).toBe('true')
+    expect(
+      defaultOption?.querySelector('[data-access-description]')?.className,
+    ).toContain('break-words')
   })
 })

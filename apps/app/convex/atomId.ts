@@ -114,6 +114,8 @@ const FM_TYPE_HTML_RE = /^type:[ \t]*['"]?html['"]?[ \t]*\r?$/m
 // quoted, optional surrounding spaces. NO trailing comments/arrays.
 const FM_TYPE_SKILL_RE = /^type:[ \t]*['"]?skill['"]?[ \t]*\r?$/m
 const FM_TYPE_COMMAND_RE = /^type:[ \t]*['"]?command['"]?[ \t]*\r?$/m
+const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 
 // Count `type:` line declarations in a frontmatter `fm` block. O(n)
 // over the already-bounded `fm` (splitFrontmatter has the Phase-4
@@ -139,6 +141,14 @@ export function isHtmlAtomBody(body: string): boolean {
   return FM_TYPE_HTML_RE.test(fm)
 }
 
+function isSourceCodePath(path: string | undefined): boolean {
+  if (!path) return false
+  return (
+    SOURCE_CODE_EXT_RE.test(path) ||
+    (isViewPath(path) && VIEW_SOURCE_EXT_RE.test(path))
+  )
+}
+
 // Display title for the tree/breadcrumb (moved here from atoms.ts so
 // the share read path can reuse it without a circular import).
 // Order: frontmatter name/title → first H1 → first non-empty line →
@@ -146,6 +156,10 @@ export function isHtmlAtomBody(body: string): boolean {
 // their filename (return null).
 export function deriveTitle(body: string, path?: string): string | null {
   const html = (path && isHtmlPath(path)) || isHtmlAtomBody(body)
+  // Source code is not prose. Its first line and optional frontmatter title
+  // are often implementation details; UI callers should show the filename
+  // with extension instead.
+  if (isSourceCodePath(path)) return null
   // A frontmatter `title:` (or `name:`) applies to ALL atoms, incl.
   // html — so an html page's title shows in the tree + above its
   // content (emoji-icons / D4.17 follow-up).

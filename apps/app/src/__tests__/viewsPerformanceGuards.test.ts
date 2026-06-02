@@ -4,7 +4,7 @@ import {
   MAX_VIEW_BUNDLE_BYTES,
   MAX_VIEW_SOURCE_BYTES,
   MAX_VIEW_SOURCE_FILES,
-} from '../views/buildViewBundle'
+} from '../views/buildViewBundle.server'
 import {
   canWriteRequestedPath,
   viewActionDetail,

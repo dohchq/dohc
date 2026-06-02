@@ -2,7 +2,8 @@ import * as Y from 'yjs'
 import { encodeDocName } from './doc-name.js'
 import type { CollabActorKind } from './auth.js'
 import type { HocuspocusAcl, HocuspocusLogger } from './hooks.js'
-import { markdownToYDoc } from './import-export.js'
+import { markdownToYDoc, plainTextToYDoc } from './import-export.js'
+import { isPlainTextAtomPath } from './source-kind.js'
 import type { PostgresYDocStore } from './persistence.js'
 import {
   applyAnchoredReplacement,
@@ -121,6 +122,8 @@ export function createSemanticApiHandler({
         ok: true,
         service: 'dohc-hocuspocus',
         semanticWrites: true,
+        createAtom: typeof acl.createAtom === 'function',
+        atomBootstrap: typeof acl.loadAtomBootstrap === 'function',
       })
     }
     if (request.method !== 'POST') {
@@ -331,7 +334,9 @@ async function handleCreateAtom({
     workspaceId: payload.workspaceId,
     atomId: created.atomId,
   })
-  const doc = markdownToYDoc(created.markdown)
+  const doc = isPlainTextAtomPath(payload.path)
+    ? plainTextToYDoc(created.markdown)
+    : markdownToYDoc(created.markdown)
   await store.storeSnapshotIfMissing(documentName, doc, { lastSeq: 0 })
   const update = Y.encodeStateAsUpdate(doc)
   const liveDocument = getUsableLiveDocument(

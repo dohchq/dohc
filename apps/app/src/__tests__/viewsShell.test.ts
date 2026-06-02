@@ -31,6 +31,14 @@ const useQueryMock = vi.mocked(useQuery as any)
 const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const APP_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
+const VIEW_FRAME_SRC = readFileSync(
+  resolve(__dirname, '../components/ViewFrame.tsx'),
+  'utf8',
+)
+const BUNDLE_FUNCTIONS_SRC = readFileSync(
+  resolve(__dirname, '../views/buildViewBundle.functions.ts'),
+  'utf8',
+)
 
 const viewRows = [
   {
@@ -215,5 +223,18 @@ describe('Views activity shell', () => {
       packageRoot: 'clients/acme/.views/overview',
       activeWorkspaceId: 'ws_active',
     })
+  })
+
+  it('calls the view bundler through a TanStack server function bridge', () => {
+    expect(VIEW_FRAME_SRC).toContain(
+      "from '../views/buildViewBundle.functions'",
+    )
+    expect(VIEW_FRAME_SRC).not.toContain(
+      "from '../views/buildViewBundle.server'",
+    )
+    expect(BUNDLE_FUNCTIONS_SRC).toContain("from './buildViewBundle.shared'")
+    expect(BUNDLE_FUNCTIONS_SRC).not.toMatch(
+      /import\s*\{[\s\S]*\bbuildViewBundle\b[\s\S]*\}\s*from\s*['"]\.\/buildViewBundle\.server['"]/,
+    )
   })
 })

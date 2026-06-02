@@ -114,4 +114,22 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('show what changed, what is known, what is missing')
     expect(personal).toContain('respect locks, sharing boundaries, capture review, skill-turn gates, and review gates')
   })
+
+  it('routes explicit view requests to .views packages instead of html atoms', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('If the user explicitly asks for a view')
+    expect(personal).toContain('create a `.views/<name>/` package, not `home.html`')
+    expect(personal).not.toContain('Default to `home.html` when the first cockpit')
+  })
+
+  it('teaches useful tracking projects instead of generic dashboards', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('TRACKING / IMPROVEMENT PROJECTS')
+    expect(personal).toContain('current baseline')
+    expect(personal).toContain('target outcome')
+    expect(personal).toContain('session log template')
+    expect(personal).toContain('recurring mistakes')
+    expect(personal).toContain('next focus')
+    expect(personal).toContain('do not hardcode a single starter day')
+  })
 })

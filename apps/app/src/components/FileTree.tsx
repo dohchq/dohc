@@ -12,6 +12,8 @@ import {
 import {
   ChevronDown,
   ChevronRight,
+  AppWindow,
+  Code2,
   FileText,
   Globe,
   Sparkles,
@@ -43,6 +45,7 @@ import {
   buildTree,
   nodeLabel,
   ancestors,
+  isSourceCodeFilePath,
   type FileRow,
   type TreeNode,
   type FolderInput,
@@ -1542,6 +1545,12 @@ function TreeRowNode({
             className="size-3.5 shrink-0 opacity-80 text-accent"
             strokeWidth={1.8}
           />
+        ) : isSourceCodeFilePath(filePath) ? (
+          <Code2
+            className="size-3.5 shrink-0 opacity-80 text-accent-2"
+            strokeWidth={1.8}
+            aria-label="source code"
+          />
         ) : node.page!.type === 'html' ? (
           <Globe className="size-3.5 shrink-0 opacity-70" strokeWidth={1.8} />
         ) : node.page!.type === 'skill' ? (
@@ -1772,22 +1781,27 @@ function TreeRowNode({
           const isContextFolder = node.fullPath === '.context'
           const isSkillsFolder = node.fullPath === '.skills'
           const isCommandsFolder = node.fullPath === '.commands'
+          const isViewsFolder = node.segment === '.views'
           const chosenColor = isContextFolder
             ? 'var(--color-accent)'
             : isSkillsFolder
               ? 'var(--color-violet-500, #8b5cf6)'
               : isCommandsFolder
                 ? 'var(--color-accent)'
-                : colorVarFor(node.color)
+                : isViewsFolder
+                  ? 'var(--color-accent-2)'
+                  : colorVarFor(node.color)
           const Base = isContextFolder
             ? Brain
             : isSkillsFolder
               ? Sparkles
               : isCommandsFolder
                 ? SquareTerminal
-                : isExpanded
-                  ? FolderOpen
-                  : Folder
+                : isViewsFolder
+                  ? AppWindow
+                  : isExpanded
+                    ? FolderOpen
+                    : Folder
           return (
             <Base
               className="size-3.5 shrink-0"
@@ -1798,6 +1812,7 @@ function TreeRowNode({
                   isContextFolder ||
                   isSkillsFolder ||
                   isCommandsFolder ||
+                  isViewsFolder ||
                   node.color
                     ? 1
                     : 0.7,

@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import {
   createFileRoute,
   useNavigate,
@@ -85,6 +95,43 @@ function AppLayout() {
 type FilesDestination =
   | { kind: 'atom'; id: string }
   | { kind: 'shared'; id: string }
+
+const ACTIVITY_BAR_WIDTH = 48
+const LEFT_SIDEBAR_STORAGE_KEY = 'dohc-left-sidebar-width'
+const RIGHT_SIDEBAR_STORAGE_KEY = 'dohc-right-sidebar-width'
+const LEFT_SIDEBAR_DEFAULT_WIDTH = 260
+const LEFT_SIDEBAR_MIN_WIDTH = 220
+const LEFT_SIDEBAR_MAX_WIDTH = 460
+const RIGHT_SIDEBAR_LEGACY_DEFAULT_WIDTH = 400
+const RIGHT_SIDEBAR_PREVIOUS_DEFAULT_WIDTH = 460
+const RIGHT_SIDEBAR_DEFAULT_WIDTH = 500
+const RIGHT_SIDEBAR_MIN_WIDTH = 320
+const RIGHT_SIDEBAR_MAX_WIDTH = 720
+const SIDEBAR_RESIZE_NUDGE = 16
+
+type ResizableSidebar = 'left' | 'right'
+
+function clampSidebarWidth(width: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(width)))
+}
+
+function readStoredSidebarWidth(
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = window.localStorage.getItem(key)
+    const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10)
+    return Number.isFinite(parsed)
+      ? clampSidebarWidth(parsed, min, max)
+      : fallback
+  } catch {
+    return fallback
+  }
+}
 
 // Display name for a file path: the leaf, sans a single extension
 // (`clients/Acme Corp.md` → `Acme Corp`). Used as the tab-title
@@ -581,6 +628,114 @@ function App() {
   // crossing workspace boundaries. Per-document sharing stays in the
   // document Share button.
   const [sharingOpen, setSharingOpen] = useState(false)
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
+    readStoredSidebarWidth(
+      LEFT_SIDEBAR_STORAGE_KEY,
+      LEFT_SIDEBAR_DEFAULT_WIDTH,
+      LEFT_SIDEBAR_MIN_WIDTH,
+      LEFT_SIDEBAR_MAX_WIDTH,
+    ),
+  )
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
+    const storedWidth = readStoredSidebarWidth(
+      RIGHT_SIDEBAR_STORAGE_KEY,
+      RIGHT_SIDEBAR_DEFAULT_WIDTH,
+      RIGHT_SIDEBAR_MIN_WIDTH,
+      RIGHT_SIDEBAR_MAX_WIDTH,
+    )
+    return storedWidth === RIGHT_SIDEBAR_LEGACY_DEFAULT_WIDTH ||
+      storedWidth === RIGHT_SIDEBAR_PREVIOUS_DEFAULT_WIDTH
+      ? RIGHT_SIDEBAR_DEFAULT_WIDTH
+      : storedWidth
+  })
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        LEFT_SIDEBAR_STORAGE_KEY,
+        String(leftSidebarWidth),
+      )
+    } catch {
+      // localStorage unavailable / quota exceeded — non-fatal.
+    }
+  }, [leftSidebarWidth])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        RIGHT_SIDEBAR_STORAGE_KEY,
+        String(rightSidebarWidth),
+      )
+    } catch {
+      // localStorage unavailable / quota exceeded — non-fatal.
+    }
+  }, [rightSidebarWidth])
+
+  const nudgeLeftSidebar = useCallback((delta: number) => {
+    setLeftSidebarWidth((width) =>
+      clampSidebarWidth(
+        width + delta,
+        LEFT_SIDEBAR_MIN_WIDTH,
+        LEFT_SIDEBAR_MAX_WIDTH,
+      ),
+    )
+  }, [])
+
+  const nudgeRightSidebar = useCallback((delta: number) => {
+    setRightSidebarWidth((width) =>
+      clampSidebarWidth(
+        width + delta,
+        RIGHT_SIDEBAR_MIN_WIDTH,
+        RIGHT_SIDEBAR_MAX_WIDTH,
+      ),
+    )
+  }, [])
+
+  const resetLeftSidebar = useCallback(() => {
+    setLeftSidebarWidth(LEFT_SIDEBAR_DEFAULT_WIDTH)
+  }, [])
+
+  const resetRightSidebar = useCallback(() => {
+    setRightSidebarWidth(RIGHT_SIDEBAR_DEFAULT_WIDTH)
+  }, [])
+
+  const startSidebarResize = useCallback(
+    (side: ResizableSidebar, event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      const startX = event.clientX
+      const startWidth =
+        side === 'left' ? leftSidebarWidth : rightSidebarWidth
+      const setWidth =
+        side === 'left' ? setLeftSidebarWidth : setRightSidebarWidth
+      const min =
+        side === 'left' ? LEFT_SIDEBAR_MIN_WIDTH : RIGHT_SIDEBAR_MIN_WIDTH
+      const max =
+        side === 'left' ? LEFT_SIDEBAR_MAX_WIDTH : RIGHT_SIDEBAR_MAX_WIDTH
+      const originalCursor = document.body.style.cursor
+      const originalUserSelect = document.body.style.userSelect
+
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+
+      function onPointerMove(moveEvent: PointerEvent) {
+        const delta = moveEvent.clientX - startX
+        const nextWidth =
+          side === 'left' ? startWidth + delta : startWidth - delta
+        setWidth(clampSidebarWidth(nextWidth, min, max))
+      }
+
+      function onPointerUp() {
+        document.body.style.cursor = originalCursor
+        document.body.style.userSelect = originalUserSelect
+        window.removeEventListener('pointermove', onPointerMove)
+        window.removeEventListener('pointerup', onPointerUp)
+      }
+
+      window.addEventListener('pointermove', onPointerMove)
+      window.addEventListener('pointerup', onPointerUp)
+    },
+    [leftSidebarWidth, rightSidebarWidth],
+  )
 
   useEffect(() => {
     if (urlFileId) {
@@ -715,6 +870,19 @@ function App() {
     [navigateToView],
   )
 
+  const startAgentDraftInPanel = useCallback(
+    (projectPath: string | null = agentProjectPath) => {
+      setAgentDraft(true)
+      setAgentProjectPath(projectPath)
+      setThreadId(null)
+      setAgentSelectionOverride(null)
+      setSelectedAgentThreadSnapshot(null)
+      setChatOpen(true)
+      setSharingOpen(false)
+    },
+    [agentProjectPath],
+  )
+
   const selectAgentThread = useCallback(
     (thread: AgentThreadSummary) => {
       setSelectedAgentThreadSnapshot(thread)
@@ -727,11 +895,22 @@ function App() {
     [navigateToView],
   )
 
-  const ensureAgentThreadForSend = useCallback(
+  const selectAgentThreadInPanel = useCallback((thread: AgentThreadSummary) => {
+    setSelectedAgentThreadSnapshot(thread)
+    setAgentProjectPath(thread.projectPath)
+    setThreadId(thread.threadId)
+    setAgentDraft(false)
+    setAgentSelectionOverride(null)
+    setChatOpen(true)
+    setSharingOpen(false)
+  }, [])
+
+  const createAgentChatThread = useCallback(
     async (
       projectPath: string | null,
       selection?: AgentModelPickerSelection | null,
       accessMode?: AgentAccessMode | null,
+      navigateAfterCreate = true,
     ) => {
       const chosenSelection = selection ?? agentSelection
       const id = await createAgentThread({
@@ -759,10 +938,28 @@ function App() {
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
-      navigateToView('agent')
+      if (navigateAfterCreate) navigateToView('agent')
       return id as string
     },
     [activeWorkspaceId, agentSelection, createAgentThread, navigateToView],
+  )
+
+  const ensureAgentThreadForSend = useCallback(
+    (
+      projectPath: string | null,
+      selection?: AgentModelPickerSelection | null,
+      accessMode?: AgentAccessMode | null,
+    ) => createAgentChatThread(projectPath, selection, accessMode, true),
+    [createAgentChatThread],
+  )
+
+  const ensureAgentThreadForPanelSend = useCallback(
+    (
+      projectPath: string | null,
+      selection?: AgentModelPickerSelection | null,
+      accessMode?: AgentAccessMode | null,
+    ) => createAgentChatThread(projectPath, selection, accessMode, false),
+    [createAgentChatThread],
   )
 
   const createAgentProject = useCallback((mode: 'scratch' | 'existing') => {
@@ -1197,16 +1394,16 @@ function App() {
   }
 
   const panelOpen = view !== 'agent' && (chatOpen || sharingOpen)
+  const rightColumnOpen = view === 'agent' || panelOpen
+  const shellGridTemplateColumns = rightColumnOpen
+    ? `${ACTIVITY_BAR_WIDTH}px ${leftSidebarWidth}px minmax(0,1fr) ${rightSidebarWidth}px`
+    : `${ACTIVITY_BAR_WIDTH}px ${leftSidebarWidth}px minmax(0,1fr)`
+  const floatingPanelButtonRight = panelOpen ? rightSidebarWidth + 12 : 20
 
   return (
     <div
-      className={`grid h-screen overflow-hidden bg-page text-ink ${
-        view === 'agent'
-          ? 'grid-cols-[48px_260px_minmax(0,1fr)_340px]'
-          : panelOpen
-            ? 'grid-cols-[48px_260px_1fr_400px]'
-            : 'grid-cols-[48px_260px_1fr]'
-      }`}
+      className="relative grid h-screen overflow-hidden bg-page text-ink"
+      style={{ gridTemplateColumns: shellGridTemplateColumns }}
     >
       <ActivityBar view={view} onSelect={navigateToView} />
       {view === 'agent' ? (
@@ -1280,12 +1477,16 @@ function App() {
             <Chat
               mode="side"
               threadId={threadId}
+              threadTitle={activeAgentThread?.title ?? null}
               projectPath={agentProjectPath}
               projectOptions={agentProjectOptions}
               folderOptions={projectFolderOptions}
+              threads={chatThreads}
+              onSelectThread={selectAgentThreadInPanel}
+              onNewThread={startAgentDraftInPanel}
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
-              onEnsureThread={ensureAgentThreadForSend}
+              onEnsureThread={ensureAgentThreadForPanelSend}
               threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
               agentProviders={agentProviders}
               agentSelection={agentSelection}
@@ -1368,12 +1569,16 @@ function App() {
             <Chat
               mode="side"
               threadId={threadId}
+              threadTitle={activeAgentThread?.title ?? null}
               projectPath={agentProjectPath}
               projectOptions={agentProjectOptions}
               folderOptions={projectFolderOptions}
+              threads={chatThreads}
+              onSelectThread={selectAgentThreadInPanel}
+              onNewThread={startAgentDraftInPanel}
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
-              onEnsureThread={ensureAgentThreadForSend}
+              onEnsureThread={ensureAgentThreadForPanelSend}
               threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
               agentProviders={agentProviders}
               agentSelection={agentSelection}
@@ -1397,6 +1602,30 @@ function App() {
             />
           )}
         </>
+      )}
+      <ShellResizeHandle
+        side="left"
+        label="Resize left sidebar"
+        value={leftSidebarWidth}
+        min={LEFT_SIDEBAR_MIN_WIDTH}
+        max={LEFT_SIDEBAR_MAX_WIDTH}
+        style={{ left: ACTIVITY_BAR_WIDTH + leftSidebarWidth }}
+        onPointerDown={(event) => startSidebarResize('left', event)}
+        onNudge={nudgeLeftSidebar}
+        onReset={resetLeftSidebar}
+      />
+      {rightColumnOpen && (
+        <ShellResizeHandle
+          side="right"
+          label="Resize right sidebar"
+          value={rightSidebarWidth}
+          min={RIGHT_SIDEBAR_MIN_WIDTH}
+          max={RIGHT_SIDEBAR_MAX_WIDTH}
+          style={{ right: rightSidebarWidth }}
+          onPointerDown={(event) => startSidebarResize('right', event)}
+          onNudge={nudgeRightSidebar}
+          onReset={resetRightSidebar}
+        />
       )}
       {projectDialogMode && (
         <AgentProjectDialog
@@ -1422,7 +1651,8 @@ function App() {
         }
         className={`fixed bottom-[60px] z-50 h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
           view === 'agent' ? 'hidden' : 'inline-flex'
-        } ${chatOpen || sharingOpen ? 'right-[412px]' : 'right-5'}`}
+        }`}
+        style={{ right: floatingPanelButtonRight }}
       >
         <ArrowLeftRight className="size-3.5" strokeWidth={2} />
         <span>{sharingOpen ? 'Hide panel' : 'Imports / Exports'}</span>
@@ -1437,7 +1667,8 @@ function App() {
         aria-label={chatOpen ? 'hide chat panel' : 'show chat panel'}
         className={`fixed bottom-5 z-50 h-9 items-center gap-1.5 rounded-full border border-rule bg-elevated px-3.5 text-[12px] font-medium tracking-wide text-ink-dim shadow-md hover:border-rule-strong hover:text-ink hover:bg-hover transition-[right,color,background,border,box-shadow] duration-150 ${
           view === 'agent' ? 'hidden' : 'inline-flex'
-        } ${chatOpen || sharingOpen ? 'right-[412px]' : 'right-5'}`}
+        }`}
+        style={{ right: floatingPanelButtonRight }}
       >
         {chatOpen ? (
           <MessageSquareOff className="size-3.5" strokeWidth={2} />
@@ -1495,6 +1726,63 @@ function App() {
           onClose={() => setSharePromptFor(null)}
         />
       )}
+    </div>
+  )
+}
+
+function ShellResizeHandle({
+  side,
+  label,
+  value,
+  min,
+  max,
+  style,
+  onPointerDown,
+  onNudge,
+  onReset,
+}: {
+  side: ResizableSidebar
+  label: string
+  value: number
+  min: number
+  max: number
+  style: CSSProperties
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void
+  onNudge: (delta: number) => void
+  onReset: () => void
+}) {
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const direction = event.key === 'ArrowLeft' ? -1 : 1
+    const delta =
+      side === 'left'
+        ? direction * SIDEBAR_RESIZE_NUDGE
+        : -direction * SIDEBAR_RESIZE_NUDGE
+    onNudge(delta)
+  }
+
+  return (
+    <div
+      role="separator"
+      aria-label={label}
+      aria-orientation="vertical"
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onDoubleClick={(event) => {
+        event.preventDefault()
+        onReset()
+      }}
+      onKeyDown={onKeyDown}
+      className={`group absolute inset-y-0 z-[55] w-2 cursor-col-resize touch-none outline-none ${
+        side === 'left' ? '-translate-x-1/2' : 'translate-x-1/2'
+      }`}
+      style={style}
+    >
+      <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-rule-strong group-focus-visible:bg-accent" />
     </div>
   )
 }

@@ -224,7 +224,7 @@ describe('P1 — agent-tool wiring (structural)', () => {
     // instead of writing atoms.body directly, and (d) return a structured
     // REFUSED message for forbidden paths.
     const match = SRC.match(
-      /create_atom:\s*createTool\([\s\S]+?execute[\s\S]+?callSemanticApply\('createAtom'[\s\S]+?\}\),/,
+      /create_atom:\s*createTool\([\s\S]+?execute[\s\S]+?callSemanticApply\(ctx,\s*'createAtom'[\s\S]+?\}\),/,
     )
     expect(match).not.toBeNull()
     const tool = match?.[0] ?? ''

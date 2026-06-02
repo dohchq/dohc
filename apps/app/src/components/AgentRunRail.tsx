@@ -94,7 +94,7 @@ export function AgentRunRail({
   const scopeLabel = activeProjectPath ?? 'Whole workspace'
 
   return (
-    <aside className="flex h-screen w-[340px] shrink-0 flex-col border-l border-rule bg-panel px-4 py-5">
+    <aside className="flex h-screen min-w-0 flex-col border-l border-rule bg-panel px-4 py-5">
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto">
         <RailSection title="Progress" Icon={ListChecks}>
           {activeThread ? (

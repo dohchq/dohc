@@ -16,7 +16,8 @@ import * as Y from 'yjs'
 import { decodeDocName } from './doc-name.js'
 import { verifyCollabToken, type CollabActorKind } from './auth.js'
 import type { PostgresYDocStore } from './persistence.js'
-import { markdownToYDoc } from './import-export.js'
+import { markdownToYDoc, plainTextToYDoc } from './import-export.js'
+import { isPlainTextAtomPath } from './source-kind.js'
 import {
   createProjectionWorker,
   type ProjectionWorker,
@@ -88,7 +89,7 @@ export type HocuspocusAcl = {
   canWriteAtom(input: AtomAccessInput): Promise<boolean>
   loadAtomBootstrap?(
     input: AtomAccessInput,
-  ): Promise<{ markdown: string } | null>
+  ): Promise<{ markdown: string; path?: string } | null>
   setAtomBodyCache?(
     input: AtomBodyCacheProjectionInput,
   ): Promise<AtomBodyCacheProjectionResult>
@@ -431,7 +432,10 @@ export function createHocuspocusHooks({
       if (!(await store.hasDocumentState(data.documentName))) {
         const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
         if (bootstrap?.markdown !== undefined) {
-          const document = markdownToYDoc(bootstrap.markdown)
+          const document =
+            bootstrap.path && isPlainTextAtomPath(bootstrap.path)
+              ? plainTextToYDoc(bootstrap.markdown)
+              : markdownToYDoc(bootstrap.markdown)
           const stored = await store.storeSnapshotIfMissing(data.documentName, document, {
             lastSeq: 0,
           })

@@ -285,7 +285,10 @@ describe('hocuspocus Convex ACL bridge', () => {
     const body = '---\nid: doc\n---\n# Doc\n\nBody'
     await seedOwnerAtom(t, 'doc.md', body)
 
-    await expect(loadBootstrap(t)).resolves.toEqual({ markdown: body })
+    await expect(loadBootstrap(t)).resolves.toEqual({
+      markdown: body,
+      path: 'doc.md',
+    })
   })
 
   it('denies bootstrap markdown when the actor cannot read the atom', async () => {

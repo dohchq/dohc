@@ -3,9 +3,12 @@ import {
   buildAgentRuntimeSystemPrompt,
   buildAgentTurnSystemPrompt,
   checkSemanticWriteBackend,
+  createAtomDirectlyForAgent,
+  projectScopedCreatePathViolation,
   semanticWriteBackendStatusBlock,
   withSemanticWriteBackendStatus,
 } from './agent'
+import { internal } from './_generated/api'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -14,7 +17,7 @@ afterEach(() => {
 })
 
 describe('agent semantic write backend preflight', () => {
-  it('reports missing Hocuspocus admin env as an offline write backend', async () => {
+  it('keeps new atom writes available when Hocuspocus admin env is missing', async () => {
     vi.stubEnv('HOCUSPOCUS_ADMIN_URL', '')
     vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', '')
     const fetch = vi.fn()
@@ -22,13 +25,13 @@ describe('agent semantic write backend preflight', () => {
 
     const status = await checkSemanticWriteBackend()
 
-    expect(status).toMatchObject({ ok: false, reason: 'missing-env' })
+    expect(status).toMatchObject({ ok: true, mode: 'direct-create' })
     expect(fetch).not.toHaveBeenCalled()
     expect(semanticWriteBackendStatusBlock(status)).toContain(
-      'Semantic write backend: offline',
+      'New atom writes: online',
     )
     expect(semanticWriteBackendStatusBlock(status)).toContain(
-      'Do not say you can create',
+      'Existing-document semantic edits: offline',
     )
     expect(semanticWriteBackendStatusBlock(status)).not.toContain(
       'HOCUSPOCUS_ADMIN_TOKEN',
@@ -49,7 +52,7 @@ describe('agent semantic write backend preflight', () => {
 
     const status = await checkSemanticWriteBackend()
 
-    expect(status).toMatchObject({ ok: true })
+    expect(status).toMatchObject({ ok: true, mode: 'semantic' })
     expect(fetch).toHaveBeenCalledWith(
       'http://hocuspocus.local:1234/apply/preflight',
       expect.objectContaining({
@@ -65,6 +68,58 @@ describe('agent semantic write backend preflight', () => {
     expect(withSemanticWriteBackendStatus('base prompt', status)).not.toContain(
       'hocuspocus.local',
     )
+  })
+
+  it('falls back to create-only writes when Hocuspocus admin is unreachable from Convex', async () => {
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', 'http://127.0.0.1:1234')
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', 'admin-token')
+    const fetch = vi.fn(async () => {
+      throw new Error('fetch failed')
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const status = await checkSemanticWriteBackend()
+
+    expect(status).toMatchObject({ ok: true, mode: 'direct-create' })
+    const block = semanticWriteBackendStatusBlock(status)
+    expect(block).toContain('New atom writes: online')
+    expect(block).toContain('Existing-document semantic edits: offline')
+    expect(block).not.toContain('Semantic write backend: offline')
+  })
+
+  it('direct create fallback routes through Convex atom gates with the viewer subject', async () => {
+    const runQuery = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('---\nid: atom_direct\n---\nBody')
+    const runMutation = vi.fn(async () => 'atom_row')
+
+    const result = await createAtomDirectlyForAgent(
+      { runQuery, runMutation } as never,
+      {
+        workspaceId: 'workspace_1',
+        path: 'notes/direct.md',
+        content: 'Body',
+        actor: {
+          userId: 'user_1',
+          actorKind: 'agent',
+        },
+      },
+    )
+
+    expect(runQuery).toHaveBeenCalledWith(internal.atoms._getInternal, {
+      workspaceId: 'workspace_1',
+      path: 'notes/direct.md',
+      viewerSubject: 'user_1',
+    })
+    expect(runMutation).toHaveBeenCalledWith(internal.atoms._upsertInternal, {
+      workspaceId: 'workspace_1',
+      path: 'notes/direct.md',
+      body: 'Body',
+      source: 'agent',
+      viewerSubject: 'user_1',
+    })
+    expect(result).toEqual({ ok: true, atomId: 'atom_direct' })
   })
 
   it('builds runtime system prompts with the live preflight status before streaming', async () => {
@@ -118,8 +173,8 @@ describe('agent semantic write backend preflight', () => {
     await vi.advanceTimersByTimeAsync(5_000)
 
     await expect(status).resolves.toMatchObject({
-      ok: false,
-      reason: 'unreachable',
+      ok: true,
+      mode: 'direct-create',
       detail: 'Hocuspocus request timed out after 5000ms.',
     })
   })
@@ -133,10 +188,40 @@ describe('agent semantic write backend preflight', () => {
         detail: 'offline for test',
       },
       'auto-review',
+      undefined,
     )
 
     expect(prompt).toContain('Semantic write backend: offline')
     expect(prompt).not.toContain('offline for test')
     expect(prompt).toContain('The user selected Auto-review')
+  })
+
+  it('injects active project scope into the runtime system prompt', () => {
+    const prompt = buildAgentTurnSystemPrompt(
+      { kind: 'personal' },
+      { ok: true, mode: 'direct-create', detail: 'test' },
+      'default',
+      'valorant',
+    )
+
+    expect(prompt).toContain('## ACTIVE PROJECT SCOPE')
+    expect(prompt).toContain('This chat is scoped to `valorant/`')
+    expect(prompt).toContain('write under `valorant/...`')
+    expect(prompt).toContain('Do not create sibling taxonomies')
+  })
+
+  it('refuses project-chat create paths outside the active folder', () => {
+    expect(
+      projectScopedCreatePathViolation('valorant/profile.md', 'valorant'),
+    ).toBeNull()
+    expect(
+      projectScopedCreatePathViolation(
+        'valorant/.views/home/src/App.tsx',
+        'valorant',
+      ),
+    ).toBeNull()
+    expect(
+      projectScopedCreatePathViolation('games/valorant/profile.md', 'valorant'),
+    ).toMatch(/outside the active project scope "valorant"/)
   })
 })

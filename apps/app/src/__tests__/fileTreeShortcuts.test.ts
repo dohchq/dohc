@@ -149,6 +149,19 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).not.toMatch(/emojiForFolderIcon/)
   })
 
+  it('.views folder row uses an app icon while preserving the literal label', () => {
+    expect(SRC).toMatch(/import\s*\{[\s\S]*\bAppWindow\b[\s\S]*\}\s*from\s*'lucide-react'/)
+    expect(SRC).toMatch(/const\s+isViewsFolder\s*=\s*node\.segment\s*===\s*['"]\.views['"]/)
+    expect(SRC).toMatch(/isViewsFolder\s*\?\s*AppWindow/)
+  })
+
+  it('renders source code files with a code icon before the generic file fallback', () => {
+    expect(SRC).toMatch(/import\s*\{[\s\S]*\bCode2\b[\s\S]*\}\s*from\s*['"]lucide-react['"]/)
+    expect(SRC).toMatch(/import\s*\{[\s\S]*\bisSourceCodeFilePath\b[\s\S]*\}\s*from\s*['"]\.\.\/lib\/path-tree['"]/)
+    expect(SRC).toMatch(/isSourceCodeFilePath\(filePath\)\s*\?\s*\(/)
+    expect(SRC).toMatch(/<Code2\b[^>]*aria-label="source code"/)
+  })
+
   it('Folder row renders the Star icon when node.starred is true', () => {
     expect(SRC).toMatch(/node\.starred\s*&&\s*\(/)
     expect(SRC).toMatch(/<Star\b[^>]*aria-label="starred folder"/)

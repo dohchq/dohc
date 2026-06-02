@@ -99,6 +99,12 @@ function manifestObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>
 }
 
+function stripDohcFrontmatter(body: string): string {
+  if (!body.startsWith('---\n') && !body.startsWith('---\r\n')) return body
+  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(body)
+  return match ? body.slice(match[0].length) : body
+}
+
 function defaultConfig(viewName: string): ViewConfig {
   return {
     title: titleFromViewName(viewName),
@@ -115,7 +121,7 @@ function parseConfig(body: string, viewName: string): ViewConfig {
   const fallback = defaultConfig(viewName)
   let parsed: unknown
   try {
-    parsed = JSON.parse(body)
+    parsed = JSON.parse(stripDohcFrontmatter(body))
   } catch {
     return {
       ...fallback,

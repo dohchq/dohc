@@ -48,6 +48,7 @@ import {
   ownerAtomByFileId,
 } from './atomShares'
 import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
+import { isViewPath } from './viewPaths'
 import type { MutationCtx } from './_generated/server'
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
@@ -55,6 +56,15 @@ import type { MutationCtx } from './_generated/server'
 // the PRE-EDIT body at most once per atom per window, so a user can
 // always recover to "before this editing session" with bounded growth.
 const SNAPSHOT_COALESCE_MS = 10 * 60 * 1000 // 10 min
+const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+
+function isViewSourceCodePath(path: string): boolean {
+  return isViewPath(path) && VIEW_SOURCE_EXT_RE.test(path)
+}
+
+function hasPostFrontmatterContent(body: string): boolean {
+  return splitFrontmatter(body).rest.trim().length > 0
+}
 
 // ── Shared destructive-op impls. ROOT-CAUSE FIX (Phase-2 review):
 // there used to be two parallel code paths — public mutations (the
@@ -964,6 +974,22 @@ export const _setBodyCache = internalMutation({
 
     if (extractFrontmatterId(markdown) !== atomId) {
       return { ok: false, reason: 'frontmatter-id-mismatch' }
+    }
+
+    if (
+      isViewSourceCodePath(atom.path) &&
+      hasPostFrontmatterContent(atom.body) &&
+      !hasPostFrontmatterContent(markdown)
+    ) {
+      await ctx.db.patch(atom._id, {
+        updatedAt: projectedAt,
+        ...(lastEditedByUserId ? { lastEditedByUserId } : {}),
+        bodyProjectionHash: projectionHash,
+        bodyProjectionVersion: schemaVersion,
+        bodyProjectionStateVector: ydocStateVector,
+        bodyProjectedAt: projectedAt,
+      })
+      return { ok: true }
     }
 
     await ctx.db.patch(atom._id, {

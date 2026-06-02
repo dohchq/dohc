@@ -31,12 +31,13 @@ async function setBodyCache(
     ydocStateVector: string
     lastEditedByUserId: string
     projectedAt: number
+    atomId: string
   }> = {},
 ) {
   return await t.mutation(api.hocuspocusAuth.setBodyCache, {
     serverToken: overrides.serverToken ?? SERVER_TOKEN,
     workspaceId: OWNER,
-    atomId: 'intro',
+    atomId: overrides.atomId ?? 'intro',
     markdown:
       overrides.markdown ?? '---\nid: intro\n---\n# Intro\n\nFresh projected body',
     projectionHash: overrides.projectionHash ?? 'sha256:projected',
@@ -83,6 +84,42 @@ describe('Hocuspocus body cache projection bridge', () => {
     expect(atom?.bodyProjectionVersion).toBe(1)
     expect(atom?.bodyProjectionStateVector).toBe('AQID')
     expect(atom?.bodyProjectedAt).toBe(1_778_888_000_000)
+  })
+
+  it('does not let stale markdown projections erase view source code', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+    await t.mutation(internal.atoms._upsertInternal, {
+      workspaceId: OWNER,
+      path: '.views/workspace/src/App.tsx',
+      body: [
+        '---',
+        'id: views.workspace.src.app',
+        '---',
+        'export default function App() {',
+        '  return <main>{items.length}</main>',
+        '}',
+      ].join('\n'),
+      source: 'agent',
+    })
+
+    await expect(
+      setBodyCache(t, {
+        atomId: 'views.workspace.src.app',
+        markdown: '---\nid: views.workspace.src.app\n---\n',
+      }),
+    ).resolves.toEqual({ ok: true })
+
+    const atom = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', OWNER).eq('path', '.views/workspace/src/App.tsx'),
+        )
+        .unique(),
+    )
+    expect(atom?.body).toContain('return <main>{items.length}</main>')
+    expect(atom?.bodyProjectionHash).toBe('sha256:projected')
   })
 
   it('returns a miss when the atom file id is unknown', async () => {

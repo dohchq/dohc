@@ -17,6 +17,7 @@ type AtomAccessResult = {
 
 type AtomBootstrapResult = {
   markdown: string
+  path: string
 }
 
 type BodyCacheProjectionResult =
@@ -214,7 +215,7 @@ export const loadAtomBootstrap = query({
     const atom = await ownerAtomByFileId(ctx, workspaceId, atomId)
     if (!atom) return null
 
-    return { markdown: atom.body }
+    return { markdown: atom.body, path: atom.path }
   },
 })
 

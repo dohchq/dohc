@@ -405,12 +405,14 @@ export function GraphView({
       </div>
 
       <div ref={wrapRef} className="relative flex-1 overflow-hidden">
-        {!FG || !ready ? (
-          null
-        ) : data.nodes.length === 0 ? (
-          <div className="grid h-full place-items-center text-ink-faint text-sm">
-            Nothing to show yet — add some {'{data}'} and [[links]], or wait for a cell to be shared with you.
-          </div>
+        {!FG || !ready || data.nodes.length === 0 ? (
+          FG && ready && data.nodes.length === 0 ? (
+            <div className="grid h-full place-items-center text-ink-faint text-sm">
+              Nothing to show yet — add some {'{data}'} and [[links]], or wait for a cell to be shared with you.
+            </div>
+          ) : (
+            null
+          )
         ) : (
           <FG
             ref={fgRef}

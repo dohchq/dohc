@@ -134,6 +134,7 @@ function evaluateVirtualSdk(dohc: unknown) {
       'export function useDohcQuery',
       'exports.useDohcQuery = function useDohcQuery',
     )
+    .replace(/^export /gm, '')
 
   new Function('window', 'useEffect', 'useState', 'exports', moduleSource)(
     { dohc },

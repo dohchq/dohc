@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
+import { register as registerAgentComponent } from '@convex-dev/agent/test'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { api, internal } from './_generated/api'
@@ -16,6 +17,12 @@ import { api, internal } from './_generated/api'
 const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_a'
 const B = 'ws_b'
+
+const convexAgentTest = () => {
+  const t = convexTest(schema, modules)
+  registerAgentComponent(t)
+  return t
+}
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -608,6 +615,28 @@ describe('agent thread ownership — fail-closed (C1)', () => {
         .withIdentity({ subject: A })
         .action(api.agent.sendMessage, { threadId: 'tB', prompt: 'pwn' }),
     ).rejects.toThrow(/does not belong/)
+  })
+
+  it('stopChat DENIES stopping a thread the caller does not own', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await expect(
+      t
+        .withIdentity({ subject: A })
+        .action(api.agent.stopChat, { threadId: 'tB' }),
+    ).rejects.toThrow(/does not belong/)
+  })
+
+  it('stopChat is a no-op for an owned thread with no active streams', async () => {
+    const t = convexAgentTest()
+    const threadId = await t
+      .withIdentity({ subject: A })
+      .mutation(api.agent.createThread, {})
+    await expect(
+      t
+        .withIdentity({ subject: A })
+        .action(api.agent.stopChat, { threadId }),
+    ).resolves.toEqual({ aborted: 0 })
   })
 
   it('multiple threadRefs for one workspace are legitimate chat history; cross-tenant stays denied', async () => {

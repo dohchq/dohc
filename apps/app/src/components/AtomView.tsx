@@ -453,16 +453,20 @@ function AtomShell({
   // FULL body so the user can still SEE and hand-edit the
   // frontmatter/id (manifesto locked-#1: inspectable & hand-editable).
   const viewInfo = useMemo(() => (path ? parseViewPath(path) : null), [path])
-  const [sourceMode, setSourceMode] = useState(() => isSourceFirstPath(path))
+  const sourceLocked = isSourceFirstPath(path)
+  const [sourceMode, setSourceMode] = useState(() => sourceLocked)
+  useEffect(() => {
+    if (sourceLocked) setSourceMode(true)
+  }, [sourceLocked])
   // D4.28 — raw-source buffer. While in source mode the textarea
   // edits THIS (local), not `draft`, so per-keystroke autosave +
-  // id-reconcile don't fire. Synced from `draft` each time source
-  // mode opens; committed (one immediate save) on blur / done.
+  // id-reconcile don't fire. Synced from `draft` while source mode is
+  // active; committed (one immediate save) on blur / formatted-return.
   const [sourceDraft, setSourceDraft] = useState(draft)
   useEffect(() => {
     if (sourceMode) setSourceDraft(draft)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceMode])
+  }, [sourceMode, draft])
   function leaveSource() {
     onCommitSource?.(sourceDraft)
     setSourceMode(false)
@@ -679,18 +683,20 @@ function AtomShell({
             share
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => (sourceMode ? leaveSource() : setSourceMode(true))}
-          className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors"
-          title={
-            sourceMode
-              ? 'Back to the formatted editor'
-              : 'Show & edit the raw source (frontmatter / id)'
-          }
-        >
-          {sourceMode ? '✓ done' : '⟨⟩ source'}
-        </button>
+        {!sourceLocked && (
+          <button
+            type="button"
+            onClick={() => (sourceMode ? leaveSource() : setSourceMode(true))}
+            className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors"
+            title={
+              sourceMode
+                ? 'Back to the formatted editor'
+                : 'Show & edit the raw source (frontmatter / id)'
+            }
+          >
+            {sourceMode ? 'formatted' : 'source'}
+          </button>
+        )}
       </div>
       {/* emoji-icons — Notion-style page icon ABOVE the title. Lives
           in the frontmatter `icon:` property (shows in the tree +

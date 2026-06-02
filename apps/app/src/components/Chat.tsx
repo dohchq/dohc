@@ -13,6 +13,7 @@ import {
   FolderPlus,
   FolderX,
   Hand,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -22,6 +23,7 @@ import {
   Shield,
   ShieldCheck,
   Sparkles,
+  SquarePen,
   SquareTerminal,
   Trash2,
   X,
@@ -73,6 +75,14 @@ const APPROX_CHARS_PER_TOKEN = 4
 type RunnableRef = { path: string; label: string }
 type EnvironmentOption = { value: string | null; label: string }
 type ChatActionResult = void | Promise<void>
+type ChatThreadOption = {
+  threadId: string
+  projectPath: string | null
+  title: string
+  createdAt: number
+  updatedAt: number
+  pinnedAt: number | null
+}
 type IconComponent = typeof Folder
 type ComposerStarterCommand = RunnableRef & {
   kind: 'command'
@@ -379,6 +389,41 @@ export function buildEstimatedContextWindowUsage({
   }
 }
 
+export function formatChatTimestamp(
+  timestamp: number | null | undefined,
+  options: {
+    now?: number
+    locale?: string
+    timeZone?: string
+  } = {},
+): string | null {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return null
+  const now = options.now ?? Date.now()
+  const locale = options.locale
+  const timeZone = options.timeZone
+  const value = new Date(timestamp)
+  const today = new Intl.DateTimeFormat(locale, {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  })
+  const time = new Intl.DateTimeFormat(locale, {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  const isSameDay = today.format(value) === today.format(new Date(now))
+  if (isSameDay) return time.format(value)
+  return new Intl.DateTimeFormat(locale, {
+    timeZone,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(value)
+}
+
 type Props = {
   threadId: string | null
   threadTitle?: string | null
@@ -388,6 +433,9 @@ type Props = {
   folderOptions?: string[]
   onProjectPathChange?: (projectPath: string | null) => void
   onCreateProject?: (mode: 'scratch' | 'existing') => void
+  threads?: ChatThreadOption[]
+  onSelectThread?: (thread: ChatThreadOption) => void
+  onNewThread?: (projectPath: string | null) => void
   onEnsureThread?: (
     projectPath: string | null,
     selection?: AgentModelPickerSelection | null,
@@ -424,6 +472,9 @@ export function Chat({
   folderOptions = [],
   onProjectPathChange,
   onCreateProject,
+  threads = [],
+  onSelectThread,
+  onNewThread,
   onEnsureThread,
   onToggleThreadPinned,
   onRenameThread,
@@ -443,6 +494,7 @@ export function Chat({
 }: Props) {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [composerError, setComposerError] = useState<string | null>(null)
   const [composerCursor, setComposerCursor] = useState(0)
   const [composerMenuCursor, setComposerMenuCursor] = useState(0)
@@ -453,10 +505,12 @@ export function Chat({
     normalizeAgentAccessMode(threadAccessMode),
   )
   const sendMessage = useAction(api.agent.sendMessage)
+  const stopChat = useAction(api.agent.stopChat)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const scrollContentRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const activeSendThreadIdRef = useRef<string | null>(null)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
@@ -519,6 +573,25 @@ export function Chat({
         ? await onEnsureThread(projectPath, agentSelection, accessMode)
         : null)
     )
+  }
+
+  async function stopActiveChat() {
+    const targetThreadId = activeSendThreadIdRef.current ?? threadId
+    if (!targetThreadId || stopping) return
+    setStopping(true)
+    setComposerError(null)
+    try {
+      await stopChat({
+        activeWorkspaceId,
+        threadId: targetThreadId,
+        projectPath,
+      })
+    } catch (e) {
+      setComposerError(formatComposerError(e))
+      console.error(e)
+    } finally {
+      setStopping(false)
+    }
   }
 
   // F1 (multiplayer-and-h-followups §7) — publish busy state up to
@@ -596,6 +669,7 @@ export function Chat({
       }
       const activeThreadId = await ensureActiveThread()
       if (!activeThreadId) return
+      activeSendThreadIdRef.current = activeThreadId
       if (!promptOverride) setInput('')
       if (match && 'matched' in match) {
         // P3+P4 indep fold F4: preserve user extras as
@@ -656,6 +730,7 @@ export function Chat({
       setComposerError(formatComposerError(e))
       console.error(e)
     } finally {
+      activeSendThreadIdRef.current = null
       setSending(false)
     }
   }
@@ -692,6 +767,7 @@ export function Chat({
         setComposerError(null)
         const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
+        activeSendThreadIdRef.current = activeThreadId
         await sendMessage({
           threadId: activeThreadId,
           prompt: path,
@@ -705,6 +781,7 @@ export function Chat({
         setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
+        activeSendThreadIdRef.current = null
         setSending(false)
       }
     })()
@@ -721,6 +798,7 @@ export function Chat({
         setComposerError(null)
         const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
+        activeSendThreadIdRef.current = activeThreadId
         await sendMessage({
           threadId: activeThreadId,
           prompt: path,
@@ -734,6 +812,7 @@ export function Chat({
         setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
+        activeSendThreadIdRef.current = null
         setSending(false)
       }
     })()
@@ -825,9 +904,7 @@ export function Chat({
     (primary ? "Don't work in a project" : 'Workspace chat')
   const canEditEnvironment = !threadId && !sending && !busy
   const headerTitle =
-    primary
-      ? threadTitle?.trim() || (threadId ? 'Workspace chat' : 'New chat')
-      : 'dohc'
+    threadTitle?.trim() || (threadId ? 'Workspace chat' : 'New chat')
   const showHeaderMenu =
     primary &&
     Boolean(threadId) &&
@@ -863,7 +940,7 @@ export function Chat({
       }`}
     >
       <header
-        className={`flex items-center justify-between border-b border-rule bg-page/92 backdrop-blur ${
+        className={`relative z-[60] flex items-center justify-between border-b border-rule bg-page/92 backdrop-blur ${
           primary ? 'h-14 px-6' : 'h-11 px-4 bg-panel'
         }`}
       >
@@ -886,12 +963,14 @@ export function Chat({
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-ink-dim">
-            <DohcMark size={14} />
-            <span className="text-[12.5px] text-ink-strong font-semibold tracking-tight">
-              {headerTitle}
-            </span>
-          </div>
+          <SideChatThreadSelector
+            threads={threads}
+            activeThreadId={threadId}
+            activeTitle={headerTitle}
+            projectPath={projectPath}
+            onSelectThread={onSelectThread}
+            onNewThread={onNewThread}
+          />
         )}
         <div className="ml-3 flex shrink-0 items-center gap-2">
           {primary && (
@@ -954,7 +1033,7 @@ export function Chat({
             primary ? 'rounded-[18px] shadow-lg focus-within:shadow-modal' : 'rounded-xl'
           }`}
         >
-          {primary && !threadId && (
+          {!threadId && (
             <div className="relative border-b border-rule bg-panel/60 px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -981,13 +1060,13 @@ export function Chat({
               {environmentOpen && canEditEnvironment && (
                 <>
                 <div
-                  className="fixed inset-0 z-20"
+                  className="fixed inset-0 z-[80]"
                   onClick={() => {
                     setEnvironmentOpen(false)
                     setCreateProjectOpen(false)
                   }}
                 />
-                <div className="absolute bottom-[calc(100%+8px)] left-3 z-30 w-[392px] max-w-[calc(100vw-24px)] rounded-xl border border-rule bg-elevated p-2 shadow-modal">
+                <div className="absolute bottom-[calc(100%+8px)] left-3 z-[90] w-[392px] max-w-[calc(100vw-24px)] rounded-xl border border-rule bg-elevated p-2 shadow-modal">
                   <label className="flex h-9 items-center gap-2 rounded-lg border border-rule bg-panel px-2.5 text-ink-dim focus-within:border-rule-strong">
                     <Search className="size-3.5 shrink-0" strokeWidth={1.8} />
                     <input
@@ -1035,7 +1114,7 @@ export function Chat({
                       <ChevronDown className="size-3.5 shrink-0 -rotate-90 text-ink-faint" strokeWidth={1.8} />
                     </button>
                     {createProjectOpen && (
-                      <div className="absolute left-[calc(100%+8px)] top-2 z-40 w-64 rounded-xl border border-rule bg-elevated p-1.5 shadow-modal">
+                      <div className="absolute left-[calc(100%+8px)] top-2 z-[100] w-64 rounded-xl border border-rule bg-elevated p-1.5 shadow-modal">
                         <button
                           type="button"
                           onClick={() => {
@@ -1250,21 +1329,207 @@ export function Chat({
               onSelectionChange={onAgentSelectionChange}
               onSetDefault={onSetAgentDefault}
             />
-            <button
-              onClick={() => submit()}
-              disabled={!canSend || sending || busy || !input.trim()}
-              className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
-                primary ? 'size-9' : 'size-7'
-              }`}
-              title={sending || busy ? 'Sending' : 'Send message'}
-              aria-label={sending || busy ? 'Sending' : 'Send message'}
-            >
-              <Send className={primary ? 'size-4' : 'size-3.5'} strokeWidth={2.2} />
-            </button>
+            {sending || busy ? (
+              <button
+                type="button"
+                onClick={() => void stopActiveChat()}
+                disabled={stopping || !(activeSendThreadIdRef.current ?? threadId)}
+                className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
+                  primary ? 'size-9' : 'size-7'
+                }`}
+                title={stopping ? 'Stopping chat' : 'Stop chat'}
+                aria-label={stopping ? 'Stopping chat' : 'Stop chat'}
+              >
+                <span
+                  aria-hidden="true"
+                  data-stop-square
+                  className={`block bg-current ${primary ? 'size-3.5' : 'size-3'}`}
+                />
+              </button>
+            ) : (
+              <button
+                onClick={() => submit()}
+                disabled={!canSend || !input.trim()}
+                className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
+                  primary ? 'size-9' : 'size-7'
+                }`}
+                title="Send message"
+                aria-label="Send message"
+              >
+                <Send className={primary ? 'size-4' : 'size-3.5'} strokeWidth={2.2} />
+              </button>
+            )}
           </div>
         </div>
       </div>
     </aside>
+  )
+}
+
+function SideChatThreadSelector({
+  threads,
+  activeThreadId,
+  activeTitle,
+  projectPath,
+  onSelectThread,
+  onNewThread,
+}: {
+  threads: ChatThreadOption[]
+  activeThreadId: string | null
+  activeTitle: string
+  projectPath: string | null
+  onSelectThread?: (thread: ChatThreadOption) => void
+  onNewThread?: (projectPath: string | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredThreads = useMemo(() => {
+    if (!normalizedQuery) return threads
+    return threads.filter((thread) => {
+      const project = thread.projectPath ?? 'workspace'
+      return `${thread.title} ${project}`.toLowerCase().includes(normalizedQuery)
+    })
+  }, [normalizedQuery, threads])
+  const activeProjectLabel = projectPath ?? 'Workspace'
+  const newChatLabel = projectPath ? `New chat in ${projectPath}` : 'New workspace chat'
+
+  function closePicker() {
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div className="relative flex min-w-0 flex-1 items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="group flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[10px] border border-rule bg-page px-2.5 text-left shadow-xs transition hover:border-rule-strong hover:bg-elevated"
+        aria-label="Select chat"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={activeTitle}
+      >
+        <span className="grid size-5 shrink-0 place-items-center rounded-md border border-rule bg-elevated text-ink-dim transition group-hover:text-ink">
+          <DohcMark size={12} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] font-semibold tracking-tight text-ink-strong">
+            {activeTitle}
+          </span>
+          <span className="block truncate text-[10px] font-medium text-ink-faint">
+            {activeProjectLabel}
+          </span>
+        </span>
+        <ChevronDown
+          className={`size-3.5 shrink-0 text-ink-faint transition-transform ${
+            open ? 'rotate-180' : ''
+          }`}
+          strokeWidth={1.8}
+        />
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          closePicker()
+          onNewThread?.(projectPath)
+        }}
+        className="grid size-8 shrink-0 place-items-center rounded-[10px] border border-rule bg-page text-ink-dim shadow-xs transition hover:border-rule-strong hover:bg-elevated hover:text-ink"
+        aria-label="New chat"
+        title={newChatLabel}
+      >
+        <SquarePen className="size-4" strokeWidth={1.8} />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-[80]" onClick={closePicker} />
+          <div className="absolute left-0 right-0 top-[calc(100%+7px)] z-[90] overflow-hidden rounded-[14px] border border-rule-strong bg-elevated shadow-modal">
+            <div className="flex items-center justify-between gap-3 border-b border-rule bg-panel/60 px-2.5 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+                Chats
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  closePicker()
+                  onNewThread?.(projectPath)
+                }}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-rule bg-elevated px-2 text-[11px] font-semibold text-ink-dim transition hover:border-rule-strong hover:bg-hover hover:text-ink"
+              >
+                <SquarePen className="size-3.5 shrink-0" strokeWidth={1.8} />
+                <span>New</span>
+              </button>
+            </div>
+            <div className="p-2">
+              <label className="flex h-8 items-center gap-2 rounded-lg border border-rule bg-panel px-2.5 text-ink-dim focus-within:border-rule-strong">
+                <Search className="size-3.5 shrink-0" strokeWidth={1.8} />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search chats"
+                  className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-ink-faint"
+                />
+              </label>
+              <div
+                role="listbox"
+                aria-label="Chats"
+                className="mt-2 max-h-[min(320px,calc(100vh-180px))] overflow-y-auto"
+              >
+                {filteredThreads.length === 0 ? (
+                  <div className="px-2.5 py-3 text-[12px] text-ink-faint">
+                    No chats found.
+                  </div>
+                ) : (
+                  filteredThreads.map((thread) => {
+                    const selected = thread.threadId === activeThreadId
+                    const projectLabel = thread.projectPath ?? 'Workspace'
+                    return (
+                      <button
+                        key={thread.threadId}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        onClick={() => {
+                          onSelectThread?.(thread)
+                          closePicker()
+                        }}
+                        className={`flex min-h-10 w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${
+                          selected
+                            ? 'border-rule bg-panel text-ink-strong'
+                            : 'border-transparent text-ink-dim hover:border-rule hover:bg-panel/70 hover:text-ink'
+                        }`}
+                      >
+                        <MessageSquare
+                          className="size-3.5 shrink-0 text-ink-faint"
+                          strokeWidth={1.8}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[12px] font-semibold">
+                            {thread.title || 'Workspace chat'}
+                          </span>
+                          <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10.5px] text-ink-faint">
+                            <span className="truncate">{projectLabel}</span>
+                            <span aria-hidden="true">·</span>
+                            <time dateTime={new Date(thread.updatedAt).toISOString()}>
+                              {formatChatTimestamp(thread.updatedAt)}
+                            </time>
+                          </span>
+                        </span>
+                        {thread.pinnedAt !== null && thread.pinnedAt !== undefined && (
+                          <Pin className="size-3.5 shrink-0 text-ink-faint" strokeWidth={1.8} />
+                        )}
+                        {selected && <Check className="size-4 shrink-0 text-accent" strokeWidth={2} />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -1600,7 +1865,7 @@ export function AgentAccessPicker({
         createPortal(
           <>
             <div
-              className="fixed inset-0 z-30"
+              className="fixed inset-0 z-[80]"
               onClick={() => {
                 restoreFocusOnCloseRef.current = false
                 setOpen(false)
@@ -1608,7 +1873,7 @@ export function AgentAccessPicker({
             />
             <div
               ref={popoverRef}
-              className="fixed z-40 w-[264px] max-w-[calc(100vw-24px)] rounded-xl border border-rule-strong bg-elevated p-1.5 shadow-modal"
+              className="fixed z-[90] w-[264px] max-w-[calc(100vw-24px)] rounded-xl border border-rule-strong bg-elevated p-1.5 shadow-modal"
               style={{
                 left: frame?.left ?? ACCESS_POPOVER_EDGE_GAP,
                 ...(frame?.placement === 'below'
@@ -1623,12 +1888,14 @@ export function AgentAccessPicker({
                   <button
                     key={option.value}
                     type="button"
+                    role="option"
+                    aria-selected={active}
                     onClick={() => {
                       onChange(option.value)
                       restoreFocusOnCloseRef.current = true
                       setOpen(false)
                     }}
-                    className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                    className={`flex min-h-11 w-full items-center gap-2 whitespace-normal rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ink-faint ${
                       active
                         ? 'bg-hover text-ink-strong'
                         : 'text-ink-dim hover:bg-hover hover:text-ink'
@@ -1642,7 +1909,10 @@ export function AgentAccessPicker({
                       <span className="block truncate text-[13px] font-medium">
                         {option.label}
                       </span>
-                      <span className="mt-0.5 block text-[10.5px] leading-snug text-ink-faint">
+                      <span
+                        data-access-description
+                        className="mt-0.5 block whitespace-normal break-words text-[10.5px] leading-snug text-ink-faint"
+                      >
                         {option.description}
                       </span>
                     </span>
@@ -2220,16 +2490,16 @@ function EmptyChatState({
                 key={starter.title}
                 type="button"
                 onClick={() => onSelectPrompt(starter.prompt)}
-                className="group flex min-h-[70px] items-start gap-3 rounded-lg border border-rule bg-elevated/82 p-3 text-left shadow-xs transition-[border,background,transform,box-shadow] hover:-translate-y-0.5 hover:border-rule-strong hover:bg-surface hover:shadow-md"
+                className="group flex min-h-[104px] items-start gap-3 rounded-lg border border-rule bg-elevated/82 p-3.5 text-left shadow-xs transition-[border,background,transform,box-shadow] hover:-translate-y-0.5 hover:border-rule-strong hover:bg-surface hover:shadow-md"
               >
                 <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-rule bg-panel text-ink-dim transition-colors group-hover:text-ink">
                   <Sparkles className="size-3.5" strokeWidth={1.8} />
                 </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-[13px] font-semibold text-ink-strong">
+                <span className="min-w-0 flex-1 whitespace-normal break-words">
+                  <span className="block text-[13px] font-semibold leading-snug text-ink-strong">
                     {starter.title}
                   </span>
-                  <span className="mt-1 line-clamp-2 block text-[11.5px] leading-snug text-ink-faint">
+                  <span className="mt-1.5 block text-[11.5px] leading-relaxed text-ink-faint">
                     {starter.prompt}
                   </span>
                 </span>
@@ -2263,6 +2533,8 @@ function MessageView({
   if (message.role === 'system') return null
   const isUser = message.role === 'user'
   const text = messageText(message)
+  const timestamp = (message as { _creationTime?: number })._creationTime
+  const timestampLabel = formatChatTimestamp(timestamp)
   const toolCalls = message.parts.filter(
     (part) =>
       part.type !== 'reasoning' &&
@@ -2299,6 +2571,15 @@ function MessageView({
           <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
             {isUser ? 'you' : 'dohc'}
           </span>
+          {timestampLabel && (
+            <time
+              dateTime={new Date(timestamp!).toISOString()}
+              className="text-[10px] font-medium text-ink-faint"
+              title={new Date(timestamp!).toLocaleString()}
+            >
+              {timestampLabel}
+            </time>
+          )}
           {streaming && (
             <span className="inline-flex items-center gap-1 text-[10px] font-medium text-ink-faint">
               <span className="size-1 rounded-full bg-success animate-pulse" />
