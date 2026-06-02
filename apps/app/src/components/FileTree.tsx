@@ -46,10 +46,10 @@ import {
   type FileRow,
   type TreeNode,
   type FolderInput,
-} from '@/lib/path-tree'
-import { navigateTree, type FlatRow } from '@/lib/file-tree-nav'
-import { colorVarFor } from '@/lib/folderTokens'
-import { planDrop, type DragSource } from '@/lib/file-tree-dnd'
+} from '../lib/path-tree'
+import { navigateTree, type FlatRow } from '../lib/file-tree-nav'
+import { colorVarFor } from '../lib/folderTokens'
+import { planDrop, type DragSource } from '../lib/file-tree-dnd'
 import { useDialogFocus } from '../lib/dialog-focus'
 
 type Props = {

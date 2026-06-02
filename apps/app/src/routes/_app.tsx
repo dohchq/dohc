@@ -52,6 +52,7 @@ import {
   useActiveWorkspaceId,
 } from '@/lib/active-workspace'
 import { type AppView as View, viewFromPathname } from '@/lib/appViews'
+import type { AgentAccessMode } from '@/lib/agentAccess'
 import { ChatBusyProvider } from '@/lib/chat-busy'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
@@ -417,6 +418,7 @@ function App() {
         agentProviderId: thread.agentProviderId,
         agentModel: thread.agentModel,
         agentReasoningEffort: thread.agentReasoningEffort,
+        agentAccessMode: thread.agentAccessMode,
       })),
     [agentThreads],
   )
@@ -729,6 +731,7 @@ function App() {
     async (
       projectPath: string | null,
       selection?: AgentModelPickerSelection | null,
+      accessMode?: AgentAccessMode | null,
     ) => {
       const chosenSelection = selection ?? agentSelection
       const id = await createAgentThread({
@@ -737,9 +740,22 @@ function App() {
         ...(chosenSelection
           ? agentSelectionToConvexArgs(chosenSelection)
           : {}),
+        ...(accessMode ? { agentAccessMode: accessMode } : {}),
       })
       if (chosenSelection) setAgentSelectionOverride(chosenSelection)
-      setSelectedAgentThreadSnapshot(null)
+      const now = Date.now()
+      setSelectedAgentThreadSnapshot({
+        threadId: id as string,
+        projectPath,
+        title: 'New chat',
+        createdAt: now,
+        updatedAt: now,
+        pinnedAt: null,
+        agentProviderId: chosenSelection?.providerId ?? null,
+        agentModel: chosenSelection?.model ?? null,
+        agentReasoningEffort: chosenSelection?.reasoningEffort ?? null,
+        agentAccessMode: accessMode ?? null,
+      })
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
@@ -1225,6 +1241,7 @@ function App() {
             onProjectPathChange={setAgentProjectPath}
             onCreateProject={createAgentProject}
             onEnsureThread={ensureAgentThreadForSend}
+            threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
             onToggleThreadPinned={toggleAgentThreadPinned}
             onRenameThread={renameAgentChat}
             onDeleteThread={deleteAgentChat}
@@ -1269,6 +1286,7 @@ function App() {
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
               onEnsureThread={ensureAgentThreadForSend}
+              threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
               agentProviders={agentProviders}
               agentSelection={agentSelection}
               onAgentSelectionChange={updateAgentSelection}
@@ -1304,6 +1322,7 @@ function App() {
             sharedWithMe={sharedWithMe ?? []}
             sharedByMeFileIds={sharedByMeFileIds ?? []}
             activeShareId={urlShareId}
+            allowCreate={view !== 'graph'}
             onOpenShared={openShared}
             onOpen={(p) => openAtom(p)}
             onCreatePage={createPageWithName}
@@ -1355,6 +1374,7 @@ function App() {
               onProjectPathChange={setAgentProjectPath}
               onCreateProject={createAgentProject}
               onEnsureThread={ensureAgentThreadForSend}
+              threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
               agentProviders={agentProviders}
               agentSelection={agentSelection}
               onAgentSelectionChange={updateAgentSelection}
@@ -1488,6 +1508,7 @@ function AgentWorkspace({
   onProjectPathChange,
   onCreateProject,
   onEnsureThread,
+  threadAccessMode,
   onToggleThreadPinned,
   onRenameThread,
   onDeleteThread,
@@ -1509,7 +1530,12 @@ function AgentWorkspace({
   folderOptions: string[]
   onProjectPathChange: (projectPath: string | null) => void
   onCreateProject: (mode: 'scratch' | 'existing') => void
-  onEnsureThread: (projectPath: string | null) => Promise<string>
+  onEnsureThread: (
+    projectPath: string | null,
+    selection?: AgentModelPickerSelection | null,
+    accessMode?: AgentAccessMode | null,
+  ) => Promise<string>
+  threadAccessMode: AgentAccessMode | null
   onToggleThreadPinned: (thread: AgentThreadSummary) => void | Promise<void>
   onRenameThread: (
     thread: AgentThreadSummary,
@@ -1560,6 +1586,7 @@ function AgentWorkspace({
         onProjectPathChange={onProjectPathChange}
         onCreateProject={onCreateProject}
         onEnsureThread={onEnsureThread}
+        threadAccessMode={threadAccessMode}
         onToggleThreadPinned={
           activeThread ? onToggleThreadPinnedForHeader : undefined
         }

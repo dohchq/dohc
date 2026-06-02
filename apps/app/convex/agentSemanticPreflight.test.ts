@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildAgentRuntimeSystemPrompt,
+  buildAgentTurnSystemPrompt,
   checkSemanticWriteBackend,
   semanticWriteBackendStatusBlock,
   withSemanticWriteBackendStatus,
 } from './agent'
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
 })
@@ -91,6 +93,50 @@ describe('agent semantic write backend preflight', () => {
       expect.objectContaining({ method: 'GET' }),
     )
     expect(prompt).toContain('Semantic write backend: online.')
+    expect(prompt).toContain('Default permissions')
     expect(prompt).toContain('You are dohc')
+  })
+
+  it('times out a hung semantic preflight endpoint', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', 'http://hocuspocus.local:1234')
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', 'admin-token')
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TIMEOUT_MS', '5000')
+    const fetch = vi.fn(
+      async (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const error = new Error('aborted')
+            error.name = 'AbortError'
+            reject(error)
+          })
+        }),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    const status = checkSemanticWriteBackend()
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    await expect(status).resolves.toMatchObject({
+      ok: false,
+      reason: 'unreachable',
+      detail: 'Hocuspocus request timed out after 5000ms.',
+    })
+  })
+
+  it('injects the preflight status into the runtime system prompt', () => {
+    const prompt = buildAgentTurnSystemPrompt(
+      { kind: 'personal' },
+      {
+        ok: false,
+        reason: 'missing-env',
+        detail: 'offline for test',
+      },
+      'auto-review',
+    )
+
+    expect(prompt).toContain('Semantic write backend: offline')
+    expect(prompt).not.toContain('offline for test')
+    expect(prompt).toContain('The user selected Auto-review')
   })
 })

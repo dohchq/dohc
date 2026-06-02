@@ -26,7 +26,7 @@ const commands = [
   { path: '.commands/client/hours.md', label: 'hours' },
 ] as const
 
-describe('T3-style composer triggers', () => {
+describe('slash and dollar composer triggers', () => {
   it('detects /command only at the start of the current line', () => {
     expect(detectComposerTrigger('/dra', 4)).toEqual({
       kind: 'command',
@@ -98,7 +98,7 @@ describe('T3-style composer triggers', () => {
   })
 })
 
-describe('Skills — detectSkillFire ($skill grammar, T3-style)', () => {
+describe('Skills — detectSkillFire ($skill grammar)', () => {
   it('null when prompt uses command slash syntax instead of $skill', () => {
     expect(detectSkillFire('/standup', skills)).toBeNull()
     expect(detectSkillFire('/help', skills)).toBeNull()

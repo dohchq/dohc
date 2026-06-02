@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { X, Check } from 'lucide-react'
-import { FOLDER_COLORS } from '@/lib/folderTokens'
+import { FOLDER_COLORS } from '../lib/folderTokens'
 
 // file-org-v1 §4.4 / D4.5b — FolderPicker popover. Modal dialog with
 // icon grid + color grid + favorite toggle + clear. Triggered from

@@ -12,12 +12,15 @@ import {
   Folder,
   FolderPlus,
   FolderX,
+  Hand,
   MoreHorizontal,
   Pencil,
   Pin,
   Plus,
   Search,
   Send,
+  Shield,
+  ShieldCheck,
   Sparkles,
   SquareTerminal,
   Trash2,
@@ -33,6 +36,12 @@ import {
   type AgentProviderSnapshot,
 } from './AgentModelPicker'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
+import {
+  AGENT_ACCESS_MODE_OPTIONS,
+  DEFAULT_AGENT_ACCESS_MODE,
+  normalizeAgentAccessMode,
+  type AgentAccessMode,
+} from '../lib/agentAccess'
 import { useSetChatBusy } from '../lib/chat-busy'
 import { ChatMessagesSkeleton } from './Skeleton'
 import {
@@ -45,7 +54,7 @@ import {
   type ToolActivityPart,
 } from '../lib/chatActivity'
 
-// T3-style composer grammar:
+// Composer grammar:
 //   /command  => saved slash command, only at the start of the line
 //   $skill    => saved skill, inline in the prompt
 // Selecting from the composer menu inserts the token; it does not
@@ -382,12 +391,14 @@ type Props = {
   onEnsureThread?: (
     projectPath: string | null,
     selection?: AgentModelPickerSelection | null,
+    accessMode?: AgentAccessMode | null,
   ) => Promise<string>
   onToggleThreadPinned?: () => ChatActionResult
   onRenameThread?: (title: string) => ChatActionResult
   onDeleteThread?: () => ChatActionResult
   agentProviders?: AgentProviderSnapshot[]
   agentSelection?: AgentModelPickerSelection | null
+  threadAccessMode?: AgentAccessMode | null
   onAgentSelectionChange?: (selection: AgentModelPickerSelection) => void
   onSetAgentDefault?: (selection: AgentModelPickerSelection) => void | Promise<void>
   mode?: 'side' | 'primary'
@@ -419,6 +430,7 @@ export function Chat({
   onDeleteThread,
   agentProviders = [],
   agentSelection = null,
+  threadAccessMode = null,
   onAgentSelectionChange,
   onSetAgentDefault,
   mode = 'side',
@@ -437,6 +449,9 @@ export function Chat({
   const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [environmentQuery, setEnvironmentQuery] = useState('')
   const [createProjectOpen, setCreateProjectOpen] = useState(false)
+  const [accessMode, setAccessMode] = useState<AgentAccessMode>(() =>
+    normalizeAgentAccessMode(threadAccessMode),
+  )
   const sendMessage = useAction(api.agent.sendMessage)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const scrollContentRef = useRef<HTMLDivElement | null>(null)
@@ -493,11 +508,15 @@ export function Chat({
     ? agentSelectionToConvexArgs(agentSelection)
     : {}
 
+  useEffect(() => {
+    setAccessMode(normalizeAgentAccessMode(threadAccessMode))
+  }, [threadAccessMode, threadId])
+
   async function ensureActiveThread() {
     return (
       threadId ??
       (onEnsureThread
-        ? await onEnsureThread(projectPath, agentSelection)
+        ? await onEnsureThread(projectPath, agentSelection, accessMode)
         : null)
     )
   }
@@ -596,6 +615,7 @@ export function Chat({
           entry: 'skill-fire',
           activeWorkspaceId,
           projectPath,
+          agentAccessMode: accessMode,
           ...agentSelectionPayload,
         })
         return
@@ -619,6 +639,7 @@ export function Chat({
           entry: 'command-fire',
           activeWorkspaceId,
           projectPath,
+          agentAccessMode: accessMode,
           ...agentSelectionPayload,
         })
         return
@@ -628,6 +649,7 @@ export function Chat({
         prompt,
         activeWorkspaceId,
         projectPath,
+        agentAccessMode: accessMode,
         ...agentSelectionPayload,
       })
     } catch (e) {
@@ -676,6 +698,7 @@ export function Chat({
           entry: 'skill-fire',
           activeWorkspaceId,
           projectPath,
+          agentAccessMode: accessMode,
           ...agentSelectionPayload,
         })
       } catch (e) {
@@ -686,7 +709,7 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingSkillFire, threadId, sending, busy, onEnsureThread, projectPath])
+  }, [pendingSkillFire, threadId, sending, busy, onEnsureThread, projectPath, accessMode])
 
   useEffect(() => {
     if (!pendingCommandFire || (!threadId && !onEnsureThread) || sending || busy) return
@@ -704,6 +727,7 @@ export function Chat({
           entry: 'command-fire',
           activeWorkspaceId,
           projectPath,
+          agentAccessMode: accessMode,
           ...agentSelectionPayload,
         })
       } catch (e) {
@@ -714,7 +738,7 @@ export function Chat({
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingCommandFire, threadId, sending, busy, onEnsureThread, projectPath])
+  }, [pendingCommandFire, threadId, sending, busy, onEnsureThread, projectPath, accessMode])
 
   const composerTrigger = useMemo(
     () => detectComposerTrigger(input, composerCursor),
@@ -1221,6 +1245,8 @@ export function Chat({
               commandCount={savedCommands.length}
               providers={agentProviders}
               selection={agentSelection}
+              accessMode={accessMode}
+              onAccessModeChange={setAccessMode}
               onSelectionChange={onAgentSelectionChange}
               onSetDefault={onSetAgentDefault}
             />
@@ -1309,6 +1335,8 @@ function ComposerStatusStrip({
   commandCount,
   providers,
   selection,
+  accessMode,
+  onAccessModeChange,
   onSelectionChange,
   onSetDefault,
 }: {
@@ -1322,6 +1350,8 @@ function ComposerStatusStrip({
   commandCount: number
   providers: AgentProviderSnapshot[]
   selection: AgentModelPickerSelection | null
+  accessMode: AgentAccessMode
+  onAccessModeChange: (mode: AgentAccessMode) => void
   onSelectionChange?: (selection: AgentModelPickerSelection) => void
   onSetDefault?: (selection: AgentModelPickerSelection) => void | Promise<void>
 }) {
@@ -1333,6 +1363,11 @@ function ComposerStatusStrip({
         disabled={!onSelectionChange || sending || busy}
         onChange={(next) => onSelectionChange?.(next)}
         onSetDefault={onSetDefault}
+      />
+      <AgentAccessPicker
+        accessMode={accessMode}
+        disabled={sending || busy}
+        onChange={onAccessModeChange}
       />
       {primary && (
         <ContextWindowMeter
@@ -1355,6 +1390,272 @@ function ComposerStatusStrip({
           {sending ? 'sending' : 'thinking'}
         </span>
       )}
+    </div>
+  )
+}
+
+const ACCESS_POPOVER_WIDTH = 264
+const ACCESS_POPOVER_EDGE_GAP = 12
+const ACCESS_POPOVER_TRIGGER_GAP = 8
+const ACCESS_FOCUSABLE_SELECTOR =
+  'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+
+const AGENT_ACCESS_ICONS: Record<AgentAccessMode, IconComponent> = {
+  default: Hand,
+  'auto-review': ShieldCheck,
+  'full-access': Shield,
+}
+
+type AccessPopoverFrame = {
+  left: number
+  top?: number
+  bottom?: number
+  placement: 'above' | 'below'
+}
+
+function accessPopoverFrameForTrigger(
+  rect: DOMRect,
+  viewportWidth: number,
+  viewportHeight: number,
+): AccessPopoverFrame {
+  const width = Math.min(
+    ACCESS_POPOVER_WIDTH,
+    viewportWidth - ACCESS_POPOVER_EDGE_GAP * 2,
+  )
+  const maxLeft = Math.max(
+    ACCESS_POPOVER_EDGE_GAP,
+    viewportWidth - width - ACCESS_POPOVER_EDGE_GAP,
+  )
+  const left = Math.round(
+    Math.min(Math.max(ACCESS_POPOVER_EDGE_GAP, rect.left), maxLeft),
+  )
+
+  if (rect.top > viewportHeight / 2) {
+    return {
+      left,
+      bottom: Math.round(
+        viewportHeight - rect.top + ACCESS_POPOVER_TRIGGER_GAP,
+      ),
+      placement: 'above',
+    }
+  }
+
+  return {
+    left,
+    top: Math.round(rect.bottom + ACCESS_POPOVER_TRIGGER_GAP),
+    placement: 'below',
+  }
+}
+
+export function AgentAccessPicker({
+  accessMode,
+  disabled,
+  onChange,
+}: {
+  accessMode: AgentAccessMode
+  disabled: boolean
+  onChange: (mode: AgentAccessMode) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [frame, setFrame] = useState<AccessPopoverFrame | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const savedFocusRef = useRef<HTMLElement | null>(null)
+  const restoreFocusOnCloseRef = useRef(false)
+  const selected =
+    AGENT_ACCESS_MODE_OPTIONS.find((option) => option.value === accessMode) ??
+    AGENT_ACCESS_MODE_OPTIONS.find(
+      (option) => option.value === DEFAULT_AGENT_ACCESS_MODE,
+    )!
+  const SelectedIcon = AGENT_ACCESS_ICONS[selected.value]
+
+  function updateFrame() {
+    if (typeof window === 'undefined') return
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setFrame(
+      accessPopoverFrameForTrigger(
+        rect,
+        window.innerWidth,
+        window.innerHeight,
+      ),
+    )
+  }
+
+  function toggleOpen() {
+    if (disabled) return
+    if (open) {
+      restoreFocusOnCloseRef.current = true
+      setOpen(false)
+      return
+    }
+    updateFrame()
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open || typeof window === 'undefined') return
+    updateFrame()
+    window.addEventListener('resize', updateFrame)
+    window.addEventListener('scroll', updateFrame, true)
+    return () => {
+      window.removeEventListener('resize', updateFrame)
+      window.removeEventListener('scroll', updateFrame, true)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return
+    savedFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : triggerRef.current
+
+    function focusableElements() {
+      return Array.from(
+        popoverRef.current?.querySelectorAll<HTMLElement>(
+          ACCESS_FOCUSABLE_SELECTOR,
+        ) ?? [],
+      ).filter((element) => !element.hasAttribute('disabled'))
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      focusableElements()[0]?.focus()
+    })
+
+    function closeFromOutsidePointer(event: PointerEvent) {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      const path =
+        typeof event.composedPath === 'function' ? event.composedPath() : []
+      const insideTrigger =
+        triggerRef.current &&
+        (triggerRef.current.contains(target) || path.includes(triggerRef.current))
+      const insidePopover =
+        popoverRef.current &&
+        (popoverRef.current.contains(target) || path.includes(popoverRef.current))
+
+      if (!insideTrigger && !insidePopover) {
+        restoreFocusOnCloseRef.current = false
+        setOpen(false)
+      }
+    }
+
+    function closeFromKeyboard(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        restoreFocusOnCloseRef.current = true
+        setOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableElements()
+      if (focusable.length < 1) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('pointerdown', closeFromOutsidePointer, true)
+    document.addEventListener('keydown', closeFromKeyboard)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
+      document.removeEventListener('keydown', closeFromKeyboard)
+      if (restoreFocusOnCloseRef.current) {
+        const restoreTarget = triggerRef.current ?? savedFocusRef.current
+        restoreTarget?.focus()
+      }
+      restoreFocusOnCloseRef.current = false
+      savedFocusRef.current = null
+    }
+  }, [open])
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={toggleOpen}
+        disabled={disabled}
+        className="inline-flex h-7 max-w-[210px] items-center gap-1.5 rounded-full border border-rule bg-panel/70 px-2.5 text-[10.5px] font-medium text-ink-dim shadow-xs transition hover:border-rule-strong hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
+        title={selected.description}
+        aria-label="Access permissions"
+        aria-expanded={open}
+      >
+        <SelectedIcon className="size-3 shrink-0 text-ink-faint" strokeWidth={1.9} />
+        <span className="min-w-0 truncate">{selected.label}</span>
+        <ChevronDown className="size-3 shrink-0 text-ink-faint" strokeWidth={1.9} />
+      </button>
+
+      {open &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <>
+            <div
+              className="fixed inset-0 z-30"
+              onClick={() => {
+                restoreFocusOnCloseRef.current = false
+                setOpen(false)
+              }}
+            />
+            <div
+              ref={popoverRef}
+              className="fixed z-40 w-[264px] max-w-[calc(100vw-24px)] rounded-xl border border-rule-strong bg-elevated p-1.5 shadow-modal"
+              style={{
+                left: frame?.left ?? ACCESS_POPOVER_EDGE_GAP,
+                ...(frame?.placement === 'below'
+                  ? { top: frame.top ?? 72 }
+                  : { bottom: frame?.bottom ?? 72 }),
+              }}
+            >
+              {AGENT_ACCESS_MODE_OPTIONS.map((option) => {
+                const active = option.value === accessMode
+                const OptionIcon = AGENT_ACCESS_ICONS[option.value]
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => {
+                      onChange(option.value)
+                      restoreFocusOnCloseRef.current = true
+                      setOpen(false)
+                    }}
+                    className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                      active
+                        ? 'bg-hover text-ink-strong'
+                        : 'text-ink-dim hover:bg-hover hover:text-ink'
+                    }`}
+                  >
+                    <OptionIcon
+                      className="size-4 shrink-0 text-ink-faint"
+                      strokeWidth={1.8}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-medium">
+                        {option.label}
+                      </span>
+                      <span className="mt-0.5 block text-[10.5px] leading-snug text-ink-faint">
+                        {option.description}
+                      </span>
+                    </span>
+                    {active && (
+                      <Check className="size-4 shrink-0 text-accent" strokeWidth={2} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </>,
+          document.body,
+        )}
     </div>
   )
 }

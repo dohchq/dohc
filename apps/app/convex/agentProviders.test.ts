@@ -35,7 +35,7 @@ describe('agent provider registry', () => {
     expect(providers[1].defaultReasoningEffort).toBe('high')
   })
 
-  it('publishes t3code-style per-model context stats instead of one blanket default', () => {
+  it('publishes dohc-style per-model context stats instead of one blanket default', () => {
     const providers = listAgentProviderSnapshots()
     const openai = providers.find((provider) => provider.providerId === 'openai')
     const anthropic = providers.find((provider) => provider.providerId === 'anthropic')

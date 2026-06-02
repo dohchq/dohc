@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add direct OpenAI + Anthropic model selection with workspace defaults, thread-bound choices, and a compact Codex/T3-style composer picker.
+**Goal:** Add direct OpenAI + Anthropic model selection with workspace defaults, thread-bound choices, and a compact dohc-first composer picker.
 
 **Architecture:** A small provider registry owns provider/model metadata, environment detection, selection validation, model construction, and provider-specific safety options. Convex persists only routing fields on `threadRefs` and `workspaceSettings`; the frontend reads provider snapshots and sends the selected routing fields with each turn.
 
@@ -279,4 +279,3 @@ git diff --check
 ```
 
 Expected: typecheck passes, targeted tests pass, and whitespace check passes. Note any Node engine warnings separately from failures.
-

@@ -129,6 +129,113 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     })
   })
 
+  it('listThreads includes each chat thread access mode', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-access',
+        title: 'Access test',
+        agentAccessMode: 'auto-review',
+        updatedAt: 10,
+      })
+    })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+
+    expect(rows[0]).toMatchObject({
+      threadId: 't-access',
+      agentAccessMode: 'auto-review',
+    })
+  })
+
+  it('_setThreadAgentAccessMode updates only caller-owned threadRefs', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+
+    await t
+      .withIdentity({ subject: A })
+      .mutation(internal.agent._setThreadAgentAccessMode, {
+        threadId: 'tA',
+        agentAccessMode: 'full-access',
+      })
+
+    const rows = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.listThreads, {})
+    expect(rows.find((row) => row.threadId === 'tA')).toMatchObject({
+      agentAccessMode: 'full-access',
+    })
+    await expect(
+      t
+        .withIdentity({ subject: A })
+        .mutation(internal.agent._setThreadAgentAccessMode, {
+          threadId: 'tB',
+          agentAccessMode: 'auto-review',
+        }),
+    ).rejects.toThrow(/thread does not belong to this workspace/)
+    await expect(
+      t
+        .withIdentity({ subject: B })
+        .mutation(internal.agent._setThreadAgentAccessMode, {
+          activeWorkspaceId: A,
+          threadId: 'tA',
+          agentAccessMode: 'auto-review',
+        }),
+    ).rejects.toThrow(/Not a member of workspace/)
+  })
+
+  it('_resolveAgentAccessModeForThread preserves stored mode unless request overrides it', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-access',
+        agentAccessMode: 'auto-review',
+        updatedAt: 10,
+      })
+      await ctx.db.insert('threadRefs', {
+        workspaceId: A,
+        threadId: 't-default',
+        updatedAt: 20,
+      })
+    })
+    const asA = t.withIdentity({ subject: A })
+
+    await expect(
+      asA.query(internal.agent._resolveAgentAccessModeForThread, {
+        threadId: 't-access',
+      }),
+    ).resolves.toBe('auto-review')
+    await expect(
+      asA.query(internal.agent._resolveAgentAccessModeForThread, {
+        threadId: 't-access',
+        agentAccessMode: 'full-access',
+      }),
+    ).resolves.toBe('full-access')
+    await expect(
+      asA.query(internal.agent._resolveAgentAccessModeForThread, {
+        threadId: 't-access',
+        agentAccessMode: 'default',
+      }),
+    ).resolves.toBe('default')
+    await expect(
+      asA.query(internal.agent._resolveAgentAccessModeForThread, {
+        threadId: 't-default',
+      }),
+    ).resolves.toBe('default')
+    await expect(
+      t
+        .withIdentity({ subject: B })
+        .query(internal.agent._resolveAgentAccessModeForThread, {
+          activeWorkspaceId: A,
+          threadId: 't-access',
+        }),
+    ).rejects.toThrow(/Not a member of workspace/)
+  })
+
   it('setAgentWorkspaceDefault validates and stores the workspace default model', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-test')
     const t = convexTest(schema, modules)

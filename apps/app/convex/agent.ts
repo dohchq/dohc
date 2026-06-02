@@ -135,6 +135,66 @@ const agentSelectionArgs = {
   agentModel: v.optional(v.string()),
   agentReasoningEffort: agentReasoningEffortArg,
 }
+type AgentAccessMode = 'default' | 'auto-review' | 'full-access'
+const DEFAULT_AGENT_ACCESS_MODE: AgentAccessMode = 'default'
+const agentAccessModeArg = v.optional(
+  v.union(
+    v.literal('default'),
+    v.literal('auto-review'),
+    v.literal('full-access'),
+  ),
+)
+const agentAccessArgs = {
+  agentAccessMode: agentAccessModeArg,
+}
+
+function normalizeAgentAccessMode(mode?: string | null): AgentAccessMode {
+  return mode === 'auto-review' || mode === 'full-access'
+    ? mode
+    : DEFAULT_AGENT_ACCESS_MODE
+}
+
+function agentAccessModePromptBlock(mode: AgentAccessMode): string {
+  switch (mode) {
+    case 'auto-review':
+      return [
+        '## AGENT CHAT ACCESS',
+        'The user selected Auto-review for this chat turn.',
+        'Proceed with ordinary low-risk workspace work when dohc tools allow it, but do not bypass required review gates: user locks, folder/atom access, sharing boundaries, destructive confirmations, and skill-turn gates still apply.',
+      ].join('\n')
+    case 'full-access':
+      return [
+        '## AGENT CHAT ACCESS',
+        'The user selected Full access for this chat turn.',
+        'Move decisively on ordinary workspace edits when dohc tools allow them, but do not bypass required review gates: user locks, folder/atom access, sharing boundaries, destructive confirmations, and skill-turn gates still apply.',
+      ].join('\n')
+    case 'default':
+    default:
+      return [
+        '## AGENT CHAT ACCESS',
+        'The user selected Default permissions for this chat turn.',
+        'Use dohc review gates normally. Ask before destructive or sharing-sensitive work when the tools require it.',
+      ].join('\n')
+  }
+}
+
+function withAgentAccessModeStatus(
+  systemPrompt: string,
+  mode: AgentAccessMode,
+): string {
+  return `${agentAccessModePromptBlock(mode)}\n\n${systemPrompt}`
+}
+
+export function buildAgentTurnSystemPrompt(
+  kindInfo: { kind: 'personal' } | { kind: 'org'; orgName: string },
+  semanticWriteBackend: SemanticWriteBackendStatus,
+  accessMode: AgentAccessMode,
+): string {
+  return withSemanticWriteBackendStatus(
+    withAgentAccessModeStatus(buildSystemPrompt(kindInfo), accessMode),
+    semanticWriteBackend,
+  )
+}
 
 function threadListLimit(limit?: number): number {
   if (typeof limit !== 'number' || !Number.isFinite(limit)) {
@@ -156,7 +216,7 @@ export function pathDeriveLabel(path: string): string {
 }
 
 const SEMANTIC_WRITE_BACKEND_OFFLINE = 'write-backend-offline'
-const SEMANTIC_BACKEND_FETCH_TIMEOUT_MS = 5_000
+const DEFAULT_HOCUSPOCUS_FETCH_TIMEOUT_MS = 5_000
 
 type HocuspocusSemanticEnv = { url: string; token: string }
 
@@ -176,30 +236,30 @@ function hocuspocusSemanticEnv(): HocuspocusSemanticEnv | null {
   return { url, token }
 }
 
-async function fetchSemanticBackend(
-  input: string | URL,
+function hocuspocusFetchTimeoutMs(): number {
+  const value = Number(process.env.HOCUSPOCUS_ADMIN_TIMEOUT_MS)
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_HOCUSPOCUS_FETCH_TIMEOUT_MS
+}
+
+async function fetchHocuspocusAdmin(
+  url: string,
   init: RequestInit,
 ): Promise<Response> {
+  const timeoutMs = hocuspocusFetchTimeoutMs()
   const controller = new AbortController()
-  const timeout = setTimeout(
-    () => controller.abort(),
-    SEMANTIC_BACKEND_FETCH_TIMEOUT_MS,
-  )
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(input, { ...init, signal: controller.signal })
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Hocuspocus request timed out after ${timeoutMs}ms.`)
+    }
+    throw error
   } finally {
     clearTimeout(timeout)
   }
-}
-
-function semanticBackendErrorDetail(error: unknown): string {
-  if (
-    error instanceof Error &&
-    (error.name === 'AbortError' || /abort/i.test(error.message))
-  ) {
-    return 'Hocuspocus semantic write backend timed out.'
-  }
-  return error instanceof Error ? error.message : 'Hocuspocus is unreachable.'
 }
 
 export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendStatus> {
@@ -215,7 +275,7 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
 
   const url = new URL('/apply/preflight', env.url).toString()
   try {
-    const response = await fetchSemanticBackend(url, {
+    const response = await fetchHocuspocusAdmin(url, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${env.token}`,
@@ -249,7 +309,8 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
     return {
       ok: false,
       reason: 'unreachable',
-      detail: semanticBackendErrorDetail(error),
+      detail:
+        error instanceof Error ? error.message : 'Hocuspocus is unreachable.',
     }
   }
 }
@@ -312,7 +373,7 @@ async function callSemanticApply(
 
   let response: Response
   try {
-    response = await fetchSemanticBackend(
+    response = await fetchHocuspocusAdmin(
       new URL(`/apply/${route}`, env.url).toString(),
       {
         method: 'POST',
@@ -371,7 +432,7 @@ async function createAnchorsForTextFromHocuspocus(
 
   let response: Response
   try {
-    response = await fetchSemanticBackend(
+    response = await fetchHocuspocusAdmin(
       new URL('/apply/createAnchorsForText', env.url).toString(),
       {
         method: 'POST',
@@ -527,16 +588,14 @@ type AgentRuntimePromptCtx = Pick<ActionCtx, 'runQuery'>
 export async function buildAgentRuntimeSystemPrompt(
   ctx: AgentRuntimePromptCtx,
   activeWorkspaceId: string | undefined,
+  accessMode: AgentAccessMode = DEFAULT_AGENT_ACCESS_MODE,
 ): Promise<string> {
   const kindInfo = await ctx.runQuery(
     internal.agent._resolveWorkspaceKindForCaller,
     { activeWorkspaceId },
   )
   const semanticWriteBackend = await checkSemanticWriteBackend()
-  return withSemanticWriteBackendStatus(
-    buildSystemPrompt(kindInfo),
-    semanticWriteBackend,
-  )
+  return buildAgentTurnSystemPrompt(kindInfo, semanticWriteBackend, accessMode)
 }
 
 const SYSTEM_PROMPT = `\
@@ -2599,6 +2658,7 @@ export const ensureThread = mutation({
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
     ...agentSelectionArgs,
+    ...agentAccessArgs,
   },
   handler: async (
     ctx,
@@ -2608,6 +2668,7 @@ export const ensureThread = mutation({
       agentProviderId,
       agentModel,
       agentReasoningEffort,
+      agentAccessMode,
     },
   ) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
@@ -2642,6 +2703,7 @@ export const ensureThread = mutation({
       ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
       title: fallbackThreadTitle(scopedProjectPath),
       ...toStoredAgentSelection(selection),
+      agentAccessMode: normalizeAgentAccessMode(agentAccessMode),
       updatedAt: Date.now(),
     })
     return threadId
@@ -2654,6 +2716,7 @@ export const createThread = mutation({
     projectPath: projectPathArg,
     title: v.optional(v.string()),
     ...agentSelectionArgs,
+    ...agentAccessArgs,
   },
   handler: async (
     ctx,
@@ -2664,6 +2727,7 @@ export const createThread = mutation({
       agentProviderId,
       agentModel,
       agentReasoningEffort,
+      agentAccessMode,
     },
   ) => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
@@ -2690,6 +2754,7 @@ export const createThread = mutation({
       ...(scopedProjectPath ? { projectPath: scopedProjectPath } : {}),
       title: cleanTitle,
       ...toStoredAgentSelection(selection),
+      agentAccessMode: normalizeAgentAccessMode(agentAccessMode),
       updatedAt: Date.now(),
     })
     return threadId
@@ -2721,6 +2786,7 @@ export const listThreads = query({
         agentProviderId: row.agentProviderId ?? null,
         agentModel: row.agentModel ?? null,
         agentReasoningEffort: row.agentReasoningEffort ?? null,
+        agentAccessMode: normalizeAgentAccessMode(row.agentAccessMode),
         updatedAt: row.updatedAt ?? row._creationTime,
         createdAt: row._creationTime,
         pinnedAt: row.pinnedAt ?? null,
@@ -3124,6 +3190,62 @@ export const _setThreadAgentSelection = internalMutation({
   },
 })
 
+export const _resolveAgentAccessModeForThread = internalQuery({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+    ...agentAccessArgs,
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId, agentAccessMode }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await threadRefRowsForWorkspaceThread(
+      ctx,
+      workspaceId,
+      threadId,
+    )
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    const threadRow = rows.sort(
+      (a: any, b: any) =>
+        (b.updatedAt ?? b._creationTime) - (a.updatedAt ?? a._creationTime),
+    )[0]
+    return normalizeAgentAccessMode(
+      agentAccessMode !== undefined
+        ? agentAccessMode
+        : threadRow.agentAccessMode,
+    )
+  },
+})
+
+export const _setThreadAgentAccessMode = internalMutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+    agentAccessMode: v.union(
+      v.literal('default'),
+      v.literal('auto-review'),
+      v.literal('full-access'),
+    ),
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId, agentAccessMode }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await threadRefRowsForWorkspaceThread(
+      ctx,
+      workspaceId,
+      threadId,
+    )
+    if (rows.length < 1) {
+      throw new Error('thread does not belong to this workspace')
+    }
+    const mode = normalizeAgentAccessMode(agentAccessMode)
+    for (const row of rows) {
+      await ctx.db.patch(row._id, { agentAccessMode: mode })
+    }
+    return mode
+  },
+})
+
 // R1 / C1 — the chat thread is a cross-person surface OUTSIDE
 // `windows` (tenancy-authz-v0.md §4: there must be NO such path).
 // `threadId` is client-supplied; bind it to the caller's OWN thread
@@ -3400,6 +3522,7 @@ export const sendMessage = action({
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
     ...agentSelectionArgs,
+    ...agentAccessArgs,
   },
   handler: async (
     ctx,
@@ -3412,6 +3535,7 @@ export const sendMessage = action({
       agentProviderId,
       agentModel,
       agentReasoningEffort,
+      agentAccessMode,
     },
   ) => {
     const workspaceId: string = await ctx.runQuery(
@@ -3428,9 +3552,18 @@ export const sendMessage = action({
     // H-1 (A1) — resolve workspace KIND for the system-prompt builder.
     // Personal ⇒ unchanged SYSTEM_PROMPT (byte-identical to v0).
     // Org ⇒ ORG_PREAMBLE + .context/me.md→.context/company.md substitution.
+    const accessMode: AgentAccessMode = await ctx.runQuery(
+      internal.agent._resolveAgentAccessModeForThread,
+      {
+        activeWorkspaceId,
+        threadId,
+        ...(agentAccessMode !== undefined ? { agentAccessMode } : {}),
+      },
+    )
     const systemPrompt = await buildAgentRuntimeSystemPrompt(
       ctx,
       activeWorkspaceId,
+      accessMode,
     )
     const selection = (await ctx.runQuery(
       internal.agent._resolveAgentSelectionForThread,
@@ -3481,6 +3614,13 @@ export const sendMessage = action({
       threadId,
       ...toStoredAgentSelection(selection),
     })
+    if (agentAccessMode !== undefined) {
+      await ctx.runMutation(internal.agent._setThreadAgentAccessMode, {
+        activeWorkspaceId,
+        threadId,
+        agentAccessMode: accessMode,
+      })
+    }
     await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
       threadId,
       promptMessageId: messageId,
@@ -3523,6 +3663,7 @@ export const sendMessage = action({
           ...(selection.reasoningEffort
             ? { agentReasoningEffort: selection.reasoningEffort }
             : {}),
+          agentAccessMode: accessMode,
         },
       } as any,
       { saveStreamDeltas: true },

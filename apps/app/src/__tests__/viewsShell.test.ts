@@ -1,11 +1,12 @@
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from 'convex/react'
 import { ActivityBar } from '../components/ActivityBar'
+import { FileTree } from '../components/FileTree'
 import { ViewFrame } from '../components/ViewFrame'
 import { ViewsSidebar } from '../components/ViewsSidebar'
 import { viewFromPathname } from '../lib/appViews'
@@ -29,11 +30,7 @@ vi.mock('../lib/active-workspace', () => ({
 const useQueryMock = vi.mocked(useQuery as any)
 const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const read = (path: string) =>
-  readFileSync(resolve(__dirname, '../../src', path), 'utf8')
-const APP_SRC = read('routes/_app.tsx')
-const FILE_TREE_SRC = read('components/FileTree.tsx')
-const VIEWS_SIDEBAR_SRC = read('components/ViewsSidebar.tsx')
+const APP_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
 
 const viewRows = [
   {
@@ -136,16 +133,53 @@ describe('Views activity shell', () => {
     })
   })
 
-  // This guards shell wiring that is awkward to exercise after static render:
-  // APP_SRC should not pass view-creation props into ViewsSidebar, while
-  // VIEWS_SIDEBAR_SRC remains view-open only and FILE_TREE_SRC keeps the Graph
-  // add control path. If these names change, update the strings with the
-  // equivalent shell boundary rather than deleting the regression.
-  it('does not expose add controls in Views while Graph reuses the Files add control', () => {
-    expect(APP_SRC).not.toContain('onCreateView=')
-    expect(VIEWS_SIDEBAR_SRC).not.toContain('onCreateView')
-    expect(FILE_TREE_SRC).toContain('allowCreate = true')
-    expect(APP_SRC).not.toContain("allowCreate={view !== 'graph'}")
+  it('does not expose add controls in Views or Graph while Files does', () => {
+    useActiveWorkspaceIdMock.mockReturnValue('ws_active')
+    useQueryMock
+      .mockReturnValueOnce({ views: viewRows, truncated: false })
+      .mockReturnValueOnce([
+        {
+          workspaceId: 'ws_active',
+          kind: 'personal',
+          name: 'Personal',
+          role: 'owner',
+        },
+      ])
+
+    const viewsHtml = renderToStaticMarkup(
+      createElement(ViewsSidebar, {
+        selectedPackageRoot: null,
+        onOpenView: () => {},
+        onOpenSource: () => {},
+      }),
+    )
+    const fileTreeProps = {
+      files: [],
+      folders: [],
+      activePath: null,
+      view: 'atom' as const,
+      user: null,
+      onOpen: () => {},
+      onCreatePage: async () => {},
+      onCreateFolder: async () => {},
+      onDeleteFolder: async () => {},
+      onRenameFolder: async () => {},
+      onDeleteFile: async () => {},
+      onRenameFile: async () => {},
+    }
+    const fileTreeHtml = renderToStaticMarkup(
+      createElement(FileTree, { ...fileTreeProps, allowCreate: true }),
+    )
+    const graphFileTreeHtml = renderToStaticMarkup(
+      createElement(FileTree, { ...fileTreeProps, allowCreate: false }),
+    )
+
+    expect(viewsHtml).not.toContain('aria-label="new"')
+    expect(fileTreeHtml).toContain('aria-label="new"')
+    expect(graphFileTreeHtml).not.toContain('aria-label="new"')
+    expect(APP_SRC).toMatch(
+      /<FileTree[\s\S]*allowCreate=\{view !== 'graph'\}[\s\S]*onCreatePage=/,
+    )
   })
 
   it('renders selected views inside a sandboxed frame shell', () => {
