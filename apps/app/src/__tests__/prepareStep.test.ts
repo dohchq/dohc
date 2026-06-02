@@ -347,6 +347,45 @@ describe('Track-3 P2b.4 — sendMessage lifecycle (saveMessage → clear → str
     // destructure still fails the test.
     expect(sendMessageBody).toMatch(/experimental_context:\s*\{\s*entry,/)
   })
+
+  it('sendMessage preserves stored access mode unless the request overrides it', () => {
+    const resolveStart = sendMessageBody.indexOf(
+      'internal.agent._resolveAgentAccessModeForThread',
+    )
+    expect(resolveStart).toBeGreaterThan(0)
+    const resolveEnd = sendMessageBody.indexOf('const systemPrompt', resolveStart)
+    const resolveBlock = sendMessageBody.slice(resolveStart, resolveEnd)
+    expect(resolveBlock).toContain('activeWorkspaceId')
+    expect(resolveBlock).toContain('threadId')
+    expect(resolveBlock).toContain(
+      '...(agentAccessMode !== undefined ? { agentAccessMode } : {})',
+    )
+    expect(resolveBlock).not.toContain('workspaceId,')
+  })
+
+  it('sendMessage persists explicit access-mode changes before streaming', () => {
+    const persistStart = sendMessageBody.indexOf(
+      'if (agentAccessMode !== undefined)',
+    )
+    expect(persistStart).toBeGreaterThan(0)
+    const persistEnd = sendMessageBody.indexOf(
+      'internal.skillTurnGate._clearTurnState',
+      persistStart,
+    )
+    const persistBlock = sendMessageBody.slice(persistStart, persistEnd)
+    expect(persistBlock).toContain(
+      'internal.agent._setThreadAgentAccessMode',
+    )
+    expect(persistBlock).toContain('activeWorkspaceId')
+    expect(persistBlock).toContain('threadId')
+    expect(persistBlock).toContain('agentAccessMode: accessMode')
+  })
+
+  it('sendMessage exposes the effective access mode to the agent runtime context', () => {
+    expect(sendMessageBody).toMatch(
+      /experimental_context:\s*\{[\s\S]*agentAccessMode:\s*accessMode/,
+    )
+  })
 })
 
 describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same pattern)', () => {

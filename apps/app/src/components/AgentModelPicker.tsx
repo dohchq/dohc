@@ -451,13 +451,7 @@ export function AgentModelPicker({
         typeof document !== 'undefined' &&
         createPortal(
           <>
-            <div
-              className="fixed inset-0 z-30"
-              onClick={() => {
-                restoreFocusOnCloseRef.current = false
-                setOpen(false)
-              }}
-            />
+            <div className="fixed inset-0 z-30" />
             <div
               ref={popoverRef}
               onKeyDown={onPopoverKeyDown}

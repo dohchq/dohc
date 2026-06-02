@@ -3192,11 +3192,12 @@ export const _setThreadAgentSelection = internalMutation({
 
 export const _resolveAgentAccessModeForThread = internalQuery({
   args: {
-    workspaceId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
     threadId: v.string(),
     ...agentAccessArgs,
   },
-  handler: async (ctx, { workspaceId, threadId, agentAccessMode }) => {
+  handler: async (ctx, { activeWorkspaceId, threadId, agentAccessMode }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await threadRefRowsForWorkspaceThread(
       ctx,
       workspaceId,
@@ -3219,7 +3220,7 @@ export const _resolveAgentAccessModeForThread = internalQuery({
 
 export const _setThreadAgentAccessMode = internalMutation({
   args: {
-    workspaceId: v.string(),
+    activeWorkspaceId: v.optional(v.string()),
     threadId: v.string(),
     agentAccessMode: v.union(
       v.literal('default'),
@@ -3227,7 +3228,8 @@ export const _setThreadAgentAccessMode = internalMutation({
       v.literal('full-access'),
     ),
   },
-  handler: async (ctx, { workspaceId, threadId, agentAccessMode }) => {
+  handler: async (ctx, { activeWorkspaceId, threadId, agentAccessMode }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const rows = await threadRefRowsForWorkspaceThread(
       ctx,
       workspaceId,
@@ -3553,7 +3555,7 @@ export const sendMessage = action({
     const accessMode: AgentAccessMode = await ctx.runQuery(
       internal.agent._resolveAgentAccessModeForThread,
       {
-        workspaceId,
+        activeWorkspaceId,
         threadId,
         ...(agentAccessMode !== undefined ? { agentAccessMode } : {}),
       },
@@ -3614,7 +3616,7 @@ export const sendMessage = action({
     })
     if (agentAccessMode !== undefined) {
       await ctx.runMutation(internal.agent._setThreadAgentAccessMode, {
-        workspaceId,
+        activeWorkspaceId,
         threadId,
         agentAccessMode: accessMode,
       })
