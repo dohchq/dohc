@@ -20,6 +20,9 @@ importers:
       '@ai-sdk/openai':
         specifier: 3.0.67
         version: 3.0.67(zod@3.25.76)
+      '@ai-sdk/provider':
+        specifier: 3.0.10
+        version: 3.0.10
       '@convex-dev/agent':
         specifier: 0.6.1
         version: 0.6.1(@ai-sdk/provider-utils@4.0.27(zod@3.25.76))(ai@6.0.180(zod@3.25.76))(convex-helpers@0.1.118(@standard-schema/spec@1.1.0)(convex@1.39.1(react@19.2.6))(react@19.2.6)(typescript@5.9.3)(zod@3.25.76))(convex@1.39.1(react@19.2.6))(react@19.2.6)
@@ -80,6 +83,9 @@ importers:
       '@tiptap/markdown':
         specifier: ^3.23.6
         version: 3.23.6(@tiptap/core@3.23.6(@tiptap/pm@3.23.6))(@tiptap/pm@3.23.6)
+      '@tiptap/pm':
+        specifier: ^3.23.6
+        version: 3.23.6
       '@tiptap/react':
         specifier: ^3.23.6
         version: 3.23.6(@floating-ui/dom@1.7.6)(@tiptap/core@3.23.6(@tiptap/pm@3.23.6))(@tiptap/pm@3.23.6)(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -125,6 +131,9 @@ importers:
       lucide-react:
         specifier: ^1.14.0
         version: 1.16.0(react@19.2.6)
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
       nitro:
         specifier: 3.0.260429-beta
         version: 3.0.260429-beta(chokidar@5.0.0)(jiti@2.7.0)(lru-cache@11.5.0)(rollup@4.60.4)(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))

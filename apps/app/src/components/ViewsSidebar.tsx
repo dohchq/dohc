@@ -1,4 +1,4 @@
-import { FilePenLine, Loader2, PanelsTopLeft } from 'lucide-react'
+import { FilePenLine, PanelsTopLeft } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
@@ -8,6 +8,7 @@ import {
   SidebarHeader,
   type SidebarUser,
 } from './SidebarChrome'
+import { SidebarListSkeleton, Skeleton } from './Skeleton'
 
 type ViewRow = {
   packageRoot: string
@@ -68,10 +69,7 @@ export function ViewsSidebar({
             </h2>
           </div>
           {result === undefined ? (
-            <Loader2
-              className="size-3.5 animate-spin text-ink-faint"
-              aria-label="loading views"
-            />
+            <Skeleton className="h-2.5 w-5 rounded-full" />
           ) : (
             <span className="font-mono text-[10.5px] text-ink-faint">
               {views.length}
@@ -79,7 +77,9 @@ export function ViewsSidebar({
           )}
         </div>
 
-        {result !== undefined && views.length === 0 ? (
+        {result === undefined ? (
+          <SidebarListSkeleton groups={2} rowsPerGroup={4} />
+        ) : views.length === 0 ? (
           <div className="px-2 py-8 text-center text-[12px] leading-relaxed text-ink-faint">
             No views yet.
           </div>

@@ -2768,7 +2768,22 @@ export const setAgentWorkspaceDefault = mutation({
     const settings = await workspaceSettingsRow(ctx, workspaceId)
     const patch = toStoredAgentSelection(selection)
     if (settings) {
-      await ctx.db.patch(settings._id, patch)
+      const {
+        _id,
+        _creationTime,
+        agentProviderId,
+        agentModel,
+        agentReasoningEffort,
+        ...rest
+      } = settings
+      void _creationTime
+      void agentProviderId
+      void agentModel
+      void agentReasoningEffort
+      await ctx.db.replace(_id, {
+        ...rest,
+        ...patch,
+      })
       return selection
     }
     await ctx.db.insert('workspaceSettings', {
@@ -3088,7 +3103,22 @@ export const _setThreadAgentSelection = internalMutation({
     }
     const patch = toStoredAgentSelection(selection)
     for (const row of rows) {
-      await ctx.db.patch(row._id, patch)
+      const {
+        _id,
+        _creationTime,
+        agentProviderId,
+        agentModel,
+        agentReasoningEffort,
+        ...rest
+      } = row
+      void _creationTime
+      void agentProviderId
+      void agentModel
+      void agentReasoningEffort
+      await ctx.db.replace(_id, {
+        ...rest,
+        ...patch,
+      })
     }
     return selection
   },
@@ -3222,7 +3252,14 @@ const USER_TURN_TOOLS_NO_RUN_SKILL = [
 const SKILL_ENTRY_TOOLS = ['run_skill'] as const
 const COMMAND_ENTRY_TOOLS = ['run_command'] as const
 
-export type SkillTurnEntry = 'skill-fire' | 'command-fire' | undefined
+export const SKILL_TURN_ENTRY_VALUES = ['skill-fire', 'command-fire'] as const
+export const skillTurnEntryArg = v.optional(
+  v.union(
+    v.literal(SKILL_TURN_ENTRY_VALUES[0]),
+    v.literal(SKILL_TURN_ENTRY_VALUES[1]),
+  ),
+)
+export type SkillTurnEntry = (typeof SKILL_TURN_ENTRY_VALUES)[number] | undefined
 
 /** Build the @convex-dev/agent `prepareStep` hook bound to a
  *  thread + (optionally) the entry-flag for this turn + the
@@ -3359,9 +3396,7 @@ export const sendMessage = action({
   args: {
     threadId: v.string(),
     prompt: v.string(),
-    entry: v.optional(
-      v.union(v.literal('skill-fire'), v.literal('command-fire')),
-    ),
+    entry: skillTurnEntryArg,
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
     ...agentSelectionArgs,
@@ -3485,7 +3520,9 @@ export const sendMessage = action({
           projectPath: normalizeProjectPath(projectPath),
           agentProviderId: selection.providerId,
           agentModel: selection.model,
-          agentReasoningEffort: selection.reasoningEffort,
+          ...(selection.reasoningEffort
+            ? { agentReasoningEffort: selection.reasoningEffort }
+            : {}),
         },
       } as any,
       { saveStreamDeltas: true },
@@ -3674,7 +3711,9 @@ export const startOnboarding = action({
               activeWorkspaceId: workspaceId,
               agentProviderId: selection.providerId,
               agentModel: selection.model,
-              agentReasoningEffort: selection.reasoningEffort,
+              ...(selection.reasoningEffort
+                ? { agentReasoningEffort: selection.reasoningEffort }
+                : {}),
             },
             onStepFinish: () => beat(),
             onChunk: () => beat(),
@@ -3696,7 +3735,9 @@ export const startOnboarding = action({
               activeWorkspaceId: workspaceId,
               agentProviderId: selection.providerId,
               agentModel: selection.model,
-              agentReasoningEffort: selection.reasoningEffort,
+              ...(selection.reasoningEffort
+                ? { agentReasoningEffort: selection.reasoningEffort }
+                : {}),
             },
             onStepFinish: () => beat(),
             onChunk: () => beat(),

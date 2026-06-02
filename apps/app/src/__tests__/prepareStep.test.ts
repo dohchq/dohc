@@ -7,9 +7,11 @@ import {
   UNAUTHORIZABLE_TOOLS,
   SAFE_FOR_COMMAND_TOOLS,
   SAFE_FOR_SKILL_TOOLS,
+  SKILL_TURN_ENTRY_VALUES,
   USER_TURN_TOOLS_NO_RUN_SKILL,
   SKILL_ENTRY_TOOLS,
   COMMAND_ENTRY_TOOLS,
+  skillTurnEntryArg,
 } from '../../convex/agent'
 
 // Track-3 P2b.4 — prepareStep.activeTools three-mode invariant +
@@ -308,10 +310,11 @@ describe('Track-3 P2b.4 — sendMessage lifecycle (saveMessage → clear → str
     return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
   })()
 
-  it('sendMessage args include `entry: v.optional(v.union("skill-fire", "command-fire"))`', () => {
-    expect(sendMessageBody).toMatch(
-      /entry:\s*v\.optional\(\s*v\.union\(\s*v\.literal\(['"]skill-fire['"]\),\s*v\.literal\(['"]command-fire['"]\)\s*,?\s*\)\s*,?\s*\)/,
-    )
+  it('sendMessage entry validator accepts only skill and command fire entries', () => {
+    expect(skillTurnEntryArg.isOptional).toBe('optional')
+    expect(
+      skillTurnEntryArg.members.map((member) => member.value).sort(),
+    ).toEqual([...SKILL_TURN_ENTRY_VALUES].sort())
   })
 
   it('sendMessage calls saveMessage BEFORE streamText (stable promptMessageId)', () => {

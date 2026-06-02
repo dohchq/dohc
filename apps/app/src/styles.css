@@ -91,6 +91,8 @@
 
   --color-selection: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
   --color-backdrop: rgba(21, 21, 21, 0.34);
+  --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 6%, var(--dohc-panel));
+  --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 12%, var(--dohc-panel));
 
   /* Depth scale — subtle, for major surfaces only (brand bible §05). */
   --shadow-xs: 0 1px 2px rgba(21, 21, 21, 0.04);
@@ -179,6 +181,8 @@
 
   --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
   --color-backdrop: rgba(4, 6, 5, 0.74);
+  --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 8%, var(--dohc-panel));
+  --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 15%, var(--dohc-panel));
 
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
@@ -243,6 +247,8 @@
 
     --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
     --color-backdrop: rgba(4, 6, 5, 0.74);
+    --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 8%, var(--dohc-panel));
+    --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 15%, var(--dohc-panel));
 
     --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
@@ -414,6 +420,40 @@
   /* Links keep their accent color but no underline by default. */
   a { color: var(--color-accent); text-decoration: none; }
   a:hover { text-decoration: underline; text-underline-offset: 2px; }
+}
+
+@keyframes dohc-skeleton-shimmer {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+
+.dohc-skeleton {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background-color: var(--dohc-skeleton-base);
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 34%,
+    var(--dohc-skeleton-sheen) 48%,
+    transparent 62%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation: dohc-skeleton-shimmer 1.55s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dohc-skeleton {
+    animation: none;
+    background-image: none;
+  }
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+    animation: none;
+    background-image: none;
+  }
 }
 
 /* Generic pane primitive — scrollable column, full viewport height. Used
@@ -1929,6 +1969,45 @@
 .doc-editing .dohc-tiptap-editor .query-atom-result--error {
   color: var(--ink-faint);
   font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading {
+  min-height: 54px;
+  color: transparent;
+  font-style: normal;
+  position: relative;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+  content: '';
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background-color: var(--dohc-skeleton-base);
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 34%,
+    var(--dohc-skeleton-sheen) 48%,
+    transparent 62%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation: dohc-skeleton-shimmer 1.55s ease-in-out infinite;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::before {
+  width: 78%;
+  margin-top: 2px;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+  width: 54%;
+  margin-top: 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+    animation: none;
+    background-image: none;
+  }
 }
 .doc-editing .dohc-tiptap-editor .query-atom-result--error {
   color: var(--color-danger);

@@ -28,11 +28,13 @@ import { Markdown } from './Markdown'
 import { DohcMark } from './DohcLogo'
 import {
   AgentModelPicker,
+  agentSelectionToConvexArgs,
   type AgentModelPickerSelection,
   type AgentProviderSnapshot,
 } from './AgentModelPicker'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { useSetChatBusy } from '../lib/chat-busy'
+import { ChatMessagesSkeleton } from './Skeleton'
 import {
   agentWorkTraceSummary,
   formatToolPayload,
@@ -488,11 +490,7 @@ export function Chat({
   )
 
   const agentSelectionPayload = agentSelection
-    ? {
-        agentProviderId: agentSelection.providerId,
-        agentModel: agentSelection.model,
-        agentReasoningEffort: agentSelection.reasoningEffort,
-      }
+    ? agentSelectionToConvexArgs(agentSelection)
     : {}
 
   async function ensureActiveThread() {
@@ -903,15 +901,14 @@ export function Chat({
               primary ? 'max-w-[820px] gap-5' : 'gap-4'
             }`}
           >
-            {uiMessages.length === 0 && messagesLoadingFirstPage && (
-              <ChatLoadingState primary={primary} />
-            )}
-            {uiMessages.length === 0 && !messagesLoadingFirstPage && (
+            {messagesLoadingFirstPage ? (
+              <ChatMessagesSkeleton primary={primary} />
+            ) : uiMessages.length === 0 ? (
               <EmptyChatState
                 primary={primary}
                 onSelectPrompt={selectStarterPrompt}
               />
-            )}
+            ) : null}
             {uiMessages.map((m, index) => (
               <MessageView
                 key={m.key}
@@ -1853,71 +1850,6 @@ function ScrollToBottomButton({ onClick }: { onClick: () => void }) {
       <ChevronDown className="size-3.5" strokeWidth={2} />
       latest
     </button>
-  )
-}
-
-function ChatLoadingState({ primary }: { primary: boolean }) {
-  if (!primary) {
-    return (
-      <div
-        aria-label="Loading chat messages"
-        className="flex animate-pulse flex-col gap-4 pt-1"
-      >
-        <div className="flex justify-end">
-          <div className="w-[76%] rounded-lg border border-rule bg-elevated px-3 py-2.5 shadow-xs">
-            <span className="block h-2 w-[72%] rounded-full bg-ink-ghost/70" />
-            <span className="mt-2 block h-2 w-[46%] rounded-full bg-ink-ghost/55" />
-          </div>
-        </div>
-        <div className="flex justify-start">
-          <div className="min-w-0 flex-1">
-            <div className="mb-1.5 flex items-center gap-1.5 px-1">
-              <DohcMark size={13} />
-              <span className="h-2 w-10 rounded-full bg-ink-ghost/65" />
-            </div>
-            <div className="rounded-lg border border-rule bg-elevated/50 px-3 py-2.5">
-              <span className="block h-2 w-24 rounded-full bg-ink-ghost/50" />
-              <span className="mt-3 block h-2 w-full rounded-full bg-ink-ghost/65" />
-              <span className="mt-2 block h-2 w-[82%] rounded-full bg-ink-ghost/55" />
-              <span className="mt-2 block h-2 w-[54%] rounded-full bg-ink-ghost/45" />
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div
-      aria-label="Loading chat messages"
-      className="flex animate-pulse flex-col gap-5"
-    >
-      <div className="flex justify-end">
-        <div className="max-w-[76%] rounded-lg border border-rule bg-elevated px-3.5 py-2.5 shadow-xs">
-          <span className="block h-2.5 w-56 max-w-full rounded-full bg-ink-ghost/70" />
-          <span className="mt-2.5 block h-2.5 w-36 max-w-full rounded-full bg-ink-ghost/50" />
-        </div>
-      </div>
-      <div className="flex justify-start">
-        <div className="min-w-0 flex-1">
-          <div className="mb-1.5 flex items-center gap-1.5 px-1">
-            <DohcMark size={13} />
-            <span className="h-2 w-12 rounded-full bg-ink-ghost/65" />
-          </div>
-          <div className="rounded-lg border border-rule bg-surface/72 px-4 py-3 shadow-xs">
-            <div className="mb-4 border-b border-rule pb-3">
-              <span className="block h-2.5 w-28 rounded-full bg-ink-ghost/50" />
-              <span className="mt-3 block h-2 w-[62%] rounded-full bg-ink-ghost/42" />
-            </div>
-            <span className="block h-2.5 w-[94%] rounded-full bg-ink-ghost/70" />
-            <span className="mt-2.5 block h-2.5 w-[86%] rounded-full bg-ink-ghost/60" />
-            <span className="mt-2.5 block h-2.5 w-[72%] rounded-full bg-ink-ghost/50" />
-            <span className="mt-5 block h-2.5 w-[78%] rounded-full bg-ink-ghost/60" />
-            <span className="mt-2.5 block h-2.5 w-[48%] rounded-full bg-ink-ghost/45" />
-          </div>
-        </div>
-      </div>
-    </div>
   )
 }
 

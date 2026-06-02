@@ -17,6 +17,7 @@ import {
   type SidebarUser,
 } from './SidebarChrome'
 import { useDialogFocus } from '../lib/dialog-focus'
+import { SidebarRowsSkeleton } from './Skeleton'
 
 type FolderLike = { path: string }
 type FileLike = { path: string }
@@ -114,6 +115,7 @@ export function AgentChatSidebar({
   onRenameProject,
   onOpenSearch,
   user,
+  loading = false,
 }: {
   files: ReadonlyArray<FileLike>
   folders: ReadonlyArray<FolderLike>
@@ -132,6 +134,7 @@ export function AgentChatSidebar({
   onRenameProject: (projectPath: string, nextPath: string) => SidebarActionResult
   onOpenSearch: () => void
   user: SidebarUser
+  loading?: boolean
 }) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
@@ -216,7 +219,9 @@ export function AgentChatSidebar({
           )}
         </div>
         <div className="space-y-1">
-          {projects.length === 0 ? (
+          {loading ? (
+            <SidebarRowsSkeleton rows={4} />
+          ) : projects.length === 0 ? (
             <p className="px-1 py-2 text-[12px] leading-relaxed text-ink-faint">
               Create a project chat when a folder deserves its own context.
             </p>
@@ -355,7 +360,9 @@ export function AgentChatSidebar({
           </button>
         </div>
         <div className="space-y-0.5">
-          {workspaceThreads.length === 0 ? (
+          {loading ? (
+            <SidebarRowsSkeleton rows={4} />
+          ) : workspaceThreads.length === 0 ? (
             <button
               type="button"
               onClick={() => onNewThread(null)}

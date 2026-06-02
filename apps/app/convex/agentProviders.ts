@@ -19,6 +19,12 @@ export type AgentModelSelection = {
   reasoningEffort?: AgentReasoningEffort
 }
 
+export type StoredAgentSelection = {
+  agentProviderId: AgentProviderId
+  agentModel: string
+  agentReasoningEffort?: AgentReasoningEffort
+}
+
 export type AgentSelectionInput = {
   providerId?: string | null
   model?: string | null
@@ -339,6 +345,9 @@ function applySelectionPatch(
   if (!patch) return base
   const requestedModel = rawModel(patch)?.trim()
   const requestedProvider = rawProviderId(patch)?.trim()
+  if (strict && requestedProvider && !isProviderId(requestedProvider)) {
+    throw new Error(`Unknown provider "${requestedProvider}".`)
+  }
   const inferredProvider = requestedModel ? providerForModel(requestedModel) : null
   const providerId = isProviderId(requestedProvider)
     ? requestedProvider
@@ -350,6 +359,9 @@ function applySelectionPatch(
   const providerModel =
     provider.models.find((candidate) => candidate.id === model) ?? null
   const reasoningRaw = rawReasoningEffort(patch)?.trim()
+  if (strict && reasoningRaw && !isReasoningEffort(reasoningRaw)) {
+    throw new Error(`Unknown reasoning effort "${reasoningRaw}".`)
+  }
   const selection: AgentModelSelection = {
     providerId,
     model,
@@ -453,10 +465,14 @@ export function agentProviderOptions(
     : undefined
 }
 
-export function toStoredAgentSelection(selection: AgentModelSelection) {
+export function toStoredAgentSelection(
+  selection: AgentModelSelection,
+): StoredAgentSelection {
   return {
     agentProviderId: selection.providerId,
     agentModel: selection.model,
-    agentReasoningEffort: selection.reasoningEffort,
+    ...(selection.reasoningEffort
+      ? { agentReasoningEffort: selection.reasoningEffort }
+      : {}),
   }
 }

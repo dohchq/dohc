@@ -32,9 +32,10 @@ import {
   type AgentThreadSummary,
 } from '@/components/AgentChatSidebar'
 import { AgentRunRail } from '@/components/AgentRunRail'
-import type {
-  AgentModelPickerSelection,
-  AgentProviderSnapshot,
+import {
+  agentSelectionToConvexArgs,
+  type AgentModelPickerSelection,
+  type AgentProviderSnapshot,
 } from '@/components/AgentModelPicker'
 import { GraphView } from '@/components/GraphView'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -44,6 +45,7 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { SearchOverlay } from '@/components/SearchOverlay'
 import { DohcLogo } from '@/components/DohcLogo'
 import { Onboarding } from '@/components/Onboarding'
+import { AppLoadingScreen } from '@/components/Skeleton'
 import { NoticeProvider, useNotice } from '@/components/NoticeCenter'
 import {
   ActiveWorkspaceProvider,
@@ -140,11 +142,7 @@ function Home() {
   const { user, loading } = useAuth()
 
   if (loading) {
-    return (
-      <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">
-        loading…
-      </div>
-    )
+    return <AppLoadingScreen />
   }
   if (!user) {
     return <SignInPrompt />
@@ -203,11 +201,7 @@ function Gate() {
     void upsertMyProfile({}).catch(() => {})
   }, [user?.id, user?.email, upsertMyProfile])
   if (state === undefined) {
-    return (
-      <div className="grid h-screen place-items-center bg-page text-ink-faint text-sm">
-        loading…
-      </div>
-    )
+    return <AppLoadingScreen />
   }
   if (state === 'NEW' || state === 'IN_PROGRESS') {
     return <Onboarding state={state} />
@@ -500,9 +494,7 @@ function App() {
       try {
         await setAgentWorkspaceDefault({
           activeWorkspaceId,
-          agentProviderId: selection.providerId,
-          agentModel: selection.model,
-          agentReasoningEffort: selection.reasoningEffort,
+          ...agentSelectionToConvexArgs(selection),
         })
         setAgentDraftSelection(selection)
         notice.success('Default model updated', selection.model)
@@ -743,11 +735,7 @@ function App() {
         activeWorkspaceId,
         projectPath,
         ...(chosenSelection
-          ? {
-              agentProviderId: chosenSelection.providerId,
-              agentModel: chosenSelection.model,
-              agentReasoningEffort: chosenSelection.reasoningEffort,
-            }
+          ? agentSelectionToConvexArgs(chosenSelection)
           : {}),
       })
       if (chosenSelection) setAgentSelectionOverride(chosenSelection)
@@ -1211,6 +1199,11 @@ function App() {
             files={files ?? []}
             folders={folders ?? []}
             threads={chatThreads}
+            loading={
+              files === undefined ||
+              folders === undefined ||
+              agentThreads === undefined
+            }
             activeThreadId={threadId}
             activeProjectPath={agentProjectPath}
             onSelectThread={selectAgentThread}
@@ -1303,6 +1296,7 @@ function App() {
           <FileTree
             files={files ?? []}
             folders={folders ?? []}
+            loading={files === undefined || folders === undefined}
             activePath={activePath}
             view="atom"
             onOpenSearch={() => setSearchOpen(true)}

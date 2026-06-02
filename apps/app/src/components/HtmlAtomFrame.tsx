@@ -4,6 +4,7 @@ import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { ATOM_BODY_MAX_BYTES } from '../lib/inlineAtom'
 import { harvestFormulaSrcsFromDoc } from '../lib/htmlFormula'
+import { DocumentSkeleton } from './Skeleton'
 
 // html-atoms-v1 §2 / §2-C / §3 / §5 — the rendered view of a
 // `type: html` atom. Tiptap is NEVER used for an html body (§5). The
@@ -117,6 +118,7 @@ export function HtmlAtomFrame({
     useRef<HTMLIFrameElement | null>(null),
   ] as const
   const [active, setActive] = useState<Buf>(0)
+  const [everPainted, setEverPainted] = useState(false)
   // activeRef MIRRORS active and is updated SYNCHRONOUSLY before
   // setActive so the drive effect never picks a stale back buffer
   // (P3 dual-review FAIL: a load that flipped `active` before the
@@ -162,6 +164,7 @@ export function HtmlAtomFrame({
       // (Best-effort: see the §2-C HONEST SCOPE note above.)
       expecting.current[buf] = false
       activeRef.current = buf
+      setEverPainted(true)
       setActive(buf)
       return
     }
@@ -206,6 +209,11 @@ export function HtmlAtomFrame({
           }}
         />
       ))}
+      {!everPainted && (
+        <div className="absolute inset-0 bg-page">
+          <DocumentSkeleton compact />
+        </div>
+      )}
     </div>
   )
 }
