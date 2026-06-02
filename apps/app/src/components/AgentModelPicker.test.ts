@@ -388,11 +388,15 @@ describe('AgentModelPicker', () => {
       document.body.querySelector('input[placeholder="Search models"]'),
     ).not.toBeNull()
 
+    outsideButton.focus()
+    expect(document.activeElement).toBe(outsideButton)
+
     await pointerDown(outsideButton)
 
     expect(
       document.body.querySelector('input[placeholder="Search models"]'),
     ).toBeNull()
+    expect(document.activeElement).toBe(outsideButton)
 
     outsideButton.remove()
   })

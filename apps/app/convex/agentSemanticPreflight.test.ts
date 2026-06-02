@@ -136,7 +136,7 @@ describe('agent semantic write backend preflight', () => {
     )
 
     expect(prompt).toContain('Semantic write backend: offline')
-    expect(prompt).toContain('offline for test')
+    expect(prompt).not.toContain('offline for test')
     expect(prompt).toContain('The user selected Auto-review')
   })
 })

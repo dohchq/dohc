@@ -13,7 +13,7 @@ import {
 
 vi.mock('../components/WorkspaceSwitcher', () => ({
   WorkspaceSwitcher: () => null,
-}))
+}));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true
@@ -107,11 +107,34 @@ describe('Agent / Files shell mode', () => {
   })
 
   it('adds dohc-style project chat history beside the Agent workspace', () => {
-    expect(AGENT_CHAT_SIDEBAR).toContain('Projects')
-    expect(AGENT_CHAT_SIDEBAR).toContain('Chats')
-    expect(AGENT_CHAT_SIDEBAR).toContain('New chat')
-    expect(AGENT_CHAT_SIDEBAR).toContain('projectPath')
-    expect(AGENT_CHAT_SIDEBAR).toContain('topLevelProjects')
+    const projectThread: AgentThreadSummary = {
+      ...pinnedThread,
+      threadId: 'thread_project',
+      projectPath: 'dohc/research',
+      title: 'Research chat',
+      pinnedAt: null,
+    }
+    const onNewThread = vi.fn()
+    const { container, root } = renderAgentSidebar({
+      threads: [projectThread, pinnedThread],
+      activeThreadId: projectThread.threadId,
+      activeProjectPath: 'dohc/research',
+      onNewThread,
+    })
+    try {
+      expect(container.textContent).toContain('Projects')
+      expect(container.textContent).toContain('Chats')
+      expect(container.textContent).toContain('dohc/research')
+      expect(container.textContent).toContain('Research chat')
+      expect(
+        container.querySelector('button[aria-label="new chat in dohc/research"]'),
+      ).not.toBeNull()
+      expect(
+        container.querySelector('button[aria-label="new workspace chat"]'),
+      ).not.toBeNull()
+    } finally {
+      cleanupRendered(container, root)
+    }
     expect(APP).toContain('api.agent.listThreads')
     expect(APP).toContain('api.agent.createThread')
   })

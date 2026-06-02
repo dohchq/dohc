@@ -1461,6 +1461,7 @@ export function AgentAccessPicker({
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const savedFocusRef = useRef<HTMLElement | null>(null)
+  const restoreFocusOnCloseRef = useRef(false)
   const selected =
     AGENT_ACCESS_MODE_OPTIONS.find((option) => option.value === accessMode) ??
     AGENT_ACCESS_MODE_OPTIONS.find(
@@ -1484,6 +1485,7 @@ export function AgentAccessPicker({
   function toggleOpen() {
     if (disabled) return
     if (open) {
+      restoreFocusOnCloseRef.current = true
       setOpen(false)
       return
     }
@@ -1533,12 +1535,16 @@ export function AgentAccessPicker({
         popoverRef.current &&
         (popoverRef.current.contains(target) || path.includes(popoverRef.current))
 
-      if (!insideTrigger && !insidePopover) setOpen(false)
+      if (!insideTrigger && !insidePopover) {
+        restoreFocusOnCloseRef.current = false
+        setOpen(false)
+      }
     }
 
     function closeFromKeyboard(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         event.preventDefault()
+        restoreFocusOnCloseRef.current = true
         setOpen(false)
         return
       }
@@ -1563,8 +1569,11 @@ export function AgentAccessPicker({
       window.cancelAnimationFrame(focusFrame)
       document.removeEventListener('pointerdown', closeFromOutsidePointer, true)
       document.removeEventListener('keydown', closeFromKeyboard)
-      const restoreTarget = triggerRef.current ?? savedFocusRef.current
-      restoreTarget?.focus()
+      if (restoreFocusOnCloseRef.current) {
+        const restoreTarget = triggerRef.current ?? savedFocusRef.current
+        restoreTarget?.focus()
+      }
+      restoreFocusOnCloseRef.current = false
       savedFocusRef.current = null
     }
   }, [open])
@@ -1590,7 +1599,13 @@ export function AgentAccessPicker({
         typeof document !== 'undefined' &&
         createPortal(
           <>
-            <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+            <div
+              className="fixed inset-0 z-30"
+              onClick={() => {
+                restoreFocusOnCloseRef.current = false
+                setOpen(false)
+              }}
+            />
             <div
               ref={popoverRef}
               className="fixed z-40 w-[264px] max-w-[calc(100vw-24px)] rounded-xl border border-rule-strong bg-elevated p-1.5 shadow-modal"
@@ -1610,6 +1625,7 @@ export function AgentAccessPicker({
                     type="button"
                     onClick={() => {
                       onChange(option.value)
+                      restoreFocusOnCloseRef.current = true
                       setOpen(false)
                     }}
                     className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${

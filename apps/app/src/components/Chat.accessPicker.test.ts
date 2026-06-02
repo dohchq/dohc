@@ -14,6 +14,13 @@ async function click(element: Element | null) {
   })
 }
 
+async function pointerDown(element: Element | null) {
+  expect(element).not.toBeNull()
+  await act(async () => {
+    element!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+  })
+}
+
 async function keyDown(key: string) {
   await act(async () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
@@ -69,5 +76,41 @@ describe('AgentAccessPicker', () => {
 
     expect(document.body.textContent).not.toContain('Auto-review')
     expect(document.activeElement).toBe(trigger)
+  })
+
+  it('does not steal focus back to the trigger after an outside pointer close', async () => {
+    act(() => {
+      root.render(
+        React.createElement(AgentAccessPicker, {
+          accessMode: 'default',
+          disabled: false,
+          onChange: vi.fn(),
+        }),
+      )
+    })
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Access permissions"]',
+    )
+    const outsideButton = document.createElement('button')
+    outsideButton.textContent = 'Outside layer'
+    outsideButton.style.position = 'fixed'
+    outsideButton.style.zIndex = '100'
+    document.body.appendChild(outsideButton)
+
+    try {
+      await click(trigger)
+      expect(document.body.textContent).toContain('Auto-review')
+
+      outsideButton.focus()
+      expect(document.activeElement).toBe(outsideButton)
+
+      await pointerDown(outsideButton)
+
+      expect(document.body.textContent).not.toContain('Auto-review')
+      expect(document.activeElement).toBe(outsideButton)
+    } finally {
+      outsideButton.remove()
+    }
   })
 })

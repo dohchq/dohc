@@ -1322,6 +1322,7 @@ function App() {
             sharedWithMe={sharedWithMe ?? []}
             sharedByMeFileIds={sharedByMeFileIds ?? []}
             activeShareId={urlShareId}
+            allowCreate={view !== 'graph'}
             onOpenShared={openShared}
             onOpen={(p) => openAtom(p)}
             onCreatePage={createPageWithName}

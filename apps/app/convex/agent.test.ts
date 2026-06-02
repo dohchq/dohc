@@ -208,6 +208,13 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     await expect(
       t.query(internal.agent._resolveAgentAccessModeForThread, {
         workspaceId: A,
+        threadId: 't-access',
+        agentAccessMode: 'default',
+      }),
+    ).resolves.toBe('default')
+    await expect(
+      t.query(internal.agent._resolveAgentAccessModeForThread, {
+        workspaceId: A,
         threadId: 't-default',
       }),
     ).resolves.toBe('default')

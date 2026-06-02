@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +29,8 @@ vi.mock('../lib/active-workspace', () => ({
 
 const useQueryMock = vi.mocked(useQuery as any)
 const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const APP_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
 
 const viewRows = [
   {
@@ -128,12 +133,7 @@ describe('Views activity shell', () => {
     })
   })
 
-  // This guards shell wiring that is awkward to exercise after static render:
-  // APP_SRC should not pass view-creation props into ViewsSidebar, while
-  // VIEWS_SIDEBAR_SRC remains view-open only and FILE_TREE_SRC keeps the Graph
-  // add control path. If these names change, update the strings with the
-  // equivalent shell boundary rather than deleting the regression.
-  it('does not expose add controls in Views while Graph reuses the Files add control', () => {
+  it('does not expose add controls in Views or Graph while Files does', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
     useQueryMock
       .mockReturnValueOnce({ views: viewRows, truncated: false })
@@ -177,6 +177,9 @@ describe('Views activity shell', () => {
     expect(viewsHtml).not.toContain('aria-label="new"')
     expect(fileTreeHtml).toContain('aria-label="new"')
     expect(graphFileTreeHtml).not.toContain('aria-label="new"')
+    expect(APP_SRC).toMatch(
+      /<FileTree[\s\S]*allowCreate=\{view !== 'graph'\}[\s\S]*onCreatePage=/,
+    )
   })
 
   it('renders selected views inside a sandboxed frame shell', () => {
