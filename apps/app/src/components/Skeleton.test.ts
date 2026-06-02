@@ -4,8 +4,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   AppLoadingScreen,
+  SidebarListSkeleton,
   Skeleton,
   SkeletonText,
+  ViewFrameSkeleton,
 } from './Skeleton'
 
 describe('Skeleton primitives', () => {
@@ -48,7 +50,44 @@ describe('Skeleton primitives', () => {
 
     expect(html).toContain('role="status"')
     expect(html).toContain('aria-label="Loading dohc workspace"')
+    expect(html).toContain('grid-cols-[48px_minmax(0,1fr)]')
+    expect(html).toContain('sm:grid-cols-[48px_260px_1fr]')
+    expect(html).toMatch(/<aside class="[^"]*\bhidden\b[^"]*\bsm:flex\b/)
+    expect((html.match(/\bsize-9\b/g) ?? []).length).toBeGreaterThanOrEqual(4)
     expect((html.match(/dohc-skeleton/g) ?? []).length).toBeGreaterThan(12)
+  })
+
+  it('keeps one-section sidebar skeletons inside the native section', () => {
+    const html = renderToStaticMarkup(
+      createElement(SidebarListSkeleton, { groups: 1, rowsPerGroup: 3 }),
+    )
+
+    expect(html).not.toContain('mb-2 h-2 w-20 rounded-full')
+    expect((html.match(/\bh-8\b/g) ?? []).length).toBe(3)
+  })
+
+  it('renders the view frame skeleton as an embedded runtime surface', () => {
+    const html = renderToStaticMarkup(
+      createElement(ViewFrameSkeleton, { withHeader: true }),
+    )
+
+    expect(html).toContain('h-12')
+    expect(html).toContain('absolute inset-0')
+    expect(html).not.toContain('place-items-center')
+  })
+
+  it('does not wire decorative graph skeleton art into graph view', () => {
+    const graphView = readFileSync(
+      new URL('./GraphView.tsx', import.meta.url),
+      'utf8',
+    )
+    const skeletonSource = readFileSync(
+      new URL('./Skeleton.tsx', import.meta.url),
+      'utf8',
+    )
+
+    expect(graphView).not.toContain('GraphSkeleton')
+    expect(skeletonSource).not.toContain('export function GraphSkeleton')
   })
 
   it('defines theme-aware shimmer tokens and reduced-motion behavior', () => {

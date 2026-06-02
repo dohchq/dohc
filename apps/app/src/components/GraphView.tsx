@@ -5,7 +5,6 @@ import { api } from '../../convex/_generated/api'
 import type { GraphNode, GraphEdge } from '../../convex/graph'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import { forceCollide } from 'd3-force-3d'
-import { GraphSkeleton } from './Skeleton'
 
 // graph-v1 1c — the knowledge graph. Cells (files) are nodes; an edge
 // is a wikilink or a concrete formula reference. The view merges every
@@ -398,14 +397,16 @@ export function GraphView({
     <div className="flex h-screen flex-col bg-page">
       <div className="flex items-center gap-2 border-b border-rule px-4 py-2.5">
         <span className="text-[13px] font-semibold text-ink-strong">Graph</span>
-        <span className="ml-auto text-[11.5px] text-ink-faint">
-          {data.nodes.length} cells · {data.links.length} connections
-        </span>
+        {ready && (
+          <span className="ml-auto text-[11.5px] text-ink-faint">
+            {data.nodes.length} cells · {data.links.length} connections
+          </span>
+        )}
       </div>
 
       <div ref={wrapRef} className="relative flex-1 overflow-hidden">
         {!FG || !ready ? (
-          <GraphSkeleton />
+          null
         ) : data.nodes.length === 0 ? (
           <div className="grid h-full place-items-center text-ink-faint text-sm">
             Nothing to show yet — add some {'{data}'} and [[links]], or wait for a cell to be shared with you.
