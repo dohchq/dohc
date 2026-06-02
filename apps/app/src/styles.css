@@ -780,6 +780,12 @@
 .doc {
   cursor: text;
 }
+.dohc-html-shell {
+  position: relative;
+  height: calc(100vh - 44px);
+  min-width: 0;
+  overflow: hidden;
+}
 .doc-editing {
   cursor: text;
 }
