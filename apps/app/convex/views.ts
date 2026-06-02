@@ -4,6 +4,7 @@ import type { QueryCtx } from './_generated/server'
 import type { Doc } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
+import { splitFrontmatter } from './atomId'
 import {
   isViewPackageRoot,
   parseViewPath,
@@ -100,9 +101,7 @@ function manifestObject(value: unknown): Record<string, unknown> | null {
 }
 
 function stripDohcFrontmatter(body: string): string {
-  if (!body.startsWith('---\n') && !body.startsWith('---\r\n')) return body
-  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(body)
-  return match ? body.slice(match[0].length) : body
+  return splitFrontmatter(body).rest
 }
 
 function defaultConfig(viewName: string): ViewConfig {

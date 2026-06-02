@@ -627,6 +627,19 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     ).rejects.toThrow(/does not belong/)
   })
 
+  it('stopChat DENIES a valid same-workspace thread under the wrong project scope', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await expect(
+      t
+        .withIdentity({ subject: A })
+        .action(api.agent.stopChat, {
+          threadId: 'tA-dohc',
+          projectPath: 'opnft-fun',
+        }),
+    ).rejects.toThrow(/does not belong/)
+  })
+
   it('stopChat is a no-op for an owned thread with no active streams', async () => {
     const t = convexAgentTest()
     const threadId = await t

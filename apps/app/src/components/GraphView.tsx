@@ -5,6 +5,7 @@ import { api } from '../../convex/_generated/api'
 import type { GraphNode, GraphEdge } from '../../convex/graph'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import { forceCollide } from 'd3-force-3d'
+import { Skeleton } from './Skeleton'
 
 // graph-v1 1c — the knowledge graph. Cells (files) are nodes; an edge
 // is a wikilink or a concrete formula reference. The view merges every
@@ -406,12 +407,12 @@ export function GraphView({
 
       <div ref={wrapRef} className="relative flex-1 overflow-hidden">
         {!FG || !ready || data.nodes.length === 0 ? (
-          FG && ready && data.nodes.length === 0 ? (
+          !FG || !ready ? (
+            <GraphLoadingSkeleton />
+          ) : (
             <div className="grid h-full place-items-center text-ink-faint text-sm">
               Nothing to show yet — add some {'{data}'} and [[links]], or wait for a cell to be shared with you.
             </div>
-          ) : (
-            null
           )
         ) : (
           <FG
@@ -700,6 +701,23 @@ export function GraphView({
             )}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function GraphLoadingSkeleton() {
+  return (
+    <div className="absolute inset-0 grid place-items-center p-8" aria-label="Loading graph">
+      <div className="relative aspect-square w-full max-w-[460px]">
+        <Skeleton className="absolute left-[42%] top-[40%] size-20 rounded-full" />
+        <Skeleton className="absolute left-[12%] top-[18%] size-14 rounded-full" />
+        <Skeleton className="absolute right-[16%] top-[12%] size-16 rounded-full" />
+        <Skeleton className="absolute bottom-[18%] left-[18%] size-16 rounded-full" />
+        <Skeleton className="absolute bottom-[16%] right-[12%] size-12 rounded-full" />
+        <Skeleton className="absolute left-[23%] top-[34%] h-px w-[40%] rotate-[18deg] rounded-full" />
+        <Skeleton className="absolute right-[23%] top-[35%] h-px w-[34%] -rotate-[24deg] rounded-full" />
+        <Skeleton className="absolute bottom-[32%] left-[33%] h-px w-[44%] rotate-[138deg] rounded-full" />
       </div>
     </div>
   )

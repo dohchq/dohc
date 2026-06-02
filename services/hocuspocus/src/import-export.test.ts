@@ -50,6 +50,7 @@ describe('hocuspocus markdown import/export', () => {
       '---',
       'id: views.workspace.src.app',
       '---',
+      '',
       'import React from "react"',
       '',
       'export default function App() {',
@@ -61,7 +62,6 @@ describe('hocuspocus markdown import/export', () => {
     const output = yDocToMarkdown(doc)
 
     expect(getDohcYDocMeta(doc)).toMatchObject({ contentKind: 'plain-text' })
-    expect(output).toContain('import React from "react"')
-    expect(output).toContain('return <main>{items.map')
+    expect(output).toBe(input)
   })
 })

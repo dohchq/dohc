@@ -435,6 +435,12 @@ describe('deriveTitle — source code files use their filenames', () => {
         '.views/workspace/src/styles.css',
       ),
     ).toBeNull()
+    expect(
+      deriveTitle(
+        '---\nid: views.workspace.src.index\ntitle: Workspace Shell\n---\n<div id="root"></div>',
+        '.views/workspace/src/index.html',
+      ),
+    ).toBeNull()
     expect(deriveTitle('# Plan', 'notes/plan.md')).toBe('Plan')
   })
 })

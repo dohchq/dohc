@@ -511,7 +511,10 @@ function ThreadButton({
 
   function togglePinnedWithFeedback(button?: HTMLButtonElement) {
     const nextPinned = !visiblePinned
-    button?.blur()
+    const row = button?.closest('[data-thread-row]')
+    row
+      ?.querySelector<HTMLButtonElement>('[data-thread-primary]')
+      ?.focus()
     setOptimisticPinned(nextPinned)
     setActionsDismissed(true)
     try {
@@ -531,6 +534,7 @@ function ThreadButton({
 
   return (
     <div
+      data-thread-row={thread.threadId}
       onPointerLeave={() => setActionsDismissed(false)}
       className={`group/thread relative flex h-8 w-full cursor-pointer items-center gap-1 rounded-md px-2 text-left transition-colors ${
         active
@@ -539,6 +543,7 @@ function ThreadButton({
       }`}
     >
       <button
+        data-thread-primary
         type="button"
         onClick={onClick}
         className="absolute inset-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft"

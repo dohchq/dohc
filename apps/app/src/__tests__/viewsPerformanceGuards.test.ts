@@ -13,6 +13,7 @@ import {
   VIEW_START_TIMEOUT_MS,
 } from '../views/ViewRuntimeHost'
 import { buildViewShell } from '../views/viewShell'
+import { validateBundleViewInput } from '../views/buildViewBundle.functions'
 
 describe('folder views performance and safety guards', () => {
   it('enforces source file count and UTF-8 byte caps during bundling', async () => {
@@ -42,6 +43,36 @@ describe('folder views performance and safety guards', () => {
       ok: false,
       diagnostics: [{ code: 'source-too-large' }],
     })
+  })
+
+  it('enforces byte caps at the server-function input boundary', () => {
+    expect(() =>
+      validateBundleViewInput({
+        entry: 'src/App.tsx',
+        files: [
+          {
+            relativePath: 'src/App.tsx',
+            body: '💥'.repeat(Math.floor(MAX_VIEW_SOURCE_BYTES / 4) + 1),
+          },
+        ],
+      }),
+    ).toThrow(/too large/i)
+
+    expect(() =>
+      validateBundleViewInput({
+        entry: 'src/App.tsx',
+        files: [
+          {
+            relativePath: 'src/App.tsx',
+            body: 'a'.repeat(MAX_VIEW_SOURCE_BYTES / 2),
+          },
+          {
+            relativePath: 'src/extra.ts',
+            body: 'b'.repeat(MAX_VIEW_SOURCE_BYTES / 2 + 1),
+          },
+        ],
+      }),
+    ).toThrow(/too large/i)
   })
 
   it('warns view authors toward batched SDK reads in the runtime shell', () => {

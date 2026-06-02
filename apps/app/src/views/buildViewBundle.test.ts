@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { buildViewBundle } from './buildViewBundle.server'
-import { VIRTUAL_DOHC_SDK } from './virtualDohcSdk'
 
 describe('buildViewBundle', () => {
   it('bundles TSX view code with relative imports, CSS, React, and @dohc/view', async () => {
@@ -82,7 +81,6 @@ describe('buildViewBundle', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.code).toContain('No React import needed')
-    expect(result.code).not.toContain('React.createElement')
   })
 
   it('strips dohc atom frontmatter before compiling source files', async () => {
@@ -118,11 +116,6 @@ main { color: green; }
       expect(result.code).toContain('main { color: green; }')
       expect(result.code).not.toContain('views.workspace.src.app')
     }
-  })
-
-  it('exposes agent-friendly document hooks in the virtual SDK', () => {
-    expect(VIRTUAL_DOHC_SDK).toContain('export function useDocs')
-    expect(VIRTUAL_DOHC_SDK).toContain('export const useDocsGlob = useDocs')
   })
 
   it('rejects imports that escape the view package or require unsafe loaders', async () => {

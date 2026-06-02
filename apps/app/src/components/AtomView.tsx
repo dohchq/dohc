@@ -593,7 +593,7 @@ function AtomShell({
       {advisory && advisory.kind === 'collision' && (
         // §1.4 REQUIRED surfacing — proactive, inline, never a modal.
         // The user learns their address is broken without having to
-        // suspect anything; `⟨⟩ source` is the fix.
+        // suspect anything; the `source` button is the fix.
         <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-[12px] leading-relaxed text-ink-dim">
           <span className="font-medium text-ink-strong">
             Address <code className="text-[11px]">{advisory.fileId}</code> is
@@ -618,7 +618,7 @@ function AtomShell({
             <code className="text-[11px]">{advisory.fileId}</code> (another file
             wanted <code className="text-[11px]">{advisory.wanted}</code>). Fine
             to keep — or rename via{' '}
-            <span className="text-ink-dim">⟨⟩ source</span>.
+            <span className="text-ink-dim">source</span>.
           </span>
           <button
             type="button"
@@ -654,7 +654,7 @@ function AtomShell({
           (Tiptap hides frontmatter, so typing `---\ntype: html\n---`
           in the formatted editor doesn't stick). Always-on unblocks
           manual creation of typed atoms + raw `id:` edits on a fresh
-          file. Plain notes just gain a faint, ignorable "⟨⟩ source"
+          file. Plain notes just gain a faint, ignorable "source"
           button — standard "view source" affordance.
           Track-3 P4: skills also surface the "copy share text"
           button (strips the canonical id + injects an advisory
@@ -780,7 +780,7 @@ function AtomShell({
       ) : isHtml ? (
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
         // route iframe (Tiptap is never used for an html body). The
-        // ⟨⟩ source toggle above still flips to the raw textarea.
+        // The source toggle above still flips to the raw textarea.
         <HtmlAtomFrame atomId={atomId} body={rest} />
       ) : identity === undefined ? (
         <DocumentSkeleton compact />

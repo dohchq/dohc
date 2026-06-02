@@ -114,7 +114,7 @@ describe('AgentAccessPicker', () => {
     }
   })
 
-  it('lets permission descriptions wrap inside the menu row without the global button outline', async () => {
+  it('exposes selected permission details as option content', async () => {
     act(() => {
       root.render(
         React.createElement(AgentAccessPicker, {
@@ -134,13 +134,12 @@ describe('AgentAccessPicker', () => {
     const defaultOption = Array.from(
       document.body.querySelectorAll<HTMLButtonElement>('button[role="option"]'),
     ).find((button) => button.textContent?.includes('Default permissions'))
+    const description = defaultOption?.querySelector('[data-access-description]')
 
-    expect(defaultOption?.className).toContain('whitespace-normal')
-    expect(defaultOption?.className).toContain('outline-none')
-    expect(defaultOption?.className).toContain('focus-visible:ring-1')
     expect(defaultOption?.getAttribute('aria-selected')).toBe('true')
-    expect(
-      defaultOption?.querySelector('[data-access-description]')?.className,
-    ).toContain('break-words')
+    expect(defaultOption?.textContent).toContain('Default permissions')
+    expect(description?.textContent).toBe(
+      'Use dohc review gates for writes, sharing, and destructive work.',
+    )
   })
 })

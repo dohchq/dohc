@@ -83,6 +83,10 @@ type ChatThreadOption = {
   updatedAt: number
   pinnedAt: number | null
 }
+type ActiveSendTarget = {
+  threadId: string
+  projectPath?: string | null
+}
 type IconComponent = typeof Folder
 type ComposerStarterCommand = RunnableRef & {
   kind: 'command'
@@ -510,7 +514,8 @@ export function Chat({
   const scrollContentRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const activeSendThreadIdRef = useRef<string | null>(null)
+  const activeSendTargetRef = useRef<ActiveSendTarget | null>(null)
+  const [activeSendTarget, setActiveSendTargetState] = useState<ActiveSendTarget | null>(null)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
@@ -548,6 +553,11 @@ export function Chat({
       ),
     [uiMessages],
   )
+
+  function setActiveSendTarget(target: ActiveSendTarget | null) {
+    activeSendTargetRef.current = target
+    setActiveSendTargetState(target)
+  }
   const contextUsage = useMemo(
     () =>
       buildEstimatedContextWindowUsage({
@@ -576,15 +586,15 @@ export function Chat({
   }
 
   async function stopActiveChat() {
-    const targetThreadId = activeSendThreadIdRef.current ?? threadId
-    if (!targetThreadId || stopping) return
+    const target = activeSendTargetRef.current
+    if (!target || stopping) return
     setStopping(true)
     setComposerError(null)
     try {
       await stopChat({
         activeWorkspaceId,
-        threadId: targetThreadId,
-        projectPath,
+        threadId: target.threadId,
+        projectPath: target.projectPath,
       })
     } catch (e) {
       setComposerError(formatComposerError(e))
@@ -606,6 +616,12 @@ export function Chat({
     setChatBusy(busy)
     return () => setChatBusy(false)
   }, [busy, setChatBusy])
+
+  useEffect(() => {
+    if (!sending && !busy && !stopping && activeSendTargetRef.current) {
+      setActiveSendTarget(null)
+    }
+  }, [busy, sending, stopping])
 
   function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
     stickToBottomRef.current = true
@@ -669,7 +685,7 @@ export function Chat({
       }
       const activeThreadId = await ensureActiveThread()
       if (!activeThreadId) return
-      activeSendThreadIdRef.current = activeThreadId
+      setActiveSendTarget({ threadId: activeThreadId, projectPath })
       if (!promptOverride) setInput('')
       if (match && 'matched' in match) {
         // P3+P4 indep fold F4: preserve user extras as
@@ -730,7 +746,6 @@ export function Chat({
       setComposerError(formatComposerError(e))
       console.error(e)
     } finally {
-      activeSendThreadIdRef.current = null
       setSending(false)
     }
   }
@@ -767,7 +782,7 @@ export function Chat({
         setComposerError(null)
         const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
-        activeSendThreadIdRef.current = activeThreadId
+        setActiveSendTarget({ threadId: activeThreadId, projectPath })
         await sendMessage({
           threadId: activeThreadId,
           prompt: path,
@@ -781,7 +796,6 @@ export function Chat({
         setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
-        activeSendThreadIdRef.current = null
         setSending(false)
       }
     })()
@@ -798,7 +812,7 @@ export function Chat({
         setComposerError(null)
         const activeThreadId = await ensureActiveThread()
         if (!activeThreadId) return
-        activeSendThreadIdRef.current = activeThreadId
+        setActiveSendTarget({ threadId: activeThreadId, projectPath })
         await sendMessage({
           threadId: activeThreadId,
           prompt: path,
@@ -812,7 +826,6 @@ export function Chat({
         setComposerError(formatComposerError(e))
         console.error(e)
       } finally {
-        activeSendThreadIdRef.current = null
         setSending(false)
       }
     })()
@@ -1333,7 +1346,7 @@ export function Chat({
               <button
                 type="button"
                 onClick={() => void stopActiveChat()}
-                disabled={stopping || !(activeSendThreadIdRef.current ?? threadId)}
+                disabled={stopping || !activeSendTarget}
                 className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
                   primary ? 'size-9' : 'size-7'
                 }`}

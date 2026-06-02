@@ -264,6 +264,9 @@ describe('Agent / Files shell mode', () => {
       expect(indicator?.getAttribute('class')).not.toContain(
         'group-hover/thread:hidden',
       )
+      expect(document.activeElement).toBe(
+        container.querySelector('button[aria-label="Open chat Workspace chat"]'),
+      )
     } finally {
       cleanupRendered(container, root)
     }

@@ -52,8 +52,13 @@ function patternToRegExp(pattern) {
     const char = input[i]
     if (char === '*') {
       if (input[i + 1] === '*') {
-        output += '.*'
-        i += 1
+        if (input[i + 2] === '/') {
+          output += '(?:.*/)?'
+          i += 2
+        } else {
+          output += '.*'
+          i += 1
+        }
       } else {
         output += '[^/]*'
       }

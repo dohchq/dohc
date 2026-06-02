@@ -89,17 +89,18 @@ describe('Hocuspocus body cache projection bridge', () => {
   it('does not let stale markdown projections erase view source code', async () => {
     const t = convexTest(schema, modules)
     stubServerToken()
+    const originalBody = [
+      '---',
+      'id: views.workspace.src.app',
+      '---',
+      'export default function App() {',
+      '  return <main>{items.length}</main>',
+      '}',
+    ].join('\n')
     await t.mutation(internal.atoms._upsertInternal, {
       workspaceId: OWNER,
       path: '.views/workspace/src/App.tsx',
-      body: [
-        '---',
-        'id: views.workspace.src.app',
-        '---',
-        'export default function App() {',
-        '  return <main>{items.length}</main>',
-        '}',
-      ].join('\n'),
+      body: originalBody,
       source: 'agent',
     })
 
@@ -118,7 +119,7 @@ describe('Hocuspocus body cache projection bridge', () => {
         )
         .unique(),
     )
-    expect(atom?.body).toContain('return <main>{items.length}</main>')
+    expect(atom?.body).toBe(originalBody)
     expect(atom?.bodyProjectionHash).toBe('sha256:projected')
   })
 

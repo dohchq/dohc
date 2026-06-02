@@ -56,7 +56,7 @@ import type { MutationCtx } from './_generated/server'
 // the PRE-EDIT body at most once per atom per window, so a user can
 // always recover to "before this editing session" with bounded growth.
 const SNAPSHOT_COALESCE_MS = 10 * 60 * 1000 // 10 min
-const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 
 function isViewSourceCodePath(path: string): boolean {
   return isViewPath(path) && VIEW_SOURCE_EXT_RE.test(path)
