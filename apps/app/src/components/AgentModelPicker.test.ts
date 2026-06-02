@@ -279,7 +279,7 @@ describe('AgentModelPicker', () => {
     ).not.toBeNull()
   })
 
-  it('moves focus into the picker and returns it to the trigger on Escape', async () => {
+  it('moves focus into picker search and returns it to the trigger on Escape', async () => {
     act(() => {
       root.render(
         React.createElement(AgentModelPicker, {
@@ -302,7 +302,9 @@ describe('AgentModelPicker', () => {
     await click(trigger)
     await flushAnimationFrame()
 
-    expect(document.activeElement).toBe(findButtonByText('OpenAI'))
+    expect(document.activeElement).toBe(
+      document.body.querySelector('input[placeholder="Search models"]'),
+    )
 
     await keyDown('Escape')
 

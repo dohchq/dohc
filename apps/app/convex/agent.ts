@@ -5,6 +5,8 @@ import {
   vStreamArgs,
   listUIMessages,
   syncStreams,
+  listStreams,
+  abortStream,
 } from '@convex-dev/agent'
 import { generateObject } from 'ai'
 import { v } from 'convex/values'
@@ -59,6 +61,15 @@ async function activeWorkspaceFromTool(
   return (await ctx.runQuery(internal.agent._resolveWorkspaceForCaller, {
     activeWorkspaceId: exp?.activeWorkspaceId,
   })) as string
+}
+
+function projectPathFromTool(
+  options?: { experimental_context?: unknown },
+): string | undefined {
+  const exp = options?.experimental_context as
+    | { projectPath?: string | null }
+    | undefined
+  return normalizeProjectPath(exp?.projectPath)
 }
 
 // P1 (multiplayer-and-h-followups §6.5) — viewer subject for agent
@@ -185,13 +196,38 @@ function withAgentAccessModeStatus(
   return `${agentAccessModePromptBlock(mode)}\n\n${systemPrompt}`
 }
 
+export function projectScopeStatusBlock(projectPath?: string | null): string {
+  const scopedProjectPath = normalizeProjectPath(projectPath)
+  if (!scopedProjectPath) return ''
+  return `\
+## ACTIVE PROJECT SCOPE
+
+This chat is scoped to \`${scopedProjectPath}/\`.
+- Treat \`${scopedProjectPath}/\` as the default home for new source files, views, dashboards, and run notes.
+- For project artifacts, write under \`${scopedProjectPath}/...\` such as \`${scopedProjectPath}/profile.md\`, \`${scopedProjectPath}/sessions/<date>.md\`, or \`${scopedProjectPath}/.views/<name>/src/App.tsx\`.
+- Do not create sibling taxonomies like \`games/${scopedProjectPath}\`, \`projects/${scopedProjectPath}\`, or \`areas/${scopedProjectPath}\` unless the user explicitly asks to move this project there.
+- You may read the wider workspace for context, but do not create new atoms outside \`${scopedProjectPath}/\`; ask or propose the global change instead.`
+}
+
+function withProjectScopeStatus(
+  systemPrompt: string,
+  projectPath?: string | null,
+): string {
+  const block = projectScopeStatusBlock(projectPath)
+  return block ? `${block}\n\n${systemPrompt}` : systemPrompt
+}
+
 export function buildAgentTurnSystemPrompt(
   kindInfo: { kind: 'personal' } | { kind: 'org'; orgName: string },
   semanticWriteBackend: SemanticWriteBackendStatus,
   accessMode: AgentAccessMode,
+  projectPath?: string | null,
 ): string {
   return withSemanticWriteBackendStatus(
-    withAgentAccessModeStatus(buildSystemPrompt(kindInfo), accessMode),
+    withProjectScopeStatus(
+      withAgentAccessModeStatus(buildSystemPrompt(kindInfo), accessMode),
+      projectPath,
+    ),
     semanticWriteBackend,
   )
 }
@@ -221,7 +257,8 @@ const DEFAULT_HOCUSPOCUS_FETCH_TIMEOUT_MS = 5_000
 type HocuspocusSemanticEnv = { url: string; token: string }
 
 export type SemanticWriteBackendStatus =
-  | { ok: true; url: string }
+  | { ok: true; mode: 'semantic'; url: string }
+  | { ok: true; mode: 'direct-create'; detail: string }
   | {
       ok: false
       reason: 'missing-env' | 'http-error' | 'unreachable' | 'invalid-response'
@@ -234,6 +271,14 @@ function hocuspocusSemanticEnv(): HocuspocusSemanticEnv | null {
   const token = process.env.HOCUSPOCUS_ADMIN_TOKEN
   if (!url || !token) return null
   return { url, token }
+}
+
+function directCreateStatus(detail: string): SemanticWriteBackendStatus {
+  return {
+    ok: true,
+    mode: 'direct-create',
+    detail,
+  }
 }
 
 function hocuspocusFetchTimeoutMs(): number {
@@ -262,15 +307,86 @@ async function fetchHocuspocusAdmin(
   }
 }
 
+type AgentCreateAtomPayload = {
+  workspaceId: string
+  path: string
+  content: string
+  actor: {
+    userId: string
+    actorKind: 'user' | 'agent'
+  }
+}
+
+function parseAgentCreateAtomPayload(
+  payload: Record<string, unknown>,
+): AgentCreateAtomPayload | null {
+  const actor = payload.actor as
+    | { userId?: unknown; actorKind?: unknown }
+    | undefined
+  if (
+    typeof payload.workspaceId !== 'string' ||
+    typeof payload.path !== 'string' ||
+    typeof payload.content !== 'string' ||
+    typeof actor?.userId !== 'string' ||
+    (actor.actorKind !== 'user' && actor.actorKind !== 'agent')
+  ) {
+    return null
+  }
+  return {
+    workspaceId: payload.workspaceId,
+    path: payload.path,
+    content: payload.content,
+    actor: {
+      userId: actor.userId,
+      actorKind: actor.actorKind,
+    },
+  }
+}
+
+export async function createAtomDirectlyForAgent(
+  ctx: Pick<ToolCtx, 'runQuery' | 'runMutation'>,
+  payload: Record<string, unknown>,
+): Promise<{ ok: true; atomId?: string } | { ok: false; reason?: string }> {
+  const input = parseAgentCreateAtomPayload(payload)
+  if (!input) return { ok: false, reason: 'invalid-request' }
+
+  const existing = (await ctx.runQuery(internal.atoms._getInternal, {
+    workspaceId: input.workspaceId,
+    path: input.path,
+    viewerSubject: input.actor.userId,
+  })) as string | null
+  if (existing !== null) return { ok: false, reason: 'already-exists' }
+
+  try {
+    await ctx.runMutation(internal.atoms._upsertInternal, {
+      workspaceId: input.workspaceId,
+      path: input.path,
+      body: input.content,
+      source: input.actor.actorKind === 'agent' ? 'agent' : 'user',
+      viewerSubject: input.actor.userId,
+    })
+  } catch (error) {
+    if (/access to write/.test((error as Error).message)) {
+      return { ok: false, reason: 'forbidden' }
+    }
+    throw error
+  }
+
+  const body = (await ctx.runQuery(internal.atoms._getInternal, {
+    workspaceId: input.workspaceId,
+    path: input.path,
+    viewerSubject: input.actor.userId,
+  })) as string | null
+  const atomId = body ? extractFrontmatterId(body) : null
+  return atomId
+    ? { ok: true, atomId }
+    : { ok: false, reason: 'missing-frontmatter-id' }
+}
+
 export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendStatus> {
   const env = hocuspocusSemanticEnv()
   if (!env) {
-    return {
-      ok: false,
-      reason: 'missing-env',
-      detail:
-        'HOCUSPOCUS_ADMIN_URL and HOCUSPOCUS_ADMIN_TOKEN are required for agent semantic writes.',
-    }
+    return directCreateStatus('Hocuspocus admin env is missing.')
   }
 
   const url = new URL('/apply/preflight', env.url).toString()
@@ -284,34 +400,29 @@ export async function checkSemanticWriteBackend(): Promise<SemanticWriteBackendS
     const body = (await response.json().catch(() => null)) as {
       ok?: boolean
       semanticWrites?: boolean
+      createAtom?: boolean
       error?: string
     } | null
     if (!response.ok) {
-      return {
-        ok: false,
-        reason: 'http-error',
-        status: response.status,
-        detail:
-          body?.error ??
+      return directCreateStatus(
+        body?.error ??
           `Hocuspocus semantic preflight returned HTTP ${response.status}.`,
-      }
+      )
     }
-    if (body?.ok === true && body.semanticWrites === true) {
-      return { ok: true, url: env.url }
+    if (
+      body?.ok === true &&
+      body.semanticWrites === true &&
+      body.createAtom !== false
+    ) {
+      return { ok: true, mode: 'semantic', url: env.url }
     }
-    return {
-      ok: false,
-      reason: 'invalid-response',
-      detail:
-        'Hocuspocus semantic preflight did not advertise semantic writes.',
-    }
+    return directCreateStatus(
+      'Hocuspocus semantic preflight did not advertise createAtom support.',
+    )
   } catch (error) {
-    return {
-      ok: false,
-      reason: 'unreachable',
-      detail:
-        error instanceof Error ? error.message : 'Hocuspocus is unreachable.',
-    }
+    return directCreateStatus(
+      error instanceof Error ? error.message : 'Hocuspocus is unreachable.',
+    )
   }
 }
 
@@ -319,6 +430,13 @@ export function semanticWriteBackendStatusBlock(
   status: SemanticWriteBackendStatus,
 ): string {
   if (status.ok) {
+    if (status.mode === 'direct-create') {
+      return `\
+## AGENT WRITE BACKEND STATUS
+
+New atom writes: online.
+You may use create_atom, save_skill, and save_command for brand-new files. Existing-document semantic edits: offline. Do not claim you can patch existing atoms through Hocuspocus right now; for existing docs, inspect and propose the exact change instead.`
+    }
     return `\
 ## AGENT WRITE BACKEND STATUS
 
@@ -365,11 +483,16 @@ function semanticOperationId(
 }
 
 async function callSemanticApply(
+  ctx: ToolCtx,
   route: 'insertAfterHeading' | 'replaceRange' | 'createAtom',
   payload: Record<string, unknown>,
 ): Promise<{ ok: true; atomId?: string } | { ok: false; reason?: string }> {
   const env = hocuspocusSemanticEnv()
-  if (!env) return { ok: false, reason: SEMANTIC_WRITE_BACKEND_OFFLINE }
+  if (!env) {
+    return route === 'createAtom'
+      ? await createAtomDirectlyForAgent(ctx, payload)
+      : { ok: false, reason: SEMANTIC_WRITE_BACKEND_OFFLINE }
+  }
 
   let response: Response
   try {
@@ -385,7 +508,9 @@ async function callSemanticApply(
       },
     )
   } catch {
-    return { ok: false, reason: SEMANTIC_WRITE_BACKEND_OFFLINE }
+    return route === 'createAtom'
+      ? await createAtomDirectlyForAgent(ctx, payload)
+      : { ok: false, reason: SEMANTIC_WRITE_BACKEND_OFFLINE }
   }
   const body = (await response.json().catch(() => null)) as {
     ok?: boolean
@@ -394,9 +519,16 @@ async function callSemanticApply(
     atomId?: string
   } | null
   if (!response.ok) {
+    const reason = body?.reason ?? body?.error ?? `http-${response.status}`
+    if (
+      route === 'createAtom' &&
+      (response.status === 503 || reason === 'createAtom unavailable')
+    ) {
+      return await createAtomDirectlyForAgent(ctx, payload)
+    }
     return {
       ok: false,
-      reason: body?.reason ?? body?.error ?? `http-${response.status}`,
+      reason,
     }
   }
   return body?.ok === true
@@ -589,13 +721,19 @@ export async function buildAgentRuntimeSystemPrompt(
   ctx: AgentRuntimePromptCtx,
   activeWorkspaceId: string | undefined,
   accessMode: AgentAccessMode = DEFAULT_AGENT_ACCESS_MODE,
+  projectPath?: string | null,
 ): Promise<string> {
   const kindInfo = await ctx.runQuery(
     internal.agent._resolveWorkspaceKindForCaller,
     { activeWorkspaceId },
   )
   const semanticWriteBackend = await checkSemanticWriteBackend()
-  return buildAgentTurnSystemPrompt(kindInfo, semanticWriteBackend, accessMode)
+  return buildAgentTurnSystemPrompt(
+    kindInfo,
+    semanticWriteBackend,
+    accessMode,
+    projectPath,
+  )
 }
 
 const SYSTEM_PROMPT = `\
@@ -635,6 +773,26 @@ useful action. If a tool can do the work, use it instead of asking the
 user to manually organize things. If context is missing, say so and
 create the smallest honest next capture path; never fill gaps with fake
 activity.
+
+## TRACKING / IMPROVEMENT PROJECTS
+
+When the user asks to track progress, train for a game/sport, learn a
+skill, improve health, or reach a rank/level, build a coaching loop, not
+a generic dashboard. Start from the current baseline, target outcome,
+constraints, schedule, available evidence, and the next decision the
+system should help with. If any of those are missing, create a clear
+"what I need" capture path and ask only for the details that change the
+plan.
+
+Useful sources usually include:
+- a profile/goals atom with current baseline, target outcome, roles/loadout,
+  constraints, and cadence.
+- a session log template with real editable fields for date, duration,
+  drills/practice, match/work blocks, review minutes, outcome, recurring
+  mistakes, next focus, and confidence/energy when relevant.
+- periodic review notes that summarize patterns and adjust the plan.
+- a cockpit/view that reads those sources and surfaces trend, recent
+  sessions, recurring mistakes, and next focus; do not hardcode a single starter day as if it were live progress.
 
 You are fully capable through dohc's tools: list/read/create semantic
 atoms, run safe queries, maintain entities, capture reusable facts,
@@ -701,11 +859,12 @@ moment. Build a first landing surface that is polished and
 source-backed, not the source of truth. The markdown source atoms from
 §1 are what the user/agent edits; the cockpit reads from them live.
 
-Default to \`home.html\` when the first cockpit is a polished read-only
-overview. Use \`.views/home/src/App.tsx\` when the setup needs an
-interactive or app-like cockpit (clicks, filters, kanban/form controls,
-workflow actions, portals, or richer state). Either way, the canonical
-work state lives in markdown/entities/{ } values, not in the view code.
+For onboarding only: \`home.html\` is acceptable when the first cockpit is
+a polished read-only overview and the user did not ask for a custom view.
+If the user asks for a "view", ".view", ".views", a workspace view, or a
+folder view, use \`.views/home/src/App.tsx\` (or the named folder-local
+view path) instead. Either way, the canonical work state lives in
+markdown/entities/{ } values, not in the view code.
 
 Rules for \`home.html\`:
 - The path is exactly \`home.html\` unless the user explicitly asked
@@ -959,9 +1118,8 @@ live.
 - **NO JavaScript.** The iframe sandbox is empty (no \`<script>\`,
   no event handlers, no top-nav, no popups, no forms, no network).
   HTML + inline CSS + inline SVG only. If the user needs interactivity
-  (clicks that do things, forms, drag-and-drop), model the underlying
-  workflow in md atoms / actions / skills and tell them the interactive
-  view itself is not supported yet.
+  (clicks that do things, forms, drag-and-drop), create a \`.views\`
+  package instead of an html atom.
 - An html atom NEVER stores data — it is a render of data living
   in md atoms. Use \`{= sum(logs.*.billable)}\`,
   \`{= count(projects.*)}\`, \`{= clients.acme.owed}\`, etc. — formulas
@@ -1025,9 +1183,10 @@ Substitution rules:
   | A regular note / log / brief                | md atom            |
   | Mixed prose + a few live numbers            | md atom (pills)    |
   | A polished dashboard / one-pager / report   | html atom          |
-  | A printable / branded / designed view       | html atom          |
+  | A printable / branded / designed report     | html atom          |
   | Interactivity (clicks, forms, drag-drop)    | .views custom view |
-  | A custom read-only data view                | html or .views     |
+  | A custom read-only data view                | .views custom view |
+  | User explicitly says "view", ".view", ".views"| .views custom view |
 
 ### Workflow
 
@@ -1050,13 +1209,19 @@ static husk.
 When the user wants an interactive dashboard, app-like workspace,
 folder cockpit, portal, kanban board, form-like control surface, or
 anything that needs JavaScript, create a folder-local custom view
-instead of an html atom.
+instead of an html atom. If the user explicitly asks for a view, create a \`.views/<name>/\` package, not \`home.html\`.
 
 Custom views:
 - Create views under \`<folder>/.views/<name>/\` (or \`.views/<name>/\`
   at workspace root). Any folder can become a work scope this way.
 - View source code is normal web code. Use TypeScript/React by default:
   put the entry at \`src/App.tsx\` and CSS beside it.
+- Export a default React component from \`src/App.tsx\`; dohc auto-mounts
+  it. Do not add your own \`createRoot(...).render(...)\` unless you need
+  a custom bootstrap.
+- Import \`{ dohc, useDocs, useDohcQuery }\` from \`@dohc/view\`.
+  \`useDocs("bugs/*.md")\` returns source-backed docs with \`path\`,
+  \`title\`, \`body\`, and \`frontmatter\`.
 - Add \`view.json\` only when the view needs title/permissions beyond
   defaults. Default read scope is the folder that contains \`.views/\`;
   default writes are none.
@@ -1662,7 +1827,7 @@ export const dohcAgent = new Agent(components.agent, {
         if (existing) {
           return `(refused: ${path} already exists. Open it and use the editor or semantic edit tools instead.)`
         }
-        const result = await callSemanticApply('createAtom', {
+        const result = await callSemanticApply(ctx, 'createAtom', {
           operationId: semanticOperationId(
             ctx,
             'save_skill',
@@ -1731,7 +1896,7 @@ export const dohcAgent = new Agent(components.agent, {
         if (existing) {
           return `(refused: ${path} already exists. Open it and use the editor or semantic edit tools instead.)`
         }
-        const result = await callSemanticApply('createAtom', {
+        const result = await callSemanticApply(ctx, 'createAtom', {
           operationId: semanticOperationId(
             ctx,
             'save_command',
@@ -1983,7 +2148,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     create_atom: createTool({
       description:
-        'Create a brand-new atom at path with markdown content. Refuses to overwrite existing atoms. Use semantic edit tools for existing docs.',
+        'Create a brand-new atom at path with markdown content. Refuses to overwrite existing atoms. In a project-scoped chat, the path must stay under that active project folder. Use semantic edit tools for existing docs.',
       inputSchema: z.object({
         path: z.string(),
         content: z.string(),
@@ -1993,6 +2158,11 @@ export const dohcAgent = new Agent(components.agent, {
         { path, content }: { path: string; content: string },
         options,
       ): Promise<string> => {
+        const scopeViolation = projectScopedCreatePathViolation(
+          path,
+          projectPathFromTool(options),
+        )
+        if (scopeViolation) return scopeViolation
         const isElevatedCapability =
           isWorkspaceSkillPath(path) ||
           isWorkspaceCommandPath(path) ||
@@ -2011,7 +2181,7 @@ export const dohcAgent = new Agent(components.agent, {
         if (existing) {
           return `REFUSED: "${path}" already exists. Use propose_replace_text, insert_after_heading, or rewrite_section for existing atoms.`
         }
-        const result = await callSemanticApply('createAtom', {
+        const result = await callSemanticApply(ctx, 'createAtom', {
           operationId: semanticOperationId(
             ctx,
             'create_atom',
@@ -2063,7 +2233,7 @@ export const dohcAgent = new Agent(components.agent, {
         const atomId = extractFrontmatterId(atom.body)
         if (!atomId) return `REFUSED: atom "${input.path}" has no stable id.`
 
-        const result = await callSemanticApply('insertAfterHeading', {
+        const result = await callSemanticApply(ctx, 'insertAfterHeading', {
           operationId: semanticOperationId(
             ctx,
             'insert_after_heading',
@@ -2508,6 +2678,26 @@ function normalizeProjectPath(projectPath?: string | null): string | undefined {
   const clean = (projectPath ?? '').trim().replace(/^\/+|\/+$/g, '')
   if (!clean) return undefined
   return clean
+}
+
+function normalizeAtomPath(path: string): string {
+  return path.trim().replace(/^\/+|\/+$/g, '')
+}
+
+export function projectScopedCreatePathViolation(
+  path: string,
+  projectPath?: string | null,
+): string | null {
+  const cleanProjectPath = normalizeProjectPath(projectPath)
+  if (!cleanProjectPath) return null
+  const cleanPath = normalizeAtomPath(path)
+  if (
+    cleanPath === cleanProjectPath ||
+    cleanPath.startsWith(`${cleanProjectPath}/`)
+  ) {
+    return null
+  }
+  return `REFUSED: "${path}" is outside the active project scope "${cleanProjectPath}". In this project chat, create new atoms under "${cleanProjectPath}/..." or switch to workspace chat for global files.`
 }
 
 function isInternalProjectPath(projectPath?: string | null) {
@@ -3542,6 +3732,7 @@ export const sendMessage = action({
       internal.agent._resolveWorkspaceForCaller,
       { activeWorkspaceId },
     )
+    const scopedProjectPath = normalizeProjectPath(projectPath)
     const ok = await ctx.runQuery(internal.agent._assertOwnThread, {
       workspaceId,
       threadId,
@@ -3564,6 +3755,7 @@ export const sendMessage = action({
       ctx,
       activeWorkspaceId,
       accessMode,
+      scopedProjectPath,
     )
     const selection = (await ctx.runQuery(
       internal.agent._resolveAgentSelectionForThread,
@@ -3657,7 +3849,7 @@ export const sendMessage = action({
           threadId,
           promptMessageId: messageId,
           activeWorkspaceId: workspaceId,
-          projectPath: normalizeProjectPath(projectPath),
+          projectPath: scopedProjectPath,
           agentProviderId: selection.providerId,
           agentModel: selection.model,
           ...(selection.reasoningEffort
@@ -3669,6 +3861,43 @@ export const sendMessage = action({
       { saveStreamDeltas: true },
     )
     await result.consumeStream()
+  },
+})
+
+export const stopChat = action({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    threadId: v.string(),
+    projectPath: projectPathArg,
+  },
+  handler: async (ctx, { activeWorkspaceId, threadId, projectPath }) => {
+    const workspaceId: string = await ctx.runQuery(
+      internal.agent._resolveWorkspaceForCaller,
+      { activeWorkspaceId },
+    )
+    const ok = await ctx.runQuery(internal.agent._assertOwnThread, {
+      workspaceId,
+      threadId,
+      projectPath,
+    })
+    if (!ok) throw new Error('thread does not belong to this workspace')
+
+    const streams = await listStreams(ctx, components.agent, {
+      threadId,
+      includeStatuses: ['streaming'],
+    })
+    let aborted = 0
+    for (const stream of streams) {
+      if (
+        await abortStream(ctx, components.agent, {
+          streamId: stream.streamId,
+          reason: 'user stopped chat',
+        })
+      ) {
+        aborted += 1
+      }
+    }
+    return { aborted }
   },
 })
 

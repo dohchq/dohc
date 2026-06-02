@@ -99,11 +99,66 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toMatch(/view !== 'agent'[\s\S]{0,240}chatOpen/)
   })
 
+  it('makes the left and right shell sidebars resizable', () => {
+    expect(APP).toContain('dohc-left-sidebar-width')
+    expect(APP).toContain('dohc-right-sidebar-width')
+    expect(APP).toContain('shellGridTemplateColumns')
+    expect(APP).toContain('style={{ gridTemplateColumns: shellGridTemplateColumns }}')
+    expect(APP).toContain('ShellResizeHandle')
+    expect(APP).toContain('role="separator"')
+    expect(APP).toContain('startSidebarResize')
+    expect(APP).toContain("startSidebarResize('left', event)")
+    expect(APP).toContain("startSidebarResize('right', event)")
+    expect(APP).toContain('resetLeftSidebar')
+    expect(APP).toContain('resetRightSidebar')
+    expect(APP).toContain('onDoubleClick')
+    expect(APP).toContain('LEFT_SIDEBAR_DEFAULT_WIDTH')
+    expect(APP).toContain('RIGHT_SIDEBAR_DEFAULT_WIDTH')
+    expect(APP).toContain('const RIGHT_SIDEBAR_DEFAULT_WIDTH = 500')
+    expect(APP).toContain('RIGHT_SIDEBAR_LEGACY_DEFAULT_WIDTH')
+    expect(APP).toContain('RIGHT_SIDEBAR_PREVIOUS_DEFAULT_WIDTH')
+    expect(APP).toContain('storedWidth === RIGHT_SIDEBAR_LEGACY_DEFAULT_WIDTH')
+    expect(APP).toContain('storedWidth === RIGHT_SIDEBAR_PREVIOUS_DEFAULT_WIDTH')
+    expect(APP).toContain('floatingPanelButtonRight')
+    expect(APP).toContain('style={{ right: floatingPanelButtonRight }}')
+    expect(AGENT_RUN_RAIL).not.toContain('w-[340px]')
+  })
+
+  it('integrates the side chat with agent thread selection without navigating away', () => {
+    expect(APP).toContain('selectAgentThreadInPanel')
+    expect(APP).toContain('startAgentDraftInPanel')
+    expect(APP).toContain('ensureAgentThreadForPanelSend')
+    expect(APP).toContain('threads={chatThreads}')
+    expect(APP).toContain('onSelectThread={selectAgentThreadInPanel}')
+    expect(APP).toContain('onNewThread={startAgentDraftInPanel}')
+    expect(APP).toContain('onEnsureThread={ensureAgentThreadForPanelSend}')
+    expect(CHAT).toContain('threads?: ChatThreadOption[]')
+    expect(CHAT).toContain('SideChatThreadSelector')
+    expect(CHAT).toContain('aria-label="Select chat"')
+    expect(CHAT).toContain('aria-label="New chat"')
+    expect(CHAT).toContain('relative z-[60] flex items-center justify-between')
+    expect(CHAT).toContain('absolute left-0 right-0 top-[calc(100%+7px)] z-[90]')
+  })
+
   it('lets Chat render as either the primary run surface or a side dock', () => {
     expect(CHAT).toMatch(/mode\?: 'side' \| 'primary'/)
     expect(CHAT).toContain("mode = 'side'")
     expect(CHAT).toContain("mode === 'primary'")
     expect(CHAT).toContain('What should we build in dohc?')
+  })
+
+  it('lets starter prompt descriptions wrap instead of clipping them', () => {
+    expect(CHAT).toContain('flex-1 whitespace-normal break-words')
+    expect(CHAT).not.toContain('line-clamp-2 block text-[11.5px]')
+  })
+
+  it('lets users stop an active chat turn and shows message timestamps', () => {
+    expect(CHAT).toContain('api.agent.stopChat')
+    expect(CHAT).toContain('data-stop-square')
+    expect(CHAT).not.toContain('CircleStop')
+    expect(CHAT).toMatch(/aria-label=\{stopping \? 'Stopping chat' : 'Stop chat'\}/)
+    expect(CHAT).toContain('<time')
+    expect(CHAT).toContain('formatChatTimestamp')
   })
 
   it('adds dohc-style project chat history beside the Agent workspace', () => {
@@ -149,6 +204,74 @@ describe('Agent / Files shell mode', () => {
     }
   })
 
+  it('dismisses row actions after pinning so the resulting pin state is visible', () => {
+    const feedbackThread: AgentThreadSummary = {
+      ...pinnedThread,
+      threadId: 'thread_feedback',
+      title: 'Workspace chat',
+      pinnedAt: null,
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root: Root = createRoot(container)
+
+    function Harness() {
+      const [thread, setThread] = React.useState(feedbackThread)
+      return React.createElement(AgentChatSidebar, {
+        files: [],
+        folders: [],
+        threads: [thread],
+        activeThreadId: thread.threadId,
+        activeProjectPath: null,
+        onSelectThread: vi.fn(),
+        onNewThread: vi.fn(),
+        onCreateProject: vi.fn(),
+        onTogglePinned: () => {
+          setThread((current) => ({
+            ...current,
+            pinnedAt: current.pinnedAt === null ? Date.now() : null,
+          }))
+        },
+        onDeleteThread: vi.fn(),
+        onRenameThread: vi.fn(),
+        onRenameProject: vi.fn(),
+        onOpenSearch: vi.fn(),
+        user: { email: 'ice@example.com', firstName: 'Ice' },
+      })
+    }
+
+    act(() => {
+      root.render(React.createElement(Harness))
+    })
+
+    try {
+      const pinButton = container.querySelector<HTMLButtonElement>(
+        'button[title="Pin chat"]',
+      )
+      expect(pinButton).not.toBeNull()
+      act(() => {
+        pinButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      const actions = container.querySelector<HTMLElement>(
+        '[data-thread-actions="thread_feedback"]',
+      )
+      const indicator = container.querySelector<SVGElement>(
+        '[data-thread-pin-indicator="thread_feedback"]',
+      )
+      expect(actions?.dataset.dismissed).toBe('true')
+      expect(actions?.className).not.toContain('group-hover/thread:flex')
+      expect(indicator).not.toBeNull()
+      expect(indicator?.getAttribute('class')).not.toContain(
+        'group-hover/thread:hidden',
+      )
+      expect(document.activeElement).toBe(
+        container.querySelector('button[aria-label="Open chat Workspace chat"]'),
+      )
+    } finally {
+      cleanupRendered(container, root)
+    }
+  })
+
   it('makes the full chat row clickable, not only the chat title text', () => {
     const onSelectThread = vi.fn()
     const { container, root } = renderAgentSidebar({ onSelectThread })
@@ -172,10 +295,13 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('projectOptions={agentProjectOptions}')
     expect(APP).toContain('folderOptions={projectFolderOptions}')
     expect(CHAT).toContain('onEnsureThread')
+    expect(CHAT).toContain('{!threadId && (')
+    expect(CHAT).not.toContain('{primary && !threadId && (')
     expect(CHAT).toContain('Environment')
     expect(CHAT).toContain('Search projects')
     expect(CHAT).toContain('Add new project')
     expect(CHAT).toContain("Don't work in a project")
+    expect(CHAT).toContain('absolute bottom-[calc(100%+8px)] left-3 z-[90]')
     expect(CHAT).not.toContain('<select')
     expect(APP).not.toContain(
       'ensureThread({ activeWorkspaceId, projectPath: agentProjectPath })',
@@ -197,8 +323,9 @@ describe('Agent / Files shell mode', () => {
     expect(APP).not.toContain('Use existing folder as project:')
   })
 
-  it('removes the environment selector once a chat thread exists', () => {
-    expect(CHAT).toContain('primary && !threadId')
+  it('shows the environment selector for draft chats only', () => {
+    expect(CHAT).toContain('{!threadId && (')
+    expect(CHAT).not.toContain('{primary && !threadId && (')
   })
 
   it('uses the active chat title and thread menu in the primary chat header', () => {
@@ -305,8 +432,8 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('agentProviderId')
     expect(APP).toContain('agentSelectionFromThread')
     expect(CHAT).toContain('AgentModelPicker')
-    expect(CHAT).toContain('agentProviderId: agentSelection.providerId')
-    expect(CHAT).toContain('agentModel: agentSelection.model')
+    expect(CHAT).toContain('agentSelectionToConvexArgs(agentSelection)')
+    expect(CHAT).toContain('...agentSelectionPayload')
     expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection, accessMode)')
     expect(AGENT_CHAT_SIDEBAR).toContain('agentProviderId?: string | null')
     expect(AGENT_MODEL_PICKER).toContain('Provider')
@@ -315,6 +442,8 @@ describe('Agent / Files shell mode', () => {
     expect(AGENT_MODEL_PICKER).toContain('Default')
     expect(AGENT_MODEL_PICKER).toContain('Recommended')
     expect(AGENT_MODEL_PICKER).toContain('Set key')
+    expect(AGENT_MODEL_PICKER).toContain('fixed z-[90] grid')
+    expect(CHAT).toContain('fixed z-[90] w-[264px]')
     expect(AGENT_MODEL_PICKER).not.toContain('<select')
     expect(AGENT_MODEL_PICKER).not.toContain('>Rec<')
   })

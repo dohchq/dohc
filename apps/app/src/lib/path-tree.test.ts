@@ -124,7 +124,7 @@ describe('nodeLabel — canonical .context files', () => {
     expect(nodeLabel(tree.children.find((c) => c.fullPath === 'me.md')!)).toBe('me')
   })
 
-  it('labels .views folders as Views while keeping package names literal', () => {
+  it('keeps .views folder labels literal while keeping package names literal', () => {
     const tree = buildTree([
       row('clients/acme/.views/overview/src/App.tsx'),
     ])
@@ -134,7 +134,36 @@ describe('nodeLabel — canonical .context files', () => {
     const overview = views.children.find(
       (c) => c.fullPath === 'clients/acme/.views/overview',
     )!
-    expect(nodeLabel(views)).toBe('Views')
+    expect(nodeLabel(views)).toBe('.views')
     expect(nodeLabel(overview)).toBe('overview')
+  })
+
+  it('uses source filenames with extensions instead of code body snippets', () => {
+    const tree = buildTree([
+      row('clients/acme/.views/overview/src/App.tsx', {
+        title: 'import React from "react"',
+      }),
+      row('clients/acme/.views/overview/src/styles.css', {
+        title: ':root {',
+      }),
+      row('home.html', { title: null }),
+      row('notes/plan.md', { title: 'Plan' }),
+    ])
+    const clients = tree.children.find((c) => c.fullPath === 'clients')!
+    const acme = clients.children.find((c) => c.fullPath === 'clients/acme')!
+    const views = acme.children.find((c) => c.fullPath === 'clients/acme/.views')!
+    const overview = views.children.find(
+      (c) => c.fullPath === 'clients/acme/.views/overview',
+    )!
+    const src = overview.children.find(
+      (c) => c.fullPath === 'clients/acme/.views/overview/src',
+    )!
+    expect(src.children.map((c) => nodeLabel(c))).toEqual([
+      'App.tsx',
+      'styles.css',
+    ])
+    expect(nodeLabel(tree.children.find((c) => c.fullPath === 'home.html')!)).toBe('home')
+    const notes = tree.children.find((c) => c.fullPath === 'notes')!
+    expect(nodeLabel(notes.children[0]!)).toBe('Plan')
   })
 })

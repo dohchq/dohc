@@ -193,6 +193,7 @@ export function AgentModelPicker({
   const [popoverFrame, setPopoverFrame] = useState<PopoverFrame | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const popoverRef = useRef<HTMLDivElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const [focusedModelId, setFocusedModelId] = useState<string | null>(null)
   const savedFocusRef = useRef<HTMLElement | null>(null)
   const restoreFocusOnCloseRef = useRef(false)
@@ -279,8 +280,22 @@ export function AgentModelPicker({
       ).filter((element) => !element.hasAttribute('disabled'))
     }
 
+    function focusInitialElement() {
+      const initialElement = searchInputRef.current ?? focusableElements()[0]
+      initialElement?.focus()
+    }
+
+    focusInitialElement()
     const focusFrame = window.requestAnimationFrame(() => {
-      focusableElements()[0]?.focus()
+      const activeElement = document.activeElement
+      if (
+        activeElement === document.body ||
+        activeElement === triggerRef.current ||
+        (activeElement instanceof Node &&
+          !popoverRef.current?.contains(activeElement))
+      ) {
+        focusInitialElement()
+      }
     })
 
     function closeFromOutsidePointer(event: PointerEvent) {
@@ -451,11 +466,11 @@ export function AgentModelPicker({
         typeof document !== 'undefined' &&
         createPortal(
           <>
-            <div className="fixed inset-0 z-30" />
+            <div className="fixed inset-0 z-[80]" />
             <div
               ref={popoverRef}
               onKeyDown={onPopoverKeyDown}
-              className="fixed z-40 grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
+              className="fixed z-[90] grid max-w-[calc(100vw-28px)] grid-cols-[154px_minmax(0,1fr)] overflow-hidden rounded-xl border border-rule-strong bg-elevated shadow-modal"
               style={{
                 left: popoverFrame?.left ?? 14,
                 width: popoverFrame?.width ?? 560,
@@ -516,6 +531,7 @@ export function AgentModelPicker({
               <label className="flex h-9 items-center gap-2 rounded-lg border border-rule bg-panel px-2.5 text-ink-dim focus-within:border-rule-strong">
                 <Search className="size-3.5 shrink-0" strokeWidth={1.8} />
                 <input
+                  ref={searchInputRef}
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Search models"

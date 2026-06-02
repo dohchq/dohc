@@ -17,26 +17,40 @@ const documentName = encodeDocName({
   atomId: 'atom_1',
 })
 
-function makeAcl(canWrite = true) {
-  return {
+function makeAcl(
+  canWrite = true,
+  options: { createAtom?: boolean; loadAtomBootstrap?: boolean } = {},
+) {
+  const acl = {
     getWorkspaceAuthzVersion: vi.fn(async () => 1),
     canReadAtom: vi.fn(async () => true),
     canWriteAtom: vi.fn(async () => canWrite),
-    createAtom: vi.fn(async () => ({
-      ok: true as const,
-      atomId: 'created_atom',
-      markdown: '---\nid: created_atom\n---\nCreated body.',
-    })),
+    ...(options.loadAtomBootstrap
+      ? { loadAtomBootstrap: vi.fn(async () => ({ markdown: 'Bootstrapped.' })) }
+      : {}),
+  }
+  return {
+    ...acl,
+    ...(options.createAtom === false
+      ? {}
+      : {
+          createAtom: vi.fn(async (input: { content: string }) => ({
+            ok: true as const,
+            atomId: 'created_atom',
+            markdown: `---\nid: created_atom\n---\n${input.content}`,
+          })),
+        }),
   }
 }
 
 function makeHandler(
   canWrite = true,
   liveDocuments = new Map<string, Y.Doc>(),
+  aclOptions: { createAtom?: boolean; loadAtomBootstrap?: boolean } = {},
 ) {
   const backend = new MemoryYDocPersistenceBackend()
   const store = new PostgresYDocStore(backend)
-  const acl = makeAcl(canWrite)
+  const acl = makeAcl(canWrite, aclOptions)
   const handler = createSemanticApiHandler({
     adminToken: 'admin-token',
     acl,
@@ -76,9 +90,29 @@ describe('semantic apply API', () => {
     await expect(response.json()).resolves.toMatchObject({
       ok: true,
       semanticWrites: true,
+      createAtom: true,
+      atomBootstrap: false,
     })
     expect(acl.canWriteAtom).not.toHaveBeenCalled()
     expect(acl.createAtom).not.toHaveBeenCalled()
+  })
+
+  it('reports when preflight cannot create brand-new atoms', async () => {
+    const { handler } = makeHandler(true, new Map(), { createAtom: false })
+
+    const response = await handler(
+      new Request('http://localhost/apply/preflight', {
+        method: 'GET',
+        headers: { authorization: 'Bearer admin-token' },
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      semanticWrites: true,
+      createAtom: false,
+    })
   })
 
   it('rejects semantic write preflight without the admin token', async () => {
@@ -418,6 +452,47 @@ describe('semantic apply API', () => {
         )
         .then(yDocToMarkdown),
     ).resolves.toContain('Created body.')
+  })
+
+  it('creates view source atoms as plain-text Y.Docs so source code survives', async () => {
+    const { handler, store } = makeHandler()
+    const source = [
+      'import React from "react"',
+      '',
+      'export default function App() {',
+      '  return <main>{items.map((item) => <span>{item}</span>)}</main>',
+      '}',
+    ].join('\n')
+
+    const response = await handler(
+      new Request('http://localhost/apply/createAtom', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          operationId: 'op_create_view_source',
+          workspaceId: 'workspace_1',
+          path: '.views/workspace/src/App.tsx',
+          content: source,
+          actor: {
+            userId: 'agent_1',
+            actorKind: 'agent',
+            authzVersion: 1,
+          },
+        }),
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(
+      store
+        .loadDocument(
+          encodeDocName({ workspaceId: 'workspace_1', atomId: 'created_atom' }),
+        )
+        .then(yDocToMarkdown),
+    ).resolves.toContain('return <main>{items.map')
   })
 
   it('rechecks write access for the actor before applying', async () => {

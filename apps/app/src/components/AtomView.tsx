@@ -453,16 +453,20 @@ function AtomShell({
   // FULL body so the user can still SEE and hand-edit the
   // frontmatter/id (manifesto locked-#1: inspectable & hand-editable).
   const viewInfo = useMemo(() => (path ? parseViewPath(path) : null), [path])
-  const [sourceMode, setSourceMode] = useState(() => isSourceFirstPath(path))
+  const sourceLocked = isSourceFirstPath(path)
+  const [sourceMode, setSourceMode] = useState(() => sourceLocked)
+  useEffect(() => {
+    if (sourceLocked) setSourceMode(true)
+  }, [sourceLocked])
   // D4.28 — raw-source buffer. While in source mode the textarea
   // edits THIS (local), not `draft`, so per-keystroke autosave +
-  // id-reconcile don't fire. Synced from `draft` each time source
-  // mode opens; committed (one immediate save) on blur / done.
+  // id-reconcile don't fire. Synced from `draft` while source mode is
+  // active; committed (one immediate save) on blur / formatted-return.
   const [sourceDraft, setSourceDraft] = useState(draft)
   useEffect(() => {
     if (sourceMode) setSourceDraft(draft)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceMode])
+  }, [sourceMode, draft])
   function leaveSource() {
     onCommitSource?.(sourceDraft)
     setSourceMode(false)
@@ -589,7 +593,7 @@ function AtomShell({
       {advisory && advisory.kind === 'collision' && (
         // §1.4 REQUIRED surfacing — proactive, inline, never a modal.
         // The user learns their address is broken without having to
-        // suspect anything; `⟨⟩ source` is the fix.
+        // suspect anything; the `source` button is the fix.
         <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-[12px] leading-relaxed text-ink-dim">
           <span className="font-medium text-ink-strong">
             Address <code className="text-[11px]">{advisory.fileId}</code> is
@@ -614,7 +618,7 @@ function AtomShell({
             <code className="text-[11px]">{advisory.fileId}</code> (another file
             wanted <code className="text-[11px]">{advisory.wanted}</code>). Fine
             to keep — or rename via{' '}
-            <span className="text-ink-dim">⟨⟩ source</span>.
+            <span className="text-ink-dim">source</span>.
           </span>
           <button
             type="button"
@@ -650,7 +654,7 @@ function AtomShell({
           (Tiptap hides frontmatter, so typing `---\ntype: html\n---`
           in the formatted editor doesn't stick). Always-on unblocks
           manual creation of typed atoms + raw `id:` edits on a fresh
-          file. Plain notes just gain a faint, ignorable "⟨⟩ source"
+          file. Plain notes just gain a faint, ignorable "source"
           button — standard "view source" affordance.
           Track-3 P4: skills also surface the "copy share text"
           button (strips the canonical id + injects an advisory
@@ -679,18 +683,20 @@ function AtomShell({
             share
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => (sourceMode ? leaveSource() : setSourceMode(true))}
-          className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors"
-          title={
-            sourceMode
-              ? 'Back to the formatted editor'
-              : 'Show & edit the raw source (frontmatter / id)'
-          }
-        >
-          {sourceMode ? '✓ done' : '⟨⟩ source'}
-        </button>
+        {!sourceLocked && (
+          <button
+            type="button"
+            onClick={() => (sourceMode ? leaveSource() : setSourceMode(true))}
+            className="text-[11px] text-ink-faint hover:text-ink-dim px-1.5 py-0.5 rounded transition-colors"
+            title={
+              sourceMode
+                ? 'Back to the formatted editor'
+                : 'Show & edit the raw source (frontmatter / id)'
+            }
+          >
+            {sourceMode ? 'formatted' : 'source'}
+          </button>
+        )}
       </div>
       {/* emoji-icons — Notion-style page icon ABOVE the title. Lives
           in the frontmatter `icon:` property (shows in the tree +
@@ -774,7 +780,7 @@ function AtomShell({
       ) : isHtml ? (
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
         // route iframe (Tiptap is never used for an html body). The
-        // ⟨⟩ source toggle above still flips to the raw textarea.
+        // The source toggle above still flips to the raw textarea.
         <HtmlAtomFrame atomId={atomId} body={rest} />
       ) : identity === undefined ? (
         <DocumentSkeleton compact />

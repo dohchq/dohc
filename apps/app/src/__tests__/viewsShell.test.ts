@@ -13,11 +13,16 @@ import { viewFromPathname } from '../lib/appViews'
 import { decodeViewRef, encodeViewRef } from '../lib/viewRefs'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 
+const bundleViewServerMock = vi.hoisted(() => vi.fn())
+
 vi.mock('convex/react', () => ({
   useQuery: vi.fn(),
   useAction: () => vi.fn(),
   useMutation: () => vi.fn(),
   useConvex: () => ({ query: vi.fn() }),
+}))
+vi.mock('../views/buildViewBundle.functions', () => ({
+  bundleViewServer: bundleViewServerMock,
 }))
 vi.mock('../lib/active-workspace', () => ({
   useActiveWorkspaceId: vi.fn(),
@@ -31,6 +36,14 @@ const useQueryMock = vi.mocked(useQuery as any)
 const useActiveWorkspaceIdMock = vi.mocked(useActiveWorkspaceId)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const APP_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
+const VIEW_FRAME_SRC = readFileSync(
+  resolve(__dirname, '../components/ViewFrame.tsx'),
+  'utf8',
+)
+const BUNDLE_FUNCTIONS_SRC = readFileSync(
+  resolve(__dirname, '../views/buildViewBundle.functions.ts'),
+  'utf8',
+)
 
 const viewRows = [
   {
@@ -66,6 +79,7 @@ const viewRows = [
 beforeEach(() => {
   useQueryMock.mockReset()
   useActiveWorkspaceIdMock.mockReset()
+  bundleViewServerMock.mockReset()
 })
 
 describe('views shell route helpers', () => {
@@ -215,5 +229,18 @@ describe('Views activity shell', () => {
       packageRoot: 'clients/acme/.views/overview',
       activeWorkspaceId: 'ws_active',
     })
+  })
+
+  it('keeps the view bundler behind the server-function bridge module', () => {
+    expect(VIEW_FRAME_SRC).toContain(
+      "from '../views/buildViewBundle.functions'",
+    )
+    expect(VIEW_FRAME_SRC).not.toContain(
+      "from '../views/buildViewBundle.server'",
+    )
+    expect(BUNDLE_FUNCTIONS_SRC).toContain("await import('./buildViewBundle.server')")
+    expect(BUNDLE_FUNCTIONS_SRC).not.toMatch(
+      /import\s*\{[\s\S]*\bbuildViewBundle\b[\s\S]*\}\s*from\s*['"]\.\/buildViewBundle\.server['"]/,
+    )
   })
 })

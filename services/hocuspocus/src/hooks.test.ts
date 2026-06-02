@@ -32,6 +32,7 @@ function makeAcl(options: {
   canWrite: boolean
   version?: number
   bootstrapMarkdown?: string | null
+  bootstrapPath?: string
   setAtomBodyCache?: ReturnType<typeof vi.fn>
 }) {
   return {
@@ -43,7 +44,7 @@ function makeAcl(options: {
         ? null
         : options.bootstrapMarkdown === null
           ? null
-          : { markdown: options.bootstrapMarkdown },
+          : { markdown: options.bootstrapMarkdown, path: options.bootstrapPath },
     ),
     ...(options.setAtomBodyCache
       ? { setAtomBodyCache: options.setAtomBodyCache }
@@ -56,6 +57,7 @@ function makeHooks(options: {
   canWrite: boolean
   version?: number
   bootstrapMarkdown?: string | null
+  bootstrapPath?: string
   setAtomBodyCache?: ReturnType<typeof vi.fn>
   projectionDebounceMs?: number
   revocations?: RevocationRegistry
@@ -203,6 +205,31 @@ describe('hocuspocus hook factory', () => {
     await expect(backend.getLatestSnapshot(documentName)).resolves.toMatchObject({
       lastSeq: 0,
     })
+  })
+
+  it('bootstraps view source files as plain text so TSX survives projection', async () => {
+    const source = [
+      '---',
+      'id: views.workspace.src.app',
+      '---',
+      'export default function App() {',
+      '  return <main>{items.length}</main>',
+      '}',
+    ].join('\n')
+    const { hooks } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      bootstrapMarkdown: source,
+      bootstrapPath: '.views/workspace/src/App.tsx',
+    })
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: baseContext,
+    } as never)
+
+    expect(getDohcYDocMeta(loaded)).toMatchObject({ contentKind: 'plain-text' })
+    expect(yDocToMarkdown(loaded)).toContain('return <main>{items.length}</main>')
   })
 
   it('loads persisted state when concurrent writes win the bootstrap race', async () => {

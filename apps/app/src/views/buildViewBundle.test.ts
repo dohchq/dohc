@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildViewBundle } from './buildViewBundle'
+import { buildViewBundle } from './buildViewBundle.server'
 
 describe('buildViewBundle', () => {
   it('bundles TSX view code with relative imports, CSS, React, and @dohc/view', async () => {
@@ -36,6 +36,85 @@ describe('buildViewBundle', () => {
       expect(result.code).toContain('Open')
       expect(result.code).toContain('button { color: red; }')
       expect(result.code).toContain('dohc')
+    }
+  })
+
+  it('auto-mounts a default React export into the view root', async () => {
+    const result = await buildViewBundle({
+      entry: 'src/App.tsx',
+      files: [
+        {
+          relativePath: 'src/App.tsx',
+          body: `
+            import React from 'react'
+            export default function App() {
+              return <main>Auto-mounted workspace view</main>
+            }
+          `,
+        },
+      ],
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.code).toContain('Auto-mounted workspace view')
+      expect(result.code).toMatch(/getElementById\(["']root["']\)/)
+      expect(result.code).toContain('createRoot')
+    }
+  })
+
+  it('runs default-export TSX views without requiring an explicit React import', async () => {
+    const result = await buildViewBundle({
+      entry: 'src/App.tsx',
+      files: [
+        {
+          relativePath: 'src/App.tsx',
+          body: `
+            export default function App() {
+              return <main>No React import needed</main>
+            }
+          `,
+        },
+      ],
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.code).toContain('No React import needed')
+  })
+
+  it('strips dohc atom frontmatter before compiling source files', async () => {
+    const result = await buildViewBundle({
+      entry: 'src/App.tsx',
+      files: [
+        {
+          relativePath: 'src/App.tsx',
+          body: `---
+id: views.workspace.src.app
+---
+import React from 'react'
+import './styles.css'
+export default function App() {
+  return <main>Frontmatter-safe view</main>
+}
+`,
+        },
+        {
+          relativePath: 'src/styles.css',
+          body: `---
+id: views.workspace.src.styles
+---
+main { color: green; }
+`,
+        },
+      ],
+    })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.code).toContain('Frontmatter-safe view')
+      expect(result.code).toContain('main { color: green; }')
+      expect(result.code).not.toContain('views.workspace.src.app')
     }
   })
 

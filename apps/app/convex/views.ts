@@ -4,6 +4,7 @@ import type { QueryCtx } from './_generated/server'
 import type { Doc } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { canReadAtom } from './atomAccess'
+import { splitFrontmatter } from './atomId'
 import {
   isViewPackageRoot,
   parseViewPath,
@@ -99,6 +100,10 @@ function manifestObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>
 }
 
+function stripDohcFrontmatter(body: string): string {
+  return splitFrontmatter(body).rest
+}
+
 function defaultConfig(viewName: string): ViewConfig {
   return {
     title: titleFromViewName(viewName),
@@ -115,7 +120,7 @@ function parseConfig(body: string, viewName: string): ViewConfig {
   const fallback = defaultConfig(viewName)
   let parsed: unknown
   try {
-    parsed = JSON.parse(body)
+    parsed = JSON.parse(stripDohcFrontmatter(body))
   } catch {
     return {
       ...fallback,

@@ -1,7 +1,15 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { FileTree } from '../components/FileTree'
+import type { FileRow, FolderInput } from '../lib/path-tree'
+
+vi.mock('../components/WorkspaceSwitcher', () => ({
+  WorkspaceSwitcher: () => null,
+}))
 
 // file-org-v1 D4.4a — structural assertions on the FileTree's L/S
 // keyboard surface + lock/star icon render. The vitest harness is
@@ -15,6 +23,33 @@ const SRC = readFileSync(
   resolve(__dirname, '../components/FileTree.tsx'),
   'utf8',
 )
+
+function renderTree({
+  files = [],
+  folders = [],
+}: {
+  files?: FileRow[]
+  folders?: FolderInput[]
+}) {
+  const noop = async () => {}
+  return renderToStaticMarkup(
+    createElement(FileTree, {
+      files,
+      folders,
+      activePath: null,
+      view: 'atom',
+      user: { email: 'ice@example.com', firstName: 'Ice' },
+      onOpen: () => {},
+      onCreatePage: noop,
+      onCreateFolder: noop,
+      onDeleteFolder: noop,
+      onRenameFolder: noop,
+      onDeleteFile: noop,
+      onRenameFile: noop,
+      allowCreate: false,
+    }),
+  )
+}
 
 describe('FileTree D4.4a — Track-4 affordances surface', () => {
   it('imports the lucide Lock + Star icons (single source for the iconography)', () => {
@@ -147,6 +182,30 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).toMatch(/colorVarFor\(node\.color\)/)
     // folders are color-only now — no emoji/icon overlay
     expect(SRC).not.toMatch(/emojiForFolderIcon/)
+  })
+
+  it('.views folder row exposes the views affordance while preserving the literal label', () => {
+    const html = renderTree({ folders: ['.views'] })
+
+    expect(html).toContain('aria-label="views folder"')
+    expect(html).toContain('.views')
+  })
+
+  it('renders source code files with a code affordance and their extension visible', () => {
+    const html = renderTree({
+      files: [
+        {
+          _id: 'src_app',
+          path: 'App.tsx',
+          title: 'Import React',
+          source: 'user',
+        },
+      ],
+    })
+
+    expect(html).toContain('aria-label="source code"')
+    expect(html).toContain('App.tsx')
+    expect(html).not.toContain('Import React')
   })
 
   it('Folder row renders the Star icon when node.starred is true', () => {

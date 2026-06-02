@@ -71,6 +71,25 @@ export type FolderInput = string | {
   starred?: boolean
 }
 
+const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
+
+function isViewSourcePath(path: string): boolean {
+  const parts = path.split('/')
+  const viewsIndex = parts.indexOf('.views')
+  return (
+    viewsIndex >= 0 &&
+    viewsIndex <= parts.length - 3 &&
+    Boolean(parts[viewsIndex + 1])
+  )
+}
+
+export function isSourceCodeFilePath(path: string): boolean {
+  return SOURCE_CODE_EXT_RE.test(path) || (
+    isViewSourcePath(path) && VIEW_SOURCE_EXT_RE.test(path)
+  )
+}
+
 // Build a tree from atoms + explicit folder rows. Obsidian-style:
 // folders are first-class containers (can sit empty), atoms are leaves.
 // Each atom is a leaf node at its full path — no folder-as-page
@@ -185,7 +204,7 @@ export function nodeLabel(node: TreeNode): string {
   if (node.fullPath === '.context/company.md') return 'Company'
   if (node.fullPath === '.skills') return 'Skills'
   if (node.fullPath === '.commands') return 'Commands'
-  if (node.segment === '.views') return 'Views'
+  if (node.page && isSourceCodeFilePath(node.page.path)) return node.segment
   if (node.page?.title) return node.page.title
   // D4.16 — strip the rendering extension (.md OR .html) so a
   // titleless file shows its clean name (e.g. `dashboard`, not
@@ -223,7 +242,7 @@ export function pathToBreadcrumbs(path: string): Crumb[] {
     const seg = segs[i]!
     if (isLast) {
       out.push({
-        label: seg.replace(/\.(md|html)$/i, ''),
+        label: isSourceCodeFilePath(path) ? seg : seg.replace(/\.(md|html)$/i, ''),
         target: segs.slice(0, i + 1).join('/'),
         isCurrent: true,
       })

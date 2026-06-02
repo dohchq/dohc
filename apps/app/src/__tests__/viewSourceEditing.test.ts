@@ -31,4 +31,10 @@ describe('view source editing contracts', () => {
     )).toBe('clients/acme/.views/overview')
     expect(viewPackageRootForSourcePath('clients/acme/tasks.md')).toBeNull()
   })
+
+  it('keeps ordinary source-code paths in the source-first editing contract', () => {
+    expect(isSourceFirstPath('src/App.tsx')).toBe(true)
+    expect(isSourceFirstPath('styles/app.css')).toBe(true)
+    expect(isSourceFirstPath('data/config.json')).toBe(true)
+  })
 })

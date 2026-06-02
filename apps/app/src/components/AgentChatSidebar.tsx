@@ -1,4 +1,10 @@
-import { useId, useRef, useState, type ComponentType } from 'react'
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ComponentType,
+} from 'react'
 import {
   Folder,
   FolderOpen,
@@ -483,8 +489,53 @@ function ThreadButton({
   onMenuToggle: () => void
   onMenuClose: () => void
 }) {
+  const serverPinned = thread.pinnedAt !== null
+  const [optimisticPinned, setOptimisticPinned] = useState<boolean | null>(null)
+  const [actionsDismissed, setActionsDismissed] = useState(false)
+  const visiblePinned = optimisticPinned ?? serverPinned
+
+  useEffect(() => {
+    setOptimisticPinned(null)
+  }, [serverPinned, thread.threadId])
+
+  useEffect(() => {
+    setActionsDismissed(false)
+  }, [thread.threadId])
+
+  const metaVisibilityClass = actionsDismissed
+    ? ''
+    : 'group-hover/thread:hidden group-focus-within/thread:hidden'
+  const actionsClass = actionsDismissed
+    ? 'relative z-10 ml-auto hidden items-center gap-0.5'
+    : 'relative z-10 ml-auto hidden items-center gap-0.5 group-hover/thread:flex group-focus-within/thread:flex'
+
+  function togglePinnedWithFeedback(button?: HTMLButtonElement) {
+    const nextPinned = !visiblePinned
+    const row = button?.closest('[data-thread-row]')
+    row
+      ?.querySelector<HTMLButtonElement>('[data-thread-primary]')
+      ?.focus()
+    setOptimisticPinned(nextPinned)
+    setActionsDismissed(true)
+    try {
+      const result = onTogglePinned()
+      if (result && typeof result.then === 'function') {
+        void result.catch(() => {
+          setOptimisticPinned(null)
+          setActionsDismissed(false)
+        })
+      }
+    } catch (error) {
+      setOptimisticPinned(null)
+      setActionsDismissed(false)
+      throw error
+    }
+  }
+
   return (
     <div
+      data-thread-row={thread.threadId}
+      onPointerLeave={() => setActionsDismissed(false)}
       className={`group/thread relative flex h-8 w-full cursor-pointer items-center gap-1 rounded-md px-2 text-left transition-colors ${
         active
           ? 'bg-hover text-ink-strong'
@@ -492,6 +543,7 @@ function ThreadButton({
       }`}
     >
       <button
+        data-thread-primary
         type="button"
         onClick={onClick}
         className="absolute inset-0 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-soft"
@@ -507,25 +559,32 @@ function ThreadButton({
           {thread.title}
         </span>
       </span>
-      {thread.pinnedAt !== null && (
+      {visiblePinned && (
         <Pin
-          className="pointer-events-none relative z-[1] size-3 shrink-0 text-accent group-hover/thread:hidden group-focus-within/thread:hidden"
+          className={`pointer-events-none relative z-[1] size-3 shrink-0 text-accent ${metaVisibilityClass}`}
+          data-thread-pin-indicator={thread.threadId}
           strokeWidth={2}
         />
       )}
-      <span className="pointer-events-none relative z-[1] shrink-0 text-[10.5px] text-ink-faint group-hover/thread:hidden group-focus-within/thread:hidden">
+      <span
+        className={`pointer-events-none relative z-[1] shrink-0 text-[10.5px] text-ink-faint ${metaVisibilityClass}`}
+      >
         {ageLabel(thread.updatedAt)}
       </span>
-      <span className="relative z-10 ml-auto hidden items-center gap-0.5 group-hover/thread:flex group-focus-within/thread:flex">
+      <span
+        className={actionsClass}
+        data-dismissed={actionsDismissed ? 'true' : undefined}
+        data-thread-actions={thread.threadId}
+      >
         <button
           type="button"
           onClick={(e) => {
             e.stopPropagation()
-            void onTogglePinned()
+            togglePinnedWithFeedback(e.currentTarget)
           }}
           className="grid size-5 shrink-0 place-items-center rounded text-ink-faint hover:bg-elevated hover:text-ink"
-          title={thread.pinnedAt === null ? 'Pin chat' : 'Unpin chat'}
-          aria-label={thread.pinnedAt === null ? 'pin chat' : 'unpin chat'}
+          title={visiblePinned ? 'Unpin chat' : 'Pin chat'}
+          aria-label={visiblePinned ? 'unpin chat' : 'pin chat'}
         >
           <Pin className="size-3" strokeWidth={1.8} />
         </button>
@@ -560,10 +619,10 @@ function ThreadButton({
           <div className="absolute right-1 top-7 z-30 w-44 overflow-hidden rounded-lg border border-rule bg-elevated p-1 shadow-modal">
             <MenuButton
               icon={Pin}
-              label={thread.pinnedAt === null ? 'Pin chat' : 'Unpin chat'}
+              label={visiblePinned ? 'Unpin chat' : 'Pin chat'}
               onClick={() => {
                 onMenuClose()
-                void onTogglePinned()
+                togglePinnedWithFeedback()
               }}
             />
             <MenuButton

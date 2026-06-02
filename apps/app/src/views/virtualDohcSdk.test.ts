@@ -97,11 +97,82 @@ describe('virtual @dohc/view SDK', () => {
       error: 'No access.',
     })
   })
+
+  it('exposes document hooks and aliases through the evaluated SDK', () => {
+    const success = evaluateVirtualSdk({
+      sources: { list: async () => ({ ok: true, rows: [] }) },
+      atom: { get: async () => ({ ok: true, atom: { body: '' } }) },
+    })
+
+    expect(typeof success.exports.useDocs).toBe('function')
+    expect(success.exports.useDocsGlob).toBe(success.exports.useDocs)
+    expect(success.exports.useQuery).toBe(success.exports.useLiveQuery)
+  })
+
+  it('matches root docs and direct children for double-star globs', async () => {
+    const rootGets: string[] = []
+    const root = evaluateVirtualSdk({
+      sources: {
+        list: async () => ({
+          ok: true,
+          rows: [
+            { path: 'README.md' },
+            { path: 'src/index.ts' },
+            { path: 'src/nested/util.ts' },
+          ],
+        }),
+      },
+      atom: {
+        get: async ({ path }: { path: string }) => {
+          rootGets.push(path)
+          return { ok: true, atom: { body: `# ${path}` } }
+        },
+      },
+    })
+
+    root.exports.useDocs('**/*')
+    await flushPromises()
+
+    expect(rootGets).toEqual([
+      'README.md',
+      'src/index.ts',
+      'src/nested/util.ts',
+    ])
+
+    const srcGets: string[] = []
+    const scoped = evaluateVirtualSdk({
+      sources: {
+        list: async () => ({
+          ok: true,
+          rows: [
+            { path: 'src/index.ts' },
+            { path: 'src/nested/util.ts' },
+            { path: 'src/styles.css' },
+          ],
+        }),
+      },
+      atom: {
+        get: async ({ path }: { path: string }) => {
+          srcGets.push(path)
+          return { ok: true, atom: { body: `# ${path}` } }
+        },
+      },
+    })
+
+    scoped.exports.useDocs('src/**/*.ts')
+    await flushPromises()
+
+    expect(srcGets).toEqual(['src/index.ts', 'src/nested/util.ts'])
+  })
 })
 
 function evaluateVirtualSdk(dohc: unknown) {
   const exports = {} as {
     dohc?: unknown
+    useDocs: (pattern?: string) => unknown[]
+    useDocsGlob?: (pattern?: string) => unknown[]
+    useLiveQuery?: (query: string) => unknown[]
+    useQuery?: (query: string) => unknown[]
     useDohcQuery: (key: string, loader: () => Promise<unknown>) => unknown
   }
   const states: unknown[] = []
@@ -129,11 +200,29 @@ function evaluateVirtualSdk(dohc: unknown) {
 
   const moduleSource = VIRTUAL_DOHC_SDK
     .replace("import { useEffect, useState } from 'react'", '')
-    .replace('export const dohc = window.dohc', 'exports.dohc = window.dohc')
+    .replace('export const dohc = window.dohc', 'const dohc = window.dohc; exports.dohc = dohc')
+    .replace(
+      'export function useDocs',
+      'function useDocs',
+    )
+    .replace(
+      'export const useDocsGlob = useDocs',
+      'const useDocsGlob = useDocs',
+    )
+    .replace(
+      'export function useLiveQuery',
+      'function useLiveQuery',
+    )
+    .replace(
+      'export const useQuery = useLiveQuery',
+      'const useQuery = useLiveQuery',
+    )
     .replace(
       'export function useDohcQuery',
-      'exports.useDohcQuery = function useDohcQuery',
+      'function useDohcQuery',
     )
+    .replace(/^export /gm, '')
+    .concat('\nObject.assign(exports, { useDocs, useDocsGlob, useLiveQuery, useQuery, useDohcQuery })')
 
   new Function('window', 'useEffect', 'useState', 'exports', moduleSource)(
     { dohc },

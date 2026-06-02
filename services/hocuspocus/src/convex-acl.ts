@@ -37,6 +37,7 @@ type ConvexBootstrapArgs = {
 
 type ConvexBootstrapResult = {
   markdown: string
+  path?: string
 } | null
 
 type ConvexAclClient = {

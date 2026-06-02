@@ -12,11 +12,13 @@ import * as Y from 'yjs'
 import { dohcMarkdownExtensions } from './dohc-markdown-extensions.js'
 
 const BODY_FIELD = 'body'
+const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_V2_SCHEMA_VERSION = 1
 const FM_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
+const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
@@ -29,7 +31,7 @@ const markdownManager = new MarkdownManager({
 })
 const schema = getSchema(extensions)
 
-type DohcV2Meta = { schemaVersion: number }
+type DohcV2Meta = { schemaVersion: number; contentKind?: 'plain-text' }
 
 export function markdownToYDoc(markdown: string): Y.Doc {
   const { meta, body } = parseFrontmatter(markdown)
@@ -41,6 +43,20 @@ export function markdownToYDoc(markdown: string): Y.Doc {
   const bodyFragment = doc.getXmlFragment(BODY_FIELD)
   const tiptapJson = markdownManager.parse(body)
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
+
+  return doc
+}
+
+export function plainTextToYDoc(markdown: string): Y.Doc {
+  const { meta, body } = parseFrontmatter(markdown)
+  const doc = new Y.Doc()
+
+  writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
+  writeMap(doc.getMap(META_FIELD), {
+    schemaVersion: DOHC_V2_SCHEMA_VERSION,
+    contentKind: PLAIN_TEXT_CONTENT_KIND,
+  })
+  doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
 
   return doc
 }
@@ -70,6 +86,10 @@ export function getDohcYDocMeta(doc: Y.Doc): DohcV2Meta {
       typeof meta.schemaVersion === 'number'
         ? meta.schemaVersion
         : DOHC_V2_SCHEMA_VERSION,
+    contentKind:
+      meta.contentKind === PLAIN_TEXT_CONTENT_KIND
+        ? PLAIN_TEXT_CONTENT_KIND
+        : undefined,
   }
 }
 
@@ -77,11 +97,19 @@ export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
   return doc.getXmlFragment(BODY_FIELD)
 }
 
+export function getDohcYDocPlainText(doc: Y.Doc): Y.Text | null {
+  return getDohcYDocMeta(doc).contentKind === PLAIN_TEXT_CONTENT_KIND
+    ? doc.getText(PLAIN_TEXT_FIELD)
+    : null
+}
+
 export function getDohcProseMirrorSchema() {
   return schema
 }
 
 function yDocBodyToMarkdown(doc: Y.Doc): string {
+  const plainText = getDohcYDocPlainText(doc)
+  if (plainText) return plainText.toString()
   return markdownManager.serialize(yDocBodyToJSON(doc))
 }
 

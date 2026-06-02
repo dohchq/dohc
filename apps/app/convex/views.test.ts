@@ -110,6 +110,29 @@ describe('api.views.list', () => {
     })
   })
 
+  it('parses view.json even when atom frontmatter was injected', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(
+      t,
+      W,
+      '.views/workspace/view.json',
+      `---
+id: views.workspace.config
+---
+{"title":"Workspace Cockpit","entry":"src/App.tsx","read":["."],"write":[]}`,
+    )
+    await seedAtom(t, W, '.views/workspace/src/App.tsx')
+
+    const result = await t.withIdentity({ subject: W }).query(api.views.list, {})
+
+    expect(result.views[0]).toMatchObject({
+      packageRoot: '.views/workspace',
+      title: 'Workspace Cockpit',
+      entryPath: '.views/workspace/src/App.tsx',
+      configStatus: { ok: true },
+    })
+  })
+
   it('filters discovery through atom read access', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrgWithBob(t)
