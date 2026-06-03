@@ -7,6 +7,8 @@ import yaml from 'js-yaml'
 // Returns the parsed meta object plus the body after the closing ---.
 
 const FM_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
+const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
+type FrontmatterPriorityKey = (typeof FRONTMATTER_PRIORITY_KEYS)[number]
 
 export function parseFrontmatter(src: string): {
   meta: Record<string, unknown>
@@ -75,17 +77,12 @@ export function applyFrontmatter(
 // content body, no extract/reattach dance.
 
 /** Set (or clear) the frontmatter `title:` key, keeping a tidy key
- *  order: id first, title second, then the user's other props in
- *  their original order. An empty/blank title drops the key. */
+ *  order: id, title, icon, then the user's other props in their
+ *  original order. An empty/blank title drops the key. */
 export function setFrontmatterTitle(body: string, title: string): string {
-  const entries = frontmatterEntries(body)
-  const props: Record<string, string> = {}
-  const id = entries.find((e) => e.key === 'id')
-  if (id) props.id = id.value
-  if (title.trim()) props.title = title
-  for (const e of entries) {
-    if (e.key !== 'id' && e.key !== 'title') props[e.key] = e.value
-  }
+  const props = orderedFrontmatterProps(body, {
+    title: title.trim() ? title : null,
+  })
   return applyFrontmatter(body, props)
 }
 
@@ -93,17 +90,32 @@ export function setFrontmatterTitle(body: string, title: string): string {
  *  icon, Notion-style). Key order: id, title, icon, then the user's
  *  other props. A null/blank icon drops the key. */
 export function setFrontmatterIcon(body: string, icon: string | null): string {
+  const props = orderedFrontmatterProps(body, {
+    icon: icon?.trim() ? icon.trim() : null,
+  })
+  return applyFrontmatter(body, props)
+}
+
+function orderedFrontmatterProps(
+  body: string,
+  overrides: Partial<Record<FrontmatterPriorityKey, string | null>>,
+): Record<string, string> {
   const entries = frontmatterEntries(body)
+  const current = new Map(entries.map((entry) => [entry.key, entry.value]))
   const props: Record<string, string> = {}
-  const id = entries.find((e) => e.key === 'id')
-  const title = entries.find((e) => e.key === 'title')
-  if (id) props.id = id.value
-  if (title) props.title = title.value
-  if (icon && icon.trim()) props.icon = icon.trim()
-  for (const e of entries) {
-    if (e.key !== 'id' && e.key !== 'title' && e.key !== 'icon') {
-      props[e.key] = e.value
+
+  for (const key of FRONTMATTER_PRIORITY_KEYS) {
+    const value = Object.hasOwn(overrides, key)
+      ? overrides[key]
+      : current.get(key)
+    if (value) props[key] = value
+  }
+
+  for (const entry of entries) {
+    if (!FRONTMATTER_PRIORITY_KEYS.includes(entry.key as FrontmatterPriorityKey)) {
+      props[entry.key] = entry.value
     }
   }
-  return applyFrontmatter(body, props)
+
+  return props
 }

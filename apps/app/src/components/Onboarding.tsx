@@ -12,7 +12,7 @@ import {
   Pencil,
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
-import { DohcLogo } from '@/components/DohcLogo'
+import { DohcLogo } from '@dohc/brand'
 import { HtmlAtomFrame } from '@/components/HtmlAtomFrame'
 import { Markdown } from '@/components/Markdown'
 import { extractFrontmatterId, isHtmlPath } from '@/lib/atomId'

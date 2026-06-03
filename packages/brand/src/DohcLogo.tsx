@@ -6,8 +6,7 @@
  * gradient, no shadow, no automotive badge. See dohc-brand-bible.html
  * section 02 (logo system).
  *
- * This file is the brand source of truth. The app re-exports it from
- * apps/app/src/components/DohcLogo.tsx. */
+ * This file is the brand source of truth. */
 
 import React, { type CSSProperties, type ReactNode } from 'react'
 

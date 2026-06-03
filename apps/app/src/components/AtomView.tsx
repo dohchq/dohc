@@ -32,7 +32,7 @@ import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { PropertiesPanel } from './PropertiesPanel'
 import { HtmlAtomFrame } from './HtmlAtomFrame'
 import { AtomEditor, type AtomEditorHandle, OPEN_SKETCH_EVENT } from './AtomEditor'
-import { DohcBrandBlock } from './DohcLogo'
+import { DohcBrandBlock } from '@dohc/brand'
 import { AsciiSketchModal } from './AsciiSketchModal'
 import { DocumentSkeleton } from './Skeleton'
 import {

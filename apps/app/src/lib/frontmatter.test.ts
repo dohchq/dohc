@@ -3,6 +3,7 @@ import {
   parseFrontmatter,
   frontmatterEntries,
   applyFrontmatter,
+  setFrontmatterIcon,
   setFrontmatterTitle,
 } from './frontmatter'
 
@@ -64,6 +65,32 @@ describe('frontmatterEntries', () => {
       { key: 'count', value: '42' },
       { key: 'done', value: 'true' },
     ])
+  })
+})
+
+describe('setFrontmatterIcon', () => {
+  it('adds icon after id and title, before user props', () => {
+    const out = setFrontmatterIcon(
+      '---\nid: x\ntitle: Page\nstatus: active\n---\nbody',
+      'dock',
+    )
+
+    expect(out).toBe(
+      '---\nid: x\ntitle: Page\nicon: dock\nstatus: active\n---\nbody',
+    )
+  })
+
+  it('blank icon drops the key and preserves other props', () => {
+    const out = setFrontmatterIcon(
+      '---\nid: x\ntitle: Page\nicon: old\nstatus: active\n---\nbody',
+      '   ',
+    )
+
+    expect(parseFrontmatter(out).meta).toEqual({
+      id: 'x',
+      title: 'Page',
+      status: 'active',
+    })
   })
 })
 
