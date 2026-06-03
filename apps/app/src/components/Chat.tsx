@@ -30,7 +30,7 @@ import {
 } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
-import { DohcMark } from './DohcLogo'
+import { DohcMark } from '@dohc/brand'
 import {
   AgentModelPicker,
   agentSelectionToConvexArgs,

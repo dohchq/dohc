@@ -73,7 +73,6 @@
   },
   "devDependencies": {
     "@edge-runtime/vm": "^4.0.4",
-    "@tanstack/router-plugin": "^1.167.30",
     "@types/js-yaml": "^4.0.9",
     "@types/jsdom": "28.0.3",
     "@types/node": "^22.13.10",

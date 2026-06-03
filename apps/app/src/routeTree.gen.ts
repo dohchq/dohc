@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SignedOutRouteImport } from './routes/signed-out'
-import { Route as PlaygroundRouteImport } from './routes/playground'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as RAtomIdRouteImport } from './routes/r/$atomId'
@@ -32,11 +31,6 @@ import { Route as AppWWsIdPAtomIdRouteImport } from './routes/_app.w.$wsId.p.$at
 const SignedOutRoute = SignedOutRouteImport.update({
   id: '/signed-out',
   path: '/signed-out',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PlaygroundRoute = PlaygroundRouteImport.update({
-  id: '/playground',
-  path: '/playground',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppRoute = AppRouteImport.update({
@@ -126,7 +120,6 @@ const AppWWsIdPAtomIdRoute = AppWWsIdPAtomIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
-  '/playground': typeof PlaygroundRoute
   '/signed-out': typeof SignedOutRoute
   '/r/$atomId': typeof RAtomIdRoute
   '/p/$atomId': typeof AppPAtomIdRoute
@@ -145,7 +138,6 @@ export interface FileRoutesByFullPath {
   '/w/$wsId/v/$viewRef': typeof AppWWsIdVViewRefRoute
 }
 export interface FileRoutesByTo {
-  '/playground': typeof PlaygroundRoute
   '/signed-out': typeof SignedOutRoute
   '/r/$atomId': typeof RAtomIdRoute
   '/': typeof AppIndexRoute
@@ -166,7 +158,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
-  '/playground': typeof PlaygroundRoute
   '/signed-out': typeof SignedOutRoute
   '/r/$atomId': typeof RAtomIdRoute
   '/_app/': typeof AppIndexRoute
@@ -189,7 +180,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/playground'
     | '/signed-out'
     | '/r/$atomId'
     | '/p/$atomId'
@@ -208,7 +198,6 @@ export interface FileRouteTypes {
     | '/w/$wsId/v/$viewRef'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/playground'
     | '/signed-out'
     | '/r/$atomId'
     | '/'
@@ -228,7 +217,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_app'
-    | '/playground'
     | '/signed-out'
     | '/r/$atomId'
     | '/_app/'
@@ -250,7 +238,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
-  PlaygroundRoute: typeof PlaygroundRoute
   SignedOutRoute: typeof SignedOutRoute
   RAtomIdRoute: typeof RAtomIdRoute
   ApiAuthCallbackRoute: typeof ApiAuthCallbackRoute
@@ -265,13 +252,6 @@ declare module '@tanstack/react-router' {
       path: '/signed-out'
       fullPath: '/signed-out'
       preLoaderRoute: typeof SignedOutRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/playground': {
-      id: '/playground'
-      path: '/playground'
-      fullPath: '/playground'
-      preLoaderRoute: typeof PlaygroundRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_app': {
@@ -440,7 +420,6 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
-  PlaygroundRoute: PlaygroundRoute,
   SignedOutRoute: SignedOutRoute,
   RAtomIdRoute: RAtomIdRoute,
   ApiAuthCallbackRoute: ApiAuthCallbackRoute,

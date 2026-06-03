@@ -1,6 +1,6 @@
 import { type ReactNode } from 'react'
 import { Monitor, Moon, Plus, Search, Sun } from 'lucide-react'
-import { DohcMark } from './DohcLogo'
+import { DohcMark } from '@dohc/brand'
 import { useTheme } from '../lib/use-theme'
 
 export type SidebarUser = {
