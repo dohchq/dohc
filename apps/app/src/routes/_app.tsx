@@ -1200,7 +1200,6 @@ function App() {
     (packageRoot: string) => {
       setView('views')
       setSharingOpen(false)
-      setLeftSidebarCollapsed(true)
       const viewRef = encodeViewRef(packageRoot)
       void navigate({
         to: '/w/$wsId/v/$viewRef',

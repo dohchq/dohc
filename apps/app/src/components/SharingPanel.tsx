@@ -32,6 +32,12 @@ type OverviewWindow = {
   entities: EntityItem[]
   atoms: AtomItem[]
 }
+type SharedWindow = {
+  windowId: Id<'windows'>
+  name: string
+  ownerWorkspaceId: string
+  view: Record<string, string | number | boolean> | null
+}
 
 const shortWs = (w: string) => (w.length > 14 ? `${w.slice(0, 12)}…` : w)
 
@@ -46,8 +52,10 @@ export function ImportsExportsPanel({
   const overview = useQuery(api.windows.consentOverview) as
     | OverviewWindow[]
     | undefined
-  const sharedWithMe = useQuery(api.windows.windowsSharedWithMe)
-  const myId = useQuery(api.windows.whoami)
+  const sharedWithMe = useQuery(api.windows.windowsSharedWithMe) as
+    | SharedWindow[]
+    | undefined
+  const myId = useQuery(api.windows.whoami) as string | undefined
   const [tab, setTab] = useState<'exports' | 'imports'>('exports')
   const [builderOpen, setBuilderOpen] = useState(false)
 
@@ -63,69 +71,64 @@ export function ImportsExportsPanel({
     return { exports, waiting, importers }
   }, [overview])
 
+  const importCount = Array.isArray(sharedWithMe) ? sharedWithMe.length : null
+
   return (
     <div className="flex h-screen flex-col border-l border-rule bg-panel">
-      <header className="shrink-0 border-b border-rule px-5 py-4">
+      <header className="shrink-0 border-b border-rule px-4 py-4">
         <div className="flex items-center gap-2">
           <ArrowLeftRight className="size-4 text-accent" strokeWidth={2} />
           <span className="text-[13px] font-semibold tracking-tight text-ink-strong">
             Imports / Exports
           </span>
         </div>
-        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-dim">
-          Exports publish only the fields you choose from this workspace.
-          Imports are fields another workspace exposes to you. Document
-          sharing is still handled from a document's Share button.
-        </p>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <WorkflowChoice
+            active={tab === 'exports'}
+            Icon={Upload}
+            title="Send fields"
+            detail={
+              summary
+                ? `${summary.exports} exports · ${summary.waiting} waiting`
+                : 'loading exports'
+            }
+            onClick={() => setTab('exports')}
+          />
+          <WorkflowChoice
+            active={tab === 'imports'}
+            Icon={Download}
+            title="Receive fields"
+            detail={
+              importCount === null
+                ? 'loading imports'
+                : `${importCount} available`
+            }
+            onClick={() => setTab('imports')}
+          />
+        </div>
       </header>
 
-      <div className="shrink-0 border-b border-rule px-5 py-3">
-        {summary && (
-          <div className="grid grid-cols-3 gap-2">
-            <Metric label="exports" value={summary.exports} />
-            <Metric label="waiting" value={summary.waiting} />
-            <Metric label="importers" value={summary.importers} />
-          </div>
-        )}
-        <p className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
-          Nothing crosses until an export exists, a workspace is granted,
-          and you approve any newly captured values for that export.
-        </p>
-      </div>
-
-      <div className="flex shrink-0 gap-1 border-b border-rule px-3 py-2">
-        {(
-          [
-            ['exports', 'Exports'],
-            ['imports', 'Imports'],
-          ] as const
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => setTab(k)}
-            className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
-              tab === k
-                ? 'bg-surface text-ink shadow-xs'
-                : 'text-ink-faint hover:text-ink-dim'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <WorkspaceIdStrip id={myId ?? null} summary={summary} />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {tab === 'exports' ? (
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="truncate text-[13px] font-semibold text-ink-strong">
+                  Send fields
+                </h2>
+                <p className="mt-0.5 text-[10.5px] text-ink-faint">
+                  Field set, importer, review.
+                </p>
+              </div>
               <button
                 onClick={() => setBuilderOpen((v) => !v)}
-                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-rule bg-surface px-2.5 text-[11.5px] font-medium text-ink-dim hover:border-rule-strong hover:text-ink transition-colors"
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface transition-colors hover:bg-ink"
               >
                 <Plus className="size-3.5" strokeWidth={2.2} />
-                {builderOpen ? 'Close' : 'New export'}
+                {builderOpen ? 'Close' : 'Create export'}
               </button>
-              {myId && <CopyId id={myId} />}
             </div>
 
             {builderOpen && (
@@ -135,12 +138,8 @@ export function ImportsExportsPanel({
             {overview === undefined ? (
               <CardStackSkeleton cards={2} />
             ) : overview.length === 0 ? (
-              // Frame B — no windows yet (discoverable, not a dead-end)
               !builderOpen && (
-                <Empty
-                  title="No exports yet."
-                  body="Create an export when another workspace should receive specific fields from yours. It is closer to a tiny API than document sharing."
-                />
+                <ExportsEmpty onCreate={() => setBuilderOpen(true)} />
               )
             ) : (
               <div className="flex flex-col gap-3">
@@ -158,31 +157,11 @@ export function ImportsExportsPanel({
         ) : sharedWithMe === undefined ? (
           <CardStackSkeleton cards={2} />
         ) : sharedWithMe.length === 0 ? (
-          <Empty
-            title="No imports yet."
-            body="When another workspace grants you an export, the imported fields appear here exactly as exposed — nothing else."
-          />
+          <ImportsEmpty myId={myId ?? null} />
         ) : (
           <div className="flex flex-col gap-3">
             {sharedWithMe.map((s) => (
-              <div
-                key={s.windowId}
-                className="rounded-lg border border-rule bg-surface px-3.5 py-3"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[12px] font-semibold text-ink-strong">
-                    {s.name}
-                  </span>
-                  <span className="text-[10px] text-ink-faint">
-                    imported from {shortWs(s.ownerWorkspaceId)}
-                  </span>
-                </div>
-                <p className="mt-1 flex items-center gap-1 text-[10.5px] text-ink-faint">
-                  <Download className="size-3" strokeWidth={2} />
-                  fields available to this workspace
-                </p>
-                <ViewBlock view={s.view} />
-              </div>
+              <ImportCard key={s.windowId} source={s} />
             ))}
           </div>
         )}
@@ -191,13 +170,88 @@ export function ImportsExportsPanel({
   )
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function WorkflowChoice({
+  active,
+  Icon,
+  title,
+  detail,
+  onClick,
+}: {
+  active: boolean
+  Icon: typeof Upload
+  title: string
+  detail: string
+  onClick: () => void
+}) {
   return (
-    <div className="rounded-md border border-rule bg-surface px-2.5 py-2">
-      <div className="text-[15px] font-semibold tabular-nums text-ink-strong">
-        {value}
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-w-0 rounded-lg border px-3 py-2 text-left transition-colors ${
+        active
+          ? 'border-rule-strong bg-surface text-ink shadow-xs'
+          : 'border-rule bg-page text-ink-dim hover:border-rule-strong hover:text-ink'
+      }`}
+    >
+      <span className="flex items-center gap-1.5 text-[11.5px] font-semibold">
+        <Icon className="size-3.5 shrink-0 text-accent" strokeWidth={2} />
+        <span className="truncate">{title}</span>
+      </span>
+      <span className="mt-1 block truncate text-[10px] text-ink-faint">
+        {detail}
+      </span>
+    </button>
+  )
+}
+
+function WorkspaceIdStrip({
+  id,
+  summary,
+}: {
+  id: string | null
+  summary: { exports: number; waiting: number; importers: number } | null
+}) {
+  return (
+    <div className="shrink-0 border-b border-rule px-4 py-3">
+      <div className="rounded-lg border border-rule bg-surface px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold text-ink-strong">
+              My workspace ID
+            </p>
+            <p className="mt-0.5 truncate font-mono text-[10px] text-ink-faint">
+              {id ?? 'loading...'}
+            </p>
+          </div>
+          {id ? (
+            <CopyId id={id} />
+          ) : (
+            <Skeleton className="h-7 w-24 rounded-md" />
+          )}
+        </div>
       </div>
-      <div className="mt-0.5 text-[9.5px] font-medium uppercase tracking-[0.12em] text-ink-faint">
+      <div className="mt-2 grid grid-cols-3 gap-1.5">
+        <PanelStat label="exports" value={summary?.exports} />
+        <PanelStat label="waiting" value={summary?.waiting} />
+        <PanelStat label="importers" value={summary?.importers} />
+      </div>
+    </div>
+  )
+}
+
+function PanelStat({
+  label,
+  value,
+}: {
+  label: string
+  value: number | undefined
+}) {
+  return (
+    <div className="rounded-md bg-page px-2 py-1.5">
+      <div className="text-[13px] font-semibold tabular-nums text-ink-strong">
+        {value ?? '—'}
+      </div>
+      <div className="mt-0.5 truncate text-[9px] font-medium uppercase tracking-[0.12em] text-ink-faint">
         {label}
       </div>
     </div>
@@ -321,12 +375,7 @@ function WindowCard({
   }, [confirmWithheld, w.windowId])
 
   const keepPrivate = useCallback(
-    async (
-      id: string,
-      kind: 'entity' | 'atom',
-      ref: string,
-      key: string,
-    ) => {
+    async (id: string, kind: 'entity' | 'atom', ref: string, key: string) => {
       try {
         await rejectKey({ kind, ref, key })
         setKept((s) => new Set(s).add(id))
@@ -338,146 +387,156 @@ function WindowCard({
   )
 
   return (
-    <div className="rounded-lg border border-rule bg-surface px-3.5 py-3">
+    <div className="rounded-lg border border-rule bg-surface px-3.5 py-3 shadow-xs">
       <div className="flex items-start justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-1.5 text-[12px] font-semibold text-ink-strong">
-          <Upload className="size-3 text-accent" strokeWidth={2} />
+        <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-semibold text-ink-strong">
+          <Upload className="size-3.5 text-accent" strokeWidth={2} />
           <span className="truncate">{w.name}</span>
         </span>
-        <span className="shrink-0 text-[10px] text-ink-faint">
+        <span
+          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+            w.grantees.length === 0
+              ? 'bg-page text-ink-faint'
+              : 'bg-page text-success'
+          }`}
+        >
           {w.grantees.length === 0
-            ? 'not granted yet'
-            : `granted to ${w.grantees.length}`}
+            ? 'not shared'
+            : `${w.grantees.length} importer${w.grantees.length === 1 ? '' : 's'}`}
         </span>
       </div>
 
-      {/* Grant / revoke, in-product */}
-      <div className="mt-1.5 flex flex-col gap-1">
-        {w.grantees.map((g) => (
-          <div
-            key={g}
-            className="flex items-center justify-between gap-2 rounded-md bg-page px-2 py-1"
-          >
-            <span className="truncate font-mono text-[10.5px] text-ink-dim">
-              {shortWs(g)}
-            </span>
+      <section className="mt-3 border-t border-rule pt-3">
+        <SectionTitle title="Who can import" />
+        <div className="mt-2 flex flex-col gap-1">
+          {w.grantees.length === 0 ? (
+            <p className="rounded-md bg-page px-2 py-1.5 text-[10.5px] text-ink-faint">
+              No workspace has access yet.
+            </p>
+          ) : (
+            w.grantees.map((g) => (
+              <div
+                key={g}
+                className="flex items-center justify-between gap-2 rounded-md bg-page px-2 py-1"
+              >
+                <span className="truncate font-mono text-[10.5px] text-ink-dim">
+                  {shortWs(g)}
+                </span>
+                <button
+                  onClick={() => doRevoke(g)}
+                  title="revoke this import"
+                  className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-ink-faint transition-colors hover:text-danger"
+                >
+                  <X className="size-3" strokeWidth={2.4} />
+                  revoke
+                </button>
+              </div>
+            ))
+          )}
+          <div className="flex items-center gap-1.5">
+            <input
+              value={grantId}
+              onChange={(e) => {
+                setGrantId(e.target.value)
+                setGrantMsg(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') doGrant()
+              }}
+              placeholder="workspace ID to grant"
+              className="min-w-0 flex-1 rounded-md border border-rule bg-page px-2 py-1 font-mono text-[10.5px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-rule-strong"
+            />
             <button
-              onClick={() => doRevoke(g)}
-              title="revoke this import"
-              className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-ink-faint hover:text-danger transition-colors"
+              onClick={doGrant}
+              disabled={grantBusy || !grantId.trim()}
+              className="inline-flex h-7 shrink-0 items-center rounded-md bg-ink-strong px-2.5 text-[10.5px] font-medium text-surface transition-colors hover:bg-ink disabled:opacity-50"
             >
-              <X className="size-3" strokeWidth={2.4} />
-              revoke
+              {grantBusy ? '…' : 'Grant access'}
             </button>
           </div>
-        ))}
-        <div className="flex items-center gap-1.5">
-          <input
-            value={grantId}
-            onChange={(e) => {
-              setGrantId(e.target.value)
-              setGrantMsg(null)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') doGrant()
-            }}
-            placeholder="paste importer workspace id…"
-            className="min-w-0 flex-1 rounded-md border border-rule bg-surface px-2 py-1 font-mono text-[10.5px] text-ink placeholder:text-ink-faint outline-none focus:border-rule-strong transition-colors"
-          />
-          <button
-            onClick={doGrant}
-            disabled={grantBusy || !grantId.trim()}
-            className="inline-flex h-6 shrink-0 items-center rounded-md bg-ink-strong px-2.5 text-[10.5px] font-medium text-surface hover:bg-ink disabled:opacity-50 transition-colors"
-          >
-            {grantBusy ? '…' : 'Grant'}
-          </button>
-        </div>
-        {grantMsg && (
-          <p className="text-[10.5px] text-ink-faint">{grantMsg}</p>
-        )}
-        <p className="text-[10px] leading-relaxed text-ink-faint">
-          They copy their workspace id from this panel. Granting creates
-          their import. Already approved fields cross immediately; new
-          captured fields wait here until you approve them for this export.
-        </p>
-      </div>
-
-      {w.truncated ? (
-        // Frame E — fail-closed, honest, and NEVER a dead-end: the
-        // copy is explicit AND defers to dohc (the existing capable
-        // bulk path) via the standard pending-prompt → Chat handoff.
-        <div className="mt-2 rounded-md bg-danger-soft px-2.5 py-2">
-          <p className="text-[11px] leading-relaxed text-danger">
-            Too many waiting values to list safely — this export is paused
-            until you review it.
-          </p>
-          <button
-            onClick={() =>
-              onAskDohc(
-                `The "${w.name}" export has too many unreviewed ` +
-                  `values to review here. Walk me through what is ` +
-                  `waiting to export and help me clear it.`,
-              )
-            }
-            className="mt-1.5 inline-flex h-6 items-center gap-1 rounded-md bg-danger px-2.5 text-[11px] font-medium text-surface hover:opacity-90 transition-opacity"
-          >
-            Ask dohc to clear this
-          </button>
-        </div>
-      ) : nWithheld === 0 ? (
-        // Frame C — nothing waiting
-        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success">
-          <Check className="size-3.5" strokeWidth={2.4} />
-          all selected fields are approved; nothing waiting.
-        </p>
-      ) : (
-        // Frame D — the batched, non-blocking digest
-        <div className="mt-2">
-          <p className="text-[11px] text-ink-dim">
-            dohc captured{' '}
-            <span className="font-medium text-ink">{nWithheld}</span> value
-            {nWithheld === 1 ? '' : 's'} this export would expose.
-          </p>
-          <ul className="mt-1.5 flex flex-col gap-1">
-            {pendingRows.map((r) => (
-              <DigestRow
-                key={r.id}
-                label={`${r.ref} · ${r.key}`}
-                onKeepPrivate={() =>
-                  keepPrivate(r.id, r.kind, r.ref, r.key)
-                }
-              />
-            ))}
-            {keptRows.map((r) => (
-              <li
-                key={r.id}
-                className="flex items-center gap-1.5 rounded-md bg-page px-2 py-1 text-[10.5px] text-ink-faint"
-              >
-                <Lock className="size-3 text-success" strokeWidth={2.2} />
-                <span className="truncate font-mono">
-                  {r.ref} · {r.key}
-                </span>
-                <span className="ml-auto shrink-0 text-success">
-                  kept private
-                </span>
-              </li>
-            ))}
-          </ul>
-          {nPending > 0 ? (
-            <button
-              onClick={shareAll}
-              disabled={busy}
-              className="mt-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface hover:bg-ink disabled:opacity-50 transition-colors"
-            >
-              {busy ? 'exporting…' : `Export these ${nPending}`}
-            </button>
-          ) : (
-            <p className="mt-2.5 text-[11px] text-ink-faint">
-              all kept private — nothing will cross this export.
-            </p>
+          {grantMsg && (
+            <p className="text-[10.5px] text-ink-faint">{grantMsg}</p>
           )}
         </div>
-      )}
+      </section>
+
+      <section className="mt-3 border-t border-rule pt-3">
+        <SectionTitle title="Review waiting values" />
+        {w.truncated ? (
+          // Frame E — fail-closed, honest, and NEVER a dead-end: the
+          // copy is explicit AND defers to dohc (the existing capable
+          // bulk path) via the standard pending-prompt → Chat handoff.
+          <div className="mt-2 rounded-md bg-danger-soft px-2.5 py-2">
+            <p className="text-[11px] leading-relaxed text-danger">
+              Too many waiting values to list safely.
+            </p>
+            <button
+              onClick={() =>
+                onAskDohc(
+                  `The "${w.name}" export has too many unreviewed ` +
+                    `values to review here. Walk me through what is ` +
+                    `waiting to export and help me clear it.`,
+                )
+              }
+              className="mt-1.5 inline-flex h-7 items-center gap-1 rounded-md bg-danger px-2.5 text-[11px] font-medium text-surface transition-opacity hover:opacity-90"
+            >
+              Ask dohc to clear this
+            </button>
+          </div>
+        ) : nWithheld === 0 ? (
+          // Frame C — nothing waiting
+          <p className="mt-2 flex items-center gap-1.5 rounded-md bg-page px-2 py-1.5 text-[11px] text-success">
+            <Check className="size-3.5" strokeWidth={2.4} />
+            all selected fields are approved
+          </p>
+        ) : (
+          // Frame D — the batched, non-blocking digest
+          <div className="mt-2">
+            <p className="text-[11px] text-ink-dim">
+              <span className="font-medium text-ink">{nWithheld}</span> value
+              {nWithheld === 1 ? '' : 's'} waiting for this export.
+            </p>
+            <ul className="mt-1.5 flex flex-col gap-1">
+              {pendingRows.map((r) => (
+                <DigestRow
+                  key={r.id}
+                  label={`${r.ref} · ${r.key}`}
+                  onKeepPrivate={() => keepPrivate(r.id, r.kind, r.ref, r.key)}
+                />
+              ))}
+              {keptRows.map((r) => (
+                <li
+                  key={r.id}
+                  className="flex items-center gap-1.5 rounded-md bg-page px-2 py-1 text-[10.5px] text-ink-faint"
+                >
+                  <Lock className="size-3 text-success" strokeWidth={2.2} />
+                  <span className="truncate font-mono">
+                    {r.ref} · {r.key}
+                  </span>
+                  <span className="ml-auto shrink-0 text-success">
+                    kept private
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {nPending > 0 ? (
+              <button
+                onClick={shareAll}
+                disabled={busy}
+                className="mt-2.5 inline-flex h-8 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface transition-colors hover:bg-ink disabled:opacity-50"
+              >
+                {busy
+                  ? 'exporting…'
+                  : `Export ${nPending} value${nPending === 1 ? '' : 's'}`}
+              </button>
+            ) : (
+              <p className="mt-2.5 text-[11px] text-ink-faint">
+                all kept private
+              </p>
+            )}
+          </div>
+        )}
+      </section>
 
       {note && (
         <p className="mt-2 text-[11px] font-medium text-ink-dim">{note}</p>
@@ -485,21 +544,31 @@ function WindowCard({
 
       {/* Preview the consequence, not the rule. */}
       {!w.truncated && (
-        <div className="mt-2.5 border-t border-rule pt-2">
+        <section className="mt-3 border-t border-rule pt-3">
           <button
             onClick={() => setSeenAsOpen((v) => !v)}
-            className="flex items-center gap-1 text-[10.5px] font-medium text-ink-faint hover:text-ink-dim transition-colors"
+            className="flex w-full items-center justify-between gap-2 text-left text-[11px] font-semibold text-ink-dim transition-colors hover:text-ink"
           >
+            <span>Recipient preview</span>
             {seenAsOpen ? (
-              <ChevronDown className="size-3" strokeWidth={2.2} />
+              <ChevronDown className="size-3.5" strokeWidth={2.2} />
             ) : (
-              <ChevronRight className="size-3" strokeWidth={2.2} />
+              <ChevronRight className="size-3.5" strokeWidth={2.2} />
             )}
-            Preview import — what the other workspace gets
           </button>
           {seenAsOpen && <SeenAs windowId={w.windowId} />}
-        </div>
+        </section>
       )}
+    </div>
+  )
+}
+
+function SectionTitle({ title }: { title: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
+        {title}
+      </h3>
     </div>
   )
 }
@@ -564,13 +633,89 @@ function ViewBlock({
   )
 }
 
-function Empty({ title, body }: { title: string; body: string }) {
+function ImportCard({ source }: { source: SharedWindow }) {
   return (
-    <div className="mx-auto mt-10 max-w-[260px] text-center">
-      <p className="text-[12.5px] font-medium text-ink-dim">{title}</p>
-      <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-faint">
-        {body}
-      </p>
+    <div className="rounded-lg border border-rule bg-surface px-3.5 py-3 shadow-xs">
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-semibold text-ink-strong">
+          <Download className="size-3.5 text-accent" strokeWidth={2} />
+          <span className="truncate">{source.name}</span>
+        </span>
+        <span className="shrink-0 rounded-full bg-page px-2 py-0.5 text-[10px] font-medium text-ink-faint">
+          from {shortWs(source.ownerWorkspaceId)}
+        </span>
+      </div>
+      <div className="mt-3 border-t border-rule pt-3">
+        <SectionTitle title="Fields received" />
+        <ViewBlock view={source.view} />
+      </div>
+    </div>
+  )
+}
+
+function ExportsEmpty({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="rounded-lg border border-rule bg-surface px-4 py-4">
+      <div className="flex items-start gap-3">
+        <div className="grid size-8 shrink-0 place-items-center rounded-md bg-page text-accent">
+          <Upload className="size-4" strokeWidth={2} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-semibold text-ink-strong">
+            Create a field set first
+          </p>
+          <div className="mt-2 grid gap-1.5 text-[11px] text-ink-dim">
+            <StepLine index={1} text="choose fields" />
+            <StepLine index={2} text="grant a workspace ID" />
+            <StepLine index={3} text="approve waiting values" />
+          </div>
+          <button
+            onClick={onCreate}
+            className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-md bg-ink-strong px-3 text-[11.5px] font-medium text-surface transition-colors hover:bg-ink"
+          >
+            <Plus className="size-3.5" strokeWidth={2.2} />
+            Create export
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ImportsEmpty({ myId }: { myId: string | null }) {
+  return (
+    <div className="rounded-lg border border-rule bg-surface px-4 py-4">
+      <div className="flex items-start gap-3">
+        <div className="grid size-8 shrink-0 place-items-center rounded-md bg-page text-accent">
+          <Download className="size-4" strokeWidth={2} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-semibold text-ink-strong">
+            Give your ID to the sender
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
+            Their grant will appear here as received fields.
+          </p>
+          <div className="mt-3">
+            {myId ? (
+              <CopyId id={myId} />
+            ) : (
+              <Skeleton className="h-8 w-32 rounded-md" />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StepLine({ index, text }: { index: number; text: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="grid size-4 shrink-0 place-items-center rounded-full bg-page text-[9px] font-semibold text-ink-faint">
+        {index}
+      </span>
+      <span>{text}</span>
     </div>
   )
 }
@@ -590,10 +735,10 @@ function CopyId({ id }: { id: string }) {
         }
       }}
       title={`workspace id for imports/exports: ${id}`}
-      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-rule bg-surface px-2 text-[10.5px] font-medium text-ink-faint hover:border-rule-strong hover:text-ink-dim transition-colors"
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-rule bg-page px-2.5 text-[10.5px] font-medium text-ink-dim transition-colors hover:border-rule-strong hover:text-ink"
     >
       <Copy className="size-3" strokeWidth={2} />
-      {done ? 'copied' : 'workspace id'}
+      {done ? 'Copied' : 'My workspace ID'}
     </button>
   )
 }
@@ -632,13 +777,13 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
   // Nothing exportable yet (not a blank picker / dead-end)
   if (ak.keys.length === 0)
     return (
-      <div className="rounded-lg border border-rule bg-surface px-3.5 py-4">
-        <p className="text-[12px] font-medium text-ink-dim">
-          Nothing exportable yet
+      <div className="rounded-lg border border-rule bg-surface px-3.5 py-4 shadow-xs">
+        <p className="text-[13px] font-semibold text-ink-strong">
+          No captured fields yet
         </p>
         <p className="mt-1 text-[11px] leading-relaxed text-ink-faint">
-          Exports use captured fields from your workspace. Do a little
-          work with dohc first — the fields you create show up here.
+          Fields from documents and entities will appear here once dohc has
+          captured them.
         </p>
         <button
           onClick={onClose}
@@ -680,17 +825,45 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-rule bg-surface px-3.5 py-3">
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="export name (e.g. “hours for my manager”)"
-        className="rounded-md border border-rule bg-page px-2.5 py-1.5 text-[12px] text-ink placeholder:text-ink-faint outline-none focus:border-rule-strong transition-colors"
-      />
+    <div className="flex flex-col gap-3 rounded-lg border border-rule bg-surface px-3.5 py-3 shadow-xs">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold text-ink-strong">
+            Create export
+          </p>
+          <p className="mt-0.5 text-[10.5px] text-ink-faint">
+            A named field set you can grant later.
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-[11px] text-ink-faint transition-colors hover:text-ink-dim"
+        >
+          cancel
+        </button>
+      </div>
+
+      <label className="block">
+        <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
+          Export name
+        </span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Client hours"
+          className="mt-1 w-full rounded-md border border-rule bg-page px-2.5 py-1.5 text-[12px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-rule-strong"
+        />
+      </label>
+
       <div>
-        <p className="mb-1 text-[10.5px] font-medium uppercase tracking-[0.12em] text-ink-faint">
-          values it exposes {picked.size > 0 && `· ${picked.size}`}
-        </p>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <p className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
+            Choose fields
+          </p>
+          <span className="text-[10px] text-ink-faint">
+            {picked.size} selected
+          </span>
+        </div>
         <div className="flex flex-wrap gap-1">
           {ak.keys.map((k) => {
             const on = picked.has(k)
@@ -711,8 +884,7 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
         </div>
         {ak.truncated && (
           <p className="mt-1 text-[10px] text-ink-faint">
-            showing the first batch — refine on your desk if a value is
-            missing.
+            showing the first batch — refine on your desk if a value is missing.
           </p>
         )}
       </div>
@@ -720,7 +892,7 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
       {picked.size > 0 && (
         <details className="text-[11px]">
           <summary className="cursor-pointer text-ink-faint hover:text-ink-dim">
-            rename or summarise (optional)
+            Optional field labels and totals
           </summary>
           <div className="mt-1.5 flex flex-col gap-1.5">
             {[...picked].map((k) => (
@@ -780,12 +952,9 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
 
       {err && <p className="text-[11px] text-danger">{err}</p>}
       <div className="flex items-center justify-between">
-        <button
-          onClick={onClose}
-          className="text-[11px] text-ink-faint hover:text-ink-dim transition-colors"
-        >
-          cancel
-        </button>
+        <span className="text-[10.5px] text-ink-faint">
+          Grant access after creating.
+        </span>
         <button
           onClick={create}
           disabled={!canCreate}
@@ -794,10 +963,6 @@ function ExportBuilder({ onClose }: { onClose: () => void }) {
           {busy ? 'creating…' : 'Create export'}
         </button>
       </div>
-      <p className="text-[10px] leading-relaxed text-ink-faint">
-        Creating exports nothing by itself. You then grant a workspace and
-        approve exactly which fields cross.
-      </p>
     </div>
   )
 }

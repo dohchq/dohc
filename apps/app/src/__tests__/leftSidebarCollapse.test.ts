@@ -11,7 +11,11 @@ const APP = read('routes/_app.tsx')
 const ACTIVITY = read('components/ActivityBar.tsx')
 
 describe('left sidebar collapse shell behavior', () => {
-  it('persists collapse state, exposes an activity-rail toggle, and auto-collapses selected views', () => {
+  it('persists collapse state, exposes an activity-rail toggle, and preserves sidebar state when opening views', () => {
+    const openViewBlock =
+      APP.match(/const openView = useCallback\([\s\S]*?\n  \)\n\n  useEffect/)?.[0] ??
+      ''
+
     expect(ACTIVITY).toContain('PanelLeftClose')
     expect(ACTIVITY).toContain('PanelLeftOpen')
     expect(ACTIVITY).toContain('sidebarCollapsed')
@@ -25,7 +29,8 @@ describe('left sidebar collapse shell behavior', () => {
     expect(APP).toContain('sidebarCollapsed={leftSidebarCollapsed}')
     expect(APP).toContain('onToggleSidebar={toggleLeftSidebar}')
     expect(APP).toContain('const leftColumn = leftSidebarCollapsed ? null')
-    expect(APP).toContain('setLeftSidebarCollapsed(true)')
+    expect(openViewBlock).toContain("setView('views')")
+    expect(openViewBlock).not.toContain('setLeftSidebarCollapsed(true)')
     expect(APP).toContain('!leftSidebarCollapsed && (')
   })
 })
