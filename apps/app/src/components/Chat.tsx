@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useMemo, useId, type ReactNode } from 'react'
+import {
+  memo,
+  useCallback,
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useId,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { useAction, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
@@ -71,6 +80,67 @@ const AUTO_COMPACT_TARGET_RATIO = 0.85
 const SYSTEM_AND_TOOL_CONTEXT_ESTIMATE_TOKENS = 3_000
 const MESSAGE_CONTEXT_OVERHEAD_TOKENS = 12
 const APPROX_CHARS_PER_TOKEN = 4
+const EMPTY_CONTEXT_USAGE: ContextWindowUsage = {
+  estimatedTokens: 0,
+  contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+  compactAtTokens: Math.round(
+    DEFAULT_CONTEXT_WINDOW_TOKENS * AUTO_COMPACT_TARGET_RATIO,
+  ),
+  percent: 0,
+  isEstimate: true,
+}
+
+type ChatTimestampFormatters = {
+  day: Intl.DateTimeFormat
+  time: Intl.DateTimeFormat
+  dateTime: Intl.DateTimeFormat
+}
+
+const chatTimestampFormatterCache = new Map<string, ChatTimestampFormatters>()
+
+function dateTimeOptions(
+  timeZone: string | undefined,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormatOptions {
+  return timeZone ? { ...options, timeZone } : options
+}
+
+function getChatTimestampFormatters(
+  locale: string | undefined,
+  timeZone: string | undefined,
+): ChatTimestampFormatters {
+  const key = `${locale ?? ''}\u0000${timeZone ?? ''}`
+  const cached = chatTimestampFormatterCache.get(key)
+  if (cached) return cached
+  const next = {
+    day: new Intl.DateTimeFormat(
+      locale,
+      dateTimeOptions(timeZone, {
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+      }),
+    ),
+    time: new Intl.DateTimeFormat(
+      locale,
+      dateTimeOptions(timeZone, {
+        hour: 'numeric',
+        minute: '2-digit',
+      }),
+    ),
+    dateTime: new Intl.DateTimeFormat(
+      locale,
+      dateTimeOptions(timeZone, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      }),
+    ),
+  }
+  chatTimestampFormatterCache.set(key, next)
+  return next
+}
 
 type RunnableRef = { path: string; label: string }
 type EnvironmentOption = { value: string | null; label: string }
@@ -406,26 +476,10 @@ export function formatChatTimestamp(
   const locale = options.locale
   const timeZone = options.timeZone
   const value = new Date(timestamp)
-  const today = new Intl.DateTimeFormat(locale, {
-    timeZone,
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-  })
-  const time = new Intl.DateTimeFormat(locale, {
-    timeZone,
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  const isSameDay = today.format(value) === today.format(new Date(now))
+  const { day, time, dateTime } = getChatTimestampFormatters(locale, timeZone)
+  const isSameDay = day.format(value) === day.format(new Date(now))
   if (isSameDay) return time.format(value)
-  return new Intl.DateTimeFormat(locale, {
-    timeZone,
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(value)
+  return dateTime.format(value)
 }
 
 type Props = {
@@ -496,6 +550,7 @@ export function Chat({
   pendingCommandFire,
   onPendingCommandFireHandled,
 }: Props) {
+  const primary = mode === 'primary'
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [stopping, setStopping] = useState(false)
@@ -513,6 +568,8 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const scrollContentRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
+  const scrollRafRef = useRef<number | null>(null)
+  const showScrollToBottomRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const activeSendTargetRef = useRef<ActiveSendTarget | null>(null)
   const [activeSendTarget, setActiveSendTargetState] = useState<ActiveSendTarget | null>(null)
@@ -560,17 +617,20 @@ export function Chat({
   }
   const contextUsage = useMemo(
     () =>
-      buildEstimatedContextWindowUsage({
-        messages: uiMessages,
-        providers: agentProviders,
-        selection: agentSelection,
-      }),
-    [agentProviders, agentSelection, uiMessages],
+      primary
+        ? buildEstimatedContextWindowUsage({
+            messages: uiMessages,
+            providers: agentProviders,
+            selection: agentSelection,
+          })
+        : EMPTY_CONTEXT_USAGE,
+    [agentProviders, agentSelection, primary, uiMessages],
   )
 
-  const agentSelectionPayload = agentSelection
-    ? agentSelectionToConvexArgs(agentSelection)
-    : {}
+  const agentSelectionPayload = useMemo(
+    () => (agentSelection ? agentSelectionToConvexArgs(agentSelection) : {}),
+    [agentSelection],
+  )
 
   useEffect(() => {
     setAccessMode(normalizeAgentAccessMode(threadAccessMode))
@@ -623,27 +683,48 @@ export function Chat({
     }
   }, [busy, sending, stopping])
 
-  function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+  const setScrollToBottomVisible = useCallback((visible: boolean) => {
+    if (showScrollToBottomRef.current === visible) return
+    showScrollToBottomRef.current = visible
+    setShowScrollToBottom(visible)
+  }, [])
+
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = 'smooth') => {
     stickToBottomRef.current = true
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
       behavior,
     })
-    setShowScrollToBottom(false)
-  }
+      setScrollToBottomVisible(false)
+    },
+    [setScrollToBottomVisible],
+  )
 
-  function updateScrollAffordance() {
-    const el = scrollRef.current
-    if (!el) return
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    stickToBottomRef.current = isNearScrollBottom(el)
-    setShowScrollToBottom(distanceFromBottom > SCROLL_TO_BOTTOM_BUTTON_PX)
-  }
+  const updateScrollAffordance = useCallback(() => {
+    if (scrollRafRef.current !== null) return
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      const el = scrollRef.current
+      if (!el) return
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      stickToBottomRef.current = isNearScrollBottom(el)
+      setScrollToBottomVisible(distanceFromBottom > SCROLL_TO_BOTTOM_BUTTON_PX)
+    })
+  }, [setScrollToBottomVisible])
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current)
+        scrollRafRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (stickToBottomRef.current) scrollToBottom('smooth')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, uiMessages.length])
+  }, [threadId, uiMessages.length, scrollToBottom])
 
   useEffect(() => {
     const content = scrollContentRef.current
@@ -653,8 +734,7 @@ export function Chat({
     })
     observer.observe(content)
     return () => observer.disconnect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, scrollToBottom])
 
   async function submit(promptOverride?: string) {
     const prompt = (promptOverride ?? input).trim()
@@ -893,7 +973,6 @@ export function Chat({
     })
   }
 
-  const primary = mode === 'primary'
   const canSend = Boolean(threadId || onEnsureThread)
   const uniqueProjectOptions = useMemo(() => {
     const seen = new Set<string>()
@@ -2532,7 +2611,7 @@ function messageText(message: UIMessage): string {
     .join('')
 }
 
-function MessageView({
+const MessageView = memo(function MessageView({
   message,
   previousMessage = null,
   primary = false,
@@ -2636,7 +2715,7 @@ function MessageView({
       </div>
     </div>
   )
-}
+})
 
 function AgentWorkTrace({
   toolCalls,
