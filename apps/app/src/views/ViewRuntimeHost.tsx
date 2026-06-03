@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 import { useConvex } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
@@ -14,6 +22,14 @@ import {
 
 export const VIEW_START_TIMEOUT_MS = 2500
 export const VIEW_ACTION_EVENT = 'dohc:view-action'
+export const VIEW_ACTION_DIALOG_FOCUS_SELECTOR = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
 
 export function viewActionDetail(
   packageRoot: string,
@@ -58,6 +74,12 @@ export function summarizeViewActionInput(input: Record<string, unknown> | undefi
   }
 }
 
+function focusableDialogElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(VIEW_ACTION_DIALOG_FOCUS_SELECTOR),
+  ).filter((element) => !element.hasAttribute('disabled'))
+}
+
 export function ViewRuntimeHost({
   packageRoot,
   scopePath,
@@ -87,7 +109,12 @@ export function ViewRuntimeHost({
   )
   const [timedOut, setTimedOut] = useState(false)
   const pendingActionRef = useRef<PendingViewAction | null>(null)
+  const actionDialogRef = useRef<HTMLDivElement | null>(null)
+  const confirmActionButtonRef = useRef<HTMLButtonElement | null>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingViewActionState | null>(null)
+  const actionDialogTitleId = useId()
+  const actionDialogDescriptionId = useId()
 
   useEffect(() => {
     startedRef.current = false
@@ -113,6 +140,27 @@ export function ViewRuntimeHost({
       )
     }
   }, [srcDoc])
+
+  useEffect(() => {
+    if (!pendingAction) return
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null
+    const timeout = window.setTimeout(() => {
+      confirmActionButtonRef.current?.focus()
+    }, 0)
+
+    return () => {
+      window.clearTimeout(timeout)
+      const previous = previousFocusRef.current
+      previousFocusRef.current = null
+      if (previous && document.contains(previous)) {
+        previous.focus()
+      }
+    }
+  }, [pendingAction?.id])
 
   const recordAction = useCallback(
     (operation: ViewRpcOp, target?: string) => {
@@ -198,6 +246,42 @@ export function ViewRuntimeHost({
       setPendingAction(null)
     }
   }, [convex, packageRoot, recordAction, workspaceArgs])
+
+  const onPendingActionKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key === 'Escape' && pendingAction?.status !== 'running') {
+        event.preventDefault()
+        event.stopPropagation()
+        cancelPendingAction()
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const elements = focusableDialogElements(event.currentTarget)
+      if (elements.length === 0) {
+        event.preventDefault()
+        return
+      }
+
+      const first = elements[0]!
+      const last = elements[elements.length - 1]!
+      const active = document.activeElement
+
+      if (event.shiftKey) {
+        if (active === first || !event.currentTarget.contains(active)) {
+          event.preventDefault()
+          last.focus()
+        }
+        return
+      }
+
+      if (active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    },
+    [cancelPendingAction, pendingAction?.status],
+  )
 
   const runRequest = useCallback(
     async (request: ViewRpcRequest): Promise<ViewRpcResponse> => {
@@ -351,12 +435,25 @@ export function ViewRuntimeHost({
         </div>
       )}
       {pendingAction && (
-        <div className="absolute inset-x-4 top-4 rounded-lg border border-rule bg-surface px-3 py-3 text-[12px] text-ink-dim shadow-sm">
-          <p className="font-medium text-ink-strong">Run view action?</p>
-          <p className="mt-1">
+        <div
+          ref={actionDialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={actionDialogTitleId}
+          aria-describedby={actionDialogDescriptionId}
+          onKeyDown={onPendingActionKeyDown}
+          className="absolute inset-x-4 top-4 rounded-lg border border-rule bg-surface px-3 py-3 text-[12px] text-ink-dim shadow-sm"
+        >
+          <p id={actionDialogTitleId} className="font-medium text-ink-strong">
+            Run view action?
+          </p>
+          <p id={actionDialogDescriptionId} className="mt-1">
             {title} wants to run <span className="font-medium text-ink-strong">{pendingAction.name}</span>.
           </p>
-          <p className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]">
+          <p
+            tabIndex={0}
+            className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]"
+          >
             {pendingAction.inputSummary}
           </p>
           <div className="mt-3 flex justify-end gap-2">
@@ -369,6 +466,7 @@ export function ViewRuntimeHost({
               Cancel
             </button>
             <button
+              ref={confirmActionButtonRef}
               type="button"
               onClick={() => {
                 void confirmPendingAction()

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   buildViewBundle,
@@ -10,6 +11,7 @@ import {
   summarizeViewActionInput,
   viewActionDetail,
   viewWorkspaceArgs,
+  VIEW_ACTION_DIALOG_FOCUS_SELECTOR,
   VIEW_ACTION_EVENT,
   VIEW_START_TIMEOUT_MS,
 } from '../views/ViewRuntimeHost'
@@ -96,6 +98,22 @@ describe('folder views performance and safety guards', () => {
     })
     expect(summarizeViewActionInput(undefined)).toBe('No input')
     expect(summarizeViewActionInput({ source: 'button' })).toBe('{"source":"button"}')
+    expect(summarizeViewActionInput({ value: 'x'.repeat(220) })).toHaveLength(180)
+    expect(VIEW_ACTION_DIALOG_FOCUS_SELECTOR).toContain('button:not([disabled])')
+    expect(VIEW_ACTION_DIALOG_FOCUS_SELECTOR).toContain('[tabindex]')
+  })
+
+  it('keeps the view action confirmation overlay modal for keyboard users', () => {
+    const source = readFileSync(
+      new URL('../views/ViewRuntimeHost.tsx', import.meta.url),
+      'utf8',
+    )
+
+    expect(source).toContain('role="dialog"')
+    expect(source).toContain('aria-modal="true"')
+    expect(source).toContain('onKeyDown={onPendingActionKeyDown}')
+    expect(source).toContain('confirmActionButtonRef.current?.focus()')
+    expect(source).toContain('previous.focus()')
   })
 
   it('omits personal workspace args instead of sending explicit undefined', () => {
