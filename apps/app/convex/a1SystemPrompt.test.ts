@@ -118,6 +118,9 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
   it('teaches diagnosis-first first turns for vague workspace requests', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('FIRST USEFUL TURN FOR VAGUE WORKSPACE REQUESTS')
+    expect(personal).toContain('Applies in MAINTENANCE (post-onboarding)')
+    expect(personal).toContain('During ONBOARDING, follow the')
+    expect(personal).toContain('Do NOT re-interrogate during onboarding')
     expect(personal).toContain('the first useful turn is diagnosis')
     expect(personal).toContain('Ask 3-5 compact, domain-specific questions')
     expect(personal).toContain('before creating files')
@@ -148,6 +151,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
   it('requires a plan-before-build approval gate for custom workspace systems', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('PLAN BEFORE BUILD FOR CUSTOM SYSTEMS')
+    expect(personal).toContain('In MAINTENANCE, after intake')
     expect(personal).toContain('propose a build plan and wait for explicit user approval')
     expect(personal).toContain('before creating a custom workspace system')
     expect(personal).toContain('multiple markdown atoms')
