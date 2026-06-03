@@ -3,7 +3,7 @@ import {
   Folder,
   ListChecks,
 } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { memo, useMemo, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 
 export type AgentRailFileRow = {
@@ -76,7 +76,7 @@ export function agentRailChangeSummary(
   }
 }
 
-export function AgentRunRail({
+export const AgentRunRail = memo(function AgentRunRail({
   files,
   activeThread,
   projectPath,
@@ -86,10 +86,14 @@ export function AgentRunRail({
   projectPath: string | null
 }) {
   const activeProjectPath = normalizeProjectPath(projectPath)
-  const changes = agentRailChangeSummary(
-    files,
-    activeProjectPath,
-    activeThread?.createdAt ?? null,
+  const changes = useMemo(
+    () =>
+      agentRailChangeSummary(
+        files,
+        activeProjectPath,
+        activeThread?.createdAt ?? null,
+      ),
+    [activeProjectPath, activeThread?.createdAt, files],
   )
   const scopeLabel = activeProjectPath ?? 'Whole workspace'
 
@@ -128,7 +132,7 @@ export function AgentRunRail({
       </div>
     </aside>
   )
-}
+})
 
 function RailSection({
   title,

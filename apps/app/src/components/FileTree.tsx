@@ -293,14 +293,14 @@ export function FileTree({
     })
   }, [activePath])
 
-  function toggle(key: string) {
+  const toggle = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
       return next
     })
-  }
+  }, [])
 
   // file-org-v1 D4.3 — WAI-ARIA tree keyboard nav. `focusedPath` is
   // the roving-tabIndex anchor: exactly ONE row has tabIndex=0; all
@@ -344,6 +344,18 @@ export function FileTree({
     return out
   }, [tree, expanded])
 
+  const flatRowByPath = useMemo(() => {
+    const rows = new Map<string, FlatRow>()
+    for (const row of flatRows) rows.set(row.fullPath, row)
+    return rows
+  }, [flatRows])
+
+  const visibleRowPaths = useMemo(() => {
+    const visible = new Set<string>()
+    for (const row of flatRows) visible.add(row.fullPath)
+    return visible
+  }, [flatRows])
+
   // R3 fold (Codex FAIL-4) — re-anchor focusedPath whenever it's
   // stale: either null (no anchor yet) OR pointing at a row that's
   // not currently visible (e.g. activePath='deleted.md' loaded from
@@ -356,7 +368,7 @@ export function FileTree({
   // bootstrap when there's a row to anchor to.
   useEffect(() => {
     if (flatRows.length === 0) return
-    const visible = new Set(flatRows.map((r) => r.fullPath))
+    const visible = visibleRowPaths
     if (focusedPath === null || !visible.has(focusedPath)) {
       const next =
         activePath && visible.has(activePath)
@@ -364,7 +376,7 @@ export function FileTree({
           : flatRows[0]!.fullPath
       setFocusedPath(next)
     }
-  }, [focusedPath, flatRows, activePath])
+  }, [focusedPath, flatRows, activePath, visibleRowPaths])
 
   // Move DOM focus onto the focused row so the screen reader announces
   // it — but ONLY when a keyboard arrow-nav requested it (wantDomFocus).
@@ -407,29 +419,54 @@ export function FileTree({
   const [, setPendingTick] = useState(0)
   const bumpPending = useCallback(() => setPendingTick((n) => n + 1), [])
 
+  // file-org-v1 D4.4a — fast path indexes for row affordances and
+  // optimistic reconciliation. These avoid nested scans as workspaces grow.
+  const fileByPath = useMemo(() => {
+    const m = new Map<string, FileRow>()
+    for (const f of files) m.set(f.path, f)
+    return m
+  }, [files])
+
+  const folderInputByPath = useMemo(() => {
+    const m = new Map<string, FolderInput>()
+    for (const f of folders) {
+      if (typeof f === 'string') m.set(f, f)
+      else m.set(f.path, f)
+    }
+    return m
+  }, [folders])
+
+  // file-org-v1 D4.5 — folder-star lookup. Built from the rich
+  // FolderInput shape; legacy string entries map to starred=false.
+  const folderStarByPath = useMemo(() => {
+    const m = new Map<string, boolean>()
+    for (const [path, f] of folderInputByPath) {
+      m.set(path, typeof f === 'string' ? false : f.starred === true)
+    }
+    return m
+  }, [folderInputByPath])
+
   // Reconcile: when the projection finally matches the optimistic
   // intent, drop the entry. Defends against the race where a
   // mutation resolves before Convex re-pushes the new query result.
   useEffect(() => {
     let mutated = false
     for (const [path, intended] of pendingLocks.current) {
-      const row = files.find((f) => f.path === path)
+      const row = fileByPath.get(path)
       if (row && (row.userLocked === true) === intended) {
         pendingLocks.current.delete(path)
         mutated = true
       }
     }
     for (const [path, intended] of pendingStars.current) {
-      const row = files.find((f) => f.path === path)
+      const row = fileByPath.get(path)
       if (row && (row.starred === true) === intended) {
         pendingStars.current.delete(path)
         mutated = true
       }
     }
     for (const [path, intended] of pendingFolderStars.current) {
-      const f = folders.find((x) =>
-        typeof x === 'string' ? x === path : x.path === path,
-      )
+      const f = folderInputByPath.get(path)
       const isStarred = typeof f === 'string' ? false : f?.starred === true
       if (f !== undefined && isStarred === intended) {
         pendingFolderStars.current.delete(path)
@@ -437,16 +474,7 @@ export function FileTree({
       }
     }
     if (mutated) bumpPending()
-  }, [files, folders, bumpPending])
-
-  // file-org-v1 D4.4a — fast index from path → file row, so the
-  // L/S shortcuts can read the current lock/star state and toggle
-  // it. Folder rows look up `folderStarByPath` instead.
-  const fileByPath = useMemo(() => {
-    const m = new Map<string, FileRow>()
-    for (const f of files) m.set(f.path, f)
-    return m
-  }, [files])
+  }, [fileByPath, folderInputByPath, bumpPending])
 
   // Optimistic-aware "is this file starred?" — reads the pending
   // override first so a just-clicked/just-pressed star reflects
@@ -493,13 +521,12 @@ export function FileTree({
   // typing.
   const targetDir = useMemo(() => {
     if (focusedPath === null) return ''
-    // Find the row in flatRows (cheaper than re-walking the tree).
-    const row = flatRows.find((r) => r.fullPath === focusedPath)
+    const row = flatRowByPath.get(focusedPath)
     if (!row) return ''
     if (row.isFolder) return row.fullPath
     // Leaf row — parent is everything before the last segment.
     return row.parentPath ?? ''
-  }, [focusedPath, flatRows])
+  }, [focusedPath, flatRowByPath])
 
   // file-org-v1 D4.7 — drag-and-drop state. `dragOverPath` is the
   // ROW the cursor is currently over (for the highlight); empty
@@ -564,17 +591,6 @@ export function FileTree({
     },
     [onMoveFile, onMoveFolder],
   )
-
-  // file-org-v1 D4.5 — folder-star lookup. Built from the rich
-  // FolderInput shape; legacy string entries map to starred=false.
-  const folderStarByPath = useMemo(() => {
-    const m = new Map<string, boolean>()
-    for (const f of folders) {
-      if (typeof f === 'string') m.set(f, false)
-      else m.set(f.path, f.starred === true)
-    }
-    return m
-  }, [folders])
 
   // Folder favorite — the optimistic-aware read + toggle, mirroring the
   // file-star pair. Shared by the folder row's star button and Shift+S.
@@ -703,14 +719,11 @@ export function FileTree({
       focusedPath,
       onOpen,
       fileByPath,
-      folderStarByPath,
       onToggleLock,
-      onToggleStar,
-      onToggleFolderStar,
       toggleFileStar,
       toggleFolderStar,
-      setAnnouncement,
       bumpPending,
+      toggle,
     ],
   )
 

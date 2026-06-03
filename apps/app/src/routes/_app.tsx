@@ -323,6 +323,18 @@ function App() {
   const activeWorkspaceId = useActiveWorkspaceId()
   const files = useQuery(api.atoms.list, { activeWorkspaceId })
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
+  const fileByPath = useMemo(() => {
+    const rows = new Map<string, NonNullable<typeof files>[number]>()
+    for (const file of files ?? []) rows.set(file.path, file)
+    return rows
+  }, [files])
+  const fileByFileId = useMemo(() => {
+    const rows = new Map<string, NonNullable<typeof files>[number]>()
+    for (const file of files ?? []) {
+      if (file.fileId) rows.set(file.fileId, file)
+    }
+    return rows
+  }, [files])
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
   const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
     activeWorkspaceId,
@@ -441,9 +453,7 @@ function App() {
   // Derived open atom: resolve the URL's fileId → its CURRENT path
   // (rename-proof). The optimistic override wins while set.
   const derivedFromUrl =
-    urlFileId && files
-      ? (files.find((f) => f.fileId === urlFileId)?.path ?? null)
-      : null
+    urlFileId ? (fileByFileId.get(urlFileId)?.path ?? null) : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>(
     () =>
@@ -590,12 +600,19 @@ function App() {
       return { docTitle: title, docEmoji: emoji }
     }
     if (!activePath) return { docTitle: null, docEmoji: null }
-    const f = (files ?? []).find((x) => x.path === activePath)
+    const f = fileByPath.get(activePath)
     return {
       docTitle: (f?.title && f.title.trim()) || leafName(activePath),
       docEmoji: f?.icon ?? null,
     }
-  }, [view, agentDocTitle, urlShareId, sharedAtomForMeta, activePath, files])
+  }, [
+    view,
+    agentDocTitle,
+    urlShareId,
+    sharedAtomForMeta,
+    activePath,
+    fileByPath,
+  ])
   useDocumentMeta({ title: docTitle, emoji: docEmoji })
 
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
@@ -1106,7 +1123,7 @@ function App() {
       const path = /\.[a-z0-9]+$/i.test(rawPath) ? rawPath : `${rawPath}.md`
       setView('atom')
       setOptimisticPath(path)
-      const fid = (files ?? []).find((f) => f.path === path)?.fileId
+      const fid = fileByPath.get(path)?.fileId
       if (fid) {
         lastFilesDestinationRef.current = { kind: 'atom', id: fid }
         // R1 — navigate to the new workspace-scoped URL. `me` sentinel
@@ -1119,7 +1136,7 @@ function App() {
         })
       }
     },
-    [files, navigate, activeWorkspaceId],
+    [fileByPath, navigate, activeWorkspaceId],
   )
 
   // Clear the open atom (→ home). Used on delete of the open atom.
@@ -1176,8 +1193,8 @@ function App() {
   // `files` (a just-created file), reflect it in the URL — unless
   // the URL already points there.
   useEffect(() => {
-    if (!optimisticPath || !files) return
-    const fid = files.find((f) => f.path === optimisticPath)?.fileId
+    if (!optimisticPath) return
+    const fid = fileByPath.get(optimisticPath)?.fileId
     if (fid && urlFileId !== fid) {
       lastFilesDestinationRef.current = { kind: 'atom', id: fid }
       // R1 — workspace-scoped URL.
@@ -1187,7 +1204,7 @@ function App() {
         replace: true,
       })
     }
-  }, [optimisticPath, files, urlFileId, navigate, activeWorkspaceId])
+  }, [optimisticPath, fileByPath, urlFileId, navigate, activeWorkspaceId])
 
   // Once the URL→files derivation converges to the optimistic path,
   // drop the override so the URL is the sole source of truth (a
@@ -1219,8 +1236,7 @@ function App() {
     let clean = name.trim().replace(/^\/+/, '')
     if (!clean) return
     if (!/\.[a-z0-9]+$/i.test(clean)) clean += '.md'
-    const filesArr = files ?? []
-    const exists = filesArr.some((f: { path: string }) => f.path === clean)
+    const exists = fileByPath.has(clean)
     if (exists) {
       throw new Error(`Page already exists: ${clean}`)
     }
@@ -1720,7 +1736,7 @@ function App() {
         <ShareDialog
           fileId={sharePromptFor}
           fileLabel={
-            (files ?? []).find((f) => f.fileId === sharePromptFor)?.title ??
+            fileByFileId.get(sharePromptFor)?.title ??
             sharePromptFor
           }
           onClose={() => setSharePromptFor(null)}

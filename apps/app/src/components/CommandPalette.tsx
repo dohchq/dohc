@@ -213,11 +213,10 @@ export function CommandPalette({
   // Zero new wiring at this layer; the palette is a discoverable
   // hotkey over the same structural-enforcement chain.
   const activeWorkspaceId = useActiveWorkspaceId()
-  const skillsResult = useQuery(api.skills.list, { activeWorkspaceId })
-  const savedCommandsResult = useQuery(api.skills.listCommands, {
-    activeWorkspaceId,
-  })
-  const viewsResult = useQuery(api.views.list, { activeWorkspaceId })
+  const workspaceArgs = open ? { activeWorkspaceId } : 'skip'
+  const skillsResult = useQuery(api.skills.list, workspaceArgs)
+  const savedCommandsResult = useQuery(api.skills.listCommands, workspaceArgs)
+  const viewsResult = useQuery(api.views.list, workspaceArgs)
   const skills = skillsResult ?? []
   const savedCommands = savedCommandsResult ?? []
   const views = viewsResult?.views ?? []
