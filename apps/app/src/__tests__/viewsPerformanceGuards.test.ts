@@ -7,6 +7,7 @@ import {
 } from '../views/buildViewBundle.server'
 import {
   canWriteRequestedPath,
+  summarizeViewActionInput,
   viewActionDetail,
   viewWorkspaceArgs,
   VIEW_ACTION_EVENT,
@@ -93,6 +94,8 @@ describe('folder views performance and safety guards', () => {
       operation: 'dohc.patch.propose',
       target: 'tasks.md',
     })
+    expect(summarizeViewActionInput(undefined)).toBe('No input')
+    expect(summarizeViewActionInput({ source: 'button' })).toBe('{"source":"button"}')
   })
 
   it('omits personal workspace args instead of sending explicit undefined', () => {

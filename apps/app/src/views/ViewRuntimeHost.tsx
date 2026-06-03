@@ -34,6 +34,30 @@ export function viewWorkspaceArgs(
   return activeWorkspaceId === undefined ? {} : { activeWorkspaceId }
 }
 
+type ViewActionRequest = Extract<ViewRpcRequest, { op: 'dohc.actions.run' }>
+
+type PendingViewAction = {
+  request: ViewActionRequest
+  resolve: (response: ViewRpcResponse) => void
+}
+
+type PendingViewActionState = {
+  id: string
+  name: string
+  inputSummary: string
+  status: 'confirming' | 'running'
+}
+
+export function summarizeViewActionInput(input: Record<string, unknown> | undefined): string {
+  if (!input || Object.keys(input).length === 0) return 'No input'
+  try {
+    const summary = JSON.stringify(input)
+    return summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
+  } catch {
+    return 'Input unavailable'
+  }
+}
+
 export function ViewRuntimeHost({
   packageRoot,
   scopePath,
@@ -62,14 +86,32 @@ export function ViewRuntimeHost({
     [activeWorkspaceId],
   )
   const [timedOut, setTimedOut] = useState(false)
+  const pendingActionRef = useRef<PendingViewAction | null>(null)
+  const [pendingAction, setPendingAction] = useState<PendingViewActionState | null>(null)
 
   useEffect(() => {
     startedRef.current = false
     setTimedOut(false)
+    setPendingAction(null)
     const timeout = window.setTimeout(() => {
       if (!startedRef.current) setTimedOut(true)
     }, VIEW_START_TIMEOUT_MS)
     return () => window.clearTimeout(timeout)
+  }, [srcDoc])
+
+  useEffect(() => {
+    return () => {
+      const pending = pendingActionRef.current
+      if (!pending) return
+      pendingActionRef.current = null
+      pending.resolve(
+        makeViewRpcError(
+          pending.request.id,
+          'view-reloaded',
+          'The view was reloaded before the action was confirmed.',
+        ),
+      )
+    }
   }, [srcDoc])
 
   const recordAction = useCallback(
@@ -82,6 +124,80 @@ export function ViewRuntimeHost({
     },
     [packageRoot],
   )
+
+  const requestActionConfirmation = useCallback(
+    (request: ViewActionRequest): Promise<ViewRpcResponse> => {
+      if (pendingActionRef.current) {
+        return Promise.resolve(
+          makeViewRpcError(
+            request.id,
+            'action-pending',
+            'Another view action is waiting for confirmation.',
+          ),
+        )
+      }
+      return new Promise((resolve) => {
+        pendingActionRef.current = { request, resolve }
+        setPendingAction({
+          id: request.id,
+          name: request.args.name,
+          inputSummary: summarizeViewActionInput(request.args.input),
+          status: 'confirming',
+        })
+      })
+    },
+    [],
+  )
+
+  const cancelPendingAction = useCallback(() => {
+    const pending = pendingActionRef.current
+    if (!pending) return
+    pendingActionRef.current = null
+    setPendingAction(null)
+    pending.resolve(
+      makeViewRpcError(
+        pending.request.id,
+        'cancelled',
+        'The view action was cancelled.',
+      ),
+    )
+  }, [])
+
+  const confirmPendingAction = useCallback(async () => {
+    const pending = pendingActionRef.current
+    if (!pending) return
+    setPendingAction((current) =>
+      current && current.id === pending.request.id
+        ? { ...current, status: 'running' }
+        : current,
+    )
+    try {
+      recordAction('dohc.actions.run', pending.request.args.name)
+      const result = await convex.action(api.viewData.runAction, {
+        packageRoot,
+        name: pending.request.args.name,
+        ...(pending.request.args.input === undefined
+          ? {}
+          : { input: pending.request.args.input }),
+        clientMutationId: pending.request.id,
+        ...workspaceArgs,
+      })
+      pending.resolve(makeViewRpcSuccess(pending.request.id, result))
+    } catch {
+      pending.resolve(
+        makeViewRpcError(
+          pending.request.id,
+          'internal-error',
+          'The view action could not be completed.',
+        ),
+      )
+    } finally {
+      if (pendingActionRef.current?.request.id === pending.request.id) {
+        pendingActionRef.current = null
+      }
+      setPendingAction(null)
+    }
+  }, [convex, packageRoot, recordAction, workspaceArgs])
 
   const runRequest = useCallback(
     async (request: ViewRpcRequest): Promise<ViewRpcResponse> => {
@@ -144,6 +260,8 @@ export function ViewRuntimeHost({
             recordAction(request.op, request.args.sources?.[0])
             onRunAgent?.(request.args.prompt)
             return makeViewRpcSuccess(request.id, { ok: true })
+          case 'dohc.actions.run':
+            return await requestActionConfirmation(request)
           case 'dohc.patch.propose': {
             if (!canWriteRequestedPath(scopePath, writeScopes, request.args.path)) {
               return makeViewRpcError(
@@ -185,6 +303,7 @@ export function ViewRuntimeHost({
       onRunAgent,
       packageRoot,
       recordAction,
+      requestActionConfirmation,
       scopePath,
       workspaceArgs,
       writeScopes,
@@ -229,6 +348,37 @@ export function ViewRuntimeHost({
           <p className="mt-0.5">
             Open source or ask dohc to repair it.
           </p>
+        </div>
+      )}
+      {pendingAction && (
+        <div className="absolute inset-x-4 top-4 rounded-lg border border-rule bg-surface px-3 py-3 text-[12px] text-ink-dim shadow-sm">
+          <p className="font-medium text-ink-strong">Run view action?</p>
+          <p className="mt-1">
+            {title} wants to run <span className="font-medium text-ink-strong">{pendingAction.name}</span>.
+          </p>
+          <p className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]">
+            {pendingAction.inputSummary}
+          </p>
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={cancelPendingAction}
+              disabled={pendingAction.status === 'running'}
+              className="rounded border border-rule px-2 py-1 text-ink-strong disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void confirmPendingAction()
+              }}
+              disabled={pendingAction.status === 'running'}
+              className="rounded bg-ink-strong px-2 py-1 text-paper disabled:opacity-50"
+            >
+              {pendingAction.status === 'running' ? 'Running...' : 'Confirm'}
+            </button>
+          </div>
         </div>
       )}
     </div>

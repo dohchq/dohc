@@ -30,9 +30,25 @@ type ViewConfig = {
   entry: string
   read: string[]
   write: string[]
+  actions: ViewActionConfig[]
   network: boolean
   agent: string[]
   status: ConfigStatus
+}
+
+export type ViewActionKind = 'field.increment' | 'field.set'
+
+type ViewActionConfig = {
+  name: string
+  kind: ViewActionKind
+  path: string
+  field: string
+  by?: number
+  valueType?: 'string' | 'number' | 'boolean' | 'date'
+}
+
+export type ViewActionDescriptor = Omit<ViewActionConfig, 'path'> & {
+  path: string
 }
 
 export type ViewDescriptor = {
@@ -46,6 +62,7 @@ export type ViewDescriptor = {
   configStatus: ConfigStatus
   read: string[]
   write: string[]
+  actions: ViewActionDescriptor[]
   network: boolean
   agent: string[]
 }
@@ -100,6 +117,60 @@ function manifestObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>
 }
 
+const ACTION_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/
+const FIELD_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function optionalNumber(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function parseActions(value: unknown): ViewActionConfig[] | null {
+  if (value === undefined) return []
+  const actionsObject = manifestObject(value)
+  if (!actionsObject) return null
+
+  const out: ViewActionConfig[] = []
+  for (const [name, raw] of Object.entries(actionsObject)) {
+    if (!ACTION_NAME_RE.test(name)) return null
+    const action = manifestObject(raw)
+    if (!action) return null
+    const kind = action.kind
+    const path = typeof action.path === 'string' ? action.path.trim() : ''
+    const field = typeof action.field === 'string' ? action.field.trim() : ''
+    if (
+      kind !== 'field.increment' &&
+      kind !== 'field.set'
+    ) {
+      return null
+    }
+    if (!path || !FIELD_NAME_RE.test(field)) return null
+
+    const by = optionalNumber(action.by)
+    if (by === null) return null
+    const valueType =
+      action.valueType === undefined ||
+      action.valueType === 'string' ||
+      action.valueType === 'number' ||
+      action.valueType === 'boolean' ||
+      action.valueType === 'date'
+        ? action.valueType
+        : null
+    if (valueType === null) return null
+    if (kind === 'field.increment' && valueType !== undefined) return null
+
+    out.push({
+      name,
+      kind,
+      path,
+      field,
+      ...(by === undefined ? {} : { by }),
+      ...(valueType === undefined ? {} : { valueType }),
+    })
+  }
+  return out
+}
+
 function stripDohcFrontmatter(body: string): string {
   return splitFrontmatter(body).rest
 }
@@ -110,6 +181,7 @@ function defaultConfig(viewName: string): ViewConfig {
     entry: 'src/App.tsx',
     read: ['.'],
     write: [],
+    actions: [],
     network: false,
     agent: [],
     status: { ok: true },
@@ -146,6 +218,7 @@ function parseConfig(body: string, viewName: string): ViewConfig {
       : fallback.entry
   const read = object.read === undefined ? fallback.read : stringArray(object.read)
   const write = object.write === undefined ? fallback.write : stringArray(object.write)
+  const actions = parseActions(object.actions)
   const agent = object.agent === undefined ? fallback.agent : stringArray(object.agent)
   const network =
     object.network === undefined
@@ -154,7 +227,7 @@ function parseConfig(body: string, viewName: string): ViewConfig {
         ? object.network
         : null
 
-  if (!read || !write || !agent || network === null) {
+  if (!read || !write || !actions || !agent || network === null) {
     return {
       ...fallback,
       status: { ok: false, reason: 'invalid-config' },
@@ -166,6 +239,7 @@ function parseConfig(body: string, viewName: string): ViewConfig {
     entry,
     read,
     write,
+    actions,
     network,
     agent,
     status: { ok: true },
@@ -178,6 +252,19 @@ function resolveScopeList(scopePath: string, entries: string[]): string[] {
     const resolved = resolveScopeRelativePath(scopePath, entry)
     if (resolved === null) continue
     out.push(resolved)
+  }
+  return out
+}
+
+function resolveActionList(
+  scopePath: string,
+  actions: ViewActionConfig[],
+): ViewActionDescriptor[] | null {
+  const out: ViewActionDescriptor[] = []
+  for (const action of actions) {
+    const path = resolveScopeRelativePath(scopePath, action.path)
+    if (path === null) return null
+    out.push({ ...action, path })
   }
   return out
 }
@@ -261,6 +348,28 @@ function descriptorForRoot(
       configStatus: { ok: false, reason: 'invalid-config' },
       read: resolveScopeList(rootInfo.scopePath, fallback.read),
       write: [],
+      actions: [],
+      network: false,
+      agent: [],
+    }
+  }
+
+  const actions = resolveActionList(rootInfo.scopePath, config.actions)
+  if (actions === null) {
+    const fallback = defaultConfig(rootInfo.viewName)
+    const fallbackEntryPath = `${packageRoot}/${fallback.entry}`
+    return {
+      packageRoot,
+      scopePath: rootInfo.scopePath,
+      viewName: rootInfo.viewName,
+      title: fallback.title ?? titleFromViewName(rootInfo.viewName),
+      entryPath: fallbackEntryPath,
+      entryExists: atomsByPath.has(fallbackEntryPath),
+      hasConfig: Boolean(configAtom),
+      configStatus: { ok: false, reason: 'invalid-config' },
+      read: resolveScopeList(rootInfo.scopePath, fallback.read),
+      write: [],
+      actions: [],
       network: false,
       agent: [],
     }
@@ -277,6 +386,7 @@ function descriptorForRoot(
     configStatus: config.status,
     read: resolveScopeList(rootInfo.scopePath, config.read),
     write: resolveScopeList(rootInfo.scopePath, config.write),
+    actions,
     network: config.network,
     agent: config.agent,
   }

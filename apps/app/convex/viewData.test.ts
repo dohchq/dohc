@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import schema from './schema'
 import { api } from './_generated/api'
 
@@ -9,6 +9,13 @@ const modules = import.meta.glob('./**/*.ts')
 const W = 'ws_view_data'
 const OWNER = 'ws_view_data_owner'
 const VIEWER = 'ws_view_data_viewer'
+const ADMIN_URL = 'http://hocuspocus.local:1234'
+const ADMIN_TOKEN = 'admin-token'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
+})
 
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
@@ -126,6 +133,219 @@ describe('viewData local sources', () => {
           sourceRef: { kind: 'atom', path: 'clients/acme/log.md', key: 'client' },
         },
       ],
+    })
+  })
+})
+
+describe('viewData manifest actions', () => {
+  it('increments an inline field through Hocuspocus without splicing the markdown cache', async () => {
+    const t = convexTest(schema, modules)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', ADMIN_URL)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', ADMIN_TOKEN)
+    const fetch = vi.fn(async (url: string, _init: RequestInit) => {
+      if (url.endsWith('/apply/createAnchorsForText')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          anchorStart: 'anchor-start',
+          anchorEnd: 'anchor-end',
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetch)
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/.views/overview/view.json',
+      JSON.stringify({
+        read: ['.'],
+        write: ['metrics.md'],
+        actions: {
+          incrementDone: {
+            kind: 'field.increment',
+            path: 'metrics.md',
+            field: 'completed',
+            by: 1,
+          },
+        },
+      }),
+    )
+    await seedAtom(t, W, 'clients/acme/.views/overview/src/App.tsx', 'view code')
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/metrics.md',
+      '---\nid: clients.acme.metrics\n---\n# Metrics\n{completed: 4}\n',
+    )
+
+    await expect(
+      t.withIdentity({ subject: W, name: 'Ice' }).action(api.viewData.runAction, {
+        packageRoot: 'clients/acme/.views/overview',
+        name: 'incrementDone',
+        input: { source: 'button' },
+        clientMutationId: 'click-1',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      action: 'incrementDone',
+      path: 'clients/acme/metrics.md',
+    })
+
+    const atom = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', W).eq('path', 'clients/acme/metrics.md'),
+        )
+        .unique(),
+    )
+    expect(atom?.body).toContain('{completed: 4}')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    const [anchorUrl, anchorInit] = fetch.mock.calls[0]!
+    expect(anchorUrl).toBe(`${ADMIN_URL}/apply/createAnchorsForText`)
+    expect(JSON.parse(anchorInit.body as string)).toMatchObject({
+      workspaceId: W,
+      atomId: 'clients.acme.metrics',
+      expectedText: '{completed: 4}',
+      actor: {
+        userId: W,
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    })
+    const [replaceUrl, replaceInit] = fetch.mock.calls[1]!
+    expect(replaceUrl).toBe(`${ADMIN_URL}/apply/replaceRange`)
+    expect(replaceInit).toMatchObject({
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${ADMIN_TOKEN}`,
+        'content-type': 'application/json',
+      },
+    })
+    expect(JSON.parse(replaceInit.body as string)).toMatchObject({
+      operationId: 'viewAction:clients/acme/.views/overview:incrementDone:click-1',
+      workspaceId: W,
+      atomId: 'clients.acme.metrics',
+      anchorStart: 'anchor-start',
+      anchorEnd: 'anchor-end',
+      expectedText: '{completed: 4}',
+      replacement: '{completed: 5}',
+      actor: {
+        userId: W,
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+    })
+  })
+
+  it('refuses manifest actions that are not covered by view write grants', async () => {
+    const t = convexTest(schema, modules)
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/.views/overview/view.json',
+      JSON.stringify({
+        read: ['.'],
+        write: [],
+        actions: {
+          incrementDone: {
+            kind: 'field.increment',
+            path: 'metrics.md',
+            field: 'completed',
+          },
+        },
+      }),
+    )
+    await seedAtom(t, W, 'clients/acme/.views/overview/src/App.tsx', 'view code')
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/metrics.md',
+      '---\nid: clients.acme.metrics\n---\n{completed: 4}',
+    )
+
+    await expect(
+      t.withIdentity({ subject: W }).action(api.viewData.runAction, {
+        packageRoot: 'clients/acme/.views/overview',
+        name: 'incrementDone',
+        clientMutationId: 'click-2',
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      code: 'write-not-granted',
+      message: 'This view action is not allowed to edit that source.',
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('sets an inline field from form input through the same semantic path', async () => {
+    const t = convexTest(schema, modules)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_URL', ADMIN_URL)
+    vi.stubEnv('HOCUSPOCUS_ADMIN_TOKEN', ADMIN_TOKEN)
+    const fetch = vi.fn(async (url: string, _init: RequestInit) => {
+      if (url.endsWith('/apply/createAnchorsForText')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          anchorStart: 'status-start',
+          anchorEnd: 'status-end',
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetch)
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/.views/overview/view.json',
+      JSON.stringify({
+        read: ['.'],
+        write: ['tasks.md'],
+        actions: {
+          setStatus: {
+            kind: 'field.set',
+            path: 'tasks.md',
+            field: 'status',
+            valueType: 'string',
+          },
+        },
+      }),
+    )
+    await seedAtom(t, W, 'clients/acme/.views/overview/src/App.tsx', 'view code')
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/tasks.md',
+      '---\nid: clients.acme.tasks\n---\n{status: active}',
+    )
+
+    await expect(
+      t.withIdentity({ subject: W }).action(api.viewData.runAction, {
+        packageRoot: 'clients/acme/.views/overview',
+        name: 'setStatus',
+        input: { value: 'done' },
+        clientMutationId: 'form-1',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      action: 'setStatus',
+      path: 'clients/acme/tasks.md',
+    })
+
+    const [, replaceInit] = fetch.mock.calls[1]!
+    expect(JSON.parse(replaceInit.body as string)).toMatchObject({
+      expectedText: '{status: active}',
+      replacement: '{status: "done"}',
     })
   })
 })

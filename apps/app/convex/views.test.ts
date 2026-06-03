@@ -133,6 +133,48 @@ id: views.workspace.config
     })
   })
 
+  it('resolves manifest-declared actions to the view scope', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(
+      t,
+      W,
+      'clients/acme/.views/overview/view.json',
+      JSON.stringify({
+        title: 'Overview',
+        read: ['.'],
+        write: ['metrics.md'],
+        actions: {
+          incrementDone: {
+            kind: 'field.increment',
+            path: 'metrics.md',
+            field: 'completed',
+            by: 1,
+          },
+        },
+      }),
+    )
+    await seedAtom(t, W, 'clients/acme/.views/overview/src/App.tsx')
+
+    const view = await t.withIdentity({ subject: W }).query(api.views.get, {
+      packageRoot: 'clients/acme/.views/overview',
+    })
+
+    expect(view).toMatchObject({
+      packageRoot: 'clients/acme/.views/overview',
+      read: ['clients/acme'],
+      write: ['clients/acme/metrics.md'],
+      actions: [
+        {
+          name: 'incrementDone',
+          kind: 'field.increment',
+          path: 'clients/acme/metrics.md',
+          field: 'completed',
+          by: 1,
+        },
+      ],
+    })
+  })
+
   it('filters discovery through atom read access', async () => {
     const t = convexTest(schema, modules)
     const orgId = await seedOrgWithBob(t)

@@ -16,6 +16,7 @@ describe('virtual @dohc/view SDK', () => {
     await dohc.exports.list()
     await dohc.source.open({ path: 'tasks.md' })
     await dohc.agent.run({ prompt: 'Draft update.', sources: ['tasks.md'] })
+    await dohc.actions.run('incrementDone', { source: 'button' })
     await dohc.patch.propose({
       path: 'tasks.md',
       summary: 'Mark done',
@@ -30,6 +31,10 @@ describe('virtual @dohc/view SDK', () => {
       { op: 'dohc.exports.list', args: {} },
       { op: 'dohc.source.open', args: { path: 'tasks.md' } },
       { op: 'dohc.agent.run', args: { prompt: 'Draft update.', sources: ['tasks.md'] } },
+      {
+        op: 'dohc.actions.run',
+        args: { name: 'incrementDone', input: { source: 'button' } },
+      },
       {
         op: 'dohc.patch.propose',
         args: {

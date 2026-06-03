@@ -84,6 +84,12 @@ button, input, textarea, select {
       pending.set(id, { resolve, reject })
     })
   }
+  function actionArgs(nameOrArgs, input) {
+    if (typeof nameOrArgs === 'string') {
+      return input === undefined ? { name: nameOrArgs } : { name: nameOrArgs, input }
+    }
+    return nameOrArgs || {}
+  }
   window.dohc = {
     sources: { list: (args = {}) => request('dohc.sources.list', args) },
     atom: { get: (args) => request('dohc.atom.get', args) },
@@ -92,6 +98,7 @@ button, input, textarea, select {
     exports: { list: () => request('dohc.exports.list', {}) },
     source: { open: (args) => request('dohc.source.open', args) },
     agent: { run: (args) => request('dohc.agent.run', args) },
+    actions: { run: (nameOrArgs, input) => request('dohc.actions.run', actionArgs(nameOrArgs, input)) },
     patch: { propose: (args) => request('dohc.patch.propose', args) },
   }
   function ready() {

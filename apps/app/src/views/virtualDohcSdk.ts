@@ -1,4 +1,15 @@
 type Bridge = (op: string, args: Record<string, unknown>) => Promise<unknown>
+type ViewActionInput = Record<string, unknown>
+
+function viewActionArgs(
+  nameOrArgs: string | { name: string; input?: ViewActionInput },
+  input?: ViewActionInput,
+): { name: string; input?: ViewActionInput } {
+  if (typeof nameOrArgs === 'string') {
+    return input === undefined ? { name: nameOrArgs } : { name: nameOrArgs, input }
+  }
+  return nameOrArgs
+}
 
 export function createDohcClient(bridge: Bridge) {
   return {
@@ -25,6 +36,12 @@ export function createDohcClient(bridge: Bridge) {
     agent: {
       run: (args: { prompt: string; sources?: string[] }) =>
         bridge('dohc.agent.run', args),
+    },
+    actions: {
+      run: (
+        nameOrArgs: string | { name: string; input?: ViewActionInput },
+        input?: ViewActionInput,
+      ) => bridge('dohc.actions.run', viewActionArgs(nameOrArgs, input)),
     },
     patch: {
       propose: (args: {
