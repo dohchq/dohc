@@ -527,9 +527,15 @@ function AtomShell({
     return () => window.removeEventListener(OPEN_SKETCH_EVENT, onOpen)
   }, [])
   // Parse from the live draft so headers/overlays update as the user types.
-  const { meta } = parseFrontmatter(draft)
-  const { fm, rest } = useMemo(() => splitFrontmatter(draft), [draft])
+  // Memoize the derived parts so unrelated shell state changes do not reparse
+  // YAML or resplit the frontmatter.
+  const { meta, fm, rest } = useMemo(() => {
+    const parsed = parseFrontmatter(draft)
+    const split = splitFrontmatter(draft)
+    return { meta: parsed.meta, fm: split.fm, rest: split.rest }
+  }, [draft])
   const isAction = meta.type === 'action'
+  const isSkill = useMemo(() => isSkillAtomBody(draft), [draft])
   // D4.13 — EXTENSION determines rendering: a `.html` path renders
   // as a sandboxed HTML page (the §2-B route iframe), NEVER Tiptap.
   // `type: html` frontmatter is kept as a backward-compat fallback
@@ -556,7 +562,7 @@ function AtomShell({
   // for html (filename is the title) / action / skill.
   // html files DO support a title now — the filename, shown above the
   // page + stored in frontmatter (like markdown pages).
-  const supportsTitle = !isAction && !isSkillAtomBody(draft)
+  const supportsTitle = !isAction && !isSkill
   // the file name (leaf, sans extension) — the default title for html.
   const leafName = useMemo(
     () =>
@@ -570,7 +576,7 @@ function AtomShell({
   // shell is keyed by path, so it re-evaluates on open).
   useEffect(() => {
     if (!isHtml || !leafName) return
-    const t = parseFrontmatter(draft).meta.title
+    const t = meta.title
     if (typeof t === 'string' && t.trim()) return
     onChange(setFrontmatterTitle(draft, leafName))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -678,7 +684,7 @@ function AtomShell({
             Open view
           </button>
         )}
-        {isSkillAtomBody(draft) && <ShareSkillButton body={draft} />}
+        {isSkill && <ShareSkillButton body={draft} />}
         {onShare && atomId && (
           <button
             type="button"
@@ -763,7 +769,7 @@ function AtomShell({
       {!sourceMode &&
         !htmlViewMode &&
         !isAction &&
-        !isSkillAtomBody(draft) && (
+        !isSkill && (
           <PropertiesPanel body={draft} onChange={onChange} />
         )}
       {sourceMode ? (
