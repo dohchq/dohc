@@ -580,9 +580,16 @@ function AtomShell({
   // above the title (Notion-style) + editable via the emoji picker.
   const pageIcon = typeof meta.icon === 'string' ? meta.icon : ''
   const [iconPickerOpen, setIconPickerOpen] = useState(false)
+  const shellClassName = isHtml && !sourceMode
+    ? 'dohc-html-shell'
+    : 'doc doc-editing'
+  const htmlViewMode = isHtml && !sourceMode
+  const fileActionsClassName = htmlViewMode
+    ? 'absolute right-3 top-3 z-30 flex items-center gap-1 rounded-md border border-rule bg-page/85 px-1.5 py-1 shadow-xs backdrop-blur'
+    : 'flex justify-end items-center gap-2 -mt-2 mb-1'
 
   return (
-    <div className="doc doc-editing">
+    <div className={shellClassName}>
       {isAction && typeof meta.prompt === 'string' && (
         <ActionHeader
           title={typeof meta.title === 'string' ? meta.title : '(untitled)'}
@@ -659,7 +666,7 @@ function AtomShell({
           Track-3 P4: skills also surface the "copy share text"
           button (strips the canonical id + injects an advisory
           source-share line so the recipient owns a clean atom). */}
-      <div className="flex justify-end items-center gap-2 -mt-2 mb-1">
+      <div className={fileActionsClassName}>
         {viewInfo && onOpenView && (
           <button
             type="button"
@@ -701,7 +708,7 @@ function AtomShell({
       {/* emoji-icons — Notion-style page icon ABOVE the title. Lives
           in the frontmatter `icon:` property (shows in the tree +
           metadata). Click to open the emoji picker. */}
-      {!sourceMode && supportsTitle && (
+      {!sourceMode && supportsTitle && !htmlViewMode && (
         <div className="group/icon mb-1">
           {pageIcon ? (
             <button
@@ -727,7 +734,7 @@ function AtomShell({
       )}
       {/* D4.22 — Notion-style page title field, ABOVE the
           properties. Backed by the frontmatter `title:` property. */}
-      {!sourceMode && supportsTitle && (
+      {!sourceMode && supportsTitle && !htmlViewMode && (
         <input
           className="dohc-title-field"
           value={pageTitle || (isHtml ? leafName : '')}
@@ -754,6 +761,7 @@ function AtomShell({
           (their frontmatter is functional config) and in raw-source
           mode. */}
       {!sourceMode &&
+        !htmlViewMode &&
         !isAction &&
         !isSkillAtomBody(draft) && (
           <PropertiesPanel body={draft} onChange={onChange} />
@@ -824,7 +832,7 @@ function AtomShell({
           }}
         />
       )}
-      {subpages.length > 0 && (
+      {!htmlViewMode && subpages.length > 0 && (
         <Subpages subpages={subpages} onOpenAtom={onOpenAtom} />
       )}
       {sketcherOpen && (
@@ -916,7 +924,7 @@ function Subpages({
   onOpenAtom: (path: string) => void
 }) {
   return (
-    <div className="mt-12 mb-16 border-t border-rule pt-6">
+    <div className="dohc-subpages mt-12 mb-16 border-t border-rule pt-6">
       <div className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-medium mb-3">
         in this folder · {subpages.length}
       </div>

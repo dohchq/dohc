@@ -41,6 +41,16 @@ describe('HTML_ATOM_HEAD_STYLE — §2a dohc mono + typographic baseline', () =>
     expect(HTML_ATOM_HEAD_STYLE).toMatch(/table\b/)
   })
 
+  it('lets authored HTML fill the iframe instead of forcing a paper page column', () => {
+    const bodyRule = HTML_ATOM_HEAD_STYLE.match(/\nbody\s*\{(?<rule>[^}]*)\}/)
+      ?.groups?.rule
+
+    expect(bodyRule).toContain('min-height:100vh')
+    expect(bodyRule).not.toContain('padding:32px')
+    expect(bodyRule).not.toContain('max-width:72ch')
+    expect(bodyRule).not.toContain('margin:0 auto')
+  })
+
   it('contains no `</style>` breakout (the shell sits inside a <style>)', () => {
     expect(HTML_ATOM_HEAD_STYLE.toLowerCase()).not.toContain('</style')
     expect(HTML_ATOM_HEAD_STYLE).not.toContain('<')

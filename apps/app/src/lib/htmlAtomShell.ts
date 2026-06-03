@@ -39,14 +39,13 @@ const faceFor = (uri: string, weight: number): string =>
     : ''
 
 // A calm, opinionated-but-safe typographic baseline in the dohc
-// palette: html atoms are NEVER plain — they're properly typeset on
-// warm paper even before the author touches CSS. Trusted (server-
-// built), fixed. The §3 `{= }` walk SKIPs STYLE ancestors ⇒ this
-// never resolves into.
+// palette: html atoms get dohc text defaults, but the authored HTML
+// owns the full iframe canvas. Trusted (server-built), fixed. The §3
+// `{= }` walk SKIPs STYLE ancestors ⇒ this never resolves into.
 export const HTML_ATOM_HEAD_STYLE = `${faceFor(PLEX_MONO_400, 400)}${faceFor(PLEX_MONO_500, 500)}
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;padding:0}
-body{font-family:'Aptos','Segoe UI',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;font-size:14.5px;line-height:1.55;color:#151515;background:#f7f6f1;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;padding:32px;max-width:72ch;margin:0 auto}
+body{font-family:'Aptos','Segoe UI',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;font-size:14.5px;line-height:1.55;color:#151515;background:#f7f6f1;min-height:100vh;width:100%;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 h1,h2,h3,h4{line-height:1.25;margin:1.5em 0 .5em;font-weight:600;color:#0a0a0a}
 h1{font-size:26px}h2{font-size:20px}h3{font-size:17px}h4{font-size:15px}
 p{margin:.75em 0}

@@ -187,11 +187,12 @@ export function HtmlAtomFrame({
     )
   }
 
+  const frameClassName =
+    compact ? 'h-[280px] rounded-md border border-rule bg-page' : 'h-full min-h-[calc(100vh-44px)]'
+
   return (
     <div
-      className={`relative w-full rounded-md overflow-hidden border border-rule bg-page ${
-        compact ? 'h-[280px]' : 'min-h-[70vh]'
-      }`}
+      className={`relative w-full overflow-hidden ${frameClassName}`}
     >
       {([0, 1] as const).map((buf) => (
         <iframe
