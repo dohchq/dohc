@@ -6,6 +6,7 @@ export type ViewRpcOp =
   | 'dohc.exports.list'
   | 'dohc.source.open'
   | 'dohc.agent.run'
+  | 'dohc.actions.run'
   | 'dohc.patch.propose'
 
 export type ViewRpcRequest =
@@ -16,6 +17,11 @@ export type ViewRpcRequest =
   | { id: string; op: 'dohc.exports.list'; args: Record<string, never> }
   | { id: string; op: 'dohc.source.open'; args: { path: string } }
   | { id: string; op: 'dohc.agent.run'; args: { prompt: string; sources?: string[] } }
+  | {
+      id: string
+      op: 'dohc.actions.run'
+      args: { name: string; input?: Record<string, unknown> }
+    }
   | {
       id: string
       op: 'dohc.patch.propose'
@@ -38,6 +44,7 @@ const OPS = new Set<ViewRpcOp>([
   'dohc.exports.list',
   'dohc.source.open',
   'dohc.agent.run',
+  'dohc.actions.run',
   'dohc.patch.propose',
 ])
 
@@ -89,6 +96,13 @@ function validateArgs(op: ViewRpcOp, args: Record<string, unknown>): boolean {
         typeof args.prompt === 'string' &&
         args.prompt.trim().length > 0 &&
         stringArray(args.sources)
+      )
+    case 'dohc.actions.run':
+      return (
+        hasOnlyKeys(args, ['name', 'input']) &&
+        typeof args.name === 'string' &&
+        args.name.trim().length > 0 &&
+        (args.input === undefined || isPlainObject(args.input))
       )
     case 'dohc.patch.propose':
       return (

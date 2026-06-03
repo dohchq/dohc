@@ -37,6 +37,11 @@ describe('view SDK protocol validation', () => {
         patch: { kind: 'frontmatter', set: { status: 'done' } },
       },
     })).toBe(true)
+    expect(isViewRpcRequest({
+      id: '5',
+      op: 'dohc.actions.run',
+      args: { name: 'incrementDone', input: { source: 'button' } },
+    })).toBe(true)
   })
 
   it('rejects missing ids, unknown operations, and non-object args', () => {
@@ -80,6 +85,16 @@ describe('view SDK protocol validation', () => {
       id: '7',
       op: 'dohc.sources.list',
       args: { source: '.', activeWorkspaceId: 'ws_other' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '8',
+      op: 'dohc.actions.run',
+      args: { name: ' ' },
+    })).toBeNull()
+    expect(parseViewRpcRequest({
+      id: '9',
+      op: 'dohc.actions.run',
+      args: { name: 'incrementDone', input: [] },
     })).toBeNull()
   })
 
