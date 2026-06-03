@@ -145,6 +145,21 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('Do not create a view just because the user asked for "help"')
   })
 
+  it('teaches post-intake builds to become coherent systems, not page piles', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('After intake, build a small coherent system, not a pile of pages')
+    expect(personal).toContain('profile/goals atom')
+    expect(personal).toContain('current plan or source-state atom')
+    expect(personal).toContain('log template when repetition matters')
+    expect(personal).toContain('review note or cadence')
+    expect(personal).toContain('short run note')
+    expect(personal).toContain('where truth lives')
+    expect(personal).toContain('what is missing')
+    expect(personal).toContain('next action')
+    expect(personal).toContain('If you create files after intake, the run note is mandatory')
+    expect(personal).toContain('A chat summary does not replace the run note')
+  })
+
   it('routes explicit view requests to .views packages instead of html atoms', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('If the user explicitly asks for a view')

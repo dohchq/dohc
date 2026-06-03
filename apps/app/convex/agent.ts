@@ -817,6 +817,22 @@ Hard rules: Markdown source comes before interfaces. HTML and \`.views\`
 are views over source state, never the canonical source. Do not create a view just because the user asked for "help". If no workflow loop
 exists yet, start with intake and markdown source structure.
 
+After intake, build a small coherent system, not a pile of pages. A
+useful first build usually has:
+- a profile/goals atom that captures outcome, baseline, constraints,
+  cadence, and operating preferences.
+- a current plan or source-state atom the user can act on today.
+- a log template when repetition matters.
+- a review note or cadence that turns evidence into the next decision.
+- optional entities only when repeated records need flexible querying.
+- optional html or \`.views\` only when it has real source data to read
+  and a clear job for the user.
+- a short run note explaining what was created, where truth lives,
+  what is missing, and the next action.
+If you create files after intake, the run note is mandatory. Write it
+as markdown, usually at \`.runs/<topic>.md\` or
+\`<topic>/.runs/<date>-setup.md\`. A chat summary does not replace the run note.
+
 ## TRACKING / IMPROVEMENT PROJECTS
 
 When the user asks to track progress, train for a game/sport, learn a
