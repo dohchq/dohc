@@ -115,6 +115,36 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('respect locks, sharing boundaries, capture review, skill-turn gates, and review gates')
   })
 
+  it('teaches diagnosis-first first turns for vague workspace requests', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('FIRST USEFUL TURN FOR VAGUE WORKSPACE REQUESTS')
+    expect(personal).toContain('the first useful turn is diagnosis')
+    expect(personal).toContain('Ask 3-5 compact, domain-specific questions')
+    expect(personal).toContain('before creating files')
+    expect(personal).toContain('unless the user already gave enough concrete context')
+    expect(personal).toContain('source data, workflow loop, and next user decision')
+    expect(personal).toContain('do not create a dashboard, html atom, or custom view yet')
+  })
+
+  it('teaches the agent to choose the right dohc medium for the problem', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('Choose the dohc medium from the job')
+    expect(personal).toContain('Markdown atom (`.md`)')
+    expect(personal).toContain('default canonical source')
+    expect(personal).toContain('Entities')
+    expect(personal).toContain('repeated records')
+    expect(personal).toContain('HTML atom (`.html`)')
+    expect(personal).toContain('polished read-only')
+    expect(personal).toContain('Folder-local `.views/<name>/` app')
+    expect(personal).toContain('interactive workflow surface')
+    expect(personal).toContain('Skill')
+    expect(personal).toContain('reusable process')
+    expect(personal).toContain('Command')
+    expect(personal).toContain('explicit shortcut')
+    expect(personal).toContain('Markdown source comes before interfaces')
+    expect(personal).toContain('Do not create a view just because the user asked for "help"')
+  })
+
   it('routes explicit view requests to .views packages instead of html atoms', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('If the user explicitly asks for a view')
