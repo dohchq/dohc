@@ -15,6 +15,25 @@ type BuildState =
   | { status: 'error'; key: string; diagnostics: Array<{ code: string; message: string }> }
 
 const BUILD_DEBOUNCE_MS = 150
+const VIEW_LOADING_SCRIPT = `
+  const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const bg = dark ? '#100f0e' : '#f7f6f1';
+  const surface = dark ? '#191c1a' : '#fffefa';
+  const rule = dark ? 'rgba(244,241,234,.14)' : 'rgba(21,21,21,.12)';
+  const base = dark ? '#30332f' : '#ece9e1';
+  const sheen = dark ? '#3c403a' : '#ded9ce';
+  document.body.style.margin = '0';
+  document.body.style.background = bg;
+  document.getElementById('root').innerHTML =
+    '<main style="min-height:100vh;display:grid;place-items:center;background:' + bg + ';padding:24px;box-sizing:border-box">' +
+      '<style>@keyframes s{0%{background-position:180% 0}100%{background-position:-80% 0}}.sk{display:block;border-radius:8px;background-color:' + base + ';background-image:linear-gradient(100deg,transparent 0%,transparent 34%,' + sheen + ' 48%,transparent 62%,transparent 100%);background-size:220% 100%;animation:s 1.55s ease-in-out infinite}@media (prefers-reduced-motion:reduce){.sk{animation:none;background-image:none}}</style>' +
+      '<section style="width:min(760px,100%);border:1px solid ' + rule + ';border-radius:10px;background:' + surface + ';padding:22px;box-sizing:border-box">' +
+        '<span class="sk" style="height:20px;width:42%;margin-bottom:22px"></span>' +
+        '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:24px"><span class="sk" style="height:96px"></span><span class="sk" style="height:96px"></span><span class="sk" style="height:96px"></span></div>' +
+        '<span class="sk" style="height:10px;width:92%;margin-bottom:10px"></span><span class="sk" style="height:10px;width:82%;margin-bottom:10px"></span><span class="sk" style="height:10px;width:64%"></span>' +
+      '</section>' +
+    '</main>';
+`
 
 export function ViewFrame({
   packageRoot,
@@ -101,7 +120,26 @@ export function ViewFrame({
       cancelled = true
       window.clearTimeout(debounce)
     }
-  }, [sourceFiles, sourceKey])
+  }, [sourceKey])
+
+  const runtimeCode =
+    buildState.status === 'ready'
+      ? buildState.code
+      : buildState.status === 'building' &&
+          'previousCode' in buildState &&
+          buildState.previousCode
+        ? buildState.previousCode
+        : VIEW_LOADING_SCRIPT
+
+  const viewTitle = view?.title ?? 'View'
+  const srcDoc = useMemo(
+    () =>
+      buildViewShell({
+        title: viewTitle,
+        script: runtimeCode,
+      }),
+    [runtimeCode, viewTitle],
+  )
 
   if (!packageRoot) {
     return (
@@ -163,39 +201,6 @@ export function ViewFrame({
       />
     )
   }
-
-  const viewLoadingScript = `
-    const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const bg = dark ? '#100f0e' : '#f7f6f1';
-    const surface = dark ? '#191c1a' : '#fffefa';
-    const rule = dark ? 'rgba(244,241,234,.14)' : 'rgba(21,21,21,.12)';
-    const base = dark ? '#30332f' : '#ece9e1';
-    const sheen = dark ? '#3c403a' : '#ded9ce';
-    document.body.style.margin = '0';
-    document.body.style.background = bg;
-    document.getElementById('root').innerHTML =
-      '<main style="min-height:100vh;display:grid;place-items:center;background:' + bg + ';padding:24px;box-sizing:border-box">' +
-        '<style>@keyframes s{0%{background-position:180% 0}100%{background-position:-80% 0}}.sk{display:block;border-radius:8px;background-color:' + base + ';background-image:linear-gradient(100deg,transparent 0%,transparent 34%,' + sheen + ' 48%,transparent 62%,transparent 100%);background-size:220% 100%;animation:s 1.55s ease-in-out infinite}@media (prefers-reduced-motion:reduce){.sk{animation:none;background-image:none}}</style>' +
-        '<section style="width:min(760px,100%);border:1px solid ' + rule + ';border-radius:10px;background:' + surface + ';padding:22px;box-sizing:border-box">' +
-          '<span class="sk" style="height:20px;width:42%;margin-bottom:22px"></span>' +
-          '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:24px"><span class="sk" style="height:96px"></span><span class="sk" style="height:96px"></span><span class="sk" style="height:96px"></span></div>' +
-          '<span class="sk" style="height:10px;width:92%;margin-bottom:10px"></span><span class="sk" style="height:10px;width:82%;margin-bottom:10px"></span><span class="sk" style="height:10px;width:64%"></span>' +
-        '</section>' +
-      '</main>';
-  `
-  const runtimeCode =
-    buildState.status === 'ready'
-      ? buildState.code
-      : buildState.status === 'building' &&
-          'previousCode' in buildState &&
-          buildState.previousCode
-        ? buildState.previousCode
-        : viewLoadingScript
-
-  const srcDoc = buildViewShell({
-    title: view.title,
-    script: runtimeCode,
-  })
 
   return (
     <main className="flex min-w-0 flex-col bg-page">
