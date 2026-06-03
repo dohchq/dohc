@@ -6,6 +6,7 @@ import { useQuery } from 'convex/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomView } from '../components/AtomView'
 import { HtmlAtomFrame } from '../components/HtmlAtomFrame'
+import type { FileRow } from '../lib/path-tree'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true
@@ -36,6 +37,7 @@ vi.mock('../components/AtomEditor', async () => {
 const htmlBody = `---
 id: home_html
 title: home
+status: live
 ---
 <main><h1>Home</h1></main>`
 
@@ -44,6 +46,21 @@ const htmlRow = {
   body: htmlBody,
   migrationNotice: null,
 }
+
+const filesWithSibling: FileRow[] = [
+  {
+    _id: 'atom_1',
+    path: 'workspace/home.html',
+    title: 'Home',
+    source: 'user',
+  },
+  {
+    _id: 'atom_2',
+    path: 'workspace/child.md',
+    title: 'Child',
+    source: 'user',
+  },
+]
 
 const useQueryMock = vi.mocked(useQuery as any)
 
@@ -84,8 +101,8 @@ describe('HTML atom layout', () => {
     act(() => {
       root.render(
         React.createElement(AtomView, {
-          path: 'home.html',
-          files: [],
+          path: 'workspace/home.html',
+          files: filesWithSibling,
           onRunAction: vi.fn(),
           onOpenAtom: vi.fn(),
         }),
@@ -101,6 +118,9 @@ describe('HTML atom layout', () => {
     expect(
       shell?.querySelector('iframe[title="Rendered HTML page"]'),
     ).not.toBeNull()
+    expect(shell?.querySelector('.dohc-title-field')).toBeNull()
+    expect(shell?.querySelector('.dohc-props')).toBeNull()
+    expect(shell?.querySelector('.dohc-subpages')).toBeNull()
   })
 
   it('keeps the full-size HTML iframe unframed unless used as a compact preview', () => {

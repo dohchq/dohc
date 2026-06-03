@@ -924,7 +924,7 @@ function Subpages({
   onOpenAtom: (path: string) => void
 }) {
   return (
-    <div className="mt-12 mb-16 border-t border-rule pt-6">
+    <div className="dohc-subpages mt-12 mb-16 border-t border-rule pt-6">
       <div className="text-[10px] uppercase tracking-[0.14em] text-ink-faint font-medium mb-3">
         in this folder · {subpages.length}
       </div>
