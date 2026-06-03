@@ -64,6 +64,11 @@ import {
   type ToolActivityKind,
   type ToolActivityPart,
 } from '../lib/chatActivity'
+import {
+  optimisticTurnHasServerEcho,
+  uiMessageText,
+  type OptimisticChatTurn,
+} from '../lib/chat-optimistic'
 
 // Composer grammar:
 //   /command  => saved slash command, only at the start of the line
@@ -157,6 +162,7 @@ type ActiveSendTarget = {
   threadId: string
   projectPath?: string | null
 }
+type SendEntry = 'skill-fire' | 'command-fire'
 type IconComponent = typeof Folder
 type ComposerStarterCommand = RunnableRef & {
   kind: 'command'
@@ -415,7 +421,7 @@ export function estimateContextTokensFromMessages(
   messages: ReadonlyArray<UIMessage>,
 ): number {
   const threadTokens = messages.reduce((total, message) => {
-    const text = message.text || messageText(message)
+    const text = uiMessageText(message)
     return total + MESSAGE_CONTEXT_OVERHEAD_TOKENS + estimateTextTokens(text)
   }, 0)
   if (threadTokens === 0) return 0
@@ -574,6 +580,8 @@ export function Chat({
   const activeSendTargetRef = useRef<ActiveSendTarget | null>(null)
   const [activeSendTarget, setActiveSendTargetState] = useState<ActiveSendTarget | null>(null)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  const optimisticTurnSeqRef = useRef(0)
+  const [optimisticTurns, setOptimisticTurns] = useState<OptimisticChatTurn[]>([])
   // Track-3 P3 — subscribe to the user's saved skills for slash-
   // command resolution. The query is cheap (one workspace-keyed
   // collect; filtered to type:skill under .skills/).
@@ -601,6 +609,24 @@ export function Chat({
     return messagesQuery.results ?? []
   }, [messagesQuery])
 
+  const visibleOptimisticTurns = useMemo(
+    () =>
+      optimisticTurns.filter(
+        (turn) => !optimisticTurnHasServerEcho(turn, uiMessages),
+      ),
+    [optimisticTurns, uiMessages],
+  )
+
+  useEffect(() => {
+    if (optimisticTurns.length === 0) return
+    setOptimisticTurns((turns) => {
+      const next = turns.filter(
+        (turn) => !optimisticTurnHasServerEcho(turn, uiMessages),
+      )
+      return next.length === turns.length ? turns : next
+    })
+  }, [uiMessages, optimisticTurns.length])
+
   const busy = useMemo(
     () =>
       uiMessages.some(
@@ -615,6 +641,35 @@ export function Chat({
     activeSendTargetRef.current = target
     setActiveSendTargetState(target)
   }
+
+  const appendOptimisticTurn = useCallback(
+    ({
+      displayText,
+      serverText,
+    }: {
+      displayText: string
+      serverText: string
+    }) => {
+      const id = `local-${Date.now()}-${optimisticTurnSeqRef.current++}`
+      stickToBottomRef.current = true
+      setOptimisticTurns((turns) => [
+        ...turns,
+        {
+          id,
+          displayText,
+          serverText,
+          createdAt: Date.now(),
+        },
+      ])
+      return id
+    },
+    [],
+  )
+
+  const removeOptimisticTurn = useCallback((id: string) => {
+    setOptimisticTurns((turns) => turns.filter((turn) => turn.id !== id))
+  }, [])
+
   const contextUsage = useMemo(
     () =>
       primary
@@ -673,9 +728,9 @@ export function Chat({
   // agent action.
   const setChatBusy = useSetChatBusy()
   useEffect(() => {
-    setChatBusy(busy)
+    setChatBusy(sending || busy)
     return () => setChatBusy(false)
-  }, [busy, setChatBusy])
+  }, [busy, sending, setChatBusy])
 
   useEffect(() => {
     if (!sending && !busy && !stopping && activeSendTargetRef.current) {
@@ -691,11 +746,11 @@ export function Chat({
 
   const scrollToBottom = useCallback(
     (behavior: ScrollBehavior = 'smooth') => {
-    stickToBottomRef.current = true
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior,
-    })
+      stickToBottomRef.current = true
+      scrollRef.current?.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior,
+      })
       setScrollToBottomVisible(false)
     },
     [setScrollToBottomVisible],
@@ -724,7 +779,7 @@ export function Chat({
 
   useEffect(() => {
     if (stickToBottomRef.current) scrollToBottom('smooth')
-  }, [threadId, uiMessages.length, scrollToBottom])
+  }, [threadId, uiMessages.length, visibleOptimisticTurns.length, scrollToBottom])
 
   useEffect(() => {
     const content = scrollContentRef.current
@@ -735,6 +790,53 @@ export function Chat({
     observer.observe(content)
     return () => observer.disconnect()
   }, [threadId, scrollToBottom])
+
+  async function sendResolvedPrompt({
+    promptText,
+    displayText = promptText,
+    entry,
+    clearComposer = false,
+  }: {
+    promptText: string
+    displayText?: string
+    entry?: SendEntry
+    clearComposer?: boolean
+  }) {
+    if (!promptText.trim() || sending || busy) return
+    setComposerError(null)
+    setSending(true)
+    const optimisticId = appendOptimisticTurn({
+      displayText,
+      serverText: promptText,
+    })
+    if (clearComposer) setInput('')
+    try {
+      const activeThreadId = await ensureActiveThread()
+      if (!activeThreadId) {
+        removeOptimisticTurn(optimisticId)
+        return
+      }
+      setActiveSendTarget({ threadId: activeThreadId, projectPath })
+      await sendMessage({
+        threadId: activeThreadId,
+        prompt: promptText,
+        ...(entry ? { entry } : {}),
+        activeWorkspaceId,
+        projectPath,
+        agentAccessMode: accessMode,
+        ...agentSelectionPayload,
+      })
+    } catch (e) {
+      removeOptimisticTurn(optimisticId)
+      if (clearComposer) {
+        setInput((current) => (current.trim() ? current : displayText))
+      }
+      setComposerError(formatComposerError(e))
+      console.error(e)
+    } finally {
+      setSending(false)
+    }
+  }
 
   async function submit(promptOverride?: string) {
     const prompt = (promptOverride ?? input).trim()
@@ -749,85 +851,56 @@ export function Chat({
     // prompt (the model sees the literal "/" prefix and replies).
     const match = detectSkillFire(prompt, skills)
     const commandMatch = match ? null : detectCommandFire(prompt, savedCommands)
-    setSending(true)
-    try {
-      if (match && 'ambiguous' in match) {
-        // Surface the collision as a local UI nudge — do NOT fire
-        // sendMessage (the user must disambiguate). Append to the
-        // input so they can pick.
-        const list = match.ambiguous.map((s) => s.path).join('\n  ')
-        setInput(
-          `${prompt}\n\n[multiple skills match this label — pick one of:]\n  ${list}`,
-        )
-        setComposerError('Multiple skills match that label. Pick the exact path to run.')
-        setSending(false)
-        return
-      }
-      const activeThreadId = await ensureActiveThread()
-      if (!activeThreadId) return
-      setActiveSendTarget({ threadId: activeThreadId, projectPath })
-      if (!promptOverride) setInput('')
-      if (match && 'matched' in match) {
-        // P3+P4 indep fold F4: preserve user extras as
-        // context the model sees AFTER run_skill returns the
-        // body. Format: `<path>\n\n<extras>`. At step 0 the
-        // model is forced to call run_skill({path}); at step
-        // 1 it sees both the skill body (tool_result) AND
-        // the user's brief (in the original prompt) and can
-        // act on the user's specific intent within the
-        // skill's instructions.
-        const promptText = match.extras
-          ? `${match.matched.path}\n\n${match.extras}`
-          : match.matched.path
-        await sendMessage({
-          threadId: activeThreadId,
-          prompt: promptText,
-          entry: 'skill-fire',
-          activeWorkspaceId,
-          projectPath,
-          agentAccessMode: accessMode,
-          ...agentSelectionPayload,
-        })
-        return
-      }
-      if (commandMatch && 'ambiguous' in commandMatch) {
-        const list = commandMatch.ambiguous.map((c) => c.path).join('\n  ')
-        setInput(
-          `${prompt}\n\n[multiple commands match this label — pick one of:]\n  ${list}`,
-        )
-        setComposerError('Multiple commands match that label. Pick the exact path to run.')
-        setSending(false)
-        return
-      }
-      if (commandMatch && 'matched' in commandMatch) {
-        const promptText = commandMatch.extras
-          ? `${commandMatch.matched.path}\n\n${commandMatch.extras}`
-          : commandMatch.matched.path
-        await sendMessage({
-          threadId: activeThreadId,
-          prompt: promptText,
-          entry: 'command-fire',
-          activeWorkspaceId,
-          projectPath,
-          agentAccessMode: accessMode,
-          ...agentSelectionPayload,
-        })
-        return
-      }
-      await sendMessage({
-        threadId: activeThreadId,
-        prompt,
-        activeWorkspaceId,
-        projectPath,
-        agentAccessMode: accessMode,
-        ...agentSelectionPayload,
-      })
-    } catch (e) {
-      setComposerError(formatComposerError(e))
-      console.error(e)
-    } finally {
-      setSending(false)
+    if (match && 'ambiguous' in match) {
+      // Surface the collision as a local UI nudge — do NOT fire
+      // sendMessage (the user must disambiguate). Append to the
+      // input so they can pick.
+      const list = match.ambiguous.map((s) => s.path).join('\n  ')
+      setInput(
+        `${prompt}\n\n[multiple skills match this label — pick one of:]\n  ${list}`,
+      )
+      setComposerError('Multiple skills match that label. Pick the exact path to run.')
+      return
     }
+    if (commandMatch && 'ambiguous' in commandMatch) {
+      const list = commandMatch.ambiguous.map((c) => c.path).join('\n  ')
+      setInput(
+        `${prompt}\n\n[multiple commands match this label — pick one of:]\n  ${list}`,
+      )
+      setComposerError('Multiple commands match that label. Pick the exact path to run.')
+      return
+    }
+
+    if (match && 'matched' in match) {
+      // P3+P4 indep fold F4: preserve user extras as context the model sees
+      // after run_skill returns the body.
+      const promptText = match.extras
+        ? `${match.matched.path}\n\n${match.extras}`
+        : match.matched.path
+      await sendResolvedPrompt({
+        promptText,
+        displayText: prompt,
+        entry: 'skill-fire',
+        clearComposer: !promptOverride,
+      })
+      return
+    }
+    if (commandMatch && 'matched' in commandMatch) {
+      const promptText = commandMatch.extras
+        ? `${commandMatch.matched.path}\n\n${commandMatch.extras}`
+        : commandMatch.matched.path
+      await sendResolvedPrompt({
+        promptText,
+        displayText: prompt,
+        entry: 'command-fire',
+        clearComposer: !promptOverride,
+      })
+      return
+    }
+    await sendResolvedPrompt({
+      promptText: prompt,
+      clearComposer: !promptOverride,
+    })
   }
 
   useEffect(() => {
@@ -856,29 +929,10 @@ export function Chat({
     // Claim the dispatch SYNCHRONOUSLY so a re-render or remount
     // sees a cleared pendingSkillFire and does not replay.
     onPendingSkillFireHandled?.()
-    setSending(true)
-    void (async () => {
-      try {
-        setComposerError(null)
-        const activeThreadId = await ensureActiveThread()
-        if (!activeThreadId) return
-        setActiveSendTarget({ threadId: activeThreadId, projectPath })
-        await sendMessage({
-          threadId: activeThreadId,
-          prompt: path,
-          entry: 'skill-fire',
-          activeWorkspaceId,
-          projectPath,
-          agentAccessMode: accessMode,
-          ...agentSelectionPayload,
-        })
-      } catch (e) {
-        setComposerError(formatComposerError(e))
-        console.error(e)
-      } finally {
-        setSending(false)
-      }
-    })()
+    void sendResolvedPrompt({
+      promptText: path,
+      entry: 'skill-fire',
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingSkillFire, threadId, sending, busy, onEnsureThread, projectPath, accessMode])
 
@@ -886,29 +940,10 @@ export function Chat({
     if (!pendingCommandFire || (!threadId && !onEnsureThread) || sending || busy) return
     const path = pendingCommandFire
     onPendingCommandFireHandled?.()
-    setSending(true)
-    void (async () => {
-      try {
-        setComposerError(null)
-        const activeThreadId = await ensureActiveThread()
-        if (!activeThreadId) return
-        setActiveSendTarget({ threadId: activeThreadId, projectPath })
-        await sendMessage({
-          threadId: activeThreadId,
-          prompt: path,
-          entry: 'command-fire',
-          activeWorkspaceId,
-          projectPath,
-          agentAccessMode: accessMode,
-          ...agentSelectionPayload,
-        })
-      } catch (e) {
-        setComposerError(formatComposerError(e))
-        console.error(e)
-      } finally {
-        setSending(false)
-      }
-    })()
+    void sendResolvedPrompt({
+      promptText: path,
+      entry: 'command-fire',
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCommandFire, threadId, sending, busy, onEnsureThread, projectPath, accessMode])
 
@@ -1071,7 +1106,7 @@ export function Chat({
               icon={projectPath ? Folder : FolderX}
             />
           )}
-          {busy && (
+          {(sending || busy) && (
             <span className="flex items-center gap-1.5 rounded-full border border-rule bg-elevated px-2.5 py-1 text-[10.5px] font-medium text-ink-faint shadow-xs">
               <span className="size-1.5 rounded-full bg-success animate-pulse" />
               thinking
@@ -1096,9 +1131,9 @@ export function Chat({
               primary ? 'max-w-[820px] gap-5' : 'gap-4'
             }`}
           >
-            {messagesLoadingFirstPage ? (
+            {messagesLoadingFirstPage && visibleOptimisticTurns.length === 0 ? (
               <ChatMessagesSkeleton primary={primary} />
-            ) : uiMessages.length === 0 ? (
+            ) : uiMessages.length === 0 && visibleOptimisticTurns.length === 0 ? (
               <EmptyChatState
                 primary={primary}
                 onSelectPrompt={selectStarterPrompt}
@@ -1109,6 +1144,13 @@ export function Chat({
                 key={m.key}
                 message={m}
                 previousMessage={uiMessages[index - 1] ?? null}
+                primary={primary}
+              />
+            ))}
+            {visibleOptimisticTurns.map((turn) => (
+              <OptimisticTurnView
+                key={turn.id}
+                turn={turn}
                 primary={primary}
               />
             ))}
@@ -1409,7 +1451,7 @@ export function Chat({
               primary={primary}
               busy={busy}
               sending={sending}
-              messageCount={uiMessages.length}
+              messageCount={uiMessages.length + visibleOptimisticTurns.length}
               contextUsage={contextUsage}
               projectPath={projectPath}
               skillCount={skills.length}
@@ -2604,12 +2646,68 @@ function EmptyChatState({
   )
 }
 
-function messageText(message: UIMessage): string {
-  return message.parts
-    .filter((p) => p.type === 'text')
-    .map((p) => (p as { text?: string }).text ?? '')
-    .join('')
-}
+const OptimisticTurnView = memo(function OptimisticTurnView({
+  turn,
+  primary,
+}: {
+  turn: OptimisticChatTurn
+  primary: boolean
+}) {
+  const timestampLabel = formatChatTimestamp(turn.createdAt)
+  return (
+    <>
+      <div className="group/message flex w-full justify-end">
+        <div className={`min-w-0 ${primary ? 'max-w-[76%]' : 'max-w-[88%]'}`}>
+          <div className="mb-1.5 flex items-center justify-end gap-1.5 px-1">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+              you
+            </span>
+            {timestampLabel && (
+              <time
+                dateTime={new Date(turn.createdAt).toISOString()}
+                className="text-[10px] font-medium text-ink-faint"
+                title={new Date(turn.createdAt).toLocaleString()}
+              >
+                {timestampLabel}
+              </time>
+            )}
+          </div>
+          <div className="rounded-lg border border-rule bg-elevated px-3.5 py-2.5 shadow-xs">
+            <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
+              {turn.displayText}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="flex w-full justify-start" aria-live="polite">
+        <div className="min-w-0 max-w-full flex-1">
+          <div className="mb-1.5 flex items-center gap-1.5 px-1">
+            <DohcMark size={13} />
+            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
+              dohc
+            </span>
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-ink-faint">
+              <span className="size-1 rounded-full bg-success animate-pulse" />
+              thinking
+            </span>
+          </div>
+          <div
+            className={
+              primary
+                ? 'rounded-lg border border-rule bg-surface/72 px-4 py-3 shadow-xs'
+                : 'rounded-lg border border-rule bg-elevated/50 px-3 py-2.5'
+            }
+          >
+            <span className="inline-flex items-center gap-2 text-[12.5px] font-medium text-ink-faint">
+              <span className="size-1.5 rounded-full bg-success animate-pulse" />
+              thinking
+            </span>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+})
 
 const MessageView = memo(function MessageView({
   message,
@@ -2624,7 +2722,7 @@ const MessageView = memo(function MessageView({
   const now = useNow(streaming)
   if (message.role === 'system') return null
   const isUser = message.role === 'user'
-  const text = messageText(message)
+  const text = uiMessageText(message)
   const timestamp = (message as { _creationTime?: number })._creationTime
   const timestampLabel = formatChatTimestamp(timestamp)
   const toolCalls = message.parts.filter(

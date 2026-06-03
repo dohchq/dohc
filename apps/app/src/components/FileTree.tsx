@@ -53,6 +53,13 @@ import {
 import { navigateTree, type FlatRow } from '../lib/file-tree-nav'
 import { colorVarFor } from '../lib/folderTokens'
 import { planDrop, type DragSource } from '../lib/file-tree-dnd'
+import {
+  applyPendingTreeMoves,
+  parentDir,
+  pendingTreeMoveSettled,
+  projectTreePath,
+  type PendingTreeMove,
+} from '../lib/file-tree-optimistic'
 import { useDialogFocus } from '../lib/dialog-focus'
 
 type Props = {
@@ -270,7 +277,31 @@ export function FileTree({
     [sharedByMeFileIds],
   )
 
-  const tree = useMemo(() => buildTree(files, folders), [files, folders])
+  const pendingMoveSeqRef = useRef(0)
+  const [pendingMoves, setPendingMoves] = useState<PendingTreeMove[]>([])
+  const displayActivePath = useMemo(
+    () => projectTreePath(activePath, pendingMoves),
+    [activePath, pendingMoves],
+  )
+  const { files: displayFiles, folders: displayFolders } = useMemo(
+    () => applyPendingTreeMoves(files, folders, pendingMoves),
+    [files, folders, pendingMoves],
+  )
+  const tree = useMemo(
+    () => buildTree(displayFiles, displayFolders),
+    [displayFiles, displayFolders],
+  )
+
+  useEffect(() => {
+    if (pendingMoves.length === 0) return
+    setPendingMoves((moves) => {
+      const next = moves.filter(
+        (move) => !pendingTreeMoveSettled(move, files, folders),
+      )
+      return next.length === moves.length ? moves : next
+    })
+  }, [files, folders, pendingMoves.length])
+
   // Collapsible-section open state, persisted per section (mirrors the
   // chat-open localStorage pattern in _app.tsx). Personal + Shared
   // both default open.
@@ -285,13 +316,13 @@ export function FileTree({
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   useEffect(() => {
-    if (!activePath) return
+    if (!displayActivePath) return
     setExpanded((prev) => {
       const next = new Set(prev)
-      for (const a of ancestors(activePath)) next.add(a)
+      for (const a of ancestors(displayActivePath)) next.add(a)
       return next
     })
-  }, [activePath])
+  }, [displayActivePath])
 
   const toggle = useCallback((key: string) => {
     setExpanded((prev) => {
@@ -371,12 +402,12 @@ export function FileTree({
     const visible = visibleRowPaths
     if (focusedPath === null || !visible.has(focusedPath)) {
       const next =
-        activePath && visible.has(activePath)
-          ? activePath
+        displayActivePath && visible.has(displayActivePath)
+          ? displayActivePath
           : flatRows[0]!.fullPath
       setFocusedPath(next)
     }
-  }, [focusedPath, flatRows, activePath, visibleRowPaths])
+  }, [focusedPath, flatRows, displayActivePath, visibleRowPaths])
 
   // Move DOM focus onto the focused row so the screen reader announces
   // it — but ONLY when a keyboard arrow-nav requested it (wantDomFocus).
@@ -423,18 +454,18 @@ export function FileTree({
   // optimistic reconciliation. These avoid nested scans as workspaces grow.
   const fileByPath = useMemo(() => {
     const m = new Map<string, FileRow>()
-    for (const f of files) m.set(f.path, f)
+    for (const f of displayFiles) m.set(f.path, f)
     return m
-  }, [files])
+  }, [displayFiles])
 
   const folderInputByPath = useMemo(() => {
     const m = new Map<string, FolderInput>()
-    for (const f of folders) {
+    for (const f of displayFolders) {
       if (typeof f === 'string') m.set(f, f)
       else m.set(f.path, f)
     }
     return m
-  }, [folders])
+  }, [displayFolders])
 
   // file-org-v1 D4.5 — folder-star lookup. Built from the rich
   // FolderInput shape; legacy string entries map to starred=false.
@@ -572,20 +603,43 @@ export function FileTree({
       }
       const action = planDrop(source, { parentDir: targetParentDir })
       if (action.kind === 'noop') return
+      if (action.kind === 'move-file' && !onMoveFile) return
+      if (action.kind === 'move-folder' && !onMoveFolder) return
+      const pendingMove: PendingTreeMove = {
+        id: `move-${Date.now()}-${pendingMoveSeqRef.current++}`,
+        kind: action.kind === 'move-file' ? 'file' : 'folder',
+        fromPath: action.fromPath,
+        toPath: action.toPath,
+      }
+      const targetFolder = parentDir(action.toPath)
+      setPendingMoves((moves) => [...moves, pendingMove])
+      setFocusedPath(action.toPath)
+      setOpenPersonal(true)
+      if (targetFolder) {
+        setExpanded((prev) => {
+          const next = new Set(prev)
+          next.add(targetFolder)
+          return next
+        })
+      }
       if (action.kind === 'move-file') {
-        if (!onMoveFile) return
         try {
-          await onMoveFile(action.fromPath, action.toPath)
+          await onMoveFile!(action.fromPath, action.toPath)
         } catch {
+          setPendingMoves((moves) =>
+            moves.filter((move) => move.id !== pendingMove.id),
+          )
           // Error already surfaced via the app-level notice.
         }
         return
       }
       // move-folder
-      if (!onMoveFolder) return
       try {
-        await onMoveFolder(action.fromPath, action.toPath)
+        await onMoveFolder!(action.fromPath, action.toPath)
       } catch {
+        setPendingMoves((moves) =>
+          moves.filter((move) => move.id !== pendingMove.id),
+        )
         // same: surfaced upstream
       }
     },
