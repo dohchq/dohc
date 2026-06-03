@@ -222,7 +222,10 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
 
   it('D4.6 — commitPending prepends targetDir to the typed name (escape-hatch when input contains slash)', () => {
     expect(SRC).toMatch(
-      /const\s+path\s*=\s*name\.includes\(['"]\/['"]\)\s*\|\|\s*targetDir\s*===\s*['"]['"][\s\S]*?\$\{targetDir\}\/\$\{name\}/,
+      /const\s+rawPath\s*=\s*name\.includes\(['"]\/['"]\)\s*\|\|\s*targetDir\s*===\s*['"]['"][\s\S]*?\$\{targetDir\}\/\$\{name\}/,
+    )
+    expect(SRC).toMatch(
+      /const\s+path\s*=\s*normalizeTreeInputPath\(pending,\s*rawPath\)/,
     )
   })
 

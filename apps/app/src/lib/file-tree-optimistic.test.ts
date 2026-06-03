@@ -4,6 +4,7 @@ import {
   applyPendingTreeMoves,
   pendingTreeMoveSettled,
   projectTreePath,
+  type PendingTreeChange,
   type PendingTreeMove,
 } from './file-tree-optimistic'
 
@@ -89,6 +90,67 @@ describe('optimistic file tree moves', () => {
       pendingTreeMoveSettled(
         move,
         [{ ...files[0]!, path: 'projects/alpha/note.md' }],
+        folders,
+      ),
+    ).toBe(true)
+  })
+
+  it('projects pending creates into the rendered tree rows', () => {
+    const pending: PendingTreeChange[] = [
+      { id: 'create-file', kind: 'create-file', path: 'ideas/new.md' },
+      { id: 'create-folder', kind: 'create-folder', path: 'ideas' },
+    ]
+
+    const projected = applyPendingTreeMoves(files, folders, pending)
+
+    expect(projected.files.map((file) => file.path)).toContain('ideas/new.md')
+    expect(projected.files.find((file) => file.path === 'ideas/new.md')).toEqual(
+      expect.objectContaining({
+        _id: 'pending:create-file',
+        title: 'new',
+        source: 'user',
+      }),
+    )
+    expect(projected.folders).toContain('ideas')
+  })
+
+  it('projects pending deletes and clears active paths inside them', () => {
+    const pending: PendingTreeChange[] = [
+      { id: 'delete-folder', kind: 'delete-folder', path: 'projects/alpha' },
+    ]
+
+    const projected = applyPendingTreeMoves(files, folders, pending)
+
+    expect(projected.files.map((file) => file.path)).toEqual(['inbox/note.md'])
+    expect(projected.folders).toEqual(['inbox'])
+    expect(projectTreePath('projects/alpha/spec.md', pending)).toBeNull()
+  })
+
+  it('keeps pending creates and deletes until the live projection catches up', () => {
+    const createFile: PendingTreeChange = {
+      id: 'create-file',
+      kind: 'create-file',
+      path: 'ideas/new.md',
+    }
+    const deleteFile: PendingTreeChange = {
+      id: 'delete-file',
+      kind: 'delete-file',
+      path: 'inbox/note.md',
+    }
+
+    expect(pendingTreeMoveSettled(createFile, files, folders)).toBe(false)
+    expect(
+      pendingTreeMoveSettled(
+        createFile,
+        [{ ...files[0]!, path: 'ideas/new.md' }],
+        folders,
+      ),
+    ).toBe(true)
+    expect(pendingTreeMoveSettled(deleteFile, files, folders)).toBe(false)
+    expect(
+      pendingTreeMoveSettled(
+        deleteFile,
+        files.filter((file) => file.path !== 'inbox/note.md'),
         folders,
       ),
     ).toBe(true)

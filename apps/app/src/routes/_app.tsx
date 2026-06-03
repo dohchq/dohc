@@ -64,6 +64,7 @@ import {
 import { type AppView as View, viewFromPathname } from '@/lib/appViews'
 import type { AgentAccessMode } from '@/lib/agentAccess'
 import { ChatBusyProvider } from '@/lib/chat-busy'
+import { pathInsideFolder, projectTreePath } from '@/lib/file-tree-optimistic'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { useDialogFocus } from '../lib/dialog-focus'
@@ -1225,11 +1226,19 @@ function App() {
   }, [urlView, urlFileId, urlShareId])
 
   async function createAtom(path: string, body = '') {
-    await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
     // openAtom shows it immediately (optimistic); the bridge effect
     // writes the URL once the new file lands in `files` with a fileId.
+    const previousPath = activePath
     openAtom(path)
     setEnterEdit(true)
+    try {
+      await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+    } catch (e) {
+      if (previousPath) openAtom(previousPath, { replace: true })
+      else clearOpenAtom({ replace: true })
+      notice.error(`Couldn't create page`, (e as Error).message)
+      throw e
+    }
   }
 
   async function createPageWithName(name: string) {
@@ -1326,6 +1335,7 @@ function App() {
     // D4.7c — flush any pending autosave for the open atom so the
     // wikilink cascade sees the latest body.
     await pendingSaveRef.current?.()
+    if (activePath === fromPath) setOptimisticPath(toPath)
     try {
       const result = await moveAtom({ fromPath, toPath, activeWorkspaceId })
       // D4.30 — no URL change: the open atom's fileId is stable
@@ -1338,6 +1348,7 @@ function App() {
         )
       }
     } catch (e) {
+      if (activePath === fromPath) setOptimisticPath(fromPath)
       notice.error(`Couldn't move file`, (e as Error).message)
       throw e
     }
@@ -1345,21 +1356,33 @@ function App() {
   async function moveFolderByDrop(fromPath: string, toPath: string) {
     // D4.7c — flush autosave before the cascade runs.
     await pendingSaveRef.current?.()
+    const activeTarget = projectTreePath(activePath, [
+      { id: 'active-folder-move', kind: 'folder', fromPath, toPath },
+    ])
+    if (activeTarget) setOptimisticPath(activeTarget)
     try {
       await moveFolder({ fromPath, toPath, activeWorkspaceId })
       // D4.8 — link-cascade alert removed per user feedback;
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
     } catch (e) {
+      if (activeTarget && activePath) setOptimisticPath(activePath)
       notice.error(`Couldn't move folder`, (e as Error).message)
       throw e
     }
   }
 
   async function deleteFileByPath(path: string) {
-    await removeAtom({ path, activeWorkspaceId })
+    const restorePath = activePath
     // D4.30 — if we just deleted the open atom, clear the URL.
     if (activePath === path) clearOpenAtom({ replace: true })
+    try {
+      await removeAtom({ path, activeWorkspaceId })
+    } catch (e) {
+      if (restorePath === path) openAtom(restorePath, { replace: true })
+      notice.error(`Couldn't delete file`, (e as Error).message)
+      throw e
+    }
   }
 
   async function renameFileByPath(path: string, next: string) {
@@ -1369,7 +1392,14 @@ function App() {
     if (target === path) return
     // D4.7c — flush autosave so the cascade reads the latest body.
     await pendingSaveRef.current?.()
-    await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+    if (activePath === path) setOptimisticPath(target)
+    try {
+      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+    } catch (e) {
+      if (activePath === path) setOptimisticPath(path)
+      notice.error(`Couldn't rename file`, (e as Error).message)
+      throw e
+    }
     // D4.30 — no URL change; fileId is stable, activePath
     // re-derives to `target` automatically.
     // D4.8 — link-cascade notice omitted; the rename row is the active surface.
@@ -1380,7 +1410,22 @@ function App() {
     if (!target || target === path) return
     // D4.7c — flush autosave before cascade.
     await pendingSaveRef.current?.()
-    await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
+    const activeTarget = projectTreePath(activePath, [
+      {
+        id: 'active-folder-rename',
+        kind: 'folder',
+        fromPath: path,
+        toPath: target,
+      },
+    ])
+    if (activeTarget) setOptimisticPath(activeTarget)
+    try {
+      await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
+    } catch (e) {
+      if (activeTarget && activePath) setOptimisticPath(activePath)
+      notice.error(`Couldn't rename folder`, (e as Error).message)
+      throw e
+    }
     // D4.30 — no URL change: every moved atom keeps its fileId
     // (folders.move reconciles the index), so the open atom's
     // `activePath` re-derives to its new path automatically.
@@ -1388,23 +1433,24 @@ function App() {
   }
 
   async function deleteFolderByPath(path: string) {
+    const restorePath = activePath
+    if (activePath && pathInsideFolder(activePath, path)) {
+      clearOpenAtom({ replace: true })
+    }
     try {
       const { atomCount, folderCount } = await removeFolder({
         path,
         activeWorkspaceId,
       })
       // D4.30 — if the open atom was inside the deleted folder, clear the URL.
-      if (
-        activePath &&
-        (activePath === path || activePath.startsWith(`${path}/`))
-      ) {
-        clearOpenAtom({ replace: true })
-      }
       notice.success(
         'Deleted folder',
         `${atomCount} atom${atomCount === 1 ? '' : 's'}, ${folderCount} folder row${folderCount === 1 ? '' : 's'} removed.`,
       )
     } catch (e) {
+      if (restorePath && pathInsideFolder(restorePath, path)) {
+        openAtom(restorePath, { replace: true })
+      }
       throw e
     }
   }
