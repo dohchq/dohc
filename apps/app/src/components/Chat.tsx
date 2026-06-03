@@ -65,6 +65,7 @@ import {
   type ToolActivityPart,
 } from '../lib/chatActivity'
 import {
+  latestUserMessageTimestamp,
   optimisticTurnHasServerEcho,
   uiMessageText,
   type OptimisticChatTurn,
@@ -651,6 +652,8 @@ export function Chat({
       serverText: string
     }) => {
       const id = `local-${Date.now()}-${optimisticTurnSeqRef.current++}`
+      const createdAt = Date.now()
+      const serverEchoAfter = latestUserMessageTimestamp(uiMessages)
       stickToBottomRef.current = true
       setOptimisticTurns((turns) => [
         ...turns,
@@ -658,12 +661,13 @@ export function Chat({
           id,
           displayText,
           serverText,
-          createdAt: Date.now(),
+          createdAt,
+          serverEchoAfter,
         },
       ])
       return id
     },
-    [],
+    [uiMessages],
   )
 
   const removeOptimisticTurn = useCallback((id: string) => {

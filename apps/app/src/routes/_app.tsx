@@ -1359,14 +1359,15 @@ function App() {
     const activeTarget = projectTreePath(activePath, [
       { id: 'active-folder-move', kind: 'folder', fromPath, toPath },
     ])
-    if (activeTarget) setOptimisticPath(activeTarget)
+    const movedActivePath = activeTarget !== null && activeTarget !== activePath
+    if (movedActivePath) setOptimisticPath(activeTarget)
     try {
       await moveFolder({ fromPath, toPath, activeWorkspaceId })
       // D4.8 — link-cascade alert removed per user feedback;
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
     } catch (e) {
-      if (activeTarget && activePath) setOptimisticPath(activePath)
+      if (movedActivePath) setOptimisticPath(activePath)
       notice.error(`Couldn't move folder`, (e as Error).message)
       throw e
     }
@@ -1418,11 +1419,13 @@ function App() {
         toPath: target,
       },
     ])
-    if (activeTarget) setOptimisticPath(activeTarget)
+    const renamedActivePath =
+      activeTarget !== null && activeTarget !== activePath
+    if (renamedActivePath) setOptimisticPath(activeTarget)
     try {
       await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
     } catch (e) {
-      if (activeTarget && activePath) setOptimisticPath(activePath)
+      if (renamedActivePath) setOptimisticPath(activePath)
       notice.error(`Couldn't rename folder`, (e as Error).message)
       throw e
     }

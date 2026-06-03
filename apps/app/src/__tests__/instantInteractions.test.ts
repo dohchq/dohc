@@ -22,7 +22,7 @@ describe('instant interaction guards', () => {
       /if \(activePath === fromPath\) setOptimisticPath\(toPath\)[\s\S]*?await moveAtom/,
     )
     expect(APP).toMatch(
-      /const activeTarget = projectTreePath\([\s\S]*?if \(activeTarget\) setOptimisticPath\(activeTarget\)[\s\S]*?await moveFolder/,
+      /const activeTarget = projectTreePath\([\s\S]*?activeTarget !== null && activeTarget !== activePath[\s\S]*?setOptimisticPath\(activeTarget\)[\s\S]*?await moveFolder/,
     )
   })
 

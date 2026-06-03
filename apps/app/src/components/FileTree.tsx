@@ -1191,7 +1191,7 @@ export function FileTree({
 	                          key={child.fullPath}
 	                          node={child}
 	                          depth={0}
-                          activePath={displayActivePath}
+	                          activePath={displayActivePath}
 	                          expanded={expanded}
 	                          viewIsAtom={view === 'atom'}
 	                          focusedPath={focusedPath}
@@ -1242,6 +1242,7 @@ export function FileTree({
 	                          handleDrop={handleDrop}
 	                          pendingKind={pending}
 	                          pendingTargetDir={targetDir}
+	                          pendingInitialValue={pendingInitialValue}
 	                          onPendingCommit={commitPending}
 	                          pendingBusy={pendingBusy}
 	                          pendingError={pendingError}
@@ -1514,6 +1515,7 @@ function TreeRowNode({
   handleDrop,
   pendingKind,
   pendingTargetDir,
+  pendingInitialValue,
   onPendingCommit,
   pendingBusy,
   pendingError,
@@ -1563,6 +1565,7 @@ function TreeRowNode({
   // top of the tree container (handled in FileTree, not here).
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
+  pendingInitialValue: string
   onPendingCommit: (value: string) => void | Promise<void>
   pendingBusy: boolean
   pendingError: string | null
@@ -1812,7 +1815,7 @@ function TreeRowNode({
             <PendingRow
               kind={pendingKind}
               indent={8 + (depth + 1) * 14}
-              initialValue=""
+              initialValue={pendingInitialValue}
               onCommit={onPendingCommit}
               busy={pendingBusy}
               error={pendingError}
@@ -1855,6 +1858,7 @@ function TreeRowNode({
               handleDrop={handleDrop}
               pendingKind={pendingKind}
               pendingTargetDir={pendingTargetDir}
+              pendingInitialValue={pendingInitialValue}
               onPendingCommit={onPendingCommit}
               pendingBusy={pendingBusy}
               pendingError={pendingError}
@@ -2012,7 +2016,7 @@ function TreeRowNode({
           <PendingRow
             kind={pendingKind}
             indent={8 + (depth + 1) * 14}
-            initialValue=""
+            initialValue={pendingInitialValue}
             onCommit={onPendingCommit}
             busy={pendingBusy}
             error={pendingError}
@@ -2065,6 +2069,7 @@ function TreeRowNode({
             handleDrop={handleDrop}
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
+            pendingInitialValue={pendingInitialValue}
             onPendingCommit={onPendingCommit}
             pendingBusy={pendingBusy}
             pendingError={pendingError}

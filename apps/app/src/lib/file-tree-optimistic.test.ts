@@ -95,6 +95,27 @@ describe('optimistic file tree moves', () => {
     ).toBe(true)
   })
 
+  it('settles a pending folder move when the destination appears', () => {
+    const move: PendingTreeMove = {
+      id: 'move-2',
+      kind: 'folder',
+      fromPath: 'projects/alpha',
+      toPath: 'archive/alpha',
+    }
+
+    expect(pendingTreeMoveSettled(move, files, folders)).toBe(false)
+    expect(
+      pendingTreeMoveSettled(move, files, [...folders, 'archive/alpha']),
+    ).toBe(true)
+    expect(
+      pendingTreeMoveSettled(
+        move,
+        [{ ...files[1]!, path: 'archive/alpha/spec.md' }],
+        folders,
+      ),
+    ).toBe(true)
+  })
+
   it('projects pending creates into the rendered tree rows', () => {
     const pending: PendingTreeChange[] = [
       { id: 'create-file', kind: 'create-file', path: 'ideas/new.md' },

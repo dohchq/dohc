@@ -5,6 +5,7 @@ export type OptimisticChatTurn = {
   displayText: string
   serverText: string
   createdAt: number
+  serverEchoAfter: number
 }
 
 export function uiMessageText(message: UIMessage): string {
@@ -24,6 +25,26 @@ export function optimisticTurnHasServerEcho(
   if (!target) return false
   return messages.some(
     (message) =>
-      message.role === 'user' && uiMessageText(message).trim() === target,
+      message.role === 'user' &&
+      uiMessageText(message).trim() === target &&
+      uiMessageTimestamp(message) > turn.serverEchoAfter,
   )
+}
+
+export function uiMessageTimestamp(message: UIMessage): number {
+  const creationTime = (message as { _creationTime?: unknown })._creationTime
+  if (typeof creationTime === 'number') return creationTime
+  const createdAt = (message as { createdAt?: unknown }).createdAt
+  return typeof createdAt === 'number' ? createdAt : 0
+}
+
+export function latestUserMessageTimestamp(
+  messages: ReadonlyArray<UIMessage>,
+): number {
+  let latest = 0
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    latest = Math.max(latest, uiMessageTimestamp(message))
+  }
+  return latest
 }
