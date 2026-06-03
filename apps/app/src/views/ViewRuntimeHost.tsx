@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type Ref,
 } from 'react'
 import { useConvex } from 'convex/react'
 import { api } from '../../convex/_generated/api'
@@ -22,7 +23,7 @@ import {
 
 export const VIEW_START_TIMEOUT_MS = 2500
 export const VIEW_ACTION_EVENT = 'dohc:view-action'
-export const VIEW_ACTION_DIALOG_FOCUS_SELECTOR = [
+const VIEW_ACTION_DIALOG_FOCUS_SELECTOR = [
   'button:not([disabled])',
   '[href]',
   'input:not([disabled])',
@@ -74,10 +75,92 @@ export function summarizeViewActionInput(input: Record<string, unknown> | undefi
   }
 }
 
+export function nextViewActionDialogFocusIndex({
+  activeIndex,
+  itemCount,
+  shiftKey,
+}: {
+  activeIndex: number
+  itemCount: number
+  shiftKey: boolean
+}): number | null {
+  if (itemCount <= 0) return null
+  if (shiftKey) return activeIndex <= 0 ? itemCount - 1 : null
+  return activeIndex < 0 || activeIndex >= itemCount - 1 ? 0 : null
+}
+
 function focusableDialogElements(container: HTMLElement): HTMLElement[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(VIEW_ACTION_DIALOG_FOCUS_SELECTOR),
   ).filter((element) => !element.hasAttribute('disabled'))
+}
+
+export function ViewActionConfirmationDialog({
+  title,
+  pendingAction,
+  titleId,
+  descriptionId,
+  confirmButtonRef,
+  onCancel,
+  onConfirm,
+  onKeyDown,
+}: {
+  title: string
+  pendingAction: PendingViewActionState
+  titleId: string
+  descriptionId: string
+  confirmButtonRef?: Ref<HTMLButtonElement>
+  onCancel: () => void
+  onConfirm: () => void
+  onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void
+}) {
+  return (
+    <div
+      data-view-action-scrim="true"
+      onKeyDown={onKeyDown}
+      className="absolute inset-0 z-10 flex items-start justify-center bg-paper/70 px-4 pt-4"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        className="w-full max-w-lg rounded-lg border border-rule bg-surface px-3 py-3 text-[12px] text-ink-dim shadow-sm"
+      >
+        <p id={titleId} className="font-medium text-ink-strong">
+          Run view action?
+        </p>
+        <p id={descriptionId} className="mt-1">
+          {title} wants to run <span className="font-medium text-ink-strong">{pendingAction.name}</span>.
+        </p>
+        <p
+          tabIndex={0}
+          className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]"
+        >
+          {pendingAction.inputSummary}
+        </p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pendingAction.status === 'running'}
+            className="rounded border border-rule px-2 py-1 text-ink-strong disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            ref={confirmButtonRef}
+            type="button"
+            onClick={onConfirm}
+            disabled={pendingAction.status === 'running'}
+            className="rounded bg-ink-strong px-2 py-1 text-paper disabled:opacity-50"
+          >
+            {pendingAction.status === 'running' ? 'Running...' : 'Confirm'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function ViewRuntimeHost({
@@ -109,7 +192,6 @@ export function ViewRuntimeHost({
   )
   const [timedOut, setTimedOut] = useState(false)
   const pendingActionRef = useRef<PendingViewAction | null>(null)
-  const actionDialogRef = useRef<HTMLDivElement | null>(null)
   const confirmActionButtonRef = useRef<HTMLButtonElement | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingViewActionState | null>(null)
@@ -264,20 +346,17 @@ export function ViewRuntimeHost({
       }
 
       const first = elements[0]!
-      const last = elements[elements.length - 1]!
       const active = document.activeElement
-
-      if (event.shiftKey) {
-        if (active === first || !event.currentTarget.contains(active)) {
-          event.preventDefault()
-          last.focus()
-        }
-        return
-      }
-
-      if (active === last) {
+      const activeIndex = active instanceof HTMLElement ? elements.indexOf(active) : -1
+      const targetIndex = nextViewActionDialogFocusIndex({
+        activeIndex,
+        itemCount: elements.length,
+        shiftKey: event.shiftKey,
+      })
+      if (targetIndex !== null) {
         event.preventDefault()
-        first.focus()
+        const target = elements[targetIndex] ?? first
+        target.focus()
       }
     },
     [cancelPendingAction, pendingAction?.status],
@@ -435,49 +514,18 @@ export function ViewRuntimeHost({
         </div>
       )}
       {pendingAction && (
-        <div
-          ref={actionDialogRef}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={actionDialogTitleId}
-          aria-describedby={actionDialogDescriptionId}
+        <ViewActionConfirmationDialog
+          title={title}
+          pendingAction={pendingAction}
+          titleId={actionDialogTitleId}
+          descriptionId={actionDialogDescriptionId}
+          confirmButtonRef={confirmActionButtonRef}
+          onCancel={cancelPendingAction}
+          onConfirm={() => {
+            void confirmPendingAction()
+          }}
           onKeyDown={onPendingActionKeyDown}
-          className="absolute inset-x-4 top-4 rounded-lg border border-rule bg-surface px-3 py-3 text-[12px] text-ink-dim shadow-sm"
-        >
-          <p id={actionDialogTitleId} className="font-medium text-ink-strong">
-            Run view action?
-          </p>
-          <p id={actionDialogDescriptionId} className="mt-1">
-            {title} wants to run <span className="font-medium text-ink-strong">{pendingAction.name}</span>.
-          </p>
-          <p
-            tabIndex={0}
-            className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]"
-          >
-            {pendingAction.inputSummary}
-          </p>
-          <div className="mt-3 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={cancelPendingAction}
-              disabled={pendingAction.status === 'running'}
-              className="rounded border border-rule px-2 py-1 text-ink-strong disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              ref={confirmActionButtonRef}
-              type="button"
-              onClick={() => {
-                void confirmPendingAction()
-              }}
-              disabled={pendingAction.status === 'running'}
-              className="rounded bg-ink-strong px-2 py-1 text-paper disabled:opacity-50"
-            >
-              {pendingAction.status === 'running' ? 'Running...' : 'Confirm'}
-            </button>
-          </div>
-        </div>
+        />
       )}
     </div>
   )

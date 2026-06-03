@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   buildViewBundle,
@@ -8,10 +9,11 @@ import {
 } from '../views/buildViewBundle.server'
 import {
   canWriteRequestedPath,
+  nextViewActionDialogFocusIndex,
   summarizeViewActionInput,
+  ViewActionConfirmationDialog,
   viewActionDetail,
   viewWorkspaceArgs,
-  VIEW_ACTION_DIALOG_FOCUS_SELECTOR,
   VIEW_ACTION_EVENT,
   VIEW_START_TIMEOUT_MS,
 } from '../views/ViewRuntimeHost'
@@ -99,21 +101,56 @@ describe('folder views performance and safety guards', () => {
     expect(summarizeViewActionInput(undefined)).toBe('No input')
     expect(summarizeViewActionInput({ source: 'button' })).toBe('{"source":"button"}')
     expect(summarizeViewActionInput({ value: 'x'.repeat(220) })).toHaveLength(180)
-    expect(VIEW_ACTION_DIALOG_FOCUS_SELECTOR).toContain('button:not([disabled])')
-    expect(VIEW_ACTION_DIALOG_FOCUS_SELECTOR).toContain('[tabindex]')
   })
 
-  it('keeps the view action confirmation overlay modal for keyboard users', () => {
-    const source = readFileSync(
-      new URL('../views/ViewRuntimeHost.tsx', import.meta.url),
-      'utf8',
+  it('renders the view action confirmation as a modal scrim', () => {
+    const html = renderToStaticMarkup(
+      createElement(ViewActionConfirmationDialog, {
+        title: 'Home',
+        pendingAction: {
+          id: 'view-action-1',
+          name: 'setStatus',
+          inputSummary: '{"value":"done"}',
+          status: 'confirming',
+        },
+        titleId: 'action-title',
+        descriptionId: 'action-description',
+        onCancel: () => {},
+        onConfirm: () => {},
+        onKeyDown: () => {},
+      }),
     )
 
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-modal="true"')
-    expect(source).toContain('onKeyDown={onPendingActionKeyDown}')
-    expect(source).toContain('confirmActionButtonRef.current?.focus()')
-    expect(source).toContain('previous.focus()')
+    expect(html).toContain('data-view-action-scrim="true"')
+    expect(html).toContain('role="dialog"')
+    expect(html).toContain('aria-modal="true"')
+    expect(html).toContain('aria-labelledby="action-title"')
+    expect(html).toContain('aria-describedby="action-description"')
+    expect(html).toContain('setStatus')
+    expect(html).toContain('{&quot;value&quot;:&quot;done&quot;}')
+  })
+
+  it('wraps focus inside the view action dialog', () => {
+    expect(nextViewActionDialogFocusIndex({
+      activeIndex: 2,
+      itemCount: 3,
+      shiftKey: false,
+    })).toBe(0)
+    expect(nextViewActionDialogFocusIndex({
+      activeIndex: 0,
+      itemCount: 3,
+      shiftKey: true,
+    })).toBe(2)
+    expect(nextViewActionDialogFocusIndex({
+      activeIndex: -1,
+      itemCount: 3,
+      shiftKey: false,
+    })).toBe(0)
+    expect(nextViewActionDialogFocusIndex({
+      activeIndex: 1,
+      itemCount: 3,
+      shiftKey: false,
+    })).toBeNull()
   })
 
   it('omits personal workspace args instead of sending explicit undefined', () => {
