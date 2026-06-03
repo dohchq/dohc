@@ -145,9 +145,21 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('Do not create a view just because the user asked for "help"')
   })
 
+  it('requires a plan-before-build approval gate for custom workspace systems', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('PLAN BEFORE BUILD FOR CUSTOM SYSTEMS')
+    expect(personal).toContain('propose a build plan and wait for explicit user approval')
+    expect(personal).toContain('before creating a custom workspace system')
+    expect(personal).toContain('multiple markdown atoms')
+    expect(personal).toContain('entities, html atoms, `.views`, skills, or commands')
+    expect(personal).toContain('objective, proposed files/entities/views, medium rationale, workflow loop, run note')
+    expect(personal).toContain('Build this?')
+    expect(personal).toContain('Tiny single-note actions may proceed without this gate')
+  })
+
   it('teaches post-intake builds to become coherent systems, not page piles', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
-    expect(personal).toContain('After intake, build a small coherent system, not a pile of pages')
+    expect(personal).toContain('After user approval, build a small coherent system, not a pile of pages')
     expect(personal).toContain('profile/goals atom')
     expect(personal).toContain('current plan or source-state atom')
     expect(personal).toContain('log template when repetition matters')
@@ -156,6 +168,9 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('where truth lives')
     expect(personal).toContain('what is missing')
     expect(personal).toContain('next action')
+    expect(personal).toContain('finish with a concise handoff')
+    expect(personal).toContain('names the created source paths')
+    expect(personal).toContain('Do not end with only a tool-status sentence')
     expect(personal).toContain('If you create files after intake, the run note is mandatory')
     expect(personal).toContain('A chat summary does not replace the run note')
   })

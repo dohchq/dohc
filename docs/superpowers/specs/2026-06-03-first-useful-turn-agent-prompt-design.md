@@ -15,6 +15,11 @@ turn is not artifact creation. The first useful turn is diagnosis: learn the
 goal, current state, constraints, failure history, and the feedback loop the
 workspace should improve.
 
+After diagnosis, the agent should not immediately build a custom multi-file
+workspace system. It should present a concise proposed build plan, explain why
+each medium is being used, and wait for explicit user approval before creating
+multiple atoms, entities, html atoms, `.views`, skills, or commands.
+
 ## Problem
 
 The current prompt already says "source first, view second" and contains a
@@ -29,6 +34,7 @@ contract for vague asks:
 - how many questions are enough
 - how to decide between markdown atoms, html atoms, custom `.views`, entities,
   skills, and commands
+- when to propose a build plan and wait for approval
 - what "useful" means before files exist
 - what tests should catch generic workspace slop
 
@@ -68,6 +74,8 @@ outcomes, success criteria, tool contracts, and evals:
 - Prevent the agent from creating dashboards or views before it understands the
   user's source data and feedback loop.
 - Teach the agent to choose the right dohc medium for the problem.
+- Make the agent propose and get approval for custom multi-file workspace
+  systems before writing files.
 - Make first-turn output useful even before files exist.
 - Keep the prompt compact enough that it is maintainable and model-portable.
 - Add prompt-contract tests that catch generic pages, fake metrics, arbitrary
@@ -96,13 +104,55 @@ When the user makes a vague workspace-building request, the agent should:
    surface.
 4. Ask 3-5 compact, domain-specific questions before creating files, unless the
    user's prompt already answered enough of them.
-5. Explain what it will build and why once the answers are sufficient.
-6. Build source atoms/entities first, then optional presentation/interface files.
+5. Once the answers are sufficient, propose a build plan and ask for explicit
+   approval before creating a custom system.
+6. After approval, build source atoms/entities first, then optional
+   presentation/interface files.
 7. Hand back the next action the user can do today.
 
 This is a stopping rule: if the agent cannot answer what source data, workflow
 loop, and next user decision the files support, it should not create a
 dashboard, html atom, or custom view yet.
+
+## Plan Before Build Gate
+
+For vague/custom workspace requests, the agent should treat the post-intake
+moment as a design review. It should present a concise plan and wait for the
+user to approve before creating a custom system.
+
+The approval gate applies when the agent would create any of these:
+
+- multiple markdown atoms
+- entities
+- an html atom
+- a `.views/<name>/` app
+- a skill
+- a command
+- any coherent workflow system, such as a training loop, CRM, project cockpit,
+  research base, or operating dashboard
+
+The proposed plan should include:
+
+- objective: what the workspace will help the user do
+- source files/entities: what truth will live where
+- views/interfaces: which html or `.views` surfaces will exist, if any
+- medium rationale: why each medium is the right fit
+- workflow loop: how the user logs, reviews, decides, or acts next
+- run note: where the inspectable setup/run note will live
+
+The agent should end the plan with a direct approval question such as "Build
+this?" or "Want me to create this structure?" It must wait for an explicit user
+approval before calling create tools.
+
+After approval and creation, the final chat handoff must still be useful. It
+should name the created source paths, explain where truth lives, and give one
+next action the user can take today. A custom multi-file build should not end
+with only a tool-status sentence like "wrote X".
+
+Tiny single-note actions may proceed without this ceremony. For example, if the
+user asks "make a note for this meeting" or "save this as a draft", the agent
+can create one markdown atom directly when the request is concrete and low
+risk.
 
 ## Intake Question Shape
 
@@ -151,8 +201,9 @@ Hard rules:
 
 ## Artifact Expectations After Intake
 
-After the user answers intake questions, the agent should build a small coherent
-system, not a pile of pages. A useful build usually includes:
+After the user answers intake questions and approves the proposed plan, the
+agent should build a small coherent system, not a pile of pages. A useful build
+usually includes:
 
 - a goal/profile atom that captures outcome, baseline, constraints, cadence, and
   operating preferences
@@ -167,6 +218,9 @@ system, not a pile of pages. A useful build usually includes:
 
 The agent should keep first builds modest. The point is not to impress with file
 count. The point is to make the user's next real action obvious.
+
+The chat handoff after the build should be as concrete as the files: created
+paths, source-of-truth location, and the user's next action today.
 
 ## Example: Training Routine
 
@@ -189,7 +243,7 @@ Good first turn:
   - How many days/minutes per week can you realistically train?
   - Any equipment limits, injuries, or recovery constraints?
   - What usually makes routines fail for you?
-- after answers, proposes the source structure:
+- after answers, proposes the source structure and waits for approval:
   - `training/profile.md`
   - `training/routine.md`
   - `training/sessions/template.md`
@@ -198,6 +252,7 @@ Good first turn:
     useful
   - optional `training/.views/cockpit/` only if the user wants an interactive
     daily cockpit
+- asks "Build this?" before creating those files
 
 The final handoff should say what to do next today, such as "log today's
 baseline session in `training/sessions/...`" or "answer the missing equipment
@@ -216,6 +271,7 @@ Suggested section:
 - Gives the 3-5 question intake rule.
 - Gives the source/workflow/next-decision stopping rule.
 - Gives the medium-selection matrix or compact equivalent.
+- Gives the plan-before-build approval gate for custom multi-file systems.
 
 The existing `TRACKING / IMPROVEMENT PROJECTS` section should be updated to fit
 this contract, not duplicate it. It should point to the first-useful-turn rules
@@ -251,6 +307,8 @@ Required assertions:
 - vague "help me with X" requests are treated as diagnosis-first
 - agent asks 3-5 domain-specific questions before creating files when context is
   insufficient
+- prompt says to propose a build plan and wait for explicit approval before
+  creating custom multi-file workspace systems
 - prompt says not to create dashboards/views before source data and workflow
   loop are known
 - prompt includes md/html/.views/entities/skills/commands medium-selection rules
