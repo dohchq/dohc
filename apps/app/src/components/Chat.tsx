@@ -67,6 +67,7 @@ import {
 import {
   latestUserMessageTimestamp,
   optimisticTurnHasServerEcho,
+  pendingTurnEchoCountBefore,
   uiMessageText,
   type OptimisticChatTurn,
 } from '../lib/chat-optimistic'
@@ -655,16 +656,24 @@ export function Chat({
       const createdAt = Date.now()
       const serverEchoAfter = latestUserMessageTimestamp(uiMessages)
       stickToBottomRef.current = true
-      setOptimisticTurns((turns) => [
-        ...turns,
-        {
-          id,
-          displayText,
+      setOptimisticTurns((turns) => {
+        const serverEchoCountBefore = pendingTurnEchoCountBefore(
+          turns,
           serverText,
-          createdAt,
           serverEchoAfter,
-        },
-      ])
+        )
+        return [
+          ...turns,
+          {
+            id,
+            displayText,
+            serverText,
+            createdAt,
+            serverEchoAfter,
+            serverEchoCountBefore,
+          },
+        ]
+      })
       return id
     },
     [uiMessages],

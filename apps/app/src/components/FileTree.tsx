@@ -1191,7 +1191,7 @@ export function FileTree({
 	                          key={child.fullPath}
 	                          node={child}
 	                          depth={0}
-	                          activePath={displayActivePath}
+	                          displayActivePath={displayActivePath}
 	                          expanded={expanded}
 	                          viewIsAtom={view === 'atom'}
 	                          focusedPath={focusedPath}
@@ -1485,7 +1485,7 @@ function InlineRenameRow({
 function TreeRowNode({
   node,
   depth,
-  activePath,
+  displayActivePath,
   expanded,
   viewIsAtom,
   focusedPath,
@@ -1524,7 +1524,7 @@ function TreeRowNode({
 }: {
   node: TreeNode
   depth: number
-  activePath: string | null
+  displayActivePath: string | null
   expanded: Set<string>
   viewIsAtom: boolean
   focusedPath: string | null
@@ -1591,7 +1591,7 @@ function TreeRowNode({
   const isTabStop = focusedPath === node.fullPath
 
   if (!isFolder) {
-    const isActive = viewIsAtom && activePath === node.page!.path
+    const isActive = viewIsAtom && displayActivePath === node.page!.path
     const filePath = node.page!.path
     const ContextIcon = contextFileIcon(filePath)
     const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
@@ -1828,7 +1828,7 @@ function TreeRowNode({
               key={c.fullPath}
               node={c}
               depth={depth + 1}
-              activePath={activePath}
+              displayActivePath={displayActivePath}
               expanded={expanded}
               viewIsAtom={viewIsAtom}
               focusedPath={focusedPath}
@@ -2039,7 +2039,7 @@ function TreeRowNode({
             key={c.fullPath}
             node={c}
             depth={depth + 1}
-            activePath={activePath}
+            displayActivePath={displayActivePath}
             expanded={expanded}
             viewIsAtom={viewIsAtom}
             focusedPath={focusedPath}
