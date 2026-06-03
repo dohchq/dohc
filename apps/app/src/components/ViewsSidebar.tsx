@@ -1,4 +1,5 @@
 import { FilePenLine, PanelsTopLeft } from 'lucide-react'
+import { useMemo } from 'react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
@@ -51,7 +52,7 @@ export function ViewsSidebar({
   const activeWorkspaceId = useActiveWorkspaceId()
   const result = useQuery(api.views.list, { activeWorkspaceId })
   const views = result?.views ?? []
-  const groups = groupViews(views)
+  const groups = useMemo(() => groupViews(views), [views])
 
   return (
     <aside className="flex h-screen min-w-0 flex-col border-r border-rule bg-panel">

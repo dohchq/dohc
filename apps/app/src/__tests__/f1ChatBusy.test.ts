@@ -47,11 +47,11 @@ describe('Chat.tsx publishes busy', () => {
     )
   })
 
-  it('writes busy to the context on every change + cleans up on unmount', () => {
-    // The setBusy(busy) + cleanup setBusy(false) pattern. Without the
+  it('writes sending or busy to the context + cleans up on unmount', () => {
+    // The send-state publish + cleanup setBusy(false) pattern. Without the
     // cleanup, closing the chat panel mid-stream would leave the
     // switcher disabled permanently.
-    expect(CHAT).toMatch(/setChatBusy\(busy\)/)
+    expect(CHAT).toMatch(/setChatBusy\(sending\s*\|\|\s*busy\)/)
     expect(CHAT).toMatch(/return\s*\(\)\s*=>\s*setChatBusy\(false\)/)
   })
 })

@@ -356,9 +356,13 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('selectedAgentThreadSnapshot?.threadId === threadId')
     expect(APP).toContain('if (threadId && selectedAgentThreadSnapshot?.threadId === threadId)')
     expect(CHAT).toContain('messagesLoadingFirstPage')
-    expect(CHAT).toContain('messagesLoadingFirstPage ? (')
+    expect(CHAT).toContain(
+      'messagesLoadingFirstPage && visibleOptimisticTurns.length === 0 ? (',
+    )
     expect(CHAT).toContain('<ChatMessagesSkeleton primary={primary} />')
-    expect(CHAT).toContain(': uiMessages.length === 0 ? (')
+    expect(CHAT).toContain(
+      ': uiMessages.length === 0 && visibleOptimisticTurns.length === 0 ? (',
+    )
     expect(CHAT).not.toContain('ChatLoadingState')
   })
 

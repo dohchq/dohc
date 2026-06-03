@@ -220,6 +220,36 @@ describe('CommandPalette entry behavior', () => {
 })
 
 describe('CommandPalette workspace wiring', () => {
+  it('skips workspace queries while the palette is closed', () => {
+    const calls: { name: string; args: unknown }[] = []
+    useActiveWorkspaceIdMock.mockReturnValue('ws_active')
+    useQueryMock.mockImplementation((ref: unknown, args: unknown) => {
+      calls.push({ name: getFunctionName(ref as never), args })
+      return undefined
+    })
+
+    const html = renderToStaticMarkup(
+      createElement(CommandPalette, {
+        open: false,
+        onClose: () => {},
+        onFireSkill: () => {},
+        onFireCommand: () => {},
+        onPromptAgent: () => {},
+        onOpenAtom: () => {},
+        onOpenView: () => {},
+      }),
+    )
+
+    expect(html).toBe('')
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { name: 'skills:list', args: 'skip' },
+        { name: 'skills:listCommands', args: 'skip' },
+        { name: 'views:list', args: 'skip' },
+      ]),
+    )
+  })
+
   it('queries skills and commands in the active workspace', () => {
     const calls: { name: string; args: unknown }[] = []
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')

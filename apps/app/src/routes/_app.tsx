@@ -64,6 +64,7 @@ import {
 import { type AppView as View, viewFromPathname } from '@/lib/appViews'
 import type { AgentAccessMode } from '@/lib/agentAccess'
 import { ChatBusyProvider } from '@/lib/chat-busy'
+import { pathInsideFolder, projectTreePath } from '@/lib/file-tree-optimistic'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { useDialogFocus } from '../lib/dialog-focus'
@@ -323,6 +324,18 @@ function App() {
   const activeWorkspaceId = useActiveWorkspaceId()
   const files = useQuery(api.atoms.list, { activeWorkspaceId })
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
+  const fileByPath = useMemo(() => {
+    const rows = new Map<string, NonNullable<typeof files>[number]>()
+    for (const file of files ?? []) rows.set(file.path, file)
+    return rows
+  }, [files])
+  const fileByFileId = useMemo(() => {
+    const rows = new Map<string, NonNullable<typeof files>[number]>()
+    for (const file of files ?? []) {
+      if (file.fileId) rows.set(file.fileId, file)
+    }
+    return rows
+  }, [files])
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
   const sharedWithMe = useQuery(api.atomShares.listSharedWithMe, {
     activeWorkspaceId,
@@ -441,9 +454,7 @@ function App() {
   // Derived open atom: resolve the URL's fileId → its CURRENT path
   // (rename-proof). The optimistic override wins while set.
   const derivedFromUrl =
-    urlFileId && files
-      ? (files.find((f) => f.fileId === urlFileId)?.path ?? null)
-      : null
+    urlFileId ? (fileByFileId.get(urlFileId)?.path ?? null) : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>(
     () =>
@@ -590,12 +601,19 @@ function App() {
       return { docTitle: title, docEmoji: emoji }
     }
     if (!activePath) return { docTitle: null, docEmoji: null }
-    const f = (files ?? []).find((x) => x.path === activePath)
+    const f = fileByPath.get(activePath)
     return {
       docTitle: (f?.title && f.title.trim()) || leafName(activePath),
       docEmoji: f?.icon ?? null,
     }
-  }, [view, agentDocTitle, urlShareId, sharedAtomForMeta, activePath, files])
+  }, [
+    view,
+    agentDocTitle,
+    urlShareId,
+    sharedAtomForMeta,
+    activePath,
+    fileByPath,
+  ])
   useDocumentMeta({ title: docTitle, emoji: docEmoji })
 
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null)
@@ -1106,7 +1124,7 @@ function App() {
       const path = /\.[a-z0-9]+$/i.test(rawPath) ? rawPath : `${rawPath}.md`
       setView('atom')
       setOptimisticPath(path)
-      const fid = (files ?? []).find((f) => f.path === path)?.fileId
+      const fid = fileByPath.get(path)?.fileId
       if (fid) {
         lastFilesDestinationRef.current = { kind: 'atom', id: fid }
         // R1 — navigate to the new workspace-scoped URL. `me` sentinel
@@ -1119,7 +1137,7 @@ function App() {
         })
       }
     },
-    [files, navigate, activeWorkspaceId],
+    [fileByPath, navigate, activeWorkspaceId],
   )
 
   // Clear the open atom (→ home). Used on delete of the open atom.
@@ -1176,8 +1194,8 @@ function App() {
   // `files` (a just-created file), reflect it in the URL — unless
   // the URL already points there.
   useEffect(() => {
-    if (!optimisticPath || !files) return
-    const fid = files.find((f) => f.path === optimisticPath)?.fileId
+    if (!optimisticPath) return
+    const fid = fileByPath.get(optimisticPath)?.fileId
     if (fid && urlFileId !== fid) {
       lastFilesDestinationRef.current = { kind: 'atom', id: fid }
       // R1 — workspace-scoped URL.
@@ -1187,7 +1205,7 @@ function App() {
         replace: true,
       })
     }
-  }, [optimisticPath, files, urlFileId, navigate, activeWorkspaceId])
+  }, [optimisticPath, fileByPath, urlFileId, navigate, activeWorkspaceId])
 
   // Once the URL→files derivation converges to the optimistic path,
   // drop the override so the URL is the sole source of truth (a
@@ -1208,19 +1226,26 @@ function App() {
   }, [urlView, urlFileId, urlShareId])
 
   async function createAtom(path: string, body = '') {
-    await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
     // openAtom shows it immediately (optimistic); the bridge effect
     // writes the URL once the new file lands in `files` with a fileId.
+    const previousPath = activePath
     openAtom(path)
     setEnterEdit(true)
+    try {
+      await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+    } catch (e) {
+      if (previousPath) openAtom(previousPath, { replace: true })
+      else clearOpenAtom({ replace: true })
+      notice.error(`Couldn't create page`, (e as Error).message)
+      throw e
+    }
   }
 
   async function createPageWithName(name: string) {
     let clean = name.trim().replace(/^\/+/, '')
     if (!clean) return
     if (!/\.[a-z0-9]+$/i.test(clean)) clean += '.md'
-    const filesArr = files ?? []
-    const exists = filesArr.some((f: { path: string }) => f.path === clean)
+    const exists = fileByPath.has(clean)
     if (exists) {
       throw new Error(`Page already exists: ${clean}`)
     }
@@ -1310,6 +1335,7 @@ function App() {
     // D4.7c — flush any pending autosave for the open atom so the
     // wikilink cascade sees the latest body.
     await pendingSaveRef.current?.()
+    if (activePath === fromPath) setOptimisticPath(toPath)
     try {
       const result = await moveAtom({ fromPath, toPath, activeWorkspaceId })
       // D4.30 — no URL change: the open atom's fileId is stable
@@ -1322,6 +1348,7 @@ function App() {
         )
       }
     } catch (e) {
+      if (activePath === fromPath) setOptimisticPath(fromPath)
       notice.error(`Couldn't move file`, (e as Error).message)
       throw e
     }
@@ -1329,21 +1356,34 @@ function App() {
   async function moveFolderByDrop(fromPath: string, toPath: string) {
     // D4.7c — flush autosave before the cascade runs.
     await pendingSaveRef.current?.()
+    const activeTarget = projectTreePath(activePath, [
+      { id: 'active-folder-move', kind: 'folder', fromPath, toPath },
+    ])
+    const movedActivePath = activeTarget !== null && activeTarget !== activePath
+    if (movedActivePath) setOptimisticPath(activeTarget)
     try {
       await moveFolder({ fromPath, toPath, activeWorkspaceId })
       // D4.8 — link-cascade alert removed per user feedback;
       // the rewrite is the kind of background polish that
       // doesn't need a popup confirmation.
     } catch (e) {
+      if (movedActivePath) setOptimisticPath(activePath)
       notice.error(`Couldn't move folder`, (e as Error).message)
       throw e
     }
   }
 
   async function deleteFileByPath(path: string) {
-    await removeAtom({ path, activeWorkspaceId })
+    const restorePath = activePath
     // D4.30 — if we just deleted the open atom, clear the URL.
     if (activePath === path) clearOpenAtom({ replace: true })
+    try {
+      await removeAtom({ path, activeWorkspaceId })
+    } catch (e) {
+      if (restorePath === path) openAtom(restorePath, { replace: true })
+      notice.error(`Couldn't delete file`, (e as Error).message)
+      throw e
+    }
   }
 
   async function renameFileByPath(path: string, next: string) {
@@ -1353,7 +1393,14 @@ function App() {
     if (target === path) return
     // D4.7c — flush autosave so the cascade reads the latest body.
     await pendingSaveRef.current?.()
-    await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+    if (activePath === path) setOptimisticPath(target)
+    try {
+      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+    } catch (e) {
+      if (activePath === path) setOptimisticPath(path)
+      notice.error(`Couldn't rename file`, (e as Error).message)
+      throw e
+    }
     // D4.30 — no URL change; fileId is stable, activePath
     // re-derives to `target` automatically.
     // D4.8 — link-cascade notice omitted; the rename row is the active surface.
@@ -1364,7 +1411,24 @@ function App() {
     if (!target || target === path) return
     // D4.7c — flush autosave before cascade.
     await pendingSaveRef.current?.()
-    await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
+    const activeTarget = projectTreePath(activePath, [
+      {
+        id: 'active-folder-rename',
+        kind: 'folder',
+        fromPath: path,
+        toPath: target,
+      },
+    ])
+    const renamedActivePath =
+      activeTarget !== null && activeTarget !== activePath
+    if (renamedActivePath) setOptimisticPath(activeTarget)
+    try {
+      await moveFolder({ fromPath: path, toPath: target, activeWorkspaceId })
+    } catch (e) {
+      if (renamedActivePath) setOptimisticPath(activePath)
+      notice.error(`Couldn't rename folder`, (e as Error).message)
+      throw e
+    }
     // D4.30 — no URL change: every moved atom keeps its fileId
     // (folders.move reconciles the index), so the open atom's
     // `activePath` re-derives to its new path automatically.
@@ -1372,23 +1436,24 @@ function App() {
   }
 
   async function deleteFolderByPath(path: string) {
+    const restorePath = activePath
+    if (activePath && pathInsideFolder(activePath, path)) {
+      clearOpenAtom({ replace: true })
+    }
     try {
       const { atomCount, folderCount } = await removeFolder({
         path,
         activeWorkspaceId,
       })
       // D4.30 — if the open atom was inside the deleted folder, clear the URL.
-      if (
-        activePath &&
-        (activePath === path || activePath.startsWith(`${path}/`))
-      ) {
-        clearOpenAtom({ replace: true })
-      }
       notice.success(
         'Deleted folder',
         `${atomCount} atom${atomCount === 1 ? '' : 's'}, ${folderCount} folder row${folderCount === 1 ? '' : 's'} removed.`,
       )
     } catch (e) {
+      if (restorePath && pathInsideFolder(restorePath, path)) {
+        openAtom(restorePath, { replace: true })
+      }
       throw e
     }
   }
@@ -1720,7 +1785,7 @@ function App() {
         <ShareDialog
           fileId={sharePromptFor}
           fileLabel={
-            (files ?? []).find((f) => f.fileId === sharePromptFor)?.title ??
+            fileByFileId.get(sharePromptFor)?.title ??
             sharePromptFor
           }
           onClose={() => setSharePromptFor(null)}

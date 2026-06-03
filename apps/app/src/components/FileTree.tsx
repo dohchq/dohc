@@ -53,6 +53,14 @@ import {
 import { navigateTree, type FlatRow } from '../lib/file-tree-nav'
 import { colorVarFor } from '../lib/folderTokens'
 import { planDrop, type DragSource } from '../lib/file-tree-dnd'
+import {
+  applyPendingTreeMoves,
+  parentDir,
+  pendingTreeMoveSettled,
+  projectTreePath,
+  type PendingTreeChange,
+  type PendingTreeChangeInput,
+} from '../lib/file-tree-optimistic'
 import { useDialogFocus } from '../lib/dialog-focus'
 
 type Props = {
@@ -151,6 +159,17 @@ function writeSectionOpen(key: string, open: boolean) {
   } catch {
     // localStorage unavailable / quota — non-fatal.
   }
+}
+
+function normalizeTreeInputPath(kind: 'page' | 'folder', path: string): string {
+  const clean =
+    kind === 'page'
+      ? path.trim().replace(/^\/+/, '')
+      : path.trim().replace(/^\/+|\/+$/g, '')
+  if (kind === 'page' && clean && !/\.[a-z0-9]+$/i.test(clean)) {
+    return `${clean}.md`
+  }
+  return clean
 }
 
 /** A section's open/closed state, persisted to localStorage by key. */
@@ -270,7 +289,47 @@ export function FileTree({
     [sharedByMeFileIds],
   )
 
-  const tree = useMemo(() => buildTree(files, folders), [files, folders])
+  const pendingChangeSeqRef = useRef(0)
+  const [pendingChanges, setPendingChanges] = useState<PendingTreeChange[]>([])
+  const displayActivePath = useMemo(
+    () => projectTreePath(activePath, pendingChanges),
+    [activePath, pendingChanges],
+  )
+  const { files: displayFiles, folders: displayFolders } = useMemo(
+    () => applyPendingTreeMoves(files, folders, pendingChanges),
+    [files, folders, pendingChanges],
+  )
+  const tree = useMemo(
+    () => buildTree(displayFiles, displayFolders),
+    [displayFiles, displayFolders],
+  )
+
+  useEffect(() => {
+    if (pendingChanges.length === 0) return
+    setPendingChanges((moves) => {
+      const next = moves.filter(
+        (move) => !pendingTreeMoveSettled(move, files, folders),
+      )
+      return next.length === moves.length ? moves : next
+    })
+  }, [files, folders, pendingChanges.length])
+
+  const addPendingChange = useCallback(
+    (change: PendingTreeChangeInput) => {
+      const pendingChange = {
+        ...change,
+        id: `change-${Date.now()}-${pendingChangeSeqRef.current++}`,
+      } as PendingTreeChange
+      setPendingChanges((moves) => [...moves, pendingChange])
+      return pendingChange
+    },
+    [],
+  )
+
+  const removePendingChange = useCallback((id: string) => {
+    setPendingChanges((moves) => moves.filter((move) => move.id !== id))
+  }, [])
+
   // Collapsible-section open state, persisted per section (mirrors the
   // chat-open localStorage pattern in _app.tsx). Personal + Shared
   // both default open.
@@ -285,22 +344,22 @@ export function FileTree({
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   useEffect(() => {
-    if (!activePath) return
+    if (!displayActivePath) return
     setExpanded((prev) => {
       const next = new Set(prev)
-      for (const a of ancestors(activePath)) next.add(a)
+      for (const a of ancestors(displayActivePath)) next.add(a)
       return next
     })
-  }, [activePath])
+  }, [displayActivePath])
 
-  function toggle(key: string) {
+  const toggle = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
       return next
     })
-  }
+  }, [])
 
   // file-org-v1 D4.3 — WAI-ARIA tree keyboard nav. `focusedPath` is
   // the roving-tabIndex anchor: exactly ONE row has tabIndex=0; all
@@ -344,6 +403,18 @@ export function FileTree({
     return out
   }, [tree, expanded])
 
+  const flatRowByPath = useMemo(() => {
+    const rows = new Map<string, FlatRow>()
+    for (const row of flatRows) rows.set(row.fullPath, row)
+    return rows
+  }, [flatRows])
+
+  const visibleRowPaths = useMemo(() => {
+    const visible = new Set<string>()
+    for (const row of flatRows) visible.add(row.fullPath)
+    return visible
+  }, [flatRows])
+
   // R3 fold (Codex FAIL-4) — re-anchor focusedPath whenever it's
   // stale: either null (no anchor yet) OR pointing at a row that's
   // not currently visible (e.g. activePath='deleted.md' loaded from
@@ -356,15 +427,15 @@ export function FileTree({
   // bootstrap when there's a row to anchor to.
   useEffect(() => {
     if (flatRows.length === 0) return
-    const visible = new Set(flatRows.map((r) => r.fullPath))
+    const visible = visibleRowPaths
     if (focusedPath === null || !visible.has(focusedPath)) {
       const next =
-        activePath && visible.has(activePath)
-          ? activePath
+        displayActivePath && visible.has(displayActivePath)
+          ? displayActivePath
           : flatRows[0]!.fullPath
       setFocusedPath(next)
     }
-  }, [focusedPath, flatRows, activePath])
+  }, [focusedPath, flatRows, displayActivePath, visibleRowPaths])
 
   // Move DOM focus onto the focused row so the screen reader announces
   // it — but ONLY when a keyboard arrow-nav requested it (wantDomFocus).
@@ -407,29 +478,54 @@ export function FileTree({
   const [, setPendingTick] = useState(0)
   const bumpPending = useCallback(() => setPendingTick((n) => n + 1), [])
 
+  // file-org-v1 D4.4a — fast path indexes for row affordances and
+  // optimistic reconciliation. These avoid nested scans as workspaces grow.
+  const fileByPath = useMemo(() => {
+    const m = new Map<string, FileRow>()
+    for (const f of displayFiles) m.set(f.path, f)
+    return m
+  }, [displayFiles])
+
+  const folderInputByPath = useMemo(() => {
+    const m = new Map<string, FolderInput>()
+    for (const f of displayFolders) {
+      if (typeof f === 'string') m.set(f, f)
+      else m.set(f.path, f)
+    }
+    return m
+  }, [displayFolders])
+
+  // file-org-v1 D4.5 — folder-star lookup. Built from the rich
+  // FolderInput shape; legacy string entries map to starred=false.
+  const folderStarByPath = useMemo(() => {
+    const m = new Map<string, boolean>()
+    for (const [path, f] of folderInputByPath) {
+      m.set(path, typeof f === 'string' ? false : f.starred === true)
+    }
+    return m
+  }, [folderInputByPath])
+
   // Reconcile: when the projection finally matches the optimistic
   // intent, drop the entry. Defends against the race where a
   // mutation resolves before Convex re-pushes the new query result.
   useEffect(() => {
     let mutated = false
     for (const [path, intended] of pendingLocks.current) {
-      const row = files.find((f) => f.path === path)
+      const row = fileByPath.get(path)
       if (row && (row.userLocked === true) === intended) {
         pendingLocks.current.delete(path)
         mutated = true
       }
     }
     for (const [path, intended] of pendingStars.current) {
-      const row = files.find((f) => f.path === path)
+      const row = fileByPath.get(path)
       if (row && (row.starred === true) === intended) {
         pendingStars.current.delete(path)
         mutated = true
       }
     }
     for (const [path, intended] of pendingFolderStars.current) {
-      const f = folders.find((x) =>
-        typeof x === 'string' ? x === path : x.path === path,
-      )
+      const f = folderInputByPath.get(path)
       const isStarred = typeof f === 'string' ? false : f?.starred === true
       if (f !== undefined && isStarred === intended) {
         pendingFolderStars.current.delete(path)
@@ -437,16 +533,7 @@ export function FileTree({
       }
     }
     if (mutated) bumpPending()
-  }, [files, folders, bumpPending])
-
-  // file-org-v1 D4.4a — fast index from path → file row, so the
-  // L/S shortcuts can read the current lock/star state and toggle
-  // it. Folder rows look up `folderStarByPath` instead.
-  const fileByPath = useMemo(() => {
-    const m = new Map<string, FileRow>()
-    for (const f of files) m.set(f.path, f)
-    return m
-  }, [files])
+  }, [fileByPath, folderInputByPath, bumpPending])
 
   // Optimistic-aware "is this file starred?" — reads the pending
   // override first so a just-clicked/just-pressed star reflects
@@ -493,13 +580,12 @@ export function FileTree({
   // typing.
   const targetDir = useMemo(() => {
     if (focusedPath === null) return ''
-    // Find the row in flatRows (cheaper than re-walking the tree).
-    const row = flatRows.find((r) => r.fullPath === focusedPath)
+    const row = flatRowByPath.get(focusedPath)
     if (!row) return ''
     if (row.isFolder) return row.fullPath
     // Leaf row — parent is everything before the last segment.
     return row.parentPath ?? ''
-  }, [focusedPath, flatRows])
+  }, [focusedPath, flatRowByPath])
 
   // file-org-v1 D4.7 — drag-and-drop state. `dragOverPath` is the
   // ROW the cursor is currently over (for the highlight); empty
@@ -545,36 +631,42 @@ export function FileTree({
       }
       const action = planDrop(source, { parentDir: targetParentDir })
       if (action.kind === 'noop') return
+      if (action.kind === 'move-file' && !onMoveFile) return
+      if (action.kind === 'move-folder' && !onMoveFolder) return
+      const pendingMove = addPendingChange({
+        kind: action.kind === 'move-file' ? 'file' : 'folder',
+        fromPath: action.fromPath,
+        toPath: action.toPath,
+      })
+      const targetFolder = parentDir(action.toPath)
+      setFocusedPath(action.toPath)
+      setOpenPersonal(true)
+      if (targetFolder) {
+        setExpanded((prev) => {
+          const next = new Set(prev)
+          next.add(targetFolder)
+          return next
+        })
+      }
       if (action.kind === 'move-file') {
-        if (!onMoveFile) return
         try {
-          await onMoveFile(action.fromPath, action.toPath)
+          await onMoveFile!(action.fromPath, action.toPath)
         } catch {
+          removePendingChange(pendingMove.id)
           // Error already surfaced via the app-level notice.
         }
         return
       }
       // move-folder
-      if (!onMoveFolder) return
       try {
-        await onMoveFolder(action.fromPath, action.toPath)
+        await onMoveFolder!(action.fromPath, action.toPath)
       } catch {
+        removePendingChange(pendingMove.id)
         // same: surfaced upstream
       }
     },
-    [onMoveFile, onMoveFolder],
+    [addPendingChange, onMoveFile, onMoveFolder, removePendingChange],
   )
-
-  // file-org-v1 D4.5 — folder-star lookup. Built from the rich
-  // FolderInput shape; legacy string entries map to starred=false.
-  const folderStarByPath = useMemo(() => {
-    const m = new Map<string, boolean>()
-    for (const f of folders) {
-      if (typeof f === 'string') m.set(f, false)
-      else m.set(f.path, f.starred === true)
-    }
-    return m
-  }, [folders])
 
   // Folder favorite — the optimistic-aware read + toggle, mirroring the
   // file-star pair. Shared by the folder row's star button and Shift+S.
@@ -703,14 +795,11 @@ export function FileTree({
       focusedPath,
       onOpen,
       fileByPath,
-      folderStarByPath,
       onToggleLock,
-      onToggleStar,
-      onToggleFolderStar,
       toggleFileStar,
       toggleFolderStar,
-      setAnnouncement,
       bumpPending,
+      toggle,
     ],
   )
 
@@ -724,6 +813,7 @@ export function FileTree({
   )
 
   const [pending, setPending] = useState<'page' | 'folder' | null>(null)
+  const [pendingInitialValue, setPendingInitialValue] = useState('')
   const [pendingBusy, setPendingBusy] = useState(false)
   const [pendingError, setPendingError] = useState<string | null>(null)
   const [newOpen, setNewOpen] = useState(false)
@@ -755,21 +845,36 @@ export function FileTree({
       setPendingError(null)
       return
     }
+    if (!pending) return
     // D4.6 — prefix with the target dir derived from focusedPath.
     // If the user typed an absolute-looking path with slashes, we
     // honor that as-written (escape hatch for power users); else
     // we prepend targetDir. This matches VSCode: type "alpha" in
     // "team" → "team/alpha"; type "other/beta" → "other/beta"
     // (the typed path wins because it already has structure).
-    const path =
+    const rawPath =
       name.includes('/') || targetDir === '' ? name : `${targetDir}/${name}`
+    const path = normalizeTreeInputPath(pending, rawPath)
+    if (!path) {
+      setPending(null)
+      setPendingError(null)
+      return
+    }
+    const pendingChange =
+      pending === 'page'
+        ? addPendingChange({ kind: 'create-file', path })
+        : addPendingChange({ kind: 'create-folder', path })
+    setFocusedPath(path)
+    setPending(null)
     setPendingBusy(true)
     setPendingError(null)
     try {
-      if (pending === 'page') await onCreatePage(path)
-      else if (pending === 'folder') await onCreateFolder(path)
-      setPending(null)
+      if (pending === 'page') await onCreatePage(rawPath)
+      else if (pending === 'folder') await onCreateFolder(rawPath)
     } catch (error) {
+      removePendingChange(pendingChange.id)
+      setPendingInitialValue(value)
+      setPending(pending)
       setPendingError(errorMessage(error, 'Could not create item.'))
     } finally {
       setPendingBusy(false)
@@ -784,6 +889,7 @@ export function FileTree({
     // sure it's expanded or the input would mount hidden (and never
     // focus) when the user creates while the section is collapsed.
     setOpenPersonal(true)
+    setPendingInitialValue('')
     if (targetDir !== '' && !expanded.has(targetDir)) {
       setExpanded((prev) => new Set(prev).add(targetDir))
     }
@@ -798,22 +904,31 @@ export function FileTree({
 
   async function commitRename(nextPath: string) {
     if (!renameTarget || renameBusy) return
-    const clean = nextPath.trim()
+    const clean = normalizeTreeInputPath(renameTarget.kind, nextPath)
     if (!clean || clean === renameTarget.path) {
       setRenameTarget(null)
       setRenameError(null)
       return
     }
+    const targetSnapshot = renameTarget
+    const pendingChange = addPendingChange({
+      kind: renameTarget.kind === 'page' ? 'file' : 'folder',
+      fromPath: renameTarget.path,
+      toPath: clean,
+    })
+    setFocusedPath(clean)
+    setRenameTarget(null)
     setRenameBusy(true)
     setRenameError(null)
     try {
-      if (renameTarget.kind === 'page') {
-        await onRenameFile(renameTarget.path, clean)
+      if (targetSnapshot.kind === 'page') {
+        await onRenameFile(targetSnapshot.path, clean)
       } else {
-        await onRenameFolder(renameTarget.path, clean)
+        await onRenameFolder(targetSnapshot.path, clean)
       }
-      setRenameTarget(null)
     } catch (error) {
+      removePendingChange(pendingChange.id)
+      setRenameTarget(targetSnapshot)
       setRenameError(errorMessage(error, 'Could not rename item.'))
     } finally {
       setRenameBusy(false)
@@ -825,6 +940,32 @@ export function FileTree({
     setRenameTarget(null)
     setRenameError(null)
   }
+
+  const deleteFileOptimistically = useCallback(
+    async (path: string) => {
+      const pendingChange = addPendingChange({ kind: 'delete-file', path })
+      try {
+        await onDeleteFile(path)
+      } catch (error) {
+        removePendingChange(pendingChange.id)
+        throw error
+      }
+    },
+    [addPendingChange, onDeleteFile, removePendingChange],
+  )
+
+  const deleteFolderOptimistically = useCallback(
+    async (path: string) => {
+      const pendingChange = addPendingChange({ kind: 'delete-folder', path })
+      try {
+        await onDeleteFolder(path)
+      } catch (error) {
+        removePendingChange(pendingChange.id)
+        throw error
+      }
+    },
+    [addPendingChange, onDeleteFolder, removePendingChange],
+  )
 
   return (
     <PresenceContext.Provider value={presentPathSet}>
@@ -972,6 +1113,7 @@ export function FileTree({
 	                    <PendingRow
 	                      kind={pending}
 	                      indent={8}
+	                      initialValue={pendingInitialValue}
 	                      onCommit={commitPending}
 	                      busy={pendingBusy}
 	                      error={pendingError}
@@ -1049,7 +1191,7 @@ export function FileTree({
 	                          key={child.fullPath}
 	                          node={child}
 	                          depth={0}
-	                          activePath={activePath}
+	                          displayActivePath={displayActivePath}
 	                          expanded={expanded}
 	                          viewIsAtom={view === 'atom'}
 	                          focusedPath={focusedPath}
@@ -1057,9 +1199,9 @@ export function FileTree({
 	                          setRowRef={setRowRef}
 	                          onOpen={onOpen}
 	                          onToggle={toggle}
-	                          onDeleteFolder={onDeleteFolder}
+	                          onDeleteFolder={deleteFolderOptimistically}
 	                          onRenameFolder={onRenameFolder}
-	                          onDeleteFile={onDeleteFile}
+	                          onDeleteFile={deleteFileOptimistically}
 	                          onRenameFile={onRenameFile}
 	                          renameTarget={renameTarget}
 	                          renameBusy={renameBusy}
@@ -1100,6 +1242,7 @@ export function FileTree({
 	                          handleDrop={handleDrop}
 	                          pendingKind={pending}
 	                          pendingTargetDir={targetDir}
+	                          pendingInitialValue={pendingInitialValue}
 	                          onPendingCommit={commitPending}
 	                          pendingBusy={pendingBusy}
 	                          pendingError={pendingError}
@@ -1173,6 +1316,7 @@ export function FileTree({
 function PendingRow({
   kind,
   indent,
+  initialValue,
   onCommit,
   busy,
   error,
@@ -1183,13 +1327,14 @@ function PendingRow({
   // used by TreeRowNode (8 + depth * 14) so the input visually
   // aligns with sibling rows at the same level.
   indent: number
+  initialValue: string
   onCommit: (value: string) => void | Promise<void>
   busy?: boolean
   error?: string | null
   onInput?: () => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
-  const [value, setValue] = useState('')
+  const [value, setValue] = useState(initialValue)
 
   useEffect(() => {
     ref.current?.focus()
@@ -1340,7 +1485,7 @@ function InlineRenameRow({
 function TreeRowNode({
   node,
   depth,
-  activePath,
+  displayActivePath,
   expanded,
   viewIsAtom,
   focusedPath,
@@ -1370,6 +1515,7 @@ function TreeRowNode({
   handleDrop,
   pendingKind,
   pendingTargetDir,
+  pendingInitialValue,
   onPendingCommit,
   pendingBusy,
   pendingError,
@@ -1378,7 +1524,7 @@ function TreeRowNode({
 }: {
   node: TreeNode
   depth: number
-  activePath: string | null
+  displayActivePath: string | null
   expanded: Set<string>
   viewIsAtom: boolean
   focusedPath: string | null
@@ -1419,6 +1565,7 @@ function TreeRowNode({
   // top of the tree container (handled in FileTree, not here).
   pendingKind: 'page' | 'folder' | null
   pendingTargetDir: string
+  pendingInitialValue: string
   onPendingCommit: (value: string) => void | Promise<void>
   pendingBusy: boolean
   pendingError: string | null
@@ -1444,7 +1591,7 @@ function TreeRowNode({
   const isTabStop = focusedPath === node.fullPath
 
   if (!isFolder) {
-    const isActive = viewIsAtom && activePath === node.page!.path
+    const isActive = viewIsAtom && displayActivePath === node.page!.path
     const filePath = node.page!.path
     const ContextIcon = contextFileIcon(filePath)
     const isSharedByMe = sharedByMeIds.has(node.page!.fileId ?? '')
@@ -1668,6 +1815,7 @@ function TreeRowNode({
             <PendingRow
               kind={pendingKind}
               indent={8 + (depth + 1) * 14}
+              initialValue={pendingInitialValue}
               onCommit={onPendingCommit}
               busy={pendingBusy}
               error={pendingError}
@@ -1680,7 +1828,7 @@ function TreeRowNode({
               key={c.fullPath}
               node={c}
               depth={depth + 1}
-              activePath={activePath}
+              displayActivePath={displayActivePath}
               expanded={expanded}
               viewIsAtom={viewIsAtom}
               focusedPath={focusedPath}
@@ -1710,6 +1858,7 @@ function TreeRowNode({
               handleDrop={handleDrop}
               pendingKind={pendingKind}
               pendingTargetDir={pendingTargetDir}
+              pendingInitialValue={pendingInitialValue}
               onPendingCommit={onPendingCommit}
               pendingBusy={pendingBusy}
               pendingError={pendingError}
@@ -1867,6 +2016,7 @@ function TreeRowNode({
           <PendingRow
             kind={pendingKind}
             indent={8 + (depth + 1) * 14}
+            initialValue={pendingInitialValue}
             onCommit={onPendingCommit}
             busy={pendingBusy}
             error={pendingError}
@@ -1889,7 +2039,7 @@ function TreeRowNode({
             key={c.fullPath}
             node={c}
             depth={depth + 1}
-            activePath={activePath}
+            displayActivePath={displayActivePath}
             expanded={expanded}
             viewIsAtom={viewIsAtom}
             focusedPath={focusedPath}
@@ -1919,6 +2069,7 @@ function TreeRowNode({
             handleDrop={handleDrop}
             pendingKind={pendingKind}
             pendingTargetDir={pendingTargetDir}
+            pendingInitialValue={pendingInitialValue}
             onPendingCommit={onPendingCommit}
             pendingBusy={pendingBusy}
             pendingError={pendingError}

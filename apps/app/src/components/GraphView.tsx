@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentType, ReactNode } from 'react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
@@ -300,9 +300,17 @@ export function GraphView({
   // ── hover → highlight the node + its neighbours, dim the rest ──
   const hiNodes = useRef(new Set<string>())
   const hiLinks = useRef(new Set<string>())
+  const hoverIdRef = useRef<string | null>(null)
   const [hoverId, setHoverId] = useState<string | null>(null)
-  const handleHover = (node: { id?: string } | null) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fgRef = useRef<any>(null)
+  useEffect(() => {
+    hoverIdRef.current = null
+  }, [neighbors, nodeLinks])
+  const handleHover = useCallback((node: { id?: string } | null) => {
     const id = node?.id ?? null
+    if (hoverIdRef.current === id) return
+    hoverIdRef.current = id
     const hn = new Set<string>()
     const hl = new Set<string>()
     if (id) {
@@ -316,11 +324,9 @@ export function GraphView({
     // explicit repaint too — after the engine cools the wrapper stops
     // its render loop, so nudge it (version-robust; codex).
     fgRef.current?.refresh?.()
-  }
+  }, [neighbors, nodeLinks])
 
   // ── physics: a touch more spacing than the defaults + fit-to-view ──
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fgRef = useRef<any>(null)
   // re-fit the view ONCE per data change (not on every engine stop —
   // that would fight a user who panned/zoomed after a drag).
   const didFit = useRef(false)

@@ -108,16 +108,21 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     activeWorkspaceId,
   ])
 
-  const { title, isHtml } = useMemo(() => {
-    const src = draft ?? shared?.body ?? ''
-    const { meta } = parseFrontmatter(src)
+  const body = draft ?? shared?.body ?? ''
+  const sharedPath = shared?.path ?? null
+  const { frontmatter, fm, rest, title, isHtml } = useMemo(() => {
+    const { meta } = parseFrontmatter(body)
+    const split = splitFrontmatter(body)
     return {
+      frontmatter: meta,
+      fm: split.fm,
+      rest: split.rest,
       title: typeof meta.title === 'string' ? meta.title : '',
-      isHtml: shared
-        ? isHtmlPath(shared.path) || isHtmlAtomBody(src)
+      isHtml: sharedPath
+        ? isHtmlPath(sharedPath) || isHtmlAtomBody(body)
         : false,
     }
-  }, [draft, shared])
+  }, [body, sharedPath])
 
   if (shared === undefined) {
     return <DocumentSkeleton />
@@ -138,9 +143,6 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
     )
   }
 
-  const body = draft ?? shared.body
-  const { meta: frontmatter } = parseFrontmatter(body)
-  const { fm, rest } = splitFrontmatter(body)
   const leaf =
     shared.path.replace(/\.[a-z0-9]+$/i, '').split('/').pop() ?? shared.path
 
