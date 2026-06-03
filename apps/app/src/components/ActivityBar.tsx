@@ -1,4 +1,11 @@
-import { AppWindow, BotMessageSquare, Files, Workflow } from 'lucide-react'
+import {
+  AppWindow,
+  BotMessageSquare,
+  Files,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Workflow,
+} from 'lucide-react'
 import type { AppView } from '../lib/appViews'
 
 // graph-v1 1c — VSCode-style activity bar (icon rail). Switches the
@@ -19,10 +26,15 @@ const ITEMS: Array<{
 export function ActivityBar({
   view,
   onSelect,
+  sidebarCollapsed = false,
+  onToggleSidebar,
 }: {
   view: ActivityView
   onSelect: (view: ActivityView) => void
+  sidebarCollapsed?: boolean
+  onToggleSidebar?: () => void
 }) {
+  const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose
   return (
     <nav className="flex h-screen w-12 flex-col items-center gap-1 border-r border-rule bg-panel py-3">
       {ITEMS.map(({ view: v, label, Icon }) => {
@@ -48,6 +60,18 @@ export function ActivityBar({
           </button>
         )
       })}
+      <div className="mt-auto border-t border-rule pt-2">
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+          aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+          disabled={!onToggleSidebar}
+          className="grid size-9 place-items-center rounded-md text-ink-faint transition-colors hover:bg-hover hover:text-ink-dim disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+        >
+          <SidebarIcon className="size-[18px]" strokeWidth={1.9} />
+        </button>
+      </div>
     </nav>
   )
 }

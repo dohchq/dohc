@@ -99,6 +99,7 @@ type FilesDestination =
 
 const ACTIVITY_BAR_WIDTH = 48
 const LEFT_SIDEBAR_STORAGE_KEY = 'dohc-left-sidebar-width'
+const LEFT_SIDEBAR_COLLAPSED_STORAGE_KEY = 'dohc-left-sidebar-collapsed'
 const RIGHT_SIDEBAR_STORAGE_KEY = 'dohc-right-sidebar-width'
 const LEFT_SIDEBAR_DEFAULT_WIDTH = 260
 const LEFT_SIDEBAR_MIN_WIDTH = 220
@@ -646,6 +647,16 @@ function App() {
   // crossing workspace boundaries. Per-document sharing stays in the
   // document Share button.
   const [sharingOpen, setSharingOpen] = useState(false)
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return (
+        window.localStorage.getItem(LEFT_SIDEBAR_COLLAPSED_STORAGE_KEY) === '1'
+      )
+    } catch {
+      return false
+    }
+  })
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
     readStoredSidebarWidth(
       LEFT_SIDEBAR_STORAGE_KEY,
@@ -666,6 +677,17 @@ function App() {
       ? RIGHT_SIDEBAR_DEFAULT_WIDTH
       : storedWidth
   })
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        LEFT_SIDEBAR_COLLAPSED_STORAGE_KEY,
+        leftSidebarCollapsed ? '1' : '0',
+      )
+    } catch {
+      // localStorage unavailable / quota exceeded — non-fatal.
+    }
+  }, [leftSidebarCollapsed])
 
   useEffect(() => {
     try {
@@ -711,6 +733,10 @@ function App() {
 
   const resetLeftSidebar = useCallback(() => {
     setLeftSidebarWidth(LEFT_SIDEBAR_DEFAULT_WIDTH)
+  }, [])
+
+  const toggleLeftSidebar = useCallback(() => {
+    setLeftSidebarCollapsed((collapsed) => !collapsed)
   }, [])
 
   const resetRightSidebar = useCallback(() => {
@@ -1174,6 +1200,7 @@ function App() {
     (packageRoot: string) => {
       setView('views')
       setSharingOpen(false)
+      setLeftSidebarCollapsed(true)
       const viewRef = encodeViewRef(packageRoot)
       void navigate({
         to: '/w/$wsId/v/$viewRef',
@@ -1460,9 +1487,15 @@ function App() {
 
   const panelOpen = view !== 'agent' && (chatOpen || sharingOpen)
   const rightColumnOpen = view === 'agent' || panelOpen
-  const shellGridTemplateColumns = rightColumnOpen
-    ? `${ACTIVITY_BAR_WIDTH}px ${leftSidebarWidth}px minmax(0,1fr) ${rightSidebarWidth}px`
-    : `${ACTIVITY_BAR_WIDTH}px ${leftSidebarWidth}px minmax(0,1fr)`
+  const leftColumn = leftSidebarCollapsed ? null : `${leftSidebarWidth}px`
+  const shellGridTemplateColumns = [
+    `${ACTIVITY_BAR_WIDTH}px`,
+    leftColumn,
+    'minmax(0,1fr)',
+    rightColumnOpen ? `${rightSidebarWidth}px` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
   const floatingPanelButtonRight = panelOpen ? rightSidebarWidth + 12 : 20
 
   return (
@@ -1470,30 +1503,37 @@ function App() {
       className="relative grid h-screen overflow-hidden bg-page text-ink"
       style={{ gridTemplateColumns: shellGridTemplateColumns }}
     >
-      <ActivityBar view={view} onSelect={navigateToView} />
+      <ActivityBar
+        view={view}
+        onSelect={navigateToView}
+        sidebarCollapsed={leftSidebarCollapsed}
+        onToggleSidebar={toggleLeftSidebar}
+      />
       {view === 'agent' ? (
         <>
-          <AgentChatSidebar
-            files={files ?? []}
-            folders={folders ?? []}
-            threads={chatThreads}
-            loading={
-              files === undefined ||
-              folders === undefined ||
-              agentThreads === undefined
-            }
-            activeThreadId={threadId}
-            activeProjectPath={agentProjectPath}
-            onSelectThread={selectAgentThread}
-            onNewThread={startAgentDraft}
-            onCreateProject={createAgentProject}
-            onTogglePinned={toggleAgentThreadPinned}
-            onDeleteThread={deleteAgentChat}
-            onRenameThread={renameAgentChat}
-            onRenameProject={renameAgentProject}
-            onOpenSearch={() => setSearchOpen(true)}
-            user={user}
-          />
+          {!leftSidebarCollapsed && (
+            <AgentChatSidebar
+              files={files ?? []}
+              folders={folders ?? []}
+              threads={chatThreads}
+              loading={
+                files === undefined ||
+                folders === undefined ||
+                agentThreads === undefined
+              }
+              activeThreadId={threadId}
+              activeProjectPath={agentProjectPath}
+              onSelectThread={selectAgentThread}
+              onNewThread={startAgentDraft}
+              onCreateProject={createAgentProject}
+              onTogglePinned={toggleAgentThreadPinned}
+              onDeleteThread={deleteAgentChat}
+              onRenameThread={renameAgentChat}
+              onRenameProject={renameAgentProject}
+              onOpenSearch={() => setSearchOpen(true)}
+              user={user}
+            />
+          )}
           <AgentWorkspace
             threadId={threadId}
             activeThread={activeAgentThread}
@@ -1526,13 +1566,15 @@ function App() {
         </>
       ) : view === 'views' ? (
         <>
-          <ViewsSidebar
-            selectedPackageRoot={selectedViewPackageRoot}
-            onOpenView={openView}
-            onOpenSource={(path) => openAtom(path)}
-            onOpenSearch={() => setSearchOpen(true)}
-            user={user}
-          />
+          {!leftSidebarCollapsed && (
+            <ViewsSidebar
+              selectedPackageRoot={selectedViewPackageRoot}
+              onOpenView={openView}
+              onOpenSource={(path) => openAtom(path)}
+              onOpenSearch={() => setSearchOpen(true)}
+              user={user}
+            />
+          )}
           <ViewFrame
             packageRoot={selectedViewPackageRoot}
             onOpenSource={(path) => openAtom(path)}
@@ -1577,36 +1619,38 @@ function App() {
         </>
       ) : (
         <>
-          <FileTree
-            files={files ?? []}
-            folders={folders ?? []}
-            loading={files === undefined || folders === undefined}
-            activePath={activePath}
-            view="atom"
-            onOpenSearch={() => setSearchOpen(true)}
-            user={user}
-            sharedWithMe={sharedWithMe ?? []}
-            sharedByMeFileIds={sharedByMeFileIds ?? []}
-            activeShareId={urlShareId}
-            allowCreate={view !== 'graph'}
-            onOpenShared={openShared}
-            onOpen={(p) => openAtom(p)}
-            onCreatePage={createPageWithName}
-            onCreateFolder={createFolderWithName}
-            onDeleteFolder={deleteFolderByPath}
-            onRenameFolder={renameFolderByPath}
-            onDeleteFile={deleteFileByPath}
-            onRenameFile={renameFileByPath}
-            onToggleLock={toggleLockAtPath}
-            onToggleStar={toggleStarAtPath}
-            onToggleFolderStar={toggleFolderStarAtPath}
-            onSetFolderMeta={setFolderMetaAtPath}
-            onSetFileIcon={async (path, icon) => {
-              await setIconAtom({ path, icon, activeWorkspaceId })
-            }}
-            onMoveFile={moveFileByDrop}
-            onMoveFolder={moveFolderByDrop}
-          />
+          {!leftSidebarCollapsed && (
+            <FileTree
+              files={files ?? []}
+              folders={folders ?? []}
+              loading={files === undefined || folders === undefined}
+              activePath={activePath}
+              view="atom"
+              onOpenSearch={() => setSearchOpen(true)}
+              user={user}
+              sharedWithMe={sharedWithMe ?? []}
+              sharedByMeFileIds={sharedByMeFileIds ?? []}
+              activeShareId={urlShareId}
+              allowCreate={view !== 'graph'}
+              onOpenShared={openShared}
+              onOpen={(p) => openAtom(p)}
+              onCreatePage={createPageWithName}
+              onCreateFolder={createFolderWithName}
+              onDeleteFolder={deleteFolderByPath}
+              onRenameFolder={renameFolderByPath}
+              onDeleteFile={deleteFileByPath}
+              onRenameFile={renameFileByPath}
+              onToggleLock={toggleLockAtPath}
+              onToggleStar={toggleStarAtPath}
+              onToggleFolderStar={toggleFolderStarAtPath}
+              onSetFolderMeta={setFolderMetaAtPath}
+              onSetFileIcon={async (path, icon) => {
+                await setIconAtom({ path, icon, activeWorkspaceId })
+              }}
+              onMoveFile={moveFileByDrop}
+              onMoveFolder={moveFolderByDrop}
+            />
+          )}
           {view === 'graph' ? (
             <GraphView onOpenAtom={openAtom} onOpenShared={openShared} />
           ) : urlShareId ? (
@@ -1668,17 +1712,19 @@ function App() {
           )}
         </>
       )}
-      <ShellResizeHandle
-        side="left"
-        label="Resize left sidebar"
-        value={leftSidebarWidth}
-        min={LEFT_SIDEBAR_MIN_WIDTH}
-        max={LEFT_SIDEBAR_MAX_WIDTH}
-        style={{ left: ACTIVITY_BAR_WIDTH + leftSidebarWidth }}
-        onPointerDown={(event) => startSidebarResize('left', event)}
-        onNudge={nudgeLeftSidebar}
-        onReset={resetLeftSidebar}
-      />
+      {!leftSidebarCollapsed && (
+        <ShellResizeHandle
+          side="left"
+          label="Resize left sidebar"
+          value={leftSidebarWidth}
+          min={LEFT_SIDEBAR_MIN_WIDTH}
+          max={LEFT_SIDEBAR_MAX_WIDTH}
+          style={{ left: ACTIVITY_BAR_WIDTH + leftSidebarWidth }}
+          onPointerDown={(event) => startSidebarResize('left', event)}
+          onNudge={nudgeLeftSidebar}
+          onReset={resetLeftSidebar}
+        />
+      )}
       {rightColumnOpen && (
         <ShellResizeHandle
           side="right"

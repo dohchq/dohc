@@ -5,7 +5,6 @@ import { api } from '../../convex/_generated/api'
 import type { GraphNode, GraphEdge } from '../../convex/graph'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
 import { forceCollide } from 'd3-force-3d'
-import { Skeleton } from './Skeleton'
 
 // graph-v1 1c — the knowledge graph. Cells (files) are nodes; an edge
 // is a wikilink or a concrete formula reference. The view merges every
@@ -713,17 +712,90 @@ export function GraphView({
 }
 
 function GraphLoadingSkeleton() {
+  const nodes = [
+    { x: 155, y: 138, r: 5.5, fill: 'var(--color-accent)' },
+    { x: 278, y: 94, r: 4.5, fill: 'var(--color-folder-blue)' },
+    { x: 392, y: 168, r: 7, fill: 'var(--color-accent)' },
+    { x: 528, y: 126, r: 5, fill: 'var(--color-folder-orange)' },
+    { x: 214, y: 278, r: 6, fill: 'var(--color-folder-blue)' },
+    { x: 352, y: 314, r: 4.5, fill: 'var(--color-accent)' },
+    { x: 494, y: 282, r: 5.5, fill: 'var(--color-accent-2)' },
+  ]
+  const edges = [
+    { x1: 155, y1: 138, x2: 278, y2: 94 },
+    { x1: 278, y1: 94, x2: 392, y2: 168 },
+    { x1: 392, y1: 168, x2: 528, y2: 126 },
+    { x1: 155, y1: 138, x2: 214, y2: 278 },
+    { x1: 214, y1: 278, x2: 352, y2: 314 },
+    { x1: 392, y1: 168, x2: 494, y2: 282 },
+    { x1: 352, y1: 314, x2: 494, y2: 282 },
+  ]
+
   return (
-    <div className="absolute inset-0 grid place-items-center p-8" aria-label="Loading graph">
-      <div className="relative aspect-square w-full max-w-[460px]">
-        <Skeleton className="absolute left-[42%] top-[40%] size-20 rounded-full" />
-        <Skeleton className="absolute left-[12%] top-[18%] size-14 rounded-full" />
-        <Skeleton className="absolute right-[16%] top-[12%] size-16 rounded-full" />
-        <Skeleton className="absolute bottom-[18%] left-[18%] size-16 rounded-full" />
-        <Skeleton className="absolute bottom-[16%] right-[12%] size-12 rounded-full" />
-        <Skeleton className="absolute left-[23%] top-[34%] h-px w-[40%] rotate-[18deg] rounded-full" />
-        <Skeleton className="absolute right-[23%] top-[35%] h-px w-[34%] -rotate-[24deg] rounded-full" />
-        <Skeleton className="absolute bottom-[32%] left-[33%] h-px w-[44%] rotate-[138deg] rounded-full" />
+    <div
+      role="status"
+      aria-label="Loading graph"
+      data-graph-loading-skeleton="true"
+      className="absolute inset-0 overflow-hidden bg-page"
+    >
+      <div
+        className="absolute inset-0 opacity-[0.45]"
+        style={{
+          backgroundImage:
+            'linear-gradient(90deg, var(--dohc-grid) 1px, transparent 1px), linear-gradient(0deg, var(--dohc-grid) 1px, transparent 1px)',
+          backgroundSize: '56px 56px',
+        }}
+        aria-hidden="true"
+      />
+
+      <div className="absolute inset-0 grid place-items-center px-8 py-10">
+        <div className="relative w-full max-w-[720px]">
+          <svg
+            viewBox="0 0 680 400"
+            className="h-auto w-full"
+            preserveAspectRatio="xMidYMid meet"
+            aria-hidden="true"
+          >
+            <g fill="none" strokeLinecap="round">
+              {edges.map((edge, i) => (
+                <line
+                  key={i}
+                  data-graph-loading-edge="true"
+                  x1={edge.x1}
+                  y1={edge.y1}
+                  x2={edge.x2}
+                  y2={edge.y2}
+                  stroke="var(--color-ink-faint)"
+                  strokeOpacity={i === 2 || i === 5 ? 0.3 : 0.16}
+                  strokeWidth={i === 2 || i === 5 ? 1.4 : 1}
+                  strokeDasharray={i === 2 || i === 5 ? '5 8' : undefined}
+                />
+              ))}
+            </g>
+            <g>
+              {nodes.map((node, i) => (
+                <circle
+                  key={i}
+                  data-graph-loading-node="true"
+                  cx={node.x}
+                  cy={node.y}
+                  r={node.r}
+                  fill={node.fill}
+                  opacity={i === 2 ? 0.78 : 0.56}
+                />
+              ))}
+            </g>
+          </svg>
+
+          <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-md border border-rule bg-surface/90 px-3 py-2 shadow-sm backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <span className="size-1.5 rounded-full bg-accent opacity-70" aria-hidden="true" />
+              <span className="whitespace-nowrap text-[11px] font-medium text-ink-dim">
+                Loading graph
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   )

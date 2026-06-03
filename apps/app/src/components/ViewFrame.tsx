@@ -6,7 +6,6 @@ import { useActiveWorkspaceId } from '../lib/active-workspace'
 import { bundleViewServer } from '../views/buildViewBundle.functions'
 import { ViewRuntimeHost } from '../views/ViewRuntimeHost'
 import { buildViewShell } from '../views/viewShell'
-import { ViewFrameSkeleton } from './Skeleton'
 
 type BuildState =
   | { status: 'idle'; key: null }
@@ -15,6 +14,7 @@ type BuildState =
   | { status: 'error'; key: string; diagnostics: Array<{ code: string; message: string }> }
 
 const BUILD_DEBOUNCE_MS = 150
+const VIEW_LOADING_TITLE = 'View'
 const VIEW_LOADING_SCRIPT = `
   const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const bg = dark ? '#100f0e' : '#f7f6f1';
@@ -34,6 +34,10 @@ const VIEW_LOADING_SCRIPT = `
       '</section>' +
     '</main>';
 `
+const VIEW_LOADING_SRC_DOC = buildViewShell({
+  title: VIEW_LOADING_TITLE,
+  script: VIEW_LOADING_SCRIPT,
+})
 
 export function ViewFrame({
   packageRoot,
@@ -134,10 +138,12 @@ export function ViewFrame({
   const viewTitle = view?.title ?? 'View'
   const srcDoc = useMemo(
     () =>
-      buildViewShell({
-        title: viewTitle,
-        script: runtimeCode,
-      }),
+      runtimeCode === VIEW_LOADING_SCRIPT
+        ? VIEW_LOADING_SRC_DOC
+        : buildViewShell({
+            title: viewTitle,
+            script: runtimeCode,
+          }),
     [runtimeCode, viewTitle],
   )
 
@@ -150,7 +156,20 @@ export function ViewFrame({
   }
 
   if (view === undefined) {
-    return <ViewFrameSkeleton withHeader />
+    return (
+      <main className="flex min-w-0 flex-col bg-page">
+        <ViewFrameLoadingHeader packageRoot={packageRoot} />
+        <ViewRuntimeHost
+          packageRoot={packageRoot}
+          scopePath=""
+          writeScopes={[]}
+          title={VIEW_LOADING_TITLE}
+          srcDoc={VIEW_LOADING_SRC_DOC}
+          onOpenSource={onOpenSource}
+          onRunAgent={onRunAgent}
+        />
+      </main>
+    )
   }
 
   if (view === null) {
@@ -232,6 +251,21 @@ export function ViewFrame({
         onRunAgent={onRunAgent}
       />
     </main>
+  )
+}
+
+function ViewFrameLoadingHeader({ packageRoot }: { packageRoot: string }) {
+  return (
+    <header className="flex h-12 items-center justify-between border-b border-rule bg-surface px-4">
+      <div className="min-w-0">
+        <h1 className="truncate text-[14px] font-semibold text-ink-strong">
+          View
+        </h1>
+        <div className="truncate font-mono text-[10.5px] text-ink-faint">
+          {packageRoot}
+        </div>
+      </div>
+    </header>
   )
 }
 

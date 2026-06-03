@@ -231,6 +231,33 @@ describe('Views activity shell', () => {
     })
   })
 
+  it('uses one stable runtime skeleton while a selected view loads', () => {
+    useActiveWorkspaceIdMock.mockReturnValue('ws_active')
+    useQueryMock.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined)
+    const initialHtml = renderToStaticMarkup(
+      createElement(ViewFrame, {
+        packageRoot: 'clients/acme/.views/overview',
+        onOpenSource: () => {},
+      }),
+    )
+    const initialSrcDoc = initialHtml.match(/srcDoc="([^"]+)"/)?.[1]
+
+    useQueryMock.mockReset()
+    useQueryMock.mockReturnValueOnce(viewRows[1]).mockReturnValueOnce(undefined)
+    const metadataHtml = renderToStaticMarkup(
+      createElement(ViewFrame, {
+        packageRoot: 'clients/acme/.views/overview',
+        onOpenSource: () => {},
+      }),
+    )
+    const metadataSrcDoc = metadataHtml.match(/srcDoc="([^"]+)"/)?.[1]
+
+    expect(initialHtml).toContain('sandbox="allow-scripts"')
+    expect(initialHtml).not.toContain('dohc-skeleton')
+    expect(initialSrcDoc).toBeTruthy()
+    expect(metadataSrcDoc).toBe(initialSrcDoc)
+  })
+
   it('keeps the view bundler behind the server-function bridge module', () => {
     expect(VIEW_FRAME_SRC).toContain(
       "from '../views/buildViewBundle.functions'",
