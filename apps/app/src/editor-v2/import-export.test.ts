@@ -184,6 +184,25 @@ Escaped: [[Research\|AI\] notes|label \| with pipe]]`
     expect(nodeTypes).toContain('queryBlock')
   })
 
+  it('imports media asset embeds as first-class Tiptap nodes', () => {
+    const input = [
+      '![Screenshot](dohc-asset:image/asset_img)',
+      '',
+      '[Demo video](dohc-asset:video/asset_video)',
+      '',
+      '[Voice memo](dohc-asset:audio/asset_audio)',
+    ].join('\n')
+
+    const doc = markdownToYDoc(input)
+    const output = yDocToMarkdown(doc)
+    const nodeTypes = collectNodeTypes(getDohcYDocBodyJSON(doc))
+
+    expect(nodeTypes.filter((type) => type === 'mediaAsset')).toHaveLength(3)
+    expect(output).toContain('![Screenshot](dohc-asset:image/asset_img)')
+    expect(output).toContain('[Demo video](dohc-asset:video/asset_video)')
+    expect(output).toContain('[Voice memo](dohc-asset:audio/asset_audio)')
+  })
+
   it('encodes update bytes that hydrate a fresh Y.Doc', () => {
     const doc = markdownToYDoc(readCorpus('lists-tables.md'))
     const update = encodeDohcYDocUpdate(doc)

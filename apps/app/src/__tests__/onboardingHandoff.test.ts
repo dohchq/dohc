@@ -44,4 +44,12 @@ describe('Onboarding ready handoff', () => {
     expect(APP_SRC).toContain('dohc:onboarding:view')
     expect(APP_SRC).toMatch(/initialViewPackageRootRef[\s\S]{0,500}openView/)
   })
+
+  it('opens the normal agent dashboard while onboarding is in progress', () => {
+    expect(APP_SRC).toMatch(/state === 'NEW'[\s\S]{0,120}<Onboarding/)
+    expect(APP_SRC).toMatch(
+      /state === 'IN_PROGRESS'[\s\S]{0,160}<App initialView="agent"/,
+    )
+    expect(APP_SRC).toMatch(/function App\(\{\s*initialView/)
+  })
 })

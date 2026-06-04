@@ -8,7 +8,7 @@ import {
   listStreams,
   abortStream,
 } from '@convex-dev/agent'
-import { generateObject } from 'ai'
+import { generateObject, type ModelMessage, type UserContent } from 'ai'
 import { v } from 'convex/values'
 import { paginationOptsValidator } from 'convex/server'
 import { z } from 'zod'
@@ -39,6 +39,7 @@ import {
   validateAgentSelection,
   type AgentModelSelection,
 } from './agentProviders'
+import { inlineAttachmentBlock } from './attachmentPrompt'
 
 // org-plan §5 + Jenny round-2 C-1 fix — the agent's tool handlers need
 // to resolve the CALLER's active workspace, NOT the personal default.
@@ -2758,6 +2759,7 @@ export const dohcAgent = new Agent(components.agent, {
 })
 
 const projectPathArg = v.optional(v.union(v.string(), v.null()))
+const attachmentIdsArg = v.optional(v.array(v.id('workspaceAssets')))
 
 function normalizeProjectPath(projectPath?: string | null): string | undefined {
   const clean = (projectPath ?? '').trim().replace(/^\/+|\/+$/g, '')
@@ -3827,6 +3829,142 @@ export {
   COMMAND_ENTRY_TOOLS,
 }
 
+type AgentAttachmentKind = 'image' | 'video' | 'audio' | 'file'
+type AgentResolvedAsset = {
+  assetId: Id<'workspaceAssets'>
+  storageId: Id<'_storage'>
+  filename: string
+  mediaType: string
+  kind: AgentAttachmentKind
+  size: number
+}
+
+const INLINE_TEXT_ATTACHMENT_MAX_BYTES = 256 * 1024
+const INLINE_TEXT_MEDIA_TYPES = new Set([
+  'application/csv',
+  'application/json',
+  'application/ld+json',
+  'application/markdown',
+  'application/x-ndjson',
+  'application/xml',
+  'text/csv',
+  'text/markdown',
+  'text/plain',
+  'text/tab-separated-values',
+  'text/x-markdown',
+])
+const INLINE_TEXT_EXTENSIONS = new Set([
+  'csv',
+  'css',
+  'html',
+  'js',
+  'json',
+  'jsx',
+  'log',
+  'md',
+  'mdx',
+  'sql',
+  'ts',
+  'tsx',
+  'txt',
+  'xml',
+  'yaml',
+  'yml',
+])
+
+async function buildUserMessageForAttachments(
+  ctx: ActionCtx,
+  workspaceId: string,
+  prompt: string,
+  attachmentIds?: Id<'workspaceAssets'>[],
+): Promise<{
+  titleHint: string
+  saveArgs:
+    | { prompt: string }
+    | { message: ModelMessage }
+  assetIds: Id<'workspaceAssets'>[]
+}> {
+  const assetIds = attachmentIds ?? []
+  const trimmed = prompt.trim()
+  if (assetIds.length === 0) {
+    return { titleHint: trimmed, saveArgs: { prompt: trimmed }, assetIds }
+  }
+
+  const assets = (await ctx.runQuery(internal.assets._resolveForAgent, {
+    workspaceId,
+    assetIds,
+  })) as AgentResolvedAsset[]
+  const inlineBlocks: string[] = []
+  const content: Exclude<UserContent, string> = []
+
+  for (const asset of assets) {
+    const url = await ctx.storage.getUrl(asset.storageId)
+    if (!url) throw new Error(`asset blob not found: ${asset.filename}`)
+
+    if (
+      asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES &&
+      isInlineTextAttachment(asset)
+    ) {
+      const blob = await ctx.storage.get(asset.storageId)
+      const text = blob ? await blob.text() : ''
+      if (text) {
+        inlineBlocks.push(
+          inlineAttachmentBlock({
+            assetId: asset.assetId,
+            filename: asset.filename,
+            mediaType: asset.mediaType,
+            text,
+          }),
+        )
+      }
+    }
+
+    if (asset.kind === 'image') {
+      content.push({
+        type: 'image',
+        image: url,
+        mediaType: asset.mediaType,
+      })
+    } else {
+      content.push({
+        type: 'file',
+        data: url,
+        mediaType: asset.mediaType,
+        filename: asset.filename,
+      })
+    }
+  }
+
+  const baseText = trimmed || 'Attached files.'
+  content.unshift({
+    type: 'text',
+    text:
+      inlineBlocks.length > 0
+        ? `${baseText}\n\n${inlineBlocks.join('\n\n')}`
+        : baseText,
+  })
+
+  const filenames = assets.map((asset) => asset.filename).join(', ')
+  return {
+    titleHint: trimmed || filenames || 'Attached files.',
+    saveArgs: {
+      message: {
+        role: 'user',
+        content,
+      },
+    },
+    assetIds,
+  }
+}
+
+function isInlineTextAttachment(asset: AgentResolvedAsset): boolean {
+  const mediaType = asset.mediaType.toLowerCase()
+  if (mediaType.startsWith('text/')) return true
+  if (INLINE_TEXT_MEDIA_TYPES.has(mediaType)) return true
+  const extension = asset.filename.split('.').pop()?.toLowerCase()
+  return extension ? INLINE_TEXT_EXTENSIONS.has(extension) : false
+}
+
 export const sendMessage = action({
   // Track-3 P2b.4 — `entry` is the optional skill/command-entry flag
   // plumbed from ⌘K palette / slash-command callsites (P3); when
@@ -3842,6 +3980,7 @@ export const sendMessage = action({
     threadId: v.string(),
     prompt: v.string(),
     entry: skillTurnEntryArg,
+    attachmentIds: attachmentIdsArg,
     activeWorkspaceId: v.optional(v.string()),
     projectPath: projectPathArg,
     ...agentSelectionArgs,
@@ -3853,6 +3992,7 @@ export const sendMessage = action({
       threadId,
       prompt,
       entry,
+      attachmentIds,
       activeWorkspaceId,
       projectPath,
       agentProviderId,
@@ -3925,15 +4065,29 @@ export const sendMessage = action({
     //      older than N hours.
     //   3. streamText is called with the stable promptMessageId
     //      + prepareStep + experimental_context.entry.
+    const userMessage = await buildUserMessageForAttachments(
+      ctx,
+      workspaceId,
+      prompt,
+      attachmentIds,
+    )
     const { messageId } = await dohcAgent.saveMessage(ctx, {
       threadId,
-      prompt,
+      ...userMessage.saveArgs,
     })
     await ctx.runMutation(internal.agent._touchThread, {
       workspaceId,
       threadId,
-      titleHint: prompt,
+      titleHint: userMessage.titleHint,
     })
+    if (userMessage.assetIds.length > 0) {
+      await ctx.runMutation(internal.assets._markUsedInMessage, {
+        workspaceId,
+        assetIds: userMessage.assetIds,
+        threadId,
+        messageId,
+      })
+    }
     await ctx.runMutation(internal.agent._setThreadAgentSelection, {
       workspaceId,
       threadId,
@@ -4114,11 +4268,12 @@ export const startOnboarding = action({
   // workspaceId so onboarding lands in the active workspace.
   args: {
     intro: v.optional(v.string()),
+    attachmentIds: attachmentIdsArg,
     activeWorkspaceId: v.optional(v.string()),
   },
   handler: async (
     ctx,
-    { intro, activeWorkspaceId },
+    { intro, attachmentIds, activeWorkspaceId },
   ): Promise<{ started: boolean }> => {
     const workspaceId: string = await ctx.runQuery(
       internal.agent._resolveWorkspaceForCaller,
@@ -4166,7 +4321,8 @@ export const startOnboarding = action({
       }
     }
 
-    const trimmed = intro?.trim()
+    const trimmed = intro?.trim() ?? ''
+    const introAttachmentIds = attachmentIds ?? []
     // P2b.4 LIFECYCLE applied to onboarding too: when there IS a
     // user brief, save it synchronously, clear the row, then
     // stream with the stable promptMessageId. When there isn't
@@ -4174,12 +4330,26 @@ export const startOnboarding = action({
     // thread flow remains; depth defaults to 0 because no skill
     // turn has run on this thread yet.
     let promptMessageId: string | undefined
-    if (trimmed) {
+    if (trimmed || introAttachmentIds.length > 0) {
+      const userMessage = await buildUserMessageForAttachments(
+        ctx,
+        workspaceId,
+        trimmed,
+        introAttachmentIds,
+      )
       const saved = await dohcAgent.saveMessage(ctx, {
         threadId,
-        prompt: trimmed,
+        ...userMessage.saveArgs,
       })
       promptMessageId = saved.messageId
+      if (userMessage.assetIds.length > 0) {
+        await ctx.runMutation(internal.assets._markUsedInMessage, {
+          workspaceId,
+          assetIds: userMessage.assetIds,
+          threadId,
+          messageId: promptMessageId,
+        })
+      }
       await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
         threadId,
         promptMessageId,

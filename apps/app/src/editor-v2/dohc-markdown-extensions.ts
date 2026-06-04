@@ -1,4 +1,5 @@
 import { Node } from '@tiptap/core'
+import { parseDohcAssetHref } from '../lib/pastedAttachments'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -240,6 +241,92 @@ export const DohcFormula = Node.create({
     `{{${node.attrs?.source || `formula:${node.attrs?.expression ?? ''}`}}}`,
 })
 
+export const DohcMediaAsset = Node.create({
+  name: 'mediaAsset',
+  priority: 1000,
+  group: 'block',
+  atom: true,
+
+  addAttributes() {
+    return {
+      kind: { default: 'file' },
+      assetId: { default: '' },
+      label: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'figure[data-dohc-media-asset]' }]
+  },
+
+  renderHTML({ node }) {
+    const kind = node.attrs.kind || 'file'
+    const label = node.attrs.label || node.attrs.assetId || 'media asset'
+    return [
+      'figure',
+      {
+        'data-dohc-media-asset': node.attrs.assetId,
+        'data-dohc-media-kind': kind,
+        class: 'dohc-media-asset',
+        contenteditable: 'false',
+      },
+      ['span', { class: 'dohc-media-asset-label' }, `${kind}: ${label}`],
+    ]
+  },
+
+  markdownTokenizer: {
+    name: 'mediaAsset',
+    level: 'block',
+    start(src) {
+      const imageIndex = firstUnescapedIndex(
+        src,
+        /(^|[^\\])!\[(?:\\.|[^\]\n])*\]\(dohc-asset:/,
+      )
+      const linkIndex = firstUnescapedIndex(
+        src,
+        /(^|[^\\])\[(?:\\.|[^\]\n])*\]\(dohc-asset:/,
+      )
+      if (imageIndex === -1) return linkIndex
+      if (linkIndex === -1) return imageIndex
+      return Math.min(imageIndex, linkIndex)
+    },
+    tokenize(src) {
+      const match = firstTokenMatch(
+        src,
+        /^(!?)\[("(?:\\.|[^"\n])*"|(?:\\.|[^\]\n])*)\]\((dohc-asset:(image|video|audio|file)\/[^)\s]+)\)[^\S\n]*(?:\n|$)?/,
+      )
+      if (!match) return undefined
+
+      const [, marker = '', label = '', href = ''] = match
+      const parsed = parseDohcAssetHref(href)
+      if (!parsed) return undefined
+
+      return {
+        type: 'mediaAsset',
+        raw: match[0],
+        kind: parsed.kind,
+        assetId: parsed.assetId,
+        label: unquoteMarkdownLabel(marker ? label : label),
+      }
+    },
+  },
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('mediaAsset', {
+      kind: token.kind,
+      assetId: token.assetId,
+      label: token.label ?? '',
+    }),
+
+  renderMarkdown: (node) => {
+    const kind = node.attrs?.kind ?? 'file'
+    const assetId = node.attrs?.assetId ?? ''
+    const label = escapeMarkdownLabel(node.attrs?.label || assetId)
+    const href = `dohc-asset:${kind}/${assetId}`
+    return kind === 'image' ? `![${label}](${href})` : `[${label}](${href})`
+  },
+})
+
 export const DohcQueryBlock = Node.create({
   name: 'queryBlock',
   priority: 1000,
@@ -293,5 +380,17 @@ export const dohcMarkdownExtensions = [
   DohcWikilink,
   DohcInlineAtom,
   DohcFormula,
+  DohcMediaAsset,
   DohcQueryBlock,
 ]
+
+function escapeMarkdownLabel(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll(']', '\\]')
+}
+
+function unquoteMarkdownLabel(value: string): string {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1)
+  }
+  return value
+}

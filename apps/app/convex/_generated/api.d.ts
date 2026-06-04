@@ -10,6 +10,7 @@
 
 import type * as agent from "../agent.js";
 import type * as agentProviders from "../agentProviders.js";
+import type * as assets from "../assets.js";
 import type * as atomAccess from "../atomAccess.js";
 import type * as atomCapture from "../atomCapture.js";
 import type * as atomId from "../atomId.js";
@@ -17,6 +18,7 @@ import type * as atomLocks from "../atomLocks.js";
 import type * as atomShares from "../atomShares.js";
 import type * as atomSuggestions from "../atomSuggestions.js";
 import type * as atoms from "../atoms.js";
+import type * as attachmentPrompt from "../attachmentPrompt.js";
 import type * as auth from "../auth.js";
 import type * as captures from "../captures.js";
 import type * as confirmTier from "../confirmTier.js";
@@ -61,6 +63,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
   agentProviders: typeof agentProviders;
+  assets: typeof assets;
   atomAccess: typeof atomAccess;
   atomCapture: typeof atomCapture;
   atomId: typeof atomId;
@@ -68,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   atomShares: typeof atomShares;
   atomSuggestions: typeof atomSuggestions;
   atoms: typeof atoms;
+  attachmentPrompt: typeof attachmentPrompt;
   auth: typeof auth;
   captures: typeof captures;
   confirmTier: typeof confirmTier;

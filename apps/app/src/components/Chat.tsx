@@ -68,9 +68,18 @@ import {
   latestUserMessageTimestamp,
   optimisticTurnHasServerEcho,
   pendingTurnEchoCountBefore,
+  uiMessageDisplayText,
   uiMessageText,
   type OptimisticChatTurn,
 } from '../lib/chat-optimistic'
+import type { Id } from '../../convex/_generated/dataModel'
+import {
+  AttachmentTray,
+  AttachmentDropOverlay,
+  AttachmentUploadButton,
+  MessageFileParts,
+  useAttachmentUploads,
+} from './AttachmentComposer'
 
 // Composer grammar:
 //   /command  => saved slash command, only at the start of the line
@@ -593,6 +602,10 @@ export function Chat({
   // action cannot validate active membership; the thread itself
   // binds to a workspace via threadRefs, which is the long-term fix).
   const activeWorkspaceId = useActiveWorkspaceId()
+  const attachmentUploads = useAttachmentUploads({
+    activeWorkspaceId,
+    purpose: 'chat',
+  })
   const skills = useQuery(api.skills.list, { activeWorkspaceId }) ?? []
   const savedCommands =
     useQuery(api.skills.listCommands, { activeWorkspaceId }) ?? []
@@ -809,18 +822,23 @@ export function Chat({
     displayText = promptText,
     entry,
     clearComposer = false,
+    attachmentIds = attachmentUploads.readyAssetIds,
   }: {
     promptText: string
     displayText?: string
     entry?: SendEntry
     clearComposer?: boolean
+    attachmentIds?: Id<'workspaceAssets'>[]
   }) {
-    if (!promptText.trim() || sending || busy) return
+    const sendPrompt =
+      promptText.trim() || (attachmentIds.length > 0 ? 'Attached files.' : '')
+    if (!sendPrompt || sending || busy || attachmentUploads.hasUploading) return
     setComposerError(null)
     setSending(true)
+    const optimisticText = displayText.trim() || sendPrompt
     const optimisticId = appendOptimisticTurn({
-      displayText,
-      serverText: promptText,
+      displayText: optimisticText,
+      serverText: sendPrompt,
     })
     if (clearComposer) setInput('')
     try {
@@ -832,17 +850,19 @@ export function Chat({
       setActiveSendTarget({ threadId: activeThreadId, projectPath })
       await sendMessage({
         threadId: activeThreadId,
-        prompt: promptText,
+        prompt: sendPrompt,
+        attachmentIds,
         ...(entry ? { entry } : {}),
         activeWorkspaceId,
         projectPath,
         agentAccessMode: accessMode,
         ...agentSelectionPayload,
       })
+      if (clearComposer) attachmentUploads.clearReadyAttachmentIds(attachmentIds)
     } catch (e) {
       removeOptimisticTurn(optimisticId)
       if (clearComposer) {
-        setInput((current) => (current.trim() ? current : displayText))
+        setInput((current) => (current.trim() ? current : optimisticText))
       }
       setComposerError(formatComposerError(e))
       console.error(e)
@@ -853,7 +873,14 @@ export function Chat({
 
   async function submit(promptOverride?: string) {
     const prompt = (promptOverride ?? input).trim()
-    if (!prompt || sending || busy) return
+    const attachmentIds = attachmentUploads.readyAssetIds
+    if (
+      (!prompt && attachmentIds.length === 0) ||
+      sending ||
+      busy ||
+      attachmentUploads.hasUploading
+    )
+      return
     setComposerError(null)
     // Track-3 P3 — slash-command routing. A leading `/<token>`
     // that resolves to a saved skill flips this turn into
@@ -895,6 +922,7 @@ export function Chat({
         displayText: prompt,
         entry: 'skill-fire',
         clearComposer: !promptOverride,
+        attachmentIds,
       })
       return
     }
@@ -907,12 +935,14 @@ export function Chat({
         displayText: prompt,
         entry: 'command-fire',
         clearComposer: !promptOverride,
+        attachmentIds,
       })
       return
     }
     await sendResolvedPrompt({
       promptText: prompt,
       clearComposer: !promptOverride,
+      attachmentIds,
     })
   }
 
@@ -1176,10 +1206,21 @@ export function Chat({
 
       <div className={primary ? 'mx-auto w-full max-w-[820px] px-7 pb-6 pt-1' : 'px-3 pb-3 pt-1'}>
         <div
-          className={`relative overflow-visible border border-rule bg-elevated/96 focus-within:border-rule-strong transition-[border,box-shadow,background] shadow-xs backdrop-blur ${
+          onDragEnter={attachmentUploads.handleDragEnter}
+          onDragOver={attachmentUploads.handleDragOver}
+          onDragLeave={attachmentUploads.handleDragLeave}
+          onDrop={attachmentUploads.handleDrop}
+          className={`relative overflow-visible border bg-elevated/96 focus-within:border-rule-strong transition-[border,box-shadow,background] shadow-xs backdrop-blur ${
+            attachmentUploads.isDragActive
+              ? 'border-accent bg-accent/5 shadow-modal'
+              : 'border-rule'
+          } ${
             primary ? 'rounded-[18px] shadow-lg focus-within:shadow-modal' : 'rounded-xl'
           }`}
         >
+          {attachmentUploads.isDragActive && (
+            <AttachmentDropOverlay compact={!primary} />
+          )}
           {!threadId && (
             <div className="relative border-b border-rule bg-panel/60 px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -1314,9 +1355,17 @@ export function Chat({
             </div>
           )}
           <ComposerBannerStack items={composerBannerItems} />
+          <div className={attachmentUploads.attachments.length > 0 ? 'px-3 pt-3' : ''}>
+            <AttachmentTray
+              attachments={attachmentUploads.attachments}
+              onRemove={attachmentUploads.removeAttachment}
+              compact={!primary}
+            />
+          </div>
           <textarea
             ref={textareaRef}
             value={input}
+            onPaste={attachmentUploads.handlePaste}
             onChange={(e) => {
               setInput(e.target.value)
               updateComposerCursor(e.currentTarget)
@@ -1460,22 +1509,29 @@ export function Chat({
             </div>
           )}
           <div className="absolute bottom-2.5 left-3 right-2.5 flex items-center justify-between gap-3">
-            <ComposerStatusStrip
-              primary={primary}
-              busy={busy}
-              sending={sending}
-              messageCount={uiMessages.length + visibleOptimisticTurns.length}
-              contextUsage={contextUsage}
-              projectPath={projectPath}
-              skillCount={skills.length}
-              commandCount={savedCommands.length}
-              providers={agentProviders}
-              selection={agentSelection}
-              accessMode={accessMode}
-              onAccessModeChange={setAccessMode}
-              onSelectionChange={onAgentSelectionChange}
-              onSetDefault={onSetAgentDefault}
-            />
+            <div className="flex min-w-0 items-center gap-1.5">
+              <AttachmentUploadButton
+                uploader={attachmentUploads}
+                disabled={!canSend || sending || busy}
+                compact={!primary}
+              />
+              <ComposerStatusStrip
+                primary={primary}
+                busy={busy}
+                sending={sending}
+                messageCount={uiMessages.length + visibleOptimisticTurns.length}
+                contextUsage={contextUsage}
+                projectPath={projectPath}
+                skillCount={skills.length}
+                commandCount={savedCommands.length}
+                providers={agentProviders}
+                selection={agentSelection}
+                accessMode={accessMode}
+                onAccessModeChange={setAccessMode}
+                onSelectionChange={onAgentSelectionChange}
+                onSetDefault={onSetAgentDefault}
+              />
+            </div>
             {sending || busy ? (
               <button
                 type="button"
@@ -1496,7 +1552,11 @@ export function Chat({
             ) : (
               <button
                 onClick={() => submit()}
-                disabled={!canSend || !input.trim()}
+                disabled={
+                  !canSend ||
+                  attachmentUploads.hasUploading ||
+                  (!input.trim() && attachmentUploads.readyAssetIds.length === 0)
+                }
                 className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
                   primary ? 'size-9' : 'size-7'
                 }`}
@@ -2735,7 +2795,7 @@ const MessageView = memo(function MessageView({
   const now = useNow(streaming)
   if (message.role === 'system') return null
   const isUser = message.role === 'user'
-  const text = uiMessageText(message)
+  const text = uiMessageDisplayText(message)
   const timestamp = (message as { _creationTime?: number })._creationTime
   const timestampLabel = formatChatTimestamp(timestamp)
   const toolCalls = message.parts.filter(
@@ -2744,11 +2804,12 @@ const MessageView = memo(function MessageView({
       part.type !== 'text' &&
       isToolActivityPart(part),
   ) as ToolActivityPart[]
+  const hasFileParts = message.parts.some((part) => part.type === 'file')
   const workedDurationMs = !isUser
     ? workedDurationForMessage(message, previousMessage, now)
     : null
 
-  if (!text.trim() && toolCalls.length === 0) return null
+  if (!text.trim() && toolCalls.length === 0 && !hasFileParts) return null
 
   return (
     <div
@@ -2818,6 +2879,7 @@ const MessageView = memo(function MessageView({
               <Markdown>{text}</Markdown>
             )
           )}
+          <MessageFileParts parts={message.parts} />
         </div>
 
         {text.trim() && (

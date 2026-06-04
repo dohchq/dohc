@@ -15,10 +15,19 @@ import { api } from '../../convex/_generated/api'
 import { DohcLogo } from '@dohc/brand'
 import { HtmlAtomFrame } from '@/components/HtmlAtomFrame'
 import { Markdown } from '@/components/Markdown'
+import {
+  AttachmentTray,
+  AttachmentDropOverlay,
+  AttachmentUploadButton,
+  MessageFileParts,
+  useAttachmentUploads,
+} from '@/components/AttachmentComposer'
 import { extractFrontmatterId, isHtmlPath } from '@/lib/atomId'
 import { useActiveWorkspaceId } from '@/lib/active-workspace'
+import { collapsePastedFileBlocks } from '@/lib/pastedFileDisplay'
 import { isViewPackageRoot } from '@/lib/viewPaths'
 import { onboardingWorkspaceReady } from '../lib/onboarding-ready'
+import type { Id } from '../../convex/_generated/dataModel'
 
 // P1 — the onboarding wedge. Design:
 // docs/strategy/onboarding-wedge-design.md. UX-polish pass: a 2-choice
@@ -234,6 +243,7 @@ export function Onboarding({ state }: Props) {
     state === 'IN_PROGRESS' ? 'working' : 'intro',
   )
   const introRef = useRef<string | null>(null)
+  const introAttachmentIdsRef = useRef<Id<'workspaceAssets'>[]>([])
 
   // org-plan §5: onboarding is always per-workspace. ensureThread +
   // listMessages thread the active workspace (non-defaultable). The
@@ -271,9 +281,11 @@ export function Onboarding({ state }: Props) {
       if (!threadId) return
       setKicking(true)
       setKickFailed(false)
-      startOnboarding(
-        intro ? { intro, activeWorkspaceId } : { activeWorkspaceId },
-      )
+      startOnboarding({
+        ...(intro ? { intro } : {}),
+        attachmentIds: introAttachmentIdsRef.current,
+        activeWorkspaceId,
+      })
         .catch(() => setKickFailed(true))
         .finally(() => setKicking(false))
     },
@@ -324,21 +336,40 @@ export function Onboarding({ state }: Props) {
   // ── composer ───────────────────────────────────────────────────
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const replyAttachments = useAttachmentUploads({
+    activeWorkspaceId,
+    purpose: 'chat',
+  })
   const send = useCallback(
     async (override?: string) => {
       const prompt = (override ?? input).trim()
-      if (!prompt || !threadId || sending) return
+      const attachmentIds = replyAttachments.readyAssetIds
+      if (
+        (!prompt && attachmentIds.length === 0) ||
+        !threadId ||
+        sending ||
+        replyAttachments.hasUploading
+      )
+        return
+      const previousInput = input
       setSending(true)
       if (!override) setInput('')
       try {
-        await sendMessage({ threadId, prompt, activeWorkspaceId })
+        await sendMessage({
+          threadId,
+          prompt: prompt || 'Attached files.',
+          attachmentIds,
+          activeWorkspaceId,
+        })
+        if (!override) replyAttachments.clearReadyAttachmentIds(attachmentIds)
       } catch (e) {
+        if (!override) setInput(previousInput)
         console.error(e)
       } finally {
         setSending(false)
       }
     },
-    [input, threadId, sending, sendMessage, activeWorkspaceId],
+    [input, threadId, sending, replyAttachments, sendMessage, activeWorkspaceId],
   )
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -475,8 +506,9 @@ export function Onboarding({ state }: Props) {
       <Questionnaire
         workspaceKind={workspaceKind}
         onCancel={() => setPhase('intro')}
-        onDone={(intro) => {
+        onDone={(intro, attachmentIds) => {
           introRef.current = intro
+          introAttachmentIdsRef.current = attachmentIds
           setPhase('working')
         }}
       />
@@ -512,9 +544,32 @@ export function Onboarding({ state }: Props) {
 
         <div className="mx-auto w-full max-w-[700px] px-6 pb-5 pt-1">
           {composerReady ? (
-            <div className="relative rounded-xl border border-rule bg-elevated shadow-xs transition-colors focus-within:border-rule-strong">
+            <div
+              onDragEnter={replyAttachments.handleDragEnter}
+              onDragOver={replyAttachments.handleDragOver}
+              onDragLeave={replyAttachments.handleDragLeave}
+              onDrop={replyAttachments.handleDrop}
+              className={`relative rounded-xl border bg-elevated shadow-xs transition-[border,background,box-shadow] focus-within:border-rule-strong ${
+                replyAttachments.isDragActive
+                  ? 'border-accent bg-accent/5 shadow-modal'
+                  : 'border-rule'
+              }`}
+            >
+              {replyAttachments.isDragActive && (
+                <AttachmentDropOverlay compact />
+              )}
+              {replyAttachments.attachments.length > 0 && (
+                <div className="px-3.5 pt-3">
+                  <AttachmentTray
+                    attachments={replyAttachments.attachments}
+                    onRemove={replyAttachments.removeAttachment}
+                    compact
+                  />
+                </div>
+              )}
               <textarea
                 value={input}
+                onPaste={replyAttachments.handlePaste}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -527,12 +582,23 @@ export function Onboarding({ state }: Props) {
                 className="w-full resize-none bg-transparent px-3.5 pb-9 pt-3 text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-ink-faint"
               />
               <div className="absolute bottom-2 left-3.5 right-2 flex items-center justify-between">
-                <span className="text-[10px] text-ink-faint">
-                  ⏎ send · ⇧⏎ newline
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <AttachmentUploadButton
+                    uploader={replyAttachments}
+                    disabled={sending}
+                    compact
+                  />
+                  <span className="text-[10px] text-ink-faint">
+                    ⏎ send · ⇧⏎ newline
+                  </span>
+                </div>
                 <button
                   onClick={() => send()}
-                  disabled={sending || !input.trim()}
+                  disabled={
+                    sending ||
+                    replyAttachments.hasUploading ||
+                    (!input.trim() && replyAttachments.readyAssetIds.length === 0)
+                  }
                   className="inline-flex h-7 items-center gap-1.5 rounded-md bg-ink-strong px-2.5 text-[11.5px] font-medium text-surface transition-colors hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink-ghost"
                 >
                   <Send className="size-3" strokeWidth={2.2} />
@@ -648,10 +714,15 @@ function Questionnaire({
   onCancel,
 }: {
   workspaceKind: WorkspaceKind
-  onDone: (intro: string) => void
+  onDone: (intro: string, attachmentIds: Id<'workspaceAssets'>[]) => void
   onCancel: () => void
 }) {
   const generate = useAction(api.agent.generateQuestions)
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const materialAttachments = useAttachmentUploads({
+    activeWorkspaceId,
+    purpose: 'chat',
+  })
   const [answers, setAnswers] = useState<Answers>({})
   const [rest, setRest] = useState<Q[] | null>(null)
   const [tailoring, setTailoring] = useState(false)
@@ -673,7 +744,8 @@ function Questionnaire({
   const a = answers[q.id] ?? { picks: [], other: '' }
   const isLast = !!rest && i === ordered.length - 1
   const valid =
-    q.kind === 'free' || a.picks.length > 0 || a.other.trim().length > 0
+    (q.kind === 'free' || a.picks.length > 0 || a.other.trim().length > 0) &&
+    !(q.kind === 'free' && materialAttachments.hasUploading)
 
   const set = (next: { picks: string[]; other: string }) =>
     setAnswers((s) => ({ ...s, [q.id]: next }))
@@ -720,7 +792,10 @@ function Questionnaire({
     // the lock is never released (correct — no second fire).
     if (dir === -1 && i === 0) return onCancel()
     if (dir === 1 && isLast)
-      return onDone(composeIntro(ordered, answers, workspaceKind))
+      return onDone(
+        composeIntro(ordered, answers, workspaceKind),
+        materialAttachments.readyAssetIds,
+      )
     // leaving the seed question (forward): tailor (or, if already
     // tailored for this exact seed, just advance).
     if (dir === 1 && i === 0) {
@@ -839,16 +914,43 @@ function Questionnaire({
             })}
 
             {q.kind === 'free' ? (
-              <textarea
-                autoFocus
-                value={a.other}
-                onChange={(e) =>
-                  set({ picks: [], other: e.target.value })
-                }
-                rows={4}
-                placeholder="Type anything — or skip with Continue."
-                className="w-full resize-none rounded-xl border border-rule bg-surface px-4 py-3 text-[13.5px] leading-relaxed text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-rule-strong"
-              />
+              <div
+                onDragEnter={materialAttachments.handleDragEnter}
+                onDragOver={materialAttachments.handleDragOver}
+                onDragLeave={materialAttachments.handleDragLeave}
+                onDrop={materialAttachments.handleDrop}
+                className={`relative rounded-xl border bg-surface transition-[border,background,box-shadow] focus-within:border-rule-strong ${
+                  materialAttachments.isDragActive
+                    ? 'border-accent bg-accent/5 shadow-modal'
+                    : 'border-rule'
+                }`}
+              >
+                {materialAttachments.isDragActive && (
+                  <AttachmentDropOverlay />
+                )}
+                <textarea
+                  autoFocus
+                  value={a.other}
+                  onPaste={materialAttachments.handlePaste}
+                  onChange={(e) =>
+                    set({ picks: [], other: e.target.value })
+                  }
+                  rows={4}
+                  placeholder="Type anything — or skip with Continue."
+                  className="w-full resize-none bg-transparent px-4 py-3 text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-ink-faint"
+                />
+                <div className="flex items-end justify-between gap-2 px-3 pb-3">
+                  <AttachmentTray
+                    attachments={materialAttachments.attachments}
+                    onRemove={materialAttachments.removeAttachment}
+                    compact
+                  />
+                  <AttachmentUploadButton
+                    uploader={materialAttachments}
+                    compact
+                  />
+                </div>
+              </div>
             ) : (
               <div className="relative">
                 {a.other.trim().length > 0 && (
@@ -1226,10 +1328,16 @@ function MeCard({
 function Msg({ m }: { m: UIMessage }) {
   if (m.role === 'system') return null
   const isUser = m.role === 'user'
-  const text = m.parts
-    .filter((p) => p.type === 'text')
-    .map((p) => (p as { text?: string }).text ?? '')
-    .join('')
+  const text = collapsePastedFileBlocks(
+    m.parts
+      .filter((p) => p.type === 'text')
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join(''),
+  )
+  const hasFileParts = m.parts.some((p) => p.type === 'file')
+  if (!text.trim() && !hasFileParts && !m.parts.some((p) => p.type?.startsWith('tool-'))) {
+    return null
+  }
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
@@ -1250,6 +1358,7 @@ function Msg({ m }: { m: UIMessage }) {
           ) : (
             <Markdown>{text}</Markdown>
           ))}
+        <MessageFileParts parts={m.parts} />
         <div className="mt-1 flex flex-wrap gap-1">
           {m.parts.map((part, i) => {
             if (!part.type?.startsWith('tool-')) return null

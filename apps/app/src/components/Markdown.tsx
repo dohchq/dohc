@@ -1,7 +1,12 @@
 import { memo } from 'react'
+import { useQuery } from 'convex/react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
+import { api } from '../../convex/_generated/api'
+import type { Id } from '../../convex/_generated/dataModel'
+import { useActiveWorkspaceId } from '../lib/active-workspace'
+import { parseDohcAssetHref, type AttachmentKind } from '../lib/pastedAttachments'
 
 // One styled markdown renderer for AI prose (the chat) and the live
 // previews (dashboard / profile). Maps every element to the
@@ -65,16 +70,49 @@ const make = (v: Variant): Components => {
       <strong className="font-semibold text-ink-strong">{children}</strong>
     ),
     em: ({ children }) => <em className="italic text-ink">{children}</em>,
-    a: ({ children, href }) => (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        className="font-medium text-accent underline decoration-accent/30 underline-offset-2 hover:decoration-accent"
-      >
-        {children}
-      </a>
-    ),
+    a: ({ children, href }) => {
+      const asset = parseDohcAssetHref(href)
+      if (asset) {
+        return (
+          <AssetMedia
+            kind={asset.kind}
+            assetId={asset.assetId}
+            label={textFromChildren(children) || asset.assetId}
+            compact={compact}
+          />
+        )
+      }
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="font-medium text-accent underline decoration-accent/30 underline-offset-2 hover:decoration-accent"
+        >
+          {children}
+        </a>
+      )
+    },
+    img: ({ src, alt }) => {
+      const asset = parseDohcAssetHref(src)
+      if (asset) {
+        return (
+          <AssetMedia
+            kind={asset.kind}
+            assetId={asset.assetId}
+            label={alt || asset.assetId}
+            compact={compact}
+          />
+        )
+      }
+      return (
+        <img
+          src={src}
+          alt={alt ?? ''}
+          className="mt-2 max-h-[360px] rounded-lg border border-rule bg-page object-contain"
+        />
+      )
+    },
     code: ({ children, className }) => {
       const block = (className ?? '').includes('language-')
       if (block)
@@ -141,3 +179,90 @@ export const Markdown = memo(function Markdown({
     </div>
   )
 })
+
+function AssetMedia({
+  kind,
+  assetId,
+  label,
+  compact,
+}: {
+  kind: AttachmentKind
+  assetId: string
+  label: string
+  compact: boolean
+}) {
+  const activeWorkspaceId = useActiveWorkspaceId()
+  const asset = useQuery(api.assets.resolveAsset, {
+    activeWorkspaceId,
+    assetId: assetId as Id<'workspaceAssets'>,
+  })
+  const resolvedKind = (asset?.kind ?? kind) as AttachmentKind
+  const title = asset?.filename ?? label
+  const mediaClass = compact ? 'max-h-40' : 'max-h-[420px]'
+
+  if (!asset) {
+    return (
+      <span className="mt-2 inline-flex h-8 max-w-full items-center rounded-md border border-rule bg-page px-2.5 text-[11.5px] font-medium text-ink-faint">
+        {title}
+      </span>
+    )
+  }
+
+  if (resolvedKind === 'image') {
+    return (
+      <span className="mt-2 block overflow-hidden rounded-lg border border-rule bg-page">
+        <img
+          src={asset.url}
+          alt={title}
+          className={`${mediaClass} w-full object-contain`}
+        />
+      </span>
+    )
+  }
+
+  if (resolvedKind === 'video') {
+    return (
+      <span className="mt-2 block overflow-hidden rounded-lg border border-rule bg-page">
+        <video
+          src={asset.url}
+          controls
+          preload="metadata"
+          className={`${mediaClass} w-full bg-black`}
+        />
+      </span>
+    )
+  }
+
+  if (resolvedKind === 'audio') {
+    return (
+      <span className="mt-2 block rounded-lg border border-rule bg-page px-3 py-2">
+        <audio src={asset.url} controls preload="metadata" className="w-full" />
+      </span>
+    )
+  }
+
+  return (
+    <a
+      href={asset.url}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-2 inline-flex h-8 max-w-full items-center rounded-md border border-rule bg-page px-2.5 text-[11.5px] font-medium text-accent"
+    >
+      <span className="truncate">{title}</span>
+    </a>
+  )
+}
+
+function textFromChildren(children: unknown): string {
+  if (typeof children === 'string') return children
+  if (Array.isArray(children)) return children.map(textFromChildren).join('')
+  if (
+    children &&
+    typeof children === 'object' &&
+    'props' in children &&
+    typeof (children as { props?: { children?: unknown } }).props === 'object'
+  ) {
+    return textFromChildren((children as { props?: { children?: unknown } }).props?.children)
+  }
+  return ''
+}

@@ -261,8 +261,11 @@ function Gate() {
   if (state === undefined) {
     return <AppLoadingScreen />
   }
-  if (state === 'NEW' || state === 'IN_PROGRESS') {
+  if (state === 'NEW') {
     return <Onboarding state={state} />
+  }
+  if (state === 'IN_PROGRESS') {
+    return <App initialView="agent" />
   }
   // DONE | DEFERRED → the workspace
   return <App />
@@ -324,7 +327,11 @@ function SignInPrompt() {
   )
 }
 
-function App() {
+type AppProps = {
+  initialView?: View
+}
+
+function App({ initialView }: AppProps = {}) {
   const { user } = useAuth()
   const notice = useNotice()
   // org-plan §5 Phase B — every read/write is scoped to the active
@@ -528,6 +535,7 @@ function App() {
   const [view, setView] = useState<View>(
     () =>
       urlView ??
+      initialView ??
       (urlPageId || activeShareId || initialOpenPathRef.current
         ? 'atom'
         : 'views'),

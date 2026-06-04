@@ -369,6 +369,34 @@ export default defineSchema({
     ])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
+  // Workspace-scoped blobs uploaded through Convex storage. These are
+  // source attachments for chat/onboarding and durable media assets for
+  // dohc files; document bodies store stable `dohc-asset:` references,
+  // never raw signed storage URLs.
+  workspaceAssets: defineTable({
+    workspaceId: v.string(),
+    storageId: v.id('_storage'),
+    filename: v.string(),
+    mediaType: v.string(),
+    kind: v.union(
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('audio'),
+      v.literal('file'),
+    ),
+    size: v.number(),
+    sha256: v.optional(v.string()),
+    purpose: v.union(v.literal('chat'), v.literal('workspace')),
+    createdByUserId: v.string(),
+    createdAt: v.number(),
+    threadId: v.optional(v.string()),
+    messageId: v.optional(v.string()),
+    usedAt: v.optional(v.number()),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_workspace_storage', ['workspaceId', 'storageId'])
+    .index('by_workspace_thread', ['workspaceId', 'threadId']),
+
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
   // infer "ONBOARDING vs MAINTENANCE" from `list_atoms` being empty —
   // which flipped mid-onboarding the instant dohc wrote its first
