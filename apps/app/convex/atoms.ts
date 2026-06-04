@@ -438,6 +438,7 @@ export const getByPath = query({
 })
 
 type PageResolveCtx = QueryCtx | MutationCtx
+const SHARE_LOOKUP_PAGE_SIZE = 50
 
 async function viewerCanUseWorkspace(
   ctx: PageResolveCtx,
@@ -461,39 +462,53 @@ async function shareForViewer(
   shareId: Id<'atomShares'>
   activeWorkspaceId: string | null
 } | null> {
-  const shares = await ctx.db
-    .query('atomShares')
-    .withIndex('by_owner_fileId', (q) =>
-      q.eq('ownerWorkspaceId', ownerWorkspaceId).eq('fileId', fileId),
-    )
-    .collect()
+  let cursor: string | null = null
 
-  for (const share of shares) {
-    if (share.publicAccess === true) {
-      return { shareId: share._id, activeWorkspaceId: null }
-    }
-    if (share.granteeOrgId) {
-      if (await viewerCanUseWorkspace(ctx, share.granteeOrgId, viewerSubject)) {
+  while (true) {
+    const page = await ctx.db
+      .query('atomShares')
+      .withIndex('by_owner_fileId', (q) =>
+        q.eq('ownerWorkspaceId', ownerWorkspaceId).eq('fileId', fileId),
+      )
+      .paginate({ numItems: SHARE_LOOKUP_PAGE_SIZE, cursor })
+
+    for (const share of page.page) {
+      if (share.publicAccess === true) {
         return { shareId: share._id, activeWorkspaceId: null }
       }
-      continue
-    }
-    if (!share.granteeWorkspaceId) continue
-    if (share.granteeUserId && share.granteeUserId !== viewerSubject) continue
-    if (share.granteeWorkspaceId === viewerSubject) {
-      return { shareId: share._id, activeWorkspaceId: null }
-    }
-    if (
-      share.granteeUserId &&
-      (await viewerCanUseWorkspace(ctx, share.granteeWorkspaceId, viewerSubject))
-    ) {
-      return {
-        shareId: share._id,
-        activeWorkspaceId: share.granteeWorkspaceId,
+      if (share.granteeOrgId) {
+        if (
+          await viewerCanUseWorkspace(ctx, share.granteeOrgId, viewerSubject)
+        ) {
+          return { shareId: share._id, activeWorkspaceId: null }
+        }
+        continue
+      }
+      if (!share.granteeWorkspaceId) continue
+      if (share.granteeUserId && share.granteeUserId !== viewerSubject) {
+        continue
+      }
+      if (share.granteeWorkspaceId === viewerSubject) {
+        return { shareId: share._id, activeWorkspaceId: null }
+      }
+      if (
+        share.granteeUserId &&
+        (await viewerCanUseWorkspace(
+          ctx,
+          share.granteeWorkspaceId,
+          viewerSubject,
+        ))
+      ) {
+        return {
+          shareId: share._id,
+          activeWorkspaceId: share.granteeWorkspaceId,
+        }
       }
     }
+
+    if (page.isDone) return null
+    cursor = page.continueCursor
   }
-  return null
 }
 
 // Canonical pretty URL resolver: /<workspaceSlug>/<pageSlug>-<atoms._id>.
@@ -518,6 +533,7 @@ export const getPageById = query({
       atom.workspaceId,
       'workspace',
     )
+    if (!canonicalWorkspaceSlug) return null
     const title = deriveTitle(atom.body, atom.path)
     const fileId = extractFrontmatterId(atom.body)
 

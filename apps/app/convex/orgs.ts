@@ -19,7 +19,11 @@ import { countActiveOwners, requireRole } from './orgRoles'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 import { ORG_IDENTITY_PATH } from './inlineAtom'
 import { PLACEHOLDER_SEED_MARKER } from './onboarding'
-import { ensureWorkspaceSlug, readWorkspaceSlug } from './workspaceSlugs'
+import {
+  ensureWorkspaceSlug,
+  readWorkspaceSlug,
+  workspaceSlugBase,
+} from './workspaceSlugs'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
@@ -508,7 +512,9 @@ export const myWorkspaces = query({
       {
         workspaceId: caller,
         kind: 'personal',
-        slug: await readWorkspaceSlug(ctx, caller, personalLabel),
+        slug:
+          (await readWorkspaceSlug(ctx, caller, personalLabel)) ??
+          workspaceSlugBase(personalLabel),
         name: 'Personal',
         role: 'owner',
         accent: null,
@@ -528,7 +534,9 @@ export const myWorkspaces = query({
       out.push({
         workspaceId: r.orgId, // org's workspaceId IS orgs._id (string)
         kind: 'org',
-        slug: await readWorkspaceSlug(ctx, r.orgId, org.name),
+        slug:
+          (await readWorkspaceSlug(ctx, r.orgId, org.name)) ??
+          workspaceSlugBase(org.name),
         name: org.name,
         role: r.role,
         accent: org.accent ?? null,

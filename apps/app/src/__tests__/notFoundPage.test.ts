@@ -1,39 +1,43 @@
-import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it, vi } from 'vitest'
+import { NotFoundPage } from '../components/NotFoundPage'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ROOT_ROUTE_SRC = readFileSync(
-  resolve(__dirname, '../../src/routes/__root.tsx'),
-  'utf8',
-)
-const APP_ROUTE_SRC = readFileSync(
-  resolve(__dirname, '../../src/routes/_app.tsx'),
-  'utf8',
-)
-const ROUTER_SRC = readFileSync(resolve(__dirname, '../../src/router.tsx'), 'utf8')
-const NOT_FOUND_SRC = readFileSync(
-  resolve(__dirname, '../../src/components/NotFoundPage.tsx'),
-  'utf8',
-)
+vi.mock('@tanstack/react-router', async () => {
+  const React = await import('react')
+  return {
+    Link: ({
+      to,
+      children,
+      ...props
+    }: {
+      to: string
+      children: React.ReactNode
+    }) => React.createElement('a', { href: to, ...props }, children),
+  }
+})
+
+function renderNotFound() {
+  return renderToStaticMarkup(React.createElement(NotFoundPage))
+}
 
 describe('root 404 page', () => {
-  it('wires a branded not-found component into the root route', () => {
-    expect(ROOT_ROUTE_SRC).toContain('notFoundComponent: NotFoundPage')
-    expect(ROOT_ROUTE_SRC).toContain('@/components/NotFoundPage')
-    expect(ROUTER_SRC).toContain('defaultNotFoundComponent: NotFoundPage')
-    expect(ROUTER_SRC).toContain("notFoundMode: 'root'")
-    expect(NOT_FOUND_SRC).toContain('export function NotFoundPage()')
-    expect(NOT_FOUND_SRC).toContain('<DohcLogo')
-    expect(NOT_FOUND_SRC).toContain('Open workspace')
-    expect(NOT_FOUND_SRC).toContain('Go back')
+  it('renders branded 404 actions and copy', () => {
+    const html = renderNotFound()
+
+    expect(html).toContain('404')
+    expect(html).toContain('This page is not in the workspace.')
+    expect(html).toContain('Open workspace')
+    expect(html).toContain('Go back')
+    expect(html).toContain('missing route')
+    expect(html).not.toContain('Sign in')
   })
 
-  it('uses the same 404 when pretty workspace URLs cannot resolve', () => {
-    expect(APP_ROUTE_SRC).toContain('<NotFoundPage />')
-    expect(APP_ROUTE_SRC).toContain('urlWorkspaceKnown')
-    expect(APP_ROUTE_SRC).toContain('routedPage === null')
-    expect(APP_ROUTE_SRC).toContain('routedAgentThread === null')
+  it('points the primary action at the workspace root', () => {
+    const html = renderNotFound()
+
+    expect(html).toContain('href="/"')
+    expect(html).toContain('path unresolved')
+    expect(html).toContain('source absent')
   })
 })

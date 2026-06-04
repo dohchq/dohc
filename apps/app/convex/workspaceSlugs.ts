@@ -31,13 +31,23 @@ type IdentityLabelSource = {
 const GENERIC_PERSONAL_SLUGS = new Set(['personal', 'workspace'])
 
 function cleanSlug(input: string): string {
-  const slug = input
+  const slug = slugToken(input)
+  if (!slug || RESERVED.has(slug)) return 'workspace'
+  return slug
+}
+
+function slugToken(input: string): string {
+  return input
     .trim()
     .toLowerCase()
     .replace(/['"]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-  if (!slug || RESERVED.has(slug)) return 'workspace'
+}
+
+function lookupSlug(input: string): string | null {
+  const slug = slugToken(input)
+  if (!slug || RESERVED.has(slug)) return null
   return slug
 }
 
@@ -67,15 +77,14 @@ export function workspaceSlugBase(label: string): string {
 export async function readWorkspaceSlug(
   ctx: SlugCtx,
   workspaceId: string,
-  fallbackLabel: string,
-): Promise<string> {
+  _fallbackLabel: string,
+): Promise<string | null> {
   const row = await ctx.db
     .query('workspaceSlugs')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .first()
   if (row) return row.slug
-  const base = cleanSlug(fallbackLabel)
-  return `${base}-${idSuffix(workspaceId)}`
+  return null
 }
 
 export async function ensureWorkspaceSlug(
@@ -138,9 +147,11 @@ export async function workspaceIdForSlug(
   ctx: QueryCtx | MutationCtx,
   slug: string,
 ): Promise<string | null> {
+  const lookup = lookupSlug(slug)
+  if (!lookup) return null
   const row = await ctx.db
     .query('workspaceSlugs')
-    .withIndex('by_slug', (q) => q.eq('slug', cleanSlug(slug)))
+    .withIndex('by_slug', (q) => q.eq('slug', lookup))
     .first()
   return row?.workspaceId ?? null
 }

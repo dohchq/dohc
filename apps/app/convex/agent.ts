@@ -3092,12 +3092,18 @@ export const getThreadById = query({
         !isInternalProjectPath(candidate.projectPath),
     )
     if (!row) return null
+    const canonicalWorkspaceSlug = await readWorkspaceSlug(
+      ctx,
+      workspaceId,
+      workspaceSlug,
+    )
+    if (!canonicalWorkspaceSlug) return null
     return {
       threadId: row.threadId,
       workspaceId,
       activeWorkspaceId:
         workspaceId === (await requireWorkspace(ctx)) ? null : workspaceId,
-      workspaceSlug: await readWorkspaceSlug(ctx, workspaceId, workspaceSlug),
+      workspaceSlug: canonicalWorkspaceSlug,
       projectPath: row.projectPath ?? null,
       title: row.title ?? fallbackThreadTitle(row.projectPath),
       agentProviderId: row.agentProviderId ?? null,

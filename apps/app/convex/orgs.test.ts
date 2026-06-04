@@ -3,6 +3,11 @@ import { convexTest } from 'convex-test'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { internal, api } from './_generated/api'
+import {
+  ensureWorkspaceSlug,
+  readWorkspaceSlug,
+  workspaceIdForSlug,
+} from './workspaceSlugs'
 
 const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_alice' // org creator/owner
@@ -196,6 +201,34 @@ describe('org workspace lifecycle (Phase 3)', () => {
       workspaceId: A,
       kind: 'personal',
       slug: 'ice',
+    })
+  })
+
+  it('workspace slug lookup rejects reserved route tokens', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: A,
+        slug: 'workspace',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+
+      expect(await workspaceIdForSlug(ctx, 'workspace')).toBe(A)
+      expect(await workspaceIdForSlug(ctx, 'shared')).toBeNull()
+      expect(await workspaceIdForSlug(ctx, 'agent')).toBeNull()
+      expect(await workspaceIdForSlug(ctx, '')).toBeNull()
+    })
+  })
+
+  it('readWorkspaceSlug only returns persisted slugs', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      expect(await readWorkspaceSlug(ctx, A, 'Ice')).toBeNull()
+      const slug = await ensureWorkspaceSlug(ctx, A, 'Ice')
+      expect(slug).toBe('ice')
+      expect(await readWorkspaceSlug(ctx, A, 'Fallback')).toBe('ice')
+      expect(await workspaceIdForSlug(ctx, slug)).toBe(A)
     })
   })
 

@@ -75,6 +75,19 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   const orgWorkspaces = (workspaces ?? []).filter((w) => w.kind === 'org')
   const currentWorkspaceId = workspaces?.find((w) => w.kind === 'personal')
     ?.workspaceId
+  const fallbackSlugAfterRemoving = (removedWorkspaceId: string) =>
+    workspaces?.find((w) => w.workspaceId !== removedWorkspaceId)?.slug
+
+  function leaveRemovedWorkspace(removedWorkspaceId: string) {
+    if (activeWorkspaceId !== removedWorkspaceId) return
+    setActiveWorkspaceId(undefined)
+    const fallbackSlug = fallbackSlugAfterRemoving(removedWorkspaceId)
+    if (!fallbackSlug) return
+    void navigate({
+      to: '/$workspaceSlug',
+      params: { workspaceSlug: fallbackSlug },
+    })
+  }
 
   async function onCreate(name: string) {
     setBusy(true)
@@ -225,26 +238,14 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                       await renameOrg({ orgId: w.workspaceId as Id<'orgs'>, name })
                     }}
                     onLeave={async () => {
-                      await leaveOrg({ orgId: w.workspaceId as Id<'orgs'> })
-                      setActiveWorkspaceId(undefined)
-                      if (workspaces?.[0]?.slug) {
-                        void navigate({
-                          to: '/$workspaceSlug',
-                          params: { workspaceSlug: workspaces[0].slug },
-                        })
-                      }
+                      const orgId = w.workspaceId
+                      await leaveOrg({ orgId: orgId as Id<'orgs'> })
+                      leaveRemovedWorkspace(orgId)
                     }}
                     onDelete={async () => {
-                      await deleteOrg({ orgId: w.workspaceId as Id<'orgs'> })
-                      if (activeWorkspaceId === w.workspaceId) {
-                        setActiveWorkspaceId(undefined)
-                        if (workspaces?.[0]?.slug) {
-                          void navigate({
-                            to: '/$workspaceSlug',
-                            params: { workspaceSlug: workspaces[0].slug },
-                          })
-                        }
-                      }
+                      const orgId = w.workspaceId
+                      await deleteOrg({ orgId: orgId as Id<'orgs'> })
+                      leaveRemovedWorkspace(orgId)
                     }}
                     onRemove={async (memberWorkspaceId) => {
                       await removeMember({

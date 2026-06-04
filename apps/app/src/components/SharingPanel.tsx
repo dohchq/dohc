@@ -43,11 +43,13 @@ const shortWs = (w: string) => (w.length > 14 ? `${w.slice(0, 12)}…` : w)
 
 export function ImportsExportsPanel({
   onAskDohc,
+  initialTab = 'exports',
 }: {
   // Frame E / §3 + §5: the truncated state must DEFER to the agent
   // (the existing capable bulk path) — never a dead-end. App wires
   // this to open Chat with a pending prompt.
   onAskDohc: (prompt: string) => void
+  initialTab?: 'exports' | 'imports'
 }) {
   const overview = useQuery(api.windows.consentOverview) as
     | OverviewWindow[]
@@ -56,7 +58,7 @@ export function ImportsExportsPanel({
     | SharedWindow[]
     | undefined
   const myId = useQuery(api.windows.whoami) as string | undefined
-  const [tab, setTab] = useState<'exports' | 'imports'>('exports')
+  const [tab, setTab] = useState<'exports' | 'imports'>(initialTab)
   const [builderOpen, setBuilderOpen] = useState(false)
 
   // Standing glanceable summary (always present, even at zero).
@@ -187,6 +189,7 @@ function WorkflowChoice({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={`min-w-0 rounded-lg border px-3 py-2 text-left transition-colors ${
         active
           ? 'border-rule-strong bg-surface text-ink shadow-xs'
@@ -435,6 +438,7 @@ function WindowCard({
           )}
           <div className="flex items-center gap-1.5">
             <input
+              aria-label="Workspace ID to grant import access"
               value={grantId}
               onChange={(e) => {
                 setGrantId(e.target.value)

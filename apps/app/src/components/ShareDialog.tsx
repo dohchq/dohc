@@ -276,7 +276,13 @@ export function ShareDialog({
   function copyLink() {
     const href = (() => {
       if (typeof window === 'undefined' || !window.location?.origin) return ''
-      if (pageHref) return pageHref
+      if (pageHref) {
+        try {
+          return new URL(pageHref, window.location.origin).toString()
+        } catch {
+          return window.location.href
+        }
+      }
       return window.location.href
     })()
     if (href) void navigator.clipboard?.writeText(href)

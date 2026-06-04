@@ -19,26 +19,30 @@ beforeEach(() => {
   useMutationMock.mockReturnValue(vi.fn())
 })
 
-function renderPanel(queryData: Record<string, unknown>) {
-  const values = Object.values(queryData)
-  let index = 0
+function renderPanel(
+  queryData: Record<string, unknown>,
+  options: { initialTab?: 'exports' | 'imports' } = {},
+) {
   useQueryMock.mockImplementation((ref: unknown) => {
     const name = getFunctionName(ref as never)
     if (name in queryData) return queryData[name]
-    return values[index++]
+    throw new Error(`Unexpected query ref in test: ${name}`)
   })
 
   return renderToStaticMarkup(
-    createElement(ImportsExportsPanel, { onAskDohc: () => {} }),
+    createElement(ImportsExportsPanel, {
+      onAskDohc: () => {},
+      initialTab: options.initialTab,
+    }),
   )
 }
 
 describe('imports/exports panel UX', () => {
   it('frames the empty state around sending and receiving fields', () => {
     const html = renderPanel({
-      'windows.consentOverview': [],
-      'windows.windowsSharedWithMe': [],
-      'windows.whoami': 'ws_current',
+      'windows:consentOverview': [],
+      'windows:windowsSharedWithMe': [],
+      'windows:whoami': 'ws_current',
     })
 
     expect(html).toContain('Send fields')
@@ -51,7 +55,7 @@ describe('imports/exports panel UX', () => {
 
   it('shows export cards as importers, review, and recipient preview sections', () => {
     const html = renderPanel({
-      'windows.consentOverview': [
+      'windows:consentOverview': [
         {
           windowId: 'window_1',
           name: 'Client hours',
@@ -68,8 +72,8 @@ describe('imports/exports panel UX', () => {
           atoms: [{ kind: 'atom', ref: 'logs/2026-06-04.md', key: 'billable' }],
         },
       ],
-      'windows.windowsSharedWithMe': [],
-      'windows.whoami': 'ws_current',
+      'windows:windowsSharedWithMe': [],
+      'windows:whoami': 'ws_current',
     })
 
     expect(html).toContain('Who can import')
@@ -78,5 +82,46 @@ describe('imports/exports panel UX', () => {
     expect(html).toContain('Export 2 values')
     expect(html).toContain('Recipient preview')
     expect(html).not.toContain('paste importer workspace id…')
+  })
+
+  it('shows the imports empty state when Receive fields is active', () => {
+    const html = renderPanel(
+      {
+        'windows:consentOverview': [],
+        'windows:windowsSharedWithMe': [],
+        'windows:whoami': 'ws_current',
+      },
+      { initialTab: 'imports' },
+    )
+
+    expect(html).toContain('Receive fields')
+    expect(html).toContain('Give your ID to the sender')
+    expect(html).toContain('Their grant will appear here as received fields.')
+    expect(html).toContain('ws_current')
+    expect(html).not.toContain('Create a field set first')
+  })
+
+  it('shows received import cards when a workspace grants fields', () => {
+    const html = renderPanel(
+      {
+        'windows:consentOverview': [],
+        'windows:windowsSharedWithMe': [
+          {
+            windowId: 'window_2',
+            name: 'Partner metrics',
+            ownerWorkspaceId: 'ws_partner_workspace',
+            view: { revenue: 123, status: 'green' },
+          },
+        ],
+        'windows:whoami': 'ws_current',
+      },
+      { initialTab: 'imports' },
+    )
+
+    expect(html).toContain('Partner metrics')
+    expect(html).toContain('from ws_partner_')
+    expect(html).toContain('Fields received')
+    expect(html).toContain('revenue: 123')
+    expect(html).not.toContain('Grant access')
   })
 })
