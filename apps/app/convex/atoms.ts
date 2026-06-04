@@ -49,7 +49,9 @@ import {
 } from './atomShares'
 import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
 import { isViewPath } from './viewPaths'
-import type { MutationCtx } from './_generated/server'
+import type { QueryCtx, MutationCtx } from './_generated/server'
+import { isMember } from './orgs'
+import { readWorkspaceSlug } from './workspaceSlugs'
 
 // Snapshot-coalescing window. The editor auto-saves every ~500ms; we
 // must NOT write a trash snapshot per keystroke. Instead we snapshot
@@ -432,6 +434,131 @@ export const getByPath = query({
     const viewerSubject = identity?.subject ?? ''
     if (!(await canReadAtom(ctx, row._id, viewerSubject))) return null
     return row
+  },
+})
+
+type PageResolveCtx = QueryCtx | MutationCtx
+
+async function viewerCanUseWorkspace(
+  ctx: PageResolveCtx,
+  workspaceId: string,
+  viewerSubject: string,
+): Promise<boolean> {
+  if (workspaceId === viewerSubject) return true
+  try {
+    return await isMember(ctx, workspaceId, viewerSubject)
+  } catch {
+    return false
+  }
+}
+
+async function shareForViewer(
+  ctx: PageResolveCtx,
+  ownerWorkspaceId: string,
+  fileId: string,
+  viewerSubject: string,
+): Promise<{
+  shareId: Id<'atomShares'>
+  activeWorkspaceId: string | null
+} | null> {
+  const shares = await ctx.db
+    .query('atomShares')
+    .withIndex('by_owner_fileId', (q) =>
+      q.eq('ownerWorkspaceId', ownerWorkspaceId).eq('fileId', fileId),
+    )
+    .collect()
+
+  for (const share of shares) {
+    if (share.publicAccess === true) {
+      return { shareId: share._id, activeWorkspaceId: null }
+    }
+    if (share.granteeOrgId) {
+      if (await viewerCanUseWorkspace(ctx, share.granteeOrgId, viewerSubject)) {
+        return { shareId: share._id, activeWorkspaceId: null }
+      }
+      continue
+    }
+    if (!share.granteeWorkspaceId) continue
+    if (share.granteeUserId && share.granteeUserId !== viewerSubject) continue
+    if (share.granteeWorkspaceId === viewerSubject) {
+      return { shareId: share._id, activeWorkspaceId: null }
+    }
+    if (
+      share.granteeUserId &&
+      (await viewerCanUseWorkspace(ctx, share.granteeWorkspaceId, viewerSubject))
+    ) {
+      return {
+        shareId: share._id,
+        activeWorkspaceId: share.granteeWorkspaceId,
+      }
+    }
+  }
+  return null
+}
+
+// Canonical pretty URL resolver: /<workspaceSlug>/<pageSlug>-<atoms._id>.
+// The slug is cosmetic; the global atom id identifies the document.
+// Access is still enforced server-side before the UI can open it.
+export const getPageById = query({
+  args: { atomId: v.string(), workspaceSlug: v.optional(v.string()) },
+  handler: async (ctx, { atomId }) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+
+    let atom = null
+    try {
+      atom = await ctx.db.get(atomId as Id<'atoms'>)
+    } catch {
+      return null
+    }
+    if (!atom) return null
+
+    const canonicalWorkspaceSlug = await readWorkspaceSlug(
+      ctx,
+      atom.workspaceId,
+      'workspace',
+    )
+    const title = deriveTitle(atom.body, atom.path)
+    const fileId = extractFrontmatterId(atom.body)
+
+    if (
+      await viewerCanUseWorkspace(ctx, atom.workspaceId, identity.subject)
+    ) {
+      if (!(await canReadAtom(ctx, atom._id, identity.subject))) return null
+      return {
+        kind: 'workspace' as const,
+        atomId: atom._id,
+        workspaceId: atom.workspaceId,
+        activeWorkspaceId:
+          atom.workspaceId === identity.subject ? null : atom.workspaceId,
+        workspaceSlug: canonicalWorkspaceSlug,
+        path: atom.path,
+        title,
+        fileId,
+      }
+    }
+
+    if (fileId) {
+      const share = await shareForViewer(
+        ctx,
+        atom.workspaceId,
+        fileId,
+        identity.subject,
+      )
+      if (share) {
+        return {
+          kind: 'share' as const,
+          atomId: atom._id,
+          shareId: share.shareId,
+          activeWorkspaceId: share.activeWorkspaceId,
+          workspaceSlug: canonicalWorkspaceSlug,
+          title,
+          fileId,
+        }
+      }
+    }
+
+    return null
   },
 })
 

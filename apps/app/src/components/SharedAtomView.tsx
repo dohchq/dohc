@@ -15,9 +15,17 @@ import { DocumentSkeleton } from './Skeleton'
 // is read-only; with 'edit' markdown changes go through the shared
 // Hocuspocus/Yjs document. The legacy whole-body CAS save path stays disabled
 // for collaborative markdown so a CRDT merge cannot become a false conflict.
-export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
+export function SharedAtomView({
+  shareId,
+  activeWorkspaceIdOverride,
+}: {
+  shareId: Id<'atomShares'>
+  activeWorkspaceIdOverride?: string
+}) {
   const { user } = useAuth()
-  const activeWorkspaceId = useActiveWorkspaceId()
+  const contextActiveWorkspaceId = useActiveWorkspaceId()
+  const activeWorkspaceId =
+    activeWorkspaceIdOverride ?? contextActiveWorkspaceId
   const shared = useQuery(api.atomShares.getSharedAtom, {
     shareId,
     activeWorkspaceId,
@@ -233,6 +241,7 @@ export function SharedAtomView({ shareId }: { shareId: Id<'atomShares'> }) {
           shareId={shareId}
           readOnly={!canEdit || conflict}
           frontmatter={frontmatter}
+          activeWorkspaceId={activeWorkspaceId}
           collab={{
             workspaceId: shared.ownerWorkspaceId,
             atomId: shared.fileId,

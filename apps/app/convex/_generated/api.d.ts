@@ -50,6 +50,7 @@ import type * as viewData from "../viewData.js";
 import type * as viewPaths from "../viewPaths.js";
 import type * as views from "../views.js";
 import type * as windows from "../windows.js";
+import type * as workspaceSlugs from "../workspaceSlugs.js";
 
 import type {
   ApiFromModules,
@@ -100,6 +101,7 @@ declare const fullApi: ApiFromModules<{
   viewPaths: typeof viewPaths;
   views: typeof views;
   windows: typeof windows;
+  workspaceSlugs: typeof workspaceSlugs;
 }>;
 
 /**

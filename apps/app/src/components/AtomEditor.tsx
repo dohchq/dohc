@@ -265,6 +265,7 @@ type Props = {
   // sharing-v1 — view-only shared atom: Tiptap is read-only.
   readOnly?: boolean
   frontmatter?: Record<string, unknown>
+  activeWorkspaceId?: string
   collab?: {
     workspaceId: string
     atomId: string
@@ -2753,11 +2754,14 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
     disableReactiveResolvers,
     readOnly,
     frontmatter,
+    activeWorkspaceId: activeWorkspaceIdOverride,
     collab,
   },
   ref,
 ) {
-  const activeWorkspaceId = useActiveWorkspaceId()
+  const contextActiveWorkspaceId = useActiveWorkspaceId()
+  const activeWorkspaceId =
+    activeWorkspaceIdOverride ?? contextActiveWorkspaceId
   const getCollabToken = useAction(api.auth.getCollabToken)
   const fetchCollabToken = useMemo(
     () => async (workspaceId: string) =>

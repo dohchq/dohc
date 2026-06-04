@@ -172,6 +172,33 @@ describe('org workspace lifecycle (Phase 3)', () => {
     expect(bWs[1]).toMatchObject({ workspaceId: orgId, role: 'member' })
   })
 
+  it('personal workspace slugs use the user profile and replace generic personal', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: A,
+        slug: 'personal',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+    })
+
+    const asA = t.withIdentity({
+      subject: A,
+      email: 'ice@example.com',
+      name: 'Ice',
+    })
+    await asA.mutation(api.auth.upsertMyProfile, {})
+    await asA.mutation(api.workspaceSlugs.ensureMine, {})
+
+    const workspaces = await asA.query(api.orgs.myWorkspaces, {})
+    expect(workspaces[0]).toMatchObject({
+      workspaceId: A,
+      kind: 'personal',
+      slug: 'ice',
+    })
+  })
+
   it('myWorkspaces shows an optional email route without requiring one', async () => {
     const t = convexTest(schema, modules)
     const { orgId } = await t

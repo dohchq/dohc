@@ -57,8 +57,10 @@ import { DohcLogo } from '@dohc/brand'
 import { Onboarding } from '@/components/Onboarding'
 import { AppLoadingScreen } from '@/components/Skeleton'
 import { NoticeProvider, useNotice } from '@/components/NoticeCenter'
+import { NotFoundPage } from '@/components/NotFoundPage'
 import {
   ActiveWorkspaceProvider,
+  useActiveWorkspace,
   useActiveWorkspaceId,
 } from '@/lib/active-workspace'
 import { type AppView as View, viewFromPathname } from '@/lib/appViews'
@@ -67,15 +69,18 @@ import { ChatBusyProvider } from '@/lib/chat-busy'
 import { pathInsideFolder, projectTreePath } from '@/lib/file-tree-optimistic'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
+import { pageIdFromRef, pagePath, pageRef } from '@/lib/page-urls'
+import {
+  agentThreadIdFromRef,
+  agentThreadRef,
+} from '@/lib/agent-thread-urls'
 import { useDialogFocus } from '../lib/dialog-focus'
 
-// D4.33 — pathless layout. The open atom now lives in the URL as a
-// PATH segment `/p/<fileId>` (the rename-proof id, so a shared link
-// survives renames). This layout holds the WHOLE app shell so that
-// navigating `/` ↔ `/p/<id>` swaps only the (vestigial) child route
-// and NEVER remounts the shell (file tree, chat, editor stay live).
-// The child routes (_app.index, _app.p.$atomId) render nothing — the
-// shell reads the open fileId straight from the path via useLocation.
+// Pathless layout. The open atom now lives in the URL as
+// `/<workspaceSlug>/<pageSlug>-<atomId>`. This layout holds the whole
+// app shell so route changes never remount the file tree, chat, or editor.
+// Child routes render nothing; the shell resolves the current page from
+// useLocation and the global atom id embedded in the page ref.
 export const Route = createFileRoute('/_app')({
   component: AppLayout,
 })
@@ -224,6 +229,7 @@ function Gate() {
   const { user } = useAuth()
   const reconcileMembership = useAction(api.orgsBridge.reconcileMembership)
   const upsertMyProfile = useMutation(api.auth.upsertMyProfile)
+  const ensureWorkspaceSlugs = useMutation(api.workspaceSlugs.ensureMine)
   useEffect(() => {
     if (!user?.id) return
     const LAST_USER = 'dohc.lastReconcileFor'
@@ -248,8 +254,10 @@ function Gate() {
   }, [user?.id, reconcileMembership])
   useEffect(() => {
     if (!user?.id) return
-    void upsertMyProfile({}).catch(() => {})
-  }, [user?.id, user?.email, upsertMyProfile])
+    void upsertMyProfile({})
+      .then(() => ensureWorkspaceSlugs({}))
+      .catch(() => {})
+  }, [user?.id, user?.email, upsertMyProfile, ensureWorkspaceSlugs])
   if (state === undefined) {
     return <AppLoadingScreen />
   }
@@ -322,7 +330,19 @@ function App() {
   // org-plan §5 Phase B — every read/write is scoped to the active
   // workspace. undefined ⇒ caller's personal workspace (the v0 default;
   // back-compat preserved by requireWorkspace(ctx, undefined)).
-  const activeWorkspaceId = useActiveWorkspaceId()
+  const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
+  const workspaces = useQuery(api.orgs.myWorkspaces, {})
+  const activeWorkspace = useMemo(() => {
+    if (!workspaces?.length) return null
+    return (
+      workspaces.find((w) =>
+        activeWorkspaceId === undefined
+          ? w.kind === 'personal'
+          : w.workspaceId === activeWorkspaceId,
+      ) ?? workspaces[0]
+    )
+  }, [activeWorkspaceId, workspaces])
+  const activeWorkspaceSlug = activeWorkspace?.slug ?? 'workspace'
   const files = useQuery(api.atoms.list, { activeWorkspaceId })
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
   const fileByPath = useMemo(() => {
@@ -335,6 +355,11 @@ function App() {
     for (const file of files ?? []) {
       if (file.fileId) rows.set(file.fileId, file)
     }
+    return rows
+  }, [files])
+  const fileByAtomId = useMemo(() => {
+    const rows = new Map<string, NonNullable<typeof files>[number]>()
+    for (const file of files ?? []) rows.set(file._id, file)
     return rows
   }, [files])
   // sharing-v1 1a — files shared WITH me (the "Shared with me" section).
@@ -395,33 +420,69 @@ function App() {
   // never an empty "Pick a page". One-shot: read AND clear on mount
   // (this App subtree mounts client-side post-gate, so the lazy
   // initializer runs on the client — same pattern as chatOpen).
-  // D4.33 — the open atom is URL-driven via the PATH `/p/<fileId>`,
-  // the SINGLE source of truth. `activePath` is DERIVED from that id
-  // + the files list, so a rename/move (path changes, fileId stable)
-  // re-derives the open path automatically — NO URL change needed.
+  // The open atom is URL-driven by `/<workspaceSlug>/<pageSlug>-<atomId>`.
+  // The slug is cosmetic; the global atom id is the source of truth.
+  // `activePath` is derived from either the current file list or the
+  // backend page resolver, so renames keep the same durable URL id.
   const location = useLocation()
-  // R1 — recognize BOTH the legacy URL shape AND the new workspace-
-  // scoped `/w/<wsId>/...` shape. Either form opens the right atom;
-  // the activeWorkspaceId is derived separately by the hook (URL
-  // wins → `useActiveWorkspaceId()`). Order in the regex alternation
-  // matters: the workspace-scoped match must come FIRST so a literal
-  // `/w/me/p/<id>` doesn't accidentally match `/p/<id>` on the suffix.
-  const urlFileId = (() => {
-    const m = /^(?:\/w\/[^/]+)?\/p\/(.+)$/.exec(location.pathname)
-    return m ? decodeURIComponent(m[1]) : null
-  })()
+  const pathParts = location.pathname.split('/').filter(Boolean)
+  const urlWorkspaceSlug =
+    pathParts.length > 0 && pathParts[0] !== 'shared'
+      ? decodeURIComponent(pathParts[0])
+      : null
+  const urlPageRef =
+    pathParts.length === 2 &&
+    !['agent', 'files', 'views', 'graph', 'v'].includes(pathParts[1])
+      ? decodeURIComponent(pathParts[1])
+      : null
+  const urlPageId = pageIdFromRef(urlPageRef)
+  const urlAgentThreadRef =
+    pathParts.length === 3 && pathParts[1] === 'agent'
+      ? decodeURIComponent(pathParts[2])
+      : null
+  const urlAgentThreadId = agentThreadIdFromRef(urlAgentThreadRef)
+  const urlWorkspaceKnown =
+    !urlWorkspaceSlug || workspaces === undefined
+      ? undefined
+      : workspaces.some((workspace) => workspace.slug === urlWorkspaceSlug)
   // sharing-v1 1a — `/shared/<shareId>` opens an atom shared WITH me.
-  // Same R1 dual-shape: matches `/shared/<id>` and `/w/<wsId>/shared/<id>`.
   const urlShareId = (() => {
-    const m = /^(?:\/w\/[^/]+)?\/shared\/(.+)$/.exec(location.pathname)
+    const m = /^\/shared\/([^/]+)\/?$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const urlViewRef = (() => {
-    const m = /^(?:\/w\/[^/]+)?\/v\/([^/]+)\/?$/.exec(location.pathname)
+    const m = /^\/[^/]+\/v\/([^/]+)\/?$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const selectedViewPackageRoot = urlViewRef ? decodeViewRef(urlViewRef) : null
   const urlView = viewFromPathname(location.pathname)
+  const routedPage = useQuery(
+    api.atoms.getPageById,
+    urlPageId
+      ? {
+          atomId: urlPageId,
+          workspaceSlug: urlWorkspaceSlug ?? undefined,
+        }
+      : 'skip',
+  )
+  const routedAgentThread = useQuery(
+    api.agent.getThreadById,
+    urlAgentThreadId && urlWorkspaceSlug
+      ? {
+          workspaceSlug: urlWorkspaceSlug,
+          threadId: urlAgentThreadId,
+        }
+      : 'skip',
+  )
+  const routedShareId =
+    routedPage?.kind === 'share' ? String(routedPage.shareId) : null
+  const routedShareActiveWorkspaceId =
+    routedPage?.kind === 'share'
+      ? (routedPage.activeWorkspaceId ?? undefined)
+      : undefined
+  const activeShareId = urlShareId ?? routedShareId
+  const activeShareWorkspaceId =
+    routedShareActiveWorkspaceId ?? activeWorkspaceId
   const navigate = useNavigate()
   const lastFilesDestinationRef = useRef<FilesDestination | null>(null)
   // Optimistic override: the path we want shown RIGHT NOW, taking
@@ -454,16 +515,78 @@ function App() {
   })
   // Derived open atom: resolve the URL's fileId → its CURRENT path
   // (rename-proof). The optimistic override wins while set.
+  const routedWorkspaceActiveId =
+    routedPage?.kind === 'workspace'
+      ? (routedPage.activeWorkspaceId ?? undefined)
+      : undefined
   const derivedFromUrl =
-    urlFileId ? (fileByFileId.get(urlFileId)?.path ?? null) : null
+    urlPageId
+      ? (fileByAtomId.get(urlPageId)?.path ??
+        (routedPage?.kind === 'workspace' ? routedPage.path : null))
+      : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
   const [view, setView] = useState<View>(
     () =>
       urlView ??
-      (urlFileId || urlShareId || initialOpenPathRef.current
+      (urlPageId || activeShareId || initialOpenPathRef.current
         ? 'atom'
         : 'views'),
   )
+
+  useEffect(() => {
+    if (routedPage?.kind !== 'workspace') return
+    const next = routedPage.activeWorkspaceId ?? undefined
+    if (next === activeWorkspaceId) return
+    setActiveWorkspaceId(next)
+  }, [activeWorkspaceId, routedPage, setActiveWorkspaceId])
+
+  useEffect(() => {
+    if (!routedAgentThread) return
+    const next = routedAgentThread.activeWorkspaceId ?? undefined
+    if (next === activeWorkspaceId) return
+    setActiveWorkspaceId(next)
+  }, [activeWorkspaceId, routedAgentThread, setActiveWorkspaceId])
+
+  useEffect(() => {
+    if (!urlPageRef || !routedPage) return
+    const canonicalRef = pageRef({
+      _id: String(routedPage.atomId),
+      title: routedPage.title,
+    })
+    if (
+      urlWorkspaceSlug === routedPage.workspaceSlug &&
+      urlPageRef === canonicalRef
+    ) {
+      return
+    }
+    void navigate({
+      to: '/$workspaceSlug/$pageRef',
+      params: {
+        workspaceSlug: routedPage.workspaceSlug,
+        pageRef: canonicalRef,
+      },
+      replace: true,
+    })
+  }, [navigate, routedPage, urlPageRef, urlWorkspaceSlug])
+
+  useEffect(() => {
+    if (!urlAgentThreadRef || !routedAgentThread) return
+    const canonicalRef = agentThreadRef(routedAgentThread)
+    if (
+      urlWorkspaceSlug === routedAgentThread.workspaceSlug &&
+      urlAgentThreadRef === canonicalRef
+    ) {
+      return
+    }
+    void navigate({
+      to: '/$workspaceSlug/agent/$threadRef',
+      params: {
+        workspaceSlug: routedAgentThread.workspaceSlug,
+        threadRef: canonicalRef,
+      },
+      replace: true,
+    })
+  }, [navigate, routedAgentThread, urlAgentThreadRef, urlWorkspaceSlug])
 
   const chatThreads = useMemo<AgentThreadSummary[]>(
     () =>
@@ -493,6 +616,25 @@ function App() {
         : null),
     [queryActiveAgentThread, selectedAgentThreadSnapshot, threadId],
   )
+  useEffect(() => {
+    if (!routedAgentThread) return
+    setSelectedAgentThreadSnapshot({
+      threadId: routedAgentThread.threadId,
+      projectPath: routedAgentThread.projectPath,
+      title: routedAgentThread.title,
+      createdAt: routedAgentThread.createdAt,
+      updatedAt: routedAgentThread.updatedAt,
+      pinnedAt: routedAgentThread.pinnedAt,
+      agentProviderId: routedAgentThread.agentProviderId,
+      agentModel: routedAgentThread.agentModel,
+      agentReasoningEffort: routedAgentThread.agentReasoningEffort,
+      agentAccessMode: routedAgentThread.agentAccessMode,
+    })
+    setAgentProjectPath(routedAgentThread.projectPath)
+    setThreadId(routedAgentThread.threadId)
+    setAgentDraft(false)
+    setView('agent')
+  }, [routedAgentThread])
   const agentProviders = useMemo(
     () => (agentProviderInfo?.providers ?? []) as AgentProviderSnapshot[],
     [agentProviderInfo],
@@ -574,8 +716,11 @@ function App() {
   // so it costs nothing extra.
   const sharedAtomForMeta = useQuery(
     api.atomShares.getSharedAtom,
-    urlShareId
-      ? { shareId: urlShareId as Id<'atomShares'>, activeWorkspaceId }
+    activeShareId
+      ? {
+          shareId: activeShareId as Id<'atomShares'>,
+          activeWorkspaceId: activeShareWorkspaceId,
+        }
       : 'skip',
   )
   const { docTitle, docEmoji } = useMemo<{
@@ -585,7 +730,7 @@ function App() {
     if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
     if (view === 'views') return { docTitle: 'Views', docEmoji: null }
-    if (urlShareId) {
+    if (activeShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
       // null ⇒ gone/forbidden: fall back to the brand default.
       if (sharedAtomForMeta === undefined)
@@ -610,7 +755,7 @@ function App() {
   }, [
     view,
     agentDocTitle,
-    urlShareId,
+    activeShareId,
     sharedAtomForMeta,
     activePath,
     fileByPath,
@@ -782,22 +927,40 @@ function App() {
   )
 
   useEffect(() => {
-    if (urlFileId) {
-      lastFilesDestinationRef.current = { kind: 'atom', id: urlFileId }
-    } else if (urlShareId) {
-      lastFilesDestinationRef.current = { kind: 'shared', id: urlShareId }
+    if (urlPageId) {
+      lastFilesDestinationRef.current = { kind: 'atom', id: urlPageId }
+    } else if (activeShareId) {
+      lastFilesDestinationRef.current = { kind: 'shared', id: activeShareId }
     }
-  }, [urlFileId, urlShareId])
+  }, [urlPageId, activeShareId])
+
+  const navigateToAgentThread = useCallback(
+    (thread: AgentThreadSummary, opts?: { replace?: boolean }) => {
+      void navigate({
+        to: '/$workspaceSlug/agent/$threadRef',
+        params: {
+          workspaceSlug: activeWorkspaceSlug,
+          threadRef: agentThreadRef(thread),
+        },
+        replace: opts?.replace ?? false,
+      })
+    },
+    [activeWorkspaceSlug, navigate],
+  )
 
   const navigateToView = useCallback(
     (next: View, opts?: { replace?: boolean }) => {
-      if (next === view && (urlView || urlFileId || urlShareId)) return
+      if (next === view && (urlView || urlPageId || activeShareId)) return
       setView(next)
       if (next === 'agent') {
         setSharingOpen(false)
+        if (activeAgentThread && !agentDraft) {
+          navigateToAgentThread(activeAgentThread, opts)
+          return
+        }
         void navigate({
-          to: '/w/$wsId/agent',
-          params: { wsId: activeWorkspaceId ?? 'me' },
+          to: '/$workspaceSlug/agent',
+          params: { workspaceSlug: activeWorkspaceSlug },
           replace: opts?.replace ?? false,
         })
         return
@@ -805,8 +968,8 @@ function App() {
       if (next === 'graph') {
         setSharingOpen(false)
         void navigate({
-          to: '/w/$wsId/graph',
-          params: { wsId: activeWorkspaceId ?? 'me' },
+          to: '/$workspaceSlug/graph',
+          params: { workspaceSlug: activeWorkspaceSlug },
           replace: opts?.replace ?? false,
         })
         return
@@ -814,42 +977,65 @@ function App() {
       if (next === 'views') {
         setSharingOpen(false)
         void navigate({
-          to: '/w/$wsId/views',
-          params: { wsId: activeWorkspaceId ?? 'me' },
+          to: '/$workspaceSlug/views',
+          params: { workspaceSlug: activeWorkspaceSlug },
           replace: opts?.replace ?? false,
         })
         return
       }
 
-      const destination = urlFileId
-        ? ({ kind: 'atom', id: urlFileId } as const)
-        : urlShareId
-          ? ({ kind: 'shared', id: urlShareId } as const)
+      const destination = urlPageId
+        ? ({ kind: 'atom', id: urlPageId } as const)
+        : activeShareId
+          ? ({ kind: 'shared', id: activeShareId } as const)
           : lastFilesDestinationRef.current
 
       if (destination?.kind === 'atom') {
+        const row = fileByAtomId.get(destination.id)
+        if (!row) {
+          void navigate({
+            to: '/$workspaceSlug/files',
+            params: { workspaceSlug: activeWorkspaceSlug },
+            replace: opts?.replace ?? false,
+          })
+          return
+        }
         void navigate({
-          to: '/w/$wsId/p/$atomId',
-          params: { wsId: activeWorkspaceId ?? 'me', atomId: destination.id },
+          to: '/$workspaceSlug/$pageRef',
+          params: {
+            workspaceSlug: activeWorkspaceSlug,
+            pageRef: pageRef(row),
+          },
           replace: opts?.replace ?? false,
         })
         return
       }
       if (destination?.kind === 'shared') {
         void navigate({
-          to: '/w/$wsId/shared/$shareId',
-          params: { wsId: activeWorkspaceId ?? 'me', shareId: destination.id },
+          to: '/shared/$shareId',
+          params: { shareId: destination.id },
           replace: opts?.replace ?? false,
         })
         return
       }
       void navigate({
-        to: '/w/$wsId/files',
-        params: { wsId: activeWorkspaceId ?? 'me' },
+        to: '/$workspaceSlug/files',
+        params: { workspaceSlug: activeWorkspaceSlug },
         replace: opts?.replace ?? false,
       })
     },
-    [activeWorkspaceId, navigate, urlFileId, urlShareId, urlView, view],
+    [
+      activeShareId,
+      activeAgentThread,
+      agentDraft,
+      activeWorkspaceSlug,
+      fileByAtomId,
+      navigate,
+      navigateToAgentThread,
+      urlPageId,
+      urlView,
+      view,
+    ],
   )
 
   const toggleChat = useCallback(() => {
@@ -883,6 +1069,7 @@ function App() {
   }, [agentProjectPath, chatThreads])
 
   useEffect(() => {
+    if (urlAgentThreadId) return
     if (agentDraft || agentThreads === undefined) return
     if (threadId && selectedAgentThreadSnapshot?.threadId === threadId) return
     if (
@@ -894,12 +1081,19 @@ function App() {
     const first = chatThreads[0] ?? null
     setThreadId(first?.threadId ?? null)
     setAgentProjectPath(first?.projectPath ?? null)
+    if (first && view === 'agent' && urlView === 'agent') {
+      navigateToAgentThread(first, { replace: true })
+    }
   }, [
     agentDraft,
     agentThreads,
     chatThreads,
+    navigateToAgentThread,
     selectedAgentThreadSnapshot,
     threadId,
+    urlAgentThreadId,
+    urlView,
+    view,
   ])
 
   const startAgentDraft = useCallback(
@@ -909,9 +1103,14 @@ function App() {
       setThreadId(null)
       setAgentSelectionOverride(null)
       setSelectedAgentThreadSnapshot(null)
-      navigateToView('agent')
+      setView('agent')
+      setSharingOpen(false)
+      void navigate({
+        to: '/$workspaceSlug/agent',
+        params: { workspaceSlug: activeWorkspaceSlug },
+      })
     },
-    [navigateToView],
+    [activeWorkspaceSlug, navigate],
   )
 
   const startAgentDraftInPanel = useCallback(
@@ -934,9 +1133,11 @@ function App() {
       setThreadId(thread.threadId)
       setAgentDraft(false)
       setAgentSelectionOverride(null)
-      navigateToView('agent')
+      setView('agent')
+      setSharingOpen(false)
+      navigateToAgentThread(thread)
     },
-    [navigateToView],
+    [navigateToAgentThread],
   )
 
   const selectAgentThreadInPanel = useCallback((thread: AgentThreadSummary) => {
@@ -982,10 +1183,30 @@ function App() {
       setAgentProjectPath(projectPath)
       setThreadId(id as string)
       setAgentDraft(false)
-      if (navigateAfterCreate) navigateToView('agent')
+      if (navigateAfterCreate) {
+        navigateToAgentThread(
+          {
+            threadId: id as string,
+            projectPath,
+            title: 'New chat',
+            createdAt: now,
+            updatedAt: now,
+            pinnedAt: null,
+            agentProviderId: chosenSelection?.providerId ?? null,
+            agentModel: chosenSelection?.model ?? null,
+            agentReasoningEffort: chosenSelection?.reasoningEffort ?? null,
+            agentAccessMode: accessMode ?? null,
+          },
+        )
+      }
       return id as string
     },
-    [activeWorkspaceId, agentSelection, createAgentThread, navigateToView],
+    [
+      activeWorkspaceId,
+      agentSelection,
+      createAgentThread,
+      navigateToAgentThread,
+    ],
   )
 
   const ensureAgentThreadForSend = useCallback(
@@ -1059,9 +1280,14 @@ function App() {
         setAgentProjectPath(null)
         setThreadId(null)
         setAgentDraft(true)
+        void navigate({
+          to: '/$workspaceSlug/agent',
+          params: { workspaceSlug: activeWorkspaceSlug },
+          replace: true,
+        })
       }
     },
-    [activeWorkspaceId, deleteAgentThread, threadId],
+    [activeWorkspaceId, activeWorkspaceSlug, deleteAgentThread, navigate, threadId],
   )
 
   const renameAgentChat = useCallback(
@@ -1135,11 +1361,9 @@ function App() {
     [navigateToView],
   )
 
-  // D4.33 — open an atom by PATH. Show it immediately (optimistic
-  // override) AND, if its rename-proof fileId is known, push it into
-  // the URL as `/p/<fileId>`. A just-created file has no fileId in
-  // `files` yet → the bridge effect navigates once it appears. A
-  // legacy atom with NO id stays optimistic-only (shown, no URL).
+  // Open an atom by PATH. Show it immediately (optimistic override)
+  // and, once its row is known, push the global atom id into the
+  // canonical pretty URL.
   const openAtom = useCallback(
     (rawPath: string, opts?: { replace?: boolean }) => {
       // Only append `.md` to an EXTENSIONLESS path (e.g. a wikilink
@@ -1150,20 +1374,20 @@ function App() {
       const path = /\.[a-z0-9]+$/i.test(rawPath) ? rawPath : `${rawPath}.md`
       setView('atom')
       setOptimisticPath(path)
-      const fid = fileByPath.get(path)?.fileId
-      if (fid) {
-        lastFilesDestinationRef.current = { kind: 'atom', id: fid }
-        // R1 — navigate to the new workspace-scoped URL. `me` sentinel
-        // for personal (activeWorkspaceId === undefined ⇒ /w/me/...);
-        // the literal org id for org workspaces (/w/<orgId>/...).
+      const row = fileByPath.get(path)
+      if (row) {
+        lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
         void navigate({
-          to: '/w/$wsId/p/$atomId',
-          params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
+          to: '/$workspaceSlug/$pageRef',
+          params: {
+            workspaceSlug: activeWorkspaceSlug,
+            pageRef: pageRef(row),
+          },
           replace: opts?.replace ?? false,
         })
       }
     },
-    [fileByPath, navigate, activeWorkspaceId],
+    [activeWorkspaceSlug, fileByPath, navigate],
   )
 
   // Clear the open atom (→ home). Used on delete of the open atom.
@@ -1173,12 +1397,12 @@ function App() {
       lastFilesDestinationRef.current = null
       // Stay in the Files surface after deleting/clearing the open atom.
       void navigate({
-        to: '/w/$wsId/files',
-        params: { wsId: activeWorkspaceId ?? 'me' },
+        to: '/$workspaceSlug/files',
+        params: { workspaceSlug: activeWorkspaceSlug },
         replace: opts?.replace ?? false,
       })
     },
-    [navigate, activeWorkspaceId],
+    [activeWorkspaceSlug, navigate],
   )
 
   // sharing-v1 1a — open an atom shared WITH me (by share id).
@@ -1187,13 +1411,12 @@ function App() {
       setOptimisticPath(null)
       setView('atom')
       lastFilesDestinationRef.current = { kind: 'shared', id: sid }
-      // R1 — workspace-scoped share URL.
       void navigate({
-        to: '/w/$wsId/shared/$shareId',
-        params: { wsId: activeWorkspaceId ?? 'me', shareId: sid },
+        to: '/shared/$shareId',
+        params: { shareId: sid },
       })
     },
-    [navigate, activeWorkspaceId],
+    [navigate],
   )
 
   const openView = useCallback(
@@ -1202,11 +1425,11 @@ function App() {
       setSharingOpen(false)
       const viewRef = encodeViewRef(packageRoot)
       void navigate({
-        to: '/w/$wsId/v/$viewRef',
-        params: { wsId: activeWorkspaceId ?? 'me', viewRef },
+        to: '/$workspaceSlug/v/$viewRef',
+        params: { workspaceSlug: activeWorkspaceSlug, viewRef },
       })
     },
-    [activeWorkspaceId, navigate],
+    [activeWorkspaceSlug, navigate],
   )
 
   useEffect(() => {
@@ -1221,21 +1444,23 @@ function App() {
   // the URL already points there.
   useEffect(() => {
     if (!optimisticPath) return
-    const fid = fileByPath.get(optimisticPath)?.fileId
-    if (fid && urlFileId !== fid) {
-      lastFilesDestinationRef.current = { kind: 'atom', id: fid }
-      // R1 — workspace-scoped URL.
+    const row = fileByPath.get(optimisticPath)
+    if (row && urlPageId !== row._id) {
+      lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
       void navigate({
-        to: '/w/$wsId/p/$atomId',
-        params: { wsId: activeWorkspaceId ?? 'me', atomId: fid },
+        to: '/$workspaceSlug/$pageRef',
+        params: {
+          workspaceSlug: activeWorkspaceSlug,
+          pageRef: pageRef(row),
+        },
         replace: true,
       })
     }
-  }, [optimisticPath, fileByPath, urlFileId, navigate, activeWorkspaceId])
+  }, [activeWorkspaceSlug, optimisticPath, fileByPath, urlPageId, navigate])
 
   // Once the URL→files derivation converges to the optimistic path,
   // drop the override so the URL is the sole source of truth (a
-  // rename keeps the same fileId, so this fires when `files` shows
+  // rename keeps the same atom id, so this fires when `files` shows
   // the file at its new path).
   useEffect(() => {
     if (optimisticPath && derivedFromUrl === optimisticPath) {
@@ -1247,13 +1472,13 @@ function App() {
   // surface too. File/share routes are Files; the explicit view routes
   // cover Agent, Files-home, and Graph.
   useEffect(() => {
-    const routedView = urlView ?? (urlFileId || urlShareId ? 'atom' : null)
+    const routedView = urlView ?? (urlPageId || activeShareId ? 'atom' : null)
     if (routedView) setView(routedView)
-  }, [urlView, urlFileId, urlShareId])
+  }, [urlView, urlPageId, activeShareId])
 
   async function createAtom(path: string, body = '') {
     // openAtom shows it immediately (optimistic); the bridge effect
-    // writes the URL once the new file lands in `files` with a fileId.
+    // writes the URL once the new file lands in `files` with an atom id.
     const previousPath = activePath
     openAtom(path)
     setEnterEdit(true)
@@ -1496,6 +1721,31 @@ function App() {
     .filter(Boolean)
     .join(' ')
   const floatingPanelButtonRight = panelOpen ? rightSidebarWidth + 12 : 20
+  const sharePromptFile = sharePromptFor
+    ? fileByFileId.get(sharePromptFor)
+    : undefined
+  const sharePromptHref =
+    sharePromptFile && typeof window !== 'undefined'
+      ? `${window.location.origin}${pagePath({
+          workspaceSlug: activeWorkspaceSlug,
+          ...sharePromptFile,
+        })}`
+      : undefined
+  const invalidPageRef = urlPageRef !== null && urlPageId === null
+  const invalidAgentThreadRef =
+    urlAgentThreadRef !== null && urlAgentThreadId === null
+  const workspaceSlugMissing =
+    urlWorkspaceKnown === false &&
+    urlPageId === null &&
+    urlAgentThreadId === null
+  const showNotFound =
+    invalidPageRef ||
+    invalidAgentThreadRef ||
+    workspaceSlugMissing ||
+    routedPage === null ||
+    routedAgentThread === null
+
+  if (showNotFound) return <NotFoundPage />
 
   return (
     <div
@@ -1629,7 +1879,7 @@ function App() {
               user={user}
               sharedWithMe={sharedWithMe ?? []}
               sharedByMeFileIds={sharedByMeFileIds ?? []}
-              activeShareId={urlShareId}
+              activeShareId={activeShareId}
               allowCreate={view !== 'graph'}
               onOpenShared={openShared}
               onOpen={(p) => openAtom(p)}
@@ -1652,17 +1902,19 @@ function App() {
           )}
           {view === 'graph' ? (
             <GraphView onOpenAtom={openAtom} onOpenShared={openShared} />
-          ) : urlShareId ? (
+          ) : activeShareId ? (
             // key by shareId → fresh state per share (no stale draft
             // reuse when switching shared files; codex P1).
             <SharedAtomView
-              key={urlShareId}
-              shareId={urlShareId as Id<'atomShares'>}
+              key={activeShareId}
+              shareId={activeShareId as Id<'atomShares'>}
+              activeWorkspaceIdOverride={routedShareActiveWorkspaceId}
             />
           ) : (
             <AtomView
               path={activePath}
               files={files ?? []}
+              activeWorkspaceIdOverride={routedWorkspaceActiveId}
               onRunAction={onRunAction}
               onOpenAtom={openAtom}
               onOpenView={openView}
@@ -1833,6 +2085,7 @@ function App() {
             fileByFileId.get(sharePromptFor)?.title ??
             sharePromptFor
           }
+          pageHref={sharePromptHref}
           onClose={() => setSharePromptFor(null)}
         />
       )}

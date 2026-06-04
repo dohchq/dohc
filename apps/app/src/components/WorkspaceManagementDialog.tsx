@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { useAction, useMutation, useQuery } from 'convex/react'
+import { useNavigate } from '@tanstack/react-router'
 import {
   Plus,
   X,
@@ -54,6 +55,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
   )
   const me = useQuery(api.auth.whoami)
   const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
+  const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -78,12 +80,15 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     setBusy(true)
     setErr(null)
     try {
-      const { orgId } = await createOrg({ name })
+      const { orgId, slug } = await createOrg({ name })
       // A2 (H-2): the bridge action seeds .context/company.md + dashboard before
-      // returning. setActiveWorkspaceId navigates to /w/<orgId> (R1
-      // commit 3), so the user lands on the new workspace's home.
+      // returning, so the user lands on the new workspace's slug home.
       // Closing the dialog so they see the populated workspace cleanly.
       setActiveWorkspaceId(orgId)
+      void navigate({
+        to: '/$workspaceSlug',
+        params: { workspaceSlug: slug },
+      })
       onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -96,8 +101,12 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     setBusy(true)
     setErr(null)
     try {
-      const { orgId } = await joinOrg({ inviteCode: code.trim() })
+      const { orgId, slug } = await joinOrg({ inviteCode: code.trim() })
       setActiveWorkspaceId(orgId)
+      void navigate({
+        to: '/$workspaceSlug',
+        params: { workspaceSlug: slug },
+      })
       onClose()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -217,12 +226,24 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
                     }}
                     onLeave={async () => {
                       await leaveOrg({ orgId: w.workspaceId as Id<'orgs'> })
-                      setActiveWorkspaceId(undefined) // drop the now-gone active id
+                      setActiveWorkspaceId(undefined)
+                      if (workspaces?.[0]?.slug) {
+                        void navigate({
+                          to: '/$workspaceSlug',
+                          params: { workspaceSlug: workspaces[0].slug },
+                        })
+                      }
                     }}
                     onDelete={async () => {
                       await deleteOrg({ orgId: w.workspaceId as Id<'orgs'> })
                       if (activeWorkspaceId === w.workspaceId) {
                         setActiveWorkspaceId(undefined)
+                        if (workspaces?.[0]?.slug) {
+                          void navigate({
+                            to: '/$workspaceSlug',
+                            params: { workspaceSlug: workspaces[0].slug },
+                          })
+                        }
                       }
                     }}
                     onRemove={async (memberWorkspaceId) => {

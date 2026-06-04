@@ -19,6 +19,7 @@ import { countActiveOwners, requireRole } from './orgRoles'
 import { scheduleHocuspocusDisconnect } from './hocuspocusAdmin'
 import { ORG_IDENTITY_PATH } from './inlineAtom'
 import { PLACEHOLDER_SEED_MARKER } from './onboarding'
+import { ensureWorkspaceSlug, readWorkspaceSlug } from './workspaceSlugs'
 
 // Membership rows with `status === undefined` predate the status field
 // (org-plan §4); treat them as 'active' for back-compat.
@@ -170,7 +171,8 @@ export const createOrg = mutation({
       invitedAt: now,
       acceptedAt: now,
     })
-    return { orgId, name: clean, inviteCode }
+    const slug = await ensureWorkspaceSlug(ctx, orgId, clean)
+    return { orgId, name: clean, inviteCode, slug }
   },
 })
 
@@ -225,7 +227,8 @@ export const joinOrg = mutation({
         role: nextRole,
       })
     }
-    return { orgId: org._id, name: org.name }
+    const slug = await ensureWorkspaceSlug(ctx, org._id, org.name)
+    return { orgId: org._id, name: org.name, slug }
   },
 })
 
@@ -473,9 +476,18 @@ export const myWorkspaces = query({
       .query('memberships')
       .withIndex('by_workspace', (q) => q.eq('workspaceId', caller))
       .collect()
+    const profile = await ctx.db
+      .query('userProfiles')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', caller))
+      .first()
+    const personalLabel =
+      profile?.name?.trim() ||
+      profile?.email?.split('@')[0]?.trim() ||
+      'personal'
     const out: Array<{
       workspaceId: string
       kind: 'personal' | 'org'
+      slug: string
       name: string
       role: 'owner' | 'member'
       accent: string | null
@@ -496,6 +508,7 @@ export const myWorkspaces = query({
       {
         workspaceId: caller,
         kind: 'personal',
+        slug: await readWorkspaceSlug(ctx, caller, personalLabel),
         name: 'Personal',
         role: 'owner',
         accent: null,
@@ -515,6 +528,7 @@ export const myWorkspaces = query({
       out.push({
         workspaceId: r.orgId, // org's workspaceId IS orgs._id (string)
         kind: 'org',
+        slug: await readWorkspaceSlug(ctx, r.orgId, org.name),
         name: org.name,
         role: r.role,
         accent: org.accent ?? null,
@@ -546,8 +560,8 @@ export const myWorkspaces = query({
 // starter exists so:
 //  - `onboarding.progressOf` finds .context/company.md and reports hasMe:true
 //    once the agent fills it in (placeholder seed files are ignored).
-//  - The user lands on a real page when navigated to /w/<orgId>/p/<companyMdFileId>
-//    instead of an empty workspace state.
+//  - The user lands on a real workspace URL instead of an empty
+//    workspace state.
 //  - The dashboard has a query block from day one (the live primitive
 //    the prompt requires before finish_onboarding).
 export const _seedNewOrg = internalMutation({

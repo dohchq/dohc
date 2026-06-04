@@ -289,7 +289,7 @@ export const evalFormulas = query({
   // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
   // Frontend callers (AtomEditor, HtmlAtomFrame, /r/<atomId> route)
   // all pass activeWorkspaceId from `useActiveWorkspaceId()` /
-  // `?w=<wsId>`. Backend keeps the arg optional only for backend
+  // `?w=<workspaceId>`. Backend keeps the arg optional only for backend
   // tests; cross-tenant safety holds either way (requireWorkspace
   // rejects a spoofed non-member id).
   args: {
