@@ -27,7 +27,7 @@ import {
 // the route sanitizes + wraps + sets the §2-C headers.
 export const getRenderable = query({
   // Phase B.3 (org-plan §5 — NON-DEFAULTABLE surface).
-  // The /r/<atomId> server-side route forwards `?w=<wsId>` here; the
+  // The /r/<atomId> server-side route forwards `?w=<workspaceId>` here; the
   // client-side HtmlAtomFrame appends that param to the iframe URL
   // from `useActiveWorkspaceId()`. Backend stays optional for URL
   // back-compat: old shared links without `?w=` resolve against the

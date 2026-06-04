@@ -49,6 +49,7 @@ export const createOrgWithBridge = action({
     orgId: Id<'orgs'>
     name: string
     inviteCode: string
+    slug: string
     workosOrgId: string | null
   }> => {
     // 1. Always create the Convex side first. If WorkOS fails after,

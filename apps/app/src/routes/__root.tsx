@@ -7,6 +7,7 @@ import {
 } from '@tanstack/react-router'
 import { ConvexProviderWithAuth } from 'convex/react'
 import { AuthKitProvider } from '@workos/authkit-tanstack-react-start/client'
+import { NotFoundPage } from '@/components/NotFoundPage'
 import { convexClient } from '@/lib/convex-client'
 import { useAuthForConvex } from '@/lib/use-auth-bridge'
 import '@/styles.css'
@@ -48,6 +49,7 @@ export const Route = createRootRoute({
     ],
   }),
   component: RootComponent,
+  notFoundComponent: NotFoundPage,
 })
 
 function RootComponent() {

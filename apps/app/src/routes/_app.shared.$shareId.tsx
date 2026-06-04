@@ -1,15 +1,8 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 
-// R1 — legacy `/shared/<shareId>` redirects to `/w/me/shared/<shareId>`.
-// Preserves existing share links from before R1. See `_app.p.$atomId.tsx`
-// for the parallel atom-URL redirect rationale.
+// Legacy/shared grant URL. New copy-link behavior prefers
+// `/<workspaceSlug>/<pageSlug>-<atomId>`, but existing share links keep
+// rendering through the app shell.
 export const Route = createFileRoute('/_app/shared/$shareId')({
-  beforeLoad: ({ params }) => {
-    throw redirect({
-      to: '/w/$wsId/shared/$shareId',
-      params: { wsId: 'me', shareId: params.shareId },
-      replace: true,
-    })
-  },
   component: () => null,
 })

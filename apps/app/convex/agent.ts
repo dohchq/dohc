@@ -23,6 +23,7 @@ import { components, internal, api } from './_generated/api'
 import type { Id } from './_generated/dataModel'
 import type { ActionCtx } from './_generated/server'
 import { requireWorkspace } from './auth'
+import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
 import type { ToolCtx } from '@convex-dev/agent'
@@ -3065,6 +3066,54 @@ export const listThreads = query({
         createdAt: row._creationTime,
         pinnedAt: row.pinnedAt ?? null,
       }))
+  },
+})
+
+export const getThreadById = query({
+  args: {
+    workspaceSlug: v.string(),
+    threadId: v.string(),
+  },
+  handler: async (ctx, { workspaceSlug, threadId }) => {
+    const workspaceId = await workspaceIdForSlug(ctx, workspaceSlug)
+    if (!workspaceId) return null
+    try {
+      await requireWorkspace(ctx, workspaceId)
+    } catch {
+      return null
+    }
+    const rows = await threadRefRowsForWorkspaceThread(
+      ctx,
+      workspaceId,
+      threadId,
+    )
+    const row = rows.find(
+      (candidate: { projectPath?: string }) =>
+        !isInternalProjectPath(candidate.projectPath),
+    )
+    if (!row) return null
+    const canonicalWorkspaceSlug = await readWorkspaceSlug(
+      ctx,
+      workspaceId,
+      workspaceSlug,
+    )
+    if (!canonicalWorkspaceSlug) return null
+    return {
+      threadId: row.threadId,
+      workspaceId,
+      activeWorkspaceId:
+        workspaceId === (await requireWorkspace(ctx)) ? null : workspaceId,
+      workspaceSlug: canonicalWorkspaceSlug,
+      projectPath: row.projectPath ?? null,
+      title: row.title ?? fallbackThreadTitle(row.projectPath),
+      agentProviderId: row.agentProviderId ?? null,
+      agentModel: row.agentModel ?? null,
+      agentReasoningEffort: row.agentReasoningEffort ?? null,
+      agentAccessMode: normalizeAgentAccessMode(row.agentAccessMode),
+      updatedAt: row.updatedAt ?? row._creationTime,
+      createdAt: row._creationTime,
+      pinnedAt: row.pinnedAt ?? null,
+    }
   },
 })
 

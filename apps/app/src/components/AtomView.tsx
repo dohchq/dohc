@@ -70,6 +70,7 @@ type Props = {
   onShare?: (fileId: string) => void
   enterEdit?: boolean
   onEnteredEdit?: () => void
+  activeWorkspaceIdOverride?: string
   // file-org-v1 D4.7c (save-flush race fix) — when rename/move
   // mutations are about to fire from elsewhere, the caller can
   // populate this ref with our flushSave function and `await` it
@@ -89,12 +90,15 @@ export function AtomView({
   onShare,
   enterEdit,
   onEnteredEdit,
+  activeWorkspaceIdOverride,
   pendingSaveRef,
 }: Props) {
   // No path → no atom is open. We skip the Convex query and render an
   // empty placeholder below. Don't fall back to a "default" atom path.
   const effectivePath = path
-  const activeWorkspaceId = useActiveWorkspaceId()
+  const contextActiveWorkspaceId = useActiveWorkspaceId()
+  const activeWorkspaceId =
+    activeWorkspaceIdOverride ?? contextActiveWorkspaceId
   const row = useQuery(
     api.atoms.getByPath,
     effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
@@ -795,7 +799,11 @@ function AtomShell({
         // html-atoms-v1 §5 — rendered VIEW via the §2-B sandboxed
         // route iframe (Tiptap is never used for an html body). The
         // The source toggle above still flips to the raw textarea.
-        <HtmlAtomFrame atomId={atomId} body={rest} />
+        <HtmlAtomFrame
+          atomId={atomId}
+          body={rest}
+          activeWorkspaceId={activeWorkspaceId}
+        />
       ) : identity === undefined ? (
         <DocumentSkeleton compact />
       ) : (
@@ -811,6 +819,7 @@ function AtomShell({
           onChange={(next) => onChange(joinFrontmatter(fm, next))}
           onPreviewChange={(next) => onPreviewChange?.(joinFrontmatter(fm, next))}
           frontmatter={meta}
+          activeWorkspaceId={activeWorkspaceId}
           autoFocus={autoFocus}
           onAsciiBlockClick={(pos, content, language) => {
             setEditingBlock({ pos, text: content, language })

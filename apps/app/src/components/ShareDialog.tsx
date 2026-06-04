@@ -29,10 +29,12 @@ import { CardStackSkeleton, Skeleton } from './Skeleton'
 export function ShareDialog({
   fileId,
   fileLabel,
+  pageHref,
   onClose,
 }: {
   fileId: string
   fileLabel: string
+  pageHref?: string
   onClose: () => void
 }) {
   const activeWorkspaceId = useActiveWorkspaceId()
@@ -274,8 +276,12 @@ export function ShareDialog({
   function copyLink() {
     const href = (() => {
       if (typeof window === 'undefined' || !window.location?.origin) return ''
-      if (publicShareId) {
-        return `${window.location.origin}/w/me/shared/${encodeURIComponent(publicShareId)}`
+      if (pageHref) {
+        try {
+          return new URL(pageHref, window.location.origin).toString()
+        } catch {
+          return window.location.href
+        }
       }
       return window.location.href
     })()

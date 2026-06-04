@@ -76,10 +76,12 @@ export function HtmlAtomFrame({
   atomId,
   body,
   compact = false,
+  activeWorkspaceId: activeWorkspaceIdOverride,
 }: {
   atomId: string | null
   body: string
   compact?: boolean
+  activeWorkspaceId?: string
 }) {
   // Harvest in an effect (client-only ⇒ SSR-safe; no SSR/hydration
   // memo divergence — srcs feed a subscription, not rendered markup).
@@ -90,7 +92,9 @@ export function HtmlAtomFrame({
 
   // org-plan §5 non-defaultable: pass the active workspace so the
   // formulas resolve in the workspace the user is *viewing*.
-  const activeWorkspaceId = useActiveWorkspaceId()
+  const contextActiveWorkspaceId = useActiveWorkspaceId()
+  const activeWorkspaceId =
+    activeWorkspaceIdOverride ?? contextActiveWorkspaceId
   const resolved = useQuery(
     api.formulaEval.evalFormulas,
     srcs.length ? { srcs, activeWorkspaceId } : 'skip',

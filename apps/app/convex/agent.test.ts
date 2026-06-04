@@ -110,6 +110,40 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     expect(rows.some((r) => r.threadId === 'tA-context')).toBe(false)
   })
 
+  it('getThreadById resolves slug URLs only for authorized workspace members', async () => {
+    const t = convexTest(schema, modules)
+    await seedThreads(t)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: A,
+        slug: 'ice',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+    })
+
+    const owned = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.getThreadById, {
+        workspaceSlug: 'ice',
+        threadId: 'tA-dohc',
+      })
+    expect(owned).toMatchObject({
+      threadId: 'tA-dohc',
+      workspaceSlug: 'ice',
+      activeWorkspaceId: null,
+      projectPath: 'dohc/research',
+      title: 'dohc planning',
+    })
+
+    await expect(
+      t.withIdentity({ subject: B }).query(api.agent.getThreadById, {
+        workspaceSlug: 'ice',
+        threadId: 'tA-dohc',
+      }),
+    ).resolves.toBeNull()
+  })
+
   it('listThreads includes each chat thread model selection', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {

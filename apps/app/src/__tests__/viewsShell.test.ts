@@ -84,9 +84,9 @@ beforeEach(() => {
 
 describe('views shell route helpers', () => {
   it('recognizes Views routes as a first-class activity', () => {
-    expect(viewFromPathname('/w/me/views')).toBe('views')
-    expect(viewFromPathname('/w/org_123/v/abc123')).toBe('views')
-    expect(viewFromPathname('/w/me/files')).toBe('atom')
+    expect(viewFromPathname('/ice/views')).toBe('views')
+    expect(viewFromPathname('/acme/v/abc123')).toBe('views')
+    expect(viewFromPathname('/ice/files')).toBe('atom')
   })
 
   it('round-trips package roots through URL-safe refs', () => {

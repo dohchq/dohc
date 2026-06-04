@@ -102,7 +102,7 @@ export const Route = createFileRoute('/r/$atomId')({
         }
 
         // org-plan §5: the active workspace is supplied via the URL
-        // `?w=<wsId>` query param (HtmlAtomFrame appends it; old
+        // `?w=<workspaceId>` query param (HtmlAtomFrame appends it; old
         // shared links may omit it, in which case requireWorkspace
         // defaults to the caller's personal workspace via the
         // back-compat path). The route NEVER reads localStorage —

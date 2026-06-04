@@ -1,31 +1,58 @@
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import React, { isValidElement, type ReactElement, type ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
+import { ActivityBar, type ActivityView } from '../components/ActivityBar'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const read = (path: string) =>
-  readFileSync(resolve(__dirname, '../../src', path), 'utf8')
+type ButtonElement = ReactElement<{
+  'aria-label'?: string
+  onClick?: () => void
+}>
 
-const APP = read('routes/_app.tsx')
-const ACTIVITY = read('components/ActivityBar.tsx')
+function findButtonByLabel(
+  node: ReactNode,
+  label: string,
+): ButtonElement | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findButtonByLabel(child, label)
+      if (found) return found
+    }
+    return null
+  }
+  if (!isValidElement(node)) return null
+  const props = node.props as {
+    'aria-label'?: string
+    children?: ReactNode
+  }
+  if (node.type === 'button' && props['aria-label'] === label) {
+    return node as ButtonElement
+  }
+  return findButtonByLabel(props.children, label)
+}
 
 describe('left sidebar collapse shell behavior', () => {
-  it('persists collapse state, exposes an activity-rail toggle, and auto-collapses selected views', () => {
-    expect(ACTIVITY).toContain('PanelLeftClose')
-    expect(ACTIVITY).toContain('PanelLeftOpen')
-    expect(ACTIVITY).toContain('sidebarCollapsed')
-    expect(ACTIVITY).toContain('onToggleSidebar')
-    expect(ACTIVITY).toContain('aria-label={sidebarCollapsed ?')
+  it('preserves collapse state while opening another activity view', () => {
+    let view: ActivityView = 'atom'
+    let sidebarCollapsed = true
+    const render = () =>
+      ActivityBar({
+        view,
+        onSelect: (next: ActivityView) => {
+          view = next
+        },
+        sidebarCollapsed,
+        onToggleSidebar: () => {
+          sidebarCollapsed = !sidebarCollapsed
+        },
+      })
 
-    expect(APP).toContain('LEFT_SIDEBAR_COLLAPSED_STORAGE_KEY')
-    expect(APP).toContain('dohc-left-sidebar-collapsed')
-    expect(APP).toContain('leftSidebarCollapsed')
-    expect(APP).toContain('setLeftSidebarCollapsed')
-    expect(APP).toContain('sidebarCollapsed={leftSidebarCollapsed}')
-    expect(APP).toContain('onToggleSidebar={toggleLeftSidebar}')
-    expect(APP).toContain('const leftColumn = leftSidebarCollapsed ? null')
-    expect(APP).toContain('setLeftSidebarCollapsed(true)')
-    expect(APP).toContain('!leftSidebarCollapsed && (')
+    const tree = render()
+    const viewsButton = findButtonByLabel(tree, 'Views')
+    expect(viewsButton).not.toBeNull()
+
+    viewsButton?.props.onClick?.()
+
+    expect(view).toBe('views')
+    expect(sidebarCollapsed).toBe(true)
+    expect(findButtonByLabel(render(), 'Show sidebar')).not.toBeNull()
   })
 })

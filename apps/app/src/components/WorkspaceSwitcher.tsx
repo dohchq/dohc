@@ -22,6 +22,7 @@ import {
   Building2,
 } from 'lucide-react'
 import { useQuery } from 'convex/react'
+import { useNavigate } from '@tanstack/react-router'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspace } from '../lib/active-workspace'
 import { useChatBusy } from '../lib/chat-busy'
@@ -60,6 +61,7 @@ function menuFrameForTrigger(
 
 export function WorkspaceSwitcher() {
   const { activeWorkspaceId, setActiveWorkspaceId } = useActiveWorkspace()
+  const navigate = useNavigate()
   const workspaces = useQuery(api.orgs.myWorkspaces, {})
   const [open, setOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
@@ -159,8 +161,17 @@ export function WorkspaceSwitcher() {
   const isStale =
     workspaces !== undefined && activeWorkspaceId !== undefined && !known
   useEffect(() => {
-    if (isStale) setActiveWorkspaceId(undefined)
-  }, [isStale, setActiveWorkspaceId])
+    if (!isStale) return
+    setActiveWorkspaceId(undefined)
+    const personal = workspaces?.[0]
+    if (personal) {
+      void navigate({
+        to: '/$workspaceSlug',
+        params: { workspaceSlug: personal.slug },
+        replace: true,
+      })
+    }
+  }, [isStale, navigate, setActiveWorkspaceId, workspaces])
 
   if (workspaces === undefined) {
     return <WorkspaceButtonSkeleton />
@@ -205,6 +216,10 @@ export function WorkspaceSwitcher() {
                     setActiveWorkspaceId(
                       w.kind === 'personal' ? undefined : w.workspaceId,
                     )
+                    void navigate({
+                      to: '/$workspaceSlug',
+                      params: { workspaceSlug: w.slug },
+                    })
                     setOpen(false)
                   }}
                   className={`flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent ${

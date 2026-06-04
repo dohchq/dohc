@@ -218,6 +218,19 @@ export default defineSchema({
       'targetWorkspaceId',
     ]),
 
+  // Human-facing workspace URL namespace. Slugs are globally unique
+  // and map to exactly one workspace. Personal workspaces and org
+  // workspaces both use this table so document URLs can be
+  // `/ice/features-<atomId>` instead of viewer-relative workspace URLs.
+  workspaceSlugs: defineTable({
+    workspaceId: v.string(),
+    slug: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_workspace', ['workspaceId'])
+    .index('by_slug', ['slug']),
+
   // Shares addressed to an email that has no workspace route yet. This
   // is deliberately not access: it is an inbox item that the matching
   // signed-in email can accept into a chosen workspace.

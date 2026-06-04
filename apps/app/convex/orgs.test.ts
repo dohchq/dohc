@@ -3,6 +3,7 @@ import { convexTest } from 'convex-test'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { internal, api } from './_generated/api'
+import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 
 const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_alice' // org creator/owner
@@ -170,6 +171,61 @@ describe('org workspace lifecycle (Phase 3)', () => {
 
     const bWs = await t.withIdentity({ subject: B }).query(api.orgs.myWorkspaces, {})
     expect(bWs[1]).toMatchObject({ workspaceId: orgId, role: 'member' })
+  })
+
+  it('personal workspace slugs use the user profile and replace generic personal', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: A,
+        slug: 'personal',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+    })
+
+    const asA = t.withIdentity({
+      subject: A,
+      email: 'ice@example.com',
+      name: 'Ice',
+    })
+    await asA.mutation(api.auth.upsertMyProfile, {})
+    await asA.mutation(api.workspaceSlugs.ensureMine, {})
+
+    const workspaces = await asA.query(api.orgs.myWorkspaces, {})
+    expect(workspaces[0]).toMatchObject({
+      workspaceId: A,
+      kind: 'personal',
+      slug: 'ice',
+    })
+  })
+
+  it('workspace slug lookup rejects reserved route tokens', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: A,
+        slug: 'workspace',
+        createdAt: 1,
+        updatedAt: 1,
+      })
+
+      expect(await workspaceIdForSlug(ctx, 'workspace')).toBe(A)
+      expect(await workspaceIdForSlug(ctx, 'shared')).toBeNull()
+      expect(await workspaceIdForSlug(ctx, 'agent')).toBeNull()
+      expect(await workspaceIdForSlug(ctx, '')).toBeNull()
+    })
+  })
+
+  it('readWorkspaceSlug persists missing slugs from mutation contexts', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      const slug = await readWorkspaceSlug(ctx, A, 'Ice')
+      expect(slug).toBe('ice')
+      expect(await readWorkspaceSlug(ctx, A, 'Fallback')).toBe('ice')
+      if (!slug) throw new Error('expected readWorkspaceSlug to persist a slug')
+      expect(await workspaceIdForSlug(ctx, slug)).toBe(A)
+    })
   })
 
   it('myWorkspaces shows an optional email route without requiring one', async () => {
