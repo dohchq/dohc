@@ -13,9 +13,9 @@ const APP_SRC = readFileSync(resolve(__dirname, '../../src/routes/_app.tsx'), 'u
 
 describe('Onboarding ready handoff', () => {
   it('asks the server to complete a ready workspace instead of waiting forever', () => {
-    expect(ONBOARDING_SRC).toMatch(/api\.onboarding\.completeIfReady/)
-    expect(ONBOARDING_SRC).toMatch(/completeIfReady\(\{\s*activeWorkspaceId\s*\}/)
-    expect(ONBOARDING_SRC).toMatch(/workspaceReady[\s\S]{0,300}completeIfReady/)
+    expect(APP_SRC).toMatch(/api\.onboarding\.completeIfReady/)
+    expect(APP_SRC).toMatch(/completeIfReady\(\{\s*activeWorkspaceId\s*\}/)
+    expect(APP_SRC).toMatch(/workspaceReady[\s\S]{0,300}completeIfReady/)
   })
 
   it('keeps client readiness aligned with the server source invariant', () => {
@@ -29,18 +29,16 @@ describe('Onboarding ready handoff', () => {
     expect(onboardingWorkspaceReady({ ...base, sourceCount: 1 })).toBe(true)
   })
 
-  it('previews and edits ready artifacts in the active workspace', () => {
-    expect(ONBOARDING_SRC).toMatch(
-      /api\.atoms\.getByPath,\s*[\s\S]{0,180}activeWorkspaceId/,
-    )
-    expect(ONBOARDING_SRC).toMatch(
-      /upsertAtom\(\{[\s\S]{0,120}path:\s*meAtom\.path[\s\S]{0,120}activeWorkspaceId/,
-    )
+  it('does not keep artifact preview/edit code in onboarding', () => {
+    expect(ONBOARDING_SRC).not.toMatch(/api\.atoms\.getByPath/)
+    expect(ONBOARDING_SRC).not.toMatch(/upsertAtom\(/)
+    expect(ONBOARDING_SRC).not.toContain('HtmlAtomFrame')
+    expect(ONBOARDING_SRC).not.toContain('Markdown')
   })
 
-  it('hands off .views cockpits to the Views activity instead of atom open state', () => {
-    expect(ONBOARDING_SRC).toContain('dohc:onboarding:view')
-    expect(ONBOARDING_SRC).toContain('isViewPackageRoot')
+  it('keeps onboarding handoff focused on the agent dashboard', () => {
+    expect(ONBOARDING_SRC).not.toContain('dohc:onboarding:view')
+    expect(ONBOARDING_SRC).not.toContain('isViewPackageRoot')
     expect(APP_SRC).toContain('dohc:onboarding:view')
     expect(APP_SRC).toMatch(/initialViewPackageRootRef[\s\S]{0,500}openView/)
   })
@@ -51,5 +49,29 @@ describe('Onboarding ready handoff', () => {
       /state === 'IN_PROGRESS'[\s\S]{0,160}<App initialView="agent"/,
     )
     expect(APP_SRC).toMatch(/function App\(\{\s*initialView/)
+  })
+
+  it('removes the old custom setup working screen from onboarding', () => {
+    expect(ONBOARDING_SRC).not.toContain("'working'")
+    expect(ONBOARDING_SRC).not.toContain('Your Setup Run, live')
+    expect(ONBOARDING_SRC).not.toContain('StatusBar')
+    expect(ONBOARDING_SRC).not.toContain('BuildChecklist')
+    expect(ONBOARDING_SRC).not.toContain('useUIMessages')
+    expect(ONBOARDING_SRC).not.toContain("setPhase('working')")
+  })
+
+  it('starts onboarding directly from the final questionnaire submit', () => {
+    expect(ONBOARDING_SRC).toMatch(
+      /startOnboarding\(\{[\s\S]{0,240}\.\.\(intro \? \{ intro \} : \{\}\)[\s\S]{0,240}attachmentIds/,
+    )
+    expect(ONBOARDING_SRC).toMatch(/setPhase\('handoff'\)/)
+    expect(ONBOARDING_SRC).toContain('AppLoadingScreen')
+  })
+
+  it('lets the normal app complete ready onboarding after handoff', () => {
+    expect(APP_SRC).toContain('onboardingWorkspaceReady')
+    expect(APP_SRC).toMatch(/api\.onboarding\.progress/)
+    expect(APP_SRC).toMatch(/api\.onboarding\.completeIfReady/)
+    expect(APP_SRC).toMatch(/workspaceReady[\s\S]{0,300}completeIfReady/)
   })
 })

@@ -67,6 +67,7 @@ import { type AppView as View, viewFromPathname } from '@/lib/appViews'
 import type { AgentAccessMode } from '@/lib/agentAccess'
 import { ChatBusyProvider } from '@/lib/chat-busy'
 import { pathInsideFolder, projectTreePath } from '@/lib/file-tree-optimistic'
+import { onboardingWorkspaceReady } from '@/lib/onboarding-ready'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { pageIdFromRef, pagePath, pageRef } from '@/lib/page-urls'
@@ -221,6 +222,10 @@ function Gate() {
   // <Home />.
   const activeWorkspaceId = useActiveWorkspaceId()
   const state = useQuery(api.onboarding.state, { activeWorkspaceId })
+  const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
+  const completeIfReady = useMutation(api.onboarding.completeIfReady)
+  const workspaceReady = onboardingWorkspaceReady(progress)
+  const completingReadyRef = useRef(false)
 
   // W1 (H-7) — fire WorkOS membership reconcile on first sign-in for
   // each user.id + every 4h. Catches the "user removed in WorkOS but
@@ -258,6 +263,14 @@ function Gate() {
       .then(() => ensureWorkspaceSlugs({}))
       .catch(() => {})
   }, [user?.id, user?.email, upsertMyProfile, ensureWorkspaceSlugs])
+  useEffect(() => {
+    if (state !== 'IN_PROGRESS' || !workspaceReady) return
+    if (completingReadyRef.current) return
+    completingReadyRef.current = true
+    completeIfReady({ activeWorkspaceId }).catch(() => {
+      completingReadyRef.current = false
+    })
+  }, [activeWorkspaceId, completeIfReady, state, workspaceReady])
   if (state === undefined) {
     return <AppLoadingScreen />
   }

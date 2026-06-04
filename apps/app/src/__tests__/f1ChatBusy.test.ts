@@ -54,6 +54,11 @@ describe('Chat.tsx publishes busy', () => {
     expect(CHAT).toMatch(/setChatBusy\(sending\s*\|\|\s*busy\)/)
     expect(CHAT).toMatch(/return\s*\(\)\s*=>\s*setChatBusy\(false\)/)
   })
+
+  it('treats pending assistant turns as busy before text starts streaming', () => {
+    expect(CHAT).toMatch(/\['pending',\s*'streaming'\]\.includes/)
+    expect(CHAT).toMatch(/\(m as \{ status\?: string \}\)\.status \?\? ''/)
+  })
 })
 
 describe('WorkspaceSwitcher.tsx reads busy + disables', () => {

@@ -68,14 +68,11 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     expect(ATOM_VIEW).toMatch(/workspaceId:\s*activeWorkspaceId\s*\?\?\s*identity\.workspaceId/)
   })
 
-  it('Chat + Onboarding pass activeWorkspaceId to listMessages', () => {
+  it('Chat passes activeWorkspaceId to listMessages', () => {
     expect(CHAT).toMatch(
       /useActiveWorkspaceId[\s\S]{0,200}from\s+['"](?:@\/lib|\.\.\/lib)\/active-workspace['"]/,
     )
     expect(CHAT).toMatch(
-      /api\.agent\.listMessages,\s*[\s\S]{0,200}activeWorkspaceId/,
-    )
-    expect(ONBOARDING).toMatch(
       /api\.agent\.listMessages,\s*[\s\S]{0,200}activeWorkspaceId/,
     )
   })
@@ -92,9 +89,9 @@ describe('frontend §5 wiring — every CRITICAL caller threads activeWorkspaceI
     )
   })
 
-  it('thread creation callers (_app + Onboarding) pass activeWorkspaceId', () => {
+  it('thread creation callers in _app pass activeWorkspaceId', () => {
     expect(APP).toMatch(/createAgentThread\(\{[\s\S]{0,120}activeWorkspaceId/)
-    expect(ONBOARDING).toMatch(/ensureThread\(\{\s*activeWorkspaceId\s*\}\)/)
+    expect(ONBOARDING).not.toMatch(/ensureThread\(/)
   })
 
   it('FileTree share indicators come from owner share ids scoped to the active workspace', () => {

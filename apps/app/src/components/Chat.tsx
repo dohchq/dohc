@@ -647,7 +647,9 @@ export function Chat({
       uiMessages.some(
         (m) =>
           m.role === 'assistant' &&
-          (m as { status?: string }).status === 'streaming',
+          ['pending', 'streaming'].includes(
+            (m as { status?: string }).status ?? '',
+          ),
       ),
     [uiMessages],
   )
