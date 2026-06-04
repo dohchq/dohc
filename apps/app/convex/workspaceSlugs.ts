@@ -51,6 +51,10 @@ function lookupSlug(input: string): string | null {
   return slug
 }
 
+function canWriteSlug(ctx: SlugCtx): ctx is MutationCtx {
+  return 'insert' in ctx.db
+}
+
 function idSuffix(workspaceId: string): string {
   const compact = workspaceId.toLowerCase().replace(/[^a-z0-9]+/g, '')
   return compact.slice(-6) || '1'
@@ -77,13 +81,16 @@ export function workspaceSlugBase(label: string): string {
 export async function readWorkspaceSlug(
   ctx: SlugCtx,
   workspaceId: string,
-  _fallbackLabel: string,
+  fallbackLabel: string,
 ): Promise<string | null> {
   const row = await ctx.db
     .query('workspaceSlugs')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
     .first()
   if (row) return row.slug
+  if (canWriteSlug(ctx)) {
+    return await ensureWorkspaceSlug(ctx, workspaceId, fallbackLabel)
+  }
   return null
 }
 

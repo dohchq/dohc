@@ -3,11 +3,7 @@ import { convexTest } from 'convex-test'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import schema from './schema'
 import { internal, api } from './_generated/api'
-import {
-  ensureWorkspaceSlug,
-  readWorkspaceSlug,
-  workspaceIdForSlug,
-} from './workspaceSlugs'
+import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 
 const modules = import.meta.glob('./**/*.ts')
 const A = 'ws_alice' // org creator/owner
@@ -221,13 +217,13 @@ describe('org workspace lifecycle (Phase 3)', () => {
     })
   })
 
-  it('readWorkspaceSlug only returns persisted slugs', async () => {
+  it('readWorkspaceSlug persists missing slugs from mutation contexts', async () => {
     const t = convexTest(schema, modules)
     await t.run(async (ctx) => {
-      expect(await readWorkspaceSlug(ctx, A, 'Ice')).toBeNull()
-      const slug = await ensureWorkspaceSlug(ctx, A, 'Ice')
+      const slug = await readWorkspaceSlug(ctx, A, 'Ice')
       expect(slug).toBe('ice')
       expect(await readWorkspaceSlug(ctx, A, 'Fallback')).toBe('ice')
+      if (!slug) throw new Error('expected readWorkspaceSlug to persist a slug')
       expect(await workspaceIdForSlug(ctx, slug)).toBe(A)
     })
   })

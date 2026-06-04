@@ -437,7 +437,11 @@ function WindowCard({
             ))
           )}
           <div className="flex items-center gap-1.5">
+            <label htmlFor="grant-workspace-id-input" className="sr-only">
+              Workspace ID to grant import access
+            </label>
             <input
+              id="grant-workspace-id-input"
               aria-label="Workspace ID to grant import access"
               value={grantId}
               onChange={(e) => {

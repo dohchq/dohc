@@ -18,13 +18,17 @@ function WorkspaceHarness() {
   )
 }
 
-const originalWindow = globalThis.window
+const originalWindowDescriptor = Object.getOwnPropertyDescriptor(
+  globalThis,
+  'window',
+)
 
 afterEach(() => {
-  Object.defineProperty(globalThis, 'window', {
-    value: originalWindow,
-    configurable: true,
-  })
+  if (originalWindowDescriptor) {
+    Object.defineProperty(globalThis, 'window', originalWindowDescriptor)
+    return
+  }
+  delete (globalThis as { window?: unknown }).window
 })
 
 describe('canonical URL contract', () => {
@@ -82,6 +86,7 @@ describe('active workspace state after URL cleanup', () => {
         location: { pathname: '/ice/files' },
       },
       configurable: true,
+      writable: true,
     })
 
     const html = renderToStaticMarkup(
