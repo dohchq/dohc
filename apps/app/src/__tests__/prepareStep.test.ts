@@ -406,6 +406,41 @@ describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same p
     expect(saveIdx).toBeLessThan(clearIdx)
   })
 
+  it('startOnboarding creates a visible pending assistant turn before streaming', () => {
+    const userSaveIdx = startOnboardingBody.indexOf(
+      'const saved = await dohcAgent.saveMessage',
+    )
+    const pendingSaveIdx = startOnboardingBody.indexOf(
+      'const pending = await dohcAgent.saveMessage',
+    )
+    const streamIdx = startOnboardingBody.indexOf(
+      'const result = await dohcAgent.streamText',
+    )
+    expect(userSaveIdx).toBeGreaterThan(0)
+    expect(pendingSaveIdx).toBeGreaterThan(userSaveIdx)
+    expect(streamIdx).toBeGreaterThan(pendingSaveIdx)
+    expect(startOnboardingBody).toMatch(/metadata:\s*\{\s*status:\s*'pending'\s*\}/)
+    expect(startOnboardingBody).toMatch(/pendingMessageId:\s*pendingMessageId/)
+  })
+
+  it('startOnboarding touches the setup thread before stream handoff', () => {
+    const saveIdx = startOnboardingBody.indexOf(
+      'const saved = await dohcAgent.saveMessage',
+    )
+    const touchIdx = startOnboardingBody.indexOf('internal.agent._touchThread')
+    const selectionIdx = startOnboardingBody.indexOf(
+      'internal.agent._setThreadAgentSelection',
+    )
+    const streamIdx = startOnboardingBody.indexOf(
+      'const result = await dohcAgent.streamText',
+    )
+    expect(saveIdx).toBeGreaterThan(0)
+    expect(touchIdx).toBeGreaterThan(saveIdx)
+    expect(selectionIdx).toBeGreaterThan(saveIdx)
+    expect(touchIdx).toBeLessThan(streamIdx)
+    expect(selectionIdx).toBeLessThan(streamIdx)
+  })
+
   it('startOnboarding passes prepareStep + experimental_context to streamText (both branches)', () => {
     expect(startOnboardingBody).toMatch(/prepareStep:\s*buildPrepareStep\(/)
     expect(startOnboardingBody).toMatch(/experimental_context:\s*\{/)

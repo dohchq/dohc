@@ -4330,6 +4330,7 @@ export const startOnboarding = action({
     // thread flow remains; depth defaults to 0 because no skill
     // turn has run on this thread yet.
     let promptMessageId: string | undefined
+    let pendingMessageId: string | undefined
     if (trimmed || introAttachmentIds.length > 0) {
       const userMessage = await buildUserMessageForAttachments(
         ctx,
@@ -4342,18 +4343,49 @@ export const startOnboarding = action({
         ...userMessage.saveArgs,
       })
       promptMessageId = saved.messageId
+      await ctx.runMutation(internal.agent._touchThread, {
+        workspaceId,
+        threadId,
+        titleHint: userMessage.titleHint,
+      })
+      await ctx.runMutation(internal.agent._setThreadAgentSelection, {
+        workspaceId,
+        threadId,
+        ...toStoredAgentSelection(selection),
+      })
       if (userMessage.assetIds.length > 0) {
-        await ctx.runMutation(internal.assets._markUsedInMessage, {
-          workspaceId,
-          assetIds: userMessage.assetIds,
-          threadId,
-          messageId: promptMessageId,
-        })
+        try {
+          await ctx.runMutation(internal.assets._markUsedInMessage, {
+            workspaceId,
+            assetIds: userMessage.assetIds,
+            threadId,
+            messageId: promptMessageId,
+          })
+        } catch {
+          // Attachment usage metadata is advisory; do not strand the
+          // setup turn after the user prompt is already visible.
+        }
       }
-      await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
+      try {
+        await ctx.runMutation(internal.skillTurnGate._clearTurnState, {
+          threadId,
+          promptMessageId,
+        })
+      } catch {
+        // The first setup turn should still visibly start even if the
+        // advisory skill gate row is stale or unavailable.
+      }
+      const pending = await dohcAgent.saveMessage(ctx, {
         threadId,
         promptMessageId,
+        skipEmbeddings: true,
+        message: {
+          role: 'assistant',
+          content: [],
+        },
+        metadata: { status: 'pending' },
       })
+      pendingMessageId = pending.messageId
     }
     const providerOptions = agentProviderOptions(selection, false)
     const result = await dohcAgent.streamText(
@@ -4370,6 +4402,7 @@ export const startOnboarding = action({
             model: createAgentLanguageModel(selection),
             ...(providerOptions ? { providerOptions } : {}),
             promptMessageId,
+            pendingMessageId: pendingMessageId,
             prepareStep: buildPrepareStep(
               ctx,
               threadId,

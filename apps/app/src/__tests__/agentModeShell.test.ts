@@ -93,6 +93,16 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('mode="primary"')
   })
 
+  it('does not render an empty new-chat frame while initial agent threads are still loading', () => {
+    expect(APP).toContain('agentWorkspaceLoading')
+    expect(APP).toMatch(
+      /view === 'agent' &&[\s\S]{0,240}agentThreads === undefined/,
+    )
+    expect(APP).toMatch(
+      /agentWorkspaceLoading \?[\s\S]{0,120}<AppLoadingScreen \/>[\s\S]{0,120}: \(/,
+    )
+  })
+
   it('keeps optional side chat available in Files mode', () => {
     expect(APP).toContain('mode="side"')
     expect(APP).toContain('dohc-chat-open')

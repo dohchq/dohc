@@ -278,7 +278,7 @@ function Gate() {
     return <Onboarding state={state} />
   }
   if (state === 'IN_PROGRESS') {
-    return <App initialView="agent" />
+    return <App initialView="agent" initialAgentHandoff />
   }
   // DONE | DEFERRED → the workspace
   return <App />
@@ -342,9 +342,10 @@ function SignInPrompt() {
 
 type AppProps = {
   initialView?: View
+  initialAgentHandoff?: boolean
 }
 
-function App({ initialView }: AppProps = {}) {
+function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   const { user } = useAuth()
   const notice = useNotice()
   // org-plan §5 Phase B — every read/write is scoped to the active
@@ -425,6 +426,8 @@ function App({ initialView }: AppProps = {}) {
   const [threadId, setThreadId] = useState<string | null>(null)
   const [agentProjectPath, setAgentProjectPath] = useState<string | null>(null)
   const [agentDraft, setAgentDraft] = useState(false)
+  const [agentHandoffPending, setAgentHandoffPending] =
+    useState(initialAgentHandoff)
   const [agentDraftSelection, setAgentDraftSelection] =
     useState<AgentModelPickerSelection | null>(null)
   const [agentSelectionOverride, setAgentSelectionOverride] =
@@ -656,6 +659,19 @@ function App({ initialView }: AppProps = {}) {
     setAgentDraft(false)
     setView('agent')
   }, [routedAgentThread])
+  const handoffAgentThread =
+    !agentDraft && !threadId ? (chatThreads[0] ?? null) : null
+  const visibleAgentThread = activeAgentThread ?? handoffAgentThread
+  const visibleAgentThreadId =
+    visibleAgentThread?.threadId ?? threadId ?? null
+  const visibleAgentProjectPath =
+    visibleAgentThreadId === threadId
+      ? agentProjectPath
+      : (visibleAgentThread?.projectPath ?? agentProjectPath)
+  const agentWorkspaceLoading =
+    view === 'agent' &&
+    agentHandoffPending &&
+    (agentThreads === undefined || !visibleAgentThreadId)
   const agentProviders = useMemo(
     () => (agentProviderInfo?.providers ?? []) as AgentProviderSnapshot[],
     [agentProviderInfo],
@@ -663,15 +679,15 @@ function App({ initialView }: AppProps = {}) {
   const agentEffectiveDefault = agentSelectionFromApi(
     agentProviderInfo?.effectiveDefault,
   )
-  const activeThreadSelection = agentSelectionFromThread(activeAgentThread)
+  const activeThreadSelection = agentSelectionFromThread(visibleAgentThread)
   const agentSelection =
     agentSelectionOverride ??
     activeThreadSelection ??
     (agentDraft ? agentDraftSelection : null) ??
     agentEffectiveDefault
   const agentDocTitle =
-    activeAgentThread?.title?.trim() ||
-    (threadId ? 'Workspace chat' : 'New chat')
+    visibleAgentThread?.title?.trim() ||
+    (visibleAgentThreadId ? 'Workspace chat' : 'New chat')
 
   useEffect(() => {
     setAgentSelectionOverride(null)
@@ -694,6 +710,11 @@ function App({ initialView }: AppProps = {}) {
     setAgentDraftSelection(null)
     setSelectedAgentThreadSnapshot(null)
   }, [activeWorkspaceId])
+
+  useEffect(() => {
+    if (!agentHandoffPending) return
+    if (visibleAgentThreadId || agentDraft) setAgentHandoffPending(false)
+  }, [agentDraft, agentHandoffPending, visibleAgentThreadId])
 
   useEffect(() => {
     if (!selectedAgentThreadSnapshot) return
@@ -1768,7 +1789,9 @@ function App({ initialView }: AppProps = {}) {
 
   if (showNotFound) return <NotFoundPage />
 
-  return (
+  return agentWorkspaceLoading ? (
+    <AppLoadingScreen />
+  ) : (
     <div
       className="relative grid h-screen overflow-hidden bg-page text-ink"
       style={{ gridTemplateColumns: shellGridTemplateColumns }}
@@ -1791,8 +1814,8 @@ function App({ initialView }: AppProps = {}) {
                 folders === undefined ||
                 agentThreads === undefined
               }
-              activeThreadId={threadId}
-              activeProjectPath={agentProjectPath}
+              activeThreadId={visibleAgentThreadId}
+              activeProjectPath={visibleAgentProjectPath}
               onSelectThread={selectAgentThread}
               onNewThread={startAgentDraft}
               onCreateProject={createAgentProject}
@@ -1805,15 +1828,15 @@ function App({ initialView }: AppProps = {}) {
             />
           )}
           <AgentWorkspace
-            threadId={threadId}
-            activeThread={activeAgentThread}
-            projectPath={agentProjectPath}
+            threadId={visibleAgentThreadId}
+            activeThread={visibleAgentThread}
+            projectPath={visibleAgentProjectPath}
             projectOptions={agentProjectOptions}
             folderOptions={projectFolderOptions}
             onProjectPathChange={setAgentProjectPath}
             onCreateProject={createAgentProject}
             onEnsureThread={ensureAgentThreadForSend}
-            threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
+            threadAccessMode={visibleAgentThread?.agentAccessMode ?? null}
             onToggleThreadPinned={toggleAgentThreadPinned}
             onRenameThread={renameAgentChat}
             onDeleteThread={deleteAgentChat}
@@ -1830,8 +1853,8 @@ function App({ initialView }: AppProps = {}) {
           />
           <AgentRunRail
             files={files ?? []}
-            activeThread={activeAgentThread}
-            projectPath={agentProjectPath}
+            activeThread={visibleAgentThread}
+            projectPath={visibleAgentProjectPath}
           />
         </>
       ) : view === 'views' ? (
