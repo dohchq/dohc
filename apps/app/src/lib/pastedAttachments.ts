@@ -12,36 +12,87 @@ export type DohcAssetHref = {
 }
 
 const TEXT_EXTENSIONS = new Set([
+  'astro',
+  'bash',
+  'bat',
+  'c',
+  'cc',
+  'cfg',
+  'cmd',
+  'conf',
+  'cpp',
+  'cs',
   'csv',
   'css',
+  'dockerfile',
+  'env',
+  'fish',
+  'go',
+  'gql',
+  'gradle',
+  'graphql',
+  'h',
+  'hpp',
   'html',
+  'ini',
+  'java',
   'js',
   'json',
   'jsx',
+  'kt',
+  'kts',
+  'less',
   'log',
+  'lock',
   'md',
   'mdx',
+  'php',
+  'properties',
+  'ps1',
+  'py',
+  'rb',
+  'rs',
+  'sass',
+  'scss',
+  'sh',
   'sql',
+  'svelte',
+  'svg',
+  'toml',
   'ts',
+  'tsv',
   'tsx',
   'txt',
+  'vue',
   'xml',
   'yaml',
   'yml',
+  'zsh',
 ])
 
 const TEXT_MEDIA_TYPES = new Set([
   'application/csv',
+  'application/graphql',
   'application/json',
+  'application/javascript',
   'application/ld+json',
   'application/markdown',
+  'application/sql',
+  'application/toml',
+  'application/typescript',
+  'application/x-sh',
   'application/x-ndjson',
+  'application/x-yaml',
   'application/xml',
+  'image/svg+xml',
   'text/csv',
+  'text/javascript',
   'text/markdown',
   'text/plain',
   'text/tab-separated-values',
+  'text/typescript',
   'text/x-markdown',
+  'text/xml',
 ])
 
 export function attachmentKindForType(mediaType?: string | null): AttachmentKind {
@@ -59,7 +110,11 @@ export function isInlineTextType(
   const normalized = (mediaType ?? '').toLowerCase()
   if (normalized.startsWith('text/')) return true
   if (TEXT_MEDIA_TYPES.has(normalized)) return true
-  const extension = (filename ?? '').split('.').pop()?.toLowerCase()
+  const basename = (filename ?? '').split('/').pop()?.toLowerCase() ?? ''
+  if (basename.startsWith('dockerfile') || basename.startsWith('.env')) {
+    return true
+  }
+  const extension = basename.split('.').pop()?.toLowerCase()
   return extension ? TEXT_EXTENSIONS.has(extension) : false
 }
 

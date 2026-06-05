@@ -481,6 +481,11 @@ describe('agent attachment model-parts', () => {
   it('does not send inline text files as provider file parts', () => {
     expect(AGENT_SRC).toContain('read_asset')
     expect(buildAttachmentBody).toContain('const inlineText =')
+    expect(buildAttachmentBody).toContain('const sendModelImage =')
+    expect(AGENT_SRC).toContain('function shouldSendModelImagePart')
+    expect(AGENT_SRC).toContain("mediaType === 'image/png'")
+    expect(AGENT_SRC).toContain("mediaType === 'image/jpeg'")
+    expect(AGENT_SRC).toContain("mediaType === 'image/webp'")
     expect(buildAttachmentBody).toMatch(/if \(!inlineText && shouldSendModelFilePart\(asset\)\)/)
   })
 })

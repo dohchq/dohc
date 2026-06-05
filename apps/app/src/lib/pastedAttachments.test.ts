@@ -20,9 +20,24 @@ describe('pasted attachment helpers', () => {
     expect(isInlineTextType('text/plain', 'notes.txt')).toBe(true)
     expect(isInlineTextType('text/csv', 'clients.csv')).toBe(true)
     expect(isInlineTextType('application/json', 'data.json')).toBe(true)
+    expect(isInlineTextType('application/toml', 'settings.toml')).toBe(true)
+    expect(isInlineTextType('image/svg+xml', 'diagram.svg')).toBe(true)
+    expect(isInlineTextType('', '.env')).toBe(true)
+    expect(isInlineTextType('', '.env.local')).toBe(true)
+    expect(isInlineTextType('', 'Dockerfile')).toBe(true)
+    expect(isInlineTextType('', 'Dockerfile.prod')).toBe(true)
+    expect(isInlineTextType('', 'script.py')).toBe(true)
+    expect(isInlineTextType('', 'deploy.sh')).toBe(true)
     expect(isInlineTextType('', 'README.md')).toBe(true)
     expect(isInlineTextType('image/png', 'screenshot.png')).toBe(false)
     expect(isInlineTextType('application/pdf', 'deck.pdf')).toBe(false)
+    expect(isInlineTextType('audio/mpeg', 'voice.mp3')).toBe(false)
+    expect(
+      isInlineTextType(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'book.xlsx',
+      ),
+    ).toBe(false)
   })
 
   it('formats compact file sizes for attachment chips', () => {

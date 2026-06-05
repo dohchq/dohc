@@ -3876,36 +3876,94 @@ const INLINE_TEXT_ATTACHMENT_MAX_BYTES = 256 * 1024
 const READ_ASSET_MAX_BYTES = 2 * 1024 * 1024
 const READ_ASSET_DEFAULT_LINES = 200
 const READ_ASSET_MAX_LINES = 500
+const MODEL_IMAGE_MEDIA_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+])
 const INLINE_TEXT_MEDIA_TYPES = new Set([
   'application/csv',
+  'application/graphql',
   'application/json',
+  'application/javascript',
   'application/ld+json',
   'application/markdown',
+  'application/sql',
+  'application/toml',
+  'application/typescript',
+  'application/x-sh',
   'application/x-ndjson',
+  'application/x-yaml',
   'application/xml',
+  'image/svg+xml',
   'text/csv',
+  'text/javascript',
   'text/markdown',
   'text/plain',
   'text/tab-separated-values',
+  'text/typescript',
   'text/x-markdown',
+  'text/xml',
 ])
 const INLINE_TEXT_EXTENSIONS = new Set([
+  'astro',
+  'bash',
+  'bat',
+  'c',
+  'cc',
+  'cfg',
+  'cmd',
+  'conf',
+  'cpp',
+  'cs',
   'csv',
   'css',
+  'dockerfile',
+  'env',
+  'fish',
+  'go',
+  'gql',
+  'gradle',
+  'graphql',
+  'h',
+  'hpp',
   'html',
+  'ini',
+  'java',
   'js',
   'json',
   'jsx',
+  'kt',
+  'kts',
+  'less',
   'log',
+  'lock',
   'md',
   'mdx',
+  'php',
+  'properties',
+  'ps1',
+  'py',
+  'rb',
+  'rs',
+  'sass',
+  'scss',
+  'sh',
   'sql',
+  'svelte',
+  'svg',
+  'toml',
   'ts',
+  'tsv',
   'tsx',
   'txt',
+  'vue',
   'xml',
   'yaml',
   'yml',
+  'zsh',
 ])
 
 async function buildUserMessageForAttachments(
@@ -3940,6 +3998,10 @@ async function buildUserMessageForAttachments(
     const textAttachment = isInlineTextAttachment(asset)
     const inlineText =
       asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES && textAttachment
+    const sendModelImage =
+      asset.kind === 'image' &&
+      !textAttachment &&
+      shouldSendModelImagePart(asset)
     if (inlineText) {
       const blob = await ctx.storage.get(asset.storageId)
       const text = blob ? await blob.text() : ''
@@ -3953,7 +4015,7 @@ async function buildUserMessageForAttachments(
           }),
         )
       }
-    } else if (textAttachment || asset.kind !== 'image') {
+    } else {
       inlineBlocks.push(
         attachmentReferenceBlock({
           assetId: asset.assetId,
@@ -3961,11 +4023,12 @@ async function buildUserMessageForAttachments(
           mediaType: asset.mediaType,
           size: asset.size,
           readable: textAttachment,
+          vision: sendModelImage,
         }),
       )
     }
 
-    if (asset.kind === 'image') {
+    if (sendModelImage) {
       content.push({
         type: 'image',
         image: url,
@@ -4007,8 +4070,22 @@ function isInlineTextAttachment(asset: AgentResolvedAsset): boolean {
   const mediaType = asset.mediaType.toLowerCase()
   if (mediaType.startsWith('text/')) return true
   if (INLINE_TEXT_MEDIA_TYPES.has(mediaType)) return true
-  const extension = asset.filename.split('.').pop()?.toLowerCase()
+  const basename = asset.filename.split('/').pop()?.toLowerCase() ?? ''
+  if (basename.startsWith('dockerfile') || basename.startsWith('.env')) {
+    return true
+  }
+  const extension = basename.split('.').pop()?.toLowerCase()
   return extension ? INLINE_TEXT_EXTENSIONS.has(extension) : false
+}
+
+function shouldSendModelImagePart(asset: AgentResolvedAsset): boolean {
+  const mediaType = asset.mediaType.toLowerCase()
+  return (
+    mediaType === 'image/png' ||
+    mediaType === 'image/jpeg' ||
+    mediaType === 'image/webp' ||
+    MODEL_IMAGE_MEDIA_TYPES.has(mediaType)
+  )
 }
 
 function shouldSendModelFilePart(_asset: AgentResolvedAsset): boolean {
