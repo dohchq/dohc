@@ -653,6 +653,9 @@ export function Chat({
       ),
     [uiMessages],
   )
+  const fallbackStopTarget =
+    threadId && busy ? { threadId, projectPath } : null
+  const canStopActiveChat = Boolean(activeSendTarget ?? fallbackStopTarget)
 
   function setActiveSendTarget(target: ActiveSendTarget | null) {
     activeSendTargetRef.current = target
@@ -729,7 +732,7 @@ export function Chat({
   }
 
   async function stopActiveChat() {
-    const target = activeSendTargetRef.current
+    const target = activeSendTargetRef.current ?? fallbackStopTarget
     if (!target || stopping) return
     setStopping(true)
     setComposerError(null)
@@ -1538,7 +1541,7 @@ export function Chat({
               <button
                 type="button"
                 onClick={() => void stopActiveChat()}
-                disabled={stopping || !activeSendTarget}
+                disabled={stopping || !canStopActiveChat}
                 className={`grid shrink-0 place-items-center rounded-full bg-ink-strong text-surface shadow-sm transition-[background,opacity,transform] hover:bg-accent-hover active:scale-95 disabled:bg-ink-ghost disabled:cursor-not-allowed disabled:opacity-60 ${
                   primary ? 'size-9' : 'size-7'
                 }`}

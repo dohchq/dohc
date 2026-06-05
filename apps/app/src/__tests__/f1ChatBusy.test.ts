@@ -71,6 +71,12 @@ describe('Chat.tsx publishes busy', () => {
     expect(CHAT).toContain('Agent run failed')
     expect(CHAT).toContain('errorText')
   })
+
+  it('lets onboarding-started busy threads stop even without a composer send target', () => {
+    expect(CHAT).toContain('const fallbackStopTarget')
+    expect(CHAT).toMatch(/threadId && busy[\s\S]{0,160}threadId/)
+    expect(CHAT).toMatch(/disabled=\{stopping \|\| !canStopActiveChat\}/)
+  })
 })
 
 describe('WorkspaceSwitcher.tsx reads busy + disables', () => {
