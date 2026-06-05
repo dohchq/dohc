@@ -38,8 +38,9 @@ describe('setup-first onboarding wedge', () => {
 
   it('uses team-workflow language for org onboarding surfaces', () => {
     expect(ONBOARDING_SRC).toContain('What should this team workspace run first?')
-    expect(ONBOARDING_SRC).toContain('Saved the workspace brief')
-    expect(ONBOARDING_SRC).toContain('What dohc learned about this workspace')
+    expect(ONBOARDING_SRC).toContain('Here’s the shared system this workspace should run:')
+    expect(ONBOARDING_SRC).toContain('.context/company.md')
+    expect(ONBOARDING_SRC).toContain('Set up this workflow')
   })
 
   it('asks generated follow-ups about the desired setup instead of the user role', () => {

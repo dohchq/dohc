@@ -186,6 +186,26 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).not.toContain('Default to `home.html` when the first cockpit')
   })
 
+  it('pushes onboarding tracker/setup requests toward app-grade .views, not static infographics', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('ONBOARDING QUALITY BAR')
+    expect(personal).toContain('Think in terms of apps')
+    expect(personal).toContain('minimum lovable app')
+    expect(personal).toContain('For trackers, finance systems, CRM, habits, routines')
+    expect(personal).toContain('default to `.views/home`')
+    expect(personal).toContain('home.html is only acceptable')
+    expect(personal).toContain('not a static infographic of the uploaded file')
+  })
+
+  it('requires onboarding to self-review for empty files and shallow output before finishing', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('Before finish_onboarding, self-review')
+    expect(personal).toContain('No empty or frontmatter-only user-facing files')
+    expect(personal).toContain('No useless page pile')
+    expect(personal).toContain('Every created source file has a job')
+    expect(personal).toContain('If you used an uploaded CSV')
+  })
+
   it('teaches useful tracking projects instead of generic dashboards', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('TRACKING / IMPROVEMENT PROJECTS')

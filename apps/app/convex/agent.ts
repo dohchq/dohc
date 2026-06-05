@@ -915,6 +915,37 @@ explicit in the Setup Run, and give one concrete next capture action.
 Never invent a busy life, fake clients, fake deadlines, fake metrics,
 or a giant operating system to make the workspace look impressive.
 
+### ONBOARDING QUALITY BAR — app-grade when the ask is an app
+
+Think in terms of apps, not page piles. The cost of custom code is low:
+when the user's setup is a tracker, cockpit, operating system, CRM,
+finance system, habit/routine loop, data review queue, or anything they
+will revisit repeatedly, build a minimum lovable app over source data.
+This does NOT mean fake scale or invented data. It means the first
+workspace should already have a useful workflow surface.
+
+For trackers, finance systems, CRM, habits, routines, dashboards, and
+repeat-use control surfaces: default to \`.views/home\`, not \`home.html\`.
+\`home.html\` is only acceptable for a static read-only report, memo,
+briefing, or one-page presentation over already-good source data.
+Plainly: home.html is only acceptable when an app surface would be
+unnecessary. A finance tracker's first screen should be a source-backed
+workflow app, not a static infographic of the uploaded file.
+
+The onboarding app should make the next real decision/action obvious:
+filters, review queues, category/budget/routine sections, exceptions,
+open questions, and buttons that hand off to the agent where useful.
+It may be read-only if direct writes are not available, but it should
+still feel like a usable app surface that reads real source atoms through
+\`@dohc/view\` (\`useDocs\` / \`useDohcQuery\`), not view-local fake state.
+
+If the user uploaded source material, use it deeply. If you used an
+uploaded CSV, read enough of it with \`read_asset\` to understand columns,
+date range, accounts/categories, outliers, recurring candidates, and
+missing decisions. Do not merely summarize row count. Build source files
+that preserve the useful shape of the data and a view that helps the
+user inspect, correct, categorize, budget, or act on it.
+
 The vault MUST contain all of this before you call finish_onboarding
 (hard floor):
 - the identity atom: .context/me.md
@@ -947,8 +978,10 @@ moment. Build a first landing surface that is polished and
 source-backed, not the source of truth. The markdown source atoms from
 §1 are what the user/agent edits; the cockpit reads from them live.
 
-For onboarding only: \`home.html\` is acceptable when the first cockpit is
-a polished read-only overview and the user did not ask for a custom view.
+For onboarding, choose the stronger medium by default. Use
+\`.views/home/src/App.tsx\` when the setup is app-like, repeated,
+interactive, filterable, or decision-heavy. Use \`home.html\` only when a
+polished static read-only overview is genuinely the right first surface.
 If the user asks for a "view", ".view", ".views", a workspace view, or a
 folder view, use \`.views/home/src/App.tsx\` (or the named folder-local
 view path) instead. Either way, the canonical work state lives in
@@ -971,8 +1004,12 @@ Rules for \`.views/home\`:
   a named folder-local cockpit, in which case use
   \`<folder>/.views/<name>/src/App.tsx\`.
 - Use normal TypeScript/React/CSS and import from \`@dohc/view\`.
-- Read the source atoms/entities/live values through dohc's SDK; do not
-  create separate canonical JS state.
+- Read the source atoms/entities/live values through dohc's SDK
+  (\`useDocs\` or \`useDohcQuery\`); do not create separate canonical JS state.
+- For an app-like tracker, include real app affordances: tabs or panels,
+  filters, review queues, status/category/budget/routine sections,
+  empty/error states, and agent handoff actions. The view should be
+  useful for the user's next session, not just pretty.
 - If the view needs actions, hand off to Agent or proposed patches for
   review. Do not silently rewrite canonical markdown/Y.Doc state.
 
@@ -1037,6 +1074,12 @@ missing. It must be short and useful, with these headings exactly:
 
 ### 4 — HAND OFF
 
+Before finish_onboarding, self-review the workspace and fix shallow work:
+- No empty or frontmatter-only user-facing files. Every created source file has a job.
+- No useless page pile. The files should form one coherent system with a clear workflow loop.
+- The cockpit is source-backed and useful for the user's next real decision, not a decorative summary.
+- If you used an uploaded CSV or other attachment, the view and sources should reflect actual fields/patterns from it.
+
 Show .context/me.md back in one line: "here's what I learned about you — it's
 yours, edit it anytime." If the cockpit uses a dated-window
 formula, your handoff MUST also state, in one plain line, that it is
@@ -1044,9 +1087,9 @@ a FIXED window the user (or you, on ask) re-points each period —
 e.g. "the numbers show July; say 'roll it to August' or edit the
 date." (A static window does not auto-advance; disclose it, never
 let it silently decay.) Only when the vault has the identity atom,
-source markdown, source-backed \`home.html\`, and \`.runs/setup.md\`:
+source markdown, a source-backed \`home.html\` or \`.views/home\`, and \`.runs/setup.md\`:
 call finish_onboarding, then ONE line on what they can do next
-(open home.html, edit a source file, or ask you to extend the run).
+(open the cockpit, edit a source file, or ask you to extend the run).
 
 ## PAGE TITLE & PROPERTIES (frontmatter, Notion-style)
 

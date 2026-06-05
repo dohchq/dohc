@@ -150,6 +150,14 @@ function isViewEntryPath(
     : null
 }
 
+function isSourceBackedViewEntryBody(body: string): boolean {
+  const rest = strippedBody(body)
+  return (
+    /from\s+['"]@dohc\/view['"]/.test(rest) &&
+    /\b(useDocs|useDohcQuery)\s*\(/.test(rest)
+  )
+}
+
 function isSourceBackedCockpit(path: string, body: string): boolean {
   return (
     (isHtmlPath(path) || isHtmlAtomBody(body)) &&
@@ -241,8 +249,20 @@ export async function progressOf(
     ...new Map(
       atoms
         .filter((a) => !isPlaceholderSeed(a.body))
-        .map((a) => isViewEntryPath(a.path))
-        .filter((v): v is { packageRoot: string; viewName: string } => v !== null)
+        .map((a) => ({
+          entry: isViewEntryPath(a.path),
+          body: a.body,
+        }))
+        .filter(
+          (
+            v,
+          ): v is {
+            entry: { packageRoot: string; viewName: string }
+            body: string
+          } =>
+            v.entry !== null && isSourceBackedViewEntryBody(v.body),
+        )
+        .map((v) => v.entry)
         .map((v) => [v.packageRoot, v]),
     ).values(),
   ].sort(

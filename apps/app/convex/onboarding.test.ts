@@ -198,7 +198,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     await seedAtom(
       t,
       '.views/home/src/App.tsx',
-      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
@@ -207,6 +207,27 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
       'DONE',
     )
+  })
+
+  it('_complete THROWS when .views/home is just a static shell with no source read', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "export default function App() {\n  return <main>Home</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/source-backed-cockpit/)
   })
 })
 
@@ -304,7 +325,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(
       t,
       '.views/home/src/App.tsx',
-      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
