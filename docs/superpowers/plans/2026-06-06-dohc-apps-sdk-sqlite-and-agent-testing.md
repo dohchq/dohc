@@ -44,16 +44,16 @@ If the runtime supports Responses API `phase`, preserve phase metadata for inter
 Use this prompt as the user/developer handoff to GPT-5.5:
 
 ```text
-You are implementing dohc's first-class Apps platform. This is a high-risk, high-leverage systems change. Work in /home/ice/dev/dohc on branch codex/onboarding-improvements-fixes.
+You are implementing dohc's first-class Apps platform. This is a high-risk, high-leverage systems change. Work from the repository root on branch codex/onboarding-improvements-fixes.
 
 Outcome:
 Implement the plan in docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md so dohc has collaborative, secure, testable .apps powered by @dohc/app, readable source-backed collections, first-class SQLite database files, and an agent-testable app runtime. Generated apps must be useful and persistent, not fake UI.
 
 Read first:
-1. /home/ice/dev/dohc/AGENTS.md
-2. /home/ice/dev/dohc/apps/app/AGENTS.md
-3. /home/ice/dev/dohc/apps/app/convex/_generated/ai/guidelines.md before editing Convex code
-4. /home/ice/dev/dohc/docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md
+1. AGENTS.md
+2. apps/app/AGENTS.md
+3. apps/app/convex/_generated/ai/guidelines.md before editing Convex code
+4. docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.md
 
 Non-negotiables:
 - Do not weaken authorization, ownership, sharing boundaries, locks, review gates, or app trust.
@@ -518,7 +518,7 @@ await plan.replaceText({
 Run:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 rg -n '@dohc/app|--filter @dohc/app|filter @dohc/app' .
 ```
 
@@ -570,7 +570,7 @@ The migration should refuse if the target `.apps` path already exists.
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/typescript/bin/tsc --noEmit
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/viewPaths.test.ts \
@@ -727,7 +727,7 @@ The agent prompt must not generate new `@dohc/view` imports.
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   src/apps/sdkProtocol.test.ts \
   src/apps/virtualDohcAppSdk.test.ts \
@@ -824,7 +824,7 @@ This app can only write inside these scopes. Changing app.json resets this permi
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/apps.test.ts \
   convex/appTrust.test.ts
@@ -1061,7 +1061,7 @@ Every app write should be inspectable as:
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/appCollaboration.test.ts \
   convex/appSecurity.test.ts \
@@ -1176,7 +1176,7 @@ Tests:
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/collectionMarkdownTable.test.ts \
   convex/collectionMarkdownCards.test.ts \
@@ -1262,12 +1262,12 @@ semantic-backend-offline
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/appData.collectionMutations.test.ts \
   convex/collectionMarkdownTable.test.ts
 
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run services/hocuspocus/src/semantic-api.test.ts
 ```
 
@@ -1388,7 +1388,7 @@ Every write increments `databaseFiles.version`. Failed SQLite apply must leave t
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/databaseFiles.test.ts \
   convex/databaseOps.test.ts \
@@ -1471,10 +1471,10 @@ Response:
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run services/sqlite-worker/src/sqliteEngine.test.ts
 
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/collectionIndex.test.ts
 ```
 
@@ -1542,7 +1542,7 @@ Event detail:
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   src/apps/AppRuntimeHost.test.tsx \
   src/__tests__/appsShell.test.tsx
@@ -1640,10 +1640,10 @@ Before finish_onboarding, run test_app on every generated app and fix failures.
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run services/app-tester/src/runAppTest.test.ts
 
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/appTesting.test.ts \
   convex/a1SystemPrompt.test.ts \
@@ -1700,7 +1700,7 @@ The SQLite version must:
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appFinanceTracker.acceptance.test.ts
 ```
 
@@ -1759,7 +1759,7 @@ They should not be recommended to generated apps unless the use case is truly a 
 Verification:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/a1SystemPrompt.test.ts \
   src/__tests__/onboardingSetupFirst.test.ts \
@@ -1775,14 +1775,14 @@ npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.t
 Run:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/typescript/bin/tsc --noEmit
 ```
 
 Run targeted app tests:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   src/apps/sdkProtocol.test.ts \
   src/apps/virtualDohcAppSdk.test.ts \
@@ -1807,7 +1807,7 @@ npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.t
 Run cross-cutting security, privacy, and authorization tests:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/appSecurity.test.ts \
   convex/appTrust.test.ts \
@@ -1830,7 +1830,7 @@ PASS: cross-workspace reads/writes denied
 Run generated app quality tests:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/appTesting.test.ts \
   convex/appFinanceTracker.acceptance.test.ts \
@@ -1850,7 +1850,7 @@ PASS: generated apps fail validation when they render placeholder metrics over r
 Run onboarding regression tests:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/onboarding.test.ts \
   src/__tests__/onboardingSetupFirst.test.ts \
@@ -1872,7 +1872,7 @@ PASS: next-message model and permission controls stay usable
 Run service tests:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run \
   services/hocuspocus/src/semantic-api.test.ts \
   services/sqlite-worker/src/sqliteEngine.test.ts \
@@ -1882,13 +1882,13 @@ npx -y node@24 node_modules/vitest/vitest.mjs run \
 Run SQLite failure and concurrency tests:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run \
   services/sqlite-worker/src/sqliteEngine.test.ts \
   services/sqlite-worker/src/sqliteEngine.concurrency.test.ts \
   services/sqlite-worker/src/sqliteEngine.failureInjection.test.ts
 
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/databaseFiles.test.ts \
   convex/databaseOps.test.ts \
@@ -1908,7 +1908,7 @@ PASS: raw SQLite bytes are never sent through Y.Doc/CRDT paths
 Run app tester/browser service:
 
 ```bash
-cd /home/ice/dev/dohc
+cd "$(git rev-parse --show-toplevel)"
 npx -y node@24 node_modules/vitest/vitest.mjs run \
   services/app-tester/src/runAppTest.test.ts \
   services/app-tester/src/runAppTest.browser.test.ts \
@@ -1928,7 +1928,7 @@ PASS: app tester verifies persisted collection/database mutations
 Run realistic data/performance tests:
 
 ```bash
-cd /home/ice/dev/dohc/apps/app
+cd "$(git rev-parse --show-toplevel)/apps/app"
 npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts \
   convex/collectionMarkdownTable.performance.test.ts \
   convex/collectionCsv.performance.test.ts \

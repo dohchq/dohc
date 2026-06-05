@@ -4,7 +4,7 @@ import {
   attachmentKindForType,
   formatAttachmentSize,
   isInlineTextType,
-  parseDohcAssetHref,
+  parseAssetHref,
 } from './pastedAttachments'
 
 describe('pasted attachment helpers', () => {
@@ -71,10 +71,10 @@ describe('pasted attachment helpers', () => {
   })
 
   it('parses stable dohc asset hrefs', () => {
-    expect(parseDohcAssetHref('dohc-asset:image/asset_abc')).toEqual({
+    expect(parseAssetHref('dohc-asset:image/asset_abc')).toEqual({
       kind: 'image',
       assetId: 'asset_abc',
     })
-    expect(parseDohcAssetHref('https://example.com/image.png')).toBeNull()
+    expect(parseAssetHref('https://example.com/image.png')).toBeNull()
   })
 })

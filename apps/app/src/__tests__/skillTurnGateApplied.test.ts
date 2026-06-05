@@ -324,4 +324,14 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
     ])
     expect([...SAFE_NO_GATE_OPS].sort()).toEqual([...expectedSafe].sort())
   })
+
+  it('read_asset derives workspace scope server-side before reading saved attachments', () => {
+    const body = TOOL_BODIES.read_asset
+    expect(body).toBeTruthy()
+    const workspaceIdx = body.indexOf('activeWorkspaceFromTool(ctx, options)')
+    const readIdx = body.indexOf('readAssetTextForAgent(')
+
+    expect(workspaceIdx).toBeGreaterThanOrEqual(0)
+    expect(readIdx).toBeGreaterThan(workspaceIdx)
+  })
 })

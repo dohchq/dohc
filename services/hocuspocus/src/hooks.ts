@@ -17,7 +17,9 @@ import { decodeDocName } from './doc-name.js'
 import { verifyCollabToken, type CollabActorKind } from './auth.js'
 import type { PostgresYDocStore } from './persistence.js'
 import {
+  getDohcYDocBodyFragment,
   getDohcYDocFrontmatter,
+  getDohcYDocPlainText,
   markdownToYDoc,
   plainTextToYDoc,
   yDocToMarkdown,
@@ -152,15 +154,33 @@ function isUninitializedCanonicalDoc(doc: Y.Doc, atomId: string): boolean {
   return !hasPersistedBodyContent(doc)
 }
 
-function getSharedType(doc: Y.Doc, key: string): unknown {
+function getExistingSharedType(doc: Y.Doc, key: string): unknown {
+  // Yjs public getters create missing shared types, and also throw if
+  // the key already exists with a different type. This fallback is only
+  // for legacy/corrupt docs and for detecting whether v2 meta exists.
   return (doc as unknown as { share?: Map<string, unknown> }).share?.get(key)
 }
 
-function hasPersistedBodyContent(doc: Y.Doc): boolean {
-  const plainText = getSharedType(doc, 'plainText')
-  if (plainText instanceof Y.Text) return plainText.toString().trim().length > 0
+function getPersistedBodyContent(doc: Y.Doc): unknown {
+  const meta = getExistingSharedType(doc, 'meta')
+  if (meta instanceof Y.Map) {
+    try {
+      return getDohcYDocPlainText(doc) ?? getDohcYDocBodyFragment(doc)
+    } catch {
+      return (
+        getExistingSharedType(doc, 'plainText') ??
+        getExistingSharedType(doc, 'body')
+      )
+    }
+  }
 
-  const body = getSharedType(doc, 'body')
+  return (
+    getExistingSharedType(doc, 'plainText') ?? getExistingSharedType(doc, 'body')
+  )
+}
+
+function hasPersistedBodyContent(doc: Y.Doc): boolean {
+  const body = getPersistedBodyContent(doc)
   if (!body) return false
   if (body instanceof Y.Text) return body.toString().trim().length > 0
   if (!(body instanceof Y.XmlFragment)) return true

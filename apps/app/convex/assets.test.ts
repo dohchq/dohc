@@ -46,4 +46,40 @@ describe('workspace assets', () => {
       }),
     ).rejects.toThrow(/asset not found/)
   })
+
+  it('returns the existing asset when the same storage object is registered twice in a workspace', async () => {
+    const t = convexTest(schema, modules)
+    const storageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(
+        new Blob(['retry me'], { type: 'text/plain' }),
+      )
+    })
+
+    const first = await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.registerUploadedAsset,
+      {
+        storageId,
+        filename: 'first.txt',
+        mediaType: 'text/plain',
+        purpose: 'chat',
+      },
+    )
+    const retry = await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.registerUploadedAsset,
+      {
+        storageId,
+        filename: 'retry.txt',
+        mediaType: 'application/octet-stream',
+        purpose: 'workspace',
+      },
+    )
+
+    expect(retry.assetId).toBe(first.assetId)
+    expect(retry.filename).toBe('first.txt')
+
+    const rows = await t.run(async (ctx) => {
+      return await ctx.db.query('workspaceAssets').collect()
+    })
+    expect(rows).toHaveLength(1)
+  })
 })

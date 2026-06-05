@@ -2942,6 +2942,7 @@ export const dohcAgent = new Agent(components.agent, {
 
 const projectPathArg = v.optional(v.union(v.string(), v.null()))
 const attachmentIdsArg = v.optional(v.array(v.id('workspaceAssets')))
+const MAX_ATTACHMENTS_PER_MESSAGE = 12
 
 function normalizeProjectPath(projectPath?: string | null): string | undefined {
   const clean = (projectPath ?? '').trim().replace(/^\/+|\/+$/g, '')
@@ -4023,6 +4024,7 @@ type AgentResolvedAsset = {
 }
 
 const INLINE_TEXT_ATTACHMENT_MAX_BYTES = 256 * 1024
+const INLINE_TEXT_ATTACHMENTS_TOTAL_MAX_BYTES = 512 * 1024
 const READ_ASSET_MAX_BYTES = 2 * 1024 * 1024
 const READ_ASSET_DEFAULT_LINES = 200
 const READ_ASSET_MAX_LINES = 500
@@ -4129,6 +4131,11 @@ async function buildUserMessageForAttachments(
   assetIds: Id<'workspaceAssets'>[]
 }> {
   const assetIds = attachmentIds ?? []
+  if (assetIds.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+    throw new Error(
+      `Too many attachments (${assetIds.length}). Max is ${MAX_ATTACHMENTS_PER_MESSAGE}.`,
+    )
+  }
   const trimmed = prompt.trim()
   if (assetIds.length === 0) {
     return { titleHint: trimmed, saveArgs: { prompt: trimmed }, assetIds }
@@ -4140,6 +4147,7 @@ async function buildUserMessageForAttachments(
   })) as AgentResolvedAsset[]
   const inlineBlocks: string[] = []
   const content: Exclude<UserContent, string> = []
+  let inlineTextBytesUsed = 0
 
   for (const asset of assets) {
     const url = await ctx.storage.getUrl(asset.storageId)
@@ -4147,7 +4155,10 @@ async function buildUserMessageForAttachments(
 
     const textAttachment = isInlineTextAttachment(asset)
     const inlineText =
-      asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES && textAttachment
+      asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES &&
+      inlineTextBytesUsed + asset.size <=
+        INLINE_TEXT_ATTACHMENTS_TOTAL_MAX_BYTES &&
+      textAttachment
     const sendModelImage =
       asset.kind === 'image' &&
       !textAttachment &&
@@ -4156,6 +4167,7 @@ async function buildUserMessageForAttachments(
       const blob = await ctx.storage.get(asset.storageId)
       const text = blob ? await blob.text() : ''
       if (text) {
+        inlineTextBytesUsed += asset.size
         inlineBlocks.push(
           inlineAttachmentBlock({
             assetId: asset.assetId,
@@ -4436,12 +4448,16 @@ export const sendMessage = action({
       titleHint: userMessage.titleHint,
     })
     if (userMessage.assetIds.length > 0) {
-      await ctx.runMutation(internal.assets._markUsedInMessage, {
-        workspaceId,
-        assetIds: userMessage.assetIds,
-        threadId,
-        messageId,
-      })
+      try {
+        await ctx.runMutation(internal.assets._markUsedInMessage, {
+          workspaceId,
+          assetIds: userMessage.assetIds,
+          threadId,
+          messageId,
+        })
+      } catch (error) {
+        console.error('Failed to mark message attachments as used', error)
+      }
     }
     await ctx.runMutation(internal.agent._setThreadAgentSelection, {
       workspaceId,

@@ -6,7 +6,7 @@ export type AssetMarkdownReferenceInput = {
   label: string
 }
 
-export type DohcAssetHref = {
+export type AssetHref = {
   kind: AttachmentKind
   assetId: string
 }
@@ -135,7 +135,7 @@ export function assetMarkdownReference({
   return kind === 'image' ? `![${safeLabel}](${href})` : `[${safeLabel}](${href})`
 }
 
-export function parseDohcAssetHref(href?: string | null): DohcAssetHref | null {
+export function parseAssetHref(href?: string | null): AssetHref | null {
   const match = /^dohc-asset:(image|video|audio|file)\/(.+)$/.exec(href ?? '')
   if (!match) return null
   return {

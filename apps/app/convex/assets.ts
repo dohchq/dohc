@@ -44,6 +44,14 @@ export const registerUploadedAsset = mutation({
       normalizeMediaType(mediaType) ??
       normalizeMediaType(metadata.contentType) ??
       'application/octet-stream'
+    const existing = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_storage', (q) =>
+        q.eq('workspaceId', workspaceId).eq('storageId', storageId),
+      )
+      .first()
+    if (existing) return toClientAsset(existing)
+
     const now = Date.now()
     const assetId = await ctx.db.insert('workspaceAssets', {
       workspaceId,

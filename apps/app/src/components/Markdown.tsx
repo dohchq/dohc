@@ -6,7 +6,7 @@ import type { Components } from 'react-markdown'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
-import { parseDohcAssetHref, type AttachmentKind } from '../lib/pastedAttachments'
+import { parseAssetHref, type AttachmentKind } from '../lib/pastedAttachments'
 
 // One styled markdown renderer for AI prose (the chat) and the live
 // previews (dashboard / profile). Maps every element to the
@@ -71,7 +71,7 @@ const make = (v: Variant): Components => {
     ),
     em: ({ children }) => <em className="italic text-ink">{children}</em>,
     a: ({ children, href }) => {
-      const asset = parseDohcAssetHref(href)
+      const asset = parseAssetHref(href)
       if (asset) {
         return (
           <AssetMedia
@@ -94,7 +94,7 @@ const make = (v: Variant): Components => {
       )
     },
     img: ({ src, alt }) => {
-      const asset = parseDohcAssetHref(src)
+      const asset = parseAssetHref(src)
       if (asset) {
         return (
           <AssetMedia

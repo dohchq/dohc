@@ -1,5 +1,5 @@
 import { Node } from '@tiptap/core'
-import { parseDohcAssetHref } from '../lib/pastedAttachments'
+import { parseAssetHref } from '../lib/pastedAttachments'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -298,7 +298,7 @@ export const DohcMediaAsset = Node.create({
       if (!match) return undefined
 
       const [, marker = '', label = '', href = ''] = match
-      const parsed = parseDohcAssetHref(href)
+      const parsed = parseAssetHref(href)
       if (!parsed) return undefined
 
       return {
@@ -306,7 +306,7 @@ export const DohcMediaAsset = Node.create({
         raw: match[0],
         kind: parsed.kind,
         assetId: parsed.assetId,
-        label: unquoteMarkdownLabel(marker ? label : label),
+        label: unquoteMarkdownLabel(label),
       }
     },
   },
