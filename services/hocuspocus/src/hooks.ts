@@ -16,7 +16,12 @@ import * as Y from 'yjs'
 import { decodeDocName } from './doc-name.js'
 import { verifyCollabToken, type CollabActorKind } from './auth.js'
 import type { PostgresYDocStore } from './persistence.js'
-import { markdownToYDoc, plainTextToYDoc } from './import-export.js'
+import {
+  getDohcYDocFrontmatter,
+  markdownToYDoc,
+  plainTextToYDoc,
+  yDocToMarkdown,
+} from './import-export.js'
 import { isPlainTextAtomPath } from './source-kind.js'
 import {
   createProjectionWorker,
@@ -138,6 +143,42 @@ type DohcHocuspocusHooks = {
     Configuration<DohcHocuspocusContext>['onAwarenessUpdate']
   >
   onDisconnect: NonNullable<Configuration<DohcHocuspocusContext>['onDisconnect']>
+}
+
+function isUninitializedCanonicalDoc(doc: Y.Doc, atomId: string): boolean {
+  const frontmatter = getDohcYDocFrontmatter(doc)
+  if (frontmatter.id === atomId) return false
+  if (Object.keys(frontmatter).length > 0) return false
+  return !hasPersistedBodyContent(doc)
+}
+
+function getSharedType(doc: Y.Doc, key: string): unknown {
+  return (doc as unknown as { share?: Map<string, unknown> }).share?.get(key)
+}
+
+function hasPersistedBodyContent(doc: Y.Doc): boolean {
+  const plainText = getSharedType(doc, 'plainText')
+  if (plainText instanceof Y.Text) return plainText.toString().trim().length > 0
+
+  const body = getSharedType(doc, 'body')
+  if (!body) return false
+  if (body instanceof Y.Text) return body.toString().trim().length > 0
+  if (!(body instanceof Y.XmlFragment)) return true
+
+  try {
+    return yDocToMarkdown(doc).trim().length > 0
+  } catch {
+    return true
+  }
+}
+
+function bootstrapMarkdownToYDoc(bootstrap: {
+  markdown: string
+  path?: string
+}): Y.Doc {
+  return bootstrap.path && isPlainTextAtomPath(bootstrap.path)
+    ? plainTextToYDoc(bootstrap.markdown)
+    : markdownToYDoc(bootstrap.markdown)
 }
 
 const YJS_SYNC_STEP2 = 1
@@ -432,10 +473,7 @@ export function createHocuspocusHooks({
       if (!(await store.hasDocumentState(data.documentName))) {
         const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
         if (bootstrap?.markdown !== undefined) {
-          const document =
-            bootstrap.path && isPlainTextAtomPath(bootstrap.path)
-              ? plainTextToYDoc(bootstrap.markdown)
-              : markdownToYDoc(bootstrap.markdown)
+          const document = bootstrapMarkdownToYDoc(bootstrap)
           const stored = await store.storeSnapshotIfMissing(data.documentName, document, {
             lastSeq: 0,
           })
@@ -447,10 +485,24 @@ export function createHocuspocusHooks({
       }
 
       const document = await store.loadDocument(data.documentName)
-      sequences.setLoadedSequence(
-        data.documentName,
-        await store.latestSequence(data.documentName),
-      )
+      const loadedSequence = await store.latestSequence(data.documentName)
+      if (isUninitializedCanonicalDoc(document, context.atomId)) {
+        const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
+        if (bootstrap?.markdown !== undefined) {
+          const repairedDocument = bootstrapMarkdownToYDoc(bootstrap)
+          await store.storeSnapshot(data.documentName, repairedDocument, {
+            lastSeq: loadedSequence,
+          })
+          sequences.setLoadedSequence(data.documentName, loadedSequence)
+          logger.warn('repaired uninitialized hocuspocus document from atom cache', {
+            documentName: data.documentName,
+            workspaceId: context.workspaceId,
+            atomId: context.atomId,
+          })
+          return repairedDocument
+        }
+      }
+      sequences.setLoadedSequence(data.documentName, loadedSequence)
       return document
     },
 

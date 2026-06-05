@@ -134,10 +134,10 @@ function isCockpitPath(path: string): boolean {
 
 function cockpitRank(name: string): number {
   const clean = name.toLowerCase()
-  if (clean === 'home') return 0
-  if (clean === 'dashboard') return 1
-  if (clean === 'cockpit') return 2
-  return 3
+  if (clean === 'cockpit') return 1
+  if (clean === 'dashboard') return 2
+  if (clean === 'home') return 3
+  return 0
 }
 
 function isViewEntryPath(

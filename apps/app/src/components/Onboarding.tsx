@@ -179,7 +179,7 @@ function composeIntro(
       : 'Here’s the Setup Run I want dohc to build:',
     ...lines,
     '',
-    `Set it up now — build source markdown first, then a polished source-backed cockpit at home.html or .views/home if the setup needs an interactive app-like cockpit, then an inspectable .runs/setup.md, and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, avoid fake productivity theater and make the next capture action obvious.`,
+    `Set it up now — build source markdown first, then a polished source-backed cockpit at home.html for a read-only report or .views/<use-case> if the setup needs an interactive app-like cockpit; use .views/home only if the user asked for a general home. Then write an inspectable .runs/setup.md and ${identityPath}. Use the real material I gave you first. Don’t re-ask what I just answered; if I skipped real material, avoid fake productivity theater and make the next capture action obvious.`,
   ].join('\n')
 }
 

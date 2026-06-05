@@ -338,6 +338,30 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     })
   })
 
+  it('progress prefers a specific use-case view over generic home when both exist', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me')
+    await seedAtom(t, 'finance/wallet.md', '# Wallet\n{status: active}')
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} docs</main>\n}\n",
+    )
+    await seedAtom(
+      t,
+      'finance/.views/tracker/src/App.tsx',
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} finance docs</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    expect(await asW(t).query(api.onboarding.progress, {})).toMatchObject({
+      hasCockpitView: true,
+      sourceCount: 1,
+      cockpitPath: 'finance/.views/tracker',
+      dashboardPath: 'finance/.views/tracker',
+    })
+  })
+
   it('defer ⇒ DEFERRED, never fakes DONE, leaves the never-empty invariant intact, idempotent', async () => {
     const t = convexTest(schema, modules)
     await asW(t).mutation(api.onboarding.defer, {})

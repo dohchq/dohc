@@ -349,15 +349,17 @@ describe('AtomEditor collaborative browser lifecycle', () => {
   })
 
   it('waits for local IndexedDB hydration and first remote sync before enabling edits', async () => {
-    await mountAtomEditor()
+    const { container } = await mountAtomEditor()
 
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
+    expect(container.querySelector('[data-testid="editor-content"]')).toBeNull()
     expect(indexeddbState.instances).toHaveLength(1)
     await fireIndexeddbSynced(0)
 
     expect(hocuspocusState.providers.length).toBeGreaterThanOrEqual(1)
     expect(hocuspocusState.providers[0]?.documentName).toBe(documentName())
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(false)
+    expect(container.querySelector('[data-testid="editor-content"]')).toBeNull()
 
     await act(async () => {
       hocuspocusState.providers[0]?.onSynced?.({ state: true })
@@ -366,6 +368,7 @@ describe('AtomEditor collaborative browser lifecycle', () => {
 
     expect(localStorage.getItem(`dohc:yjs-cache:${documentName()}`)).toBe('1')
     expect(tiptapState.editors.at(-1)?.setEditable).toHaveBeenLastCalledWith(true)
+    expect(container.querySelector('[data-testid="editor-content"]')).not.toBeNull()
     expect(containerStatusText()).not.toContain('Syncing')
   })
 
