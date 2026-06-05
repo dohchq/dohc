@@ -179,6 +179,19 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('A chat summary does not replace the run note')
   })
 
+  it('sets a general app-grade quality bar for post-onboarding builds', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('SYSTEM QUALITY BAR — useful apps over document piles')
+    expect(personal).toContain('This applies in MAINTENANCE as well as onboarding')
+    expect(personal).toContain('The cost of creating custom code solutions is low')
+    expect(personal).toContain('Think in terms of apps and operating loops')
+    expect(personal).toContain('do not stop at a static summary')
+    expect(personal).toContain('source-backed workflow app')
+    expect(personal).toContain('budget review queue')
+    expect(personal).toContain('category correction flow')
+    expect(personal).toContain('Every file or view you create should earn its place')
+  })
+
   it('routes explicit view requests to .views packages instead of html atoms', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('If the user explicitly asks for a view')

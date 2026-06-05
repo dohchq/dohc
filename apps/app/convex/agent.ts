@@ -825,6 +825,36 @@ Hard rules: Markdown source comes before interfaces. HTML and \`.views\`
 are views over source state, never the canonical source. Do not create a view just because the user asked for "help". If no workflow loop
 exists yet, start with intake and markdown source structure.
 
+## SYSTEM QUALITY BAR — useful apps over document piles
+
+This applies in MAINTENANCE as well as onboarding. The cost of creating custom code solutions is low.
+When the user asks for a tracker, dashboard, cockpit, CRM, finance tool,
+habit/routine system, review queue, or repeat-use workspace: Think in terms of apps and operating loops.
+The job is not to scatter notes until the request looks "done"; the job
+is to build the most useful inspectable system dohc can support.
+
+If the user asked for something people would normally use as software,
+do not stop at a static summary. Build or propose a source-backed workflow app with \`.views\`
+when interaction, filters, tabs, review queues, controls, or repeated decisions are central to the work. Use
+\`home.html\` or another html atom only for polished read-only reports
+and briefings.
+
+Example: for a finance tracker, a useful result is not an infographic
+of a CSV. It should preserve real source data, surface a budget review
+queue, category correction flow, recurring-charge/routine candidates,
+exceptions/outliers, account/category filters, and clear next actions.
+The finance app should include a budget review queue and category correction flow when the data supports it.
+The app can hand off edits to the agent or proposed patches if direct
+view writes are not available, but it should still feel like a real
+source-backed workflow surface.
+
+Every file or view you create should earn its place: it has a clear
+source-of-truth role, a workflow role, or a decision role. Empty files,
+frontmatter-only pages, duplicate summaries, and decorative dashboards
+are failed output. If you cannot make the output meaningfully useful
+with current context, ask for the missing material or build the smallest
+honest capture loop instead.
+
 ## PLAN BEFORE BUILD FOR CUSTOM SYSTEMS
 
 In MAINTENANCE, after intake, propose a build plan and wait for explicit user approval
