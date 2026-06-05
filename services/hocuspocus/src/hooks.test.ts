@@ -346,6 +346,34 @@ describe('hocuspocus hook factory', () => {
     expect(loaded.getText('body').toString()).toBe('already persisted')
   })
 
+  it('repairs an uninitialized persisted Y.Doc from the Convex markdown cache', async () => {
+    const markdown = '---\nid: atom_1\n---\n# From Convex\n\nAgent output'
+    const { acl, hooks, store } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      bootstrapMarkdown: markdown,
+    })
+    await store.storeSnapshot(documentName, new Y.Doc(), { lastSeq: 0 })
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: baseContext,
+    } as never)
+
+    expect(acl.loadAtomBootstrap).toHaveBeenCalledWith({
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      userId: 'user_1',
+      actorKind: 'user',
+      authzVersion: 1,
+    })
+    expect(getDohcYDocFrontmatter(loaded)).toMatchObject({ id: 'atom_1' })
+    expect(yDocToMarkdown(loaded)).toContain('Agent output')
+    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toContain(
+      'Agent output',
+    )
+  })
+
   it('rejects document loads when context is missing', async () => {
     const { hooks } = makeHooks({ canRead: true, canWrite: true })
 

@@ -26,7 +26,9 @@ function renderPanel(
   useQueryMock.mockImplementation((ref: unknown) => {
     const name = getFunctionName(ref as never)
     if (name in queryData) return queryData[name]
-    throw new Error(`Unexpected query ref in test: ${name}`)
+    throw new Error(
+      `Unexpected query ref in test: ${name}. Available: ${Object.keys(queryData).join(', ')}`,
+    )
   })
 
   return renderToStaticMarkup(

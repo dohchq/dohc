@@ -1,4 +1,5 @@
 import type { UIMessage } from '@convex-dev/agent/react'
+import { collapsePastedFileBlocks } from './pastedFileDisplay'
 
 export type OptimisticChatTurn = {
   id: string
@@ -16,6 +17,10 @@ export function uiMessageText(message: UIMessage): string {
     .filter((part) => part.type === 'text')
     .map((part) => (part as { text?: string }).text ?? '')
     .join('')
+}
+
+export function uiMessageDisplayText(message: UIMessage): string {
+  return collapsePastedFileBlocks(uiMessageText(message))
 }
 
 export function optimisticTurnHasServerEcho(

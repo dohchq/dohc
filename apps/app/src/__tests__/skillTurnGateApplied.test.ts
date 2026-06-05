@@ -257,6 +257,7 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'pending_captures',
   'review_window_sharing',
   'onboarding_state',
+  'read_asset', // read-only saved attachment fetch; scoped by activeWorkspaceFromTool and no mutation path
   // sanity-check
   'run_query',
   // explicitly-additive writes (no overwrite path)
@@ -313,7 +314,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'list_atoms', 'read_atom', 'list_trash', 'list_entities',
       'find_entity', 'list_skills', 'list_commands',
       'pending_captures', 'review_window_sharing',
-      'onboarding_state', 'run_query',
+      'onboarding_state', 'read_asset', 'run_query',
       'create_entities', 'create_folder',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
@@ -322,5 +323,15 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'suggest_in_doc', // retired v1 tool: always refuses
     ])
     expect([...SAFE_NO_GATE_OPS].sort()).toEqual([...expectedSafe].sort())
+  })
+
+  it('read_asset derives workspace scope server-side before reading saved attachments', () => {
+    const body = TOOL_BODIES.read_asset
+    expect(body).toBeTruthy()
+    const workspaceIdx = body.indexOf('activeWorkspaceFromTool(ctx, options)')
+    const readIdx = body.indexOf('readAssetTextForAgent(')
+
+    expect(workspaceIdx).toBeGreaterThanOrEqual(0)
+    expect(readIdx).toBeGreaterThan(workspaceIdx)
   })
 })

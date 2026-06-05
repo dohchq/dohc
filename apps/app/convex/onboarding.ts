@@ -134,10 +134,10 @@ function isCockpitPath(path: string): boolean {
 
 function cockpitRank(name: string): number {
   const clean = name.toLowerCase()
-  if (clean === 'home') return 0
-  if (clean === 'dashboard') return 1
-  if (clean === 'cockpit') return 2
-  return 3
+  if (clean === 'cockpit') return 1
+  if (clean === 'dashboard') return 2
+  if (clean === 'home') return 3
+  return 0
 }
 
 function isViewEntryPath(
@@ -148,6 +148,14 @@ function isViewEntryPath(
   return info.relativePath.toLowerCase() === 'src/app.tsx'
     ? { packageRoot: info.packageRoot, viewName: info.viewName }
     : null
+}
+
+function isSourceBackedViewEntryBody(body: string): boolean {
+  const rest = strippedBody(body)
+  return (
+    /from\s+['"]@dohc\/view['"]/.test(rest) &&
+    /\b(useDocs|useDohcQuery)\s*\(/.test(rest)
+  )
 }
 
 function isSourceBackedCockpit(path: string, body: string): boolean {
@@ -241,8 +249,20 @@ export async function progressOf(
     ...new Map(
       atoms
         .filter((a) => !isPlaceholderSeed(a.body))
-        .map((a) => isViewEntryPath(a.path))
-        .filter((v): v is { packageRoot: string; viewName: string } => v !== null)
+        .map((a) => ({
+          entry: isViewEntryPath(a.path),
+          body: a.body,
+        }))
+        .filter(
+          (
+            v,
+          ): v is {
+            entry: { packageRoot: string; viewName: string }
+            body: string
+          } =>
+            v.entry !== null && isSourceBackedViewEntryBody(v.body),
+        )
+        .map((v) => v.entry)
         .map((v) => [v.packageRoot, v]),
     ).values(),
   ].sort(
@@ -370,10 +390,10 @@ export const _complete = internalMutation({
 export const ONBOARDING_STALE_MS = 90_000
 
 export const claimKickoff = internalMutation({
-  args: { workspaceId: v.string() },
+  args: { workspaceId: v.string(), force: v.optional(v.boolean()) },
   handler: async (
     ctx,
-    { workspaceId },
+    { workspaceId, force },
   ): Promise<{ won: boolean; owner: string | null }> => {
     const row = await onboardingRow(ctx, workspaceId)
     const now = Date.now()
@@ -381,7 +401,7 @@ export const claimKickoff = internalMutation({
       !!row &&
       !!row.kickoffAt &&
       now - row.kickoffAt <= ONBOARDING_STALE_MS
-    if (fresh) return { won: false, owner: null }
+    if (fresh && !force) return { won: false, owner: null }
     const owner = randomLeaseOwner()
     if (row)
       await ctx.db.patch(row._id, { kickoffAt: now, kickoffOwner: owner })

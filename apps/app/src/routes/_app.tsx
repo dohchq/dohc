@@ -67,6 +67,7 @@ import { type AppView as View, viewFromPathname } from '@/lib/appViews'
 import type { AgentAccessMode } from '@/lib/agentAccess'
 import { ChatBusyProvider } from '@/lib/chat-busy'
 import { pathInsideFolder, projectTreePath } from '@/lib/file-tree-optimistic'
+import { onboardingWorkspaceReady } from '@/lib/onboarding-ready'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { pageIdFromRef, pagePath, pageRef } from '@/lib/page-urls'
@@ -221,6 +222,12 @@ function Gate() {
   // <Home />.
   const activeWorkspaceId = useActiveWorkspaceId()
   const state = useQuery(api.onboarding.state, { activeWorkspaceId })
+  const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
+  const completeIfReady = useMutation(api.onboarding.completeIfReady)
+  const startOnboarding = useAction(api.agent.startOnboarding)
+  const workspaceReady = onboardingWorkspaceReady(progress)
+  const completingReadyRef = useRef(false)
+  const resumeStartedRef = useRef<string | null>(null)
 
   // W1 (H-7) — fire WorkOS membership reconcile on first sign-in for
   // each user.id + every 4h. Catches the "user removed in WorkOS but
@@ -258,11 +265,31 @@ function Gate() {
       .then(() => ensureWorkspaceSlugs({}))
       .catch(() => {})
   }, [user?.id, user?.email, upsertMyProfile, ensureWorkspaceSlugs])
+  useEffect(() => {
+    if (state !== 'IN_PROGRESS' || !workspaceReady) return
+    if (completingReadyRef.current) return
+    completingReadyRef.current = true
+    completeIfReady({ activeWorkspaceId }).catch(() => {
+      completingReadyRef.current = false
+    })
+  }, [activeWorkspaceId, completeIfReady, state, workspaceReady])
+  useEffect(() => {
+    if (state !== 'IN_PROGRESS' || workspaceReady) return
+    const workspaceKey = activeWorkspaceId ?? 'personal'
+    if (resumeStartedRef.current === workspaceKey) return
+    resumeStartedRef.current = workspaceKey
+    startOnboarding({ activeWorkspaceId }).catch(() => {
+      resumeStartedRef.current = null
+    })
+  }, [activeWorkspaceId, startOnboarding, state, workspaceReady])
   if (state === undefined) {
     return <AppLoadingScreen />
   }
-  if (state === 'NEW' || state === 'IN_PROGRESS') {
+  if (state === 'NEW') {
     return <Onboarding state={state} />
+  }
+  if (state === 'IN_PROGRESS') {
+    return <App initialView="agent" initialAgentHandoff />
   }
   // DONE | DEFERRED → the workspace
   return <App />
@@ -324,7 +351,12 @@ function SignInPrompt() {
   )
 }
 
-function App() {
+type AppProps = {
+  initialView?: View
+  initialAgentHandoff?: boolean
+}
+
+function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   const { user } = useAuth()
   const notice = useNotice()
   // org-plan §5 Phase B — every read/write is scoped to the active
@@ -405,6 +437,8 @@ function App() {
   const [threadId, setThreadId] = useState<string | null>(null)
   const [agentProjectPath, setAgentProjectPath] = useState<string | null>(null)
   const [agentDraft, setAgentDraft] = useState(false)
+  const [agentHandoffPending, setAgentHandoffPending] =
+    useState(initialAgentHandoff)
   const [agentDraftSelection, setAgentDraftSelection] =
     useState<AgentModelPickerSelection | null>(null)
   const [agentSelectionOverride, setAgentSelectionOverride] =
@@ -528,6 +562,7 @@ function App() {
   const [view, setView] = useState<View>(
     () =>
       urlView ??
+      initialView ??
       (urlPageId || activeShareId || initialOpenPathRef.current
         ? 'atom'
         : 'views'),
@@ -635,6 +670,19 @@ function App() {
     setAgentDraft(false)
     setView('agent')
   }, [routedAgentThread])
+  const handoffAgentThread =
+    !agentDraft && !threadId ? (chatThreads[0] ?? null) : null
+  const visibleAgentThread = activeAgentThread ?? handoffAgentThread
+  const visibleAgentThreadId =
+    visibleAgentThread?.threadId ?? threadId ?? null
+  const visibleAgentProjectPath =
+    visibleAgentThreadId === threadId
+      ? agentProjectPath
+      : (visibleAgentThread?.projectPath ?? agentProjectPath)
+  const agentWorkspaceLoading =
+    view === 'agent' &&
+    agentHandoffPending &&
+    (agentThreads === undefined || !visibleAgentThreadId)
   const agentProviders = useMemo(
     () => (agentProviderInfo?.providers ?? []) as AgentProviderSnapshot[],
     [agentProviderInfo],
@@ -642,15 +690,15 @@ function App() {
   const agentEffectiveDefault = agentSelectionFromApi(
     agentProviderInfo?.effectiveDefault,
   )
-  const activeThreadSelection = agentSelectionFromThread(activeAgentThread)
+  const activeThreadSelection = agentSelectionFromThread(visibleAgentThread)
   const agentSelection =
     agentSelectionOverride ??
     activeThreadSelection ??
     (agentDraft ? agentDraftSelection : null) ??
     agentEffectiveDefault
   const agentDocTitle =
-    activeAgentThread?.title?.trim() ||
-    (threadId ? 'Workspace chat' : 'New chat')
+    visibleAgentThread?.title?.trim() ||
+    (visibleAgentThreadId ? 'Workspace chat' : 'New chat')
 
   useEffect(() => {
     setAgentSelectionOverride(null)
@@ -673,6 +721,11 @@ function App() {
     setAgentDraftSelection(null)
     setSelectedAgentThreadSnapshot(null)
   }, [activeWorkspaceId])
+
+  useEffect(() => {
+    if (!agentHandoffPending) return
+    if (visibleAgentThreadId || agentDraft) setAgentHandoffPending(false)
+  }, [agentDraft, agentHandoffPending, visibleAgentThreadId])
 
   useEffect(() => {
     if (!selectedAgentThreadSnapshot) return
@@ -1747,7 +1800,9 @@ function App() {
 
   if (showNotFound) return <NotFoundPage />
 
-  return (
+  return agentWorkspaceLoading ? (
+    <AppLoadingScreen />
+  ) : (
     <div
       className="relative grid h-screen overflow-hidden bg-page text-ink"
       style={{ gridTemplateColumns: shellGridTemplateColumns }}
@@ -1770,8 +1825,8 @@ function App() {
                 folders === undefined ||
                 agentThreads === undefined
               }
-              activeThreadId={threadId}
-              activeProjectPath={agentProjectPath}
+              activeThreadId={visibleAgentThreadId}
+              activeProjectPath={visibleAgentProjectPath}
               onSelectThread={selectAgentThread}
               onNewThread={startAgentDraft}
               onCreateProject={createAgentProject}
@@ -1784,15 +1839,15 @@ function App() {
             />
           )}
           <AgentWorkspace
-            threadId={threadId}
-            activeThread={activeAgentThread}
-            projectPath={agentProjectPath}
+            threadId={visibleAgentThreadId}
+            activeThread={visibleAgentThread}
+            projectPath={visibleAgentProjectPath}
             projectOptions={agentProjectOptions}
             folderOptions={projectFolderOptions}
             onProjectPathChange={setAgentProjectPath}
             onCreateProject={createAgentProject}
             onEnsureThread={ensureAgentThreadForSend}
-            threadAccessMode={activeAgentThread?.agentAccessMode ?? null}
+            threadAccessMode={visibleAgentThread?.agentAccessMode ?? null}
             onToggleThreadPinned={toggleAgentThreadPinned}
             onRenameThread={renameAgentChat}
             onDeleteThread={deleteAgentChat}
@@ -1809,8 +1864,8 @@ function App() {
           />
           <AgentRunRail
             files={files ?? []}
-            activeThread={activeAgentThread}
-            projectPath={agentProjectPath}
+            activeThread={visibleAgentThread}
+            projectPath={visibleAgentProjectPath}
           />
         </>
       ) : view === 'views' ? (

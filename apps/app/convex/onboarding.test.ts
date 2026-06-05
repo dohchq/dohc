@@ -198,7 +198,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     await seedAtom(
       t,
       '.views/home/src/App.tsx',
-      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
@@ -207,6 +207,27 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
       'DONE',
     )
+  })
+
+  it('_complete THROWS when .views/home is just a static shell with no source read', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "export default function App() {\n  return <main>Home</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/source-backed-cockpit/)
   })
 })
 
@@ -304,7 +325,7 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(
       t,
       '.views/home/src/App.tsx',
-      "import { dohc } from '@dohc/view'\n\nexport default function App() {\n  return <main>Home</main>\n}\n",
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
@@ -314,6 +335,30 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       sourceCount: 1,
       cockpitPath: '.views/home',
       dashboardPath: '.views/home',
+    })
+  })
+
+  it('progress prefers a specific use-case view over generic home when both exist', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, '.context/me.md', '# Me')
+    await seedAtom(t, 'finance/wallet.md', '# Wallet\n{status: active}')
+    await seedAtom(
+      t,
+      '.views/home/src/App.tsx',
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} docs</main>\n}\n",
+    )
+    await seedAtom(
+      t,
+      'finance/.views/tracker/src/App.tsx',
+      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} finance docs</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    expect(await asW(t).query(api.onboarding.progress, {})).toMatchObject({
+      hasCockpitView: true,
+      sourceCount: 1,
+      cockpitPath: 'finance/.views/tracker',
+      dashboardPath: 'finance/.views/tracker',
     })
   })
 
@@ -433,5 +478,20 @@ describe('P1 — start LEASE: single-doc CAS + heartbeat + staleness recovery', 
       // still owned by c3 (c1's heartbeat was ignored)
       expect(r!.kickoffOwner).toBe(c3.owner)
     })
+  })
+
+  it('lets an explicit user kickoff reclaim a fresh-but-stuck lease', async () => {
+    const t = convexTest(schema, modules)
+    const c1 = await t.mutation(internal.onboarding.claimKickoff, {
+      workspaceId: W,
+    })
+    expect(c1.won).toBe(true)
+
+    const forced = await t.mutation(internal.onboarding.claimKickoff, {
+      workspaceId: W,
+      force: true,
+    })
+    expect(forced.won).toBe(true)
+    expect(forced.owner).not.toBe(c1.owner)
   })
 })

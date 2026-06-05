@@ -93,6 +93,16 @@ describe('Agent / Files shell mode', () => {
     expect(APP).toContain('mode="primary"')
   })
 
+  it('does not render an empty new-chat frame while initial agent threads are still loading', () => {
+    expect(APP).toContain('agentWorkspaceLoading')
+    expect(APP).toMatch(
+      /view === 'agent' &&[\s\S]{0,240}agentThreads === undefined/,
+    )
+    expect(APP).toMatch(
+      /agentWorkspaceLoading \?[\s\S]{0,120}<AppLoadingScreen \/>[\s\S]{0,120}: \(/,
+    )
+  })
+
   it('keeps optional side chat available in Files mode', () => {
     expect(APP).toContain('mode="side"')
     expect(APP).toContain('dohc-chat-open')
@@ -342,7 +352,7 @@ describe('Agent / Files shell mode', () => {
   it('uses the active chat title as the Agent document metadata title', () => {
     expect(APP).toContain('agentDocTitle')
     expect(APP).toMatch(
-      /activeAgentThread\?\.title\?\.trim\(\)\s*\|\|\s*\(threadId \? 'Workspace chat' : 'New chat'\)/,
+      /visibleAgentThread\?\.title\?\.trim\(\)\s*\|\|\s*\(visibleAgentThreadId \? 'Workspace chat' : 'New chat'\)/,
     )
     expect(APP).toContain("if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }")
     expect(APP).not.toContain("if (view === 'agent') return { docTitle: 'Agent', docEmoji: null }")
@@ -461,7 +471,7 @@ describe('Agent / Files shell mode', () => {
     expect(AGENT_ACCESS).toContain('Full access')
     expect(CHAT).toContain('onEnsureThread(projectPath, agentSelection, accessMode)')
     expect(APP).toContain('agentAccessMode')
-    expect(APP).toContain('threadAccessMode={activeAgentThread?.agentAccessMode ?? null}')
+    expect(APP).toContain('threadAccessMode={visibleAgentThread?.agentAccessMode ?? null}')
     expect(AGENT_CHAT_SIDEBAR).toContain('agentAccessMode?: AgentAccessMode | null')
   })
 
@@ -475,7 +485,7 @@ describe('Agent / Files shell mode', () => {
   })
 
   it('keeps the Agent right rail focused on real run trust signals', () => {
-    expect(APP).toContain('activeThread={activeAgentThread}')
+    expect(APP).toContain('activeThread={visibleAgentThread}')
     expect(APP).toContain('projectPath={agentProjectPath}')
     expect(AGENT_RUN_RAIL).toContain('activeThread')
     expect(AGENT_RUN_RAIL).toContain('projectPath')

@@ -54,6 +54,49 @@ describe('Chat.tsx publishes busy', () => {
     expect(CHAT).toMatch(/setChatBusy\(sending\s*\|\|\s*busy\)/)
     expect(CHAT).toMatch(/return\s*\(\)\s*=>\s*setChatBusy\(false\)/)
   })
+
+  it('treats pending assistant turns as busy before text starts streaming', () => {
+    expect(CHAT).toMatch(/\['pending',\s*'streaming'\]\.includes/)
+    expect(CHAT).toMatch(/\(m as \{ status\?: string \}\)\.status \?\? ''/)
+  })
+
+  it('renders empty pending assistant turns as visible activity', () => {
+    expect(CHAT).toContain("status === 'pending'")
+    expect(CHAT).toContain('dohc is starting')
+    expect(CHAT).toMatch(/!pending[\s\S]{0,120}!failed/)
+  })
+
+  it('renders failed assistant turns instead of hiding silent failures', () => {
+    expect(CHAT).toContain("status === 'failed'")
+    expect(CHAT).toContain('Agent run failed')
+    expect(CHAT).toContain('errorText')
+  })
+
+  it('lets onboarding-started busy threads stop even without a composer send target', () => {
+    expect(CHAT).toContain('const fallbackStopTarget')
+    expect(CHAT).toMatch(/threadId && busy[\s\S]{0,160}threadId/)
+    expect(CHAT).toMatch(/disabled=\{stopping \|\| !canStopActiveChat\}/)
+  })
+
+  it('keeps next-message model and permission controls editable while busy', () => {
+    const statusStripStart = CHAT.indexOf('function ComposerStatusStrip')
+    expect(statusStripStart).toBeGreaterThan(0)
+    const statusStripEnd = CHAT.indexOf('const ACCESS_POPOVER_WIDTH', statusStripStart)
+    const statusStrip = CHAT.slice(statusStripStart, statusStripEnd)
+
+    expect(statusStrip).toMatch(
+      /<AgentModelPicker[\s\S]{0,260}disabled=\{!onSelectionChange\}/,
+    )
+    expect(statusStrip).toMatch(
+      /<AgentAccessPicker[\s\S]{0,220}disabled=\{false\}/,
+    )
+    expect(statusStrip).not.toMatch(
+      /<AgentModelPicker[\s\S]{0,260}sending \|\| busy/,
+    )
+    expect(statusStrip).not.toMatch(
+      /<AgentAccessPicker[\s\S]{0,220}sending \|\| busy/,
+    )
+  })
 })
 
 describe('WorkspaceSwitcher.tsx reads busy + disables', () => {

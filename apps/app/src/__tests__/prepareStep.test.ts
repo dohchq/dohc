@@ -112,6 +112,11 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     )
   })
 
+  it('SAFE_FOR_SKILL_TOOLS includes read_asset so text attachments can be fetched without model file parts', () => {
+    expect(SAFE_FOR_SKILL_TOOLS).toContain('read_asset')
+    expect(USER_TURN_TOOLS_NO_RUN_SKILL).toContain('read_asset')
+  })
+
   it('entry modes are MUTUALLY EXCLUSIVE — entry tools are disjoint from the others', () => {
     const skillEntry = new Set<string>(SKILL_ENTRY_TOOLS)
     const commandEntry = new Set<string>(COMMAND_ENTRY_TOOLS)
@@ -406,8 +411,81 @@ describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same p
     expect(saveIdx).toBeLessThan(clearIdx)
   })
 
+  it('startOnboarding lets the Agent SDK create the pending assistant turn', () => {
+    const userSaveIdx = startOnboardingBody.indexOf(
+      'const saved = await dohcAgent.saveMessage',
+    )
+    const streamIdx = startOnboardingBody.indexOf(
+      'const result = await dohcAgent.streamText',
+    )
+    expect(userSaveIdx).toBeGreaterThan(0)
+    expect(streamIdx).toBeGreaterThan(userSaveIdx)
+    expect(startOnboardingBody).toMatch(/promptMessageId,\s*prepareStep:/)
+    expect(startOnboardingBody).not.toContain('pendingMessageId')
+  })
+
+  it('startOnboarding forces explicit questionnaire starts past stale handoff leases', () => {
+    expect(startOnboardingBody).toMatch(
+      /claimKickoff,[\s\S]{0,160}force:\s*hasExplicitSetupBrief/,
+    )
+  })
+
+  it('startOnboarding touches the setup thread before stream handoff', () => {
+    const saveIdx = startOnboardingBody.indexOf(
+      'const saved = await dohcAgent.saveMessage',
+    )
+    const touchIdx = startOnboardingBody.indexOf('internal.agent._touchThread')
+    const selectionIdx = startOnboardingBody.indexOf(
+      'internal.agent._setThreadAgentSelection',
+    )
+    const streamIdx = startOnboardingBody.indexOf(
+      'const result = await dohcAgent.streamText',
+    )
+    expect(saveIdx).toBeGreaterThan(0)
+    expect(touchIdx).toBeGreaterThan(saveIdx)
+    expect(selectionIdx).toBeGreaterThan(saveIdx)
+    expect(touchIdx).toBeLessThan(streamIdx)
+    expect(selectionIdx).toBeLessThan(streamIdx)
+  })
+
   it('startOnboarding passes prepareStep + experimental_context to streamText (both branches)', () => {
     expect(startOnboardingBody).toMatch(/prepareStep:\s*buildPrepareStep\(/)
     expect(startOnboardingBody).toMatch(/experimental_context:\s*\{/)
+  })
+})
+
+describe('agent message listing diagnostics', () => {
+  const listMessagesBody = (() => {
+    const start = AGENT_SRC.indexOf('export const listMessages = query({')
+    expect(start).toBeGreaterThan(0)
+    const next = AGENT_SRC.indexOf('export const ', start + 1)
+    return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
+  })()
+
+  it('preserves failed assistant error text on UI messages', () => {
+    expect(AGENT_SRC).toContain('listMessages as listAgentMessages')
+    expect(listMessagesBody).toContain('const rawMessages = await listAgentMessages')
+    expect(listMessagesBody).toContain('errorsByStep')
+    expect(listMessagesBody).toMatch(/\.\.\.message,\s*error/)
+  })
+})
+
+describe('agent attachment model-parts', () => {
+  const buildAttachmentBody = (() => {
+    const start = AGENT_SRC.indexOf('async function buildUserMessageForAttachments')
+    expect(start).toBeGreaterThan(0)
+    const next = AGENT_SRC.indexOf('function isInlineTextAttachment', start + 1)
+    return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
+  })()
+
+  it('does not send inline text files as provider file parts', () => {
+    expect(AGENT_SRC).toContain('read_asset')
+    expect(buildAttachmentBody).toContain('const inlineText =')
+    expect(buildAttachmentBody).toContain('const sendModelImage =')
+    expect(AGENT_SRC).toContain('function shouldSendModelImagePart')
+    expect(AGENT_SRC).toContain("mediaType === 'image/png'")
+    expect(AGENT_SRC).toContain("mediaType === 'image/jpeg'")
+    expect(AGENT_SRC).toContain("mediaType === 'image/webp'")
+    expect(buildAttachmentBody).toMatch(/if \(!inlineText && shouldSendModelFilePart\(asset\)\)/)
   })
 })

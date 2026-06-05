@@ -2616,6 +2616,10 @@ function TiptapAtomEditor({
     hasLocalCache,
     syncError,
   })
+  const waitingForCollaborationContent =
+    collaborationRequested &&
+    (collaborationPending ||
+      (collaborationEnabled && !remoteReady && !hasLocalCache && !syncError))
   useEffect(() => {
     editor?.setEditable(editable)
     const view = editor?.view
@@ -2721,7 +2725,7 @@ function TiptapAtomEditor({
           )}
         </div>
       )}
-      <EditorContent editor={editor} />
+      {!waitingForCollaborationContent && <EditorContent editor={editor} />}
       <SlashCommandMenu
         state={slashState}
         onSelect={runSlashCommand}
