@@ -4,6 +4,7 @@ import {
   stepCountIs,
   vStreamArgs,
   listUIMessages,
+  listMessages as listAgentMessages,
   syncStreams,
   listStreams,
   abortStream,
@@ -4473,10 +4474,26 @@ export const listMessages = query({
     if (!ok) {
       throw new Error('thread does not belong to this workspace')
     }
+    const rawMessages = await listAgentMessages(ctx, components.agent, {
+      threadId: args.threadId,
+      paginationOpts: args.paginationOpts,
+    })
+    const errorsByStep = new Map(
+      rawMessages.page
+        .filter((message) => message.error)
+        .map((message) => [
+          `${message.order}:${message.stepOrder}`,
+          message.error!,
+        ]),
+    )
     const paginated = await listUIMessages(ctx, components.agent, args)
+    const page = paginated.page.map((message) => {
+      const error = errorsByStep.get(`${message.order}:${message.stepOrder}`)
+      return error ? { ...message, error } : message
+    })
     const streams = args.streamArgs
       ? await syncStreams(ctx, components.agent, args)
       : undefined
-    return { ...paginated, streams }
+    return { ...paginated, page, streams }
   },
 })

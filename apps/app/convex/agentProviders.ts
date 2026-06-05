@@ -72,7 +72,6 @@ const OPENAI_REASONING: AgentReasoningEffort[] = [
   'low',
   'medium',
   'high',
-  'xhigh',
 ]
 
 const ANTHROPIC_REASONING: AgentReasoningEffort[] = [
@@ -115,7 +114,7 @@ const PROVIDERS: AgentProviderDefinition[] = [
     accentColor: '#111827',
     envVar: 'OPENAI_API_KEY',
     defaultModel: 'gpt-5.5',
-    defaultReasoningEffort: 'xhigh',
+    defaultReasoningEffort: 'high',
     models: [
       {
         id: 'gpt-5.5',

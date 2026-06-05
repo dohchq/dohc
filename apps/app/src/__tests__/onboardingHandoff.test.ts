@@ -74,4 +74,11 @@ describe('Onboarding ready handoff', () => {
     expect(APP_SRC).toMatch(/api\.onboarding\.completeIfReady/)
     expect(APP_SRC).toMatch(/workspaceReady[\s\S]{0,300}completeIfReady/)
   })
+
+  it('resumes an in-progress setup run from the normal agent dashboard', () => {
+    expect(APP_SRC).toMatch(/useAction\(api\.agent\.startOnboarding\)/)
+    expect(APP_SRC).toContain('resumeStartedRef')
+    expect(APP_SRC).toMatch(/state !== 'IN_PROGRESS' \|\| workspaceReady/)
+    expect(APP_SRC).toMatch(/startOnboarding\(\{\s*activeWorkspaceId\s*\}\)/)
+  })
 })

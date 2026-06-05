@@ -448,3 +448,19 @@ describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same p
     expect(startOnboardingBody).toMatch(/experimental_context:\s*\{/)
   })
 })
+
+describe('agent message listing diagnostics', () => {
+  const listMessagesBody = (() => {
+    const start = AGENT_SRC.indexOf('export const listMessages = query({')
+    expect(start).toBeGreaterThan(0)
+    const next = AGENT_SRC.indexOf('export const ', start + 1)
+    return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
+  })()
+
+  it('preserves failed assistant error text on UI messages', () => {
+    expect(AGENT_SRC).toContain('listMessages as listAgentMessages')
+    expect(listMessagesBody).toContain('const rawMessages = await listAgentMessages')
+    expect(listMessagesBody).toContain('errorsByStep')
+    expect(listMessagesBody).toMatch(/\.\.\.message,\s*error/)
+  })
+})

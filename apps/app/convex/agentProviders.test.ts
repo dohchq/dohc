@@ -60,6 +60,23 @@ describe('agent provider registry', () => {
     })
   })
 
+  it('does not expose unsupported OpenAI extra-high reasoning for GPT-5.5', () => {
+    const openai = listAgentProviderSnapshots().find(
+      (provider) => provider.providerId === 'openai',
+    )
+    const gpt55 = openai?.models.find((model) => model.id === 'gpt-5.5')
+
+    expect(openai?.defaultReasoningEffort).toBe('high')
+    expect(gpt55?.reasoningEfforts).toEqual(['low', 'medium', 'high'])
+    expect(() =>
+      validateAgentSelection({
+        providerId: 'openai',
+        model: 'gpt-5.5',
+        reasoningEffort: 'xhigh',
+      }),
+    ).toThrow(/does not support reasoning effort "xhigh"/)
+  })
+
   it('surfaces missing-key status instead of hiding provider diagnostics', () => {
     vi.stubEnv('OPENAI_API_KEY', '')
     vi.stubEnv('ANTHROPIC_API_KEY', '')
@@ -190,11 +207,11 @@ describe('agent provider registry', () => {
 
     expect(
       agentProviderOptions(
-        { providerId: 'openai', model: 'gpt-5.5', reasoningEffort: 'xhigh' },
+        { providerId: 'openai', model: 'gpt-5.5', reasoningEffort: 'high' },
         true,
       ),
     ).toEqual({
-      openai: { parallelToolCalls: false, reasoningEffort: 'xhigh' },
+      openai: { parallelToolCalls: false, reasoningEffort: 'high' },
     })
   })
 

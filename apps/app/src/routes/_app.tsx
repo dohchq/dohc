@@ -224,8 +224,10 @@ function Gate() {
   const state = useQuery(api.onboarding.state, { activeWorkspaceId })
   const progress = useQuery(api.onboarding.progress, { activeWorkspaceId })
   const completeIfReady = useMutation(api.onboarding.completeIfReady)
+  const startOnboarding = useAction(api.agent.startOnboarding)
   const workspaceReady = onboardingWorkspaceReady(progress)
   const completingReadyRef = useRef(false)
+  const resumeStartedRef = useRef<string | null>(null)
 
   // W1 (H-7) — fire WorkOS membership reconcile on first sign-in for
   // each user.id + every 4h. Catches the "user removed in WorkOS but
@@ -271,6 +273,15 @@ function Gate() {
       completingReadyRef.current = false
     })
   }, [activeWorkspaceId, completeIfReady, state, workspaceReady])
+  useEffect(() => {
+    if (state !== 'IN_PROGRESS' || workspaceReady) return
+    const workspaceKey = activeWorkspaceId ?? 'personal'
+    if (resumeStartedRef.current === workspaceKey) return
+    resumeStartedRef.current = workspaceKey
+    startOnboarding({ activeWorkspaceId }).catch(() => {
+      resumeStartedRef.current = null
+    })
+  }, [activeWorkspaceId, startOnboarding, state, workspaceReady])
   if (state === undefined) {
     return <AppLoadingScreen />
   }
