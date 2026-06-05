@@ -1837,13 +1837,13 @@ function ComposerStatusStrip({
       <AgentModelPicker
         providers={providers}
         selection={selection}
-        disabled={!onSelectionChange || sending || busy}
+        disabled={!onSelectionChange}
         onChange={(next) => onSelectionChange?.(next)}
         onSetDefault={onSetDefault}
       />
       <AgentAccessPicker
         accessMode={accessMode}
-        disabled={sending || busy}
+        disabled={false}
         onChange={onAccessModeChange}
       />
       {primary && (

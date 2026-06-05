@@ -77,6 +77,26 @@ describe('Chat.tsx publishes busy', () => {
     expect(CHAT).toMatch(/threadId && busy[\s\S]{0,160}threadId/)
     expect(CHAT).toMatch(/disabled=\{stopping \|\| !canStopActiveChat\}/)
   })
+
+  it('keeps next-message model and permission controls editable while busy', () => {
+    const statusStripStart = CHAT.indexOf('function ComposerStatusStrip')
+    expect(statusStripStart).toBeGreaterThan(0)
+    const statusStripEnd = CHAT.indexOf('const ACCESS_POPOVER_WIDTH', statusStripStart)
+    const statusStrip = CHAT.slice(statusStripStart, statusStripEnd)
+
+    expect(statusStrip).toMatch(
+      /<AgentModelPicker[\s\S]{0,260}disabled=\{!onSelectionChange\}/,
+    )
+    expect(statusStrip).toMatch(
+      /<AgentAccessPicker[\s\S]{0,220}disabled=\{false\}/,
+    )
+    expect(statusStrip).not.toMatch(
+      /<AgentModelPicker[\s\S]{0,260}sending \|\| busy/,
+    )
+    expect(statusStrip).not.toMatch(
+      /<AgentAccessPicker[\s\S]{0,220}sending \|\| busy/,
+    )
+  })
 })
 
 describe('WorkspaceSwitcher.tsx reads busy + disables', () => {
