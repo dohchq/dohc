@@ -112,6 +112,11 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
     )
   })
 
+  it('SAFE_FOR_SKILL_TOOLS includes read_asset so text attachments can be fetched without model file parts', () => {
+    expect(SAFE_FOR_SKILL_TOOLS).toContain('read_asset')
+    expect(USER_TURN_TOOLS_NO_RUN_SKILL).toContain('read_asset')
+  })
+
   it('entry modes are MUTUALLY EXCLUSIVE — entry tools are disjoint from the others', () => {
     const skillEntry = new Set<string>(SKILL_ENTRY_TOOLS)
     const commandEntry = new Set<string>(COMMAND_ENTRY_TOOLS)
@@ -462,5 +467,20 @@ describe('agent message listing diagnostics', () => {
     expect(listMessagesBody).toContain('const rawMessages = await listAgentMessages')
     expect(listMessagesBody).toContain('errorsByStep')
     expect(listMessagesBody).toMatch(/\.\.\.message,\s*error/)
+  })
+})
+
+describe('agent attachment model-parts', () => {
+  const buildAttachmentBody = (() => {
+    const start = AGENT_SRC.indexOf('async function buildUserMessageForAttachments')
+    expect(start).toBeGreaterThan(0)
+    const next = AGENT_SRC.indexOf('function isInlineTextAttachment', start + 1)
+    return AGENT_SRC.slice(start, next > 0 ? next : AGENT_SRC.length)
+  })()
+
+  it('does not send inline text files as provider file parts', () => {
+    expect(AGENT_SRC).toContain('read_asset')
+    expect(buildAttachmentBody).toContain('const inlineText =')
+    expect(buildAttachmentBody).toMatch(/if \(!inlineText && shouldSendModelFilePart\(asset\)\)/)
   })
 })

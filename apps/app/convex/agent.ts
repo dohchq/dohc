@@ -40,7 +40,10 @@ import {
   validateAgentSelection,
   type AgentModelSelection,
 } from './agentProviders'
-import { inlineAttachmentBlock } from './attachmentPrompt'
+import {
+  attachmentReferenceBlock,
+  inlineAttachmentBlock,
+} from './attachmentPrompt'
 
 // org-plan §5 + Jenny round-2 C-1 fix — the agent's tool handlers need
 // to resolve the CALLER's active workspace, NOT the personal default.
@@ -2233,6 +2236,34 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
+    read_asset: createTool({
+      description:
+        'Read a text-like uploaded attachment by assetId. Use this for pasted CSV, TXT, JSON, Markdown, logs, and other text files referenced inside <pasted-file> blocks. Optional startLine/maxLines let you page through large files.',
+      inputSchema: z.object({
+        assetId: z.string(),
+        startLine: z.number().int().min(1).optional(),
+        maxLines: z.number().int().min(1).max(500).optional(),
+      }),
+      execute: async (
+        ctx,
+        {
+          assetId,
+          startLine,
+          maxLines,
+        }: { assetId: string; startLine?: number; maxLines?: number },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        return await readAssetTextForAgent(
+          ctx,
+          workspaceId,
+          assetId,
+          startLine,
+          maxLines,
+        )
+      },
+    }),
+
     create_atom: createTool({
       description:
         'Create a brand-new atom at path with markdown content. Refuses to overwrite existing atoms. In a project-scoped chat, the path must stay under that active project folder. Use semantic edit tools for existing docs.',
@@ -3670,6 +3701,7 @@ const SAFE_FOR_SKILL_TOOLS = [
   'list_trash',
   'list_entities',
   'find_entity',
+  'read_asset',
   'list_skills',
   'list_commands',
   'pending_captures',
@@ -3841,6 +3873,9 @@ type AgentResolvedAsset = {
 }
 
 const INLINE_TEXT_ATTACHMENT_MAX_BYTES = 256 * 1024
+const READ_ASSET_MAX_BYTES = 2 * 1024 * 1024
+const READ_ASSET_DEFAULT_LINES = 200
+const READ_ASSET_MAX_LINES = 500
 const INLINE_TEXT_MEDIA_TYPES = new Set([
   'application/csv',
   'application/json',
@@ -3902,10 +3937,10 @@ async function buildUserMessageForAttachments(
     const url = await ctx.storage.getUrl(asset.storageId)
     if (!url) throw new Error(`asset blob not found: ${asset.filename}`)
 
-    if (
-      asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES &&
-      isInlineTextAttachment(asset)
-    ) {
+    const textAttachment = isInlineTextAttachment(asset)
+    const inlineText =
+      asset.size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES && textAttachment
+    if (inlineText) {
       const blob = await ctx.storage.get(asset.storageId)
       const text = blob ? await blob.text() : ''
       if (text) {
@@ -3918,6 +3953,16 @@ async function buildUserMessageForAttachments(
           }),
         )
       }
+    } else if (textAttachment || asset.kind !== 'image') {
+      inlineBlocks.push(
+        attachmentReferenceBlock({
+          assetId: asset.assetId,
+          filename: asset.filename,
+          mediaType: asset.mediaType,
+          size: asset.size,
+          readable: textAttachment,
+        }),
+      )
     }
 
     if (asset.kind === 'image') {
@@ -3926,7 +3971,7 @@ async function buildUserMessageForAttachments(
         image: url,
         mediaType: asset.mediaType,
       })
-    } else {
+    } else if (!inlineText && shouldSendModelFilePart(asset)) {
       content.push({
         type: 'file',
         data: url,
@@ -3964,6 +4009,88 @@ function isInlineTextAttachment(asset: AgentResolvedAsset): boolean {
   if (INLINE_TEXT_MEDIA_TYPES.has(mediaType)) return true
   const extension = asset.filename.split('.').pop()?.toLowerCase()
   return extension ? INLINE_TEXT_EXTENSIONS.has(extension) : false
+}
+
+function shouldSendModelFilePart(_asset: AgentResolvedAsset): boolean {
+  return false
+}
+
+async function readAssetTextForAgent(
+  ctx: ToolCtx,
+  workspaceId: string,
+  assetId: string,
+  startLine?: number,
+  maxLines?: number,
+): Promise<string> {
+  let asset: AgentResolvedAsset | null = null
+  try {
+    const assets = (await ctx.runQuery(internal.assets._resolveForAgent, {
+      workspaceId,
+      assetIds: [assetId as Id<'workspaceAssets'>],
+    })) as AgentResolvedAsset[]
+    asset = assets[0] ?? null
+  } catch {
+    return `(asset not found: ${assetId})`
+  }
+  if (!asset) return `(asset not found: ${assetId})`
+  if (!isInlineTextAttachment(asset)) {
+    return `(${asset.filename} is ${asset.mediaType}, not a readable text attachment.)`
+  }
+  const blob = await ctx.storage.get(asset.storageId)
+  if (!blob) return `(asset blob not found: ${asset.filename})`
+
+  const byteLimited = asset.size > READ_ASSET_MAX_BYTES
+  const text = await (byteLimited
+    ? blob.slice(0, READ_ASSET_MAX_BYTES).text()
+    : blob.text())
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+  const requestedStart = Math.max(1, Math.floor(startLine ?? 1))
+  const requestedMax = Math.max(
+    1,
+    Math.min(
+      READ_ASSET_MAX_LINES,
+      Math.floor(maxLines ?? READ_ASSET_DEFAULT_LINES),
+    ),
+  )
+  const shown = lines.slice(
+    requestedStart - 1,
+    requestedStart - 1 + requestedMax,
+  )
+  const lastShown = requestedStart + shown.length - 1
+  const totalLabel = byteLimited
+    ? `${lines.length}+ lines in first ${READ_ASSET_MAX_BYTES.toLocaleString('en-US')} bytes`
+    : `${lines.length} lines`
+  const assetHeader =
+    `<asset name="${escapeAssetReadAttribute(asset.filename)}" ` +
+    `mediaType="${escapeAssetReadAttribute(asset.mediaType)}" ` +
+    `assetId="${escapeAssetReadAttribute(asset.assetId)}" ` +
+    `lines="${requestedStart}-${lastShown}" ` +
+    `total="${escapeAssetReadAttribute(totalLabel)}">`
+  return escapeAssetReadClose(
+    [
+      assetHeader,
+      ...shown,
+      '</asset>',
+      byteLimited
+        ? `(truncated at ${READ_ASSET_MAX_BYTES.toLocaleString('en-US')} bytes; ask the user to split the file if more rows are needed.)`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  )
+}
+
+function escapeAssetReadClose(value: string): string {
+  return value.replaceAll('</asset', '<\\/asset')
+}
+
+function escapeAssetReadAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
 }
 
 export const sendMessage = action({
