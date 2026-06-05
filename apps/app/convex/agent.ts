@@ -4295,11 +4295,16 @@ export const startOnboarding = action({
       { workspaceId, threadId },
     )) as AgentModelSelection
     assertAgentSelectionReady(selection)
-    // single-document atomic CAS: exactly one concurrent winner;
-    // a fresh (heartbeating) run keeps the lease ⇒ losers no-op.
+    const trimmed = intro?.trim() ?? ''
+    const introAttachmentIds = attachmentIds ?? []
+    const hasExplicitSetupBrief =
+      trimmed.length > 0 || introAttachmentIds.length > 0
+    // single-document atomic CAS: exactly one concurrent winner for
+    // background resumes. A user pressing Continue with a fresh setup
+    // brief is an explicit restart and must reclaim a stuck fresh lease.
     const { won, owner } = await ctx.runMutation(
       internal.onboarding.claimKickoff,
-      { workspaceId },
+      { workspaceId, force: hasExplicitSetupBrief },
     )
     if (!won || !owner) return { started: false }
 
@@ -4321,8 +4326,6 @@ export const startOnboarding = action({
       }
     }
 
-    const trimmed = intro?.trim() ?? ''
-    const introAttachmentIds = attachmentIds ?? []
     // P2b.4 LIFECYCLE applied to onboarding too: when there IS a
     // user brief, save it synchronously, clear the row, then
     // stream with the stable promptMessageId. When there isn't
@@ -4330,7 +4333,6 @@ export const startOnboarding = action({
     // thread flow remains; depth defaults to 0 because no skill
     // turn has run on this thread yet.
     let promptMessageId: string | undefined
-    let pendingMessageId: string | undefined
     if (trimmed || introAttachmentIds.length > 0) {
       const userMessage = await buildUserMessageForAttachments(
         ctx,
@@ -4375,17 +4377,6 @@ export const startOnboarding = action({
         // The first setup turn should still visibly start even if the
         // advisory skill gate row is stale or unavailable.
       }
-      const pending = await dohcAgent.saveMessage(ctx, {
-        threadId,
-        promptMessageId,
-        skipEmbeddings: true,
-        message: {
-          role: 'assistant',
-          content: [],
-        },
-        metadata: { status: 'pending' },
-      })
-      pendingMessageId = pending.messageId
     }
     const providerOptions = agentProviderOptions(selection, false)
     const result = await dohcAgent.streamText(
@@ -4402,7 +4393,6 @@ export const startOnboarding = action({
             model: createAgentLanguageModel(selection),
             ...(providerOptions ? { providerOptions } : {}),
             promptMessageId,
-            pendingMessageId: pendingMessageId,
             prepareStep: buildPrepareStep(
               ctx,
               threadId,

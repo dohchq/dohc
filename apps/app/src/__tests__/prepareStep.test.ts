@@ -406,21 +406,23 @@ describe('Track-3 P2b.4 — startOnboarding lifecycle (intro path follows same p
     expect(saveIdx).toBeLessThan(clearIdx)
   })
 
-  it('startOnboarding creates a visible pending assistant turn before streaming', () => {
+  it('startOnboarding lets the Agent SDK create the pending assistant turn', () => {
     const userSaveIdx = startOnboardingBody.indexOf(
       'const saved = await dohcAgent.saveMessage',
-    )
-    const pendingSaveIdx = startOnboardingBody.indexOf(
-      'const pending = await dohcAgent.saveMessage',
     )
     const streamIdx = startOnboardingBody.indexOf(
       'const result = await dohcAgent.streamText',
     )
     expect(userSaveIdx).toBeGreaterThan(0)
-    expect(pendingSaveIdx).toBeGreaterThan(userSaveIdx)
-    expect(streamIdx).toBeGreaterThan(pendingSaveIdx)
-    expect(startOnboardingBody).toMatch(/metadata:\s*\{\s*status:\s*'pending'\s*\}/)
-    expect(startOnboardingBody).toMatch(/pendingMessageId:\s*pendingMessageId/)
+    expect(streamIdx).toBeGreaterThan(userSaveIdx)
+    expect(startOnboardingBody).toMatch(/promptMessageId,\s*prepareStep:/)
+    expect(startOnboardingBody).not.toContain('pendingMessageId')
+  })
+
+  it('startOnboarding forces explicit questionnaire starts past stale handoff leases', () => {
+    expect(startOnboardingBody).toMatch(
+      /claimKickoff,[\s\S]{0,160}force:\s*hasExplicitSetupBrief/,
+    )
   })
 
   it('startOnboarding touches the setup thread before stream handoff', () => {

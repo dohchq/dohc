@@ -2793,7 +2793,14 @@ const MessageView = memo(function MessageView({
   previousMessage?: UIMessage | null
   primary?: boolean
 }) {
-  const streaming = (message as { status?: string }).status === 'streaming'
+  const status = (message as { status?: string }).status
+  const streaming = status === 'streaming'
+  const pending = status === 'pending'
+  const failed = status === 'failed'
+  const errorText =
+    typeof (message as { error?: unknown }).error === 'string'
+      ? (message as { error?: string }).error
+      : null
   const now = useNow(streaming)
   if (message.role === 'system') return null
   const isUser = message.role === 'user'
@@ -2811,7 +2818,14 @@ const MessageView = memo(function MessageView({
     ? workedDurationForMessage(message, previousMessage, now)
     : null
 
-  if (!text.trim() && toolCalls.length === 0 && !hasFileParts) return null
+  if (
+    !text.trim() &&
+    toolCalls.length === 0 &&
+    !hasFileParts &&
+    !pending &&
+    !failed
+  )
+    return null
 
   return (
     <div
@@ -2846,10 +2860,10 @@ const MessageView = memo(function MessageView({
               {timestampLabel}
             </time>
           )}
-          {streaming && (
+          {(streaming || pending) && (
             <span className="inline-flex items-center gap-1 text-[10px] font-medium text-ink-faint">
               <span className="size-1 rounded-full bg-success animate-pulse" />
-              writing
+              {streaming ? 'writing' : 'starting'}
             </span>
           )}
         </div>
@@ -2871,6 +2885,25 @@ const MessageView = memo(function MessageView({
               compact={!primary}
               hasText={Boolean(text.trim())}
             />
+          )}
+          {!isUser && pending && !text.trim() && toolCalls.length === 0 && (
+            <div className="flex items-center gap-2 text-[13px] leading-relaxed text-ink-dim">
+              <span className="size-1.5 rounded-full bg-success animate-pulse" />
+              <span>dohc is starting</span>
+            </div>
+          )}
+          {!isUser && failed && (
+            <div className="flex items-start gap-2 text-[13px] leading-relaxed text-danger">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" strokeWidth={2} />
+              <div className="min-w-0">
+                <div className="font-medium">Agent run failed</div>
+                {errorText && (
+                  <div className="mt-1 break-words text-ink-dim">
+                    {errorText}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
           {text.trim() && (
             isUser ? (

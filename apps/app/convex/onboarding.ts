@@ -370,10 +370,10 @@ export const _complete = internalMutation({
 export const ONBOARDING_STALE_MS = 90_000
 
 export const claimKickoff = internalMutation({
-  args: { workspaceId: v.string() },
+  args: { workspaceId: v.string(), force: v.optional(v.boolean()) },
   handler: async (
     ctx,
-    { workspaceId },
+    { workspaceId, force },
   ): Promise<{ won: boolean; owner: string | null }> => {
     const row = await onboardingRow(ctx, workspaceId)
     const now = Date.now()
@@ -381,7 +381,7 @@ export const claimKickoff = internalMutation({
       !!row &&
       !!row.kickoffAt &&
       now - row.kickoffAt <= ONBOARDING_STALE_MS
-    if (fresh) return { won: false, owner: null }
+    if (fresh && !force) return { won: false, owner: null }
     const owner = randomLeaseOwner()
     if (row)
       await ctx.db.patch(row._id, { kickoffAt: now, kickoffOwner: owner })

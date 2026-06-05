@@ -59,6 +59,18 @@ describe('Chat.tsx publishes busy', () => {
     expect(CHAT).toMatch(/\['pending',\s*'streaming'\]\.includes/)
     expect(CHAT).toMatch(/\(m as \{ status\?: string \}\)\.status \?\? ''/)
   })
+
+  it('renders empty pending assistant turns as visible activity', () => {
+    expect(CHAT).toContain("status === 'pending'")
+    expect(CHAT).toContain('dohc is starting')
+    expect(CHAT).toMatch(/!pending[\s\S]{0,120}!failed/)
+  })
+
+  it('renders failed assistant turns instead of hiding silent failures', () => {
+    expect(CHAT).toContain("status === 'failed'")
+    expect(CHAT).toContain('Agent run failed')
+    expect(CHAT).toContain('errorText')
+  })
 })
 
 describe('WorkspaceSwitcher.tsx reads busy + disables', () => {

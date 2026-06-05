@@ -434,4 +434,19 @@ describe('P1 — start LEASE: single-doc CAS + heartbeat + staleness recovery', 
       expect(r!.kickoffOwner).toBe(c3.owner)
     })
   })
+
+  it('lets an explicit user kickoff reclaim a fresh-but-stuck lease', async () => {
+    const t = convexTest(schema, modules)
+    const c1 = await t.mutation(internal.onboarding.claimKickoff, {
+      workspaceId: W,
+    })
+    expect(c1.won).toBe(true)
+
+    const forced = await t.mutation(internal.onboarding.claimKickoff, {
+      workspaceId: W,
+      force: true,
+    })
+    expect(forced.won).toBe(true)
+    expect(forced.owner).not.toBe(c1.owner)
+  })
 })

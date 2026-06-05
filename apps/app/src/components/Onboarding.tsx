@@ -246,11 +246,17 @@ export function Onboarding(_props: Props) {
       ...(intro ? { intro } : {}),
       attachmentIds,
       activeWorkspaceId,
-    }).catch((error) => {
-      console.error(error)
-      setupStartedRef.current = false
-      setPhase('questions')
     })
+      .then((result) => {
+        if (!result.started) {
+          throw new Error('Setup run did not start. Please try again.')
+        }
+      })
+      .catch((error) => {
+        console.error(error)
+        setupStartedRef.current = false
+        setPhase('questions')
+      })
   }
 
   if (phase === 'handoff') return <AppLoadingScreen />
