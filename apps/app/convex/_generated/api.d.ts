@@ -10,6 +10,7 @@
 
 import type * as agent from "../agent.js";
 import type * as agentProviders from "../agentProviders.js";
+import type * as appAgent from "../appAgent.js";
 import type * as appCollaboration from "../appCollaboration.js";
 import type * as appData from "../appData.js";
 import type * as appManifest from "../appManifest.js";
@@ -85,6 +86,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
   agentProviders: typeof agentProviders;
+  appAgent: typeof appAgent;
   appCollaboration: typeof appCollaboration;
   appData: typeof appData;
   appManifest: typeof appManifest;

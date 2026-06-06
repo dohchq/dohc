@@ -143,8 +143,10 @@ function publicFnsTakingWorkspace(
     //     reads/writes; resolver calls requireWorkspace with that active id)
     //   - `resolveView(ctx, activeWorkspaceId, packageRoot)` (view data
     //     resolver calls requireWorkspace with that active id)
-    //   - `resolveAppForSecurity(ctx, activeWorkspaceId, packageRoot)` (app
-    //     collaboration resolver calls requireWorkspace before source/trust ACLs)
+    //   - `resolveAppForSecurity(ctx, activeWorkspaceId, packageRoot)` and
+    //     `resolveAppForAgent(ctx, activeWorkspaceId, packageRoot, capability)`
+    //     (app collaboration/agent resolvers call requireWorkspace before
+    //     manifest/source/trust ACLs)
     //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
     //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
     //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
@@ -170,6 +172,9 @@ function publicFnsTakingWorkspace(
         body,
       ) ||
       /resolveAppForSecurity\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
+      ) ||
+      /resolveAppForAgent\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
         body,
       ) ||
       /authorizeAppDatabaseRead\s*\(\s*ctx\s*,\s*\{[^}]*activeWorkspaceId:\s*(?:args\.)?activeWorkspaceId/.test(
@@ -203,6 +208,9 @@ function publicFnsTakingWorkspace(
             body,
           ) ||
           /resolveAppForSecurity\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) ||
+          /resolveAppForAgent\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
             body,
           ) ||
           /authorizeAppDatabaseRead\s*\(\s*ctx\s*,\s*\{[^}]*activeWorkspaceId:\s*(?:args\.)?activeWorkspaceId/.test(
@@ -240,10 +248,11 @@ describe('authz boundary (§6 tripwire — not a proof; see §6b contract)', () 
           (COLLAB_TOKEN_ALLOW.has(`${rel}:${h.name}`) &&
             h.authed &&
             h.collabTokenMint) ||
-          // appData/viewData route activeWorkspaceId through resolveApp/resolveView(),
-          // which calls requireWorkspace(ctx, activeWorkspaceId) before
-          // resolving the app/view descriptor and source access.
-          (/^(appData|viewData)\.ts$/.test(rel) && h.authed)
+          // appData/appAgent/viewData route activeWorkspaceId through
+          // resolveApp/resolveAppForAgent/resolveView(), which call
+          // requireWorkspace(ctx, activeWorkspaceId) before resolving app/view
+          // descriptors, manifest capabilities, trust, and source access.
+          (/^(appData|appAgent|viewData)\.ts$/.test(rel) && h.authed)
         if (allowed) continue
         offenders.push(`${rel}: ${h.name} (${h.kind})`)
       }

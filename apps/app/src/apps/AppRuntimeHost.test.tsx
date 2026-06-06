@@ -18,14 +18,18 @@ describe('AppRuntimeHost full SDK dispatch', () => {
     expect(source).toContain('api.appData.runDocMutation')
   })
 
-  it('routes asset resolution through the workspace asset resolver', () => {
+  it('routes asset resolution through the app-scoped asset resolver', () => {
     expect(source).toContain("case 'dohc.asset.resolve'")
-    expect(source).toContain('api.assets.resolveAsset')
+    expect(source).toContain('api.assets.resolveAppAsset')
+    expect(source).toContain('packageRoot,')
   })
 
-  it('forwards structured app context to agent handoffs', () => {
+  it('authorizes app-origin agent handoffs and gates them on host confirmation', () => {
+    expect(source).toContain('api.appAgent.authorizeRun')
+    expect(source).toContain('api.appAgent.authorizePatch')
+    expect(source).toContain('requestAgentConfirmation')
+    expect(source).toContain('app-agent-confirmation-required')
     expect(source).toContain('originatingApp: packageRoot')
     expect(source).toContain('titleHint: title')
-    expect(source).toContain('sources: request.args.sources')
   })
 })

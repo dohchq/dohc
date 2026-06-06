@@ -23,6 +23,7 @@ import {
 
 export const APP_START_TIMEOUT_MS = 2500
 export const APP_ACTION_EVENT = 'dohc:app-action'
+export const APP_AGENT_CONFIRMATION_REQUIRED = 'app-agent-confirmation-required'
 const APP_ACTION_DIALOG_FOCUS_SELECTOR = [
   'button:not([disabled])',
   '[href]',
@@ -59,9 +60,30 @@ export type AppAgentRunRequest = {
 }
 
 type AppActionRequest = Extract<AppRpcRequest, { op: 'dohc.actions.run' }>
+type AppAgentRequest = Extract<AppRpcRequest, { op: 'dohc.agent.run' | 'dohc.patch.propose' }>
+
+type AppAgentAuthorization =
+  | {
+      ok: true
+      operation: 'dohc.agent.run' | 'dohc.patch.propose'
+      prompt: string
+      sources: string[]
+      requiresConfirmation: true
+    }
+  | {
+      ok: false
+      code: string
+      message: string
+    }
 
 type PendingAppAction = {
   request: AppActionRequest
+  resolve: (response: AppRpcResponse) => void
+}
+
+type PendingAppAgent = {
+  request: AppAgentRequest
+  handoff: Extract<AppAgentAuthorization, { ok: true }>
   resolve: (response: AppRpcResponse) => void
 }
 
@@ -80,6 +102,12 @@ export function summarizeAppActionInput(input: Record<string, unknown> | undefin
   } catch {
     return 'Input unavailable'
   }
+}
+
+export function summarizeAppAgentInput(prompt: string): string {
+  const summary = prompt.trim()
+  if (!summary) return APP_AGENT_CONFIRMATION_REQUIRED
+  return summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
 }
 
 export function nextAppActionDialogFocusIndex({
@@ -199,9 +227,11 @@ export function AppRuntimeHost({
   )
   const [timedOut, setTimedOut] = useState(false)
   const pendingActionRef = useRef<PendingAppAction | null>(null)
+  const pendingAgentRef = useRef<PendingAppAgent | null>(null)
   const confirmActionButtonRef = useRef<HTMLButtonElement | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingAppActionState | null>(null)
+  const [pendingAgent, setPendingAgent] = useState<PendingAppActionState | null>(null)
   const actionDialogTitleId = useId()
   const actionDialogDescriptionId = useId()
 
@@ -209,6 +239,7 @@ export function AppRuntimeHost({
     startedRef.current = false
     setTimedOut(false)
     setPendingAction(null)
+    setPendingAgent(null)
     const timeout = window.setTimeout(() => {
       if (!startedRef.current) setTimedOut(true)
     }, APP_START_TIMEOUT_MS)
@@ -218,20 +249,31 @@ export function AppRuntimeHost({
   useEffect(() => {
     return () => {
       const pending = pendingActionRef.current
-      if (!pending) return
-      pendingActionRef.current = null
-      pending.resolve(
+      if (pending) {
+        pendingActionRef.current = null
+        pending.resolve(
+          makeAppRpcError(
+            pending.request.id,
+            'app-reloaded',
+            'The app was reloaded before the action was confirmed.',
+          ),
+        )
+      }
+      const pendingAgent = pendingAgentRef.current
+      if (!pendingAgent) return
+      pendingAgentRef.current = null
+      pendingAgent.resolve(
         makeAppRpcError(
-          pending.request.id,
+          pendingAgent.request.id,
           'app-reloaded',
-          'The app was reloaded before the action was confirmed.',
+          'The app was reloaded before the agent request was confirmed.',
         ),
       )
     }
   }, [srcDoc])
 
   useEffect(() => {
-    if (!pendingAction) return
+    if (!pendingAction && !pendingAgent) return
 
     previousFocusRef.current =
       document.activeElement instanceof HTMLElement
@@ -249,7 +291,7 @@ export function AppRuntimeHost({
         previous.focus()
       }
     }
-  }, [pendingAction?.id])
+  }, [pendingAction?.id, pendingAgent?.id])
 
   const recordAction = useCallback(
     (operation: AppRpcOp, target?: string) => {
@@ -262,14 +304,35 @@ export function AppRuntimeHost({
     [packageRoot],
   )
 
+  const authorizeAgentRequest = useCallback(
+    async (request: AppAgentRequest): Promise<AppAgentAuthorization> => {
+      if (request.op === 'dohc.agent.run') {
+        return await convex.query(api.appAgent.authorizeRun, {
+          packageRoot,
+          prompt: request.args.prompt,
+          ...(request.args.sources === undefined ? {} : { sources: request.args.sources }),
+          ...workspaceArgs,
+        }) as AppAgentAuthorization
+      }
+      return await convex.query(api.appAgent.authorizePatch, {
+        packageRoot,
+        path: request.args.path,
+        summary: request.args.summary,
+        patch: request.args.patch,
+        ...workspaceArgs,
+      }) as AppAgentAuthorization
+    },
+    [convex, packageRoot, workspaceArgs],
+  )
+
   const requestActionConfirmation = useCallback(
     (request: AppActionRequest): Promise<AppRpcResponse> => {
-      if (pendingActionRef.current) {
+      if (pendingActionRef.current || pendingAgentRef.current) {
         return Promise.resolve(
           makeAppRpcError(
             request.id,
             'action-pending',
-            'Another app action is waiting for confirmation.',
+            'Another app request is waiting for confirmation.',
           ),
         )
       }
@@ -279,6 +342,33 @@ export function AppRuntimeHost({
           id: request.id,
           name: request.args.name,
           inputSummary: summarizeAppActionInput(request.args.input),
+          status: 'confirming',
+        })
+      })
+    },
+    [],
+  )
+
+  const requestAgentConfirmation = useCallback(
+    (
+      request: AppAgentRequest,
+      handoff: Extract<AppAgentAuthorization, { ok: true }>,
+    ): Promise<AppRpcResponse> => {
+      if (pendingActionRef.current || pendingAgentRef.current) {
+        return Promise.resolve(
+          makeAppRpcError(
+            request.id,
+            'action-pending',
+            'Another app request is waiting for confirmation.',
+          ),
+        )
+      }
+      return new Promise((resolve) => {
+        pendingAgentRef.current = { request, handoff, resolve }
+        setPendingAgent({
+          id: request.id,
+          name: request.op === 'dohc.agent.run' ? 'Ask agent' : 'Propose patch',
+          inputSummary: summarizeAppAgentInput(handoff.prompt),
           status: 'confirming',
         })
       })
@@ -296,6 +386,20 @@ export function AppRuntimeHost({
         pending.request.id,
         'cancelled',
         'The app action was cancelled.',
+      ),
+    )
+  }, [])
+
+  const cancelPendingAgent = useCallback(() => {
+    const pending = pendingAgentRef.current
+    if (!pending) return
+    pendingAgentRef.current = null
+    setPendingAgent(null)
+    pending.resolve(
+      makeAppRpcError(
+        pending.request.id,
+        'cancelled',
+        'The app agent request was cancelled.',
       ),
     )
   }, [])
@@ -336,12 +440,62 @@ export function AppRuntimeHost({
     }
   }, [convex, packageRoot, recordAction, workspaceArgs])
 
+  const confirmPendingAgent = useCallback(async () => {
+    const pending = pendingAgentRef.current
+    if (!pending) return
+    setPendingAgent((current) =>
+      current && current.id === pending.request.id
+        ? { ...current, status: 'running' }
+        : current,
+    )
+    try {
+      const fresh = await authorizeAgentRequest(pending.request)
+      if (!fresh.ok) {
+        pending.resolve(makeAppRpcError(pending.request.id, fresh.code, fresh.message))
+        return
+      }
+      if (!onRunAgent) {
+        pending.resolve(
+          makeAppRpcError(
+            pending.request.id,
+            'app-agent-not-available',
+            'The agent is not available in this host.',
+          ),
+        )
+        return
+      }
+      recordAction(fresh.operation, fresh.sources[0])
+      onRunAgent({
+        prompt: fresh.prompt,
+        sources: fresh.sources,
+        originatingApp: packageRoot,
+        titleHint: title,
+      })
+      pending.resolve(makeAppRpcSuccess(pending.request.id, { ok: true }))
+    } catch {
+      pending.resolve(
+        makeAppRpcError(
+          pending.request.id,
+          'internal-error',
+          'The app agent request could not be completed.',
+        ),
+      )
+    } finally {
+      if (pendingAgentRef.current?.request.id === pending.request.id) {
+        pendingAgentRef.current = null
+      }
+      setPendingAgent(null)
+    }
+  }, [authorizeAgentRequest, onRunAgent, packageRoot, recordAction, title])
+
   const onPendingActionKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'Escape' && pendingAction?.status !== 'running') {
+      const status = pendingAction?.status ?? pendingAgent?.status
+      if (event.key === 'Escape' && status !== 'running') {
         event.preventDefault()
         event.stopPropagation()
-        cancelPendingAction()
+        if (pendingAction) cancelPendingAction()
+        else cancelPendingAgent()
         return
       }
       if (event.key !== 'Tab') return
@@ -366,7 +520,7 @@ export function AppRuntimeHost({
         target.focus()
       }
     },
-    [cancelPendingAction, pendingAction?.status],
+    [cancelPendingAction, cancelPendingAgent, pendingAction, pendingAgent?.status],
   )
 
   const runRequest = useCallback(
@@ -672,7 +826,8 @@ export function AppRuntimeHost({
           case 'dohc.asset.resolve':
             return makeAppRpcSuccess(
               request.id,
-              await convex.query(api.assets.resolveAsset, {
+              await convex.query(api.assets.resolveAppAsset, {
+                packageRoot,
                 assetId: request.args.assetId as never,
                 ...workspaceArgs,
               }),
@@ -705,40 +860,21 @@ export function AppRuntimeHost({
             return makeAppRpcSuccess(request.id, result)
           }
           case 'dohc.agent.run':
-            recordAction(request.op, request.args.sources?.[0])
-            onRunAgent?.({
-              prompt: request.args.prompt,
-              sources: request.args.sources,
-              originatingApp: packageRoot,
-              titleHint: title,
-            })
-            return makeAppRpcSuccess(request.id, { ok: true })
+            {
+              const authorization = await authorizeAgentRequest(request)
+              if (!authorization.ok) {
+                return makeAppRpcError(request.id, authorization.code, authorization.message)
+              }
+              return await requestAgentConfirmation(request, authorization)
+            }
           case 'dohc.actions.run':
             return await requestActionConfirmation(request)
           case 'dohc.patch.propose': {
-            if (!canWriteRequestedPath(scopePath, writeScopes, request.args.path)) {
-              return makeAppRpcError(
-                request.id,
-                'write-not-granted',
-                'This app is not allowed to propose changes to that source.',
-              )
+            const authorization = await authorizeAgentRequest(request)
+            if (!authorization.ok) {
+              return makeAppRpcError(request.id, authorization.code, authorization.message)
             }
-            recordAction(request.op, request.args.path)
-            const prompt = [
-              `Review this proposed change from the app at ${packageRoot}.`,
-              `Target: ${request.args.path}`,
-              `Summary: ${request.args.summary}`,
-              '',
-              'Proposed patch:',
-              JSON.stringify(request.args.patch, null, 2),
-            ].join('\n')
-            onRunAgent?.({
-              prompt,
-              sources: [request.args.path],
-              originatingApp: packageRoot,
-              titleHint: title,
-            })
-            return makeAppRpcSuccess(request.id, { ok: true })
+            return await requestAgentConfirmation(request, authorization)
           }
           default:
             return makeAppRpcError(
@@ -758,14 +894,12 @@ export function AppRuntimeHost({
     [
       convex,
       onOpenSource,
-      onRunAgent,
       packageRoot,
       recordAction,
+      authorizeAgentRequest,
+      requestAgentConfirmation,
       requestActionConfirmation,
-      scopePath,
-      title,
       workspaceArgs,
-      writeScopes,
     ],
   )
 
@@ -819,6 +953,20 @@ export function AppRuntimeHost({
           onCancel={cancelPendingAction}
           onConfirm={() => {
             void confirmPendingAction()
+          }}
+          onKeyDown={onPendingActionKeyDown}
+        />
+      )}
+      {pendingAgent && (
+        <AppActionConfirmationDialog
+          title={title}
+          pendingAction={pendingAgent}
+          titleId={actionDialogTitleId}
+          descriptionId={actionDialogDescriptionId}
+          confirmButtonRef={confirmActionButtonRef}
+          onCancel={cancelPendingAgent}
+          onConfirm={() => {
+            void confirmPendingAgent()
           }}
           onKeyDown={onPendingActionKeyDown}
         />

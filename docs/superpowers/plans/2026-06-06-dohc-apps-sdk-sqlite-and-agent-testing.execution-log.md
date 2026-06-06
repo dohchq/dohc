@@ -947,3 +947,83 @@ Failures fixed:
 Remaining risk:
 - Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
 - The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, and browser runtime coverage passed.
+
+## Fifth-Pass Review Remediation: 2026-06-07 App-Agent Handoffs And Asset Scope
+
+Status: complete.
+
+Files changed:
+- `apps/app/convex/appAgent.ts`
+- `apps/app/convex/appAgent.test.ts`
+- `apps/app/convex/appManifest.ts`
+- `apps/app/convex/appTrust.ts`
+- `apps/app/convex/appTrust.test.ts`
+- `apps/app/convex/assets.ts`
+- `apps/app/convex/assets.test.ts`
+- `apps/app/convex/agent.ts`
+- `apps/app/convex/phaseBC.test.ts`
+- `apps/app/convex/_generated/api.d.ts`
+- `apps/app/src/apps/AppRuntimeHost.tsx`
+- `apps/app/src/apps/AppRuntimeHost.agent.test.tsx`
+- `apps/app/src/apps/AppRuntimeHost.test.tsx`
+- `apps/app/src/lib/authzBoundary.test.ts`
+- `docs/superpowers/reviews/2026-06-06-apps-sdk-sqlite-agent-testing-review.md`
+
+Tests added:
+- `appAgent` server authorization tests proving `dohc.agent.run` requires manifest `agent: ["run"]`, per-user trust, and readable in-scope sources.
+- `appAgent` patch proposal tests proving `dohc.patch.propose` requires manifest `agent: ["patch.propose"]`, per-user trust, read scope, write scope, and source write authorization.
+- App trust regression proving agent-only manifests require trust even without direct doc/collection/database writes, and agent capability changes are included in the trust key.
+- App asset resolution regression proving an app can resolve only assets referenced by an app-readable source, while same-workspace unreferenced/private assets are denied.
+- Runtime host regression proving an iframe `dohc.agent.run` message does not call `onRunAgent` until the host confirmation dialog is accepted.
+- Runtime dispatch assertions proving app asset resolution uses `api.assets.resolveAppAsset` and app-agent handoffs use `api.appAgent.authorizeRun`/`authorizePatch`.
+- Authz tripwire updates recognizing `resolveAppForAgent(ctx, activeWorkspaceId, ...)` as a server-derived workspace/identity/manifest/trust helper.
+
+Commands run:
+
+```bash
+cd /home/ice/dev/dohc/apps/app
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appAgent.test.ts convex/appTrust.test.ts convex/assets.test.ts src/apps/AppRuntimeHost.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/apps/AppRuntimeHost.agent.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appAgent.test.ts convex/appTrust.test.ts convex/assets.test.ts src/apps/AppRuntimeHost.test.tsx src/apps/AppRuntimeHost.agent.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appAgent.test.ts convex/appTrust.test.ts convex/assets.test.ts convex/apps.test.ts convex/appData.test.ts convex/databaseFiles.test.ts convex/a1SystemPrompt.test.ts src/apps/AppRuntimeHost.test.tsx src/apps/AppRuntimeHost.agent.test.tsx src/apps/AppRuntimeHost.security.test.tsx src/apps/AppRuntimeHost.database.test.ts src/apps/AppRuntimeHost.collection.test.ts src/apps/virtualDohcAppSdk.test.ts src/apps/sdkProtocol.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appReviewFixes.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/appAgent.test.ts convex/assets.test.ts convex/appData.collectionMutations.test.ts convex/appData.docMutations.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts convex/databaseOps.concurrency.test.ts convex/appTesting.test.ts convex/collectionIndex.test.ts convex/apps.test.ts convex/appData.test.ts convex/hocuspocusAuth.test.ts convex/appFinanceTracker.acceptance.test.ts convex/appFinanceTracker.largeCsv.acceptance.test.ts convex/onboardingGeneratedAppQuality.test.ts convex/a1SystemPrompt.test.ts src/apps/AppRuntimeHost.security.test.tsx src/apps/AppRuntimeHost.agent.test.tsx src/apps/AppRuntimeHost.database.test.ts src/apps/buildAppBundle.test.ts src/__tests__/viewsShell.test.ts src/apps/AppRuntimeHost.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/lib/authzBoundary.test.ts convex/phaseBC.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts
+
+cd /home/ice/dev/dohc
+npx -y node@24 ./node_modules/vitest/vitest.mjs run services/app-tester/src/runAppTest.test.ts services/app-tester/src/runAppTest.browser.test.ts services/app-tester/src/runAppTest.screenshot.test.ts services/sqlite-worker/src/sqliteEngine.test.ts services/sqlite-worker/src/sqliteEngine.concurrency.test.ts services/sqlite-worker/src/sqliteEngine.failureInjection.test.ts services/hocuspocus/src/semantic-api.test.ts
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p apps/app/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/app-tester/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/hocuspocus/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/sqlite-worker/tsconfig.json
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:9 npx -y pnpm@10.24.0 exec playwright test apps/app/e2e/apps.spec.ts
+git diff --check
+```
+
+Final verification results:
+- Initial failing-first remediation slice failed on missing `appAgent`, missing app-scoped asset resolver, agent-only trust treated as trusted, and host dispatch still using generic/auto-run paths.
+- Focused app-agent/assets/runtime slice: 5 files, 16 tests passed.
+- Focused prompt/runtime/security slice: 14 files, 80 tests passed.
+- Focused app/security review slice: 25 files, 133 tests passed.
+- Full `apps/app` suite first exposed two authz tripwire failures for new `appAgent` functions; after recognizing `resolveAppForAgent` as the validated helper, the authz slice passed.
+- Full `apps/app` suite final rerun: 183 files passed, 1559 tests passed, 1 expected live-eval skip.
+- Expanded service/AppTester/SQLite/Hocuspocus slice: 7 files, 46 tests passed.
+- App TypeScript: exit 0.
+- App tester TypeScript: exit 0.
+- Hocuspocus TypeScript: exit 0.
+- SQLite worker TypeScript: exit 0.
+- No-secret Playwright finance app runtime smoke: 1 test passed.
+- Diff hygiene: `git diff --check` exit 0.
+
+Failures fixed:
+- App-origin `dohc.agent.run` no longer auto-submits directly into chat. The host first calls `api.appAgent.authorizeRun`, which derives workspace/user server-side, validates manifest `agent: ["run"]`, checks per-user trust, resolves source paths inside the app scope, and checks normal source ACLs.
+- App-origin `dohc.patch.propose` no longer relies on a client-only write-scope check. The host calls `api.appAgent.authorizePatch`, which validates manifest `agent: ["patch.propose"]`, per-user trust, read scope, write scope, source write authorization, and lock state before returning a server-built handoff prompt.
+- App-agent handoffs now pause behind a host confirmation dialog; `onRunAgent` is called only after the user confirms, and the request is re-authorized immediately before submit.
+- Agent capabilities are included in the manifest trust key, so adding/removing `run` or `patch.propose` resets per-user trust. Agent-only apps now require trust even when they declare no direct writes.
+- App-generation prompt guidance now tells agents to declare matching app.json agent capabilities when using `dohc.agent.run` or `dohc.patch.propose`.
+- App sandbox `dohc.asset(assetId).resolve()` now calls `api.assets.resolveAppAsset`; the server returns a URL only when the asset belongs to the workspace and is referenced by a non-app source the app is allowed to read and the user can read.
+- Authz tripwires now recognize `resolveAppForAgent` as a validated server-derived workspace/identity/manifest/trust helper.
+
+Remaining risk:
+- Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
+- The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, browser runtime, app-agent handoff, and asset-scope coverage passed.

@@ -56,6 +56,46 @@ async function seedTracker(
 }
 
 describe('api.appTrust', () => {
+  it('requires trust for manifest-declared agent capabilities even without direct writes', async () => {
+    const t = convexTest(schema, modules)
+    await seedTracker(t, ALICE, {
+      read: ['transactions/**'],
+      write: [],
+      collections: {},
+      databases: {},
+      agent: ['run'],
+    })
+
+    const before = await t.withIdentity({ subject: ALICE }).query(api.appTrust.state, {
+      packageRoot: 'finance/.apps/tracker',
+    })
+    expect(before).toMatchObject({
+      ok: true,
+      trusted: false,
+      title: 'Finance Tracker',
+      agentCapabilities: ['run'],
+    })
+    assertOk(before)
+    expect(before.trustKey).toContain('"agent":["run"]')
+    expect(before.prompt).toContain('Finance Tracker wants to use agent capabilities:')
+    expect(before.prompt).toContain('- run')
+
+    await t.withIdentity({ subject: ALICE }).mutation(api.appTrust.grant, {
+      packageRoot: 'finance/.apps/tracker',
+    })
+
+    await expect(
+      t.withIdentity({ subject: ALICE }).query(api.appTrust.state, {
+        packageRoot: 'finance/.apps/tracker',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      trusted: true,
+      trustKey: before.trustKey,
+      agentCapabilities: ['run'],
+    })
+  })
+
   it('requires per-user trust for the current manifest write key', async () => {
     const t = convexTest(schema, modules)
     await seedTracker(t, ALICE)

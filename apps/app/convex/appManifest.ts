@@ -20,6 +20,8 @@ export type ResolvedDatabaseConfig = {
   write: boolean
 }
 
+export type AppAgentCapability = 'run' | 'patch.propose'
+
 export type ResolvedAppManifest = {
   title: string
   entry: string
@@ -59,6 +61,7 @@ const COLLECTION_FORMATS = new Set<CollectionFormat>([
   'yaml',
   'sqlite',
 ])
+const APP_AGENT_CAPABILITIES = new Set<AppAgentCapability>(['run', 'patch.propose'])
 
 function stripDohcFrontmatter(body: string): string {
   return splitFrontmatter(body).rest
@@ -87,6 +90,17 @@ function stringOrStringArray(value: unknown): string[] | null {
     return clean ? [clean] : null
   }
   return stringArray(value)
+}
+
+function parseAgentCapabilities(value: unknown): AppAgentCapability[] | null {
+  const raw = stringArray(value)
+  if (!raw) return null
+  const out: AppAgentCapability[] = []
+  for (const capability of raw) {
+    if (!APP_AGENT_CAPABILITIES.has(capability as AppAgentCapability)) return null
+    out.push(capability as AppAgentCapability)
+  }
+  return sortedUnique(out) as AppAgentCapability[]
 }
 
 function optionalNumber(value: unknown): number | undefined | null {
@@ -204,6 +218,7 @@ function trustKeyForApp(
   actions: AppActionConfig[],
   collections: Record<string, ResolvedCollectionConfig>,
   databases: Record<string, ResolvedDatabaseConfig>,
+  agent: string[],
 ): string | null {
   const actionEntries = actions
     .map((action) => [
@@ -222,18 +237,21 @@ function trustKeyForApp(
     .map(([name, config]) => [name, config.write ? [config.path] : []] as const)
     .sort(([a], [b]) => a.localeCompare(b))
   const writeScopes = sortedUnique(write)
-  const hasWrites =
+  const agentCapabilities = sortedUnique(agent)
+  const hasPrivilegedCapabilities =
     writeScopes.length > 0 ||
     actionEntries.length > 0 ||
     collectionEntries.some(([, targets]) => targets.length > 0) ||
-    databaseEntries.some(([, targets]) => targets.length > 0)
-  if (!hasWrites) return null
+    databaseEntries.some(([, targets]) => targets.length > 0) ||
+    agentCapabilities.length > 0
+  if (!hasPrivilegedCapabilities) return null
   return JSON.stringify({
     packageRoot,
     write: writeScopes,
     actions: actionEntries,
     collections: Object.fromEntries(collectionEntries),
     databases: Object.fromEntries(databaseEntries),
+    agent: agentCapabilities,
   })
 }
 
@@ -272,7 +290,7 @@ export function parseAppManifest({
   const readRaw = object.read === undefined ? ['.'] : stringArray(object.read)
   const writeRaw = object.write === undefined ? [] : stringArray(object.write)
   const actionsRaw = parseActions(object.actions)
-  const agent = object.agent === undefined ? [] : stringArray(object.agent)
+  const agent = object.agent === undefined ? [] : parseAgentCapabilities(object.agent)
   const network =
     object.network === undefined
       ? false
@@ -383,6 +401,6 @@ export function parseAppManifest({
     tests,
     status: { ok: true },
     writeTargets,
-    trustKey: trustKeyForApp(packageRoot, write, actions, collections, databases),
+    trustKey: trustKeyForApp(packageRoot, write, actions, collections, databases, agent),
   }
 }

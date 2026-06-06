@@ -404,6 +404,9 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           !/resolveApp(?:ForSecurity)?\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
             body,
           ) &&
+          !/resolveAppForAgent\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) &&
           !/resolveTrustState\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
             body,
           ) &&

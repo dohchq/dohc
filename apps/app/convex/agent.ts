@@ -1061,6 +1061,10 @@ state. Use \`dohc.agent.run\` for judgment-heavy tasks like analyze, summarize,
 suggest, draft, investigate, or plan. Use \`dohc.patch.propose\` for risky or
 ambiguous reviewed edits. It should feel like a working app surface, not a
 poster about the uploaded material.
+If an app calls \`dohc.agent.run\`, its app.json must declare
+\`"agent": ["run"]\`; if it calls \`dohc.patch.propose\`, app.json must
+declare \`"agent": ["patch.propose"]\` and the target must be in read/write
+scope. These capabilities require user trust and host confirmation.
 Never create fake app controls that only mutate React state. Run test_app and fix failures before finish_onboarding.
 
 Name the app after the specific use case; use \`.apps/home\` only when the user asked for a general home,
@@ -1084,6 +1088,9 @@ for risky reviewed edits, but ordinary buttons/forms should write through
 \`dohc.collection\`, \`dohc.doc\`, or \`dohc.database\`. It should feel like a
 usable app surface that reads real sources through \`@dohc/app\`
 (\`useCollection\`, \`useDoc\`, or \`useDatabase\`), not app-local fake state.
+When using agent handoffs, declare the exact app.json agent capability:
+\`"agent": ["run"]\` for \`dohc.agent.run\`, \`"agent": ["patch.propose"]\`
+for \`dohc.patch.propose\`, or both when both APIs are used.
 
 If the user uploaded source material, use it deeply. If you used an
 uploaded CSV, read enough of it with \`read_asset\` to understand columns,
@@ -1525,7 +1532,8 @@ Custom apps:
   cross-workspace data path.
 - Normal app controls persist through dohc.collection, dohc.doc, or dohc.database.
   Use dohc.agent.run only for judgment-heavy work, and dohc.patch.propose for
-  risky/ambiguous reviewed edits.
+  risky/ambiguous reviewed edits. Declare matching app.json agent capabilities
+  because these handoffs require user trust and host confirmation.
 
 Creation pattern for a dashboard/app:
 1. Inspect the folder's source atoms first.

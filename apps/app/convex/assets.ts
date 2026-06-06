@@ -7,10 +7,29 @@ import {
 } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
+import { canReadAtom } from './atomAccess'
+import { isNonDataAtom } from './atomId'
+import { scopeAllowsPath } from './appScopes'
+import { isAppDescriptorError, resolveAppDescriptor } from './apps'
 
 const assetPurposeValidator = v.union(v.literal('chat'), v.literal('workspace'))
+const APP_ASSET_SOURCE_SCAN_CAP = 5000
 
 type AssetKind = 'image' | 'video' | 'audio' | 'file'
+
+type AppAssetError = {
+  ok: false
+  code:
+    | 'app-not-found'
+    | 'invalid-manifest'
+    | 'asset-not-authorized'
+    | 'source-scan-truncated'
+  message: string
+}
+
+function appAssetError(code: AppAssetError['code'], message: string): AppAssetError {
+  return { ok: false, code, message }
+}
 
 export const generateUploadUrl = mutation({
   args: {
@@ -92,6 +111,61 @@ export const resolveAsset = query({
   },
 })
 
+export const resolveAppAsset = query({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    packageRoot: v.string(),
+    assetId: v.id('workspaceAssets'),
+  },
+  handler: async (ctx, { activeWorkspaceId, packageRoot, assetId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const app = await resolveAppDescriptor(ctx, workspaceId, identity.subject, packageRoot)
+    if (isAppDescriptorError(app)) return appAssetError(app.code, app.message)
+    if (!app) return appAssetError('app-not-found', 'App not found.')
+    if (!app.configStatus.ok) {
+      return appAssetError('invalid-manifest', 'The app manifest is invalid.')
+    }
+
+    const asset = await ctx.db.get(assetId)
+    if (!asset || asset.workspaceId !== workspaceId) {
+      return appAssetError('asset-not-authorized', 'Asset not found.')
+    }
+
+    const raw = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .take(APP_ASSET_SOURCE_SCAN_CAP + 1)
+    if (raw.length > APP_ASSET_SOURCE_SCAN_CAP) {
+      return appAssetError(
+        'source-scan-truncated',
+        'This workspace has too many files to resolve app assets safely.',
+      )
+    }
+
+    for (const atom of raw) {
+      if (!scopeAllowsPath(app.read, atom.path)) continue
+      if (isNonDataAtom(atom.path, atom.body ?? '')) continue
+      if (!(await canReadAtom(ctx, atom._id, identity.subject))) continue
+      if (!bodyReferencesAsset(atom.body ?? '', assetId)) continue
+      const url = await ctx.storage.getUrl(asset.storageId)
+      if (!url) return appAssetError('asset-not-authorized', 'Asset blob not found.')
+      return {
+        ok: true as const,
+        asset: toClientAsset(asset),
+        url,
+        sourcePath: atom.path,
+      }
+    }
+
+    return appAssetError(
+      'asset-not-authorized',
+      'This app is not allowed to resolve that asset.',
+    )
+  },
+})
+
 export const _resolveForAgent = internalQuery({
   args: {
     workspaceId: v.string(),
@@ -147,6 +221,14 @@ function normalizeFilename(filename: string): string {
 function normalizeMediaType(value?: string | null): string | null {
   const trimmed = value?.trim().toLowerCase()
   return trimmed || null
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+}
+
+function bodyReferencesAsset(body: string, assetId: string): boolean {
+  return new RegExp(`dohc-asset:(?:image|video|audio|file)/${escapeRegExp(assetId)}(?:[)\\s]|$)`).test(body)
 }
 
 function toClientAsset(asset: {

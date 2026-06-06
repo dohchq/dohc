@@ -4,13 +4,26 @@ import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireWorkspace } from './auth'
 import { isAppDescriptorError, resolveAppDescriptor } from './apps'
 
-function trustPrompt(title: string, writeTargets: string[]): string {
-  return [
-    `${title} wants to write to:`,
-    ...writeTargets.map((target) => `- ${target}`),
+function trustPrompt(title: string, writeTargets: string[], agentCapabilities: string[]): string {
+  const sections: string[] = []
+  if (writeTargets.length > 0) {
+    sections.push(
+      `${title} wants to write to:`,
+      ...writeTargets.map((target) => `- ${target}`),
+    )
+  }
+  if (agentCapabilities.length > 0) {
+    if (sections.length > 0) sections.push('')
+    sections.push(
+      `${title} wants to use agent capabilities:`,
+      ...agentCapabilities.map((capability) => `- ${capability}`),
+    )
+  }
+  sections.push(
     '',
-    'This app can only write inside these scopes. Changing app.json resets this permission.',
-  ].join('\n')
+    'This app can only use these capabilities inside its manifest scopes. Changing app.json resets this permission.',
+  )
+  return sections.join('\n')
 }
 
 async function trustRows(
@@ -63,7 +76,8 @@ async function resolveTrustState(
       title: app.title,
       trustKey: app.trustKey,
       writeTargets: app.writeTargets,
-      prompt: app.trustKey === null ? '' : trustPrompt(app.title, app.writeTargets),
+      agentCapabilities: app.agent,
+      prompt: app.trustKey === null ? '' : trustPrompt(app.title, app.writeTargets, app.agent),
     }
   }
   const trusted = await isTrustedForKey(
@@ -79,7 +93,8 @@ async function resolveTrustState(
     title: app.title,
     trustKey: app.trustKey,
     writeTargets: app.writeTargets,
-    prompt: trustPrompt(app.title, app.writeTargets),
+    agentCapabilities: app.agent,
+    prompt: trustPrompt(app.title, app.writeTargets, app.agent),
   }
 }
 
