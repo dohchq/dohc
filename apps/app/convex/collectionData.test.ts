@@ -169,7 +169,7 @@ describe('app collection data reads', () => {
       }),
     ).resolves.toMatchObject({
       ok: false,
-      code: 'collection-scan-truncated',
+      code: 'source-scan-truncated',
     })
   })
 })

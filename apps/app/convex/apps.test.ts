@@ -3,10 +3,19 @@ import { convexTest } from 'convex-test'
 import { describe, expect, it } from 'vitest'
 import schema from './schema'
 import { api } from './_generated/api'
+import type { AppDescriptor, AppDescriptorError } from './apps'
 
 const modules = import.meta.glob('./**/*.ts')
 
 const W = 'ws_apps'
+
+function assertDescriptor(
+  value: AppDescriptor | AppDescriptorError | null,
+): asserts value is AppDescriptor {
+  expect(value).not.toBeNull()
+  expect(value).not.toMatchObject({ ok: false })
+  if (!value || 'ok' in value) throw new Error('expected app descriptor')
+}
 
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
@@ -171,6 +180,7 @@ describe('api.apps.get', () => {
         'finance/transactions/**',
       ],
     })
+    assertDescriptor(app)
     expect(app?.trustKey).toContain('finance/.apps/tracker')
   })
 
@@ -204,7 +214,31 @@ describe('api.apps.get', () => {
       databases: {},
       writeTargets: [],
     })
+    assertDescriptor(app)
     expect(app?.trustKey).toBeNull()
+  })
+
+  it('fails closed instead of resolving descriptors from capped partial scans', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, W, 'finance/.apps/tracker/src/App.tsx', 'export default function App() {}')
+    for (let index = 0; index < 5001; index += 1) {
+      await seedAtom(t, W, `archive/${String(index).padStart(4, '0')}.md`, '# Archive')
+    }
+    await seedAtom(
+      t,
+      W,
+      'finance/.apps/tracker/app.json',
+      JSON.stringify({ title: 'Finance Tracker', read: ['rules.md'], write: [] }),
+    )
+
+    await expect(
+      t.withIdentity({ subject: W }).query(api.apps.get, {
+        packageRoot: 'finance/.apps/tracker',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'source-scan-truncated',
+    })
   })
 })
 

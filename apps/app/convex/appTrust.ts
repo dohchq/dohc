@@ -2,7 +2,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireWorkspace } from './auth'
-import { resolveAppDescriptor } from './apps'
+import { isAppDescriptorError, resolveAppDescriptor } from './apps'
 
 function trustPrompt(title: string, writeTargets: string[]): string {
   return [
@@ -48,6 +48,7 @@ async function resolveTrustState(
   const identity = await ctx.auth.getUserIdentity()
   if (!identity) throw new Error('Not authenticated')
   const app = await resolveAppDescriptor(ctx, workspaceId, identity.subject, packageRoot)
+  if (isAppDescriptorError(app)) return app
   if (!app) {
     return {
       ok: false as const,

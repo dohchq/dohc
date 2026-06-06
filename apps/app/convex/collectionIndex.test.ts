@@ -181,7 +181,7 @@ describe('collectionIndex', () => {
 
     expect(result).toMatchObject({
       ok: false,
-      code: 'collection-scan-truncated',
+      code: 'source-scan-truncated',
     })
     expect(fetch).not.toHaveBeenCalled()
   })

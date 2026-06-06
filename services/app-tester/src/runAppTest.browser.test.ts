@@ -194,6 +194,75 @@ describe('runAppTest browser checks', () => {
     })
   })
 
+  it('fails when manifest-declared workflows are not implemented as visible persistent controls', async () => {
+    await expect(runAppTest({
+      packageRoot: 'finance/.apps/incomplete',
+      files: [{
+        relativePath: 'src/App.tsx',
+        body: `
+          import { dohc, useCollection } from '@dohc/app'
+          export default function App() {
+            const transactions = useCollection('transactions')
+            return (
+              <main>
+                <strong>{transactions.length}</strong>
+                <button onClick={() => dohc.collection('transactions').insert({ id: 'txn_003' })}>
+                  Add expense
+                </button>
+              </main>
+            )
+          }
+        `,
+      }],
+      manifest: {
+        collections: {
+          transactions: { source: 'transactions/*.md', format: 'markdown-table', key: 'ID' },
+        },
+        tests: [
+          { name: 'add expense', collection: 'transactions' },
+          { name: 'categorize transaction', collection: 'transactions' },
+          { name: 'mark reviewed', collection: 'transactions' },
+        ],
+      },
+      seed: { collections: { transactions: [{ id: 'txn_001', ID: 'txn_001', Amount: 420, Reviewed: 'No' }] } },
+      mode: 'browser',
+    })).resolves.toMatchObject({
+      ok: false,
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'manifest tests', code: 'manifest-test-missing-control' }),
+      ]),
+    })
+  })
+
+  it('fails closed for manifest-declared tests without an enforceable workflow name', async () => {
+    await expect(runAppTest({
+      packageRoot: 'finance/.apps/invalid-test',
+      files: [{
+        relativePath: 'src/App.tsx',
+        body: `
+          import { dohc, useCollection } from '@dohc/app'
+          export default function App() {
+            useCollection('transactions')
+            return <button onClick={() => dohc.collection('transactions').insert({ id: 'txn_003' })}>Add expense</button>
+          }
+        `,
+      }],
+      manifest: {
+        collections: {
+          transactions: { source: 'transactions/*.md', format: 'markdown-table', key: 'ID' },
+        },
+        tests: [{ collection: 'transactions' }],
+      },
+      seed: { collections: { transactions: [{ id: 'txn_001', ID: 'txn_001', Amount: 420 }] } },
+      mode: 'browser',
+    })).resolves.toMatchObject({
+      ok: false,
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'manifest tests', code: 'manifest-test-invalid' }),
+      ]),
+    })
+  })
+
   it('requires SQLite-backed controls to write through dohc.database tables', async () => {
     await expect(runAppTest({
       packageRoot: 'finance/.apps/sqlite-plain-collection',

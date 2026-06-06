@@ -867,3 +867,83 @@ Failures fixed:
 Remaining risk:
 - Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with the Phase 12 risk note.
 - The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, and browser runtime coverage passed.
+
+## Fourth-Pass Review Remediation: 2026-06-07 Manifest Tests And Scan Fail-Closed
+
+Status: complete.
+
+Files changed:
+- `services/app-tester/src/runAppTest.ts`
+- `services/app-tester/src/runAppTest.browser.test.ts`
+- `apps/app/convex/apps.ts`
+- `apps/app/convex/apps.test.ts`
+- `apps/app/convex/appSecurity.ts`
+- `apps/app/convex/appTrust.ts`
+- `apps/app/convex/appTrust.test.ts`
+- `apps/app/convex/appData.ts`
+- `apps/app/convex/appData.test.ts`
+- `apps/app/convex/databaseFiles.test.ts`
+- `apps/app/convex/collectionIndex.test.ts`
+- `apps/app/convex/collectionData.test.ts`
+- `apps/app/convex/onboardingGeneratedAppQuality.test.ts`
+- `apps/app/convex/a1SystemPrompt.test.ts`
+- `apps/app/convex/agent.ts`
+- `apps/app/src/components/ViewFrame.tsx`
+- `apps/app/src/__tests__/onboardingSetupFirst.test.ts`
+
+Tests added:
+- AppTester manifest-test enforcement probes proving manifest-declared workflows fail when they lack matching visible persistent controls, and fail closed when manifest test entries do not have enforceable names.
+- Onboarding generated-app quality regression proving generated apps that omit declared finance workflows cannot pass.
+- App descriptor fail-closed regressions for `apps.get`, `appTrust.state`, `appData.getAtom`, and `databaseFiles.appQuery` when large workspace source scans truncate before seeing the full package manifest.
+- System prompt regression proving stale legacy view phrases are not present in app-generation guidance.
+
+Commands run:
+
+```bash
+cd /home/ice/dev/dohc
+npx -y node@24 ./node_modules/vitest/vitest.mjs run services/app-tester/src/runAppTest.browser.test.ts
+npx -y node@24 ./node_modules/vitest/vitest.mjs run services/app-tester/src/runAppTest.test.ts services/app-tester/src/runAppTest.browser.test.ts services/app-tester/src/runAppTest.screenshot.test.ts services/sqlite-worker/src/sqliteEngine.test.ts services/sqlite-worker/src/sqliteEngine.concurrency.test.ts services/sqlite-worker/src/sqliteEngine.failureInjection.test.ts services/hocuspocus/src/semantic-api.test.ts
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p apps/app/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/app-tester/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/hocuspocus/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/sqlite-worker/tsconfig.json
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:9 npx -y pnpm@10.24.0 exec playwright test apps/app/e2e/apps.spec.ts
+TMPDIR=/tmp npx -y tsx -e '/* direct adversarial manifest runAppTest probe */'
+git diff --check
+
+cd /home/ice/dev/dohc/apps/app
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/onboardingGeneratedAppQuality.test.ts convex/apps.test.ts convex/appTrust.test.ts convex/appData.test.ts convex/databaseFiles.test.ts convex/a1SystemPrompt.test.ts src/__tests__/viewsShell.test.ts src/apps/AppRuntimeHost.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appFinanceTracker.acceptance.test.ts convex/collectionIndex.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/collectionData.test.ts src/__tests__/onboardingSetupFirst.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appReviewFixes.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/appData.collectionMutations.test.ts convex/appData.docMutations.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts convex/databaseOps.concurrency.test.ts convex/appTesting.test.ts convex/collectionIndex.test.ts convex/apps.test.ts convex/appData.test.ts convex/hocuspocusAuth.test.ts convex/appFinanceTracker.acceptance.test.ts convex/appFinanceTracker.largeCsv.acceptance.test.ts convex/onboardingGeneratedAppQuality.test.ts convex/a1SystemPrompt.test.ts src/apps/AppRuntimeHost.security.test.tsx src/apps/AppRuntimeHost.database.test.ts src/apps/buildAppBundle.test.ts src/__tests__/viewsShell.test.ts src/apps/AppRuntimeHost.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts
+```
+
+Final verification results:
+- Focused AppTester browser slice: 1 file, 12 tests passed.
+- Expanded AppTester/SQLite/Hocuspocus service slice: 7 files, 46 tests passed.
+- Focused app manifest/descriptor/prompt slice: 8 files, 64 tests passed.
+- Focused finance tracker/index slice: 2 files, 5 tests passed.
+- Focused descriptor/onboarding assertion update slice: 2 files, 10 tests passed.
+- Focused app/security review slice: 22 files, 124 tests passed.
+- Full `apps/app` suite: 181 files passed, 1552 tests passed, 1 expected live-eval skip.
+- App TypeScript: exit 0.
+- App tester TypeScript: exit 0.
+- Hocuspocus TypeScript: exit 0.
+- SQLite worker TypeScript: exit 0.
+- No-secret Playwright finance app runtime smoke: 1 test passed.
+- Direct adversarial manifest probe: failed closed with `manifest-test-missing-control` instead of returning `ok: true`.
+- Diff hygiene: `git diff --check` exit 0.
+
+Failures fixed:
+- Manifest-declared app tests are no longer advisory/no-op metadata. AppTester now validates every manifest test entry, matches declared workflows to visible controls, requires the matching control to issue a mutating SDK call, requires persisted state to change, and checks declared collection/path/database targets when present.
+- AppTester fails closed when manifest test entries are malformed and cannot be mapped to a visible workflow name.
+- SQLite-backed manifest tests recognize database table writes through `dohc.database(path).table(name)`, including scoped package-relative database paths.
+- Onboarding generated-app quality now exercises manifest-declared finance workflows, so incomplete generated apps cannot pass by rendering only a subset of fake controls.
+- App descriptor resolution now fails closed with `source-scan-truncated` when a large workspace scan hits the source cap before the whole package can be resolved. `apps.get`, app trust, app data, and database app queries propagate that error instead of proceeding from partial source data.
+- The app runtime frame now treats descriptor errors as first-class renderable errors instead of assuming every `apps.get` result is a descriptor.
+- Agent prompt and onboarding assertions no longer use legacy "views" product language for generated apps/interfaces, while migration-compatible code/tests retain old names only where required.
+
+Remaining risk:
+- Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
+- The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, and browser runtime coverage passed.

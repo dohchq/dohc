@@ -169,6 +169,132 @@ function mutatingCalls(calls: SdkCall[]): SdkCall[] {
   )
 }
 
+function stateChanged(control: { beforeSnapshot: unknown; afterSnapshot: unknown }): boolean {
+  return stableJson(control.beforeSnapshot) !== stableJson(control.afterSnapshot)
+}
+
+function normalizeWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+const WORKFLOW_VERBS = new Set([
+  'add',
+  'append',
+  'categorize',
+  'category',
+  'check',
+  'complete',
+  'create',
+  'delete',
+  'edit',
+  'insert',
+  'mark',
+  'move',
+  'remove',
+  'replace',
+  'review',
+  'save',
+  'set',
+  'submit',
+  'update',
+  'upsert',
+])
+
+function controlMatchesManifestTest(label: string, name: string): boolean {
+  const labelWords = normalizeWords(label)
+  const nameWords = normalizeWords(name)
+  if (labelWords.length === 0 || nameWords.length === 0) return false
+  const labelText = labelWords.join(' ')
+  const nameText = nameWords.join(' ')
+  if (labelText === nameText) return true
+  if (nameText.includes(labelText) && labelWords.some((word) => WORKFLOW_VERBS.has(word))) return true
+  const nameSet = new Set(nameWords)
+  return labelWords.every((word) => nameSet.has(word)) &&
+    labelWords.some((word) => WORKFLOW_VERBS.has(word))
+}
+
+function manifestRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function manifestString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
+function manifestStringOrFirst(value: unknown): string | null {
+  const direct = manifestString(value)
+  if (direct) return direct
+  return Array.isArray(value) ? manifestString(value[0]) : null
+}
+
+function scopePathFromPackageRoot(packageRoot: string): string {
+  const marker = '/.apps/'
+  const index = packageRoot.indexOf(marker)
+  if (index < 0) return ''
+  return packageRoot.slice(0, index)
+}
+
+function appPathCandidates(packageRoot: string, path: string): Set<string> {
+  const candidates = new Set([path])
+  const scopePath = scopePathFromPackageRoot(packageRoot)
+  if (scopePath && path.startsWith(`${scopePath}/`)) {
+    candidates.add(path.slice(scopePath.length + 1))
+  }
+  return candidates
+}
+
+function sqliteCollectionTarget(
+  manifest: RunAppTestInput['manifest'],
+  packageRoot: string,
+  collectionName: string,
+): { table: string; databases: Set<string> } | null {
+  const config = manifestRecord(manifest?.collections?.[collectionName])
+  if (!config || config.format !== 'sqlite') return null
+  const table = manifestString(config.table)
+  const source = manifestStringOrFirst(config.source)
+  return table && source ? { table, databases: appPathCandidates(packageRoot, source) } : null
+}
+
+function callMatchesManifestTarget(
+  call: SdkCall,
+  test: Record<string, unknown>,
+  manifest: RunAppTestInput['manifest'],
+  packageRoot: string,
+): boolean {
+  const collection = manifestString(test.collection)
+  if (collection) {
+    if (call.collection === collection) return true
+    const sqliteTarget = sqliteCollectionTarget(manifest, packageRoot, collection)
+    return Boolean(
+      sqliteTarget &&
+        call.collection === sqliteTarget.table &&
+        call.database &&
+        sqliteTarget.databases.has(call.database),
+    )
+  }
+  const path = manifestString(test.path)
+  if (path) return call.path === path
+  const database = manifestString(test.database)
+  if (database) {
+    if (call.database === database) return true
+    const databaseConfig = manifestRecord(manifest?.databases?.[database])
+    const configuredPath = manifestString(databaseConfig?.path)
+    return Boolean(
+      configuredPath &&
+        call.database &&
+        appPathCandidates(packageRoot, configuredPath).has(call.database),
+    )
+  }
+  return true
+}
+
 async function runRenderedApp(input: RunAppTestInput, code: string): Promise<RuntimeResult> {
   const compiled = ts.transpileModule(code, {
     fileName: 'App.tsx',
@@ -712,9 +838,57 @@ async function screenshotArtifact(html: string, reason: string) {
   }
 }
 
-function checkManifestTests(manifest: RunAppTestInput['manifest']): AppTestCheck {
-  if (manifest?.tests && manifest.tests.length > 0) {
-    return { name: 'manifest tests', status: 'ok' }
+function checkManifestTests(
+  runtime: RuntimeResult,
+  manifest: RunAppTestInput['manifest'],
+  packageRoot: string,
+): AppTestCheck {
+  if (!runtime.ok) return { name: 'manifest tests', status: 'ok' }
+  if (manifest?.tests === undefined) return { name: 'manifest tests', status: 'ok' }
+  if (!Array.isArray(manifest.tests)) {
+    return {
+      name: 'manifest tests',
+      status: 'failed',
+      code: 'manifest-test-invalid',
+      message: 'App manifest tests must be an array of enforceable workflow tests.',
+    }
+  }
+  for (const rawTest of manifest.tests) {
+    const test = manifestRecord(rawTest)
+    const name = manifestString(test?.name)
+    if (!test || !name) {
+      return {
+        name: 'manifest tests',
+        status: 'failed',
+        code: 'manifest-test-invalid',
+        message: 'Each app manifest test must include a workflow name.',
+      }
+    }
+    const matchingControls = runtime.controlResults.filter((control) =>
+      controlMatchesManifestTest(control.label, name),
+    )
+    if (matchingControls.length === 0) {
+      return {
+        name: 'manifest tests',
+        status: 'failed',
+        code: 'manifest-test-missing-control',
+        message: `Manifest test "${name}" does not have a matching visible control.`,
+      }
+    }
+    const passed = matchingControls.some((control) =>
+      stateChanged(control) &&
+        mutatingCalls(control.sdkCalls).some((call) =>
+          callMatchesManifestTarget(call, test, manifest, packageRoot),
+        ),
+    )
+    if (!passed) {
+      return {
+        name: 'manifest tests',
+        status: 'failed',
+        code: 'manifest-test-missing-persistence',
+        message: `Manifest test "${name}" did not perform the required persistent SDK write.`,
+      }
+    }
   }
   return { name: 'manifest tests', status: 'ok' }
 }
@@ -735,7 +909,7 @@ export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResu
     checkRender(runtime),
     checkSourceBackedData(runtime, input.seed),
     checkMutationPersistence(runtime, code),
-    checkManifestTests(input.manifest),
+    checkManifestTests(runtime, input.manifest, input.packageRoot),
   ]
   const failures = checks.filter((check) => check.status === 'failed')
   const renderFailure = failures.find((check) => check.name === 'browser render')

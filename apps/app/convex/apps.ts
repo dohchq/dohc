@@ -78,6 +78,21 @@ export type AppDescriptor = {
   trustKey: string | null
 }
 
+export type AppDescriptorError = {
+  ok: false
+  code: 'source-scan-truncated'
+  message: string
+}
+
+export function isAppDescriptorError(value: unknown): value is AppDescriptorError {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as { ok?: unknown }).ok === false &&
+      (value as { code?: unknown }).code === 'source-scan-truncated',
+  )
+}
+
 type SourceFileResult =
   | {
       ok: true
@@ -331,7 +346,7 @@ async function visibleAtomsForPackage(
   workspaceId: string,
   viewerSubject: string,
   packageRoot: string,
-): Promise<Doc<'atoms'>[]> {
+): Promise<{ ok: true; atoms: Doc<'atoms'>[] } | AppDescriptorError> {
   const raw = await ctx.db
     .query('atoms')
     .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
@@ -342,17 +357,21 @@ async function visibleAtomsForPackage(
       packageRoot,
       atomScanCap: ATOM_SCAN_CAP,
     })
+    return {
+      ok: false,
+      code: 'source-scan-truncated',
+      message: 'This workspace has too many files to resolve app descriptors safely.',
+    }
   }
-  const bounded = raw.length > ATOM_SCAN_CAP ? raw.slice(0, ATOM_SCAN_CAP) : raw
   const prefix = `${packageRoot}/`
   const atoms: Doc<'atoms'>[] = []
 
-  for (const atom of bounded) {
+  for (const atom of raw) {
     if (!atom.path.startsWith(prefix)) continue
     if (await canReadAtom(ctx, atom._id, viewerSubject)) atoms.push(atom)
   }
 
-  return atoms
+  return { ok: true, atoms }
 }
 
 function descriptorForRoot(
@@ -451,13 +470,14 @@ export async function resolveAppDescriptor(
   workspaceId: string,
   viewerSubject: string,
   packageRoot: string,
-): Promise<AppDescriptor | null> {
+): Promise<AppDescriptor | AppDescriptorError | null> {
   if (!isAppPackageRoot(packageRoot)) return null
-  const atoms = await visibleAtomsForPackage(ctx, workspaceId, viewerSubject, packageRoot)
-  if (atoms.length === 0) return null
+  const result = await visibleAtomsForPackage(ctx, workspaceId, viewerSubject, packageRoot)
+  if (!result.ok) return result
+  if (result.atoms.length === 0) return null
   return descriptorForRoot(
     packageRoot,
-    new Map(atoms.map((atom) => [atom.path, atom])),
+    new Map(result.atoms.map((atom) => [atom.path, atom])),
   )
 }
 
@@ -515,6 +535,9 @@ export const getSourceFiles = query({
       }
     }
     const app = await resolveAppDescriptor(ctx, workspaceId, viewerSubject, packageRoot)
+    if (isAppDescriptorError(app)) {
+      return app
+    }
     if (!app) {
       return {
         ok: false,

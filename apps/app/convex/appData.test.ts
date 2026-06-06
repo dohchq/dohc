@@ -88,4 +88,29 @@ describe('appData local sources', () => {
       message: 'App not found.',
     })
   })
+
+  it('fails closed when descriptor resolution would use a capped partial scan', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, W, 'finance/.apps/tracker/src/App.tsx', 'app code')
+    await seedAtom(t, W, 'finance/rules.md', '# Rules')
+    for (let index = 0; index < 5001; index += 1) {
+      await seedAtom(t, W, `archive/${String(index).padStart(4, '0')}.md`, '# Archive')
+    }
+    await seedAtom(
+      t,
+      W,
+      'finance/.apps/tracker/app.json',
+      JSON.stringify({ read: ['rules.md'], write: [] }),
+    )
+
+    await expect(
+      t.withIdentity({ subject: W }).query(api.appData.getAtom, {
+        packageRoot: 'finance/.apps/tracker',
+        path: 'rules.md',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'source-scan-truncated',
+    })
+  })
 })

@@ -52,4 +52,35 @@ describe('onboarding generated app quality', () => {
       failures: [expect.objectContaining({ code: 'fake-primary-button' })],
     })
   })
+
+  it('fails generated apps that omit manifest-declared finance workflows', async () => {
+    await expect(runAppTest({
+      packageRoot: 'finance/.apps/tracker',
+      files: [{
+        relativePath: 'src/App.tsx',
+        body: `
+          import { dohc, useCollection } from '@dohc/app'
+          export default function App() {
+            const transactions = useCollection('transactions')
+            return (
+              <main>
+                <strong>{transactions.length}</strong>
+                <button onClick={() => dohc.collection('transactions').insert({ ID: 'txn_003', Amount: 900, Reviewed: 'No' })}>
+                  Add expense
+                </button>
+              </main>
+            )
+          }
+        `,
+      }],
+      manifest: financeTrackerManifest,
+      seed,
+      mode: 'browser',
+    })).resolves.toMatchObject({
+      ok: false,
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'manifest tests', code: 'manifest-test-missing-control' }),
+      ]),
+    })
+  })
 })

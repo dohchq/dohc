@@ -39,6 +39,16 @@ const VIEW_LOADING_SRC_DOC = buildAppShell({
   script: VIEW_LOADING_SCRIPT,
 })
 
+type AppDescriptorError = { ok: false; message: string }
+
+function isAppDescriptorError(value: unknown): value is AppDescriptorError {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as { ok?: unknown }).ok === false,
+  )
+}
+
 export function ViewFrame({
   packageRoot,
   onOpenSource,
@@ -61,6 +71,8 @@ export function ViewFrame({
     status: 'idle',
     key: null,
   })
+  const viewError = isAppDescriptorError(view) ? view : null
+  const viewDescriptor = view && !isAppDescriptorError(view) ? view : null
 
   const sourceKey = useMemo(() => {
     if (!sourceFiles || !sourceFiles.ok) return null
@@ -135,7 +147,7 @@ export function ViewFrame({
         ? buildState.previousCode
         : VIEW_LOADING_SCRIPT
 
-  const viewTitle = view?.title ?? 'App'
+  const viewTitle = viewDescriptor?.title ?? 'App'
   const srcDoc = useMemo(
     () =>
       runtimeCode === VIEW_LOADING_SCRIPT
@@ -180,12 +192,28 @@ export function ViewFrame({
     )
   }
 
-  if (!view.entryExists) {
+  if (viewError) {
+    return (
+      <main className="grid min-w-0 place-items-center bg-page p-6 text-center text-[13px] text-ink-faint">
+        {viewError.message}
+      </main>
+    )
+  }
+
+  if (!viewDescriptor) {
+    return (
+      <main className="grid min-w-0 place-items-center bg-page text-[13px] text-ink-faint">
+        App not found.
+      </main>
+    )
+  }
+
+  if (!viewDescriptor.entryExists) {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
         message="The app entry file is missing."
         onOpenSource={onOpenSource}
         onRunAgent={onRunAgent}
@@ -196,9 +224,9 @@ export function ViewFrame({
   if (sourceFiles && !sourceFiles.ok) {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
         message={sourceFiles.message}
         code={sourceFiles.code}
         onOpenSource={onOpenSource}
@@ -210,9 +238,9 @@ export function ViewFrame({
   if (buildState.status === 'error') {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
         message={buildState.diagnostics[0]?.message ?? 'This app could not render.'}
         code={buildState.diagnostics[0]?.code}
         onOpenSource={onOpenSource}
@@ -226,15 +254,15 @@ export function ViewFrame({
       <header className="flex h-12 items-center justify-between border-b border-rule bg-surface px-4">
         <div className="min-w-0">
           <h1 className="truncate text-[14px] font-semibold text-ink-strong">
-            {view.title}
+            {viewDescriptor.title}
           </h1>
           <div className="truncate font-mono text-[10.5px] text-ink-faint">
-            {view.scopePath || 'Workspace'} · {view.packageRoot}
+            {viewDescriptor.scopePath || 'Workspace'} · {viewDescriptor.packageRoot}
           </div>
         </div>
         <button
           type="button"
-          onClick={() => onOpenSource(view.entryPath)}
+          onClick={() => onOpenSource(viewDescriptor.entryPath)}
           className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-rule bg-panel px-2.5 text-[12px] font-medium text-ink-dim hover:border-rule-strong hover:bg-hover hover:text-ink"
         >
           <FilePenLine className="size-3.5" strokeWidth={2} />
@@ -242,10 +270,10 @@ export function ViewFrame({
         </button>
       </header>
       <AppRuntimeHost
-        packageRoot={view.packageRoot}
-        scopePath={view.scopePath}
-        writeScopes={view.write}
-        title={view.title}
+        packageRoot={viewDescriptor.packageRoot}
+        scopePath={viewDescriptor.scopePath}
+        writeScopes={viewDescriptor.write}
+        title={viewDescriptor.title}
         srcDoc={srcDoc}
         onOpenSource={onOpenSource}
         onRunAgent={onRunAgent}

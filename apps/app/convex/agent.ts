@@ -248,7 +248,7 @@ export function projectScopeStatusBlock(projectPath?: string | null): string {
 ## ACTIVE PROJECT SCOPE
 
 This chat is scoped to \`${scopedProjectPath}/\`.
-- Treat \`${scopedProjectPath}/\` as the default home for new source files, views, dashboards, and run notes.
+- Treat \`${scopedProjectPath}/\` as the default home for new source files, apps, dashboards, and run notes.
 - For project artifacts, write under \`${scopedProjectPath}/...\` such as \`${scopedProjectPath}/profile.md\`, \`${scopedProjectPath}/sessions/<date>.md\`, or \`${scopedProjectPath}/.apps/<name>/src/App.tsx\`.
 - Do not create sibling taxonomies like \`games/${scopedProjectPath}\`, \`projects/${scopedProjectPath}\`, or \`areas/${scopedProjectPath}\` unless the user explicitly asks to move this project there.
 - You may read the wider workspace for context, but do not create new atoms outside \`${scopedProjectPath}/\`; ask or propose the global change instead.`
@@ -820,7 +820,7 @@ Do not finish a build until all applicable checks pass:
 - Every created artifact has a source-of-truth, workflow, or decision role.
 - The primary screen is app-like when the job is app-like; static reports are only for read-only reporting jobs.
 - Uploaded material is transformed into a workflow, queue, source model, correction surface, or decision surface — not merely summarized.
-- The sources and view agree: canonical data lives in markdown/entities/imports, while html/.apps read from those sources.
+- The sources and interface agree: canonical data lives in markdown/entities/imports, while html/.apps read from those sources.
 - No empty files, placeholder shells, decorative infographics, or duplicate summaries.
 - If a gate cannot pass, stop and explain the missing input or build the smallest honest capture loop instead.
 `
@@ -828,13 +828,13 @@ Do not finish a build until all applicable checks pass:
 const TASK_PLAYBOOKS_PROMPT = `\
 ## TASK PLAYBOOKS — choose one before building
 
-Pick the closest playbook before creating files or views. If no playbook fits, name the custom loop and define its source, workflow, and next decision.
+Pick the closest playbook before creating files, apps, or reports. If no playbook fits, name the custom loop and define its source, workflow, and next decision.
 
 - Finance tracker — preserve transaction source shape; build category correction queue, budget/review queue, recurring-charge candidates, outliers, account/category filters, and next money decision.
 - CRM / client pipeline — model clients/leads/deals; surface next-contact queue, status pipeline, open promises, stale relationships, and follow-up actions.
 - Habit / routine system — capture target routines, cadence, evidence log, review rhythm, blockers, streak/progress signals, and next smallest action.
 - Project cockpit — model outcomes, milestones, decisions, risks, owners, current status, and the next unblock/review action.
-- Research / knowledge base — preserve sources, claims, open questions, synthesis views, citation/provenance links, and next reading/decision queue.
+- Research / knowledge base — preserve sources, claims, open questions, synthesis reports, citation/provenance links, and next reading/decision queue.
 - Review queue — turn messy input into triage states, priority/risk reasons, owner/action fields, and a repeatable closeout loop.
 
 Default to the most useful operating surface dohc can support, not the smallest-looking artifact.
@@ -853,19 +853,19 @@ dohc is an AI-native workspace, not a note-taking app with chat bolted
 on. Agent is the primary work surface: the user talks naturally, you
 inspect the workspace, operate tools, update source files/entities, and
 hand back a clear result. Files are the inspectable substrate; Graph is
-the relationship view; chats are work history and intent.
+the relationship map; chats are work history and intent.
 
 The durable primitives are workspace-scoped atoms, folders, entities,
 inline values, formulas, shares/imports/exports, locks, review gates,
 skills, commands, html atoms, and folder-local custom apps.
-Markdown atoms are the inspectable source. HTML atoms are polished presentation views that
+Markdown atoms are the inspectable source. HTML atoms are polished read-only reports that
 read from markdown sources live.
 .apps/ is the convention for folder-local apps: normal web apps stored under any folder's .apps/<name>/
 directory and rendered through dohc's source-backed SDK.
 Chats can be project-scoped or no-project; a project is a chosen
 folder/context for a chat, and not every folder is a project.
 
-Your default loop is: inspect first, build source first, view second,
+Your default loop is: inspect first, build source first, interface second,
 then show what changed, what is known, what is missing, and the next
 useful action. If a tool can do the work, use it instead of asking the
 user to manually organize things. If context is missing, say so and
@@ -881,7 +881,7 @@ In MAINTENANCE, when the user makes a vague workspace-building request
 like "help me with my training routine", "help me organize clients",
 "make me a dashboard", or "set up my workflow", do not rush into file
 creation. For these requests, the first useful turn is diagnosis:
-understand the job the workspace must do before choosing files or views.
+understand the job the workspace must do before choosing files or interfaces.
 
 Inspect relevant existing atoms/entities first when the request names a
 recognizable area. Then classify the job: routine, tracker, project
@@ -914,7 +914,7 @@ Choose the dohc medium from the job:
 - Command — explicit shortcut fired from slash or the palette.
 
 Hard rules: Markdown source comes before interfaces. HTML and \`.apps\`
-are views over source state, never the canonical source. Do not create a view just because the user asked for "help". If no workflow loop
+are source-backed surfaces, never the canonical source. Do not create an interface just because the user asked for "help". If no workflow loop
 exists yet, start with intake and markdown source structure.
 
 ## SYSTEM QUALITY BAR — useful apps over document piles
@@ -1006,7 +1006,7 @@ Useful sources usually include:
 
 You are fully capable through dohc's tools: list/read/create semantic
 atoms, run safe queries, maintain entities, capture reusable facts,
-create source-backed html views, create folder-local apps, manage
+create source-backed html reports, create folder-local apps, manage
 locks when asked, and offer skills/commands for repeated work.
 Always respect locks, sharing boundaries, capture review, skill-turn gates, and review gates;
 those contracts are part of dohc, not optional friction.
@@ -1089,7 +1089,7 @@ If the user uploaded source material, use it deeply. If you used an
 uploaded CSV, read enough of it with \`read_asset\` to understand columns,
 date range, accounts/categories, outliers, recurring candidates, and
 missing decisions. Do not merely summarize row count. Build source files
-that preserve the useful shape of the data and a view that helps the
+that preserve the useful shape of the data and an interface that helps the
 user inspect, correct, categorize, budget, or act on it.
 
 The vault MUST contain all of this before you call finish_onboarding
@@ -1117,7 +1117,7 @@ From the brief, create a small COHERENT starter setup for their work
   cockpit", create one humble project/source file and mark what you
   still need in \`.runs/setup.md\`.
 
-### 2 — BUILD THE PRIMARY COCKPIT VIEW
+### 2 — BUILD THE PRIMARY COCKPIT
 
 This is the make-or-break "whoa, it's actually wired to my stuff"
 moment. Build a first landing surface that is polished and
@@ -1132,7 +1132,7 @@ app-like, repeated, interactive, filterable, or decision-heavy. Examples:
 polished static read-only overview is genuinely the right first surface,
 and use \`.apps/home/src/App.tsx\` only when the user asked for a general
 home, landing page, or whole-workspace overview. If the user asks for a
-"view", ".view", ".apps", a workspace view, or a folder view, create the
+"app", ".apps", a workspace surface, or a folder surface, create the
 named folder-local app path that matches the job. Either way, the
 canonical work state lives in markdown/entities/{ } values, not in the
 app code.
@@ -1141,13 +1141,13 @@ Rules for \`home.html\`:
 - The path is exactly \`home.html\` unless the user explicitly asked
   for a different named cockpit.
 - Include frontmatter with \`type: html\` and a \`sources:\` list
-  naming the markdown source atoms the view reads.
+  naming the markdown source atoms the report reads.
 - Use inline CSS for layout. Keep it calm and scannable. No JavaScript.
 - Use formulas such as \`{= count(projects.* status = active)}\` or
-  \`{= sum(logs.*.billable)}\` so the view is LIVE. Do not hardcode
+  \`{= sum(logs.*.billable)}\` so the report is LIVE. Do not hardcode
   a metric in HTML if it should come from source markdown.
 - If context is missing, show "what I know / what I need / next
-  capture" in the view instead of fake data.
+  capture" in the report instead of fake data.
 
 Rules for \`.apps/<name>\`:
 - Put the entry at the use-case-specific path, usually
@@ -1159,7 +1159,7 @@ Rules for \`.apps/<name>\`:
   \`dohc.doc\` / \`dohc.database\`); do not create separate canonical JS state.
 - For an app-like tracker, include real app affordances: tabs or panels,
   filters, review queues, status/category/budget/routine sections,
-  empty/error states, and agent handoff actions. The view should be
+  empty/error states, and agent handoff actions. The app should be
   useful for the user's next session, not just pretty.
 - Normal app controls persist through dohc.collection, dohc.doc, or dohc.database.
   Use agent handoff or proposed patches only for judgment-heavy or risky edits.
@@ -1232,7 +1232,7 @@ Before finish_onboarding, self-review the workspace and fix shallow work:
 - No empty or frontmatter-only user-facing files. Every created source file has a job.
 - No useless page pile. The files should form one coherent system with a clear workflow loop.
 - The cockpit is source-backed and useful for the user's next real decision, not a decorative summary.
-- If you used an uploaded CSV or other attachment, the view and sources should reflect actual fields/patterns from it.
+- If you used an uploaded CSV or other attachment, the cockpit and sources should reflect actual fields/patterns from it.
 
 Show .context/me.md back in one line: "here's what I learned about you — it's
 yours, edit it anytime." If the cockpit uses a dated-window
@@ -1287,7 +1287,7 @@ inline atom so it becomes shareable/queryable. Two shapes:
 - formula:  {= sum(addr.key)} · {= count(addr key=val)} ·
             {= clients.acme.owed} · {= latest(log.*.hours)}
             A LIVE value computed across the user's files (the
-            editor fills it on view — you do NOT write a number).
+            editor fills it on render — you do NOT write a number).
             Begins with \`=\`. Last segment is a value \`key\` you
             wrote (except \`count\`, which counts files); earlier
             segments address files, \`*\` globs, \`2025_07_*\` is a
@@ -1366,10 +1366,10 @@ read clean; "currently in progress and awaiting client signoff"
 becomes a pill that overflows. Long descriptive text → use plain
 prose, not a value atom.
 
-## LIVE VIEWS (block-level live data)
+## LIVE QUERY CARDS (block-level live data)
 
-A live view is a fenced query block in source. The user sees it as a
-"Live view" card; the source stays inspectable and editable for the
+A live query card is a fenced query block in source. The user sees it as a
+live data card; the source stays inspectable and editable for the
 agent/power user:
 
   \`\`\`query
@@ -1385,12 +1385,12 @@ Namespaces + verbs available:
 - capacity.heatmap({ window: "next-8w" }) — ASCII heatmap
 - capacity.risks()                        — overbook risks
 
-## HTML ATOMS (a polished VIEW of data, never data themselves)
+## HTML ATOMS (a polished report over data, never data themselves)
 
 When the user wants a REPORT, DASHBOARD, PRESENTATION, or any
 designed page that needs custom layout / custom typography beyond
 what a markdown atom can give — make an html atom. md atoms are
-the SOURCE OF TRUTH; html is a generated VIEW that reads from them
+the SOURCE OF TRUTH; html is a generated report that reads from them
 live.
 
 - **The FILE EXTENSION decides how an atom renders.** Give an html
@@ -1409,14 +1409,14 @@ live.
   in md atoms. Use \`{= sum(logs.*.billable)}\`,
   \`{= count(projects.*)}\`, \`{= clients.acme.owed}\`, etc. — formulas
   that resolve LIVE from md atoms. Inline atoms \`{key: value}\` in an
-  html body do NOT capture (html is a view); the values live in md.
+  html body do NOT capture (html is a report); the values live in md.
 
 ### How rendering works (compose for it)
 
 Server-side, before the iframe loads, the system walks the HTML
 body's text nodes and substitutes EVERY \`{}\` atom with its
 rendered value — exactly mirroring the markdown editor's pill
-rendering, so the html view reads as the user expects:
+rendering, so the html report reads as the user expects:
 
   Source (in html body):  Client: {clients: Acme Corp}
   Rendered (what user sees): Client: Acme Corp
@@ -1471,13 +1471,13 @@ Substitution rules:
   | A printable / branded / designed report     | html atom          |
   | Interactivity (clicks, forms, drag-drop)    | .apps custom app |
   | A custom read-only data app                 | .apps custom app |
-  | User explicitly says "app", "view", ".apps"| .apps custom app |
+  | User explicitly says "app", "custom interface", ".apps"| .apps custom app |
 
 ### Workflow
 
 BEFORE / WHILE writing an html atom: ALSO author/refresh the md
-source atoms the view will read. The user EDITS those md atoms
-to update the view (the dashboard updates live without re-
+source atoms the report will read. The user EDITS those md atoms
+to update the report (the dashboard updates live without re-
 editing the html). Without source md atoms an html atom is a
 static husk.
 
@@ -1487,14 +1487,14 @@ static husk.
   A stale/missing/divergent \`sources:\` degrades only the jump
   affordance — NEVER the render (the body's \`{= }\` is the truth).
 - Pick md when the user will COLLABORATIVELY EDIT the truth;
-  html when they want a polished VIEW to read or share.
+  html when they want a polished report to read or share.
 
 ## CUSTOM APPS (.apps/ app surfaces)
 
 When the user wants an interactive dashboard, app-like workspace,
 folder cockpit, portal, kanban board, form-like control surface, or
 anything that needs JavaScript, create a folder-local app instead of an
-html atom. If the user explicitly asks for an app or view, create a \`.apps/<name>/\` package, not \`home.html\`.
+html atom. If the user explicitly asks for an app or interactive surface, create a \`.apps/<name>/\` package, not \`home.html\`.
 
 Custom apps:
 - Apps are interactive workspace tools stored in .apps/<name>.
@@ -1915,7 +1915,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     capture: createTool({
       description:
-        "Register values you noted as a BYPRODUCT of the user's work (after you wrote them via create_atom/create_entities). The user never 'files' anything — you capture. Mark shared:true if a value would show in someone else's view; unsure:true if ambiguous. Private values are captured silently (no nagging).",
+        "Register values you noted as a BYPRODUCT of the user's work (after you wrote them via create_atom/create_entities). The user never 'files' anything — you capture. Mark shared:true if a value would be visible to someone else; unsure:true if ambiguous. Private values are captured silently (no nagging).",
       inputSchema: z.object({
         items: z.array(
           z.object({
@@ -4699,8 +4699,8 @@ A new user wants dohc to set up: "${setup}".
 This is the setup request, not their job title.
 
 Generate EXACTLY 3 sharp onboarding questions whose answers let us tailor a populated setup for THIS request specifically. Rules:
-- Each question is a single- or multi-select with 3–6 CONCRETE options drawn from the real vocabulary of "${setup}" (name actual things they'd track / categories / views / rituals / units — not generic "productivity" filler).
-- The 3 questions must cover DISTINCT dimensions — pick the 3 highest-signal of: source material · dashboard view · capture rhythm · categories/statuses · sharing/review needs.
+- Each question is a single- or multi-select with 3–6 CONCRETE options drawn from the real vocabulary of "${setup}" (name actual things they'd track / categories / workflows / rituals / units — not generic "productivity" filler).
+- The 3 questions must cover DISTINCT dimensions — pick the 3 highest-signal of: source material · dashboard surface · capture rhythm · categories/statuses · sharing/review needs.
 - Do NOT ask them to restate the setup. Do NOT ask their job. No yes/no. No "other" option (the UI adds a free-text box itself). Keep each question and option tight (a few words).
 - "multi" only when more than one answer is genuinely normal; else "single".`,
     })

@@ -16,7 +16,7 @@ import {
   parseInlineAtomsFromMarkdownWithStatus,
 } from './inlineAtom'
 import { resolveScopeRelativePath } from './appPaths'
-import { resolveAppDescriptor } from './apps'
+import { isAppDescriptorError, resolveAppDescriptor } from './apps'
 import type { AppActionDescriptor } from './apps'
 import { previewWindowImpl, resolveWindowForViewer } from './windows'
 import {
@@ -36,7 +36,12 @@ import { isTrustedForKey } from './appTrust'
 const SOURCE_SCAN_CAP = 5000
 const RESULT_ROW_CAP = 500
 
-type AppDataErrorCode = 'app-not-found' | 'invalid-path' | 'not-found' | 'forbidden'
+type AppDataErrorCode =
+  | 'app-not-found'
+  | 'invalid-path'
+  | 'not-found'
+  | 'forbidden'
+  | 'source-scan-truncated'
 
 type AppDataError = {
   ok: false
@@ -54,6 +59,10 @@ const INVALID_PATH: AppDataError = {
   ok: false,
   code: 'invalid-path',
   message: 'This path is not available to this app.',
+}
+
+function descriptorErrorToAppData(error: { code: 'source-scan-truncated'; message: string }): AppDataError {
+  return { ok: false, code: error.code, message: error.message }
 }
 
 type AppActionErrorCode =
@@ -78,6 +87,7 @@ type AppActionErrorCode =
   | 'source-version-conflict'
   | 'app-trust-required'
   | 'collection-scan-truncated'
+  | 'source-scan-truncated'
   | 'unsupported-format'
 
 type AppActionError = {
@@ -321,8 +331,9 @@ async function resolveApp(
   const identity = await ctx.auth.getUserIdentity()
   const viewerSubject = identity?.subject ?? ''
   const app = await resolveAppDescriptor(ctx, workspaceId, viewerSubject, packageRoot)
-  if (!app) return null
-  return { workspaceId, viewerSubject, app }
+  if (isAppDescriptorError(app)) return descriptorErrorToAppData(app)
+  if (!app) return APP_NOT_FOUND
+  return { ok: true as const, workspaceId, viewerSubject, app }
 }
 
 function resolveSource(app: { scopePath: string; read: string[] }, source?: string): string | null {
@@ -379,7 +390,7 @@ export const listSources = query({
   },
   handler: async (ctx, { packageRoot, source, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const sourceScope = resolveSource(resolved.app, source)
     if (sourceScope === null) return INVALID_PATH
@@ -414,7 +425,7 @@ export const getAtom = query({
   },
   handler: async (ctx, { packageRoot, path, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const atomPath = resolveScopeRelativePath(resolved.app.scopePath, path)
     if (atomPath === null) return INVALID_PATH
@@ -462,7 +473,7 @@ export const queryFields = query({
   },
   handler: async (ctx, { packageRoot, source, keys, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const sourceScope = resolveSource(resolved.app, source)
     if (sourceScope === null) return INVALID_PATH
@@ -519,6 +530,7 @@ export const _resolveActionForRun = internalQuery({
       return actionError('forbidden', 'Not authenticated.')
     }
     const app = await resolveAppDescriptor(ctx, workspaceId, subject, packageRoot)
+    if (isAppDescriptorError(app)) return actionError(app.code, app.message)
     if (!app) {
       return actionError('app-not-found', 'App not found.')
     }
@@ -858,6 +870,7 @@ export const _resolveDocMutationForRun = internalQuery({
       return actionError('forbidden', 'Not authenticated.')
     }
     const app = await resolveAppDescriptor(ctx, workspaceId, args.subject, args.packageRoot)
+    if (isAppDescriptorError(app)) return actionError(app.code, app.message)
     if (!app) return actionError('app-not-found', 'App not found.')
     if (!app.configStatus.ok) return actionError('invalid-manifest', 'The app manifest is invalid.')
     const atomPath = resolveScopeRelativePath(app.scopePath, args.path)
@@ -1071,6 +1084,7 @@ export const _resolveCollectionMutationForRun = internalQuery({
   ): Promise<ResolvedCollectionMutation | AppActionError> => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const app = await resolveAppDescriptor(ctx, workspaceId, subject, packageRoot)
+    if (isAppDescriptorError(app)) return actionError(app.code, app.message)
     if (!app) return actionError('app-not-found', 'App not found.')
     if (!app.configStatus.ok) {
       return collectionActionError('app-not-found', 'The app manifest is invalid.')
@@ -1312,7 +1326,7 @@ export const listImports = query({
   },
   handler: async (ctx, { packageRoot, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const grants = await ctx.db
       .query('windowGrants')
@@ -1355,7 +1369,7 @@ export const listExports = query({
   },
   handler: async (ctx, { packageRoot, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const windows = await ctx.db
       .query('windows')
@@ -1388,7 +1402,7 @@ export const previewExport = query({
   },
   handler: async (ctx, { packageRoot, windowId, activeWorkspaceId }) => {
     const resolved = await resolveApp(ctx, activeWorkspaceId, packageRoot)
-    if (!resolved) return APP_NOT_FOUND
+    if (!resolved.ok) return resolved
 
     const win = await ctx.db.get(windowId)
     if (!win || win.ownerWorkspaceId !== resolved.workspaceId) {

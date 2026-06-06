@@ -56,7 +56,7 @@ describe('setup-first onboarding wedge', () => {
     expect(AGENT_SRC).toContain('home.html')
     expect(AGENT_SRC).toContain('use-case-named \\`.apps/<name>\\` app')
     expect(AGENT_SRC).toContain('use \\`.apps/home\\` only when the user asked for a general home')
-    expect(AGENT_SRC).toContain('workspace view, or a')
+    expect(AGENT_SRC).toContain('workspace surface, or a')
     expect(AGENT_SRC).toContain('create a \\`.apps/<name>/\\` package')
     expect(AGENT_SRC).toContain('not \\`home.html\\`')
     expect(AGENT_SRC).toContain('.runs/setup.md')

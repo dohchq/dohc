@@ -295,6 +295,36 @@ describe('databaseFiles', () => {
     })
   })
 
+  it('fails app database reads closed when descriptor resolution would use a capped partial scan', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, W, 'finance/.apps/tracker/src/App.tsx', 'app')
+    for (let index = 0; index < 5001; index += 1) {
+      await seedAtom(t, W, `archive/${String(index).padStart(4, '0')}.md`, '# Archive')
+    }
+    await seedAtom(
+      t,
+      W,
+      'finance/.apps/tracker/app.json',
+      JSON.stringify({
+        title: 'Finance Tracker',
+        read: ['ledger.sqlite'],
+        write: ['ledger.sqlite'],
+        databases: { ledger: { path: 'ledger.sqlite', write: true } },
+      }),
+    )
+
+    await expect(
+      t.withIdentity({ subject: W }).query(api.databaseFiles.appQuery, {
+        packageRoot: 'finance/.apps/tracker',
+        path: 'ledger.sqlite',
+        sql: 'select * from transactions',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'source-scan-truncated',
+    })
+  })
+
   it('reads SQLite-backed collection rows through the app manifest', async () => {
     const t = convexTest(schema, modules)
     await stubSqliteWorker()

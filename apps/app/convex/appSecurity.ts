@@ -2,7 +2,7 @@ import type { MutationCtx, QueryCtx } from './_generated/server'
 import type { Doc } from './_generated/dataModel'
 import { requireWorkspace } from './auth'
 import { canReadAtom, canWriteAtomPath } from './atomAccess'
-import { resolveAppDescriptor } from './apps'
+import { isAppDescriptorError, resolveAppDescriptor } from './apps'
 import { isTrustedForKey } from './appTrust'
 export {
   globBase,
@@ -23,6 +23,7 @@ export type AppSecurityError = {
     | 'collection-write-not-granted'
     | 'source-write-not-authorized'
     | 'app-trust-required'
+    | 'source-scan-truncated'
   message: string
 }
 
@@ -52,6 +53,7 @@ export async function resolveAppForSecurity(
   const identity = await ctx.auth.getUserIdentity()
   if (!identity) throw new Error('Not authenticated')
   const app = await resolveAppDescriptor(ctx, workspaceId, identity.subject, packageRoot)
+  if (isAppDescriptorError(app)) return error(app.code, app.message)
   if (!app) return error('app-not-found', 'App not found.')
   if (!app.configStatus.ok) {
     return error('invalid-manifest', 'The app manifest is invalid.')

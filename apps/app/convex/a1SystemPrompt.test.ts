@@ -99,7 +99,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('not every folder is a project')
     expect(personal).toContain('project-scoped or no-project')
     expect(personal).toContain('Markdown atoms are the inspectable source')
-    expect(personal).toContain('HTML atoms are polished presentation views')
+    expect(personal).toContain('HTML atoms are polished read-only reports')
     expect(personal).toContain('.apps/ is the convention for folder-local apps')
     expect(personal).toContain('App source code is normal web code')
     expect(personal).toContain('Use TypeScript/React by default')
@@ -110,7 +110,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('cross-workspace data path')
     expect(personal).toContain('Normal app controls persist through dohc.collection, dohc.doc, or dohc.database')
     expect(personal).toContain('App manifests never grant permissions by themselves')
-    expect(personal).toContain('build source first, view second')
+    expect(personal).toContain('build source first, interface second')
     expect(personal).toContain('show what changed, what is known, what is missing')
     expect(personal).toContain('respect locks, sharing boundaries, capture review, skill-turn gates, and review gates')
   })
@@ -145,7 +145,30 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('Command')
     expect(personal).toContain('explicit shortcut')
     expect(personal).toContain('Markdown source comes before interfaces')
-    expect(personal).toContain('Do not create a view just because the user asked for "help"')
+    expect(personal).toContain('Do not create an interface just because the user asked for "help"')
+  })
+
+  it('does not use legacy view product language outside explicit migration compatibility', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    const forbiddenProductPhrases = [
+      'new source files, views, dashboards',
+      'creating files or views',
+      'Source-backed HTML views',
+      'source-backed html views',
+      'presentation views',
+      'views over source state',
+      'Do not create a view',
+      'source and view agree',
+      'sources and view agree',
+      'synthesis views',
+    ]
+
+    for (const phrase of forbiddenProductPhrases) {
+      expect(personal).not.toContain(phrase)
+      expect(AGENT_SRC).not.toContain(phrase)
+    }
+    expect(personal).not.toContain('.views')
+    expect(personal).not.toContain('@dohc/view')
   })
 
   it('requires a plan-before-build approval gate for custom workspace systems', () => {
@@ -243,7 +266,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
 
   it('routes explicit app requests to .apps packages instead of html atoms', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
-    expect(personal).toContain('If the user explicitly asks for an app or view')
+    expect(personal).toContain('If the user explicitly asks for an app or interactive surface')
     expect(personal).toContain('create a `.apps/<name>/` package, not `home.html`')
     expect(personal).not.toContain('Default to `home.html` when the first cockpit')
   })

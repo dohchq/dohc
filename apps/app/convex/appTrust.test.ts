@@ -9,6 +9,11 @@ const modules = import.meta.glob('./**/*.ts')
 const ALICE = 'ws_app_trust_alice'
 const BOB = 'ws_app_trust_bob'
 
+function assertOk<T extends { ok: boolean }>(value: T): asserts value is Extract<T, { ok: true }> {
+  expect(value).toMatchObject({ ok: true })
+  if (!value.ok) throw new Error('expected ok result')
+}
+
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
   workspaceId: string,
@@ -68,6 +73,7 @@ describe('api.appTrust', () => {
         'finance/transactions/**',
       ],
     })
+    assertOk(before)
     expect(before.prompt).toContain('Finance Tracker wants to write to:')
     expect(before.prompt).toContain('- finance/transactions/**')
     expect(before.prompt).toContain('Changing app.json resets this permission.')
@@ -89,6 +95,7 @@ describe('api.appTrust', () => {
     const before = await t.withIdentity({ subject: ALICE }).query(api.appTrust.state, {
       packageRoot: 'finance/.apps/tracker',
     })
+    assertOk(before)
     await t.withIdentity({ subject: ALICE }).mutation(api.appTrust.grant, {
       packageRoot: 'finance/.apps/tracker',
     })
@@ -114,6 +121,7 @@ describe('api.appTrust', () => {
       packageRoot: 'finance/.apps/tracker',
     })
     expect(after).toMatchObject({ ok: true, trusted: false })
+    assertOk(after)
     expect(after.trustKey).not.toBe(before.trustKey)
     expect(after.writeTargets).toContain('finance/budgets.md')
   })
@@ -143,6 +151,7 @@ describe('api.appTrust', () => {
       activeWorkspaceId: orgId,
       packageRoot: 'finance/.apps/tracker',
     })
+    assertOk(aliceBefore)
 
     expect(aliceAfter).toMatchObject({
       ok: true,
@@ -153,6 +162,33 @@ describe('api.appTrust', () => {
       ok: true,
       trusted: false,
       trustKey: aliceBefore.trustKey,
+    })
+  })
+
+  it('fails closed when app descriptor resolution would use a capped partial scan', async () => {
+    const t = convexTest(schema, modules)
+    await seedAtom(t, ALICE, 'finance/.apps/tracker/src/App.tsx', 'app')
+    for (let index = 0; index < 5001; index += 1) {
+      await seedAtom(t, ALICE, `archive/${String(index).padStart(4, '0')}.md`, '# Archive')
+    }
+    await seedAtom(
+      t,
+      ALICE,
+      'finance/.apps/tracker/app.json',
+      JSON.stringify({
+        title: 'Finance Tracker',
+        read: ['ledger.sqlite'],
+        write: ['ledger.sqlite'],
+      }),
+    )
+
+    await expect(
+      t.withIdentity({ subject: ALICE }).query(api.appTrust.state, {
+        packageRoot: 'finance/.apps/tracker',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'source-scan-truncated',
     })
   })
 })
