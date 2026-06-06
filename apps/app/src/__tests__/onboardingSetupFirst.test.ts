@@ -31,10 +31,11 @@ describe('setup-first onboarding wedge', () => {
   it('asks for a Setup Run that produces source docs plus a first-class cockpit surface', () => {
     expect(ONBOARDING_SRC).toContain('Setup Run')
     expect(ONBOARDING_SRC).toContain('home.html')
-    expect(ONBOARDING_SRC).toContain('.views/<use-case>')
-    expect(ONBOARDING_SRC).toContain('use .views/home only if the user asked for a general home')
+    expect(ONBOARDING_SRC).toContain('.apps/<use-case>')
+    expect(ONBOARDING_SRC).toContain('use .apps/home only if the user asked for a general home')
     expect(ONBOARDING_SRC).toContain('.runs/setup.md')
     expect(ONBOARDING_SRC).toContain('source-backed cockpit')
+    expect(ONBOARDING_SRC).toContain('If you create an app, run test_app and fix failures before finish_onboarding.')
   })
 
   it('uses team-workflow language for org onboarding surfaces', () => {
@@ -53,10 +54,10 @@ describe('setup-first onboarding wedge', () => {
   it('locks the agent to no-fake-productivity-theater onboarding', () => {
     expect(AGENT_SRC).toContain('No fake productivity theater')
     expect(AGENT_SRC).toContain('home.html')
-    expect(AGENT_SRC).toContain('use-case-named \\`.views/<name>\\` app')
-    expect(AGENT_SRC).toContain('use \\`.views/home\\` only when the user asked for a general home')
+    expect(AGENT_SRC).toContain('use-case-named \\`.apps/<name>\\` app')
+    expect(AGENT_SRC).toContain('use \\`.apps/home\\` only when the user asked for a general home')
     expect(AGENT_SRC).toContain('workspace view, or a')
-    expect(AGENT_SRC).toContain('create a \\`.views/<name>/\\` package')
+    expect(AGENT_SRC).toContain('create a \\`.apps/<name>/\\` package')
     expect(AGENT_SRC).toContain('not \\`home.html\\`')
     expect(AGENT_SRC).toContain('.runs/setup.md')
     expect(AGENT_SRC).toContain('source-backed cockpit')

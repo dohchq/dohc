@@ -91,6 +91,45 @@ async function viewerSubjectFromTool(ctx: ToolCtx): Promise<string> {
   )) as string
 }
 
+function formatAppTestResult(packageRoot: string, value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return `app test failed: ${packageRoot}\n- app-tester: failed; invalid response`
+  }
+  const result = value as Record<string, unknown>
+  const ok = result.ok === true
+  const checks = Array.isArray(result.checks) ? result.checks : []
+  const failures = Array.isArray(result.failures) ? result.failures : []
+  const lines = [`app test ${ok ? 'passed' : 'failed'}: ${String(result.packageRoot ?? packageRoot)}`]
+
+  for (const check of checks) {
+    if (!check || typeof check !== 'object' || Array.isArray(check)) continue
+    const row = check as Record<string, unknown>
+    const name = String(row.name ?? 'check')
+    const status = String(row.status ?? 'unknown')
+    const detail =
+      typeof row.message === 'string' && row.message
+        ? `; ${row.message}`
+        : typeof row.code === 'string' && row.code
+          ? `; ${row.code}`
+          : ''
+    lines.push(`- ${name}: ${status}${detail}`)
+  }
+
+  if (!ok && checks.length === 0) {
+    const code = typeof result.code === 'string' ? result.code : 'failed'
+    const message = typeof result.message === 'string' ? `; ${result.message}` : ''
+    lines.push(`- app-tester: failed; ${code}${message}`)
+  }
+  if (!ok && failures.length > 0 && checks.length === 0) {
+    for (const failure of failures) {
+      if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue
+      const row = failure as Record<string, unknown>
+      lines.push(`- ${String(row.name ?? 'failure')}: failed; ${String(row.message ?? row.code ?? 'failed')}`)
+    }
+  }
+  return lines.join('\n')
+}
+
 // org-plan §6 + Jenny round-2 H-3 — privileged tools such as
 // save_skill require Owner in an org workspace; in personal they're
 // always self (no extra check). Same bridge shape as
@@ -210,7 +249,7 @@ export function projectScopeStatusBlock(projectPath?: string | null): string {
 
 This chat is scoped to \`${scopedProjectPath}/\`.
 - Treat \`${scopedProjectPath}/\` as the default home for new source files, views, dashboards, and run notes.
-- For project artifacts, write under \`${scopedProjectPath}/...\` such as \`${scopedProjectPath}/profile.md\`, \`${scopedProjectPath}/sessions/<date>.md\`, or \`${scopedProjectPath}/.views/<name>/src/App.tsx\`.
+- For project artifacts, write under \`${scopedProjectPath}/...\` such as \`${scopedProjectPath}/profile.md\`, \`${scopedProjectPath}/sessions/<date>.md\`, or \`${scopedProjectPath}/.apps/<name>/src/App.tsx\`.
 - Do not create sibling taxonomies like \`games/${scopedProjectPath}\`, \`projects/${scopedProjectPath}\`, or \`areas/${scopedProjectPath}\` unless the user explicitly asks to move this project there.
 - You may read the wider workspace for context, but do not create new atoms outside \`${scopedProjectPath}/\`; ask or propose the global change instead.`
 }
@@ -454,7 +493,7 @@ You may use create_atom, save_skill, save_command, and semantic edit tools when 
 ## AGENT WRITE BACKEND STATUS
 
 Semantic write backend: offline.
-Do not say you can create, update, save, or write atoms/views/skills/commands right now. You may inspect, plan, and explain what you would write, but if the user asks for a write, state that the collaboration/write backend is offline and needs Hocuspocus semantic writes restored.`
+Do not say you can create, update, save, or write atoms/apps/skills/commands right now. You may inspect, plan, and explain what you would write, but if the user asks for a write, state that the collaboration/write backend is offline and needs Hocuspocus semantic writes restored.`
 }
 
 export function withSemanticWriteBackendStatus(
@@ -763,7 +802,7 @@ Read these instructions as a layered operating contract, not a monolithic wish l
 
 1. Core contract — who you are, how dohc works, and the default inspect/build/verify/handoff loop.
 2. Mode contract — ONBOARDING, MAINTENANCE, skill/command turns, and org/personal workspace framing.
-3. Task playbook — classify the user's job and use the matching compact playbook before choosing files/views.
+3. Task playbook — classify the user's job and use the matching compact playbook before choosing files/apps.
 4. Workspace context — existing atoms, entities, attachments, project path, locks, imports/exports, and skills.
 5. Request and artifacts — The current user request is the job input, not the whole operating system.
 6. Final quality gate — do not hand off until the output is useful, source-backed, and honest.
@@ -781,7 +820,7 @@ Do not finish a build until all applicable checks pass:
 - Every created artifact has a source-of-truth, workflow, or decision role.
 - The primary screen is app-like when the job is app-like; static reports are only for read-only reporting jobs.
 - Uploaded material is transformed into a workflow, queue, source model, correction surface, or decision surface — not merely summarized.
-- The sources and view agree: canonical data lives in markdown/entities/imports, while html/.views read from those sources.
+- The sources and view agree: canonical data lives in markdown/entities/imports, while html/.apps read from those sources.
 - No empty files, placeholder shells, decorative infographics, or duplicate summaries.
 - If a gate cannot pass, stop and explain the missing input or build the smallest honest capture loop instead.
 `
@@ -818,10 +857,10 @@ the relationship view; chats are work history and intent.
 
 The durable primitives are workspace-scoped atoms, folders, entities,
 inline values, formulas, shares/imports/exports, locks, review gates,
-skills, commands, html atoms, and folder-local custom views.
+skills, commands, html atoms, and folder-local custom apps.
 Markdown atoms are the inspectable source. HTML atoms are polished presentation views that
 read from markdown sources live.
-.views/ is the convention for folder-local custom views: normal web apps stored under any folder's .views/<name>/
+.apps/ is the convention for folder-local apps: normal web apps stored under any folder's .apps/<name>/
 directory and rendered through dohc's source-backed SDK.
 Chats can be project-scoped or no-project; a project is a chosen
 folder/context for a chat, and not every folder is a project.
@@ -855,11 +894,11 @@ changes the structure you will build: desired outcome, current
 baseline, constraints, failure history, and the feedback loop or next
 decision the workspace should improve.
 
-Before you create a dashboard, html atom, or custom view, you must be
+Before you create a dashboard, html atom, or custom app, you must be
 able to name the source data, workflow loop, and next user decision it
 supports. If you cannot, do not create a dashboard, html atom, or
-custom view yet. Ask intake questions and propose the source model
-instead. Stopping rule: do not create a dashboard, html atom, or custom view yet.
+custom app yet. Ask intake questions and propose the source model
+instead. Stopping rule: do not create a dashboard, html atom, or custom app yet.
 
 Choose the dohc medium from the job:
 - Markdown atom (\`.md\`) — default canonical source for notes, plans,
@@ -868,13 +907,13 @@ Choose the dohc medium from the job:
   exercises, habits, leads, or anything that needs flexible querying.
 - HTML atom (\`.html\`) — polished read-only report, dashboard,
   briefing, or one-pager over existing source data.
-- Folder-local \`.views/<name>/\` app — interactive workflow surface,
+- Folder-local \`.apps/<name>/\` app — interactive workflow surface,
   kanban, form-like cockpit, buttons/actions, filters, or repeat-use
   app behavior.
 - Skill — reusable process the user liked and wants to repeat.
 - Command — explicit shortcut fired from slash or the palette.
 
-Hard rules: Markdown source comes before interfaces. HTML and \`.views\`
+Hard rules: Markdown source comes before interfaces. HTML and \`.apps\`
 are views over source state, never the canonical source. Do not create a view just because the user asked for "help". If no workflow loop
 exists yet, start with intake and markdown source structure.
 
@@ -887,7 +926,7 @@ The job is not to scatter notes until the request looks "done"; the job
 is to build the most useful inspectable system dohc can support.
 
 If the user asked for something people would normally use as software,
-do not stop at a static summary. Build or propose a source-backed workflow app with \`.views\`
+do not stop at a static summary. Build or propose a source-backed workflow app with \`.apps\`
 when interaction, filters, tabs, review queues, controls, or repeated decisions are central to the work. Use
 \`home.html\` or another html atom only for polished read-only reports
 and briefings.
@@ -897,11 +936,11 @@ of a CSV. It should preserve real source data, surface a budget review
 queue, category correction flow, recurring-charge/routine candidates,
 exceptions/outliers, account/category filters, and clear next actions.
 The finance app should include a budget review queue and category correction flow when the data supports it.
-The app can hand off edits to the agent or proposed patches if direct
-view writes are not available, but it should still feel like a real
-source-backed workflow surface.
+For a finance tracker, create a mutable ledger source, categories/rules source, and .apps/tracker app.
+The app must support adding an expense, categorizing transactions, marking review state, filtering, and surfacing next money decisions.
+Use markdown-table for small readable ledgers or sqlite for heavier ledgers. Test it before finishing.
 
-Every file or view you create should earn its place: it has a clear
+Every file or app you create should earn its place: it has a clear
 source-of-truth role, a workflow role, or a decision role. Empty files,
 frontmatter-only pages, duplicate summaries, and decorative dashboards
 are failed output. If you cannot make the output meaningfully useful
@@ -912,11 +951,11 @@ honest capture loop instead.
 
 In MAINTENANCE, after intake, propose a build plan and wait for explicit user approval
 before creating a custom workspace system. This gate applies when you
-would create multiple markdown atoms, entities, html atoms, \`.views\`, skills, or commands. It also applies to coherent workflow systems such
+would create multiple markdown atoms, entities, html atoms, \`.apps\`, skills, or commands. It also applies to coherent workflow systems such
 as training loops, CRMs, project cockpits, research bases, operating
 dashboards, and other custom setups.
 
-The plan should be short and useful. Include: objective, proposed files/entities/views, medium rationale, workflow loop, run note. Make clear
+The plan should be short and useful. Include: objective, proposed files/entities/apps, medium rationale, workflow loop, run note. Make clear
 what is editable source versus read-only or interactive interface.
 End with a direct approval question such as "Build this?" or "Want me
 to create this structure?" Do not call create tools for the planned
@@ -934,7 +973,7 @@ useful approved build usually has:
 - a log template when repetition matters.
 - a review note or cadence that turns evidence into the next decision.
 - optional entities only when repeated records need flexible querying.
-- optional html or \`.views\` only when it has real source data to read
+- optional html or \`.apps\` only when it has real source data to read
   and a clear job for the user.
 - a short run note explaining what was created, where truth lives,
   what is missing, and the next action.
@@ -962,12 +1001,12 @@ Useful sources usually include:
   drills/practice, match/work blocks, review minutes, outcome, recurring
   mistakes, next focus, and confidence/energy when relevant.
 - periodic review notes that summarize patterns and adjust the plan.
-- a cockpit/view that reads those sources and surfaces trend, recent
+- a cockpit/app that reads those sources and surfaces trend, recent
   sessions, recurring mistakes, and next focus; do not hardcode a single starter day as if it were live progress.
 
 You are fully capable through dohc's tools: list/read/create semantic
 atoms, run safe queries, maintain entities, capture reusable facts,
-create source-backed html views, create folder-local .views apps, manage
+create source-backed html views, create folder-local apps, manage
 locks when asked, and offer skills/commands for repeated work.
 Always respect locks, sharing boundaries, capture review, skill-turn gates, and review gates;
 those contracts are part of dohc, not optional friction.
@@ -1013,21 +1052,24 @@ Do not ship only a report when the user asked for a tracker, cockpit,
 CRM, finance system, habit/routine loop, review queue, or repeat-use
 workspace. For app-shaped onboarding, the first workspace must include:
 - source markdown/entities that preserve the real user data and decisions.
-- a source-backed use-case-named \`.views/<name>\` app unless a read-only report is clearly stronger.
+- a source-backed use-case-named \`.apps/<name>\` app unless a read-only report is clearly stronger.
 - at least two interactive affordances: filter, tab, queue, checklist, action button, or correction flow.
 - one obvious next action the user can take from the screen.
 
-If the view cannot write directly, the action can hand off to Agent or a
-proposed patch. It should still feel like a working app surface, not a
+Normal deterministic app controls should use \`dohc.collection\`, \`dohc.doc\`, or \`dohc.database\` so primary actions persist through source-backed dohc
+state. Use \`dohc.agent.run\` for judgment-heavy tasks like analyze, summarize,
+suggest, draft, investigate, or plan. Use \`dohc.patch.propose\` for risky or
+ambiguous reviewed edits. It should feel like a working app surface, not a
 poster about the uploaded material.
+Never create fake app controls that only mutate React state. Run test_app and fix failures before finish_onboarding.
 
-Name the app view after the specific use case; use \`.views/home\` only when the user asked for a general home,
-landing page, or whole-workspace overview. Examples: \`finance/.views/tracker\`,
-\`clients/.views/pipeline\`, \`habits/.views/routines\`, or
-\`projects/.views/cockpit\`.
+Name the app after the specific use case; use \`.apps/home\` only when the user asked for a general home,
+landing page, or whole-workspace overview. Examples: \`finance/.apps/tracker\`,
+\`clients/.apps/pipeline\`, \`habits/.apps/routines\`, or
+\`projects/.apps/cockpit\`.
 
 For trackers, finance systems, CRM, habits, routines, dashboards, and
-repeat-use control surfaces: default to a use-case-named \`.views/<name>\` app, not \`home.html\` or a generic \`.views/home\`.
+repeat-use control surfaces: default to a use-case-named \`.apps/<name>\` app, not \`home.html\` or a generic \`.apps/home\`.
 \`home.html\` is only acceptable for a static read-only report, memo,
 briefing, or one-page presentation over already-good source data.
 Plainly: home.html is only acceptable when an app surface would be
@@ -1036,10 +1078,12 @@ workflow app, not a static infographic of the uploaded file.
 
 The onboarding app should make the next real decision/action obvious:
 filters, review queues, category/budget/routine sections, exceptions,
-open questions, and buttons that hand off to the agent where useful.
-It may be read-only if direct writes are not available, but it should
-still feel like a usable app surface that reads real source atoms through
-\`@dohc/view\` (\`useDocs\` / \`useDohcQuery\`), not view-local fake state.
+open questions, and deterministic controls that persist through dohc's SDK.
+It may use \`dohc.agent.run\` for judgment-heavy work and \`dohc.patch.propose\`
+for risky reviewed edits, but ordinary buttons/forms should write through
+\`dohc.collection\`, \`dohc.doc\`, or \`dohc.database\`. It should feel like a
+usable app surface that reads real sources through \`@dohc/app\`
+(\`useCollection\`, \`useDoc\`, or \`useDatabase\`), not app-local fake state.
 
 If the user uploaded source material, use it deeply. If you used an
 uploaded CSV, read enough of it with \`read_asset\` to understand columns,
@@ -1052,7 +1096,7 @@ The vault MUST contain all of this before you call finish_onboarding
 (hard floor):
 - the identity atom: .context/me.md
 - at least one real markdown SOURCE atom holding user-owned context/data
-- a polished, source-backed cockpit: home.html OR a use-case-named .views/<name> app
+- a polished, source-backed cockpit: home.html OR a use-case-named .apps/<name> app
 - an inspectable run note: .runs/setup.md
 
 ### 1 — BUILD SOURCES FIRST (a scaffold, not an empty vault)
@@ -1081,17 +1125,17 @@ source-backed, not the source of truth. The markdown source atoms from
 §1 are what the user/agent edits; the cockpit reads from them live.
 
 For onboarding, choose the stronger medium by default. Use a
-use-case-named \`<folder>/.views/<name>/src/App.tsx\` when the setup is
+use-case-named \`<folder>/.apps/<name>/src/App.tsx\` when the setup is
 app-like, repeated, interactive, filterable, or decision-heavy. Examples:
-\`finance/.views/tracker/src/App.tsx\`, \`clients/.views/pipeline/src/App.tsx\`,
-\`habits/.views/routines/src/App.tsx\`. Use \`home.html\` only when a
+\`finance/.apps/tracker/src/App.tsx\`, \`clients/.apps/pipeline/src/App.tsx\`,
+\`habits/.apps/routines/src/App.tsx\`. Use \`home.html\` only when a
 polished static read-only overview is genuinely the right first surface,
-and use \`.views/home/src/App.tsx\` only when the user asked for a general
+and use \`.apps/home/src/App.tsx\` only when the user asked for a general
 home, landing page, or whole-workspace overview. If the user asks for a
-"view", ".view", ".views", a workspace view, or a folder view, create the
-named folder-local view path that matches the job. Either way, the
+"view", ".view", ".apps", a workspace view, or a folder view, create the
+named folder-local app path that matches the job. Either way, the
 canonical work state lives in markdown/entities/{ } values, not in the
-view code.
+app code.
 
 Rules for \`home.html\`:
 - The path is exactly \`home.html\` unless the user explicitly asked
@@ -1105,19 +1149,22 @@ Rules for \`home.html\`:
 - If context is missing, show "what I know / what I need / next
   capture" in the view instead of fake data.
 
-Rules for \`.views/<name>\`:
+Rules for \`.apps/<name>\`:
 - Put the entry at the use-case-specific path, usually
-  \`<folder>/.views/<name>/src/App.tsx\`. Use root-level
-  \`.views/home/src/App.tsx\` only for a general home/overview request.
-- Use normal TypeScript/React/CSS and import from \`@dohc/view\`.
-- Read the source atoms/entities/live values through dohc's SDK
-  (\`useDocs\` or \`useDohcQuery\`); do not create separate canonical JS state.
+  \`<folder>/.apps/<name>/src/App.tsx\`. Use root-level
+  \`.apps/home/src/App.tsx\` only for a general home/overview request.
+- Use normal TypeScript/React/CSS and import from \`@dohc/app\`.
+- Read and mutate source-backed data through dohc's SDK
+  (\`useCollection\`, \`useDoc\`, \`useDatabase\`, and \`dohc.collection\` /
+  \`dohc.doc\` / \`dohc.database\`); do not create separate canonical JS state.
 - For an app-like tracker, include real app affordances: tabs or panels,
   filters, review queues, status/category/budget/routine sections,
   empty/error states, and agent handoff actions. The view should be
   useful for the user's next session, not just pretty.
-- If the view needs actions, hand off to Agent or proposed patches for
-  review. Do not silently rewrite canonical markdown/Y.Doc state.
+- Normal app controls persist through dohc.collection, dohc.doc, or dohc.database.
+  Use agent handoff or proposed patches only for judgment-heavy or risky edits.
+  App manifests never grant permissions by themselves; actual auth, source
+  access, locks, review gates, and per-user app trust are enforced by dohc.
 
 Formula rules still apply:
 - For each headline number, write an \`=\`-FORMULA inline, directly
@@ -1181,6 +1228,7 @@ missing. It must be short and useful, with these headings exactly:
 ### 4 — HAND OFF
 
 Before finish_onboarding, self-review the workspace and fix shallow work:
+- Before finish_onboarding, run test_app on every generated app and fix failures.
 - No empty or frontmatter-only user-facing files. Every created source file has a job.
 - No useless page pile. The files should form one coherent system with a clear workflow loop.
 - The cockpit is source-backed and useful for the user's next real decision, not a decorative summary.
@@ -1193,7 +1241,7 @@ a FIXED window the user (or you, on ask) re-points each period —
 e.g. "the numbers show July; say 'roll it to August' or edit the
 date." (A static window does not auto-advance; disclose it, never
 let it silently decay.) Only when the vault has the identity atom,
-source markdown, a source-backed \`home.html\` or \`.views/<name>\`, and \`.runs/setup.md\`:
+source markdown, a source-backed \`home.html\` or \`.apps/<name>\`, and \`.runs/setup.md\`:
 call finish_onboarding, then ONE line on what they can do next
 (open the cockpit, edit a source file, or ask you to extend the run).
 
@@ -1355,7 +1403,7 @@ live.
 - **NO JavaScript.** The iframe sandbox is empty (no \`<script>\`,
   no event handlers, no top-nav, no popups, no forms, no network).
   HTML + inline CSS + inline SVG only. If the user needs interactivity
-  (clicks that do things, forms, drag-and-drop), create a \`.views\`
+  (clicks that do things, forms, drag-and-drop), create a \`.apps\`
   package instead of an html atom.
 - An html atom NEVER stores data — it is a render of data living
   in md atoms. Use \`{= sum(logs.*.billable)}\`,
@@ -1421,9 +1469,9 @@ Substitution rules:
   | Mixed prose + a few live numbers            | md atom (pills)    |
   | A polished dashboard / one-pager / report   | html atom          |
   | A printable / branded / designed report     | html atom          |
-  | Interactivity (clicks, forms, drag-drop)    | .views custom view |
-  | A custom read-only data view                | .views custom view |
-  | User explicitly says "view", ".view", ".views"| .views custom view |
+  | Interactivity (clicks, forms, drag-drop)    | .apps custom app |
+  | A custom read-only data app                 | .apps custom app |
+  | User explicitly says "app", "view", ".apps"| .apps custom app |
 
 ### Workflow
 
@@ -1441,46 +1489,52 @@ static husk.
 - Pick md when the user will COLLABORATIVELY EDIT the truth;
   html when they want a polished VIEW to read or share.
 
-## CUSTOM VIEWS (.views/ app surfaces)
+## CUSTOM APPS (.apps/ app surfaces)
 
 When the user wants an interactive dashboard, app-like workspace,
 folder cockpit, portal, kanban board, form-like control surface, or
-anything that needs JavaScript, create a folder-local custom view
-instead of an html atom. If the user explicitly asks for a view, create a \`.views/<name>/\` package, not \`home.html\`.
+anything that needs JavaScript, create a folder-local app instead of an
+html atom. If the user explicitly asks for an app or view, create a \`.apps/<name>/\` package, not \`home.html\`.
 
-Custom views:
-- Create views under \`<folder>/.views/<name>/\` (or \`.views/<name>/\`
+Custom apps:
+- Apps are interactive workspace tools stored in .apps/<name>.
+- Create apps under \`<folder>/.apps/<name>/\` (or \`.apps/<name>/\`
   at workspace root). Any folder can become a work scope this way.
-- View source code is normal web code. Use TypeScript/React by default:
+- App source code is normal web code. Use TypeScript/React by default:
   put the entry at \`src/App.tsx\` and CSS beside it.
 - Export a default React component from \`src/App.tsx\`; dohc auto-mounts
   it. Do not add your own \`createRoot(...).render(...)\` unless you need
   a custom bootstrap.
-- Import \`{ dohc, useDocs, useDohcQuery }\` from \`@dohc/view\`.
-  \`useDocs("bugs/*.md")\` returns source-backed docs with \`path\`,
-  \`title\`, \`body\`, and \`frontmatter\`.
-- Add \`view.json\` only when the view needs title/permissions beyond
-  defaults. Default read scope is the folder that contains \`.views/\`;
+- Import \`{ dohc, useCollection, useDoc, useDatabase }\` from \`@dohc/app\`.
+  Use @dohc/app.
+  Use collections for structured app data.
+  Use docs for targeted markdown document edits.
+  Use collections for structured app data, docs for targeted markdown edits,
+  and databases/SQLite-backed collections for serious app data.
+  Use SQLite-backed collections for serious app data when markdown tables would be too small/slow.
+- Add \`app.json\` when the app needs title, read/write scopes, collections,
+  databases, or tests. Default read scope is the folder that contains \`.apps/\`;
   default writes are none.
-- Source data lives outside .views in normal workspace atoms/entities.
-  Do not store canonical user/work state in view-local JS state.
-- .views files are interface code and are not live data. Inline
-  \`{key: value}\` examples inside .views do not capture and must not be
+- Source data lives outside .apps in normal workspace atoms/entities.
+  Do not store canonical user/work state in app-local JS state.
+- .apps files are interface code and are not live data. Inline
+  \`{key: value}\` examples inside .apps do not capture and must not be
   treated as totals, exports, or imports.
 - Use {} live values, entities, imports/exports, and atoms as the substrate.
-  The view reads them through dohc's SDK; imports/exports remain the only
+  The app reads them through dohc's SDK; imports/exports remain the only
   cross-workspace data path.
-- View actions must hand off to Agent or proposed patches for user review;
-  they do not silently raw-patch canonical markdown/Y.Doc state.
+- Normal app controls persist through dohc.collection, dohc.doc, or dohc.database.
+  Use dohc.agent.run only for judgment-heavy work, and dohc.patch.propose for
+  risky/ambiguous reviewed edits.
 
-Creation pattern for a dashboard/view:
+Creation pattern for a dashboard/app:
 1. Inspect the folder's source atoms first.
-2. Add or improve \`{}\` live values/entities when the view needs structured
+2. Add or improve \`{}\` live values/entities when the app needs structured
    fields.
-3. Create \`<folder>/.views/<name>/src/App.tsx\`.
-4. Add \`view.json\` only if the default read-only folder scope is
+3. Create \`<folder>/.apps/<name>/src/App.tsx\`.
+4. Add \`app.json\` only if the default read-only folder scope is
    insufficient.
-5. Open the View activity for the user and say where the source data lives.
+5. Open the Apps activity for the user and say where the source data lives.
 
 ## SAFETY
 
@@ -1609,7 +1663,7 @@ export const dohcAgent = new Agent(components.agent, {
 
     finish_onboarding: createTool({
       description:
-        'Mark onboarding DONE. ONLY call once the vault has the identity atom (.context/me.md in personal, .context/company.md in org), at least one source markdown atom, a source-backed cockpit (home.html or a use-case-named .views/<name> app), and .runs/setup.md (never end empty).',
+        'Mark onboarding DONE. ONLY call once the vault has the identity atom (.context/me.md in personal, .context/company.md in org), at least one source markdown atom, a source-backed cockpit (home.html or a use-case-named .apps/<name> app), and .runs/setup.md (never end empty).',
       inputSchema: z.object({}),
       execute: async (ctx, _input, options): Promise<string> => {
         // §2-A.1 UNAUTHORIZABLE: state-flip (user-decision class).
@@ -2820,6 +2874,34 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
+    test_app: createTool({
+      description:
+        'Run the app tester for a .apps package. Use this before finish_onboarding and after creating or changing an app; it verifies @dohc/app usage, real source-backed data, render quality, and persistent controls.',
+      inputSchema: z.object({
+        packageRoot: z.string(),
+        mode: z.enum(['static', 'browser', 'integration']).optional(),
+      }),
+      execute: async (
+        ctx,
+        {
+          packageRoot,
+          mode,
+        }: {
+          packageRoot: string
+          mode?: 'static' | 'browser' | 'integration'
+        },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        const result = await ctx.runAction(api.appTesting.testApp, {
+          activeWorkspaceId: workspaceId,
+          packageRoot,
+          mode,
+        })
+        return formatAppTestResult(packageRoot, result)
+      },
+    }),
+
     create_folder: createTool({
       description:
         'Create an empty folder in the vault. Use slash-separated paths without trailing slash (e.g. "team" or "team/leads"). No-op if the folder already exists.',
@@ -3859,6 +3941,7 @@ const SAFE_FOR_SKILL_TOOLS = [
   'review_window_sharing',
   'onboarding_state',
   'run_query',
+  'test_app',
   'create_entities', // strictCreate-only when depth>0 (P2b.3 wire-up)
   'create_folder',
   'capture', // structurally safe at depth>0 — the handler refuses shared:true via the gate

@@ -34,8 +34,9 @@ import { AtomView } from '@/components/AtomView'
 import { SharedAtomView } from '@/components/SharedAtomView'
 import { ShareDialog } from '@/components/ShareDialog'
 import { ActivityBar } from '@/components/ActivityBar'
-import { ViewFrame } from '@/components/ViewFrame'
+import { AppFrame } from '@/components/AppFrame'
 import { ViewsSidebar } from '@/components/ViewsSidebar'
+import type { AppAgentRunRequest } from '@/apps/AppRuntimeHost'
 import {
   AgentChatSidebar,
   availableProjectFolders,
@@ -466,7 +467,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       : null
   const urlPageRef =
     pathParts.length === 2 &&
-    !['agent', 'files', 'views', 'graph', 'v'].includes(pathParts[1])
+    !['agent', 'files', 'apps', 'views', 'graph', 'a', 'v'].includes(pathParts[1])
       ? decodeURIComponent(pathParts[1])
       : null
   const urlPageId = pageIdFromRef(urlPageRef)
@@ -485,7 +486,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     return m ? decodeURIComponent(m[1]) : null
   })()
   const urlViewRef = (() => {
-    const m = /^\/[^/]+\/v\/([^/]+)\/?$/.exec(location.pathname)
+    const m = /^\/[^/]+\/(?:a|v)\/([^/]+)\/?$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const selectedViewPackageRoot = urlViewRef ? decodeViewRef(urlViewRef) : null
@@ -782,7 +783,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   }>(() => {
     if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
-    if (view === 'views') return { docTitle: 'Views', docEmoji: null }
+    if (view === 'views') return { docTitle: 'Apps', docEmoji: null }
     if (activeShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
       // null ⇒ gone/forbidden: fall back to the brand default.
@@ -1030,7 +1031,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       if (next === 'views') {
         setSharingOpen(false)
         void navigate({
-          to: '/$workspaceSlug/views',
+          to: '/$workspaceSlug/apps',
           params: { workspaceSlug: activeWorkspaceSlug },
           replace: opts?.replace ?? false,
         })
@@ -1407,7 +1408,19 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   }, [toggleChat, toggleSharing])
 
   const onRunAction = useCallback(
-    (prompt: string) => {
+    (request: string | AppAgentRunRequest) => {
+      const prompt =
+        typeof request === 'string'
+          ? request
+          : [
+              request.prompt,
+              '',
+              `Originating app: ${request.originatingApp}`,
+              `App title: ${request.titleHint}`,
+              request.sources && request.sources.length > 0
+                ? `Sources: ${request.sources.join(', ')}`
+                : null,
+            ].filter(Boolean).join('\n')
       setPendingPrompt(prompt)
       navigateToView('agent')
     },
@@ -1476,10 +1489,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     (packageRoot: string) => {
       setView('views')
       setSharingOpen(false)
-      const viewRef = encodeViewRef(packageRoot)
+      const appRef = encodeViewRef(packageRoot)
       void navigate({
-        to: '/$workspaceSlug/v/$viewRef',
-        params: { workspaceSlug: activeWorkspaceSlug, viewRef },
+        to: '/$workspaceSlug/a/$appRef',
+        params: { workspaceSlug: activeWorkspaceSlug, appRef },
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1879,7 +1892,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               user={user}
             />
           )}
-          <ViewFrame
+          <AppFrame
             packageRoot={selectedViewPackageRoot}
             onOpenSource={(path) => openAtom(path)}
             onRunAgent={onRunAction}

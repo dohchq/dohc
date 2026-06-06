@@ -375,6 +375,9 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           !/requireWorkspace\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*\)/.test(
             body,
           ) &&
+          !/requireWorkspace\s*\(\s*ctx\s*,\s*activeWorkspaceId\s*\)/.test(
+            body,
+          ) &&
           // Action surfaces can't ctx.db, so they route through
           // `_resolveWorkspaceForCaller` (an internalQuery that DOES
           // have db — see agent.ts). The runQuery proxy carries the
@@ -394,6 +397,17 @@ describe('Phase F (org-plan §14) — cross-tenant isolation × every Phase B su
           // requireWorkspace(ctx, activeWorkspaceId) before resolving
           // view/source authorization.
           !/resolveView\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) &&
+          // App data/security helpers centralize requireWorkspace and
+          // identity resolution before applying manifest and source ACLs.
+          !/resolveApp(?:ForSecurity)?\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) &&
+          !/resolveTrustState\s*\(\s*ctx\s*,\s*(args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) &&
+          !/authorizeAppDatabaseRead\s*\(\s*ctx\s*,[\s\S]{0,200}activeWorkspaceId/.test(
             body,
           ) &&
           // Action surfaces that explicitly refuse a non-undefined

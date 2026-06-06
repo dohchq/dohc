@@ -71,25 +71,25 @@ export function buildCommandPaletteEntries({
   for (const view of views) {
     const scope = view.scopePath || 'Workspace'
     out.push({
-      id: `view.${view.packageRoot}`,
-      title: `Open view: ${view.title}`,
-      hint: `view · ${scope}`,
+      id: `app.${view.packageRoot}`,
+      title: `Open app: ${view.title}`,
+      hint: `app · ${scope}`,
       kind: 'view',
       section: 'Open',
-      keywords: ['dashboard', 'view', view.packageRoot, view.entryPath],
+      keywords: ['dashboard', 'app', view.packageRoot, view.entryPath],
       run: () => {
         onClose()
         onOpenView(view.packageRoot)
       },
     })
     out.push({
-      id: `view-source.${view.packageRoot}`,
-      title: `Edit view source: ${view.title}`,
-      hint: `source · ${view.entryPath}`,
+      id: `app-source.${view.packageRoot}`,
+      title: `Open app source: ${view.title}`,
+      hint: `app source · ${view.entryPath}`,
       kind: 'view',
       section: 'Open',
       editPath: view.entryPath,
-      keywords: ['dashboard', 'view', 'source', view.packageRoot, view.entryPath],
+      keywords: ['dashboard', 'app', 'source', view.packageRoot, view.entryPath],
       run: () => {
         onClose()
         onOpenAtom(view.entryPath)
@@ -216,10 +216,10 @@ export function CommandPalette({
   const workspaceArgs = open ? { activeWorkspaceId } : 'skip'
   const skillsResult = useQuery(api.skills.list, workspaceArgs)
   const savedCommandsResult = useQuery(api.skills.listCommands, workspaceArgs)
-  const viewsResult = useQuery(api.views.list, workspaceArgs)
+  const viewsResult = useQuery(api.apps.list, workspaceArgs)
   const skills = skillsResult ?? []
   const savedCommands = savedCommandsResult ?? []
-  const views = viewsResult?.views ?? []
+  const views = viewsResult?.apps ?? []
   const paletteLoading =
     open &&
     (skillsResult === undefined ||

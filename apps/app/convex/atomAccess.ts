@@ -203,6 +203,27 @@ export async function canWriteInFolder(
   return true
 }
 
+export function folderPathForPath(path: string): string {
+  const index = path.lastIndexOf('/')
+  return index < 0 ? '' : path.slice(0, index)
+}
+
+export async function canReadPathByFolderAccess(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+  path: string,
+  viewerSubject: string,
+): Promise<boolean> {
+  const existing = await ctx.db
+    .query('atoms')
+    .withIndex('by_workspace_path', (q) =>
+      q.eq('workspaceId', workspaceId).eq('path', path),
+    )
+    .unique()
+  if (existing) return canReadAtom(ctx, existing._id, viewerSubject)
+  return canWriteInFolder(ctx, workspaceId, folderPathForPath(path), viewerSubject)
+}
+
 /** Write-path gate for an atom PATH (not id) — handles both create
  *  and overwrite. Notion-full §6.5 semantic: read == write at the
  *  per-atom layer. So:

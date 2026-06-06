@@ -260,6 +260,7 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'read_asset', // read-only saved attachment fetch; scoped by activeWorkspaceFromTool and no mutation path
   // sanity-check
   'run_query',
+  'test_app', // app verification only; server-side resolver gathers authorized app/source data and records a test result, but does not change workspace content or permissions
   // explicitly-additive writes (no overwrite path)
   'create_entities', // gated via mutation-level strictCreate (P2b.2 BRACE) — no `requireDirectUserAuthorization` needed at the tool layer; the depth-read + strictCreate mode is the structural enforcement
   'create_folder',
@@ -314,7 +315,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'list_atoms', 'read_atom', 'list_trash', 'list_entities',
       'find_entity', 'list_skills', 'list_commands',
       'pending_captures', 'review_window_sharing',
-      'onboarding_state', 'read_asset', 'run_query',
+      'onboarding_state', 'read_asset', 'run_query', 'test_app',
       'create_entities', 'create_folder',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment

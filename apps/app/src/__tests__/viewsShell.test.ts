@@ -13,7 +13,7 @@ import { viewFromPathname } from '../lib/appViews'
 import { decodeViewRef, encodeViewRef } from '../lib/viewRefs'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
 
-const bundleViewServerMock = vi.hoisted(() => vi.fn())
+const bundleAppServerMock = vi.hoisted(() => vi.fn())
 
 vi.mock('convex/react', () => ({
   useQuery: vi.fn(),
@@ -21,8 +21,8 @@ vi.mock('convex/react', () => ({
   useMutation: () => vi.fn(),
   useConvex: () => ({ query: vi.fn() }),
 }))
-vi.mock('../views/buildViewBundle.functions', () => ({
-  bundleViewServer: bundleViewServerMock,
+vi.mock('../apps/buildAppBundle.functions', () => ({
+  bundleAppServer: bundleAppServerMock,
 }))
 vi.mock('../lib/active-workspace', () => ({
   useActiveWorkspaceId: vi.fn(),
@@ -41,17 +41,17 @@ const VIEW_FRAME_SRC = readFileSync(
   'utf8',
 )
 const BUNDLE_FUNCTIONS_SRC = readFileSync(
-  resolve(__dirname, '../views/buildViewBundle.functions.ts'),
+  resolve(__dirname, '../apps/buildAppBundle.functions.ts'),
   'utf8',
 )
 
 const viewRows = [
   {
-    packageRoot: '.views/home',
+    packageRoot: '.apps/home',
     scopePath: '',
-    viewName: 'home',
+    appName: 'home',
     title: 'Home',
-    entryPath: '.views/home/src/App.tsx',
+    entryPath: '.apps/home/src/App.tsx',
     entryExists: true,
     hasConfig: false,
     configStatus: { ok: true },
@@ -61,11 +61,11 @@ const viewRows = [
     agent: [],
   },
   {
-    packageRoot: 'clients/acme/.views/overview',
+    packageRoot: 'clients/acme/.apps/overview',
     scopePath: 'clients/acme',
-    viewName: 'overview',
+    appName: 'overview',
     title: 'Overview',
-    entryPath: 'clients/acme/.views/overview/src/App.tsx',
+    entryPath: 'clients/acme/.apps/overview/src/App.tsx',
     entryExists: true,
     hasConfig: false,
     configStatus: { ok: true },
@@ -79,18 +79,18 @@ const viewRows = [
 beforeEach(() => {
   useQueryMock.mockReset()
   useActiveWorkspaceIdMock.mockReset()
-  bundleViewServerMock.mockReset()
+  bundleAppServerMock.mockReset()
 })
 
 describe('views shell route helpers', () => {
-  it('recognizes Views routes as a first-class activity', () => {
-    expect(viewFromPathname('/ice/views')).toBe('views')
-    expect(viewFromPathname('/acme/v/abc123')).toBe('views')
+  it('recognizes Apps routes as a first-class activity', () => {
+    expect(viewFromPathname('/ice/apps')).toBe('views')
+    expect(viewFromPathname('/acme/a/abc123')).toBe('views')
     expect(viewFromPathname('/ice/files')).toBe('atom')
   })
 
   it('round-trips package roots through URL-safe refs', () => {
-    const root = 'clients/acme/.views/client-portal'
+    const root = 'clients/acme/.apps/client-portal'
     const ref = encodeViewRef(root)
     expect(ref).not.toContain('/')
     expect(decodeViewRef(ref)).toBe(root)
@@ -98,8 +98,8 @@ describe('views shell route helpers', () => {
   })
 })
 
-describe('Views activity shell', () => {
-  it('puts Views at the top of the activity bar above Agent', () => {
+describe('Apps activity shell', () => {
+  it('puts Apps at the top of the activity bar above Agent', () => {
     const html = renderToStaticMarkup(
       createElement(ActivityBar, {
         view: 'views',
@@ -109,17 +109,17 @@ describe('Views activity shell', () => {
 
     expect(html).toContain('aria-label="Agent"')
     expect(html).toContain('aria-label="Files"')
-    expect(html).toContain('aria-label="Views"')
+    expect(html).toContain('aria-label="Apps"')
     expect(html).toContain('aria-label="Graph"')
-    expect(html.indexOf('aria-label="Views"')).toBeLessThan(
+    expect(html.indexOf('aria-label="Apps"')).toBeLessThan(
       html.indexOf('aria-label="Agent"'),
     )
   })
 
-  it('groups discovered views by scope and exposes source editing', () => {
+  it('groups discovered apps by scope and exposes source editing', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
     useQueryMock
-      .mockReturnValueOnce({ views: viewRows, truncated: false })
+      .mockReturnValueOnce({ apps: viewRows, truncated: false })
       .mockReturnValueOnce([
         {
           workspaceId: 'ws_active',
@@ -131,7 +131,7 @@ describe('Views activity shell', () => {
 
     const html = renderToStaticMarkup(
       createElement(ViewsSidebar, {
-        selectedPackageRoot: 'clients/acme/.views/overview',
+        selectedPackageRoot: 'clients/acme/.apps/overview',
         onOpenView: () => {},
         onOpenSource: () => {},
       }),
@@ -141,16 +141,16 @@ describe('Views activity shell', () => {
     expect(html).toContain('clients/acme')
     expect(html).toContain('Home')
     expect(html).toContain('Overview')
-    expect(html).toContain('Open source')
+    expect(html).toContain('Open app source')
     expect(useQueryMock.mock.calls[0]?.[1]).toEqual({
       activeWorkspaceId: 'ws_active',
     })
   })
 
-  it('does not expose add controls in Views or Graph while Files does', () => {
+  it('does not expose add controls in Apps or Graph while Files does', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
     useQueryMock
-      .mockReturnValueOnce({ views: viewRows, truncated: false })
+      .mockReturnValueOnce({ apps: viewRows, truncated: false })
       .mockReturnValueOnce([
         {
           workspaceId: 'ws_active',
@@ -196,7 +196,7 @@ describe('Views activity shell', () => {
     )
   })
 
-  it('renders selected views inside a sandboxed frame shell', () => {
+  it('renders selected apps inside a sandboxed frame shell', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
     useQueryMock.mockReturnValueOnce(viewRows[1]).mockReturnValueOnce({
       ok: true,
@@ -212,31 +212,31 @@ describe('Views activity shell', () => {
 
     const html = renderToStaticMarkup(
       createElement(ViewFrame, {
-        packageRoot: 'clients/acme/.views/overview',
+        packageRoot: 'clients/acme/.apps/overview',
         onOpenSource: () => {},
       }),
     )
 
     expect(html).toContain('Overview')
-    expect(html).toContain('Open source')
+    expect(html).toContain('Open app source')
     expect(html).toContain('sandbox="allow-scripts"')
     expect(html).not.toContain('allow-same-origin')
     expect(useQueryMock.mock.calls[0]?.[1]).toEqual({
-      packageRoot: 'clients/acme/.views/overview',
+      packageRoot: 'clients/acme/.apps/overview',
       activeWorkspaceId: 'ws_active',
     })
     expect(useQueryMock.mock.calls[1]?.[1]).toEqual({
-      packageRoot: 'clients/acme/.views/overview',
+      packageRoot: 'clients/acme/.apps/overview',
       activeWorkspaceId: 'ws_active',
     })
   })
 
-  it('uses one stable runtime skeleton while a selected view loads', () => {
+  it('uses one stable runtime skeleton while a selected app loads', () => {
     useActiveWorkspaceIdMock.mockReturnValue('ws_active')
     useQueryMock.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined)
     const initialHtml = renderToStaticMarkup(
       createElement(ViewFrame, {
-        packageRoot: 'clients/acme/.views/overview',
+        packageRoot: 'clients/acme/.apps/overview',
         onOpenSource: () => {},
       }),
     )
@@ -246,7 +246,7 @@ describe('Views activity shell', () => {
     useQueryMock.mockReturnValueOnce(viewRows[1]).mockReturnValueOnce(undefined)
     const metadataHtml = renderToStaticMarkup(
       createElement(ViewFrame, {
-        packageRoot: 'clients/acme/.views/overview',
+        packageRoot: 'clients/acme/.apps/overview',
         onOpenSource: () => {},
       }),
     )
@@ -258,16 +258,16 @@ describe('Views activity shell', () => {
     expect(metadataSrcDoc).toBe(initialSrcDoc)
   })
 
-  it('keeps the view bundler behind the server-function bridge module', () => {
+  it('keeps the app bundler behind the server-function bridge module', () => {
     expect(VIEW_FRAME_SRC).toContain(
-      "from '../views/buildViewBundle.functions'",
+      "from '../apps/buildAppBundle.functions'",
     )
     expect(VIEW_FRAME_SRC).not.toContain(
-      "from '../views/buildViewBundle.server'",
+      "from '../apps/buildAppBundle.server'",
     )
-    expect(BUNDLE_FUNCTIONS_SRC).toContain("await import('./buildViewBundle.server')")
+    expect(BUNDLE_FUNCTIONS_SRC).toContain("await import('./buildAppBundle.server')")
     expect(BUNDLE_FUNCTIONS_SRC).not.toMatch(
-      /import\s*\{[\s\S]*\bbuildViewBundle\b[\s\S]*\}\s*from\s*['"]\.\/buildViewBundle\.server['"]/,
+      /import\s*\{[\s\S]*\bbuildAppBundle\b[\s\S]*\}\s*from\s*['"]\.\/buildAppBundle\.server['"]/,
     )
   })
 })

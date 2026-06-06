@@ -1,5 +1,5 @@
 {
-  "name": "@dohc/app",
+  "name": "@dohc/web",
   "private": true,
   "type": "module",
   "scripts": {

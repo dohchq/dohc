@@ -7,13 +7,13 @@
     "pnpm": "10.24.0"
   },
   "scripts": {
-    "dev": "node scripts/dev-sync.mjs && pnpm --filter @dohc/app --if-present run dev",
-    "dev:app": "pnpm --filter @dohc/app --if-present run dev",
+    "dev": "node scripts/dev-sync.mjs && pnpm --filter @dohc/web --if-present run dev",
+    "dev:app": "pnpm --filter @dohc/web --if-present run dev",
     "dev:sync": "node scripts/dev-sync.mjs",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
     "build": "pnpm -r --if-present build",
-    "start": "pnpm --filter @dohc/app --if-present run start",
-    "preview": "pnpm --filter @dohc/app --if-present run preview",
+    "start": "pnpm --filter @dohc/web --if-present run start",
+    "preview": "pnpm --filter @dohc/web --if-present run preview",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",

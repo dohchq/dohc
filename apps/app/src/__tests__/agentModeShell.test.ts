@@ -81,7 +81,7 @@ describe('Agent / Files shell mode', () => {
     expect(ACTIVITY).toContain("ActivityView = Extract<AppView, 'agent' | 'atom' | 'views' | 'graph'>")
     expect(ACTIVITY).toContain("label: 'Agent'")
     expect(ACTIVITY).toContain("label: 'Files'")
-    expect(ACTIVITY).toContain("label: 'Views'")
+    expect(ACTIVITY).toContain("label: 'Apps'")
     expect(ACTIVITY).toContain("label: 'Graph'")
   })
 

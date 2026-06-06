@@ -516,4 +516,39 @@ describe('semantic apply API', () => {
 
     expect(response.status).toBe(403)
   })
+
+  it('treats app-origin semantic writes as a distinct final ACL actor', async () => {
+    const { acl, backend, handler, store } = makeHandler(false)
+    const doc = markdownToYDoc('---\nid: atom_1\n---\nHello world.')
+    const anchors = createAnchorsForText(doc, 'world')
+    expect(anchors).not.toBeNull()
+    await store.storeSnapshot(documentName, doc, { lastSeq: 0 })
+
+    const response = await handler(
+      request({
+        operationId: 'op_app_locked',
+        workspaceId: 'workspace_1',
+        atomId: 'atom_1',
+        actor: {
+          userId: 'workspace_1',
+          actorKind: 'app',
+          authzVersion: 1,
+        },
+        anchorStart: anchors!.anchorStart,
+        anchorEnd: anchors!.anchorEnd,
+        replacement: 'earth',
+        expectedText: 'world',
+      }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(acl.canWriteAtom).toHaveBeenCalledWith({
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      userId: 'workspace_1',
+      actorKind: 'app',
+      authzVersion: 1,
+    })
+    expect(backend.updatesFor(documentName)).toHaveLength(0)
+  })
 })

@@ -14,7 +14,7 @@ Convex agent skills for common tasks can be installed by running
 
 ## dohc app notes
 
-- This is the `@dohc/app` workspace package in the dohc monorepo. Run
+- This is the `@dohc/web` workspace package in the dohc monorepo. Run
   commands from the repo root (`pnpm dev`, `pnpm test`, …).
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping

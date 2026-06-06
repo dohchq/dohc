@@ -50,8 +50,8 @@ export function ViewsSidebar({
   user?: SidebarUser
 }) {
   const activeWorkspaceId = useActiveWorkspaceId()
-  const result = useQuery(api.views.list, { activeWorkspaceId })
-  const views = result?.views ?? []
+  const result = useQuery(api.apps.list, { activeWorkspaceId })
+  const views = result?.apps ?? []
   const groups = useMemo(() => groupViews(views), [views])
 
   return (
@@ -66,7 +66,7 @@ export function ViewsSidebar({
               strokeWidth={1.9}
             />
             <h2 className="truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint">
-              Views
+              Apps
             </h2>
           </div>
           {result === undefined ? (
@@ -82,7 +82,7 @@ export function ViewsSidebar({
           <SidebarListSkeleton groups={2} rowsPerGroup={4} />
         ) : views.length === 0 ? (
           <div className="px-2 py-8 text-center text-[12px] leading-relaxed text-ink-faint">
-            No views yet.
+            No apps yet.
           </div>
         ) : null}
 
@@ -111,8 +111,8 @@ export function ViewsSidebar({
                     </button>
                     <button
                       type="button"
-                      title={`Open source ${view.entryPath}`}
-                      aria-label={`Open source ${view.entryPath}`}
+                      title={`Open app source ${view.entryPath}`}
+                      aria-label={`Open app source ${view.entryPath}`}
                       onClick={() => onOpenSource(view.entryPath)}
                       className="grid size-7 shrink-0 place-items-center rounded-md text-ink-faint opacity-0 transition-opacity hover:bg-elevated hover:text-ink group-hover:opacity-100 focus:opacity-100"
                     >

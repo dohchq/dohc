@@ -219,6 +219,24 @@ importers:
 
   packages/config: {}
 
+  services/app-tester:
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.60.0
+        version: 1.60.0
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
+      tsx:
+        specifier: ^4.22.3
+        version: 4.22.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1)(lightningcss@1.32.0)
+
   services/hocuspocus:
     dependencies:
       '@hocuspocus/provider':
@@ -270,6 +288,21 @@ importers:
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0
+      tsx:
+        specifier: ^4.22.3
+        version: 4.22.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1)(lightningcss@1.32.0)
+
+  services/sqlite-worker:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
       tsx:
         specifier: ^4.22.3
         version: 4.22.3

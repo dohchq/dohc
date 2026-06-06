@@ -2,7 +2,7 @@ import { SignJWT, jwtVerify } from 'jose'
 
 export const COLLAB_TOKEN_TTL_SECONDS = 5 * 60
 
-export type CollabActorKind = 'user' | 'agent'
+export type CollabActorKind = 'user' | 'agent' | 'app'
 
 export type CollabTokenInput = {
   sub: string
@@ -60,7 +60,7 @@ export async function verifyCollabToken(
   if (
     typeof payload.sub !== 'string' ||
     typeof payload.ws !== 'string' ||
-    (payload.actorKind !== 'user' && payload.actorKind !== 'agent') ||
+    (payload.actorKind !== 'user' && payload.actorKind !== 'agent' && payload.actorKind !== 'app') ||
     typeof payload.authzVersion !== 'number' ||
     typeof payload.iat !== 'number' ||
     typeof payload.exp !== 'number'

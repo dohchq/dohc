@@ -143,6 +143,8 @@ function publicFnsTakingWorkspace(
     //     reads/writes; resolver calls requireWorkspace with that active id)
     //   - `resolveView(ctx, activeWorkspaceId, packageRoot)` (view data
     //     resolver calls requireWorkspace with that active id)
+    //   - `resolveAppForSecurity(ctx, activeWorkspaceId, packageRoot)` (app
+    //     collaboration resolver calls requireWorkspace before source/trust ACLs)
     //   - `runQuery(... _resolveWorkspaceForCaller ..., { activeWorkspaceId })` (action-bridge)
     //   - `requireRole(ctx, activeWorkspaceId, ...)` (Owner-gated; internally calls requireWorkspace)
     //   - P1 (multiplayer-and-h-followups): `recoverTombstonedAtom`
@@ -163,6 +165,18 @@ function publicFnsTakingWorkspace(
       ) ||
       /resolveView\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
         body,
+      ) ||
+      /resolveApp\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
+      ) ||
+      /resolveAppForSecurity\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
+      ) ||
+      /authorizeAppDatabaseRead\s*\(\s*ctx\s*,\s*\{[^}]*activeWorkspaceId:\s*(?:args\.)?activeWorkspaceId/.test(
+        body,
+      ) ||
+      /resolveTrustState\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+        body,
       )
     // Strip BOTH optional + required shapes of activeWorkspaceId when
     // validated (P1's recoverTombstonedAtom uses the required form).
@@ -174,7 +188,7 @@ function publicFnsTakingWorkspace(
           )
           .replace(/\bactiveWorkspaceId\s*:\s*v\.string\(\)\s*,?/g, '')
       : head
-    if (/\bargs\s*:\s*\{[\s\S]*?workspace/i.test(headWithoutActive)) {
+    if (/\b\w*WorkspaceId\s*:|\bworkspaceId\s*:/i.test(headWithoutActive)) {
       // `requireRole(ctx, …)` internally calls `requireWorkspace` — it
       // is also a valid auth check (org-plan §6 introduced it).
       hits.push({
@@ -183,6 +197,18 @@ function publicFnsTakingWorkspace(
         authed:
           /\b(requireWorkspace|requireRole)\s*\(/.test(body) ||
           /resolveView\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) ||
+          /resolveApp\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) ||
+          /resolveAppForSecurity\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
+            body,
+          ) ||
+          /authorizeAppDatabaseRead\s*\(\s*ctx\s*,\s*\{[^}]*activeWorkspaceId:\s*(?:args\.)?activeWorkspaceId/.test(
+            body,
+          ) ||
+          /resolveTrustState\s*\(\s*ctx\s*,\s*(?:args\.)?activeWorkspaceId\s*,/.test(
             body,
           ),
         serverTokenGated:
@@ -214,10 +240,10 @@ describe('authz boundary (§6 tripwire — not a proof; see §6b contract)', () 
           (COLLAB_TOKEN_ALLOW.has(`${rel}:${h.name}`) &&
             h.authed &&
             h.collabTokenMint) ||
-          // viewData routes activeWorkspaceId through resolveView(),
+          // appData/viewData route activeWorkspaceId through resolveApp/resolveView(),
           // which calls requireWorkspace(ctx, activeWorkspaceId) before
-          // resolving the view descriptor and source access.
-          (/^viewData\.ts$/.test(rel) && h.authed)
+          // resolving the app/view descriptor and source access.
+          (/^(appData|viewData)\.ts$/.test(rel) && h.authed)
         if (allowed) continue
         offenders.push(`${rel}: ${h.name} (${h.kind})`)
       }

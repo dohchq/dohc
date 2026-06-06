@@ -132,7 +132,7 @@ function run(command, args) {
 function convexEnv(command, args, options = {}) {
   return spawnSync(
     'pnpm',
-    ['--filter', '@dohc/app', 'exec', 'convex', 'env', command, ...args],
+    ['--filter', '@dohc/web', 'exec', 'convex', 'env', command, ...args],
     {
       encoding: 'utf8',
       stdio: options.stdio ?? 'pipe',

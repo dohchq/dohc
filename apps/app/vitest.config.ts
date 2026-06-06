@@ -13,7 +13,7 @@ import { defineConfig } from 'vitest/config'
 //                  mocked identity, no auth hole, no live deployment.
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts', 'convex/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'convex/**/*.test.ts'],
     exclude: ['**/node_modules/**', 'convex/_generated/**'],
     environment: 'node',
     environmentMatchGlobs: [['convex/**', 'edge-runtime']],

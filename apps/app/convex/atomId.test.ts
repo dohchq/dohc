@@ -400,8 +400,23 @@ describe('isHtmlAtomBody — pure non-data classification', () => {
   })
 })
 
-describe('isNonDataAtom — folder-local view source classification', () => {
-  it('treats every atom under a .views package as interface code, not data', () => {
+describe('isNonDataAtom — folder-local app source classification', () => {
+  it('treats every atom under a .apps package as interface code, not data', () => {
+    expect(
+      isNonDataAtom(
+        'clients/acme/.apps/overview/src/App.tsx',
+        'const example = "{billable: 999}"',
+      ),
+    ).toBe(true)
+    expect(
+      isNonDataAtom(
+        '.apps/home/src/styles.css',
+        '.metric::after { content: "{owed: 1}" }',
+      ),
+    ).toBe(true)
+  })
+
+  it('keeps legacy .views packages classified as interface code during migration', () => {
     expect(
       isNonDataAtom(
         'clients/acme/.views/overview/src/App.tsx',
