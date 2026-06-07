@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { useAction, useQuery } from 'convex/react'
+import { useAction, useMutation, useQuery } from 'convex/react'
 import { useUIMessages, type UIMessage } from '@convex-dev/agent/react'
 import {
   AlertCircle,
@@ -203,6 +203,15 @@ type ComposerBannerItem = {
   dismissLabel?: string
   onDismiss?: () => void
 }
+type AgentApprovalRequest = {
+  _id: string
+  createdAt: number
+  operation: string
+  title: string
+  detail: string
+  targetPaths: string[]
+}
+type AgentApprovalDecision = 'allow_once' | 'always_allow' | 'deny'
 
 const BUILTIN_COMPOSER_COMMANDS: readonly ComposerStarterCommand[] = [
   {
@@ -615,6 +624,13 @@ export function Chat({
     threadId ? { threadId, activeWorkspaceId, projectPath } : 'skip',
     { initialNumItems: 50, stream: true },
   )
+  const pendingApprovals =
+    (useQuery(
+      api.agent.listPendingApprovals,
+      threadId ? { threadId, activeWorkspaceId } : 'skip',
+    ) as AgentApprovalRequest[] | undefined) ?? []
+  const respondToApproval = useMutation(api.agent.respondToApproval)
+  const [respondingApprovalId, setRespondingApprovalId] = useState<string | null>(null)
   const messagesLoadingFirstPage = Boolean(
     threadId && (!messagesQuery || messagesQuery.status === 'LoadingFirstPage'),
   )
@@ -656,6 +672,7 @@ export function Chat({
   const fallbackStopTarget =
     threadId && busy ? { threadId, projectPath } : null
   const canStopActiveChat = Boolean(activeSendTarget ?? fallbackStopTarget)
+  const activeApproval = pendingApprovals[0] ?? null
 
   function setActiveSendTarget(target: ActiveSendTarget | null) {
     activeSendTargetRef.current = target
@@ -747,6 +764,27 @@ export function Chat({
       console.error(e)
     } finally {
       setStopping(false)
+    }
+  }
+
+  async function answerApproval(
+    approvalId: string,
+    decision: AgentApprovalDecision,
+  ) {
+    if (respondingApprovalId) return
+    setRespondingApprovalId(approvalId)
+    setComposerError(null)
+    try {
+      await respondToApproval({
+        activeWorkspaceId,
+        approvalId: approvalId as Id<'agentApprovals'>,
+        decision,
+      })
+    } catch (e) {
+      setComposerError(formatComposerError(e))
+      console.error(e)
+    } finally {
+      setRespondingApprovalId(null)
     }
   }
 
@@ -1359,6 +1397,14 @@ export function Chat({
               )}
             </div>
           )}
+          {activeApproval && (
+            <AgentApprovalCard
+              approval={activeApproval}
+              pendingCount={pendingApprovals.length}
+              responding={respondingApprovalId === activeApproval._id}
+              onAnswer={answerApproval}
+            />
+          )}
           <ComposerBannerStack items={composerBannerItems} />
           <div className={attachmentUploads.attachments.length > 0 ? 'px-3 pt-3' : ''}>
             <AttachmentTray
@@ -1575,6 +1621,75 @@ export function Chat({
         </div>
       </div>
     </aside>
+  )
+}
+
+function AgentApprovalCard({
+  approval,
+  pendingCount,
+  responding,
+  onAnswer,
+}: {
+  approval: AgentApprovalRequest
+  pendingCount: number
+  responding: boolean
+  onAnswer: (approvalId: string, decision: AgentApprovalDecision) => void
+}) {
+  const targetLabel =
+    approval.targetPaths.length > 0
+      ? approval.targetPaths.join(', ')
+      : approval.operation.replace(/_/g, ' ')
+  return (
+    <div className="border-b border-rule bg-panel/70 px-3 py-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[12px] font-semibold text-ink-strong">
+            <ShieldCheck className="size-4 shrink-0 text-accent" strokeWidth={2} />
+            <span className="min-w-0 truncate">{approval.title}</span>
+            {pendingCount > 1 && (
+              <span className="shrink-0 rounded-full border border-rule bg-elevated px-1.5 py-0.5 text-[10px] font-medium text-ink-faint">
+                {pendingCount}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-ink-dim">
+            {approval.detail}
+          </p>
+          <p className="mt-1 truncate font-mono text-[10.5px] text-ink-faint">
+            {targetLabel}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={responding}
+            onClick={() => onAnswer(approval._id, 'deny')}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-danger/30 bg-danger/5 px-2.5 text-[12px] font-medium text-danger transition hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <X className="size-3.5" strokeWidth={2} />
+            Deny
+          </button>
+          <button
+            type="button"
+            disabled={responding}
+            onClick={() => onAnswer(approval._id, 'always_allow')}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rule bg-elevated px-2.5 text-[12px] font-medium text-ink transition hover:bg-hover disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Shield className="size-3.5 text-ink-dim" strokeWidth={2} />
+            Always allow
+          </button>
+          <button
+            type="button"
+            disabled={responding}
+            onClick={() => onAnswer(approval._id, 'allow_once')}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-ink-strong px-2.5 text-[12px] font-semibold text-surface shadow-xs transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Check className="size-3.5" strokeWidth={2.2} />
+            Allow
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

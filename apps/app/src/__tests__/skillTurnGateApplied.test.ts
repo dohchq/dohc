@@ -108,7 +108,7 @@ describe('Track-3 P2b.3 — UNAUTHORIZABLE-set gate coverage', () => {
 // the gate appears BEFORE the first side-effect token (a
 // `ctx.runMutation` / `ctx.runAction` / `requireWorkspace` call
 // for unconditional gates; for delete handlers, gate must appear
-// after the `requiresConfirmation` early-return but before
+// after the `requestAgentApproval` early-return but before
 // `requireWorkspace` / the mutation).
 //
 // The slicer reads from `<op>: createTool({` up to the NEXT
@@ -157,9 +157,9 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
 // surrounding conditional logic in the source.
 const CONDITIONAL_GATE_OPS = ['create_atom', 'capture'] as const
 
-// Ops where the gate is AFTER a `requiresConfirmation` early-return
-// branch (delete_*). Verify the gate is below that early-return
-// AND above the first side-effect call.
+// Ops where the gate is AFTER a `requestAgentApproval` early-return
+// branch (delete_*). Verify the gate is below that approval request
+// AND above the first destructive side-effect call.
 const POST_CONFIRM_GATE_OPS = [
   'delete_atom',
   'delete_entity',
@@ -183,12 +183,13 @@ describe('Track-3 P2b.3 fold (Codex F2/F3) — gate PLACEMENT, not just presence
   }
 
   for (const op of POST_CONFIRM_GATE_OPS) {
-    it(`\`${op}\`: gate is AFTER requiresConfirmation early-return AND BEFORE first side effect`, () => {
+    it(`\`${op}\`: gate is AFTER requestAgentApproval early-return AND BEFORE first side effect`, () => {
       const body = TOOL_BODIES[op]
       expect(body).toBeTruthy()
-      // The early-return prompt text (a string-literal anchor unique
-      // to delete-tool prompts; matches the existing handlers).
-      const confirmReturnIdx = body.search(/CONFIRMATION REQUIRED:/)
+      // The approval request call is the new structured user-decision
+      // edge; the tool must not mutate before it either returns
+      // pending or falls through with an approved policy.
+      const confirmReturnIdx = body.search(/requestAgentApproval\(ctx,\s*options/)
       const safeOp = op.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const gateIdx = body.search(
         new RegExp(`requireDirectUserAuthorization\\(ctx,\\s*['"]${safeOp}['"]\\)`),

@@ -369,6 +369,75 @@ export default defineSchema({
     ])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
+  // Agent action approvals. These are server-created requests for
+  // operations that need a human button decision. The client never
+  // supplies operation args; it can only answer a pending request id
+  // that belongs to the authenticated caller and thread.
+  agentApprovals: defineTable({
+    workspaceId: v.string(),
+    threadId: v.string(),
+    createdByUserId: v.string(),
+    operation: v.union(
+      v.literal('delete_atom'),
+      v.literal('delete_entity'),
+      v.literal('delete_folder'),
+    ),
+    title: v.string(),
+    detail: v.string(),
+    targetPaths: v.array(v.string()),
+    targetKey: v.string(),
+    args: v.any(),
+    status: v.union(
+      v.literal('pending'),
+      v.literal('approved'),
+      v.literal('denied'),
+    ),
+    decision: v.optional(
+      v.union(
+        v.literal('allow_once'),
+        v.literal('always_allow'),
+        v.literal('deny'),
+      ),
+    ),
+    result: v.optional(v.string()),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index('by_workspace_thread_status_user', [
+      'workspaceId',
+      'threadId',
+      'status',
+      'createdByUserId',
+    ])
+    .index('by_workspace_user_thread_status_operation_target', [
+      'workspaceId',
+      'createdByUserId',
+      'threadId',
+      'status',
+      'operation',
+      'targetKey',
+    ]),
+
+  agentApprovalPolicies: defineTable({
+    workspaceId: v.string(),
+    createdByUserId: v.string(),
+    threadId: v.string(),
+    operation: v.union(
+      v.literal('delete_atom'),
+      v.literal('delete_entity'),
+      v.literal('delete_folder'),
+    ),
+    targetKey: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('by_workspace_user_thread_operation_target', [
+    'workspaceId',
+    'createdByUserId',
+    'threadId',
+    'operation',
+    'targetKey',
+  ]),
+
   // Workspace-scoped blobs uploaded through Convex storage. These are
   // source attachments for chat/onboarding and durable media assets for
   // dohc files; document bodies store stable `dohc-asset:` references,

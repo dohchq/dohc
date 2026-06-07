@@ -269,7 +269,7 @@ describe('requireDirectUserAuthorization — gate semantics', () => {
       await expect(
         requireDirectUserAuthorization(agentCtx, 'delete_atom'),
       ).rejects.toMatchObject({
-        kind: 'needs-user-yes',
+        kind: 'needs-approval',
         op: 'delete_atom',
       })
     })
@@ -298,17 +298,19 @@ describe('requireDirectUserAuthorization — gate semantics', () => {
   })
 })
 
-describe('SkillAuthRequiredError — structured "needs-user-yes"', () => {
+describe('SkillAuthRequiredError — structured approval request', () => {
   it('carries the op + the kind discriminator + a clear message', () => {
     const e = new SkillAuthRequiredError('delete_atom')
     expect(e).toBeInstanceOf(Error)
     expect(e).toBeInstanceOf(SkillAuthRequiredError)
-    expect(e.kind).toBe('needs-user-yes')
+    expect(e.kind).toBe('needs-approval')
     expect(e.op).toBe('delete_atom')
     expect(e.name).toBe('SkillAuthRequiredError')
     expect(e.message).toContain('delete_atom')
     expect(e.message).toContain('direct user authorization')
     expect(e.message).toContain('skill body cannot pre-approve')
+    expect(e.message).toContain('approval button')
+    expect(e.message).not.toMatch(/explicit ["']?yes|wait for yes/i)
   })
 
   it('preserves stack trace + is instanceof both Error and the subclass', () => {
@@ -317,10 +319,11 @@ describe('SkillAuthRequiredError — structured "needs-user-yes"', () => {
     } catch (caught) {
       expect(caught).toBeInstanceOf(SkillAuthRequiredError)
       expect(caught).toBeInstanceOf(Error)
-      expect((caught as SkillAuthRequiredError).kind).toBe('needs-user-yes')
+      expect((caught as SkillAuthRequiredError).kind).toBe('needs-approval')
       // The agent SDK propagates the message as the tool result; the
-      // model sees the op + the "wait for yes" instruction.
+      // model sees the op + the structured approval instruction.
       expect((caught as Error).message).toMatch(/confirm_window_sharing/)
+      expect((caught as Error).message).not.toMatch(/explicit ["']?yes|wait for yes/i)
     }
   })
 })
