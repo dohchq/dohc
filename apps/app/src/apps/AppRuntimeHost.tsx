@@ -104,10 +104,24 @@ export function summarizeAppActionInput(input: Record<string, unknown> | undefin
   }
 }
 
-export function summarizeAppAgentInput(prompt: string): string {
-  const summary = prompt.trim()
-  if (!summary) return APP_AGENT_CONFIRMATION_REQUIRED
-  return summary.length > 180 ? `${summary.slice(0, 177)}...` : summary
+export function appAgentConfirmationText({
+  packageRoot,
+  handoff,
+}: {
+  packageRoot: string
+  handoff: Extract<AppAgentAuthorization, { ok: true }>
+}): string {
+  const prompt = handoff.prompt.trim() || APP_AGENT_CONFIRMATION_REQUIRED
+  return [
+    `App: ${packageRoot}`,
+    `Operation: ${handoff.operation}`,
+    handoff.sources.length > 0
+      ? ['Sources:', ...handoff.sources.map((source) => `- ${source}`)].join('\n')
+      : 'Sources: none',
+    '',
+    'Prompt submitted after confirmation:',
+    prompt,
+  ].join('\n')
 }
 
 export function nextAppActionDialogFocusIndex({
@@ -170,7 +184,7 @@ export function AppActionConfirmationDialog({
         </p>
         <p
           tabIndex={0}
-          className="mt-1 max-h-20 overflow-auto rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]"
+          className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-rule bg-paper px-2 py-1 font-mono text-[11px]"
         >
           {pendingAction.inputSummary}
         </p>
@@ -368,12 +382,12 @@ export function AppRuntimeHost({
         setPendingAgent({
           id: request.id,
           name: request.op === 'dohc.agent.run' ? 'Ask agent' : 'Propose patch',
-          inputSummary: summarizeAppAgentInput(handoff.prompt),
+          inputSummary: appAgentConfirmationText({ packageRoot, handoff }),
           status: 'confirming',
         })
       })
     },
-    [],
+    [packageRoot],
   )
 
   const cancelPendingAction = useCallback(() => {

@@ -1027,3 +1027,58 @@ Failures fixed:
 Remaining risk:
 - Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
 - The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, browser runtime, app-agent handoff, and asset-scope coverage passed.
+
+## Sixth-Pass Review Remediation: 2026-06-07 Full App-Agent Confirmation Disclosure
+
+Status: complete.
+
+Files changed:
+- `apps/app/src/apps/AppRuntimeHost.tsx`
+- `apps/app/src/apps/AppRuntimeHost.agent.test.tsx`
+- `docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.execution-log.md`
+- `docs/superpowers/reviews/2026-06-06-apps-sdk-sqlite-agent-testing-review.md`
+
+Tests added:
+- Runtime host regression proving a long authorized `dohc.agent.run` prompt displays its hidden tail and server-authorized sources in the confirmation dialog before the user can confirm.
+- Runtime host regression proving a long authorized `dohc.patch.propose` payload displays the patch prompt tail and target source in the confirmation dialog before the user can confirm.
+
+Commands run:
+
+```bash
+cd /home/ice/dev/dohc/apps/app
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/apps/AppRuntimeHost.agent.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/apps/AppRuntimeHost.agent.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/appAgent.test.ts convex/appTrust.test.ts convex/assets.test.ts src/apps/AppRuntimeHost.test.tsx src/apps/AppRuntimeHost.agent.test.tsx
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts
+
+cd /home/ice/dev/dohc
+npx -y node@24 ./node_modules/vitest/vitest.mjs run services/app-tester/src/runAppTest.test.ts services/app-tester/src/runAppTest.browser.test.ts services/app-tester/src/runAppTest.screenshot.test.ts services/sqlite-worker/src/sqliteEngine.test.ts services/sqlite-worker/src/sqliteEngine.concurrency.test.ts services/sqlite-worker/src/sqliteEngine.failureInjection.test.ts services/hocuspocus/src/semantic-api.test.ts
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p apps/app/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/app-tester/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/hocuspocus/tsconfig.json
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p services/sqlite-worker/tsconfig.json
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:9 npx -y pnpm@10.24.0 exec playwright test apps/app/e2e/apps.spec.ts
+git diff --check
+```
+
+Final verification results:
+- Failing-first focused runtime test exposed the blocker: 1 file ran, 2 new confirmation-disclosure tests failed because the hidden prompt/patch tails were truncated out of the dialog.
+- Focused runtime test after the fix: 1 file passed, 3 tests passed.
+- Focused runtime/app-agent/assets slice: 5 files passed, 18 tests passed.
+- Expanded service/AppTester/SQLite/Hocuspocus slice: 7 files passed, 46 tests passed.
+- Full `apps/app` suite: 183 files passed, 1561 tests passed, 1 expected live-eval skip.
+- App TypeScript: exit 0.
+- App tester TypeScript: exit 0.
+- Hocuspocus TypeScript: exit 0.
+- SQLite worker TypeScript: exit 0.
+- No-secret Playwright finance app runtime smoke: 1 test passed.
+- Diff hygiene: `git diff --check` exit 0.
+
+Failures fixed:
+- App-agent confirmations no longer show a truncated summary while submitting the full prompt after confirmation.
+- The confirmation payload now shows the originating app package root, operation, full server-authorized source list, and exact prompt text that will be submitted after confirmation.
+- Long app-agent and patch-proposal prompts remain inspectable in a scrollable full-text disclosure with preserved newlines.
+
+Remaining risk:
+- Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
+- The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, browser runtime, app-agent handoff, asset-scope, and full-prompt confirmation coverage passed.
