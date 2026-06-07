@@ -154,6 +154,14 @@ export async function workspaceIdForSlug(
   ctx: QueryCtx | MutationCtx,
   slug: string,
 ): Promise<string | null> {
+  const token = slugToken(slug)
+  if (token === 'personal') {
+    try {
+      return await requireWorkspace(ctx)
+    } catch {
+      return null
+    }
+  }
   const lookup = lookupSlug(slug)
   if (!lookup) return null
   const row = await ctx.db

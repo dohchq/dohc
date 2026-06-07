@@ -120,6 +120,12 @@ describe('agent thread ownership — fail-closed (C1)', () => {
         createdAt: 1,
         updatedAt: 1,
       })
+      await ctx.db.insert('workspaceSlugs', {
+        workspaceId: B,
+        slug: 'bob',
+        createdAt: 1,
+        updatedAt: 1,
+      })
     })
 
     const owned = await t
@@ -139,6 +145,39 @@ describe('agent thread ownership — fail-closed (C1)', () => {
     await expect(
       t.withIdentity({ subject: B }).query(api.agent.getThreadById, {
         workspaceSlug: 'ice',
+        threadId: 'tA-dohc',
+      }),
+    ).resolves.toBeNull()
+
+    const personalAlias = await t
+      .withIdentity({ subject: A })
+      .query(api.agent.getThreadById, {
+        workspaceSlug: 'personal',
+        threadId: 'tA-dohc',
+      })
+    expect(personalAlias).toMatchObject({
+      threadId: 'tA-dohc',
+      workspaceSlug: 'ice',
+      activeWorkspaceId: null,
+      projectPath: 'dohc/research',
+    })
+
+    const bobPersonal = await t
+      .withIdentity({ subject: B })
+      .query(api.agent.getThreadById, {
+        workspaceSlug: 'personal',
+        threadId: 'tB',
+      })
+    expect(bobPersonal).toMatchObject({
+      threadId: 'tB',
+      workspaceSlug: 'bob',
+      activeWorkspaceId: null,
+      projectPath: null,
+    })
+
+    await expect(
+      t.withIdentity({ subject: B }).query(api.agent.getThreadById, {
+        workspaceSlug: 'personal',
         threadId: 'tA-dohc',
       }),
     ).resolves.toBeNull()
