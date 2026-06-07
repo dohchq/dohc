@@ -5,20 +5,20 @@ import {
   humanizeQuery,
 } from './AtomEditor'
 
-describe('live view chrome', () => {
+describe('live query chrome', () => {
   it('does not label empty query fences as live data', () => {
     expect(humanizeQuery('')).toBeNull()
     expect(humanizeQuery('   \n\t')).toBeNull()
   })
 
-  it('presents entity lists as human live views, not raw query language', () => {
+  it('presents entity lists as human live queries, not raw query language', () => {
     expect(humanizeQuery('entities.list("project")')).toBe('Projects')
     expect(
       humanizeQuery('entities.list("project", { status: "active" })'),
     ).toBe('Projects · status: active')
 
     expect(describeQueryView('entities.list("person")')).toMatchObject({
-      badge: 'Live view',
+      badge: 'Live query',
       title: 'People',
       sourceLabel: 'entities.list("person")',
       emptyText: 'No people yet.',
@@ -39,16 +39,16 @@ describe('live view chrome', () => {
     })
     expect(formatQueryViewResult({ value: null }, view)).toEqual({
       kind: 'error',
-      text: "This live view couldn't update.",
+      text: "This live query couldn't update.",
     })
     expect(
       formatQueryViewResult(
-        { unavailableText: 'Live views need a workspace connection.' },
+        { unavailableText: 'Live queries need a workspace connection.' },
         view,
       ),
     ).toEqual({
       kind: 'unavailable',
-      text: 'Live views need a workspace connection.',
+      text: 'Live queries need a workspace connection.',
     })
     expect(formatQueryViewResult({ value: '_(nothing)_' }, view)).toEqual({
       kind: 'empty',

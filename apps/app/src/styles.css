@@ -712,7 +712,7 @@
   max-width: 50%;
 }
 
-/* keep the doc table left-aligned & narrow for live views, etc.
+/* keep the doc table left-aligned & narrow for live queries, etc.
    pre-existing rule unchanged below */
 .query-block {
   border: 1px solid var(--rule);
@@ -739,7 +739,7 @@
 /* action header, empty state, chat, sign-in are now styled
  * inline via Tailwind utilities. */
 
-/* ---------- live view legacy chrome ---------- */
+/* ---------- live query chrome ---------- */
 
 .query-badge {
   font-size: 9.5px;
@@ -807,7 +807,7 @@
   --tiptap-font-title: var(--font-sans);
   --tiptap-font-code: var(--font-mono);
   /* Tiptap's frame theme hardcodes a LIGHT palette on `.tiptap`
-   * (surface #f7f7f7, background #fff, …), so code/live views and
+   * (surface #f7f7f7, background #fff, …), so code/live queries and
    * the editor chrome rendered as a glaring white box in dark mode.
    * Map every Tiptap design token to our theme-aware --color-* tokens
    * (they already flip light/dark) — ONE source, so the whole editor
@@ -1876,9 +1876,9 @@
   background: transparent !important;
   outline: none !important;
 }
-/* ── Live view block (query fence underneath) ─────────────────────
+/* ── Live query block (query fence underneath) ─────────────────────
  * A `language: query` fence is the repeating live-data primitive. The
- * product surface is "Live view"; the DSL remains as a quiet editable
+ * product surface is "Live query"; the DSL remains as a quiet editable
  * source strip for agents/power users. */
 .doc-editing .dohc-tiptap-editor .query-atom-block {
   background: color-mix(in srgb, var(--color-accent) 3%, var(--color-surface));

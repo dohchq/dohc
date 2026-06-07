@@ -1082,3 +1082,57 @@ Failures fixed:
 Remaining risk:
 - Verification remains deterministic/local plus no-secret Playwright smoke. A live authenticated WorkOS/onboarding/provider smoke is still needed before launch, consistent with earlier Phase 12 risk notes.
 - The full app suite still contains the intentional `ANTHROPIC_API_KEY` live-eval skip; offline scorer, app tester, manifest-test, browser runtime, app-agent handoff, asset-scope, and full-prompt confirmation coverage passed.
+
+## Seventh-Pass Cleanup: 2026-06-07 Active Apps Product Language
+
+Status: complete.
+
+Files changed:
+- `AGENTS.md`
+- `apps/app/src/__tests__/appsNoLegacyProductLanguage.test.ts`
+- `apps/app/src/__tests__/fileTreeShortcuts.test.ts`
+- `apps/app/src/components/AtomEditor.queryBlocks.test.ts`
+- `apps/app/src/components/AtomEditor.slashCommands.test.ts`
+- `apps/app/src/components/AtomEditor.tsx`
+- `apps/app/src/components/FileTree.tsx`
+- `apps/app/src/styles.css`
+- `docs/product/ai-native-positioning.md`
+- `docs/product/transcript-corpus-synthesis.md`
+- `docs/qa/playwright-checklist.md`
+- `docs/views/dohc-top-priorities.html`
+- `docs/superpowers/plans/2026-06-06-dohc-apps-sdk-sqlite-and-agent-testing.execution-log.md`
+
+Tests added:
+- `appsNoLegacyProductLanguage.test.ts` scans active agent instructions, product docs, QA docs, app editor UI source, file-tree accessibility copy, and active CSS comments for stale Apps-platform product language such as `source-backed views`, `Live view`, `Live views`, `Views activity`, `.views source file`, and `views folder`.
+
+Commands run:
+
+```bash
+cd /home/ice/dev/dohc/apps/app
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/__tests__/appsNoLegacyProductLanguage.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/__tests__/appsNoLegacyProductLanguage.test.ts src/components/AtomEditor.queryBlocks.test.ts src/components/AtomEditor.slashCommands.test.ts src/__tests__/fileTreeShortcuts.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts convex/a1SystemPrompt.test.ts src/__tests__/onboardingSetupFirst.test.ts convex/onboarding.test.ts
+npx -y node@24 ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts src/__tests__/brandNoLegacy.test.ts src/__tests__/appsNoLegacyProductLanguage.test.ts src/components/AtomEditor.queryBlocks.test.ts src/components/AtomEditor.slashCommands.test.ts src/__tests__/fileTreeShortcuts.test.ts convex/a1SystemPrompt.test.ts src/__tests__/onboardingSetupFirst.test.ts convex/onboarding.test.ts
+
+cd /home/ice/dev/dohc
+npx -y node@24 ./node_modules/typescript/bin/tsc --noEmit -p apps/app/tsconfig.json
+rg -n "source-backed views|\\.views|@dohc/view|Live views|live views|Live view|live view|Views activity|rendered folder view|views folder" AGENTS.md apps/app/src apps/app/convex docs --glob '!docs/superpowers/plans/2026-06-01-folder-views-runtime.md' --glob '!docs/superpowers/plans/2026-06-03-first-useful-turn-agent-prompt.md' --glob '!docs/superpowers/specs/2026-06-03-first-useful-turn-agent-prompt-design.md' --glob '!**/node_modules/**' --glob '!**/.next/**' --glob '!**/dist/**'
+```
+
+Final verification results:
+- Failing-first active language guard failed on stale active references in `AGENTS.md`, product docs, QA checklist, `AtomEditor`, `FileTree`, and CSS comments.
+- Focused language/editor/file-tree slice: 4 files passed, 37 tests passed.
+- Prompt/onboarding slice: 3 files passed, 52 tests passed.
+- Combined brand/language/prompt/editor/file-tree slice: 8 files passed, 91 tests passed.
+- App TypeScript: exit 0.
+- Broad legacy-language scan now returns only migration compatibility code/tests, explicit legacy migration diagnostics, historical implementation plans/specs, and internal route/state compatibility names.
+
+Failures fixed:
+- Active agent-facing repo instructions now say source-backed apps instead of source-backed views.
+- Active product docs and QA docs now use Apps, `.apps`, app build diagnostics, source-backed apps, and live queries.
+- Query fence UI now presents as `Live query` instead of `Live view`, including slash command labels, badges, loading/error/unavailable copy, and editor tooltips.
+- The `.views` folder accessibility label now says `legacy app folder`, preserving migration visibility without shipping old product language.
+
+Remaining risk:
+- Legacy `.views`/`@dohc/view` compatibility remains intentionally present in migration code, migration tests, historical plans/specs, and explicit diagnostics.
+- Internal route/state/component names still include `views` in places that render as Apps to users. Renaming those symbols/routes is a larger compatibility cleanup and was not necessary for active product/agent-facing language.

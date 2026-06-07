@@ -42,7 +42,7 @@ describe('AtomEditor slash commands', () => {
         label: command.label,
         hint: command.hint,
       })),
-    ).toEqual([{ label: 'Live view', hint: 'Show a live list or table' }])
+    ).toEqual([{ label: 'Live query', hint: 'Show a source-backed list or table' }])
   })
 
   it('detects slash triggers at the tail of the current text block', () => {
