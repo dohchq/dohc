@@ -376,6 +376,23 @@ describe('Agent / Files shell mode', () => {
     expect(CHAT).not.toContain('ChatLoadingState')
   })
 
+  it('renders workspace-scoped 404s inside the Agent shell instead of replacing sidebars', () => {
+    const branchStart = APP.indexOf('{workspaceScopedNotFound ? (')
+    const branchEnd = APP.indexOf(") : view === 'agent' ? (", branchStart)
+    const workspaceNotFoundBranch = APP.slice(branchStart, branchEnd)
+
+    expect(branchStart).toBeGreaterThan(-1)
+    expect(branchEnd).toBeGreaterThan(branchStart)
+    expect(APP).toContain('workspaceScopedNotFound')
+    expect(APP).toContain('resolvingWorkspaceScopedNotFound')
+    expect(APP).toContain('if (showNotFound && !workspaceScopedNotFound) return <NotFoundPage />')
+    expect(APP).toContain('!workspaceScopedNotFound && (view ===')
+    expect(workspaceNotFoundBranch).toContain('<AgentChatSidebar')
+    expect(workspaceNotFoundBranch).toContain('<ViewsSidebar')
+    expect(workspaceNotFoundBranch).toContain('<FileTree')
+    expect(workspaceNotFoundBranch).toContain('<NotFoundPage mode="workspace" />')
+  })
+
   it('polishes the primary Agent chat window into a focused work surface', () => {
     expect(CHAT).toContain('EmptyChatState')
     expect(CHAT).toContain('ScrollToBottomButton')

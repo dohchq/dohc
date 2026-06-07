@@ -1,10 +1,21 @@
-import { Link } from '@tanstack/react-router'
 import { ArrowLeft, FileQuestion, Home, Search } from 'lucide-react'
 import { DohcLogo } from '@dohc/brand'
 
-export function NotFoundPage() {
+type NotFoundPageProps = {
+  mode?: 'full' | 'workspace'
+  data?: unknown
+  isNotFound?: boolean
+  routeId?: string
+}
+
+export function NotFoundPage({ mode = 'full' }: NotFoundPageProps = {}) {
+  const rootClassName =
+    mode === 'workspace'
+      ? 'relative grid min-h-full overflow-hidden bg-page px-6 py-8 text-ink'
+      : 'relative grid min-h-screen overflow-hidden bg-page px-6 py-8 text-ink'
+
   return (
-    <main className="relative grid min-h-screen overflow-hidden bg-page px-6 py-8 text-ink">
+    <main className={rootClassName}>
       <div
         aria-hidden
         className="absolute inset-0 opacity-100"
@@ -39,13 +50,13 @@ export function NotFoundPage() {
           </p>
 
           <div className="mt-9 flex flex-col gap-2.5 sm:flex-row">
-            <Link
-              to="/"
+            <a
+              href="/"
               className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink-strong px-4 text-[13px] font-medium text-surface shadow-sm transition-[background,transform,box-shadow] hover:-translate-y-px hover:bg-accent-hover hover:shadow-md"
             >
               <Home className="size-4" strokeWidth={2} />
               <span>Open workspace</span>
-            </Link>
+            </a>
             <button
               type="button"
               onClick={() => window.history.back()}
