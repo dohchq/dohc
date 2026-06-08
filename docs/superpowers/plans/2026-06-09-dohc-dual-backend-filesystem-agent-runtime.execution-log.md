@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 1 - Shared Workspace Contract
+- Current phase: Phase 2 - Shared Conformance Harness
 - Current step: not started
-- Last successful commit: Phase 0 commit, `Add dual backend baseline guard`
+- Last successful commit: Phase 1 commit, `Add shared workspace backend contracts`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -50,3 +50,37 @@
 - Deferred findings with reason: none
 - Remaining risk: baseline requires Node 20.19+/22.13+/24+; default shell currently exposes Node 18, so commands in this session should use the Node 22 PATH prefix until the shell profile is fixed.
 - Next phase: Phase 1 - Shared Workspace Contract
+
+### Phase 1: Shared Workspace Contract
+
+- Status: complete
+- Execution map: add a new `packages/workspace-contracts` package under the existing `packages/*` workspace glob; define only shared domain validators, backend port types, event types, and path-safety tests. No Convex or app runtime behavior changes in this phase.
+- Files changed:
+  - `packages/workspace-contracts/package.json`
+  - `packages/workspace-contracts/tsconfig.json`
+  - `packages/workspace-contracts/src/backend.test.ts`
+  - `packages/workspace-contracts/src/backend.ts`
+  - `packages/workspace-contracts/src/domain.ts`
+  - `packages/workspace-contracts/src/errors.ts`
+  - `packages/workspace-contracts/src/events.ts`
+  - `packages/workspace-contracts/src/index.ts`
+  - `pnpm-lock.yaml`
+- Code deleted or consolidated: none; this phase creates the shared contract surface that later phases consolidate around.
+- Obsolete paths retained and why: existing Convex domain shapes remain untouched until the compatibility adapter and conformance harness prove parity.
+- Tests added: `packages/workspace-contracts/src/backend.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (RED: failed to load missing `./domain`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 1 file, 3 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install --lockfile-only` (passed; existing app peer warnings only)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed after lockfile update)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck` (passed after lockfile update)
+- Failing tests fixed: path-safety test now passes by implementing `WorkspacePath`.
+- Cross-cutting regressions run: not required; this phase only adds a standalone shared package and does not touch auth, agents, apps, assets, SQLite, filesystem sync, shell sandboxing, sharing, or permissions behavior.
+- Convex status: preserved; no Convex code touched after Phase 0 baseline.
+- Postgres status: not started
+- Reviewer/subagent/CodeRabbit findings: none
+- Relevant findings fixed: none
+- Deferred findings with reason: none
+- Remaining risk: contract is intentionally minimal until Phase 2 conformance cases and backend adapters exercise it.
+- Next phase: Phase 2 - Shared Conformance Harness
