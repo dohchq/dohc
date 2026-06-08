@@ -6,6 +6,7 @@ import { requireWorkspace } from './auth'
 import { listCollectionRows } from './collectionAdapters'
 import type { CollectionRow } from './collectionAdapterTypes'
 import { parseAppManifest } from './appManifest'
+import { splitFrontmatter } from './atomId'
 import {
   globMatchesPath,
   resolveAppForSecurity,
@@ -79,6 +80,10 @@ function error(
   extra: Omit<AppTestingError, 'ok' | 'code' | 'message'> = {},
 ): AppTestingError {
   return { ok: false, code, message, ...extra }
+}
+
+function stripDohcFrontmatter(body: string): string {
+  return splitFrontmatter(body).rest
 }
 
 function packageRelativeFromFullPath(packageRoot: string, path: string): string | null {
@@ -173,7 +178,7 @@ export const _resolveAppTestPayload = internalQuery({
       const relativePath = packageRelativeFromFullPath(args.packageRoot, atom.path)
       if (!relativePath) continue
       if (!(await canReadAtom(ctx, atom._id, resolved.userId))) continue
-      files.push({ relativePath, body: atom.body ?? '' })
+      files.push({ relativePath, body: stripDohcFrontmatter(atom.body ?? '') })
       totalBytes += TEXT_ENCODER.encode(atom.body ?? '').length
       if (files.length > SOURCE_FILE_CAP) {
         return error('too-many-files', 'This app has too many source files to test safely.')

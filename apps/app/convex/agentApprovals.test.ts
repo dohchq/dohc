@@ -77,6 +77,11 @@ describe('agent approval requests', () => {
         result: 'deleted .runs/setup.md',
       }),
     )
+    expect(result.resumePrompt).toContain('The user clicked Allow')
+    expect(result.resumePrompt).toContain('delete_atom')
+    expect(result.resumePrompt).toContain('.runs/setup.md')
+    expect(result.resumePrompt).toContain('Continue from where you paused')
+    expect(result.resumeDisplayText).toBe('Approved: Delete .runs/setup.md')
 
     const gone = await t.run(async (ctx) =>
       ctx.db
@@ -124,6 +129,7 @@ describe('agent approval requests', () => {
         decision: 'deny',
       }),
     )
+    expect(result).not.toHaveProperty('resumePrompt')
 
     const stillThere = await t.run(async (ctx) =>
       ctx.db

@@ -47,4 +47,11 @@ describe('agent approvals UI/source contract', () => {
     expect(CHAT_SRC).toContain('Always allow')
     expect(CHAT_SRC).toContain('Deny')
   })
+
+  it('chat resumes the agent automatically after an approved button decision', () => {
+    expect(CHAT_SRC).toContain('resumePrompt')
+    expect(CHAT_SRC).toContain('resumeDisplayText')
+    expect(CHAT_SRC).toContain('attachmentIds: []')
+    expect(CHAT_SRC).toMatch(/await\s+sendResolvedPrompt\(\{[\s\S]*resumePrompt/)
+  })
 })

@@ -31,31 +31,38 @@ async function seedAtom(
 }
 
 async function seedFinanceTracker(t: ReturnType<typeof convexTest>, workspaceId: string) {
+  const manifestBody = JSON.stringify({
+    title: 'Finance Tracker',
+    entry: 'src/App.tsx',
+    read: ['transactions/**'],
+    write: ['transactions/**'],
+    collections: {
+      transactions: {
+        source: 'transactions/*.md',
+        write: 'transactions/*.md',
+        format: 'markdown-table',
+        key: 'ID',
+      },
+    },
+    tests: [{ name: 'add expense' }],
+  })
   await seedAtom(
     t,
     workspaceId,
     'finance/.apps/tracker/app.json',
-    JSON.stringify({
-      title: 'Finance Tracker',
-      entry: 'src/App.tsx',
-      read: ['transactions/**'],
-      write: ['transactions/**'],
-      collections: {
-        transactions: {
-          source: 'transactions/*.md',
-          write: 'transactions/*.md',
-          format: 'markdown-table',
-          key: 'ID',
-        },
-      },
-      tests: [{ name: 'add expense' }],
-    }),
+    `---
+id: finance.apps.tracker.manifest
+---
+${manifestBody}`,
   )
   await seedAtom(
     t,
     workspaceId,
     'finance/.apps/tracker/src/App.tsx',
     [
+      '---',
+      'id: finance.apps.tracker.source',
+      '---',
       "import { dohc, useCollection } from '@dohc/app'",
       'export default function App() {',
       "  const transactions = useCollection('transactions')",
@@ -162,6 +169,12 @@ describe('appTesting', () => {
       expect.objectContaining({ relativePath: 'app.json' }),
       expect.objectContaining({ relativePath: 'src/App.tsx' }),
     ])
+    expect(body.files.find((file: { relativePath: string }) => file.relativePath === 'app.json')?.body)
+      .not.toContain('finance.apps.tracker.manifest')
+    expect(body.files.find((file: { relativePath: string }) => file.relativePath === 'src/App.tsx')?.body)
+      .toMatch(/^import \{ dohc, useCollection \} from '@dohc\/app'/)
+    expect(body.files.find((file: { relativePath: string }) => file.relativePath === 'src/App.tsx')?.body)
+      .not.toContain('finance.apps.tracker.source')
     expect(body.manifest.tests).toEqual([{ name: 'add expense' }])
 
     const latest = await t.withIdentity({ subject: ALICE }).query(api.appTesting.latestResult, {

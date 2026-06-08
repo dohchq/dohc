@@ -92,6 +92,37 @@ export function createAppTestSdk(seed: AppTestSeed = {}) {
         docs[path] = `${docs[path] ?? ''}\n${markdown}`
         return { ok: true }
       },
+      async replaceText(args: { find?: string; with?: string; expectedText?: string; proposedText?: string }) {
+        calls.push({ op: 'doc.replaceText', path, payload: args })
+        const find = typeof args.find === 'string'
+          ? args.find
+          : typeof args.expectedText === 'string'
+            ? args.expectedText
+            : ''
+        const withText = typeof args.with === 'string'
+          ? args.with
+          : typeof args.proposedText === 'string'
+            ? args.proposedText
+            : ''
+        if (find && docs[path]?.includes(find)) {
+          docs[path] = docs[path]!.replace(find, withText)
+        }
+        return { ok: true }
+      },
+      section(heading: string) {
+        return {
+          async append(markdown: string) {
+            calls.push({ op: 'doc.section.append', path, payload: { heading, markdown } })
+            docs[path] = `${docs[path] ?? ''}\n${markdown}`
+            return { ok: true }
+          },
+          async replace(markdown: string) {
+            calls.push({ op: 'doc.section.replace', path, payload: { heading, markdown } })
+            docs[path] = `${docs[path] ?? ''}\n${markdown}`
+            return { ok: true }
+          },
+        }
+      },
     }
   }
 

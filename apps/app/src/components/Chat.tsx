@@ -775,11 +775,18 @@ export function Chat({
     setRespondingApprovalId(approvalId)
     setComposerError(null)
     try {
-      await respondToApproval({
+      const result = await respondToApproval({
         activeWorkspaceId,
         approvalId: approvalId as Id<'agentApprovals'>,
         decision,
       })
+      if (result.status === 'approved' && result.resumePrompt) {
+        await sendResolvedPrompt({
+          promptText: result.resumePrompt,
+          displayText: result.resumeDisplayText ?? 'Approved',
+          attachmentIds: [],
+        })
+      }
     } catch (e) {
       setComposerError(formatComposerError(e))
       console.error(e)

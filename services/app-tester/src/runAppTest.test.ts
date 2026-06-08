@@ -60,6 +60,35 @@ describe('runAppTest', () => {
     )
   })
 
+  it('strips dohc atom frontmatter from app source before compiling', async () => {
+    const result = await runAppTest({
+      packageRoot: 'finance/.apps/frontmatter',
+      files: [
+        { relativePath: 'app.json', body: '---\nid: app.manifest\n---\n{"title":"Finance Tracker"}' },
+        {
+          relativePath: 'src/App.tsx',
+          body: `---
+id: app.source
+---
+${financeTracker}`,
+        },
+      ],
+      seed: { collections: seedCollections },
+      manifest: {
+        collections: { transactions: { source: 'transactions.md' } },
+        tests: [{ name: 'add expense' }],
+      },
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      packageRoot: 'finance/.apps/frontmatter',
+    })
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: 'compile', status: 'ok' }),
+    )
+  })
+
   it('catches blank renders', async () => {
     const result = await runAppTest({
       packageRoot: 'finance/.apps/blank',
@@ -135,6 +164,38 @@ describe('runAppTest', () => {
       expect.objectContaining({ op: 'collection.insert', collection: 'transactions' }),
       expect.objectContaining({ op: 'collection.update', collection: 'transactions', id: 'txn_001' }),
     ])
+  })
+
+  it('treats doc replaceText controls as persistent source writes', async () => {
+    const result = await runAppTest({
+      packageRoot: 'finance/.apps/doc-review',
+      files: [{
+        relativePath: 'src/App.tsx',
+        body: `
+          import { dohc, useDoc } from '@dohc/app'
+          export default function App() {
+            const ledger = useDoc('finance/ledger.md')
+            async function markReviewed() {
+              await dohc.doc('finance/ledger.md').replaceText({
+                find: 'review: no',
+                with: 'review: yes'
+              })
+            }
+            return <main><h1>Review</h1><p>{ledger.body}</p><button onClick={markReviewed}>Mark reviewed</button></main>
+          }
+        `,
+      }],
+      seed: { docs: { 'finance/ledger.md': 'review: no' } },
+      manifest: { tests: [{ name: 'mark reviewed', path: 'finance/ledger.md' }] },
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      packageRoot: 'finance/.apps/doc-review',
+    })
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: 'mutation persistence', status: 'ok' }),
+    )
   })
 
   it('serves test_app over the app tester handler', async () => {

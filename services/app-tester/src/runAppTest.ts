@@ -44,8 +44,14 @@ function isCodeFile(file: AppTestFile): boolean {
   return /\.(?:[cm]?[jt]sx?)$/i.test(file.relativePath)
 }
 
+function stripDohcFrontmatter(body: string): string {
+  if (!body.startsWith('---\n') && !body.startsWith('---\r\n')) return body
+  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(body)
+  return match ? body.slice(match[0].length) : body
+}
+
 function source(input: RunAppTestInput): string {
-  return input.files.filter(isCodeFile).map((file) => file.body).join('\n')
+  return input.files.filter(isCodeFile).map((file) => stripDohcFrontmatter(file.body)).join('\n')
 }
 
 function hasRealRows(seed: AppTestSeed | undefined): boolean {
@@ -493,6 +499,48 @@ async function runRenderedApp(input: RunAppTestInput, code: string): Promise<Run
               noteStateChange(docs[path] !== next)
               docs[path] = next
               return { ok: true }
+            },
+            async replaceText(args: {
+              find?: unknown
+              with?: unknown
+              expectedText?: unknown
+              proposedText?: unknown
+            }) {
+              calls.push({ op: 'doc.replaceText', path, payload: args })
+              const find = typeof args.find === 'string'
+                ? args.find
+                : typeof args.expectedText === 'string'
+                  ? args.expectedText
+                  : ''
+              const withText = typeof args.with === 'string'
+                ? args.with
+                : typeof args.proposedText === 'string'
+                  ? args.proposedText
+                  : ''
+              const before = docs[path] ?? ''
+              if (find && before.includes(find)) {
+                docs[path] = before.replace(find, withText)
+              }
+              noteStateChange(before !== (docs[path] ?? ''))
+              return { ok: true }
+            },
+            section(heading: string) {
+              return {
+                async append(markdown: string) {
+                  calls.push({ op: 'doc.section.append', path, payload: { heading, markdown } })
+                  const next = `${docs[path] ?? ''}\n${markdown}`
+                  noteStateChange(docs[path] !== next)
+                  docs[path] = next
+                  return { ok: true }
+                },
+                async replace(markdown: string) {
+                  calls.push({ op: 'doc.section.replace', path, payload: { heading, markdown } })
+                  const next = `${docs[path] ?? ''}\n${markdown}`
+                  noteStateChange(docs[path] !== next)
+                  docs[path] = next
+                  return { ok: true }
+                },
+              }
             },
           }
         }

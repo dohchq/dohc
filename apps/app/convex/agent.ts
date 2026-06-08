@@ -1576,6 +1576,7 @@ Custom apps:
   at workspace root). Any folder can become a work scope this way.
 - App source code is normal web code. Use TypeScript/React by default:
   put the entry at \`src/App.tsx\` and CSS beside it.
+- .apps package files are raw code/config, not markdown atoms. Do not add YAML frontmatter to app.json, src/App.tsx, or other .apps package files.
 - Export a default React component from \`src/App.tsx\`; dohc auto-mounts
   it. Do not add your own \`createRoot(...).render(...)\` unless you need
   a custom bootstrap.
@@ -1598,6 +1599,8 @@ Custom apps:
   The app reads them through dohc's SDK; imports/exports remain the only
   cross-workspace data path.
 - Normal app controls persist through dohc.collection, dohc.doc, or dohc.database.
+  dohc.doc is a function: call dohc.doc("path").append(...), dohc.doc("path").replaceText(...), or dohc.doc("path").section("Heading").append(...).
+  Reserve <button> for persistent commands; use selects or non-button tab controls for filtering/navigation so test_app can distinguish workflow actions from local UI state.
   Use dohc.agent.run only for judgment-heavy work, and dohc.patch.propose for
   risky/ambiguous reviewed edits. Declare matching app.json agent capabilities
   because these handoffs require user trust and host confirmation.
@@ -3220,6 +3223,42 @@ function cleanApprovalDetail(value: string, fallback: string): string {
   return value.trim().replace(/\s+/g, ' ').slice(0, 1200) || fallback
 }
 
+function approvalDecisionLabel(decision: AgentApprovalDecision): string {
+  if (decision === 'always_allow') return 'Always allow'
+  if (decision === 'allow_once') return 'Allow'
+  return 'Deny'
+}
+
+function approvalResumePayload(
+  approval: {
+    operation: AgentApprovalOperation
+    title: string
+    detail: string
+    targetPaths: string[]
+  },
+  decision: Extract<AgentApprovalDecision, 'allow_once' | 'always_allow'>,
+  result: string,
+): { resumePrompt: string; resumeDisplayText: string } {
+  const label = approvalDecisionLabel(decision)
+  const targets = approval.targetPaths
+    .map((path) => path.trim())
+    .filter(Boolean)
+  const lines = [
+    `The user clicked ${label} on a dohc approval card.`,
+    `Approved operation: ${approval.operation}.`,
+    `Approval title: ${approval.title}.`,
+    targets.length > 0
+      ? `Approved target paths: ${JSON.stringify(targets)}.`
+      : null,
+    `Server result: ${result}.`,
+    'Continue from where you paused. The approved operation has already been executed by the server; do not ask the user to approve it again, and do not infer any broader permission.',
+  ].filter((line): line is string => Boolean(line))
+  return {
+    resumePrompt: lines.join('\n'),
+    resumeDisplayText: `Approved: ${approval.title}`,
+  }
+}
+
 async function upsertApprovalPolicy(
   ctx: any,
   approval: {
@@ -3482,6 +3521,8 @@ export const respondToApproval = mutation({
     status: 'approved' | 'denied'
     decision: AgentApprovalDecision
     result?: string
+    resumePrompt?: string
+    resumeDisplayText?: string
   }> => {
     const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
     const identity = await ctx.auth.getUserIdentity()
@@ -3528,7 +3569,12 @@ export const respondToApproval = mutation({
       resolvedAt: now,
       result,
     })
-    return { status: 'approved', decision, result }
+    return {
+      status: 'approved',
+      decision,
+      result,
+      ...approvalResumePayload(approval as any, decision, result),
+    }
   },
 })
 

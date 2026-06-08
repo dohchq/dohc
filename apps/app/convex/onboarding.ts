@@ -111,7 +111,11 @@ function isRunPath(path: string): boolean {
 }
 
 function isSetupRunPath(path: string): boolean {
-  return /^\.?runs\/setup\.md$/i.test(path)
+  return /^\.?runs\/[^/]+\.md$/i.test(path)
+}
+
+function setupRunRank(path: string): number {
+  return /^\.?runs\/setup\.md$/i.test(path) ? 0 : 1
 }
 
 function strippedBody(body: string): string {
@@ -288,7 +292,7 @@ async function appTestGateFailure(
         .filter((atom) => atom.path.startsWith(`${packageRoot}/`))
         .map((atom) => ({
           relativePath: atom.path.slice(packageRoot.length + 1),
-          body: atom.body ?? '',
+          body: strippedBody(atom.body),
         })),
       seed,
     })
@@ -416,7 +420,14 @@ export async function progressOf(
       cockpitRank(a.appName) - cockpitRank(b.appName) ||
       a.packageRoot.localeCompare(b.packageRoot),
   )
-  const setupRun = atoms.find((a) => isCompleteSetupRun(a.path, a.body))
+  const setupRun =
+    atoms
+      .filter((a) => isCompleteSetupRun(a.path, a.body))
+      .sort(
+        (a, b) =>
+          setupRunRank(a.path) - setupRunRank(b.path) ||
+          a.path.localeCompare(b.path),
+      )[0] ?? null
   const legacyDashboards = atoms.filter(
     (a) =>
       !isPlaceholderSeed(a.body) &&
