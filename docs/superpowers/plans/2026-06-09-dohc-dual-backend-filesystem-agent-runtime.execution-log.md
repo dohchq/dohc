@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 3 - Postgres Service Scaffold
+- Current phase: Phase 4 - Postgres Metadata, Atom, And Permission Core
 - Current step: not started
-- Last successful commit: Phase 2 commit, `Add workspace backend conformance harness`
+- Last successful commit: Phase 3 commit, `Scaffold Postgres workspace backend`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -111,3 +111,42 @@
 - Deferred findings with reason: none
 - Remaining risk: real backend adapters have not yet implemented the contract, so the harness is currently validated only by the memory self-test.
 - Next phase: Phase 3 - Postgres Service Scaffold
+
+### Phase 3: Postgres Service Scaffold
+
+- Status: complete
+- Execution map: add `@dohc/workspace-postgres` package shell, first Drizzle schema/migration for required workspace tables, local Postgres/MinIO compose file, dev/reset scripts, and root scripts. Use a schema scaffold test as the RED step before implementing the schema.
+- Files changed:
+  - `packages/workspace-postgres/package.json`
+  - `packages/workspace-postgres/tsconfig.json`
+  - `packages/workspace-postgres/src/db/schema.test.ts`
+  - `packages/workspace-postgres/src/db/schema.ts`
+  - `packages/workspace-postgres/src/db/client.ts`
+  - `packages/workspace-postgres/src/db/migrations/0001_initial.sql`
+  - `packages/workspace-postgres/src/testAdapter.ts`
+  - `packages/workspace-postgres/src/index.ts`
+  - `docker-compose.dev.yml`
+  - `scripts/dev-postgres.mjs`
+  - `scripts/reset-postgres-dev-data.mjs`
+  - `package.json`
+  - `pnpm-lock.yaml`
+- Code deleted or consolidated: none; this phase adds the scaffold only.
+- Obsolete paths retained and why: existing `docker-compose.dev.yml` Postgres/Hocuspocus service naming and `dohc_v2` database are retained so the Hocuspocus dev stack is not broken. The plan's `dohc_dev` default is folded into the existing dev database instead.
+- Tests added: `packages/workspace-postgres/src/db/schema.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (RED: missing `./schema`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (failed: missing `drizzle-orm/pg-core` before install)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install` (passed; existing app peer warnings only)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm dev:postgres` (passed; started existing Postgres and new MinIO service)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm reset:postgres` (passed; migration applied and dev tables truncated)
+- Failing tests fixed: implemented schema exports and installed Drizzle/pg dependencies.
+- Cross-cutting regressions run: not required; this phase adds scaffold/schema only and does not touch existing auth, app, agent, SQLite, or sharing behavior.
+- Convex status: preserved; no Convex code touched in this phase.
+- Postgres status: scaffold test/typecheck pass; local dev Postgres/MinIO start and reset succeeds.
+- Reviewer/subagent/CodeRabbit findings: none
+- Relevant findings fixed: none
+- Deferred findings with reason: `packages/workspace-postgres/src/conformance.test.ts` is intentionally deferred to Phase 4 so the conformance test can be the Phase 4 RED step instead of a failing placeholder in the scaffold commit.
+- Remaining risk: schema is a first scaffold and has not yet proven atom behavior through the shared conformance harness.
+- Next phase: Phase 4 - Postgres Metadata, Atom, And Permission Core
