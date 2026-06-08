@@ -48,7 +48,6 @@ import {
   ownerAtomByFileId,
 } from './atomShares'
 import { scheduleHocuspocusDeleteDocument } from './hocuspocusAdmin'
-import { isViewPath } from './viewPaths'
 import type { QueryCtx, MutationCtx } from './_generated/server'
 import { isMember } from './orgs'
 import { readWorkspaceSlug } from './workspaceSlugs'
@@ -58,14 +57,18 @@ import { readWorkspaceSlug } from './workspaceSlugs'
 // the PRE-EDIT body at most once per atom per window, so a user can
 // always recover to "before this editing session" with bounded growth.
 const SNAPSHOT_COALESCE_MS = 10 * 60 * 1000 // 10 min
-const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
-
-function isViewSourceCodePath(path: string): boolean {
-  return isViewPath(path) && VIEW_SOURCE_EXT_RE.test(path)
-}
-
 function hasPostFrontmatterContent(body: string): boolean {
   return splitFrontmatter(body).rest.trim().length > 0
+}
+
+function wouldErasePostFrontmatterContent(
+  previousBody: string,
+  nextBody: string,
+): boolean {
+  return (
+    hasPostFrontmatterContent(previousBody) &&
+    !hasPostFrontmatterContent(nextBody)
+  )
 }
 
 // ── Shared destructive-op impls. ROOT-CAUSE FIX (Phase-2 review):
@@ -179,6 +182,14 @@ export async function upsertAtomImpl(
     ) {
       throw new Error(
         `refusing to overwrite user-authored atom "${path}" without confirmation`,
+      )
+    }
+    if (
+      finalBody !== existing.body &&
+      wouldErasePostFrontmatterContent(existing.body, finalBody)
+    ) {
+      throw new Error(
+        `refusing unsafe frontmatter-only overwrite of non-empty atom "${path}"`,
       )
     }
     if (finalBody !== existing.body) {
@@ -1119,11 +1130,7 @@ export const _setBodyCache = internalMutation({
       return { ok: false, reason: 'frontmatter-id-mismatch' }
     }
 
-    if (
-      isViewSourceCodePath(atom.path) &&
-      hasPostFrontmatterContent(atom.body) &&
-      !hasPostFrontmatterContent(markdown)
-    ) {
+    if (wouldErasePostFrontmatterContent(atom.body, markdown)) {
       await ctx.db.patch(atom._id, {
         updatedAt: projectedAt,
         ...(lastEditedByUserId ? { lastEditedByUserId } : {}),

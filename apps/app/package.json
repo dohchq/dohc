@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "eval": "vitest run src/eval/live.test.ts",
     "lint": "tsc --noEmit",
+    "reset:dev": "node ../../scripts/reset-dev-data.mjs",
     "reset:onboarding": "npx convex run internal.devReset.wipeWorkspace '{\"workspaceId\":\"user_01KQHA425W6TSH7CYBM0FAAZEH\",\"confirm\":\"WIPE\"}'",
     "migrate:skills": "npx convex run internal.skillsMigration._migrateLegacyPaths '{\"workspaceId\":\"user_01KQHA425W6TSH7CYBM0FAAZEH\"}'"
   },

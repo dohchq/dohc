@@ -123,6 +123,39 @@ describe('Hocuspocus body cache projection bridge', () => {
     expect(atom?.bodyProjectionHash).toBe('sha256:projected')
   })
 
+  it('does not let stale markdown projections erase ordinary source docs', async () => {
+    const t = convexTest(schema, modules)
+    stubServerToken()
+    await seedAtom(t)
+    const originalBody = await t.run(async (ctx) => {
+      const atom = await ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', OWNER).eq('path', 'docs/intro.md'),
+        )
+        .unique()
+      return atom?.body
+    })
+
+    await expect(
+      setBodyCache(t, {
+        markdown: '---\nid: intro\n---\n',
+      }),
+    ).resolves.toEqual({ ok: true })
+
+    const atom = await t.run(async (ctx) =>
+      ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', OWNER).eq('path', 'docs/intro.md'),
+        )
+        .unique(),
+    )
+    expect(atom?.body).toBe(originalBody)
+    expect(atom?.bodyProjectionHash).toBe('sha256:projected')
+    expect(atom?.searchText).toContain('Old body')
+  })
+
   it('returns a miss when the atom file id is unknown', async () => {
     const t = convexTest(schema, modules)
     stubServerToken()

@@ -20,6 +20,10 @@ cp apps/app/.env.example apps/app/.env.local   # fill in real values
 pnpm dev        # local Postgres + Hocuspocus sync, vite (:3000), Convex dev
 ```
 
+## Reset dev data
+
+pnpm reset:dev --confirm WIPE_DEV_DATA --email you@example.com --delete-workos-orgs
+
 ## Commands
 
 ```bash
