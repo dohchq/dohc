@@ -19,7 +19,8 @@
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",
     "test:hocuspocus:integration": "pnpm --filter @dohc/hocuspocus run test:integration",
-    "lint": "pnpm -r --if-present lint"
+    "lint": "pnpm -r --if-present lint",
+    "check:dual-backend-baseline": "node scripts/check-dual-backend-baseline.mjs"
   },
   "packageManager": "pnpm@10.24.0",
   "devDependencies": {

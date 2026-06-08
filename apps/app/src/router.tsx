@@ -3,8 +3,9 @@ import { NotFoundPage } from './components/NotFoundPage'
 import { routeTree } from './routeTree.gen'
 
 type RouterOptions = Parameters<typeof createTanstackRouter>[0]
+type AppRouter = ReturnType<typeof createTanstackRouter>
 
-export function getRouter(options: Partial<RouterOptions> = {}) {
+export function getRouter(options: Partial<RouterOptions> = {}): AppRouter {
   return createTanstackRouter({
     routeTree,
     scrollRestoration: true,
@@ -18,6 +19,6 @@ export function getRouter(options: Partial<RouterOptions> = {}) {
 
 declare module '@tanstack/react-router' {
   interface Register {
-    router: ReturnType<typeof getRouter>
+    router: AppRouter
   }
 }

@@ -597,10 +597,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
     void navigate({
       to: '/$workspaceSlug/$pageRef',
-      params: {
+      params: () => ({
         workspaceSlug: routedPage.workspaceSlug,
         pageRef: canonicalRef,
-      },
+      }),
       replace: true,
     })
   }, [navigate, routedPage, urlPageRef, urlWorkspaceSlug])
@@ -616,10 +616,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
     void navigate({
       to: '/$workspaceSlug/agent/$threadRef',
-      params: {
+      params: () => ({
         workspaceSlug: routedAgentThread.workspaceSlug,
         threadRef: canonicalRef,
-      },
+      }),
       replace: true,
     })
   }, [navigate, routedAgentThread, urlAgentThreadRef, urlWorkspaceSlug])
@@ -992,10 +992,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     (thread: AgentThreadSummary, opts?: { replace?: boolean }) => {
       void navigate({
         to: '/$workspaceSlug/agent/$threadRef',
-        params: {
+        params: () => ({
           workspaceSlug: activeWorkspaceSlug,
           threadRef: agentThreadRef(thread),
-        },
+        }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1014,7 +1014,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         }
         void navigate({
           to: '/$workspaceSlug/agent',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1023,7 +1023,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setSharingOpen(false)
         void navigate({
           to: '/$workspaceSlug/graph',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1032,7 +1032,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setSharingOpen(false)
         void navigate({
           to: '/$workspaceSlug/apps',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1049,17 +1049,17 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         if (!row) {
           void navigate({
             to: '/$workspaceSlug/files',
-            params: { workspaceSlug: activeWorkspaceSlug },
+            params: () => ({ workspaceSlug: activeWorkspaceSlug }),
             replace: opts?.replace ?? false,
           })
           return
         }
         void navigate({
           to: '/$workspaceSlug/$pageRef',
-          params: {
+          params: () => ({
             workspaceSlug: activeWorkspaceSlug,
             pageRef: pageRef(row),
-          },
+          }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1067,14 +1067,14 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       if (destination?.kind === 'shared') {
         void navigate({
           to: '/shared/$shareId',
-          params: { shareId: destination.id },
+          params: () => ({ shareId: destination.id }),
           replace: opts?.replace ?? false,
         })
         return
       }
       void navigate({
         to: '/$workspaceSlug/files',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1161,7 +1161,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       setSharingOpen(false)
       void navigate({
         to: '/$workspaceSlug/agent',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1336,7 +1336,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setAgentDraft(true)
         void navigate({
           to: '/$workspaceSlug/agent',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: true,
         })
       }
@@ -1445,10 +1445,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
         void navigate({
           to: '/$workspaceSlug/$pageRef',
-          params: {
+          params: () => ({
             workspaceSlug: activeWorkspaceSlug,
             pageRef: pageRef(row),
-          },
+          }),
           replace: opts?.replace ?? false,
         })
       }
@@ -1464,7 +1464,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       // Stay in the Files surface after deleting/clearing the open atom.
       void navigate({
         to: '/$workspaceSlug/files',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1479,7 +1479,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       lastFilesDestinationRef.current = { kind: 'shared', id: sid }
       void navigate({
         to: '/shared/$shareId',
-        params: { shareId: sid },
+        params: () => ({ shareId: sid }),
       })
     },
     [navigate],
@@ -1492,7 +1492,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       const appRef = encodeViewRef(packageRoot)
       void navigate({
         to: '/$workspaceSlug/a/$appRef',
-        params: { workspaceSlug: activeWorkspaceSlug, appRef },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug, appRef }),
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1515,10 +1515,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
       void navigate({
         to: '/$workspaceSlug/$pageRef',
-        params: {
+        params: () => ({
           workspaceSlug: activeWorkspaceSlug,
           pageRef: pageRef(row),
-        },
+        }),
         replace: true,
       })
     }
