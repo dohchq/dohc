@@ -21,6 +21,15 @@ function renderNotFound() {
   return renderToStaticMarkup(React.createElement(NotFoundPage))
 }
 
+function renderWorkspaceNotFound() {
+  const WorkspaceNotFoundPage = NotFoundPage as React.ComponentType<{
+    mode: 'workspace'
+  }>
+  return renderToStaticMarkup(
+    React.createElement(WorkspaceNotFoundPage, { mode: 'workspace' }),
+  )
+}
+
 describe('root 404 page', () => {
   it('renders branded 404 actions and copy', () => {
     const html = renderNotFound()
@@ -39,5 +48,13 @@ describe('root 404 page', () => {
     expect(html).toContain('href="/"')
     expect(html).toContain('path unresolved')
     expect(html).toContain('source absent')
+  })
+
+  it('can render as an in-workspace panel without taking over the whole viewport', () => {
+    const html = renderWorkspaceNotFound()
+
+    expect(html).toContain('This page is not in the workspace.')
+    expect(html).toContain('min-h-full')
+    expect(html).not.toContain('min-h-screen')
   })
 })

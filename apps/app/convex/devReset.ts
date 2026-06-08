@@ -36,6 +36,44 @@ const BATCH = 500
 // cap so the mutation always COMMITS (never an atomic rollback that
 // would make "re-run" a lie). Tiny dev workspaces finish in one call.
 const MAX_DELETES = 6000
+export const WIPE_DEV_DATA_CONFIRMATION = 'WIPE_DEV_DATA' as const
+
+export const DEV_RESET_TABLES = [
+  'atoms',
+  'skillTurnState',
+  'atomIds',
+  'atomShares',
+  'userProfiles',
+  'workspaceAddressRoutes',
+  'workspaceSlugs',
+  'pendingAtomShares',
+  'orgs',
+  'entities',
+  'folders',
+  'folderMetadata',
+  'threadRefs',
+  'agentApprovals',
+  'agentApprovalPolicies',
+  'workspaceAssets',
+  'databaseFiles',
+  'databaseOps',
+  'appTrust',
+  'appProvenance',
+  'appTestResults',
+  'onboarding',
+  'trash',
+  'captures',
+  'sourceAtoms',
+  'workspaceSettings',
+  'memberships',
+  'atomAccess',
+  'folderAccess',
+  'atomTombstones',
+  'windows',
+  'windowGrants',
+  'rollups',
+  'atomSuggestions',
+] as const
 
 type Budget = { left: number }
 
@@ -60,6 +98,81 @@ async function drain(
   }
   return n
 }
+
+async function maybeDeleteStorageId(
+  ctx: MutationCtx,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  storageId: any,
+): Promise<boolean> {
+  if (!storageId) return false
+  const storage = ctx.storage as unknown as {
+    // Convex storage supports this in deployed mutations. convex-test may
+    // lag the runtime shape, so this stays best-effort for local tests.
+    delete?: (id: unknown) => Promise<void>
+  }
+  if (typeof storage.delete !== 'function') return false
+  try {
+    await storage.delete(storageId)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function drainTable(
+  ctx: MutationCtx,
+  b: Budget,
+  table: (typeof DEV_RESET_TABLES)[number],
+): Promise<{ rows: number; storage: number }> {
+  let rowsDeleted = 0
+  let storageDeleted = 0
+  while (b.left > 0) {
+    const rows = await ctx.db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .query(table as any)
+      .take(Math.min(BATCH, b.left))
+    if (rows.length === 0) break
+    for (const row of rows) {
+      if (table === 'workspaceAssets' || table === 'databaseFiles') {
+        if (await maybeDeleteStorageId(ctx, row.storageId)) storageDeleted++
+      }
+      await ctx.db.delete(row._id)
+      rowsDeleted++
+      b.left--
+      if (b.left <= 0) break
+    }
+  }
+  return { rows: rowsDeleted, storage: storageDeleted }
+}
+
+export const wipeAllData = internalMutation({
+  args: {
+    confirm: v.literal(WIPE_DEV_DATA_CONFIRMATION),
+  },
+  handler: async (ctx) => {
+    const deleted: Record<string, number> = {}
+    const b: Budget = { left: MAX_DELETES }
+    let deletedStorage = 0
+
+    for (const table of DEV_RESET_TABLES) {
+      if (b.left <= 0) {
+        deleted[table] = 0
+        continue
+      }
+      const result = await drainTable(ctx, b, table)
+      deleted[table] = result.rows
+      deletedStorage += result.storage
+    }
+
+    const total = Object.values(deleted).reduce((x, y) => x + y, 0)
+    return {
+      total,
+      done: b.left > 0,
+      deleted,
+      deletedStorage,
+    }
+  },
+})
 
 export const wipeWorkspace = internalMutation({
   args: {

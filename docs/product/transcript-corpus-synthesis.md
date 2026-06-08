@@ -72,7 +72,7 @@ For dohc, this validates "text is the primitive." But the product cannot
 stop at files. A folder of markdown plus an agent is powerful for technical
 or highly motivated users, but still too raw for normal people. dohc should
 provide the missing product layer: storage, permissions, sync, search,
-source-backed views, safe agent writes, review gates, polished UI, and
+source-backed apps, safe agent writes, review gates, polished UI, and
 context-aware workflows.
 
 ### 2. Systems beat tools
@@ -279,7 +279,7 @@ The MVP loop:
 3. **The user keeps judgment.** AI can suggest, organize, draft, and update,
    but meaningful direction and approval belong to the user.
 4. **The agent works where humans can inspect.** Durable artifacts should be
-   readable as text or source-backed views.
+   readable as text or source-backed apps.
 5. **Structure is earned.** Avoid over-foldering and over-templating before
    patterns exist.
 6. **Chats are work artifacts.** They should be durable, named, scoped,

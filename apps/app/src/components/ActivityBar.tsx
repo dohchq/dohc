@@ -9,7 +9,7 @@ import {
 import type { AppView } from '../lib/appViews'
 
 // graph-v1 1c — VSCode-style activity bar (icon rail). Switches the
-// primary view: Views, Agent, Files (explorer + editor), Graph.
+// primary view: Apps, Agent, Files (explorer + editor), Graph.
 export type ActivityView = Extract<AppView, 'agent' | 'atom' | 'views' | 'graph'>
 
 const ITEMS: Array<{
@@ -17,7 +17,7 @@ const ITEMS: Array<{
   label: string
   Icon: typeof Files
 }> = [
-  { view: 'views', label: 'Views', Icon: AppWindow },
+  { view: 'views', label: 'Apps', Icon: AppWindow },
   { view: 'agent', label: 'Agent', Icon: BotMessageSquare },
   { view: 'atom', label: 'Files', Icon: Files },
   { view: 'graph', label: 'Graph', Icon: Workflow },

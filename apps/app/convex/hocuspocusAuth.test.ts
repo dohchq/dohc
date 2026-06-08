@@ -34,7 +34,7 @@ async function checkAccess(
     userId: string
     workspaceId?: string
     atomId?: string
-    actorKind?: 'user' | 'agent'
+    actorKind?: 'user' | 'agent' | 'app'
     authzVersion?: number
   },
 ) {
@@ -55,7 +55,7 @@ async function loadBootstrap(
     userId?: string
     workspaceId?: string
     atomId?: string
-    actorKind?: 'user' | 'agent'
+    actorKind?: 'user' | 'agent' | 'app'
     authzVersion?: number
   } = {},
 ) {
@@ -77,7 +77,7 @@ async function createAtom(
     workspaceId?: string
     path?: string
     content?: string
-    actorKind?: 'user' | 'agent'
+    actorKind?: 'user' | 'agent' | 'app'
     authzVersion?: number
   } = {},
 ) {
@@ -137,7 +137,7 @@ describe('hocuspocus Convex ACL bridge', () => {
     })
   })
 
-  it('lets a human owner write userLocked atoms but blocks owner agent writes', async () => {
+  it('lets a human owner write userLocked atoms but blocks owner agent and app writes', async () => {
     const t = convexTest(schema, modules)
     stubServerToken()
     await seedOwnerAtom(t, 'doc.md', '---\nid: doc\n---\n# Doc')
@@ -153,6 +153,12 @@ describe('hocuspocus Convex ACL bridge', () => {
     })
     await expect(
       checkAccess(t, { userId: OWNER, actorKind: 'agent' }),
+    ).resolves.toMatchObject({
+      canRead: true,
+      canWrite: false,
+    })
+    await expect(
+      checkAccess(t, { userId: OWNER, actorKind: 'app' }),
     ).resolves.toMatchObject({
       canRead: true,
       canWrite: false,

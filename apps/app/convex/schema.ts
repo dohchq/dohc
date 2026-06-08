@@ -369,6 +369,75 @@ export default defineSchema({
     ])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 
+  // Agent action approvals. These are server-created requests for
+  // operations that need a human button decision. The client never
+  // supplies operation args; it can only answer a pending request id
+  // that belongs to the authenticated caller and thread.
+  agentApprovals: defineTable({
+    workspaceId: v.string(),
+    threadId: v.string(),
+    createdByUserId: v.string(),
+    operation: v.union(
+      v.literal('delete_atom'),
+      v.literal('delete_entity'),
+      v.literal('delete_folder'),
+    ),
+    title: v.string(),
+    detail: v.string(),
+    targetPaths: v.array(v.string()),
+    targetKey: v.string(),
+    args: v.any(),
+    status: v.union(
+      v.literal('pending'),
+      v.literal('approved'),
+      v.literal('denied'),
+    ),
+    decision: v.optional(
+      v.union(
+        v.literal('allow_once'),
+        v.literal('always_allow'),
+        v.literal('deny'),
+      ),
+    ),
+    result: v.optional(v.string()),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index('by_workspace_thread_status_user', [
+      'workspaceId',
+      'threadId',
+      'status',
+      'createdByUserId',
+    ])
+    .index('by_workspace_user_thread_status_operation_target', [
+      'workspaceId',
+      'createdByUserId',
+      'threadId',
+      'status',
+      'operation',
+      'targetKey',
+    ]),
+
+  agentApprovalPolicies: defineTable({
+    workspaceId: v.string(),
+    createdByUserId: v.string(),
+    threadId: v.string(),
+    operation: v.union(
+      v.literal('delete_atom'),
+      v.literal('delete_entity'),
+      v.literal('delete_folder'),
+    ),
+    targetKey: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('by_workspace_user_thread_operation_target', [
+    'workspaceId',
+    'createdByUserId',
+    'threadId',
+    'operation',
+    'targetKey',
+  ]),
+
   // Workspace-scoped blobs uploaded through Convex storage. These are
   // source attachments for chat/onboarding and durable media assets for
   // dohc files; document bodies store stable `dohc-asset:` references,
@@ -396,6 +465,76 @@ export default defineSchema({
     .index('by_workspace', ['workspaceId'])
     .index('by_workspace_storage', ['workspaceId', 'storageId'])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
+
+  databaseFiles: defineTable({
+    workspaceId: v.string(),
+    path: v.string(),
+    storageId: v.id('_storage'),
+    filename: v.string(),
+    size: v.number(),
+    sha256: v.optional(v.string()),
+    schemaHash: v.optional(v.string()),
+    canonicalFormat: v.optional(v.literal('structured-snapshot')),
+    bytesOutOfDate: v.optional(v.boolean()),
+    systemLocked: v.optional(v.boolean()),
+    userLocked: v.optional(v.boolean()),
+    reviewRequired: v.optional(v.boolean()),
+    version: v.number(),
+    tables: v.any(),
+    createdByUserId: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_workspace_path', ['workspaceId', 'path'])
+    .index('by_workspace', ['workspaceId']),
+
+  databaseOps: defineTable({
+    workspaceId: v.string(),
+    databasePath: v.string(),
+    operationId: v.string(),
+    actorUserId: v.string(),
+    op: v.string(),
+    table: v.string(),
+    rowId: v.optional(v.string()),
+    payload: v.any(),
+    version: v.number(),
+    appliedAt: v.number(),
+  })
+    .index('by_database', ['workspaceId', 'databasePath'])
+    .index('by_database_operation', ['workspaceId', 'databasePath', 'operationId']),
+
+  appTrust: defineTable({
+    workspaceId: v.string(),
+    userId: v.string(),
+    packageRoot: v.string(),
+    trustKey: v.string(),
+    grantedAt: v.number(),
+  }).index('by_user_app', ['workspaceId', 'userId', 'packageRoot']),
+
+  appProvenance: defineTable({
+    workspaceId: v.string(),
+    actorUserId: v.string(),
+    packageRoot: v.string(),
+    operation: v.string(),
+    targetPath: v.string(),
+    targetId: v.optional(v.string()),
+    sourceRevision: v.optional(v.string()),
+    databaseVersion: v.optional(v.number()),
+    clientMutationId: v.string(),
+    createdAt: v.number(),
+  }).index('by_workspace_app', ['workspaceId', 'packageRoot']),
+
+  appTestResults: defineTable({
+    workspaceId: v.string(),
+    actorUserId: v.string(),
+    packageRoot: v.string(),
+    manifestTrustKey: v.optional(v.string()),
+    sourceDigest: v.optional(v.string()),
+    mode: v.string(),
+    ok: v.boolean(),
+    result: v.any(),
+    createdAt: v.number(),
+  }).index('by_workspace_app', ['workspaceId', 'packageRoot']),
 
   // Explicit onboarding state (Phase 1 / Eng-EG6). The agent USED to
   // infer "ONBOARDING vs MAINTENANCE" from `list_atoms` being empty —

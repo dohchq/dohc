@@ -99,18 +99,18 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('not every folder is a project')
     expect(personal).toContain('project-scoped or no-project')
     expect(personal).toContain('Markdown atoms are the inspectable source')
-    expect(personal).toContain('HTML atoms are polished presentation views')
-    expect(personal).toContain('.views/ is the convention for folder-local custom views')
-    expect(personal).toContain('View source code is normal web code')
+    expect(personal).toContain('HTML atoms are polished read-only reports')
+    expect(personal).toContain('.apps/ is the convention for folder-local apps')
+    expect(personal).toContain('App source code is normal web code')
     expect(personal).toContain('Use TypeScript/React by default')
-    expect(personal).toContain('Source data lives outside .views')
-    expect(personal).toContain('Do not store canonical user/work state in view-local JS state')
+    expect(personal).toContain('Source data lives outside .apps')
+    expect(personal).toContain('Do not store canonical user/work state in app-local JS state')
     expect(personal).toContain('Use {} live values, entities, imports/exports, and atoms as the substrate')
     expect(personal).toContain('imports/exports remain the only')
     expect(personal).toContain('cross-workspace data path')
-    expect(personal).toContain('View actions must hand off to Agent or proposed patches for user review')
-    expect(personal).toContain('they do not silently raw-patch canonical markdown/Y.Doc state')
-    expect(personal).toContain('build source first, view second')
+    expect(personal).toContain('Normal app controls persist through dohc.collection, dohc.doc, or dohc.database')
+    expect(personal).toContain('App manifests never grant permissions by themselves')
+    expect(personal).toContain('build source first, interface second')
     expect(personal).toContain('show what changed, what is known, what is missing')
     expect(personal).toContain('respect locks, sharing boundaries, capture review, skill-turn gates, and review gates')
   })
@@ -126,7 +126,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('before creating files')
     expect(personal).toContain('unless the user already gave enough concrete context')
     expect(personal).toContain('source data, workflow loop, and next user decision')
-    expect(personal).toContain('do not create a dashboard, html atom, or custom view yet')
+    expect(personal).toContain('do not create a dashboard, html atom, or custom app yet')
   })
 
   it('teaches the agent to choose the right dohc medium for the problem', () => {
@@ -138,14 +138,37 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('repeated records')
     expect(personal).toContain('HTML atom (`.html`)')
     expect(personal).toContain('polished read-only')
-    expect(personal).toContain('Folder-local `.views/<name>/` app')
+    expect(personal).toContain('Folder-local `.apps/<name>/` app')
     expect(personal).toContain('interactive workflow surface')
     expect(personal).toContain('Skill')
     expect(personal).toContain('reusable process')
     expect(personal).toContain('Command')
     expect(personal).toContain('explicit shortcut')
     expect(personal).toContain('Markdown source comes before interfaces')
-    expect(personal).toContain('Do not create a view just because the user asked for "help"')
+    expect(personal).toContain('Do not create an interface just because the user asked for "help"')
+  })
+
+  it('does not use legacy view product language outside explicit migration compatibility', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    const forbiddenProductPhrases = [
+      'new source files, views, dashboards',
+      'creating files or views',
+      'Source-backed HTML views',
+      'source-backed html views',
+      'presentation views',
+      'views over source state',
+      'Do not create a view',
+      'source and view agree',
+      'sources and view agree',
+      'synthesis views',
+    ]
+
+    for (const phrase of forbiddenProductPhrases) {
+      expect(personal).not.toContain(phrase)
+      expect(AGENT_SRC).not.toContain(phrase)
+    }
+    expect(personal).not.toContain('.views')
+    expect(personal).not.toContain('@dohc/view')
   })
 
   it('requires a plan-before-build approval gate for custom workspace systems', () => {
@@ -155,8 +178,8 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('propose a build plan and wait for explicit user approval')
     expect(personal).toContain('before creating a custom workspace system')
     expect(personal).toContain('multiple markdown atoms')
-    expect(personal).toContain('entities, html atoms, `.views`, skills, or commands')
-    expect(personal).toContain('objective, proposed files/entities/views, medium rationale, workflow loop, run note')
+    expect(personal).toContain('entities, html atoms, `.apps`, skills, or commands')
+    expect(personal).toContain('objective, proposed files/entities/apps, medium rationale, workflow loop, run note')
     expect(personal).toContain('Build this?')
     expect(personal).toContain('Tiny single-note actions may proceed without this gate')
   })
@@ -189,7 +212,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('source-backed workflow app')
     expect(personal).toContain('budget review queue')
     expect(personal).toContain('category correction flow')
-    expect(personal).toContain('Every file or view you create should earn its place')
+    expect(personal).toContain('Every file or app you create should earn its place')
   })
 
   it('uses an explicit layered prompt architecture instead of a monolithic wish list', () => {
@@ -236,26 +259,26 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('at least two interactive affordances')
     expect(personal).toContain('filter, tab, queue, checklist, action button, or correction flow')
     expect(personal).toContain('one obvious next action')
-    expect(personal).toContain('If the view cannot write directly, the action can hand off to Agent')
-    expect(personal).toContain('Name the app view after the specific use case')
-    expect(personal).toContain('use `.views/home` only when the user asked for a general home')
+    expect(personal).toContain('Normal deterministic app controls should use `dohc.collection`, `dohc.doc`, or `dohc.database`')
+    expect(personal).toContain('Name the app after the specific use case')
+    expect(personal).toContain('use `.apps/home` only when the user asked for a general home')
   })
 
-  it('routes explicit view requests to .views packages instead of html atoms', () => {
+  it('routes explicit app requests to .apps packages instead of html atoms', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
-    expect(personal).toContain('If the user explicitly asks for a view')
-    expect(personal).toContain('create a `.views/<name>/` package, not `home.html`')
+    expect(personal).toContain('If the user explicitly asks for an app or interactive surface')
+    expect(personal).toContain('create a `.apps/<name>/` package, not `home.html`')
     expect(personal).not.toContain('Default to `home.html` when the first cockpit')
   })
 
-  it('pushes onboarding tracker/setup requests toward app-grade .views, not static infographics', () => {
+  it('pushes onboarding tracker/setup requests toward app-grade .apps, not static infographics', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('ONBOARDING QUALITY BAR')
     expect(personal).toContain('Think in terms of apps')
     expect(personal).toContain('minimum lovable app')
     expect(personal).toContain('For trackers, finance systems, CRM, habits, routines')
-    expect(personal).toContain('default to a use-case-named `.views/<name>` app')
-    expect(personal).not.toContain('default to `.views/home`')
+    expect(personal).toContain('default to a use-case-named `.apps/<name>` app')
+    expect(personal).not.toContain('default to `.apps/home`')
     expect(personal).toContain('home.html is only acceptable')
     expect(personal).toContain('not a static infographic of the uploaded file')
   })
@@ -263,6 +286,7 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
   it('requires onboarding to self-review for empty files and shallow output before finishing', () => {
     const personal = buildSystemPrompt({ kind: 'personal' })
     expect(personal).toContain('Before finish_onboarding, self-review')
+    expect(personal).toContain('Before finish_onboarding, run test_app on every generated app and fix failures')
     expect(personal).toContain('No empty or frontmatter-only user-facing files')
     expect(personal).toContain('No useless page pile')
     expect(personal).toContain('Every created source file has a job')
@@ -278,5 +302,22 @@ describe('buildSystemPrompt (H-1 / A1)', () => {
     expect(personal).toContain('recurring mistakes')
     expect(personal).toContain('next focus')
     expect(personal).toContain('do not hardcode a single starter day')
+  })
+
+  it('prompts generated apps to use persistent @dohc/app controls and the finance tracker playbook', () => {
+    const personal = buildSystemPrompt({ kind: 'personal' })
+    expect(personal).toContain('Apps are interactive workspace tools stored in .apps/<name>.')
+    expect(personal).toContain('Use @dohc/app.')
+    expect(personal).toContain('Use collections for structured app data.')
+    expect(personal).toContain('Use docs for targeted markdown document edits.')
+    expect(personal).toContain('Use SQLite-backed collections for serious app data')
+    expect(personal).toContain('Never create fake app controls that only mutate React state.')
+    expect(personal).toContain('Do not add YAML frontmatter to app.json, src/App.tsx, or other .apps package files.')
+    expect(personal).toContain('dohc.doc is a function: call dohc.doc("path").append')
+    expect(personal).toContain('Reserve <button> for persistent commands')
+    expect(personal).toContain('Run test_app and fix failures before finish_onboarding.')
+    expect(personal).toContain('For a finance tracker, create a mutable ledger source, categories/rules source, and .apps/tracker app.')
+    expect(personal).toContain('adding an expense, categorizing transactions, marking review state, filtering, and surfacing next money decisions')
+    expect(personal).not.toContain('The app can hand off edits to the agent or proposed patches if direct')
   })
 })

@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {
-        command: `${pnpmCommand} --filter @dohc/app run dev:vite -- --host 127.0.0.1`,
+        command: `${pnpmCommand} --filter @dohc/web run dev:vite -- --host 127.0.0.1`,
         reuseExistingServer: true,
         timeout: 120_000,
         url: `${baseURL}/playground`,

@@ -34,8 +34,9 @@ import { AtomView } from '@/components/AtomView'
 import { SharedAtomView } from '@/components/SharedAtomView'
 import { ShareDialog } from '@/components/ShareDialog'
 import { ActivityBar } from '@/components/ActivityBar'
-import { ViewFrame } from '@/components/ViewFrame'
+import { AppFrame } from '@/components/AppFrame'
 import { ViewsSidebar } from '@/components/ViewsSidebar'
+import type { AppAgentRunRequest } from '@/apps/AppRuntimeHost'
 import {
   AgentChatSidebar,
   availableProjectFolders,
@@ -466,7 +467,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       : null
   const urlPageRef =
     pathParts.length === 2 &&
-    !['agent', 'files', 'views', 'graph', 'v'].includes(pathParts[1])
+    !['agent', 'files', 'apps', 'views', 'graph', 'a', 'v'].includes(pathParts[1])
       ? decodeURIComponent(pathParts[1])
       : null
   const urlPageId = pageIdFromRef(urlPageRef)
@@ -485,7 +486,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     return m ? decodeURIComponent(m[1]) : null
   })()
   const urlViewRef = (() => {
-    const m = /^\/[^/]+\/v\/([^/]+)\/?$/.exec(location.pathname)
+    const m = /^\/[^/]+\/(?:a|v)\/([^/]+)\/?$/.exec(location.pathname)
     return m ? decodeURIComponent(m[1]) : null
   })()
   const selectedViewPackageRoot = urlViewRef ? decodeViewRef(urlViewRef) : null
@@ -782,7 +783,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   }>(() => {
     if (view === 'agent') return { docTitle: agentDocTitle, docEmoji: null }
     if (view === 'graph') return { docTitle: 'Graph', docEmoji: null }
-    if (view === 'views') return { docTitle: 'Views', docEmoji: null }
+    if (view === 'views') return { docTitle: 'Apps', docEmoji: null }
     if (activeShareId) {
       // undefined ⇒ still loading: hold the current tab (no brand flash).
       // null ⇒ gone/forbidden: fall back to the brand default.
@@ -1030,7 +1031,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       if (next === 'views') {
         setSharingOpen(false)
         void navigate({
-          to: '/$workspaceSlug/views',
+          to: '/$workspaceSlug/apps',
           params: { workspaceSlug: activeWorkspaceSlug },
           replace: opts?.replace ?? false,
         })
@@ -1407,7 +1408,19 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   }, [toggleChat, toggleSharing])
 
   const onRunAction = useCallback(
-    (prompt: string) => {
+    (request: string | AppAgentRunRequest) => {
+      const prompt =
+        typeof request === 'string'
+          ? request
+          : [
+              request.prompt,
+              '',
+              `Originating app: ${request.originatingApp}`,
+              `App title: ${request.titleHint}`,
+              request.sources && request.sources.length > 0
+                ? `Sources: ${request.sources.join(', ')}`
+                : null,
+            ].filter(Boolean).join('\n')
       setPendingPrompt(prompt)
       navigateToView('agent')
     },
@@ -1476,10 +1489,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     (packageRoot: string) => {
       setView('views')
       setSharingOpen(false)
-      const viewRef = encodeViewRef(packageRoot)
+      const appRef = encodeViewRef(packageRoot)
       void navigate({
-        to: '/$workspaceSlug/v/$viewRef',
-        params: { workspaceSlug: activeWorkspaceSlug, viewRef },
+        to: '/$workspaceSlug/a/$appRef',
+        params: { workspaceSlug: activeWorkspaceSlug, appRef },
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1762,8 +1775,26 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
   }
 
+  const invalidPageRef = urlPageRef !== null && urlPageId === null
+  const invalidAgentThreadRef =
+    urlAgentThreadRef !== null && urlAgentThreadId === null
+  const workspaceSlugMissing =
+    urlWorkspaceKnown === false &&
+    urlPageId === null &&
+    urlAgentThreadId === null
+  const showNotFound =
+    invalidPageRef ||
+    invalidAgentThreadRef ||
+    workspaceSlugMissing ||
+    routedPage === null ||
+    routedAgentThread === null
+  const resolvingWorkspaceScopedNotFound =
+    showNotFound && urlWorkspaceSlug !== null && urlWorkspaceKnown === undefined
+  const workspaceScopedNotFound =
+    showNotFound && urlWorkspaceSlug !== null && urlWorkspaceKnown === true
   const panelOpen = view !== 'agent' && (chatOpen || sharingOpen)
-  const rightColumnOpen = view === 'agent' || panelOpen
+  const rightColumnOpen =
+    !workspaceScopedNotFound && (view === 'agent' || panelOpen)
   const leftColumn = leftSidebarCollapsed ? null : `${leftSidebarWidth}px`
   const shellGridTemplateColumns = [
     `${ACTIVITY_BAR_WIDTH}px`,
@@ -1784,21 +1815,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
           ...sharePromptFile,
         })}`
       : undefined
-  const invalidPageRef = urlPageRef !== null && urlPageId === null
-  const invalidAgentThreadRef =
-    urlAgentThreadRef !== null && urlAgentThreadId === null
-  const workspaceSlugMissing =
-    urlWorkspaceKnown === false &&
-    urlPageId === null &&
-    urlAgentThreadId === null
-  const showNotFound =
-    invalidPageRef ||
-    invalidAgentThreadRef ||
-    workspaceSlugMissing ||
-    routedPage === null ||
-    routedAgentThread === null
 
-  if (showNotFound) return <NotFoundPage />
+  if (resolvingWorkspaceScopedNotFound) return <AppLoadingScreen />
+
+  if (showNotFound && !workspaceScopedNotFound) return <NotFoundPage />
 
   return agentWorkspaceLoading ? (
     <AppLoadingScreen />
@@ -1813,7 +1833,74 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         sidebarCollapsed={leftSidebarCollapsed}
         onToggleSidebar={toggleLeftSidebar}
       />
-      {view === 'agent' ? (
+      {workspaceScopedNotFound ? (
+        <>
+          {!leftSidebarCollapsed &&
+            (view === 'agent' ? (
+              <AgentChatSidebar
+                files={files ?? []}
+                folders={folders ?? []}
+                threads={chatThreads}
+                loading={
+                  files === undefined ||
+                  folders === undefined ||
+                  agentThreads === undefined
+                }
+                activeThreadId={visibleAgentThreadId}
+                activeProjectPath={visibleAgentProjectPath}
+                onSelectThread={selectAgentThread}
+                onNewThread={startAgentDraft}
+                onCreateProject={createAgentProject}
+                onTogglePinned={toggleAgentThreadPinned}
+                onDeleteThread={deleteAgentChat}
+                onRenameThread={renameAgentChat}
+                onRenameProject={renameAgentProject}
+                onOpenSearch={() => setSearchOpen(true)}
+                user={user}
+              />
+            ) : view === 'views' ? (
+              <ViewsSidebar
+                selectedPackageRoot={selectedViewPackageRoot}
+                onOpenView={openView}
+                onOpenSource={(path) => openAtom(path)}
+                onOpenSearch={() => setSearchOpen(true)}
+                user={user}
+              />
+            ) : (
+              <FileTree
+                files={files ?? []}
+                folders={folders ?? []}
+                loading={files === undefined || folders === undefined}
+                activePath={activePath}
+                view="atom"
+                onOpenSearch={() => setSearchOpen(true)}
+                user={user}
+                sharedWithMe={sharedWithMe ?? []}
+                sharedByMeFileIds={sharedByMeFileIds ?? []}
+                activeShareId={activeShareId}
+                allowCreate={view !== 'graph'}
+                onOpenShared={openShared}
+                onOpen={(p) => openAtom(p)}
+                onCreatePage={createPageWithName}
+                onCreateFolder={createFolderWithName}
+                onDeleteFolder={deleteFolderByPath}
+                onRenameFolder={renameFolderByPath}
+                onDeleteFile={deleteFileByPath}
+                onRenameFile={renameFileByPath}
+                onToggleLock={toggleLockAtPath}
+                onToggleStar={toggleStarAtPath}
+                onToggleFolderStar={toggleFolderStarAtPath}
+                onSetFolderMeta={setFolderMetaAtPath}
+                onSetFileIcon={async (path, icon) => {
+                  await setIconAtom({ path, icon, activeWorkspaceId })
+                }}
+                onMoveFile={moveFileByDrop}
+                onMoveFolder={moveFolderByDrop}
+              />
+            ))}
+          <NotFoundPage mode="workspace" />
+        </>
+      ) : view === 'agent' ? (
         <>
           {!leftSidebarCollapsed && (
             <AgentChatSidebar
@@ -1879,7 +1966,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               user={user}
             />
           )}
-          <ViewFrame
+          <AppFrame
             packageRoot={selectedViewPackageRoot}
             onOpenSource={(path) => openAtom(path)}
             onRunAgent={onRunAction}

@@ -1955,7 +1955,7 @@ function TreeRowNode({
             <Base
               className="size-3.5 shrink-0"
               strokeWidth={1.8}
-              aria-label={isViewsFolder ? 'views folder' : undefined}
+              aria-label={isViewsFolder ? 'legacy app folder' : undefined}
               style={{
                 color: chosenColor,
                 opacity:

@@ -1,0 +1,1 @@
+import './AppRuntimeHost.collaboration.test'

@@ -46,10 +46,10 @@ describe('left sidebar collapse shell behavior', () => {
       })
 
     const tree = render()
-    const viewsButton = findButtonByLabel(tree, 'Views')
-    expect(viewsButton).not.toBeNull()
+    const appsButton = findButtonByLabel(tree, 'Apps')
+    expect(appsButton).not.toBeNull()
 
-    viewsButton?.props.onClick?.()
+    appsButton?.props.onClick?.()
 
     expect(view).toBe('views')
     expect(sidebarCollapsed).toBe(true)

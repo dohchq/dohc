@@ -19,7 +19,11 @@ import {
   isNonDataAtom,
   splitFrontmatter,
 } from './atomId'
-import { parseViewPath } from './viewPaths'
+import { parseAppPath, parseViewPath } from './viewPaths'
+import { parseAppManifest } from './appManifest'
+import { computeAppSourceDigest } from './appSourceDigest'
+import { listCollectionRows } from './collectionAdapters'
+import { globMatchesPath, scopeAllowsPath } from './appSecurity'
 
 function randomLeaseOwner(): string {
   const cryptoApi = globalThis.crypto
@@ -45,7 +49,7 @@ function randomLeaseOwner(): string {
 //    degrades gracefully instead of throwing and bricking onboarding.
 //  - `_complete` enforces "never end empty" SERVER-SIDE (not prompt-
 //    hope): refuses unless the canonical .context identity file AND a
-//    populated source-backed cockpit exists (`home.html` or `.views/home`).
+//    populated source-backed cockpit exists (`home.html` or `.apps/home`).
 //  - the start LEASE is a single-document atomic CAS on THIS row's
 //    own `kickoffAt`, kept fresh by an action-driven heartbeat;
 //    recovery is staleness-only (survives a HARD process kill). No
@@ -107,7 +111,11 @@ function isRunPath(path: string): boolean {
 }
 
 function isSetupRunPath(path: string): boolean {
-  return /^\.?runs\/setup\.md$/i.test(path)
+  return /^\.?runs\/[^/]+\.md$/i.test(path)
+}
+
+function setupRunRank(path: string): number {
+  return /^\.?runs\/setup\.md$/i.test(path) ? 0 : 1
 }
 
 function strippedBody(body: string): string {
@@ -140,21 +148,37 @@ function cockpitRank(name: string): number {
   return 0
 }
 
-function isViewEntryPath(
+function isAppEntryPath(
   path: string,
-): { packageRoot: string; viewName: string } | null {
-  const info = parseViewPath(path)
+): { packageRoot: string; appName: string } | null {
+  const info = parseAppPath(path)
   if (!info) return null
   return info.relativePath.toLowerCase() === 'src/app.tsx'
-    ? { packageRoot: info.packageRoot, viewName: info.viewName }
+    ? { packageRoot: info.packageRoot, appName: info.appName }
     : null
 }
 
-function isSourceBackedViewEntryBody(body: string): boolean {
+function isLegacyViewEntryPath(
+  path: string,
+): { packageRoot: string; appName: string } | null {
+  const info = parseViewPath(path)
+  if (!info) return null
+  return info.relativePath.toLowerCase() === 'src/app.tsx'
+    ? { packageRoot: info.packageRoot, appName: info.viewName }
+    : null
+}
+
+function isSourceBackedAppEntryBody(body: string): boolean {
   const rest = strippedBody(body)
   return (
-    /from\s+['"]@dohc\/view['"]/.test(rest) &&
-    /\b(useDocs|useDohcQuery)\s*\(/.test(rest)
+    (
+      /from\s+['"]@dohc\/app['"]/.test(rest) &&
+      /\b(useCollection|useDoc|useDatabase|useDohcQuery|useDocs)\s*\(/.test(rest)
+    ) ||
+    (
+      /from\s+['"]@dohc\/view['"]/.test(rest) &&
+      /\b(useDocs|useDohcQuery)\s*\(/.test(rest)
+    )
   )
 }
 
@@ -165,6 +189,132 @@ function isSourceBackedCockpit(path: string, body: string): boolean {
     hasSourcesMetadata(body) &&
     hasLiveViewReference(body)
   )
+}
+
+async function appTestGateFailure(
+  ctx: QueryCtx | MutationCtx,
+  workspaceId: string,
+): Promise<string | null> {
+  const atoms = await ctx.db
+    .query('atoms')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .take(501)
+  if (atoms.length > 500) {
+    return 'cannot finish onboarding: workspace has too many files to verify generated apps safely; run test_app after reducing or indexing app sources.'
+  }
+  const appEntries = new Map<string, { scopePath: string; appName: string }>()
+
+  for (const atom of atoms) {
+    if (parseViewPath(atom.path) || /from\s+['"]@dohc\/view['"]/.test(strippedBody(atom.body))) {
+      return 'cannot finish onboarding: generated apps must use .apps and @dohc/app; legacy .views/@dohc/view output must be migrated first.'
+    }
+    const appInfo = parseAppPath(atom.path)
+    if (appInfo?.relativePath.toLowerCase() === 'src/app.tsx') {
+      appEntries.set(appInfo.packageRoot, {
+        scopePath: appInfo.scopePath,
+        appName: appInfo.appName,
+      })
+    }
+  }
+
+  for (const [packageRoot, appInfo] of appEntries) {
+    const manifestAtom = atoms.find((atom) => atom.path === `${packageRoot}/app.json`)
+    const manifest = parseAppManifest({
+      appName: appInfo.appName,
+      scopePath: appInfo.scopePath,
+      packageRoot,
+      body: manifestAtom?.body ?? null,
+    })
+    if (!manifest.status.ok) {
+      return `cannot finish onboarding: ${packageRoot} has an invalid app manifest; fix app.json before finish_onboarding.`
+    }
+    const seed = {
+      collections: {} as Record<string, Array<Record<string, unknown>>>,
+      docs: {} as Record<string, string>,
+      databases: {} as Record<string, Record<string, Array<Record<string, unknown>>>>,
+    }
+    for (const atom of atoms) {
+      if (atom.path.startsWith(`${packageRoot}/`)) continue
+      if (!scopeAllowsPath(manifest.read, atom.path)) continue
+      const prefix = appInfo.scopePath ? `${appInfo.scopePath}/` : ''
+      seed.docs[prefix && atom.path.startsWith(prefix) ? atom.path.slice(prefix.length) : atom.path] = atom.body ?? ''
+    }
+    for (const [name, config] of Object.entries(manifest.collections)) {
+      if (config.format === 'sqlite') {
+        const databasePath = config.source[0]
+        const database = databasePath
+          ? await ctx.db
+            .query('databaseFiles')
+            .withIndex('by_workspace_path', (q) =>
+              q.eq('workspaceId', workspaceId).eq('path', databasePath),
+            )
+            .unique()
+          : null
+        if (database && config.table) {
+          const snapshot = database.tables as Record<string, { rows?: Array<Record<string, unknown>> }>
+          const rows = snapshot[config.table]?.rows ?? []
+          seed.collections[name] = rows
+          seed.databases[database.path] = {
+            ...(seed.databases[database.path] ?? {}),
+            [config.table]: rows,
+          }
+          const prefix = appInfo.scopePath ? `${appInfo.scopePath}/` : ''
+          const relativeDatabasePath = prefix && database.path.startsWith(prefix)
+            ? database.path.slice(prefix.length)
+            : database.path
+          if (relativeDatabasePath !== database.path) {
+            seed.databases[relativeDatabasePath] = {
+              ...(seed.databases[relativeDatabasePath] ?? {}),
+              [config.table]: rows,
+            }
+          }
+        }
+        continue
+      }
+      const visibleSources = atoms
+        .filter((atom) =>
+          config.source.some((source) => globMatchesPath(source, atom.path)) &&
+          scopeAllowsPath(manifest.read, atom.path),
+        )
+        .map((atom) => ({ path: atom.path, body: atom.body ?? '' }))
+        .sort((a, b) => a.path.localeCompare(b.path))
+      const rows = listCollectionRows(
+        { name, format: config.format, key: config.key, table: config.table },
+        visibleSources,
+        undefined,
+      )
+      if (rows.ok) seed.collections[name] = rows.rows
+    }
+    const currentTrustKey = manifest.trustKey ?? undefined
+    const currentSourceDigest = await computeAppSourceDigest({
+      manifestTrustKey: currentTrustKey,
+      files: atoms
+        .filter((atom) => atom.path.startsWith(`${packageRoot}/`))
+        .map((atom) => ({
+          relativePath: atom.path.slice(packageRoot.length + 1),
+          body: strippedBody(atom.body),
+        })),
+      seed,
+    })
+    const rows = await ctx.db
+      .query('appTestResults')
+      .withIndex('by_workspace_app', (q) =>
+        q.eq('workspaceId', workspaceId).eq('packageRoot', packageRoot),
+      )
+      .order('desc')
+      .take(20)
+    const latestForManifest = rows.find((row) =>
+      row.manifestTrustKey === currentTrustKey &&
+      row.sourceDigest === currentSourceDigest
+    )
+    if (!latestForManifest) {
+      return `cannot finish onboarding: run test_app for ${packageRoot} and fix failures before finish_onboarding.`
+    }
+    if (!latestForManifest.ok) {
+      return `cannot finish onboarding: test_app failed for ${packageRoot}; fix the app and rerun test_app before finish_onboarding.`
+    }
+  }
+  return null
 }
 
 function isRealSourceAtom(
@@ -245,49 +395,56 @@ export async function progressOf(
   const cockpits = atoms.filter(
     (a) => !isPlaceholderSeed(a.body) && isSourceBackedCockpit(a.path, a.body),
   )
-  const viewCockpitRoots = [
+  const appCockpitRoots = [
     ...new Map(
       atoms
         .filter((a) => !isPlaceholderSeed(a.body))
         .map((a) => ({
-          entry: isViewEntryPath(a.path),
+          entry: isAppEntryPath(a.path) ?? isLegacyViewEntryPath(a.path),
           body: a.body,
         }))
         .filter(
           (
             v,
           ): v is {
-            entry: { packageRoot: string; viewName: string }
+            entry: { packageRoot: string; appName: string }
             body: string
           } =>
-            v.entry !== null && isSourceBackedViewEntryBody(v.body),
+            v.entry !== null && isSourceBackedAppEntryBody(v.body),
         )
         .map((v) => v.entry)
         .map((v) => [v.packageRoot, v]),
     ).values(),
   ].sort(
     (a, b) =>
-      cockpitRank(a.viewName) - cockpitRank(b.viewName) ||
+      cockpitRank(a.appName) - cockpitRank(b.appName) ||
       a.packageRoot.localeCompare(b.packageRoot),
   )
-  const setupRun = atoms.find((a) => isCompleteSetupRun(a.path, a.body))
+  const setupRun =
+    atoms
+      .filter((a) => isCompleteSetupRun(a.path, a.body))
+      .sort(
+        (a, b) =>
+          setupRunRank(a.path) - setupRunRank(b.path) ||
+          a.path.localeCompare(b.path),
+      )[0] ?? null
   const legacyDashboards = atoms.filter(
     (a) =>
       !isPlaceholderSeed(a.body) &&
       !isNonDataAtom(a.path, a.body) &&
       a.body.includes('```query'),
   )
-  const viewCockpit = viewCockpitRoots[0] ?? null
+  const appCockpit = appCockpitRoots[0] ?? null
   const htmlCockpit =
     cockpits.find((a) => /(^|\/)home\.html$/i.test(a.path)) ??
     cockpits.find((a) => /(^|\/)dashboard\.html$/i.test(a.path)) ??
     cockpits[0]
-  const cockpitPath = viewCockpit?.packageRoot ?? htmlCockpit?.path ?? null
+  const cockpitPath = appCockpit?.packageRoot ?? htmlCockpit?.path ?? null
   // Compatibility aliases for the first-run handoff. The MVP floor is
   // now a source-backed cockpit, but older UI callers still read
   // "dashboard" fields while this surface is being renamed. The alias
   // can now be either an atom path (`home.html`) or a view package root
-  // (`.views/home`).
+  // (`.apps/home`, or legacy `.views/home` during migration).
   const legacyHeroPath =
     cockpitPath ??
     legacyDashboards.find((a) =>
@@ -328,7 +485,7 @@ async function completeWorkspaceOnboarding(
     throw new Error(
       `cannot finish onboarding: vault not populated yet ` +
         `(${identityFile}=${p.hasMe}, sources=${p.sourceCount}, source-backed-cockpit=${p.hasCockpitView}). ` +
-      `Write source markdown, a populated source-backed home.html or .views/home, and ${identityFile} first.`,
+      `Write source markdown, a populated source-backed home.html or .apps/home, and ${identityFile} first.`,
     )
   }
   if (!p.hasSetupRun) {
@@ -336,6 +493,8 @@ async function completeWorkspaceOnboarding(
       'cannot finish onboarding: setup run missing. Write .runs/setup.md with objective, sources, view, what I know, what I need, and next action first.',
     )
   }
+  const appGate = await appTestGateFailure(ctx, workspaceId)
+  if (appGate) throw new Error(appGate)
   if (row) await ctx.db.patch(row._id, { completedAt: Date.now() })
   else
     await ctx.db.insert('onboarding', {
@@ -366,7 +525,7 @@ export const _begin = internalMutation({
  * Mark onboarding DONE — ONLY if the vault is genuinely populated.
  * The "never end empty" wedge promise is a DB invariant here,
  * independent of the model: requires the canonical .context identity
- * file AND a source-backed cockpit (`home.html` or `.views/home`). Throws
+ * file AND a source-backed cockpit (`home.html` or `.apps/home`). Throws
  * otherwise so the agent cannot finish empty.
  * Reuses `progressOf` so the gate's public `progress` can never lie.
  */

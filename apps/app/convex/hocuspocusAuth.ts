@@ -35,7 +35,7 @@ type AtomCreateResult =
         | 'missing-frontmatter-id'
     }
 
-type ActorKind = 'user' | 'agent'
+type ActorKind = 'user' | 'agent' | 'app'
 
 function deny(): AtomAccessResult {
   return {
@@ -75,7 +75,7 @@ function canOwnerWrite(
   actorKind: ActorKind,
 ): boolean {
   if (atom.systemLocked === true) return false
-  if (actorKind === 'agent' && atom.userLocked === true) return false
+  if (actorKind !== 'user' && atom.userLocked === true) return false
   return true
 }
 
@@ -170,7 +170,7 @@ export const checkAtomAccess = query({
     userId: v.string(),
     workspaceId: v.string(),
     atomId: v.string(),
-    actorKind: v.union(v.literal('user'), v.literal('agent')),
+    actorKind: v.union(v.literal('user'), v.literal('agent'), v.literal('app')),
     authzVersion: v.number(),
   },
   handler: async (
@@ -194,7 +194,7 @@ export const loadAtomBootstrap = query({
     workspaceId: v.string(),
     userId: v.string(),
     atomId: v.string(),
-    actorKind: v.union(v.literal('user'), v.literal('agent')),
+    actorKind: v.union(v.literal('user'), v.literal('agent'), v.literal('app')),
     authzVersion: v.number(),
   },
   handler: async (
@@ -267,7 +267,7 @@ export const createAtom = mutation({
     path: v.string(),
     content: v.string(),
     userId: v.string(),
-    actorKind: v.union(v.literal('user'), v.literal('agent')),
+    actorKind: v.union(v.literal('user'), v.literal('agent'), v.literal('app')),
     authzVersion: v.number(),
   },
   handler: async (
@@ -303,7 +303,7 @@ export const createAtom = mutation({
         workspaceId,
         path,
         body: content,
-        source: actorKind === 'agent' ? 'agent' : 'user',
+        source: actorKind === 'agent' || actorKind === 'app' ? 'agent' : 'user',
         viewerSubject: userId,
       })) as Id<'atoms'>
     } catch (error) {

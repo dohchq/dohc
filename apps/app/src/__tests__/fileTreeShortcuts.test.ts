@@ -184,10 +184,10 @@ describe('FileTree D4.4a — Track-4 affordances surface', () => {
     expect(SRC).not.toMatch(/emojiForFolderIcon/)
   })
 
-  it('.views folder row exposes the views affordance while preserving the literal label', () => {
+  it('.views folder row exposes the legacy app affordance while preserving the literal label', () => {
     const html = renderTree({ folders: ['.views'] })
 
-    expect(html).toContain('aria-label="views folder"')
+    expect(html).toContain('aria-label="legacy app folder"')
     expect(html).toContain('.views')
   })
 

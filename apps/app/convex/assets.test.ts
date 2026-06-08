@@ -82,4 +82,82 @@ describe('workspace assets', () => {
     })
     expect(rows).toHaveLength(1)
   })
+
+  it('resolves app assets only when referenced by an app-readable source', async () => {
+    const t = convexTest(schema, modules)
+    const referencedStorageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['visible'], { type: 'text/plain' }))
+    })
+    const hiddenStorageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['hidden'], { type: 'text/plain' }))
+    })
+
+    const referenced = await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.registerUploadedAsset,
+      {
+        storageId: referencedStorageId,
+        filename: 'visible.txt',
+        mediaType: 'text/plain',
+        purpose: 'workspace',
+      },
+    )
+    const hidden = await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.registerUploadedAsset,
+      {
+        storageId: hiddenStorageId,
+        filename: 'hidden.txt',
+        mediaType: 'text/plain',
+        purpose: 'workspace',
+      },
+    )
+
+    await t.run(async (ctx) => {
+      await ctx.db.insert('atoms', {
+        workspaceId: 'alice',
+        path: 'finance/.apps/tracker/src/App.tsx',
+        body: 'app code',
+        updatedAt: 1,
+      })
+      await ctx.db.insert('atoms', {
+        workspaceId: 'alice',
+        path: 'finance/.apps/tracker/app.json',
+        body: JSON.stringify({ read: ['docs.md'], write: [] }),
+        updatedAt: 2,
+      })
+      await ctx.db.insert('atoms', {
+        workspaceId: 'alice',
+        path: 'finance/docs.md',
+        body: `[Visible](dohc-asset:file/${referenced.assetId})`,
+        updatedAt: 3,
+      })
+      await ctx.db.insert('atoms', {
+        workspaceId: 'alice',
+        path: 'finance/private.md',
+        body: `[Hidden](dohc-asset:file/${hidden.assetId})`,
+        updatedAt: 4,
+      })
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.resolveAppAsset, {
+        packageRoot: 'finance/.apps/tracker',
+        assetId: referenced.assetId,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      asset: { filename: 'visible.txt' },
+      url: expect.stringMatching(/^http/),
+      sourcePath: 'finance/docs.md',
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.resolveAppAsset, {
+        packageRoot: 'finance/.apps/tracker',
+        assetId: hidden.assetId,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'asset-not-authorized',
+    })
+  })
 })

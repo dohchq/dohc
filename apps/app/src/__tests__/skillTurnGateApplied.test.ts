@@ -108,7 +108,7 @@ describe('Track-3 P2b.3 — UNAUTHORIZABLE-set gate coverage', () => {
 // the gate appears BEFORE the first side-effect token (a
 // `ctx.runMutation` / `ctx.runAction` / `requireWorkspace` call
 // for unconditional gates; for delete handlers, gate must appear
-// after the `requiresConfirmation` early-return but before
+// after the `requestAgentApproval` early-return but before
 // `requireWorkspace` / the mutation).
 //
 // The slicer reads from `<op>: createTool({` up to the NEXT
@@ -157,9 +157,9 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
 // surrounding conditional logic in the source.
 const CONDITIONAL_GATE_OPS = ['create_atom', 'capture'] as const
 
-// Ops where the gate is AFTER a `requiresConfirmation` early-return
-// branch (delete_*). Verify the gate is below that early-return
-// AND above the first side-effect call.
+// Ops where the gate is AFTER a `requestAgentApproval` early-return
+// branch (delete_*). Verify the gate is below that approval request
+// AND above the first destructive side-effect call.
 const POST_CONFIRM_GATE_OPS = [
   'delete_atom',
   'delete_entity',
@@ -183,12 +183,13 @@ describe('Track-3 P2b.3 fold (Codex F2/F3) — gate PLACEMENT, not just presence
   }
 
   for (const op of POST_CONFIRM_GATE_OPS) {
-    it(`\`${op}\`: gate is AFTER requiresConfirmation early-return AND BEFORE first side effect`, () => {
+    it(`\`${op}\`: gate is AFTER requestAgentApproval early-return AND BEFORE first side effect`, () => {
       const body = TOOL_BODIES[op]
       expect(body).toBeTruthy()
-      // The early-return prompt text (a string-literal anchor unique
-      // to delete-tool prompts; matches the existing handlers).
-      const confirmReturnIdx = body.search(/CONFIRMATION REQUIRED:/)
+      // The approval request call is the new structured user-decision
+      // edge; the tool must not mutate before it either returns
+      // pending or falls through with an approved policy.
+      const confirmReturnIdx = body.search(/requestAgentApproval\(ctx,\s*options/)
       const safeOp = op.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const gateIdx = body.search(
         new RegExp(`requireDirectUserAuthorization\\(ctx,\\s*['"]${safeOp}['"]\\)`),
@@ -260,6 +261,7 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'read_asset', // read-only saved attachment fetch; scoped by activeWorkspaceFromTool and no mutation path
   // sanity-check
   'run_query',
+  'test_app', // app verification only; server-side resolver gathers authorized app/source data and records a test result, but does not change workspace content or permissions
   // explicitly-additive writes (no overwrite path)
   'create_entities', // gated via mutation-level strictCreate (P2b.2 BRACE) — no `requireDirectUserAuthorization` needed at the tool layer; the depth-read + strictCreate mode is the structural enforcement
   'create_folder',
@@ -314,7 +316,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'list_atoms', 'read_atom', 'list_trash', 'list_entities',
       'find_entity', 'list_skills', 'list_commands',
       'pending_captures', 'review_window_sharing',
-      'onboarding_state', 'read_asset', 'run_query',
+      'onboarding_state', 'read_asset', 'run_query', 'test_app',
       'create_entities', 'create_folder',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment

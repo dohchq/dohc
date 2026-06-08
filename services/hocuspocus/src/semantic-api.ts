@@ -100,7 +100,7 @@ type SemanticRequestPayload =
   | CreateAnchorsForTextPayload
   | CreateAtomPayload
 
-const ACTOR_KINDS = new Set<CollabActorKind>(['user', 'agent'])
+const ACTOR_KINDS = new Set<CollabActorKind>(['user', 'agent', 'app'])
 
 export function createSemanticApiHandler({
   adminToken,

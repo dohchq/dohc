@@ -218,8 +218,8 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     id: 'query-block',
-    label: 'Live view',
-    hint: 'Show a live list or table',
+    label: 'Live query',
+    hint: 'Show a source-backed list or table',
     glyph: '↻',
     aliases: ['data', 'database', 'live', 'query', 'view'],
   },
@@ -938,7 +938,7 @@ function formatQueryFilters(filters: Record<string, unknown>): string | null {
 }
 
 // Describe a fenced query as the product object it really is: a live
-// document view. The editable DSL remains the durable source, but the
+// source-backed query. The editable DSL remains the durable source, but the
 // UI should answer "what will I see here?" before it reveals machinery.
 export function describeQueryView(src: string): QueryViewDescriptor | null {
   const text = (src ?? '').trim().slice(0, 600)
@@ -949,13 +949,13 @@ export function describeQueryView(src: string): QueryViewDescriptor | null {
     if (!first) return null
     const title = first.trim().slice(0, 80)
     return {
-      badge: 'Live view',
+      badge: 'Live query',
       title,
       subtitle: null,
       sourceLabel: text,
-      loadingText: 'Loading live view...',
+      loadingText: 'Loading live query...',
       emptyText: 'No results yet.',
-      errorText: "This live view couldn't update.",
+      errorText: "This live query couldn't update.",
     }
   }
 
@@ -971,7 +971,7 @@ export function describeQueryView(src: string): QueryViewDescriptor | null {
           ? singular
           : plural.title
     return {
-      badge: 'Live view',
+      badge: 'Live query',
       title,
       subtitle: filters,
       sourceLabel: text,
@@ -983,48 +983,48 @@ export function describeQueryView(src: string): QueryViewDescriptor | null {
         : filters
           ? `No matching ${plural.lower} yet.`
           : `No ${plural.lower} yet.`,
-      errorText: "This live view couldn't update.",
+      errorText: "This live query couldn't update.",
     }
   }
 
   if (parsed.namespace === 'docs' || parsed.namespace === 'vault') {
     const isFind = parsed.verb === 'find'
     return {
-      badge: 'Live view',
+      badge: 'Live query',
       title: isFind ? 'Document' : 'Documents',
       subtitle: parsed.resource || filters,
       sourceLabel: text,
       loadingText: isFind ? 'Loading document...' : 'Loading documents...',
       emptyText: isFind ? 'Document not found.' : 'No matching documents yet.',
-      errorText: "This live view couldn't update.",
+      errorText: "This live query couldn't update.",
     }
   }
 
   if (parsed.namespace === 'capacity') {
     return {
-      badge: 'Live view',
+      badge: 'Live query',
       title: parsed.verb === 'risks' ? 'Capacity risks' : 'Capacity',
       subtitle: filters,
       sourceLabel: text,
       loadingText: 'Loading capacity...',
       emptyText: 'No capacity signal yet.',
-      errorText: "This live view couldn't update.",
+      errorText: "This live query couldn't update.",
     }
   }
 
   return {
-    badge: 'Live view',
+    badge: 'Live query',
     title: titleCaseWords(parsed.resource || `${parsed.namespace} ${parsed.verb}`),
     subtitle: filters,
     sourceLabel: text,
-    loadingText: 'Loading live view...',
+    loadingText: 'Loading live query...',
     emptyText: 'No results yet.',
-    errorText: "This live view couldn't update.",
+    errorText: "This live query couldn't update.",
   }
 }
 
 // Back-compat export used by older tests/callers. This is now a compact
-// label derived from the richer live-view descriptor.
+// label derived from the richer live-query descriptor.
 export function humanizeQuery(src: string): string | null {
   const view = describeQueryView(src)
   if (!view) return null
@@ -1155,7 +1155,7 @@ function buildQueryDecorations(
             el.className = `query-atom-result query-atom-result--${result.kind}`
             el.textContent = result.text // SAFE: text only, no innerHTML
             if (result.kind === 'error') {
-              el.title = 'Edit the live view source above, or ask the agent to fix it.'
+              el.title = 'Edit the live query source above, or ask the agent to fix it.'
             }
             return el
           },
@@ -2924,9 +2924,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   const queryResultsRef = useRef<QueryResultMap>(new Map())
   const queryUnavailableTextRef = useRef<string | null>(
     shareId
-      ? 'Live views are unavailable in shared pages for now.'
+      ? 'Live queries are unavailable in shared pages for now.'
       : disableReactiveResolvers
-        ? 'Live views need a workspace connection.'
+        ? 'Live queries need a workspace connection.'
         : null,
   )
   const [queryTick, setQueryTick] = useState(0)
@@ -2938,9 +2938,9 @@ export const AtomEditor = forwardRef<AtomEditorHandle, Props>(function AtomEdito
   }, [resolvedQueries])
   useEffect(() => {
     queryUnavailableTextRef.current = shareId
-      ? 'Live views are unavailable in shared pages for now.'
+      ? 'Live queries are unavailable in shared pages for now.'
       : disableReactiveResolvers
-        ? 'Live views need a workspace connection.'
+        ? 'Live queries need a workspace connection.'
         : null
     setQueryTick((t) => t + 1)
   }, [disableReactiveResolvers, shareId])

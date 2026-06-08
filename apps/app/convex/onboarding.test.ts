@@ -3,6 +3,8 @@ import { convexTest } from 'convex-test'
 import { describe, it, expect } from 'vitest'
 import schema from './schema'
 import { internal, api } from './_generated/api'
+import { computeAppSourceDigest } from './appSourceDigest'
+import { splitFrontmatter } from './atomId'
 
 // SAFE backend verification (the path chosen after the dev-auth hole):
 // convex-test runs the real Convex functions against an in-memory DB
@@ -25,10 +27,14 @@ const COMPLETE_VIEW_SETUP_RUN =
   '# Setup Run\n\n' +
   '## Objective\nBuild an interactive cockpit.\n\n' +
   '## Sources\n- projects/acme.md\n\n' +
-  '## View\n- .views/home\n\n' +
+  '## View\n- .apps/home\n\n' +
   '## What I Know\n- Acme is active.\n\n' +
   '## What I Need\n- Nothing urgent yet.\n\n' +
   '## Next Action\nAdd detail.'
+
+function stripDohcFrontmatter(body: string): string {
+  return splitFrontmatter(body).rest
+}
 
 async function seedAtom(
   t: ReturnType<typeof convexTest>,
@@ -42,6 +48,45 @@ async function seedAtom(
       body,
       updatedAt: Date.now(),
       source: 'agent',
+    })
+  })
+}
+
+async function seedAppTestResult(
+  t: ReturnType<typeof convexTest>,
+  packageRoot: string,
+  ok: boolean,
+) {
+  await t.run(async (ctx) => {
+    const atoms = await ctx.db.query('atoms').collect()
+    const files = atoms
+      .filter((atom) => atom.path.startsWith(`${packageRoot}/`))
+      .map((atom) => ({
+        relativePath: atom.path.slice(packageRoot.length + 1),
+        body: stripDohcFrontmatter(atom.body ?? ''),
+      }))
+    const docs = Object.fromEntries(
+      atoms
+        .filter((atom) => !atom.path.startsWith(`${packageRoot}/`))
+        .map((atom) => [atom.path, atom.body ?? '']),
+    )
+    await ctx.db.insert('appTestResults', {
+      workspaceId: W,
+      actorUserId: W,
+      packageRoot,
+      sourceDigest: await computeAppSourceDigest({
+        files,
+        seed: { collections: {}, docs, databases: {} },
+      }),
+      mode: 'browser',
+      ok,
+      result: {
+        ok,
+        packageRoot,
+        checks: [],
+        failures: ok ? [] : [{ name: 'browser render', status: 'failed', code: 'blank-render' }],
+      },
+      createdAt: Date.now(),
     })
   })
 }
@@ -186,7 +231,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     )
   })
 
-  it('_complete SUCCEEDS with identity, sources, .views/home, and setup run → DONE', async () => {
+  it('_complete SUCCEEDS with identity, sources, .apps/home, and setup run → DONE', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
     await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
@@ -197,10 +242,11 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     )
     await seedAtom(
       t,
-      '.views/home/src/App.tsx',
-      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const projects = useCollection('projects')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+    await seedAppTestResult(t, '.apps/home', true)
 
     await t.mutation(internal.onboarding._complete, { workspaceId: W })
 
@@ -209,7 +255,7 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     )
   })
 
-  it('_complete THROWS when .views/home is just a static shell with no source read', async () => {
+  it('_complete matches app-test digests after stripping atom frontmatter from app files', async () => {
     const t = convexTest(schema, modules)
     await t.mutation(internal.onboarding._begin, { workspaceId: W })
     await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
@@ -220,7 +266,113 @@ describe('"never end empty" is a SERVER invariant (was prompt-hope)', () => {
     )
     await seedAtom(
       t,
-      '.views/home/src/App.tsx',
+      '.apps/home/src/App.tsx',
+      [
+        '---',
+        'id: apps.home.src.app',
+        '---',
+        "import { useCollection } from '@dohc/app'",
+        '',
+        'export default function App() {',
+        "  const projects = useCollection('projects')",
+        '  return <main>{projects.length} projects</main>',
+        '}',
+      ].join('\n'),
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+    await seedAppTestResult(t, '.apps/home', true)
+
+    await t.mutation(internal.onboarding._complete, { workspaceId: W })
+
+    expect(await t.query(internal.onboarding._state, { workspaceId: W })).toBe(
+      'DONE',
+    )
+  })
+
+  it('_complete THROWS when a generated .apps cockpit has not passed test_app', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const projects = useCollection('projects')\n  return <main>{projects.length} projects</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/test_app/)
+  })
+
+  it('_complete fails closed instead of missing generated apps beyond the scan cap', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<section><h1>Home</h1><p>Active projects: {= count(projects.* status = active)}</p></section>',
+    )
+    for (let index = 0; index < 501; index += 1) {
+      await seedAtom(t, `notes/${String(index).padStart(3, '0')}.md`, `# Note ${index}`)
+    }
+    await seedAtom(
+      t,
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const projects = useCollection('projects')\n  return <main>{projects.length} projects</main>\n}\n",
+    )
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/too many files to verify generated apps safely/)
+  })
+
+  it('_complete THROWS when the latest generated app test failed', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const projects = useCollection('projects')\n  return <main>{projects.length} projects</main>\n}\n",
+    )
+    await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
+    await seedAppTestResult(t, '.apps/home', false)
+
+    await expect(
+      t.mutation(internal.onboarding._complete, { workspaceId: W }),
+    ).rejects.toThrow(/test_app/)
+  })
+
+  it('_complete THROWS when .apps/home is just a static shell with no source read', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}. Budget is {budget: 8000}.',
+    )
+    await seedAtom(
+      t,
+      '.apps/home/src/App.tsx',
       "export default function App() {\n  return <main>Home</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
@@ -318,14 +470,14 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     })
   })
 
-  it('progress treats .views/home as the ready cockpit without counting view source as data', async () => {
+  it('progress treats .apps/home as the ready cockpit without counting app source as data', async () => {
     const t = convexTest(schema, modules)
     await seedAtom(t, '.context/me.md', '# Me')
     await seedAtom(t, 'projects/acme.md', '# Acme\n{status: active}')
     await seedAtom(
       t,
-      '.views/home/src/App.tsx',
-      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const projects = useDocs('projects/*.md')\n  return <main>{projects.length} projects</main>\n}\n",
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const projects = useCollection('projects')\n  return <main>{projects.length} projects</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
@@ -333,8 +485,8 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
       hasCockpitView: true,
       hasDashboardWithQuery: true,
       sourceCount: 1,
-      cockpitPath: '.views/home',
-      dashboardPath: '.views/home',
+      cockpitPath: '.apps/home',
+      dashboardPath: '.apps/home',
     })
   })
 
@@ -344,21 +496,21 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
     await seedAtom(t, 'finance/wallet.md', '# Wallet\n{status: active}')
     await seedAtom(
       t,
-      '.views/home/src/App.tsx',
-      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} docs</main>\n}\n",
+      '.apps/home/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const docs = useCollection('financeDocs')\n  return <main>{docs.length} docs</main>\n}\n",
     )
     await seedAtom(
       t,
-      'finance/.views/tracker/src/App.tsx',
-      "import { useDocs } from '@dohc/view'\n\nexport default function App() {\n  const docs = useDocs('finance/*.md')\n  return <main>{docs.length} finance docs</main>\n}\n",
+      'finance/.apps/tracker/src/App.tsx',
+      "import { useCollection } from '@dohc/app'\n\nexport default function App() {\n  const docs = useCollection('financeDocs')\n  return <main>{docs.length} finance docs</main>\n}\n",
     )
     await seedAtom(t, '.runs/setup.md', COMPLETE_VIEW_SETUP_RUN)
 
     expect(await asW(t).query(api.onboarding.progress, {})).toMatchObject({
       hasCockpitView: true,
       sourceCount: 1,
-      cockpitPath: 'finance/.views/tracker',
-      dashboardPath: 'finance/.views/tracker',
+      cockpitPath: 'finance/.apps/tracker',
+      dashboardPath: 'finance/.apps/tracker',
     })
   })
 
@@ -411,6 +563,35 @@ describe('P1 — public state/progress/defer (owner-scoped)', () => {
 
     await asW(t).mutation(api.onboarding.completeIfReady, {})
 
+    expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
+  })
+
+  it('accepts a complete generated setup run note elsewhere under .runs', async () => {
+    const t = convexTest(schema, modules)
+    await t.mutation(internal.onboarding._begin, { workspaceId: W })
+    await seedAtom(t, '.context/me.md', '# Me\nfreelance designer {rate: 150}')
+    await seedAtom(
+      t,
+      'projects/acme.md',
+      '# Acme\nProject status is {status: active}.',
+    )
+    await seedAtom(
+      t,
+      'home.html',
+      '---\ntype: html\nsources:\n  - projects/acme.md\n---\n<p>Active: {= count(projects.* status = active)}</p>',
+    )
+    await seedAtom(
+      t,
+      '.runs/setup-corrected.md',
+      COMPLETE_SETUP_RUN,
+    )
+
+    await asW(t).mutation(api.onboarding.completeIfReady, {})
+
+    expect(await asW(t).query(api.onboarding.progress, {})).toMatchObject({
+      hasSetupRun: true,
+      runPath: '.runs/setup-corrected.md',
+    })
     expect(await asW(t).query(api.onboarding.state, {})).toBe('DONE')
   })
 

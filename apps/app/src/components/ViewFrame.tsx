@@ -3,9 +3,9 @@ import { Bot, FilePenLine, TriangleAlert } from 'lucide-react'
 import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import { useActiveWorkspaceId } from '../lib/active-workspace'
-import { bundleViewServer } from '../views/buildViewBundle.functions'
-import { ViewRuntimeHost } from '../views/ViewRuntimeHost'
-import { buildViewShell } from '../views/viewShell'
+import { bundleAppServer } from '../apps/buildAppBundle.functions'
+import { AppRuntimeHost, type AppAgentRunRequest } from '../apps/AppRuntimeHost'
+import { buildAppShell } from '../apps/appShell'
 
 type BuildState =
   | { status: 'idle'; key: null }
@@ -14,7 +14,7 @@ type BuildState =
   | { status: 'error'; key: string; diagnostics: Array<{ code: string; message: string }> }
 
 const BUILD_DEBOUNCE_MS = 150
-const VIEW_LOADING_TITLE = 'View'
+const VIEW_LOADING_TITLE = 'App'
 const VIEW_LOADING_SCRIPT = `
   const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const bg = dark ? '#100f0e' : '#f7f6f1';
@@ -34,10 +34,20 @@ const VIEW_LOADING_SCRIPT = `
       '</section>' +
     '</main>';
 `
-const VIEW_LOADING_SRC_DOC = buildViewShell({
+const VIEW_LOADING_SRC_DOC = buildAppShell({
   title: VIEW_LOADING_TITLE,
   script: VIEW_LOADING_SCRIPT,
 })
+
+type AppDescriptorError = { ok: false; message: string }
+
+function isAppDescriptorError(value: unknown): value is AppDescriptorError {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (value as { ok?: unknown }).ok === false,
+  )
+}
 
 export function ViewFrame({
   packageRoot,
@@ -46,21 +56,23 @@ export function ViewFrame({
 }: {
   packageRoot: string | null
   onOpenSource: (path: string) => void
-  onRunAgent?: (prompt: string) => void
+  onRunAgent?: (request: AppAgentRunRequest) => void
 }) {
   const activeWorkspaceId = useActiveWorkspaceId()
   const view = useQuery(
-    api.views.get,
+    api.apps.get,
     packageRoot ? { packageRoot, activeWorkspaceId } : 'skip',
   )
   const sourceFiles = useQuery(
-    api.views.getSourceFiles,
+    api.apps.getSourceFiles,
     packageRoot ? { packageRoot, activeWorkspaceId } : 'skip',
   )
   const [buildState, setBuildState] = useState<BuildState>({
     status: 'idle',
     key: null,
   })
+  const viewError = isAppDescriptorError(view) ? view : null
+  const viewDescriptor = view && !isAppDescriptorError(view) ? view : null
 
   const sourceKey = useMemo(() => {
     if (!sourceFiles || !sourceFiles.ok) return null
@@ -91,7 +103,7 @@ export function ViewFrame({
       return { status: 'building', key: sourceKey, previousCode }
     })
     const debounce = window.setTimeout(() => {
-      void bundleViewServer({
+      void bundleAppServer({
         data: { entry: sourceFiles.entry, files: sourceFiles.files },
       })
         .then((result) => {
@@ -114,7 +126,7 @@ export function ViewFrame({
             diagnostics: [
               {
                 code: 'build-failed',
-                message: 'This view could not be bundled safely.',
+                message: 'This app could not be bundled safely.',
               },
             ],
           })
@@ -135,12 +147,12 @@ export function ViewFrame({
         ? buildState.previousCode
         : VIEW_LOADING_SCRIPT
 
-  const viewTitle = view?.title ?? 'View'
+  const viewTitle = viewDescriptor?.title ?? 'App'
   const srcDoc = useMemo(
     () =>
       runtimeCode === VIEW_LOADING_SCRIPT
         ? VIEW_LOADING_SRC_DOC
-        : buildViewShell({
+        : buildAppShell({
             title: viewTitle,
             script: runtimeCode,
           }),
@@ -150,7 +162,7 @@ export function ViewFrame({
   if (!packageRoot) {
     return (
       <main className="grid min-w-0 place-items-center bg-page text-[13px] text-ink-faint">
-        Select a view.
+        Select an app.
       </main>
     )
   }
@@ -159,7 +171,7 @@ export function ViewFrame({
     return (
       <main className="flex min-w-0 flex-col bg-page">
         <ViewFrameLoadingHeader packageRoot={packageRoot} />
-        <ViewRuntimeHost
+        <AppRuntimeHost
           packageRoot={packageRoot}
           scopePath=""
           writeScopes={[]}
@@ -175,18 +187,34 @@ export function ViewFrame({
   if (view === null) {
     return (
       <main className="grid min-w-0 place-items-center bg-page text-[13px] text-ink-faint">
-        View not found.
+        App not found.
       </main>
     )
   }
 
-  if (!view.entryExists) {
+  if (viewError) {
+    return (
+      <main className="grid min-w-0 place-items-center bg-page p-6 text-center text-[13px] text-ink-faint">
+        {viewError.message}
+      </main>
+    )
+  }
+
+  if (!viewDescriptor) {
+    return (
+      <main className="grid min-w-0 place-items-center bg-page text-[13px] text-ink-faint">
+        App not found.
+      </main>
+    )
+  }
+
+  if (!viewDescriptor.entryExists) {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
-        message="The view entry file is missing."
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
+        message="The app entry file is missing."
         onOpenSource={onOpenSource}
         onRunAgent={onRunAgent}
       />
@@ -196,9 +224,9 @@ export function ViewFrame({
   if (sourceFiles && !sourceFiles.ok) {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
         message={sourceFiles.message}
         code={sourceFiles.code}
         onOpenSource={onOpenSource}
@@ -210,10 +238,10 @@ export function ViewFrame({
   if (buildState.status === 'error') {
     return (
       <ViewDiagnostic
-        title={view.title}
-        packageRoot={view.packageRoot}
-        entryPath={view.entryPath}
-        message={buildState.diagnostics[0]?.message ?? 'This view could not render.'}
+        title={viewDescriptor.title}
+        packageRoot={viewDescriptor.packageRoot}
+        entryPath={viewDescriptor.entryPath}
+        message={buildState.diagnostics[0]?.message ?? 'This app could not render.'}
         code={buildState.diagnostics[0]?.code}
         onOpenSource={onOpenSource}
         onRunAgent={onRunAgent}
@@ -226,26 +254,26 @@ export function ViewFrame({
       <header className="flex h-12 items-center justify-between border-b border-rule bg-surface px-4">
         <div className="min-w-0">
           <h1 className="truncate text-[14px] font-semibold text-ink-strong">
-            {view.title}
+            {viewDescriptor.title}
           </h1>
           <div className="truncate font-mono text-[10.5px] text-ink-faint">
-            {view.scopePath || 'Workspace'} · {view.packageRoot}
+            {viewDescriptor.scopePath || 'Workspace'} · {viewDescriptor.packageRoot}
           </div>
         </div>
         <button
           type="button"
-          onClick={() => onOpenSource(view.entryPath)}
+          onClick={() => onOpenSource(viewDescriptor.entryPath)}
           className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-rule bg-panel px-2.5 text-[12px] font-medium text-ink-dim hover:border-rule-strong hover:bg-hover hover:text-ink"
         >
           <FilePenLine className="size-3.5" strokeWidth={2} />
-          Open source
+          Open app source
         </button>
       </header>
-      <ViewRuntimeHost
-        packageRoot={view.packageRoot}
-        scopePath={view.scopePath}
-        writeScopes={view.write}
-        title={view.title}
+      <AppRuntimeHost
+        packageRoot={viewDescriptor.packageRoot}
+        scopePath={viewDescriptor.scopePath}
+        writeScopes={viewDescriptor.write}
+        title={viewDescriptor.title}
         srcDoc={srcDoc}
         onOpenSource={onOpenSource}
         onRunAgent={onRunAgent}
@@ -259,7 +287,7 @@ function ViewFrameLoadingHeader({ packageRoot }: { packageRoot: string }) {
     <header className="flex h-12 items-center justify-between border-b border-rule bg-surface px-4">
       <div className="min-w-0">
         <h1 className="truncate text-[14px] font-semibold text-ink-strong">
-          View
+          App
         </h1>
         <div className="truncate font-mono text-[10.5px] text-ink-faint">
           {packageRoot}
@@ -284,7 +312,7 @@ function ViewDiagnostic({
   message: string
   code?: string
   onOpenSource: (path: string) => void
-  onRunAgent?: (prompt: string) => void
+  onRunAgent?: (request: AppAgentRunRequest) => void
 }) {
   return (
     <main className="flex min-w-0 flex-col bg-page">
@@ -303,7 +331,7 @@ function ViewDiagnostic({
           className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-rule bg-panel px-2.5 text-[12px] font-medium text-ink-dim hover:border-rule-strong hover:bg-hover hover:text-ink"
         >
           <FilePenLine className="size-3.5" strokeWidth={2} />
-          Open source
+          Open app source
         </button>
       </header>
       <section className="grid min-h-0 flex-1 place-items-center px-6">
@@ -312,7 +340,7 @@ function ViewDiagnostic({
             <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" strokeWidth={2} />
             <div className="min-w-0">
               <p className="text-[13px] font-semibold text-ink-strong">
-                This view needs attention.
+                This app needs attention.
               </p>
               <p className="mt-1 text-[12px] leading-relaxed text-ink-dim">
                 {message}
@@ -329,15 +357,18 @@ function ViewDiagnostic({
                   className="inline-flex h-8 items-center gap-1.5 rounded-md border border-rule bg-panel px-2.5 text-[12px] font-medium text-ink-dim hover:border-rule-strong hover:bg-hover hover:text-ink"
                 >
                   <FilePenLine className="size-3.5" strokeWidth={2} />
-                  Open source
+                  Open app source
                 </button>
                 {onRunAgent && (
                   <button
                     type="button"
                     onClick={() =>
-                      onRunAgent(
-                        `Fix the dohc view at ${packageRoot}. The entry is ${entryPath}. Error: ${message}`,
-                      )
+                      onRunAgent({
+                        prompt: `Fix the dohc app at ${packageRoot}. The entry is ${entryPath}. Error: ${message}`,
+                        sources: [entryPath],
+                        originatingApp: packageRoot,
+                        titleHint: title,
+                      })
                     }
                     className="inline-flex h-8 items-center gap-1.5 rounded-md border border-rule bg-ink-strong px-2.5 text-[12px] font-medium text-surface hover:bg-ink"
                   >

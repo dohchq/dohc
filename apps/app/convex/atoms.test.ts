@@ -96,6 +96,65 @@ describe('atoms._upsertInternal — user-content overwrite guard', () => {
   })
 })
 
+describe('atoms.upsert — frontmatter-only overwrite guard', () => {
+  const ledgerBody = `---
+id: finance.ledger
+title: Wallet Ledger
+---
+# Wallet Ledger
+
+Real transaction rows`
+
+  const ledgerFrontmatterOnly = `---
+id: finance.ledger
+title: Wallet Ledger
+---`
+
+  it('refuses to collapse non-empty markdown into frontmatter-only markdown', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('atoms', {
+        workspaceId: W,
+        path: 'finance/ledger.md',
+        body: ledgerBody,
+        updatedAt: Date.now(),
+        source: 'user',
+      })
+    })
+
+    await expect(
+      t.withIdentity({ subject: W }).mutation(api.atoms.upsert, {
+        path: 'finance/ledger.md',
+        body: ledgerFrontmatterOnly,
+        source: 'user',
+      }),
+    ).rejects.toThrow(/frontmatter-only/)
+
+    expect(await bodyOf(t, 'finance/ledger.md')).toBe(ledgerBody)
+  })
+
+  it('still allows normal non-empty markdown edits', async () => {
+    const t = convexTest(schema, modules)
+    await t.run(async (ctx) => {
+      await ctx.db.insert('atoms', {
+        workspaceId: W,
+        path: 'finance/ledger.md',
+        body: ledgerBody,
+        updatedAt: Date.now(),
+        source: 'user',
+      })
+    })
+
+    await t.withIdentity({ subject: W }).mutation(api.atoms.upsert, {
+      path: 'finance/ledger.md',
+      body: `${ledgerBody}\n\nReviewed rows`,
+      source: 'user',
+    })
+
+    expect(await contentOf(t, 'finance/ledger.md')).toContain('Reviewed rows')
+  })
+})
+
 // D4.16/D4.17 + emoji-icons follow-up — an html file derives NO title
 // from its markup (no h1/first-line parsing → null → the tree falls
 // back to the filename). BUT a frontmatter `title:`/`name:` IS now

@@ -45,6 +45,21 @@ import {
   type FileRow,
 } from '../lib/path-tree'
 
+function hasPostFrontmatterContent(body: string): boolean {
+  return splitFrontmatter(body).rest.trim().length > 0
+}
+
+export function wouldErasePostFrontmatterContent(
+  previousBody: string | null | undefined,
+  nextBody: string,
+): boolean {
+  if (!previousBody) return false
+  return (
+    hasPostFrontmatterContent(previousBody) &&
+    !hasPostFrontmatterContent(nextBody)
+  )
+}
+
 function sourceLangForPath(
   path: string | null | undefined,
   isHtml: boolean,
@@ -157,6 +172,10 @@ export function AtomView({
     if (draft === remoteBodyRef.current) return
     const t = setTimeout(() => {
       const toSave = draft
+      if (wouldErasePostFrontmatterContent(remoteBodyRef.current, toSave)) {
+        setDraft(remoteBodyRef.current ?? '')
+        return
+      }
       remoteBodyRef.current = toSave
       void upsert({
         path: effectivePath,
@@ -176,14 +195,24 @@ export function AtomView({
   // blur/done, so the id is reconciled a single time with the final
   // value. Sets remoteBodyRef so the debounce won't double-fire.
   async function commitDraft(next: string) {
-    setDraft(next)
     if (!effectivePath) return
+    if (wouldErasePostFrontmatterContent(remoteBodyRef.current, next)) {
+      setDraft(remoteBodyRef.current ?? draft)
+      return
+    }
+    setDraft(next)
     if (next === remoteBodyRef.current) return
     remoteBodyRef.current = next
     await upsert({ path: effectivePath, body: next, source: 'user', activeWorkspaceId })
   }
 
+  function changeDraft(next: string) {
+    if (wouldErasePostFrontmatterContent(remoteBodyRef.current, next)) return
+    setDraft(next)
+  }
+
   function previewDraft(next: string) {
+    if (wouldErasePostFrontmatterContent(remoteBodyRef.current, next)) return
     setDraft(next)
     remoteBodyRef.current = next
   }
@@ -207,6 +236,10 @@ export function AtomView({
       if (remoteBodyRef.current === null) return
       if (draftRef.current === remoteBodyRef.current) return
       const toSave = draftRef.current
+      if (wouldErasePostFrontmatterContent(remoteBodyRef.current, toSave)) {
+        setDraft(remoteBodyRef.current)
+        return
+      }
       remoteBodyRef.current = toSave
       await upsert({
         path: effectivePath,
@@ -309,7 +342,7 @@ export function AtomView({
              original effectivePath-only key. */
           key={effectivePath}
           draft={draft}
-          onChange={setDraft}
+          onChange={changeDraft}
           onPreviewChange={previewDraft}
           onRunAction={onRunAction}
           subpages={subpages}

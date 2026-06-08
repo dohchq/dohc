@@ -20,12 +20,12 @@ pnpm --filter @dohc/app exec playwright screenshot \
 unauthenticated sign-in · signed-out route · loading · onboarding (new) ·
 onboarding (in-progress) · post-onboarding workspace · no file selected ·
 markdown document · source mode · HTML atom · graph view ·
-Views activity · rendered folder view · `.views` source file · view build
+Apps activity · rendered folder app · `.apps` source file · app build
 diagnostic · chat open · chat closed · share dialog · properties panel ·
 command palette · folder picker · dark mode · system-prefers-dark (no
 explicit theme).
 
-## Folder Views Manual QA
+## Apps Manual QA
 
 The automated Playwright coverage verifies the sandboxed runtime and SDK
 message loop. The authenticated workspace flow still needs manual QA until
@@ -33,15 +33,15 @@ the e2e harness can seed logged-in Convex workspaces.
 
 1. Create `clients/acme/tasks.md` with `{status: active}` and
    `{next_action: send proposal}`.
-2. Create `clients/acme/.views/overview/src/App.tsx` with a small React
-   view that calls `dohc.fields.query({ source: '.', keys: ['status',
-   'next_action'] })`.
-3. Open Views, select `clients/acme / Overview`, and confirm the iframe
+2. Create `clients/acme/.apps/overview/src/App.tsx` with a small React
+   app that imports from `@dohc/app` and reads the source through
+   `useDoc` or `useCollection`.
+3. Open Apps, select `clients/acme / Overview`, and confirm the iframe
    renders the two fields.
-4. Click `Open source` from the view header and confirm Files opens
-   `clients/acme/.views/overview/src/App.tsx` in source mode.
-5. From the source atom, click `Open view` and confirm it returns to the
-   rendered view.
+4. Click `Open source` from the app header and confirm Files opens
+   `clients/acme/.apps/overview/src/App.tsx` in source mode.
+5. From the source atom, click `Open app` and confirm it returns to the
+   rendered app.
 6. Imports/exports check: grant an export from workspace A to workspace B,
    confirm the withheld values, and verify a workspace B view using
    `dohc.imports.list()` shows only granted values. Revoke the grant and

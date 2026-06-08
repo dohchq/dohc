@@ -27,7 +27,12 @@
 
 import type { MutationCtx } from './_generated/server'
 import { parseInlineAtomsFromMarkdown } from './inlineAtom'
-import { isViewPackageRoot, isViewPath } from './viewPaths'
+import {
+  isAppPackageRoot,
+  isAppPath,
+  isViewPackageRoot,
+  isViewPath,
+} from './viewPaths'
 
 // ── §1.1 path → candidate file-id (the fixed normalization) ─────────
 // lowercase · drop extension · per `/` segment · `[^a-z0-9_]→_` (this
@@ -145,7 +150,7 @@ function isSourceCodePath(path: string | undefined): boolean {
   if (!path) return false
   return (
     SOURCE_CODE_EXT_RE.test(path) ||
-    (isViewPath(path) && VIEW_SOURCE_EXT_RE.test(path))
+    ((isAppPath(path) || isViewPath(path)) && VIEW_SOURCE_EXT_RE.test(path))
   )
 }
 
@@ -242,7 +247,7 @@ export function isWorkspaceCommandPath(path: string): boolean {
 }
 
 export function isWorkspaceViewPath(path: string): boolean {
-  return isViewPath(path) || isViewPackageRoot(path)
+  return isAppPath(path) || isAppPackageRoot(path) || isViewPath(path) || isViewPackageRoot(path)
 }
 
 // skills-commands-v1 §6.1 — the ONE unified predicate every

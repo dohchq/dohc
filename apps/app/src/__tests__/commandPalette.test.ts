@@ -148,16 +148,16 @@ describe('CommandPalette entry behavior', () => {
     expect(log).toEqual(['close', 'open:.skills/invoice.md'])
   })
 
-  it('view entries open rendered views and edit source through normal atom paths', () => {
+  it('app entries open rendered apps and edit source through normal atom paths', () => {
     const log: string[] = []
     const palette = buildCommandPaletteEntries({
       savedCommands: [],
       skills: [],
       views: [
         {
-          packageRoot: 'clients/acme/.views/overview',
+          packageRoot: 'clients/acme/.apps/overview',
           title: 'Overview',
-          entryPath: 'clients/acme/.views/overview/src/App.tsx',
+          entryPath: 'clients/acme/.apps/overview/src/App.tsx',
           scopePath: 'clients/acme',
         },
       ],
@@ -177,15 +177,15 @@ describe('CommandPalette entry behavior', () => {
       kind,
     }))).toEqual([
       {
-        id: 'view.clients/acme/.views/overview',
-        title: 'Open view: Overview',
-        hint: 'view · clients/acme',
+        id: 'app.clients/acme/.apps/overview',
+        title: 'Open app: Overview',
+        hint: 'app · clients/acme',
         kind: 'view',
       },
       {
-        id: 'view-source.clients/acme/.views/overview',
-        title: 'Edit view source: Overview',
-        hint: 'source · clients/acme/.views/overview/src/App.tsx',
+        id: 'app-source.clients/acme/.apps/overview',
+        title: 'Open app source: Overview',
+        hint: 'app source · clients/acme/.apps/overview/src/App.tsx',
         kind: 'view',
       },
       {
@@ -212,9 +212,9 @@ describe('CommandPalette entry behavior', () => {
     palette[1]?.run()
     expect(log).toEqual([
       'close',
-      'view:clients/acme/.views/overview',
+      'view:clients/acme/.apps/overview',
       'close',
-      'open:clients/acme/.views/overview/src/App.tsx',
+      'open:clients/acme/.apps/overview/src/App.tsx',
     ])
   })
 })
@@ -245,7 +245,7 @@ describe('CommandPalette workspace wiring', () => {
       expect.arrayContaining([
         { name: 'skills:list', args: 'skip' },
         { name: 'skills:listCommands', args: 'skip' },
-        { name: 'views:list', args: 'skip' },
+        { name: 'apps:list', args: 'skip' },
       ]),
     )
   })
@@ -267,20 +267,20 @@ describe('CommandPalette workspace wiring', () => {
       if (name === 'skills:listCommands') {
         return [{ path: '.commands/active.md', label: 'active-command' }]
       }
-      if (name === 'views:list') {
+      if (name === 'apps:list') {
         return {
-          views: [
+          apps: [
             {
-              packageRoot: '.views/home',
+              packageRoot: '.apps/home',
               title: 'Home',
-              entryPath: '.views/home/src/App.tsx',
+              entryPath: '.apps/home/src/App.tsx',
               scopePath: '',
             },
           ],
           truncated: false,
         }
       }
-      return { views: [], truncated: false }
+      return { apps: [], truncated: false }
     })
 
     const html = renderToStaticMarkup(
@@ -302,7 +302,7 @@ describe('CommandPalette workspace wiring', () => {
           name: 'skills:listCommands',
           args: { activeWorkspaceId: 'ws_active' },
         },
-        { name: 'views:list', args: { activeWorkspaceId: 'ws_active' } },
+        { name: 'apps:list', args: { activeWorkspaceId: 'ws_active' } },
       ]),
     )
     expect(
@@ -316,7 +316,7 @@ describe('CommandPalette workspace wiring', () => {
     ).toBe(true)
     expect(html).toContain('active-command')
     expect(html).toContain('active-skill')
-    expect(html).toContain('Open view: Home')
+    expect(html).toContain('Open app: Home')
   })
 })
 
