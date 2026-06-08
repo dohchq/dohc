@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 4 - Postgres Metadata, Atom, And Permission Core
+- Current phase: Phase 5 - Convex Compatibility Adapter For Contract Tests
 - Current step: not started
-- Last successful commit: Phase 3 commit, `Scaffold Postgres workspace backend`
+- Last successful commit: Phase 4 commit, `Implement Postgres atom backend conformance`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -150,3 +150,39 @@
 - Deferred findings with reason: `packages/workspace-postgres/src/conformance.test.ts` is intentionally deferred to Phase 4 so the conformance test can be the Phase 4 RED step instead of a failing placeholder in the scaffold commit.
 - Remaining risk: schema is a first scaffold and has not yet proven atom behavior through the shared conformance harness.
 - Next phase: Phase 4 - Postgres Metadata, Atom, And Permission Core
+
+### Phase 4: Postgres Metadata, Atom, And Permission Core
+
+- Status: complete
+- Execution map: create the Postgres conformance test first, then implement `assertWorkspaceMember`, workspace membership fixture/repository helpers, atom/event repositories, and `createPostgresWorkspaceBackend` using server-side actor workspace identity and transactional revision writes. Run Postgres conformance and the Convex atom/authz regression slice.
+- Files changed:
+  - `packages/workspace-postgres/src/conformance.test.ts`
+  - `packages/workspace-postgres/src/policy/authorize.ts`
+  - `packages/workspace-postgres/src/repositories/workspaces.ts`
+  - `packages/workspace-postgres/src/repositories/atoms.ts`
+  - `packages/workspace-postgres/src/repositories/events.ts`
+  - `packages/workspace-postgres/src/services/backend.ts`
+  - `packages/workspace-postgres/src/testAdapter.ts`
+  - `packages/workspace-postgres/src/index.ts`
+- Code deleted or consolidated: removed the Phase 3 placeholder throw from `postgresTestAdapter` and replaced it with a real migration/reset/fixture adapter.
+- Obsolete paths retained and why: raw Convex atom paths are retained; Phase 5 will map Convex to the shared conformance contract instead of deleting existing Convex behavior.
+- Tests added: `packages/workspace-postgres/src/conformance.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/conformance.test.ts` (RED: adapter setup placeholder threw in all 3 conformance cases)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/conformance.test.ts` (passed: 3 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 2 files, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (failed: `rowCount` possibly null)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed after coalescing `rowCount`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/atoms.test.ts convex/agent.test.ts` (passed: 3 files, 39 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 3 files, 9 tests)
+- Failing tests fixed: implemented Postgres list/read/create/write atom behavior, membership authorization, stale revision conflict handling, soft delete, atom revision rows, and workspace events.
+- Cross-cutting regressions run: web auth/app trust/agent approvals slice, Hocuspocus tests, sqlite-worker tests.
+- Convex status: pass on named Phase 4 regression slice and cross-cutting security/collaboration slice.
+- Postgres status: conformance, package tests, and typecheck pass for the atom slice.
+- Reviewer/subagent/CodeRabbit findings: none
+- Relevant findings fixed: none
+- Deferred findings with reason: asset/database/app services remain unsupported until their later phases; `saveAsset` intentionally throws `unsupported_media_type` until Phase 6.
+- Remaining risk: Postgres authorization currently covers workspace membership only; locks, shares, app trust, and review gates are added in later phases.
+- Next phase: Phase 5 - Convex Compatibility Adapter For Contract Tests
