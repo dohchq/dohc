@@ -3,7 +3,10 @@ import pg from "pg";
 import type { WorkspaceBackendTestAdapter } from "@dohc/workspace-contracts";
 import { createPostgresWorkspaceBackend } from "./services/backend";
 import { defaultPostgresUrl } from "./db/client";
-import { seedWorkspaceMembershipFixtures } from "./repositories/workspaces";
+import {
+  seedWorkspaceMembershipFixtures,
+  workspaceFixtureIds,
+} from "./repositories/workspaces";
 
 let currentPool: pg.Pool | null = null;
 
@@ -15,16 +18,29 @@ const migrationUrl = new URL(
 export const postgresTestAdapter: WorkspaceBackendTestAdapter = {
   name: "postgres",
   async setup() {
-    currentPool = new pg.Pool({
+    const pool = new pg.Pool({
       connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
     });
-    await migrateAndReset(currentPool);
-    await seedWorkspaceMembershipFixtures(currentPool);
+    try {
+      await migrateAndReset(pool);
+      await seedWorkspaceMembershipFixtures(pool);
+    } catch (error) {
+      await pool.end().catch(() => {});
+      throw error;
+    }
+
+    currentPool = pool;
 
     return {
       backend: createPostgresWorkspaceBackend(currentPool),
-      actor: { userId: "alice", workspaceId: "workspace_a" },
-      otherActor: { userId: "bob", workspaceId: "workspace_b" },
+      actor: {
+        userId: workspaceFixtureIds.aliceUserId,
+        workspaceId: workspaceFixtureIds.aliceWorkspaceId,
+      },
+      otherActor: {
+        userId: workspaceFixtureIds.bobUserId,
+        workspaceId: workspaceFixtureIds.bobWorkspaceId,
+      },
     };
   },
   async teardown() {

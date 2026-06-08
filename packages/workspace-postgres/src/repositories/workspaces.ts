@@ -2,6 +2,13 @@ import type pg from "pg";
 
 export type PgQueryable = pg.Pool | pg.PoolClient;
 
+export const workspaceFixtureIds = {
+  aliceUserId: "alice",
+  bobUserId: "bob",
+  aliceWorkspaceId: "workspace_a",
+  bobWorkspaceId: "workspace_b",
+} as const;
+
 export async function hasWorkspaceMembership(
   db: PgQueryable,
   userId: string,
@@ -26,8 +33,8 @@ export async function seedWorkspaceMembershipFixtures(db: PgQueryable) {
     `
       insert into users (id, workspace_id, token_identifier, email, name)
       values
-        ('user_alice', 'workspace_a', 'token:alice', 'alice@example.com', 'Alice'),
-        ('user_bob', 'workspace_b', 'token:bob', 'bob@example.com', 'Bob')
+        ('alice', 'workspace_a', 'token:alice', 'alice@example.com', 'Alice'),
+        ('bob', 'workspace_b', 'token:bob', 'bob@example.com', 'Bob')
       on conflict (id) do nothing
     `,
   );
@@ -36,8 +43,8 @@ export async function seedWorkspaceMembershipFixtures(db: PgQueryable) {
     `
       insert into workspaces (id, workspace_id, owner_user_id, slug, name, kind)
       values
-        ('workspace_a', 'workspace_a', 'user_alice', 'alice', 'Alice', 'personal'),
-        ('workspace_b', 'workspace_b', 'user_bob', 'bob', 'Bob', 'personal')
+        ('workspace_a', 'workspace_a', 'alice', 'alice', 'Alice', 'personal'),
+        ('workspace_b', 'workspace_b', 'bob', 'bob', 'Bob', 'personal')
       on conflict (id) do nothing
     `,
   );

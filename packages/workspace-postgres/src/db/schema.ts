@@ -8,6 +8,15 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
+// Phase 3 scaffold note: referential relationships are documented here but
+// FK constraints are deferred until the migration path can prove soft-delete,
+// restore, and dev-reset behavior without orphaning compatibility data.
+// Expected relationships include:
+// workspace_members.user_id -> users.id,
+// folders/workspace content tables.workspace_id -> workspaces.workspace_id,
+// atom_revisions.atom_id -> atoms.id,
+// database_operations.database_file_id -> database_files.id,
+// app_trust_grants.app_package_id -> app_packages.id.
 export const workspaceTables = [
   "users",
   "workspaces",
