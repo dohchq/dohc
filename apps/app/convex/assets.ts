@@ -1,13 +1,15 @@
 import { v } from 'convex/values'
 import {
+  action,
   internalMutation,
   internalQuery,
   mutation,
   query,
 } from './_generated/server'
 import type { Id } from './_generated/dataModel'
+import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
-import { canReadAtom } from './atomAccess'
+import { canReadAtom, canWriteInFolder, folderPathForPath } from './atomAccess'
 import { isNonDataAtom } from './atomId'
 import { scopeAllowsPath } from './appScopes'
 import { isAppDescriptorError, resolveAppDescriptor } from './apps'
@@ -29,6 +31,15 @@ type AppAssetError = {
 
 function appAssetError(code: AppAssetError['code'], message: string): AppAssetError {
   return { ok: false, code, message }
+}
+
+function arrayBufferFromBase64(value: string): ArrayBuffer {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes.buffer
 }
 
 export const generateUploadUrl = mutation({
@@ -142,6 +153,110 @@ export const registerWorkspaceFile = mutation({
     const asset = await ctx.db.get(assetId)
     if (!asset) throw new Error('asset registration failed')
     return toWorkspaceFile(asset)
+  },
+})
+
+export const _registerGeneratedWorkspaceAsset = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    actorUserId: v.string(),
+    storageId: v.id('_storage'),
+    filename: v.string(),
+    mediaType: v.string(),
+    path: v.string(),
+  },
+  handler: async (
+    ctx,
+    { workspaceId, actorUserId, storageId, filename, mediaType, path },
+  ) => {
+    const cleanPath = normalizeWorkspaceAssetPath(path || filename)
+    if (!(await canWriteInFolder(
+      ctx,
+      workspaceId,
+      folderPathForPath(cleanPath),
+      actorUserId,
+    ))) {
+      return {
+        ok: false as const,
+        code: 'asset-write-not-authorized',
+        message: 'Not authorized to write this asset.',
+      }
+    }
+    const metadata = await ctx.db.system.get('_storage', storageId)
+    if (!metadata) {
+      return {
+        ok: false as const,
+        code: 'asset-blob-not-found',
+        message: 'Generated asset blob was not found.',
+      }
+    }
+    const existingAtPath = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanPath),
+      )
+      .unique()
+    if (existingAtPath) {
+      return {
+        ok: false as const,
+        code: 'asset-exists',
+        message: `File already exists: ${cleanPath}`,
+      }
+    }
+    const normalizedMediaType =
+      normalizeMediaType(mediaType) ??
+      normalizeMediaType(metadata.contentType) ??
+      mediaTypeForFilename(cleanPath) ??
+      'application/octet-stream'
+    const now = Date.now()
+    const assetId = await ctx.db.insert('workspaceAssets', {
+      workspaceId,
+      storageId,
+      path: cleanPath,
+      filename: normalizeFilename(filename),
+      mediaType: normalizedMediaType,
+      kind: kindForMediaType(normalizedMediaType),
+      size: metadata.size,
+      sha256: metadata.sha256,
+      purpose: 'workspace',
+      createdByUserId: actorUserId,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1,
+    })
+    const asset = await ctx.db.get(assetId)
+    if (!asset) throw new Error('asset registration failed')
+    return { ok: true as const, ...toWorkspaceFile(asset), size: asset.size }
+  },
+})
+
+export const saveGeneratedAsset = action({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    path: v.string(),
+    mediaType: v.string(),
+    bytesBase64: v.string(),
+  },
+  handler: async (
+    ctx,
+    { activeWorkspaceId, path, mediaType, bytesBase64 },
+  ): Promise<unknown> => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const workspaceId = await ctx.runQuery(internal.agent._resolveWorkspaceForCaller, {
+      activeWorkspaceId,
+    }) as string
+    const storageId = await ctx.storage.store(new Blob([arrayBufferFromBase64(bytesBase64)], {
+      type: mediaType,
+    }))
+    return await ctx.runMutation(internal.assets._registerGeneratedWorkspaceAsset, {
+      workspaceId,
+      actorUserId: identity.subject,
+      storageId,
+      path,
+      filename: path.split('/').pop() ?? 'asset',
+      mediaType,
+    })
   },
 })
 

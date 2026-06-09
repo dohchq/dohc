@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 7 - Agent-Native Files, Data Import, And Database Tools
+- Current phase: Phase 8 - Filesystem Projection
 - Current step: not started
-- Last successful commit: Phase 6 commit, `Add upload UI and type-specific file views`
+- Last successful commit: Phase 7 commit, `Add agent-native file and data import tools`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -298,3 +298,57 @@
 - Deferred findings with reason: SQLite opens a Database Studio shell with empty tables until Phase 7 imports/structures database files; Convex compatibility asset bytes are adapter-side for conformance while the production Convex app path uses storage-backed signed URLs; text asset previews fetch body client-side from the resolved asset URL rather than storing uploaded text as markdown atoms.
 - Remaining risk: Postgres local blob cleanup/orphan handling is basic; later object-store/S3 integration should add transactional cleanup and durable lifecycle policies.
 - Next phase: Phase 7 - Agent-Native Files, Data Import, And Database Tools
+
+### Phase 7: Agent-Native Files, Data Import, And Database Tools
+
+- Status: complete
+- Execution map: write failing tests for agent-native file saves, Convex data imports, SQLite worker imports, and Postgres import-service composition first. Then add the shared import contract, SQLite import parser/materializer, Postgres backend-composing import service, Convex `databaseFiles.importData` action, generated asset action, and agent tool wiring for `save_file`, `upload_asset`, `inspect_file`, `import_data`, `query_database`, `write_database_rows`, `export_file`, and `embed_asset`.
+- Files changed:
+  - `apps/app/convex/agent.ts`
+  - `apps/app/convex/agentDataTools.test.ts`
+  - `apps/app/convex/assets.ts`
+  - `apps/app/convex/databaseFiles.ts`
+  - `apps/app/src/__tests__/prepareStep.test.ts`
+  - `apps/app/src/__tests__/skillTurnGateApplied.test.ts`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+  - `packages/workspace-contracts/src/dataImport.ts`
+  - `packages/workspace-contracts/src/index.ts`
+  - `packages/workspace-postgres/src/services/dataImport.ts`
+  - `packages/workspace-postgres/src/services/dataImport.test.ts`
+  - `services/sqlite-worker/src/importData.test.ts`
+  - `services/sqlite-worker/src/server.ts`
+  - `services/sqlite-worker/src/sqliteEngine.ts`
+- Code deleted or consolidated: no source deletion; import parsing and SQLite materialization are consolidated in the SQLite worker instead of duplicating table-to-database behavior in Convex.
+- Obsolete paths retained and why: existing `create_atom`, `read_asset`, `databaseFiles.create`, and `databaseOps.apply` surfaces remain for compatibility; new agent tools wrap these or the new import action rather than replacing them.
+- Tests added:
+  - `apps/app/convex/agentDataTools.test.ts`
+  - `packages/workspace-postgres/src/services/dataImport.test.ts`
+  - `services/sqlite-worker/src/importData.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/agentDataTools.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts` (RED: missing `_saveFileForAgent`, missing agent tool names, missing `databaseFiles.importData`; existing database tests passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test src/importData.test.ts` (RED: `engine.importData is not a function`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/dataImport.test.ts` (RED: missing `./dataImport`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test src/importData.test.ts` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/dataImport.test.ts` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/agentDataTools.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts` (passed: 3 files, 24 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/skillTurnGateApplied.test.ts src/__tests__/prepareStep.test.ts` (passed: 2 files, 76 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 2 files, 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 3 files, 9 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (failed: new asset action inference cycle and stale privacy-helper type)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed after explicit action return type and helper type fix)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/assets.test.ts convex/agentApprovals.test.ts convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts` (passed: 5 files, 18 tests)
+- Failing tests fixed: implemented generated text-file saves as no-overwrite atoms, generated binary asset saves as no-overwrite workspace assets, CSV/JSON/JSONL/Markdown/PDF-table imports into materialized SQLite snapshots, uploaded CSV asset imports, PDF extracted-source sidecar atoms, and privacy-boundary refusal for private source data imported into unrestricted folders.
+- Cross-cutting regressions run: active tool set/gate structural tests, assets regression, agent approval/security/app trust/authz slices, workspace Convex compatibility conformance, package typechecks.
+- Convex status: agent data tools are registered and active-tool gated; imports resolve workspace and user identity server-side; private-source to unrestricted-target imports fail closed with `approval-required`; SQLite database imports are first-class `databaseFiles` rows with operation-log entries.
+- Postgres status: import service composes the shared `WorkspaceBackend`, creates generated text atoms, and saves materialized SQLite assets from worker output.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 7; next major review checkpoint is after Phase 8.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: collection imports return `unsupported-import-target` until a source-backed collection backend is introduced; Convex import privacy approval currently fails closed at the data action and the agent tool reports refusal rather than completing through the existing delete-only approval-card executor; generated text-file atoms preserve raw CSV/TXT/JSON body bytes and do not seed markdown frontmatter because frontmatter would corrupt those file formats.
+- Remaining risk: SQLite import parsing is intentionally deterministic and small; richer CSV/PDF extraction should eventually move behind a dedicated extractor with stronger format coverage.
+- Next phase: Phase 8 - Filesystem Projection

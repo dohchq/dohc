@@ -27,6 +27,7 @@ import { requireWorkspace } from './auth'
 import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
+import { canWriteInFolder, folderPathForPath } from './atomAccess'
 import type { ToolCtx } from '@convex-dev/agent'
 import {
   agentProviderOptions,
@@ -224,6 +225,33 @@ export function skillBodyBytes(body: string): number {
   return TEXT_ENCODER.encode(body).byteLength
 }
 
+function atomKindForGeneratedFile(path: string, mediaType: string) {
+  const lower = `${mediaType} ${path}`.toLowerCase()
+  if (lower.includes('csv') || lower.endsWith('.csv')) return 'csv' as const
+  if (lower.includes('json') || lower.endsWith('.json')) return 'json' as const
+  if (lower.includes('html') || lower.endsWith('.html')) return 'html' as const
+  if (lower.includes('markdown') || lower.endsWith('.md')) return 'markdown' as const
+  return 'text' as const
+}
+
+function isGeneratedTextMedia(path: string, mediaType: string) {
+  const lower = `${mediaType} ${path}`.toLowerCase()
+  return (
+    lower.includes('text/') ||
+    lower.includes('json') ||
+    lower.includes('csv') ||
+    lower.endsWith('.txt') ||
+    lower.endsWith('.json') ||
+    lower.endsWith('.csv') ||
+    lower.endsWith('.md') ||
+    lower.endsWith('.markdown')
+  )
+}
+
+function cleanGeneratedPath(path: string) {
+  return path.trim().replace(/^\/+|\/+$/g, '')
+}
+
 const DEFAULT_THREAD_LIST_LIMIT = 80
 const MAX_THREAD_LIST_LIMIT = 100
 const THREAD_LIST_SCAN_MULTIPLIER = 4
@@ -307,6 +335,67 @@ function withAgentAccessModeStatus(
 ): string {
   return `${agentAccessModePromptBlock(mode)}\n\n${systemPrompt}`
 }
+
+export const _saveFileForAgent = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    actorUserId: v.string(),
+    path: v.string(),
+    mediaType: v.string(),
+    content: v.string(),
+  },
+  handler: async (ctx, args): Promise<unknown> => {
+    const path = cleanGeneratedPath(args.path)
+    if (!path) return { ok: false as const, code: 'invalid-path', message: 'File path is empty.' }
+    if (!isGeneratedTextMedia(path, args.mediaType)) {
+      return {
+        ok: false as const,
+        code: 'binary-file-requires-asset',
+        message: 'Generated binary files must be saved as assets.',
+      }
+    }
+    if (!(await canWriteInFolder(
+      ctx,
+      args.workspaceId,
+      folderPathForPath(path),
+      args.actorUserId,
+    ))) {
+      return {
+        ok: false as const,
+        code: 'file-write-not-authorized',
+        message: 'Not authorized to write this file.',
+      }
+    }
+    const existing = await ctx.db
+      .query('atoms')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', args.workspaceId).eq('path', path),
+      )
+      .unique()
+    if (existing) {
+      return {
+        ok: false as const,
+        code: 'file-exists',
+        message: `File already exists: ${path}`,
+      }
+    }
+    const now = Date.now()
+    const atomId = await ctx.db.insert('atoms', {
+      workspaceId: args.workspaceId,
+      path,
+      body: args.content,
+      source: 'agent',
+      updatedAt: now,
+    })
+    return {
+      ok: true as const,
+      path,
+      kind: 'atom' as const,
+      atomKind: atomKindForGeneratedFile(path, args.mediaType),
+      atomId,
+    }
+  },
+})
 
 export function projectScopeStatusBlock(projectPath?: string | null): string {
   const scopedProjectPath = normalizeProjectPath(projectPath)
@@ -2545,6 +2634,297 @@ export const dohcAgent = new Agent(components.agent, {
       },
     }),
 
+    save_file: createTool({
+      description:
+        'Save a brand-new generated text file (CSV, TXT, JSON, Markdown) as a workspace atom. Refuses overwrites; use upload_asset for binary files.',
+      inputSchema: z.object({
+        path: z.string(),
+        mediaType: z.string().default('text/plain'),
+        content: z.string(),
+      }),
+      execute: async (
+        ctx,
+        input: { path: string; mediaType: string; content: string },
+        options,
+      ): Promise<string> => {
+        const scopeViolation = projectScopedCreatePathViolation(
+          input.path,
+          projectPathFromTool(options),
+        )
+        if (scopeViolation) return scopeViolation
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        const actorUserId = await viewerSubjectFromTool(ctx)
+        const result = (await ctx.runMutation(internal.agent._saveFileForAgent, {
+          workspaceId,
+          actorUserId,
+          ...input,
+        })) as { ok: true; path: string; kind: string } | { ok: false; code: string; message: string }
+        return result.ok
+          ? `saved ${result.path} (${input.content.length} chars)`
+          : `REFUSED: ${result.message}`
+      },
+    }),
+
+    upload_asset: createTool({
+      description:
+        'Save a brand-new generated binary file as a workspace asset from base64 bytes. Refuses overwrites; text files should use save_file.',
+      inputSchema: z.object({
+        path: z.string(),
+        mediaType: z.string(),
+        bytesBase64: z.string(),
+      }),
+      execute: async (
+        ctx,
+        input: { path: string; mediaType: string; bytesBase64: string },
+        options,
+      ): Promise<string> => {
+        const scopeViolation = projectScopedCreatePathViolation(
+          input.path,
+          projectPathFromTool(options),
+        )
+        if (scopeViolation) return scopeViolation
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const result = (await ctx.runAction(api.assets.saveGeneratedAsset, {
+          activeWorkspaceId: workspaceId,
+          ...input,
+        })) as { ok: true; path: string; size: number } | { ok: false; message: string }
+        return result.ok
+          ? `saved asset ${result.path} (${result.size} bytes)`
+          : `REFUSED: ${result.message}`
+      },
+    }),
+
+    inspect_file: createTool({
+      description:
+        'Inspect one atom, workspace asset, or SQLite database by path. Returns metadata and a small preview when available.',
+      inputSchema: z.object({ path: z.string() }),
+      execute: async (
+        ctx,
+        { path }: { path: string },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        const viewerSubject = await viewerSubjectFromTool(ctx)
+        const atom = (await ctx.runQuery(internal.atoms._getInternal, {
+          workspaceId,
+          path,
+          viewerSubject,
+        })) as string | null
+        if (atom !== null) {
+          return JSON.stringify({
+            kind: 'atom',
+            path,
+            size: atom.length,
+            preview: atom.slice(0, 500),
+          })
+        }
+        const asset = (await ctx.runQuery(api.assets.resolveWorkspaceFile, {
+          activeWorkspaceId: workspaceId,
+          path,
+        })) as unknown
+        if (asset) return JSON.stringify({ kind: 'asset', file: asset })
+        const database = (await ctx.runQuery(api.databaseFiles.get, {
+          activeWorkspaceId: workspaceId,
+          path,
+        })) as unknown
+        return JSON.stringify(database)
+      },
+    }),
+
+    import_data: createTool({
+      description:
+        'Import CSV, JSON, JSONL, markdown-table, or extracted PDF table text into a new atom or SQLite database file. Refuses overwrites and privacy-crossing imports without approval.',
+      inputSchema: z.object({
+        source: z.discriminatedUnion('kind', [
+          z.object({ kind: z.literal('asset'), path: z.string() }),
+          z.object({ kind: z.literal('atom'), path: z.string() }),
+          z.object({
+            kind: z.literal('inline'),
+            name: z.string(),
+            mediaType: z.string(),
+            body: z.string(),
+          }),
+        ]),
+        target: z.discriminatedUnion('kind', [
+          z.object({
+            kind: z.literal('atom'),
+            path: z.string(),
+            contentType: z.string(),
+          }),
+          z.object({
+            kind: z.literal('sqlite'),
+            path: z.string(),
+            tableName: z.string(),
+          }),
+          z.object({ kind: z.literal('collection'), path: z.string() }),
+        ]),
+        mode: z.enum(['infer-schema', 'provided-schema']).default('infer-schema'),
+        schema: z.record(z.enum(['text', 'integer', 'real', 'boolean', 'datetime'])).optional(),
+      }),
+      execute: async (
+        ctx,
+        input: {
+          source:
+            | { kind: 'asset'; path: string }
+            | { kind: 'atom'; path: string }
+            | { kind: 'inline'; name: string; mediaType: string; body: string }
+          target:
+            | { kind: 'atom'; path: string; contentType: string }
+            | { kind: 'sqlite'; path: string; tableName: string }
+            | { kind: 'collection'; path: string }
+          mode: 'infer-schema' | 'provided-schema'
+          schema?: Record<string, 'text' | 'integer' | 'real' | 'boolean' | 'datetime'>
+        },
+        options,
+      ): Promise<string> => {
+        const targetPath = input.target.path
+        const scopeViolation = projectScopedCreatePathViolation(
+          targetPath,
+          projectPathFromTool(options),
+        )
+        if (scopeViolation) return scopeViolation
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const result = (await ctx.runAction(api.databaseFiles.importData, {
+          activeWorkspaceId: workspaceId,
+          ...input,
+        })) as
+          | {
+              ok: true
+              path?: string
+              rowCount?: number
+              tableName?: string
+              sourceAtomPath?: string
+            }
+          | { ok: false; code: string; message: string }
+        if (!result.ok) return `REFUSED: ${result.message}`
+        const table = result.tableName ? ` into ${result.tableName}` : ''
+        const rows = result.rowCount === undefined ? '' : ` (${result.rowCount} rows)`
+        const source = result.sourceAtomPath ? `; source saved ${result.sourceAtomPath}` : ''
+        return `imported ${result.path ?? targetPath}${table}${rows}${source}`
+      },
+    }),
+
+    query_database: createTool({
+      description:
+        'Run a read-only SELECT query against a SQLite database file.',
+      inputSchema: z.object({
+        path: z.string(),
+        sql: z.string(),
+        params: z.array(z.any()).optional(),
+      }),
+      execute: async (
+        ctx,
+        input: { path: string; sql: string; params?: unknown[] },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const result = await ctx.runQuery(api.databaseFiles.query, {
+          activeWorkspaceId: workspaceId,
+          ...input,
+        })
+        return JSON.stringify(result)
+      },
+    }),
+
+    write_database_rows: createTool({
+      description:
+        'Apply one version-checked row operation to a SQLite database file. Requires expectedVersion and records an operation log entry.',
+      inputSchema: z.object({
+        databasePath: z.string(),
+        operationId: z.string(),
+        expectedVersion: z.number(),
+        op: z.enum(['insert', 'update', 'delete']),
+        table: z.string(),
+        rowId: z.string().optional(),
+        payload: z.record(z.any()),
+      }),
+      execute: async (
+        ctx,
+        input: {
+          databasePath: string
+          operationId: string
+          expectedVersion: number
+          op: 'insert' | 'update' | 'delete'
+          table: string
+          rowId?: string
+          payload: Record<string, unknown>
+        },
+        options,
+      ): Promise<string> => {
+        await requireDirectUserAuthorization(ctx, 'write_database_rows')
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const result = await ctx.runMutation(api.databaseOps.apply, {
+          activeWorkspaceId: workspaceId,
+          ...input,
+        })
+        return JSON.stringify(result)
+      },
+    }),
+
+    export_file: createTool({
+      description:
+        'Return export metadata for an atom, asset, or SQLite database file by path.',
+      inputSchema: z.object({ path: z.string() }),
+      execute: async (
+        ctx,
+        { path }: { path: string },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const database = (await ctx.runQuery(api.databaseFiles.get, {
+          activeWorkspaceId: workspaceId,
+          path,
+        })) as unknown
+        if (
+          database &&
+          typeof database === 'object' &&
+          'ok' in database &&
+          (database as { ok?: unknown }).ok === true
+        ) {
+          return JSON.stringify({ kind: 'database', export: database })
+        }
+        const asset = await ctx.runQuery(api.assets.resolveWorkspaceFile, {
+          activeWorkspaceId: workspaceId,
+          path,
+        })
+        if (asset) return JSON.stringify({ kind: 'asset', export: asset })
+        const atom = await ctx.runQuery(internal.atoms._getInternal, {
+          workspaceId,
+          path,
+          viewerSubject: await viewerSubjectFromTool(ctx),
+        })
+        return atom === null
+          ? `(not found: ${path})`
+          : JSON.stringify({ kind: 'atom', path, body: atom })
+      },
+    }),
+
+    embed_asset: createTool({
+      description:
+        'Return the stable markdown reference for a workspace asset by path.',
+      inputSchema: z.object({ path: z.string(), alt: z.string().optional() }),
+      execute: async (
+        ctx,
+        { path, alt }: { path: string; alt?: string },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        const asset = (await ctx.runQuery(api.assets.resolveWorkspaceFile, {
+          activeWorkspaceId: workspaceId,
+          path,
+        })) as { id?: string; filename?: string; path?: string } | null
+        if (!asset?.id) return `(asset not found: ${path})`
+        const label = alt ?? asset.filename ?? asset.path ?? path
+        return `![${label}](dohc-asset:${asset.id})`
+      },
+    }),
+
     create_atom: createTool({
       description:
         'Create a brand-new atom at path with markdown content. Refuses to overwrite existing atoms. In a project-scoped chat, the path must stay under that active project folder. Use semantic edit tools for existing docs.',
@@ -4392,6 +4772,7 @@ const UNAUTHORIZABLE_TOOLS = [
   'restore_folder',
   'capture', // gated CONDITIONALLY on shared:true; absent at depth>0
   'set_lock', // file-org-v1 D4.1b — user-decision class; never at depth>0
+  'write_database_rows', // existing database mutation; requires direct user turn outside saved skills/commands
 ] as const
 
 // At depth>0 + kind='skill' the model gets ONLY the safe
@@ -4407,6 +4788,10 @@ const SAFE_FOR_SKILL_TOOLS = [
   'list_entities',
   'find_entity',
   'read_asset',
+  'inspect_file',
+  'query_database',
+  'export_file',
+  'embed_asset',
   'list_skills',
   'list_commands',
   'pending_captures',
@@ -4418,6 +4803,9 @@ const SAFE_FOR_SKILL_TOOLS = [
   'create_folder',
   'capture', // structurally safe at depth>0 — the handler refuses shared:true via the gate
   'create_atom', // structurally safe at depth>0 — the handler refuses .skills/.commands/type frontmatter via the gate
+  'save_file', // additive text-file create only; refuses overwrites and folder ACL violations
+  'upload_asset', // additive asset create only; refuses overwrites and folder ACL violations
+  'import_data', // additive import create only; refuses overwrites and private-boundary crossings
   'propose_replace_text',
   'insert_after_heading',
   'rewrite_section',
