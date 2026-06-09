@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 13 - Frontend Backend Switch
+- Current phase: Phase 14 - Self-Hosting And Cloud Packaging
 - Current step: not started
-- Last successful commit: Phase 12 commit, `Run apps and SQLite across Convex and Postgres`
+- Last successful commit: Phase 13 commit, `Add frontend backend switch for Convex and Postgres`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -614,3 +614,44 @@
 - Deferred findings with reason: AppTester's backend matrix currently runs the same persistent browser fixture under `backend=convex` and `backend=postgres` labels while live backend transport switching is still deferred to Phase 13 and later readiness gates. The real enforcement surface for Phase 12 is covered by Convex app/database tests plus Postgres service tests.
 - Remaining risk: Postgres app/database services enforce workspace membership, app manifest read/write scopes, per-user trust for writes, source-scoped asset/database access, and version conflicts, but lock/review-gate integration is still represented by the existing Convex runtime path and must be carried into the backend-neutral client in the frontend/backend switch phases.
 - Next phase: Phase 13 - Frontend Backend Switch
+
+### Phase 13: Frontend Backend Switch
+
+- Status: complete
+- Execution map: add a frontend backend client contract and mode resolver, implement Convex and Postgres client adapters, then route Postgres mode file listing, text create/read/write, upload, and rename flows through the selected client while leaving the existing Convex hook path as the default.
+- Files changed:
+  - `apps/app/src/__tests__/backendSwitch.test.tsx`
+  - `apps/app/src/backend/backendClient.ts`
+  - `apps/app/src/backend/convexBackendClient.ts`
+  - `apps/app/src/backend/postgresBackendClient.ts`
+  - `apps/app/src/components/AtomView.tsx`
+  - `apps/app/src/components/FileTree.tsx`
+  - `apps/app/src/components/UploadFileButton.tsx`
+  - `apps/app/src/routes/_app.tsx`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: no deletion; backend mode selection and workspace file operations are consolidated into `apps/app/src/backend/*` so mode resolution is pure, URL-query-proof, and testable. The existing Convex hooks remain the default UI path to avoid changing production behavior before the readiness phases.
+- Obsolete paths retained and why: `apps/app/src/components/Chat.tsx` was listed in the plan but did not need a source change; Chat receives file/thread context from `_app.tsx` and does not own list/read/write/upload/rename calls. Convex route hooks are retained for default mode because `DOHC_BACKEND=postgres` is the only mode that switches to the Postgres HTTP client.
+- Tests added:
+  - `apps/app/src/__tests__/backendSwitch.test.tsx`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/backendSwitch.test.tsx` (RED: missing `../backend/backendClient`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/backendSwitch.test.tsx` (passed after adding pure client modules and upload client prop: 4 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/backendSwitch.test.tsx` (RED for route/editor/tree wiring contract: route did not yet import `resolveDohcBackendMode`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/backendSwitch.test.tsx` (passed after wiring route, `AtomView`, and `FileTree`: 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (failed: backend switch test fake files widened `kind` to `string`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed after using literal `kind` types in the test fixture)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/backendSwitch.test.tsx src/__tests__/fileTypeViews.test.tsx src/__tests__/uploadFiles.test.tsx` (passed: 3 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `git diff --check` (passed)
+- Failing tests fixed: implemented backend mode resolution defaulting to Convex, environment-selected Postgres mode, URL-query immutability, selected-client delegation for list/read/write/upload/rename, Postgres HTTP calls to `/services/workspace-api`, upload UI backend-client handling, route-level Postgres file list state, Postgres create/upload/rename file state updates, and backend-client text read/write inside `AtomView`.
+- Cross-cutting regressions run: exact Phase 13 backend switch/file type/upload tests, web typecheck, web authz/app security/app trust/agent approvals slice, Hocuspocus tests, sqlite-worker tests, and `git diff --check`.
+- Convex status: default mode remains Convex; existing Convex upload registration and reactive file list/query hooks stay in place when no Postgres backend mode is selected.
+- Postgres status: `DOHC_BACKEND=postgres` selects the Postgres frontend client, routes file list/text/upload/rename calls to `/services/workspace-api`, and keeps file state updated optimistically from client responses.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 13; next major review checkpoint is after Phase 15.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: the Postgres frontend client assumes `/services/workspace-api` is mounted and authenticated by the deployment; self-host/cloud packaging and readiness verification for that service are Phase 14 and Phase 15 work.
+- Remaining risk: folder operations, delete/move flows, app runtime, and chat-side agent tools still primarily use Convex-era hooks or backend-specific services; this phase intentionally covers the common file list/read/write/upload/rename surface named in the plan.
+- Next phase: Phase 14 - Self-Hosting And Cloud Packaging

@@ -42,6 +42,7 @@ import {
   UploadFileButton,
   type UploadedWorkspaceFile,
 } from './UploadFileButton'
+import type { DohcBackendClient } from '../backend/backendClient'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { SidebarAccountFooter, SidebarHeader } from './SidebarChrome'
 import { SidebarListSkeleton } from './Skeleton'
@@ -128,6 +129,7 @@ type Props = {
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
   activeWorkspaceId?: string
+  backendClient?: Pick<DohcBackendClient, 'uploadFile'>
   onUploadFile?: (file: UploadedWorkspaceFile) => void
   allowCreate?: boolean
   loading?: boolean
@@ -302,6 +304,7 @@ export function FileTree({
   onOpenShared,
   onOpenSearch,
   activeWorkspaceId,
+  backendClient,
   onUploadFile,
   allowCreate = true,
   loading = false,
@@ -1057,6 +1060,7 @@ export function FileTree({
                 {onUploadFile && (
                   <UploadFileButton
                     activeWorkspaceId={activeWorkspaceId}
+                    backendClient={backendClient}
                     defaultFolderPath={targetDir}
                     onUploaded={onUploadFile}
                   />

@@ -79,6 +79,12 @@ import {
   agentThreadRef,
 } from '@/lib/agent-thread-urls'
 import { useDialogFocus } from '../lib/dialog-focus'
+import {
+  resolveDohcBackendMode,
+  type DohcBackendClient,
+  type WorkspaceFile,
+} from '@/backend/backendClient'
+import { createPostgresBackendClient } from '@/backend/postgresBackendClient'
 
 // Pathless layout. The open atom now lives in the URL as
 // `/<workspaceSlug>/<pageSlug>-<atomId>`. This layout holds the whole
@@ -186,6 +192,38 @@ function normalizeAssetFile(file: FileRow): AppFileRow {
     contentType: file.contentType ?? 'application/octet-stream',
     icon: file.icon ?? null,
   }
+}
+
+function normalizeBackendFile(file: WorkspaceFile): AppFileRow {
+  return {
+    ...file,
+    kind: file.kind,
+    contentType: file.contentType,
+  }
+}
+
+function sortAppFiles(files: AppFileRow[]): AppFileRow[] {
+  return [...files].sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function upsertBackendFileRow(
+  rows: AppFileRow[] | undefined,
+  file: WorkspaceFile,
+): AppFileRow[] {
+  const next = new Map<string, AppFileRow>()
+  for (const row of rows ?? []) next.set(row.path, row)
+  next.set(file.path, normalizeBackendFile(file))
+  return sortAppFiles([...next.values()])
+}
+
+function renameBackendFileRow(
+  rows: AppFileRow[] | undefined,
+  fromPath: string,
+  file: WorkspaceFile,
+): AppFileRow[] {
+  const next = (rows ?? []).filter((row) => row.path !== fromPath)
+  next.push(normalizeBackendFile(file))
+  return sortAppFiles(next)
 }
 
 function isAssetFile(file: AppFileRow | null | undefined): boolean {
@@ -417,17 +455,47 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     )
   }, [activeWorkspaceId, workspaces])
   const activeWorkspaceSlug = activeWorkspace?.slug ?? 'workspace'
+  const backendMode = resolveDohcBackendMode()
+  const backendClient = useMemo<DohcBackendClient | null>(
+    () => backendMode === 'postgres' ? createPostgresBackendClient() : null,
+    [backendMode],
+  )
+  const [backendFiles, setBackendFiles] = useState<AppFileRow[] | undefined>(
+    undefined,
+  )
   const atomFiles = useQuery(api.atoms.list, { activeWorkspaceId })
   const assetFiles = useQuery(api.assets.listWorkspaceFiles, {
     activeWorkspaceId,
   })
-  const files = useMemo<AppFileRow[] | undefined>(() => {
+  const convexFiles = useMemo<AppFileRow[] | undefined>(() => {
     if (atomFiles === undefined || assetFiles === undefined) return undefined
     return [
       ...atomFiles.map((file) => normalizeAtomFile(file)),
       ...assetFiles.map((file) => normalizeAssetFile(file)),
     ].sort((a, b) => a.path.localeCompare(b.path))
   }, [assetFiles, atomFiles])
+  useEffect(() => {
+    if (!backendClient) {
+      setBackendFiles(undefined)
+      return
+    }
+    let cancelled = false
+    setBackendFiles(undefined)
+    void backendClient.listFiles()
+      .then((rows) => {
+        if (cancelled) return
+        setBackendFiles(sortAppFiles(rows.map((row) => normalizeBackendFile(row))))
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setBackendFiles([])
+        notice.error(`Couldn't load files`, (error as Error).message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [backendClient, notice])
+  const files = backendClient ? backendFiles : convexFiles
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
   const fileByPath = useMemo(() => {
     const rows = new Map<string, NonNullable<typeof files>[number]>()
@@ -1619,7 +1687,16 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     openAtom(path)
     setEnterEdit(true)
     try {
-      await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+      if (backendClient) {
+        const created = await backendClient.createTextFile({
+          path,
+          body,
+          contentType: atomContentType(path),
+        })
+        setBackendFiles((current) => upsertBackendFileRow(current, created))
+      } else {
+        await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+      }
     } catch (e) {
       if (previousPath) openAtom(previousPath, { replace: true })
       else clearOpenAtom({ replace: true })
@@ -1647,6 +1724,11 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   }
 
   function openUploadedFile(file: { path: string }) {
+    if (backendClient && 'kind' in file && 'contentType' in file && '_id' in file) {
+      setBackendFiles((current) =>
+        upsertBackendFileRow(current, file as WorkspaceFile),
+      )
+    }
     openAtom(file.path)
     notice.success('Uploaded file', file.path)
   }
@@ -1800,7 +1882,16 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
     if (activePath === path) setOptimisticPath(target)
     try {
-      if (isAssetFile(row)) {
+      if (backendClient) {
+        const renamed = await backendClient.renameFile({
+          path,
+          newName: target,
+          expectedRevision: row?.revision ?? '',
+        })
+        setBackendFiles((current) =>
+          renameBackendFileRow(current, path, renamed),
+        )
+      } else if (isAssetFile(row)) {
         await renameWorkspaceFile({
           fromPath: path,
           toPath: target,
@@ -1971,6 +2062,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
                 view="atom"
                 onOpenSearch={() => setSearchOpen(true)}
                 activeWorkspaceId={activeWorkspaceId}
+                backendClient={backendClient ?? undefined}
                 user={user}
                 sharedWithMe={sharedWithMe ?? []}
                 sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -2117,6 +2209,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               view="atom"
               onOpenSearch={() => setSearchOpen(true)}
               activeWorkspaceId={activeWorkspaceId}
+              backendClient={backendClient ?? undefined}
               user={user}
               sharedWithMe={sharedWithMe ?? []}
               sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -2168,6 +2261,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               path={activePath}
               files={files ?? []}
               activeWorkspaceIdOverride={routedWorkspaceActiveId}
+              backendClient={backendClient ?? undefined}
               onRunAction={onRunAction}
               onOpenAtom={openAtom}
               onOpenView={openView}

@@ -3,6 +3,7 @@ import { useMutation } from 'convex/react'
 import { AlertCircle, Loader2, Upload } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
+import type { DohcBackendClient } from '../backend/backendClient'
 import { uploadBlobToStorageUrl } from '../lib/storageUpload'
 
 export const WORKSPACE_UPLOAD_ACCEPT = [
@@ -36,10 +37,12 @@ type UploadState =
 
 export function UploadFileButton({
   activeWorkspaceId,
+  backendClient,
   defaultFolderPath = '',
   onUploaded,
 }: {
   activeWorkspaceId?: string
+  backendClient?: Pick<DohcBackendClient, 'uploadFile'>
   defaultFolderPath?: string
   onUploaded: (file: UploadedWorkspaceFile) => void
 }) {
@@ -62,6 +65,12 @@ export function UploadFileButton({
     const path = workspaceUploadPath(defaultFolderPath, filename)
     setState({ status: 'uploading', progress: 1 })
     try {
+      if (backendClient) {
+        const created = await backendClient.uploadFile({ file, path })
+        setState({ status: 'idle' })
+        onUploaded(created as UploadedWorkspaceFile)
+        return
+      }
       const uploadUrl = await generateUploadUrl({ activeWorkspaceId })
       const storageId = await uploadBlobToStorageUrl(uploadUrl, file, {
         mediaType,
