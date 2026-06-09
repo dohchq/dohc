@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "sync": "tsx src/syncClient.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -13,7 +14,9 @@
     "@dohc/workspace-contracts": "workspace:*"
   },
   "devDependencies": {
+    "@dohc/workspace-api": "workspace:*",
     "@types/node": "^22.19.19",
+    "tsx": "^4.22.3",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   }

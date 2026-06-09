@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 9 - Local Files Mode
+- Current phase: Phase 10 - Cloud Agent Sandbox With Bash-Like Power
 - Current step: not started
-- Last successful commit: Phase 8 commit, `Add workspace filesystem projection`
+- Last successful commit: Phase 9 commit, `Add local filesystem sync mode`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -399,3 +399,54 @@
 - Deferred findings with reason: review-required paths and locked-file approval outputs are represented by backend errors for now; explicit approval item modeling lands with Phase 9 local sync and Phase 10 sandbox apply flows.
 - Remaining risk: manifest hash tracking is sufficient for deterministic scan tests but future local sync should add conflict files/review items and manifest update after successful apply.
 - Next phase: Phase 9 - Local Files Mode
+
+### Phase 9: Local Files Mode
+
+- Status: complete
+- Execution map: write workspace API and local sync RED tests first, then add a request-handler API service, server-side actor resolver boundary, file/asset/sync/event route modules, polling watcher, HTTP backend adapter, and local sync client with revision conflict files and approval surfacing.
+- Files changed:
+  - `package.json`
+  - `packages/workspace-fs/package.json`
+  - `packages/workspace-fs/src/index.ts`
+  - `packages/workspace-fs/src/localMode.test.ts`
+  - `packages/workspace-fs/src/syncClient.ts`
+  - `packages/workspace-fs/src/watch.ts`
+  - `services/workspace-api/package.json`
+  - `services/workspace-api/tsconfig.json`
+  - `services/workspace-api/src/auth/session.ts`
+  - `services/workspace-api/src/realtime/events.ts`
+  - `services/workspace-api/src/routes/files.ts`
+  - `services/workspace-api/src/routes/sync.ts`
+  - `services/workspace-api/src/server.ts`
+  - `services/workspace-api/src/workspaceApi.test.ts`
+  - `pnpm-lock.yaml`
+- Code deleted or consolidated: no source deletion; local mode reuses the Phase 8 materialize/scan/diff primitives and the shared `WorkspaceBackend` contract instead of adding a separate local file model.
+- Obsolete paths retained and why: direct filesystem `applyFsDiff` remains because Phase 8 projection tests still cover backend-port application without the HTTP API; local sync adds `/sync/apply` as the API path for local folder clients.
+- Tests added:
+  - `services/workspace-api/src/workspaceApi.test.ts`
+  - `packages/workspace-fs/src/localMode.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api test` (RED: failed to load missing `./server`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test src/localMode.test.ts` (RED: failed to load missing `@dohc/workspace-api`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install` (passed; existing app peer warnings only)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api test` (failed once because the test resolver asserted a spoofed browser header on requests that did not send one)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api test` (passed after correcting the test assertion to prove server actor use)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test src/localMode.test.ts` (passed: 1 file, 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs typecheck` (failed before URL/operation/error-guard type fixes)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs typecheck` (passed after type fixes)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (passed: 2 files, 6 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck && PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: typecheck and 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `git diff --check` (passed)
+- Failing tests fixed: implemented route parsing, server-side actor normalization, file list/read/write, asset upload, sync apply operations, event listing, HTTP backend adapter, initial folder materialization, local edit sync with revision checks, remote pull, `.conflict` output for changed remote revisions, and approval request surfacing for locked/shared deletes.
+- Cross-cutting regressions run: web authz/app security/app trust/agent approvals slice, Hocuspocus tests, sqlite-worker tests, workspace contracts typecheck/tests, workspace filesystem tests/typecheck.
+- Convex status: unchanged; security and collaboration slices pass after local filesystem sync changes.
+- Postgres status: unchanged in this phase; local mode talks through the shared backend contract and the new workspace API handler.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 9; next major review checkpoint is after Phase 10.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: the watcher currently uses polling through `watchWorkspace`; deeper OS-native recursive watching can be added once local mode needs production-grade debounce and platform-specific watch semantics. The workspace API package exposes a handler and routes but no default production listener because backend selection and deployment packaging land in later phases.
+- Remaining risk: sync/apply batches are applied sequentially by the backend route; future production sync should add idempotency keys and transaction grouping where the selected backend supports it.
+- Next phase: Phase 10 - Cloud Agent Sandbox With Bash-Like Power
