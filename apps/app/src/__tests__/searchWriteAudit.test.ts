@@ -32,11 +32,11 @@ it('no atom-inserting convex file outside the known set', () => {
   const writers = SOURCES.filter((f) =>
     new RegExp(ATOM_INSERT_SRC).test(read(f)),
   ).sort()
-  expect(writers).toEqual(['atoms.ts', 'folders.ts', 'seed.ts', 'trash.ts'])
+  expect(writers).toEqual(['agent.ts', 'atoms.ts', 'folders.ts', 'seed.ts', 'trash.ts'])
 })
 
 describe('every atom path/body write derives search fields', () => {
-  for (const f of ['atoms.ts', 'folders.ts', 'trash.ts', 'seed.ts', 'skillsMigration.ts']) {
+  for (const f of ['agent.ts', 'atoms.ts', 'folders.ts', 'trash.ts', 'seed.ts', 'skillsMigration.ts']) {
     it(`${f}`, () => {
       const src = read(f)
 

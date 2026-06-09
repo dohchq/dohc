@@ -28,6 +28,7 @@ import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
 import { canWriteInFolder, folderPathForPath } from './atomAccess'
+import { deriveSearchFields } from './searchText'
 import type { ToolCtx } from '@convex-dev/agent'
 import {
   agentProviderOptions,
@@ -386,6 +387,7 @@ export const _saveFileForAgent = internalMutation({
       body: args.content,
       source: 'agent',
       updatedAt: now,
+      ...deriveSearchFields(path, args.content),
     })
     return {
       ok: true as const,

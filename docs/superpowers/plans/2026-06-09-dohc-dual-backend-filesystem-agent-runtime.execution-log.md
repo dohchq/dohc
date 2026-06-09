@@ -8,10 +8,10 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 15 - End-To-End Comparison Gate
+- Current phase: Phase 16 - Delete, Consolidate, And Debt Review
 - Current step: not started
-- Last successful commit: Phase 14 commit, `Document self-hosted Postgres backend mode`
-- Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
+- Last successful commit: Phase 15 commit, `Add dual backend readiness gate`
+- Last failing command: `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (command not found; Phase 16 owns this script)
 - Last blocker: none
 
 ## Phase Logs
@@ -687,3 +687,49 @@
 - Deferred findings with reason: `pnpm check:self-host` defaults to deterministic preflight instead of starting every container, because the full stack start can be slow and environment-dependent. The explicit `--start` path is documented and available for operators who want the heavier compose-up check.
 - Remaining risk: the self-host compose is an MVP packaging scaffold; production readiness still depends on the Phase 15 end-to-end comparison gate and service hardening.
 - Next phase: Phase 15 - End-To-End Comparison Gate
+
+### Phase 15: End-To-End Comparison Gate
+
+- Status: complete
+- Execution map: write the Playwright backend matrix as a deterministic end-to-end comparison of the same finance tracker workflow under `DOHC_BACKEND=convex` and `DOHC_BACKEND=postgres`; run the full verification checklist; fix the generated-file search indexing audit gap exposed by the baseline; document the readiness verdict.
+- Files changed:
+  - `apps/app/convex/agent.ts`
+  - `apps/app/e2e/backendMatrix.spec.ts`
+  - `apps/app/src/__tests__/searchWriteAudit.test.ts`
+  - `docs/superpowers/reviews/2026-06-09-dual-backend-readiness-review.md`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: no deletion; the Phase 15 fix keeps generated text/CSV/JSON atom bodies byte-faithful and explicitly wires search indexing for the direct generated-file atom writer.
+- Obsolete paths retained and why: Convex remains the production default. The matrix is deterministic and uses backend-mode fixtures for comparison; it does not replace the existing Convex production runtime or claim hosted Postgres production readiness.
+- Tests added:
+  - `apps/app/e2e/backendMatrix.spec.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=convex pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (RED: no tests found before the spec existed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=convex pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed after adding the spec: 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=postgres pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed after adding the spec: 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:dual-backend-baseline` (failed: `searchWriteAudit.test.ts` detected `agent.ts` as a direct atom writer outside the known set)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/searchWriteAudit.test.ts` (RED: reproduced the `agent.ts` direct writer audit failure)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/searchWriteAudit.test.ts convex/agentDataTools.test.ts` (failed for first attempted routing fix: `upsertAtomImpl` added frontmatter to generated CSV/TXT/JSON bodies)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/searchWriteAudit.test.ts convex/agentDataTools.test.ts` (passed after deriving search fields directly and auditing `agent.ts`: 2 files, 13 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:dual-backend-baseline` (passed: web typecheck, 197 web test files / 1619 passed / 1 skipped, app-tester 4 files / 25 tests, Hocuspocus 9 files / 78 tests, sqlite-worker 4 files / 11 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 2 files, 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 5 files, 12 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (passed: 2 files, 6 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api test` (passed: 1 file, 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox test` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=convex pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed after the audit fix: 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=postgres pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed after the audit fix: 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (failed: command not found; expected until Phase 16 creates it)
+  - `git diff --check` (passed)
+  - `coderabbit --version` (0.5.4)
+  - `coderabbit auth status --agent` (authenticated)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (Phase 15 review; completed with 0 findings)
+- Failing tests fixed: added the backend matrix spec; fixed generated-file atom search indexing by adding `deriveSearchFields(path, args.content)` to `_saveGeneratedFileInternal`; updated the audit to include and inspect `agent.ts` while preserving generated CSV/TXT/JSON body fidelity.
+- Cross-cutting regressions run: full dual-backend baseline, all shared backend/package tests in the Phase 15 checklist, both backend matrix modes, focused generated-file/search audit tests, and `git diff --check`.
+- Convex status: production default remains green. The full baseline and Convex matrix pass.
+- Postgres status: development mode is ready; shared conformance, Postgres services, workspace API, filesystem projection, agent sandbox, and Postgres matrix pass. Production mode remains not ready.
+- Reviewer/subagent/CodeRabbit findings: CodeRabbit Phase 15 review raised 0 issues.
+- Relevant findings fixed: local baseline failure fixed by indexing generated-file atom inserts and expanding the audit coverage.
+- Deferred findings with reason: `pnpm check:debt` is intentionally deferred to Phase 16, which creates the debt audit script. Hosted Postgres production readiness remains deferred because the matrix proves parity for deterministic workflows, not deployed auth/realtime/operations.
+- Remaining risk: the matrix does not yet prove real hosted Postgres workspace API sessions, live Yjs collaboration over Postgres, production migration/backup/restore, or cloud observability.
+- Next phase: Phase 16 - Delete, Consolidate, And Debt Review
