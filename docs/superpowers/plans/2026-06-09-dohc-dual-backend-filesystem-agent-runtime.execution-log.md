@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 14 - Self-Hosting And Cloud Packaging
+- Current phase: Phase 15 - End-To-End Comparison Gate
 - Current step: not started
-- Last successful commit: Phase 13 commit, `Add frontend backend switch for Convex and Postgres`
+- Last successful commit: Phase 14 commit, `Document self-hosted Postgres backend mode`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -655,3 +655,35 @@
 - Deferred findings with reason: the Postgres frontend client assumes `/services/workspace-api` is mounted and authenticated by the deployment; self-host/cloud packaging and readiness verification for that service are Phase 14 and Phase 15 work.
 - Remaining risk: folder operations, delete/move flows, app runtime, and chat-side agent tools still primarily use Convex-era hooks or backend-specific services; this phase intentionally covers the common file list/read/write/upload/rename surface named in the plan.
 - Next phase: Phase 14 - Self-Hosting And Cloud Packaging
+
+### Phase 14: Self-Hosting And Cloud Packaging
+
+- Status: complete
+- Execution map: add a self-host preflight script and root command, create the self-host compose/env template, document backend modes, filesystem projection/cloud sandboxing, and self-host operations, then add an object-storage healthcheck to the dev compose stack.
+- Files changed:
+  - `.env.self-host.example`
+  - `README.md`
+  - `docker-compose.dev.yml`
+  - `docker-compose.self-host.yml`
+  - `docs/architecture/backend-modes.md`
+  - `docs/architecture/local-files-and-cloud-sandbox.md`
+  - `docs/self-hosting.md`
+  - `package.json`
+  - `scripts/check-self-host.mjs`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: no deletion; self-host service names, env variables, and smoke checks are consolidated into `docker-compose.self-host.yml`, `.env.self-host.example`, and `scripts/check-self-host.mjs`.
+- Obsolete paths retained and why: `docker-compose.dev.yml` remains the small local dev dependency stack; the new self-host compose is separate so current dev workflows are not forced to start every service.
+- Tests added: no Vitest tests; the phase adds `pnpm check:self-host` as the smoke/preflight command.
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:self-host` (RED: command not found)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:self-host` (passed: Docker CLI and Compose available, required packages present, and compose config includes `web`, `workspace-api`, `postgres`, `object-storage`, `hocuspocus`, `sqlite-worker`, `app-tester`, and `agent-sandbox`)
+  - `git diff --check` (passed)
+- Failing tests fixed: added `scripts/check-self-host.mjs`, wired `check:self-host`, created the self-host compose/env template, and documented the backend/self-host/local-file contracts.
+- Cross-cutting regressions run: not required; this phase changes docs, compose packaging, and a preflight script only, and does not touch runtime auth, app trust, SQLite worker source, shell sandbox source, sharing source, or Convex code.
+- Convex status: documented as the default and still-supported backend during migration.
+- Postgres status: documented as the candidate self-host/cloud core; compose preflight validates the service matrix and optional `pnpm check:self-host -- --start` path.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 14; next major review checkpoint is after Phase 15.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: `pnpm check:self-host` defaults to deterministic preflight instead of starting every container, because the full stack start can be slow and environment-dependent. The explicit `--start` path is documented and available for operators who want the heavier compose-up check.
+- Remaining risk: the self-host compose is an MVP packaging scaffold; production readiness still depends on the Phase 15 end-to-end comparison gate and service hardening.
+- Next phase: Phase 15 - End-To-End Comparison Gate
