@@ -27,8 +27,6 @@ describe("Postgres workspace schema scaffold", () => {
 
   it("lists the minimum migration indexes", () => {
     expect(migrationIndexes).toEqual([
-      "atoms_workspace_path_idx",
-      "assets_workspace_path_idx",
       "workspace_events_workspace_created_idx",
       "locks_workspace_target_idx",
       "database_operations_file_version_idx",

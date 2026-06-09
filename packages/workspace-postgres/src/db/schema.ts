@@ -39,8 +39,6 @@ export const workspaceTables = [
 ] as const;
 
 export const migrationIndexes = [
-  "atoms_workspace_path_idx",
-  "assets_workspace_path_idx",
   "workspace_events_workspace_created_idx",
   "locks_workspace_target_idx",
   "database_operations_file_version_idx",
@@ -121,7 +119,6 @@ export const atoms = pgTable(
   },
   (table) => [
     uniqueIndex("atoms_workspace_path_unique").on(table.workspaceId, table.path),
-    index("atoms_workspace_path_idx").on(table.workspaceId, table.path),
   ],
 );
 
@@ -163,7 +160,6 @@ export const assets = pgTable(
       table.workspaceId,
       table.path,
     ),
-    index("assets_workspace_path_idx").on(table.workspaceId, table.path),
   ],
 );
 

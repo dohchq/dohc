@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 
 export type SandboxBackendMode = "convex" | "postgres";
 
@@ -15,6 +16,7 @@ export type SandboxSession = {
   userId: string;
   backendMode: SandboxBackendMode;
   mountPath: string;
+  cleanupDir?: string;
   status: SandboxSessionStatus;
 };
 
@@ -23,6 +25,7 @@ export type CreateSandboxSessionInput = {
   userId: string;
   backendMode: SandboxBackendMode;
   mountPath: string;
+  cleanupDir?: string;
   id?: string;
 };
 
@@ -31,6 +34,7 @@ export function createSandboxSession({
   userId,
   backendMode,
   mountPath,
+  cleanupDir,
   id = `sandbox_${randomUUID()}`,
 }: CreateSandboxSessionInput): SandboxSession {
   return {
@@ -39,6 +43,7 @@ export function createSandboxSession({
     userId,
     backendMode,
     mountPath,
+    cleanupDir,
     status: "running",
   };
 }
@@ -46,4 +51,10 @@ export function createSandboxSession({
 export function setSandboxStatus(session: SandboxSession, status: SandboxSessionStatus): SandboxSession {
   session.status = status;
   return session;
+}
+
+export function cleanupSandboxSession(session: SandboxSession): void {
+  if (!session.cleanupDir) return;
+  rmSync(session.cleanupDir, { recursive: true, force: true });
+  session.cleanupDir = undefined;
 }

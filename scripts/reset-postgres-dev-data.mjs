@@ -12,7 +12,23 @@ const client = new pg.Client({ connectionString: url });
 await client.connect();
 
 try {
-  await client.query(await readFile(migrationUrl, "utf8"));
+  const migrationId = "0001_initial";
+  await client.query(`
+    create table if not exists dohc_migrations (
+      id text primary key,
+      applied_at timestamptz not null default now()
+    )
+  `);
+  const applied = await client.query(
+    "select 1 from dohc_migrations where id = $1",
+    [migrationId],
+  );
+  if (applied.rowCount === 0) {
+    await client.query(await readFile(migrationUrl, "utf8"));
+    await client.query("insert into dohc_migrations (id) values ($1)", [
+      migrationId,
+    ]);
+  }
   await client.query(`
     truncate table
       agent_approvals,

@@ -13,6 +13,7 @@ import { canReadAtom, canWriteInFolder, folderPathForPath } from './atomAccess'
 import { isNonDataAtom } from './atomId'
 import { scopeAllowsPath } from './appScopes'
 import { isAppDescriptorError, resolveAppDescriptor } from './apps'
+import { mediaTypeForWorkspacePath } from '../src/lib/mediaTypes'
 
 const assetPurposeValidator = v.union(v.literal('chat'), v.literal('workspace'))
 const APP_ASSET_SOURCE_SCAN_CAP = 5000
@@ -131,7 +132,7 @@ export const registerWorkspaceFile = mutation({
     const normalizedMediaType =
       normalizeMediaType(mediaType) ??
       normalizeMediaType(metadata.contentType) ??
-      mediaTypeForFilename(cleanPath) ??
+      mediaTypeForWorkspacePath(cleanPath) ??
       'application/octet-stream'
     const now = Date.now()
     const assetId = await ctx.db.insert('workspaceAssets', {
@@ -206,7 +207,7 @@ export const _registerGeneratedWorkspaceAsset = internalMutation({
     const normalizedMediaType =
       normalizeMediaType(mediaType) ??
       normalizeMediaType(metadata.contentType) ??
-      mediaTypeForFilename(cleanPath) ??
+      mediaTypeForWorkspacePath(cleanPath) ??
       'application/octet-stream'
     const now = Date.now()
     const assetId = await ctx.db.insert('workspaceAssets', {
@@ -500,21 +501,6 @@ function normalizeWorkspaceAssetPath(path: string): string {
 function normalizeMediaType(value?: string | null): string | null {
   const trimmed = value?.trim().toLowerCase()
   return trimmed || null
-}
-
-function mediaTypeForFilename(path: string): string | null {
-  const clean = path.toLowerCase()
-  if (clean.endsWith('.png')) return 'image/png'
-  if (clean.endsWith('.jpg') || clean.endsWith('.jpeg')) return 'image/jpeg'
-  if (clean.endsWith('.pdf')) return 'application/pdf'
-  if (clean.endsWith('.m4a')) return 'audio/mp4'
-  if (clean.endsWith('.csv')) return 'text/csv'
-  if (clean.endsWith('.txt')) return 'text/plain'
-  if (clean.endsWith('.json')) return 'application/json'
-  if (clean.endsWith('.sqlite') || clean.endsWith('.db')) {
-    return 'application/vnd.sqlite3'
-  }
-  return null
 }
 
 function escapeRegExp(value: string): string {

@@ -164,6 +164,36 @@ describe('agent-native file tools', () => {
     ])
   })
 
+  it('rejects elevated generated files and classifies by exact media subtype or extension', async () => {
+    const t = convexTest(schema, modules)
+
+    await expect(
+      t.mutation((internal as any).agent._saveFileForAgent, {
+        workspaceId: W,
+        actorUserId: W,
+        path: '.skills/shortcut.md',
+        mediaType: 'text/markdown',
+        content: '---\ntype: skill\n---\n# Shortcut\n',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'elevated-path-not-authorized',
+    })
+
+    await expect(
+      t.mutation((internal as any).agent._saveFileForAgent, {
+        workspaceId: W,
+        actorUserId: W,
+        path: 'generated/not-json.txt',
+        mediaType: 'application/problem+jsonish',
+        content: 'plain text',
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      atomKind: 'text',
+    })
+  })
+
   it('wires all agent data tools through server-derived workspace and actor identity', () => {
     for (const name of [
       'save_file',

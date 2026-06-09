@@ -1042,7 +1042,9 @@ export const appCollectionRows = convexQuery({
     const database = await databaseByPath(ctx, access.workspaceId, access.database.path)
     if (!database) return error('database-not-found', 'Database not found.')
     const snapshot = database.tables as DatabaseSnapshot
-    const table = snapshot[access.collection.table!]
+    const tableName = access.collection.table
+    if (!tableName) return error('table-not-found', 'Table not found.')
+    const table = snapshot[tableName]
     if (!table) return error('table-not-found', 'Table not found.')
     return {
       ok: true as const,
@@ -1073,7 +1075,9 @@ export const appCollectionRow = convexQuery({
     const database = await databaseByPath(ctx, access.workspaceId, access.database.path)
     if (!database) return error('database-not-found', 'Database not found.')
     const snapshot = database.tables as DatabaseSnapshot
-    const table = snapshot[access.collection.table!]
+    const tableName = access.collection.table
+    if (!tableName) return error('table-not-found', 'Table not found.')
+    const table = snapshot[tableName]
     if (!table) return error('table-not-found', 'Table not found.')
     const rows = rowsForCollection(access.database.path, table, access.collection.key)
     return { ok: true as const, row: rows.find((row) => row.id === id) ?? null }

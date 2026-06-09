@@ -88,6 +88,8 @@ function assertWorkspaceOnlyArgs(args: string[]) {
       lower.includes("..") ||
       lower.includes("%2e%2e") ||
       value.startsWith("/") ||
+      /^-+[^=\s]*\//.test(arg) ||
+      /^-+[^=]*=\//.test(arg) ||
       /(^|[\s"'=])\/[^\s"']*/.test(value)
     ) {
       throw new Error("command references a path outside mounted workspace");

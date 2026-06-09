@@ -18,6 +18,26 @@ const actor = {
   workspaceId: "phase12_apps_workspace",
 };
 
+const WORKSPACE_SCOPED_TABLES = [
+  "agent_approvals",
+  "agent_runs",
+  "app_trust_grants",
+  "app_packages",
+  "database_operations",
+  "database_files",
+  "assets",
+  "document_states",
+  "atom_revisions",
+  "atoms",
+  "locks",
+  "shares",
+  "permissions",
+  "folders",
+  "workspace_events",
+  "workspace_members",
+  "workspaces",
+] as const;
+
 const ledgerSnapshot: DatabaseSnapshot = {
   transactions: {
     columns: [
@@ -83,28 +103,17 @@ async function seedWorkspace(db: pg.Pool, workspaceId: string, userId: string) {
 }
 
 async function clearWorkspace(db: pg.Pool, workspaceId: string, userId: string) {
-  for (const table of [
-    "agent_approvals",
-    "agent_runs",
-    "app_trust_grants",
-    "app_packages",
-    "database_operations",
-    "database_files",
-    "assets",
-    "document_states",
-    "atom_revisions",
-    "atoms",
-    "locks",
-    "shares",
-    "permissions",
-    "folders",
-    "workspace_events",
-    "workspace_members",
-    "workspaces",
-  ]) {
-    await db.query(`delete from ${table} where workspace_id = $1`, [workspaceId]);
+  for (const table of WORKSPACE_SCOPED_TABLES) {
+    await db.query(`delete from ${quotePgIdent(table)} where workspace_id = $1`, [
+      workspaceId,
+    ]);
   }
   await db.query("delete from users where id = $1", [userId]);
+}
+
+function quotePgIdent(value: (typeof WORKSPACE_SCOPED_TABLES)[number]) {
+  if (!/^[a-z_]+$/.test(value)) throw new Error(`Unsafe table name: ${value}`);
+  return `"${value}"`;
 }
 
 async function seedTracker() {

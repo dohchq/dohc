@@ -258,29 +258,15 @@ function validateDatabaseTableArgs(
   args: Record<string, unknown>,
   kind: 'list' | 'get' | 'insert' | 'update' | 'upsert' | 'delete',
 ): boolean {
-  const allowed = {
-    list: ['path', 'table', 'query'],
-    get: ['path', 'table', 'id'],
-    insert: ['path', 'table', 'record', 'expectedVersion'],
-    update: ['path', 'table', 'id', 'patch', 'expectedVersion'],
-    upsert: ['path', 'table', 'id', 'record', 'expectedVersion'],
-    delete: ['path', 'table', 'id', 'expectedVersion'],
-  }[kind]
-  if (
-    !hasOnlyKeys(args, allowed) ||
-    !validRelativePath(args.path) ||
-    !validCollectionName(args.table)
-  ) {
-    return false
+  if (!validRelativePath(args.path)) return false
+  const collectionArgs: Record<string, unknown> = {
+    ...args,
+    name: args.table,
+    database: args.path,
   }
-  if (!validOptionalExpectedVersion(args)) return false
-  if ((kind === 'get' || kind === 'update' || kind === 'upsert' || kind === 'delete') && !validId(args.id)) {
-    return false
-  }
-  if (kind === 'list') return args.query === undefined || validJsonObject(args.query)
-  if (kind === 'insert' || kind === 'upsert') return validJsonObject(args.record)
-  if (kind === 'update') return validJsonObject(args.patch)
-  return true
+  delete collectionArgs.path
+  delete collectionArgs.table
+  return validateCollectionArgs(collectionArgs, kind)
 }
 
 function validateArgs(op: AppRpcOp, args: Record<string, unknown>): boolean {

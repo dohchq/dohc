@@ -38,8 +38,11 @@ Important variables live in `.env.self-host.example`:
 - `SQLITE_WORKER_*` for SQLite import/query/materialization.
 - `APP_TESTER_*` for app validation.
 - `WEB_PORT` and `VITE_DOHC_BACKEND` for the frontend.
+- `VITE_CONVEX_URL` is intentionally blank for the Postgres self-host stack;
+  set it only when intentionally running the web app against Convex.
 
-Replace every `change-me` value before exposing a deployment.
+Replace every `change-me` value before starting the stack. Compose refuses to
+start without explicit Postgres and object-storage passwords.
 
 ## First Boot
 
@@ -47,8 +50,10 @@ Replace every `change-me` value before exposing a deployment.
 2. Replace secrets.
 3. Run `pnpm check:self-host`.
 4. Run `pnpm check:self-host -- --start`.
-5. Apply Postgres migrations with `pnpm reset:postgres` in dev, or the future
-   production migration command once the readiness gate defines it.
+5. For local development only, apply Postgres migrations with
+   `pnpm reset:postgres`. Production deployments must run the dedicated
+   migration command from the release runbook, after backups and before
+   re-enabling agent writes; do not run reset commands against production data.
 
 ## Reset Dev Data
 

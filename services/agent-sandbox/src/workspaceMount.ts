@@ -12,12 +12,17 @@ export type WorkspaceMountOptions = {
   rootDir?: string;
 };
 
+export type WorkspaceMount = {
+  mountPath: string;
+  cleanupDir?: string;
+};
+
 export async function mountWorkspaceFolder({
   backend,
   actor,
   backendMode,
   rootDir,
-}: WorkspaceMountOptions): Promise<string> {
+}: WorkspaceMountOptions): Promise<WorkspaceMount> {
   const baseDir = rootDir ?? await mkdtemp(join(tmpdir(), "dohc-agent-sandbox-"));
   const mountPath = await mkdtemp(join(baseDir, "mount-"));
   await materializeWorkspace({
@@ -26,5 +31,5 @@ export async function mountWorkspaceFolder({
     targetDir: mountPath,
     backendMode,
   });
-  return mountPath;
+  return { mountPath, cleanupDir: rootDir ? undefined : baseDir };
 }

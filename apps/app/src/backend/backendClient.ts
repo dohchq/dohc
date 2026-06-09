@@ -40,7 +40,10 @@ export type BackendEnv = {
 
 export function resolveDohcBackendMode(env: BackendEnv = runtimeBackendEnv()): BackendMode {
   const raw = env.DOHC_BACKEND ?? env.VITE_DOHC_BACKEND ?? ''
-  return raw.trim().toLowerCase() === 'postgres' ? 'postgres' : 'convex'
+  const mode = raw.trim().toLowerCase()
+  if (mode === '' || mode === 'convex') return 'convex'
+  if (mode === 'postgres') return 'postgres'
+  throw new Error(`Invalid DOHC_BACKEND value: ${raw}`)
 }
 
 export function createDohcBackendClient({

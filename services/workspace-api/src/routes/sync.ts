@@ -5,6 +5,8 @@ import type {
   WorkspaceBackend,
   WorkspaceFile,
 } from "@dohc/workspace-contracts";
+import { dirname } from "node:path";
+import { assertBase64Size } from "./files";
 
 export type WorkspaceSyncOperation =
   | {
@@ -40,6 +42,8 @@ export type ApplySyncRequest = {
   operations: WorkspaceSyncOperation[];
 };
 
+export const MAX_SYNC_ASSET_BYTES = 10 * 1024 * 1024;
+
 export async function applyWorkspaceSync(
   backend: WorkspaceBackend,
   actor: Actor,
@@ -51,6 +55,9 @@ export async function applyWorkspaceSync(
 
   const files: WorkspaceFile[] = [];
   let applied = 0;
+  // Sync apply is fail-fast and non-transactional for now: callers get the
+  // failing operation path attached to the error, and prior operations may
+  // already be applied by the backend.
   for (const operation of request.operations) {
     try {
       const file = await applyOperation(backend, actor, operation);
@@ -107,6 +114,9 @@ async function applyOperation(
     return null;
   }
 
+  if (dirname(operation.fromPath) !== dirname(operation.toPath)) {
+    throw new Error("cross-folder renames are not supported by workspace sync");
+  }
   const toName = operation.toPath.includes("/")
     ? operation.toPath.slice(operation.toPath.lastIndexOf("/") + 1)
     : operation.toPath;
@@ -121,6 +131,7 @@ function bytesFromOperation(operation: Extract<WorkspaceSyncOperation, { op: "cr
   if (!operation.bytesBase64) {
     throw new Error("binary sync operations require bytesBase64");
   }
+  assertBase64Size(operation.bytesBase64, MAX_SYNC_ASSET_BYTES, "sync asset operation");
   return Buffer.from(operation.bytesBase64, "base64");
 }
 

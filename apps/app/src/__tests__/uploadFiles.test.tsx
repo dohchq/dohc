@@ -1,10 +1,8 @@
 // @vitest-environment jsdom
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FileTree } from '../components/FileTree'
 import {
   UploadFileButton,
   WORKSPACE_UPLOAD_ACCEPT,
@@ -30,12 +28,6 @@ vi.mock('convex/react', () => ({
 vi.mock('../lib/storageUpload', () => ({
   uploadBlobToStorageUrl: vi.fn(),
 }))
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const FILE_TREE_SRC = readFileSync(
-  resolve(__dirname, '../components/FileTree.tsx'),
-  'utf8',
-)
 
 describe('workspace file uploads', () => {
   let container: HTMLDivElement
@@ -67,8 +59,29 @@ describe('workspace file uploads', () => {
   })
 
   it('exposes an upload button in the file sidebar area', () => {
-    expect(FILE_TREE_SRC).toMatch(/UploadFileButton/)
-    expect(FILE_TREE_SRC).toMatch(/onUploadFile/)
+    act(() => {
+      root.render(
+        React.createElement(FileTree, {
+          files: [],
+          folders: [],
+          activePath: null,
+          view: 'atom',
+          user: null,
+          onOpen: vi.fn(),
+          onCreatePage: vi.fn(),
+          onCreateFolder: vi.fn(),
+          onDeleteFolder: vi.fn(),
+          onRenameFolder: vi.fn(),
+          onDeleteFile: vi.fn(),
+          onRenameFile: vi.fn(),
+          onUploadFile: vi.fn(),
+        }),
+      )
+    })
+
+    expect(
+      container.querySelector('button[aria-label="Upload file"]'),
+    ).not.toBeNull()
   })
 
   it('accepts images, pdf, audio, data files, sqlite, and generic files', () => {

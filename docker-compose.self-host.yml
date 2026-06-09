@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dohc}
       POSTGRES_USER: ${POSTGRES_USER:-dohc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dohc} -d ${POSTGRES_DB:-dohc}"]
       interval: 5s
@@ -22,7 +22,7 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dohc}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-too}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.self-host}
     healthcheck:
       test:
         [
@@ -50,7 +50,7 @@ services:
       HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-false}
       HOCUSPOCUS_CONVEX_SERVER_TOKEN: ${HOCUSPOCUS_CONVEX_SERVER_TOKEN:-}
       HOCUSPOCUS_CONVEX_URL: ${HOCUSPOCUS_CONVEX_URL:-}
-      HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-dohc}
+      HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
       HOCUSPOCUS_PORT: "1234"
       HOCUSPOCUS_QUIET: ${HOCUSPOCUS_QUIET:-true}
@@ -76,7 +76,7 @@ services:
         condition: service_healthy
     environment:
       DOHC_BACKEND: postgres
-      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-dohc}
+      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
     command: >

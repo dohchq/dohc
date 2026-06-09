@@ -108,30 +108,52 @@ function resolveScopeRelativePath(scopePath: string, requested: string) {
 }
 
 function scopeHasGlob(value: string): boolean {
-  return /[?*\[]/.test(value);
+  return value.includes("*") || value.includes("?");
 }
 
 function globMatchesPath(glob: string, path: string): boolean {
   if (!scopeHasGlob(glob)) return path === glob;
-  let source = "^";
-  for (let index = 0; index < glob.length; index += 1) {
-    const char = glob[index];
-    if (char === "*") {
-      if (glob[index + 1] === "*") {
-        source += ".*";
-        index += 1;
-      } else {
-        source += "[^/]*";
-      }
-      continue;
+  return matchGlobSegments(glob.split("/"), path.split("/"));
+}
+
+function matchGlobSegments(pattern: string[], value: string[]): boolean {
+  if (pattern.length === 0) return value.length === 0;
+  const [head, ...tail] = pattern;
+  if (head === "**") {
+    for (let consumed = 0; consumed <= value.length; consumed += 1) {
+      if (matchGlobSegments(tail, value.slice(consumed))) return true;
     }
-    if (char === "?") {
-      source += "[^/]";
-      continue;
-    }
-    source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    return false;
   }
-  return new RegExp(`${source}$`).test(path);
+  const [valueHead, ...valueTail] = value;
+  if (valueHead === undefined) return false;
+  return segmentMatches(head ?? "", valueHead) && matchGlobSegments(tail, valueTail);
+}
+
+function segmentMatches(pattern: string, value: string): boolean {
+  const memo = new Map<string, boolean>();
+  function matches(patternIndex: number, valueIndex: number): boolean {
+    const key = `${patternIndex}:${valueIndex}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const char = pattern[patternIndex];
+    let result: boolean;
+    if (char === undefined) {
+      result = valueIndex === value.length;
+    } else if (char === "*") {
+      result =
+        matches(patternIndex + 1, valueIndex) ||
+        (valueIndex < value.length && matches(patternIndex, valueIndex + 1));
+    } else if (char === "?") {
+      result = valueIndex < value.length && matches(patternIndex + 1, valueIndex + 1);
+    } else {
+      result =
+        value[valueIndex] === char && matches(patternIndex + 1, valueIndex + 1);
+    }
+    memo.set(key, result);
+    return result;
+  }
+  return matches(0, 0);
 }
 
 function pathInScope(path: string, scope: string): boolean {

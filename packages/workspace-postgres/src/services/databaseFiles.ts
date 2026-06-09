@@ -390,7 +390,9 @@ async function insertDatabaseFile(
       JSON.stringify(input.snapshot),
     ],
   );
-  return result.rows[0]!;
+  const row = result.rows[0];
+  if (!row) throw new Error("Database file insert returned no row.");
+  return row;
 }
 
 export function createPostgresDatabaseServices(

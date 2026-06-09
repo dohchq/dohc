@@ -1,7 +1,7 @@
 import type { Actor, WorkspaceBackend } from "@dohc/workspace-contracts";
 import { applyFsDiff, scanWorkspaceDiff, type FsDiff } from "@dohc/workspace-fs";
 import { sandboxApprovalFromError, type SandboxApprovalRequest } from "./approvals";
-import { setSandboxStatus, type SandboxSession } from "./sandbox/session";
+import { cleanupSandboxSession, setSandboxStatus, type SandboxSession } from "./sandbox/session";
 
 export type ApplyWorkspaceShellDiffOptions = {
   backend: WorkspaceBackend;
@@ -47,10 +47,12 @@ export async function applyWorkspaceShellDiff(
   }
 
   setSandboxStatus(session, approvalRequests.length > 0 ? "running" : "complete");
+  if (approvalRequests.length === 0) cleanupSandboxSession(session);
   return { applied, approvalRequests };
 }
 
 export function discardWorkspaceShellDiff(session: SandboxSession): ApplyWorkspaceShellDiffResult {
   setSandboxStatus(session, "complete");
+  cleanupSandboxSession(session);
   return { applied: 0, approvalRequests: [] };
 }

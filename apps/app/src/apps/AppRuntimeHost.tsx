@@ -838,94 +838,71 @@ export function AppRuntimeHost({
               }),
             )
           case 'dohc.database.table.list':
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.query(api.databaseFiles.appCollectionRows, {
-                packageRoot,
-                databasePath: request.args.path,
-                collection: request.args.table,
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.list',
+              args: {
+                name: request.args.table,
+                database: request.args.path,
                 ...(request.args.query === undefined ? {} : { query: request.args.query }),
-                ...workspaceArgs,
-              }),
-            )
+              },
+            })
           case 'dohc.database.table.get':
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.query(api.databaseFiles.appCollectionRow, {
-                packageRoot,
-                databasePath: request.args.path,
-                collection: request.args.table,
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.get',
+              args: {
+                name: request.args.table,
                 id: request.args.id,
-                ...workspaceArgs,
-              }),
-            )
+                database: request.args.path,
+              },
+            })
           case 'dohc.database.table.insert':
-            recordAction(request.op, request.args.table)
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.mutation(api.databaseOps.appApply, {
-                packageRoot,
-                databasePath: request.args.path,
-                operationId: request.id,
-                op: 'insert',
-                collection: request.args.table,
-                table: request.args.table,
-                payload: request.args.record,
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.insert',
+              args: {
+                name: request.args.table,
+                record: request.args.record,
+                database: request.args.path,
                 ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
-                ...workspaceArgs,
-              }),
-            )
+              },
+            })
           case 'dohc.database.table.update':
-            recordAction(request.op, request.args.table)
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.mutation(api.databaseOps.appApply, {
-                packageRoot,
-                databasePath: request.args.path,
-                operationId: request.id,
-                op: 'update',
-                collection: request.args.table,
-                table: request.args.table,
-                rowId: request.args.id,
-                payload: request.args.patch,
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.update',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                patch: request.args.patch,
+                database: request.args.path,
                 ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
-                ...workspaceArgs,
-              }),
-            )
+              },
+            })
           case 'dohc.database.table.upsert':
-            recordAction(request.op, request.args.table)
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.mutation(api.databaseOps.appApply, {
-                packageRoot,
-                databasePath: request.args.path,
-                operationId: request.id,
-                op: 'upsert',
-                collection: request.args.table,
-                table: request.args.table,
-                rowId: request.args.id,
-                payload: request.args.record,
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.upsert',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                record: request.args.record,
+                database: request.args.path,
                 ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
-                ...workspaceArgs,
-              }),
-            )
+              },
+            })
           case 'dohc.database.table.delete':
-            recordAction(request.op, request.args.table)
-            return makeAppRpcSuccess(
-              request.id,
-              await convex.mutation(api.databaseOps.appApply, {
-                packageRoot,
-                databasePath: request.args.path,
-                operationId: request.id,
-                op: 'delete',
-                collection: request.args.table,
-                table: request.args.table,
-                rowId: request.args.id,
-                payload: {},
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.delete',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                database: request.args.path,
                 ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
-                ...workspaceArgs,
-              }),
-            )
+              },
+            })
           case 'dohc.asset.resolve':
             return makeAppRpcSuccess(
               request.id,

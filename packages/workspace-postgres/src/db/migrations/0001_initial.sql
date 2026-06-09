@@ -69,8 +69,6 @@ create table if not exists atoms (
 
 create unique index if not exists atoms_workspace_path_unique
   on atoms(workspace_id, path);
-create index if not exists atoms_workspace_path_idx
-  on atoms(workspace_id, path);
 
 create table if not exists atom_revisions (
   id text primary key,
@@ -109,8 +107,6 @@ create table if not exists assets (
 );
 
 create unique index if not exists assets_workspace_path_unique
-  on assets(workspace_id, path);
-create index if not exists assets_workspace_path_idx
   on assets(workspace_id, path);
 
 create table if not exists database_files (

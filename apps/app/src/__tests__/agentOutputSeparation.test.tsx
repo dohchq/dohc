@@ -28,6 +28,7 @@ describe('agent output separation', () => {
       parts: [
         { type: 'reasoning', text: 'Scanning files' },
         { type: 'tool-run_workspace_shell', toolName: 'run_workspace_shell', input: { command: 'rg' }, output: 'matched' },
+        { type: 'tool-agent_gate', toolName: 'agent_gate', input: { kind: 'approval', path: 'old.md' } },
         { type: 'text', text: '## Final answer\n\n- **Done**' },
       ],
     }
@@ -37,6 +38,7 @@ describe('agent output separation', () => {
       'assistant_progress',
       'tool_call',
       'tool_result',
+      'approval_request',
       'assistant_final',
     ])
     const events = agentActivityEventsFromMessage(message, {
@@ -50,6 +52,7 @@ describe('agent output separation', () => {
       'assistant_progress',
       'tool_call',
       'tool_result',
+      'approval_request',
     ])
     expect(events.map((event) => event.text).join('\n')).not.toContain('Final answer')
   })
@@ -81,6 +84,18 @@ describe('agent output separation', () => {
       userMessage('u1', 'same prompt', 100),
       userMessage('u1-copy', 'same prompt', 100),
       userMessage('u2', 'same prompt', 500),
+    ]
+
+    expect(dedupeDuplicateUserPrompts(messages).map((message) => message.key)).toEqual([
+      'u1',
+      'u2',
+    ])
+  })
+
+  it('does not collapse unrelated user prompts when timestamps are missing', () => {
+    const messages = [
+      { key: 'u1', role: 'user', parts: [{ type: 'text', text: 'same prompt' }] },
+      { key: 'u2', role: 'user', parts: [{ type: 'text', text: 'same prompt' }] },
     ]
 
     expect(dedupeDuplicateUserPrompts(messages).map((message) => message.key)).toEqual([

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { FileText, Image as ImageIcon, Music, Table, FileCode2 } from 'lucide-react'
-import { DatabaseStudio } from './DatabaseStudio'
 
 export type FileTypeViewProps = {
   path: string
@@ -66,17 +65,22 @@ export function FileTypeView({
     return <PdfFileView path={path} assetUrl={assetUrl} />
   }
   if (ext === 'sqlite' || ext === 'db' || mediaType.includes('sqlite')) {
-    return (
-      <DatabaseStudio
-        database={{
-          path,
-          version: 1,
-          tables: [],
-        }}
-      />
-    )
+    return <SqliteFileView path={path} />
   }
   return <GenericFileView path={path} mediaType={mediaType} assetUrl={assetUrl} />
+}
+
+function SqliteFileView({ path }: { path: string }) {
+  return (
+    <FileViewShell path={path} label="SQLite database" Icon={Table}>
+      <div
+        data-testid="file-view-sqlite-placeholder"
+        className="rounded-md border border-rule bg-panel px-3 py-2 text-sm text-ink-dim"
+      >
+        Database preview is not available for this file yet.
+      </div>
+    </FileViewShell>
+  )
 }
 
 function FileViewShell({

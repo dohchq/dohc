@@ -18,6 +18,7 @@ import {
   startWorkspaceShellSession,
 } from '../../../services/agent-sandbox/src/server'
 import { runAppTest } from '../../../services/app-tester/src/runAppTest'
+import { resolveDohcBackendMode } from '../src/backend/backendClient'
 import { buildAppShell } from '../src/apps/appShell'
 
 type BackendMode = 'convex' | 'postgres'
@@ -46,7 +47,7 @@ type MatrixFile = WorkspaceFile & {
   body: string
 }
 
-const backendMode: BackendMode = process.env.DOHC_BACKEND === 'postgres' ? 'postgres' : 'convex'
+const backendMode: BackendMode = resolveDohcBackendMode(process.env)
 const actor: Actor = { userId: 'user_1', workspaceId: `ws_backend_matrix_${backendMode}` }
 
 const walletCsv = [

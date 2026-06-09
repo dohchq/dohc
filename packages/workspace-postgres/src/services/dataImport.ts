@@ -141,11 +141,37 @@ async function readSource(
     };
   }
   const asset = await backend.readAsset(actor, request.source.path);
+  if (!isTextImportMediaType(asset.mediaType, request.source.path)) {
+    throw new Error(`import source ${request.source.path} is not text-compatible: ${asset.mediaType}`);
+  }
+  let body: string;
+  try {
+    body = new TextDecoder("utf-8", { fatal: true }).decode(asset.bytes);
+  } catch (error) {
+    throw new Error(`could not decode text import source ${request.source.path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return {
     name: request.source.path.split("/").pop() ?? request.source.path,
     mediaType: asset.mediaType,
-    body: new TextDecoder().decode(asset.bytes),
+    body,
   };
+}
+
+function isTextImportMediaType(mediaType: string, path: string) {
+  const lowerMediaType = mediaType.toLowerCase();
+  const lowerPath = path.toLowerCase();
+  return (
+    lowerMediaType.startsWith("text/") ||
+    lowerMediaType.includes("json") ||
+    lowerMediaType.includes("csv") ||
+    lowerMediaType.includes("markdown") ||
+    lowerPath.endsWith(".md") ||
+    lowerPath.endsWith(".markdown") ||
+    lowerPath.endsWith(".txt") ||
+    lowerPath.endsWith(".csv") ||
+    lowerPath.endsWith(".json") ||
+    lowerPath.endsWith(".jsonl")
+  );
 }
 
 function sha256(value: string) {

@@ -227,26 +227,37 @@ export function skillBodyBytes(body: string): number {
 }
 
 function atomKindForGeneratedFile(path: string, mediaType: string) {
-  const lower = `${mediaType} ${path}`.toLowerCase()
-  if (lower.includes('csv') || lower.endsWith('.csv')) return 'csv' as const
-  if (lower.includes('json') || lower.endsWith('.json')) return 'json' as const
-  if (lower.includes('html') || lower.endsWith('.html')) return 'html' as const
-  if (lower.includes('markdown') || lower.endsWith('.md')) return 'markdown' as const
+  const { subtype, ext } = generatedFileTypeParts(path, mediaType)
+  if (subtype === 'csv' || ext === '.csv') return 'csv' as const
+  if (subtype === 'json' || ext === '.json') return 'json' as const
+  if (subtype === 'html' || ext === '.html' || ext === '.htm') return 'html' as const
+  if (subtype === 'markdown' || subtype === 'x-markdown' || ext === '.md' || ext === '.markdown') return 'markdown' as const
   return 'text' as const
 }
 
 function isGeneratedTextMedia(path: string, mediaType: string) {
-  const lower = `${mediaType} ${path}`.toLowerCase()
+  const { type, subtype, ext } = generatedFileTypeParts(path, mediaType)
   return (
-    lower.includes('text/') ||
-    lower.includes('json') ||
-    lower.includes('csv') ||
-    lower.endsWith('.txt') ||
-    lower.endsWith('.json') ||
-    lower.endsWith('.csv') ||
-    lower.endsWith('.md') ||
-    lower.endsWith('.markdown')
+    type === 'text' ||
+    subtype === 'json' ||
+    subtype === 'csv' ||
+    subtype === 'x-ndjson' ||
+    ext === '.txt' ||
+    ext === '.json' ||
+    ext === '.jsonl' ||
+    ext === '.csv' ||
+    ext === '.md' ||
+    ext === '.markdown'
   )
+}
+
+function generatedFileTypeParts(path: string, mediaType: string) {
+  const cleanMediaType = mediaType.split(';')[0]?.trim().toLowerCase() ?? ''
+  const [type = '', subtype = ''] = cleanMediaType.split('/')
+  const leaf = path.split('/').pop()?.toLowerCase() ?? ''
+  const dot = leaf.lastIndexOf('.')
+  const ext = dot >= 0 ? leaf.slice(dot) : ''
+  return { type, subtype, ext }
 }
 
 function cleanGeneratedPath(path: string) {
@@ -348,6 +359,13 @@ export const _saveFileForAgent = internalMutation({
   handler: async (ctx, args): Promise<unknown> => {
     const path = cleanGeneratedPath(args.path)
     if (!path) return { ok: false as const, code: 'invalid-path', message: 'File path is empty.' }
+    if (isWorkspaceSkillPath(path) || isWorkspaceCommandPath(path) || isSkillAtomBody(args.content) || isCommandAtomBody(args.content)) {
+      return {
+        ok: false as const,
+        code: 'elevated-path-not-authorized',
+        message: 'Use save_skill or save_command for elevated workspace files.',
+      }
+    }
     if (!isGeneratedTextMedia(path, args.mediaType)) {
       return {
         ok: false as const,
@@ -1257,11 +1275,10 @@ missing decisions. Do not merely summarize row count. Build source files
 that preserve the useful shape of the data and an interface that helps the
 user inspect, correct, categorize, budget, or act on it.
 
-For large data/file/app work, use shell for large data/file/app work:
-\`run_workspace_shell\` can inspect and modify a projected workspace folder,
-then \`apply_workspace_shell_diff\` persists the captured diff through dohc
-policy. use dohc tools for permissions, approvals, sharing, app trust, and finalization.
-never claim shell changes are persisted until the diff is applied; before that they are only a sandbox diff.
+Use direct dohc file, asset, database, and app tools as the primary path for workspace changes.
+When \`run_workspace_shell\` reports that a workspace shell is available, it can be an optional fast path for large data/file/app inspection; \`apply_workspace_shell_diff\` persists captured shell diffs only after dohc policy accepts them.
+If the shell reports \`workspace-shell-service-unavailable\`, continue with direct dohc tools and do not steer the task toward shell-only steps.
+Never claim shell changes are persisted until the diff is applied; before that they are only a sandbox diff.
 
 The vault MUST contain all of this before you call finish_onboarding
 (hard floor):

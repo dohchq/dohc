@@ -6,6 +6,8 @@ export const defaultPostgresUrl =
   "postgres://dohc:dohc@localhost:54329/dohc_v2";
 
 export function createPgPool(
+  // Local development fallback only. Deployed/self-hosted services should set
+  // POSTGRES_URL explicitly through their environment.
   connectionString = process.env.POSTGRES_URL ?? defaultPostgresUrl,
 ) {
   return new pg.Pool({ connectionString });

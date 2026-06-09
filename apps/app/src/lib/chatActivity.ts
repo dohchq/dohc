@@ -3,6 +3,7 @@ export type ToolActivityKind =
   | 'read'
   | 'file_change'
   | 'search'
+  | 'approval'
   | 'other'
 
 export type ToolActivityPart = {
@@ -35,6 +36,16 @@ export function toolActivityKind(
 ): ToolActivityKind {
   const name = toolName.toLowerCase()
   const kind = typeof input?.kind === 'string' ? input.kind.toLowerCase() : ''
+  const semanticType =
+    typeof input?.type === 'string' ? input.type.toLowerCase() : ''
+  if (
+    kind === 'approval' ||
+    kind === 'approval_request' ||
+    semanticType === 'approval' ||
+    semanticType === 'approval_request'
+  ) {
+    return 'approval'
+  }
   if (
     kind === 'execute' ||
     name.includes('command') ||
@@ -89,6 +100,7 @@ export function toolActivityLabel(
   if (kind === 'search') return 'Searched'
   if (kind === 'file_change') return 'Changed file'
   if (kind === 'read') return 'Read file'
+  if (kind === 'approval') return 'Approval requested'
   return humanizeToolName(fallback)
 }
 

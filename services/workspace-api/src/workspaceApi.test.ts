@@ -36,6 +36,14 @@ function memoryBackend() {
         ...Array.from(assets.entries()).map(([path, asset]) => file(path, "asset", asset.mediaType)),
       ];
     },
+    async getFileMetadata(resolvedActor, path) {
+      calls.push({ method: "getFileMetadata", input: path, actor: resolvedActor });
+      const textRow = text.get(path);
+      if (textRow) return { ...file(path, "atom", "text/markdown"), revision: textRow.revision };
+      const asset = assets.get(path);
+      if (asset) return { ...file(path, "asset", asset.mediaType), revision: asset.revision };
+      return null;
+    },
     async readText(resolvedActor, path) {
       calls.push({ method: "readText", input: path, actor: resolvedActor });
       const row = text.get(path);
@@ -166,5 +174,55 @@ describe("workspace API service", () => {
 
     expect(observedHeaders).toContain("browser-spoof");
     expect(fixture.calls.every((call) => call.actor.userId === "server_user")).toBe(true);
+  });
+
+  it("returns 409 for stale text writes and preserves the existing atom", async () => {
+    const fixture = memoryBackend();
+    const handler = createWorkspaceApiHandler({
+      backend: fixture.backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+
+    const response = await handler(new Request("http://api.test/workspaces/ws_api/files/notes/day.md", {
+      method: "POST",
+      body: JSON.stringify({
+        expectedRevision: "rev-stale",
+        body: "# Day\nWrong update\n",
+      }),
+    }));
+
+    expect(response.status).toBe(409);
+    await expect(json(response)).resolves.toMatchObject({
+      ok: false,
+      error: "stale revision",
+    });
+    expect(fixture.text.get("notes/day.md")).toEqual({ body: "# Day\n", revision: "rev-1" });
+  });
+
+  it("rejects cross-folder sync renames", async () => {
+    const fixture = memoryBackend();
+    const handler = createWorkspaceApiHandler({
+      backend: fixture.backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+
+    const response = await handler(new Request("http://api.test/workspaces/ws_api/sync/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        operations: [{
+          op: "rename",
+          fromPath: "notes/day.md",
+          toPath: "archive/day.md",
+          expectedRevision: "rev-1",
+        }],
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(json(response)).resolves.toMatchObject({
+      ok: false,
+      error: "cross-folder renames are not supported by workspace sync",
+      path: "notes/day.md",
+    });
   });
 });

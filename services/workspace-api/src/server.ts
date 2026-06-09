@@ -1,4 +1,4 @@
-import type { Actor, WorkspaceBackend } from "@dohc/workspace-contracts";
+import type { Actor, WorkspaceBackend, WorkspaceErrorCode } from "@dohc/workspace-contracts";
 import type { ResolveActor } from "./auth/session";
 import {
   listWorkspaceFiles,
@@ -104,7 +104,7 @@ function parseWorkspaceRoute(request: Request): WorkspaceRoute {
 
 async function readJson<T>(request: Request): Promise<T> {
   const raw = await request.text();
-  if (!raw.trim()) return {} as T;
+  if (!raw.trim()) throw badRequest("request body must be valid JSON");
   return JSON.parse(raw) as T;
 }
 
@@ -131,14 +131,56 @@ function errorResponse(error: unknown) {
 }
 
 function statusForError(message: string, code?: string) {
-  if (code === "approval-required" || /approval|required|permission|unauthor/i.test(message)) return 403;
+  switch (normalizeErrorCode(code)) {
+    case "unauthorized":
+      return 401;
+    case "forbidden":
+    case "locked":
+    case "review_required":
+      return 403;
+    case "not_found":
+      return 404;
+    case "conflict":
+      return 409;
+    case "unsupported_media_type":
+      return 415;
+    case "invalid_path":
+    case "invalid_manifest":
+      return 400;
+  }
+  if (code === "approval-required" || message === "approval required" || message === "approval-required") return 403;
   if (/stale|revision|conflict/i.test(message)) return 409;
   if (/not found|missing/i.test(message)) return 404;
   return 400;
 }
 
+function normalizeErrorCode(code?: string): WorkspaceErrorCode | undefined {
+  if (!code) return undefined;
+  const normalized = code.replace(/-/g, "_");
+  if (
+    normalized === "unauthorized" ||
+    normalized === "forbidden" ||
+    normalized === "not_found" ||
+    normalized === "conflict" ||
+    normalized === "locked" ||
+    normalized === "review_required" ||
+    normalized === "invalid_path" ||
+    normalized === "invalid_manifest" ||
+    normalized === "unsupported_media_type"
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
 function notFound(message: string) {
   const error = new Error(message);
   (error as Error & { code?: string }).code = "not-found";
+  return error;
+}
+
+function badRequest(message: string) {
+  const error = new Error(message);
+  (error as Error & { code?: string }).code = "invalid-manifest";
   return error;
 }

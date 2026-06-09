@@ -4,6 +4,7 @@ import { AlertCircle, Loader2, Upload } from 'lucide-react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import type { DohcBackendClient } from '../backend/backendClient'
+import { mediaTypeForWorkspacePath } from '../lib/mediaTypes'
 import { uploadBlobToStorageUrl } from '../lib/storageUpload'
 
 export const WORKSPACE_UPLOAD_ACCEPT = [
@@ -61,7 +62,7 @@ export function UploadFileButton({
   async function uploadFile(file: File) {
     const filename = file.name || 'uploaded file'
     const mediaType =
-      file.type || mediaTypeForPath(filename) || 'application/octet-stream'
+      file.type || mediaTypeForWorkspacePath(filename) || 'application/octet-stream'
     const path = workspaceUploadPath(defaultFolderPath, filename)
     setState({ status: 'uploading', progress: 1 })
     try {
@@ -115,12 +116,11 @@ export function UploadFileButton({
       <input
         ref={inputRef}
         type="file"
-        multiple
         accept={WORKSPACE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(event) => {
-          const files = Array.from(event.currentTarget.files ?? [])
-          for (const file of files) void uploadFile(file)
+          const [file] = Array.from(event.currentTarget.files ?? [])
+          if (file) void uploadFile(file)
           event.currentTarget.value = ''
         }}
       />
@@ -143,19 +143,4 @@ function workspaceUploadPath(folderPath: string, filename: string) {
   const cleanFolder = folderPath.trim().replace(/^\/+|\/+$/g, '')
   const cleanName = filename.trim().replace(/^\/+|\/+$/g, '') || 'uploaded file'
   return cleanFolder ? `${cleanFolder}/${cleanName}` : cleanName
-}
-
-function mediaTypeForPath(path: string): string | null {
-  const clean = path.toLowerCase()
-  if (clean.endsWith('.png')) return 'image/png'
-  if (clean.endsWith('.jpg') || clean.endsWith('.jpeg')) return 'image/jpeg'
-  if (clean.endsWith('.pdf')) return 'application/pdf'
-  if (clean.endsWith('.m4a')) return 'audio/mp4'
-  if (clean.endsWith('.csv')) return 'text/csv'
-  if (clean.endsWith('.txt')) return 'text/plain'
-  if (clean.endsWith('.json')) return 'application/json'
-  if (clean.endsWith('.sqlite') || clean.endsWith('.db')) {
-    return 'application/vnd.sqlite3'
-  }
-  return null
 }

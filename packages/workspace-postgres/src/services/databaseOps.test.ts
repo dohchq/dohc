@@ -15,6 +15,31 @@ const actor = {
   workspaceId: "phase12_db_workspace",
 };
 
+const otherActor = {
+  userId: "phase12_db_bob",
+  workspaceId: "phase12_db_other_workspace",
+};
+
+const WORKSPACE_SCOPED_TABLES = [
+  "agent_approvals",
+  "agent_runs",
+  "app_trust_grants",
+  "app_packages",
+  "database_operations",
+  "database_files",
+  "assets",
+  "document_states",
+  "atom_revisions",
+  "atoms",
+  "locks",
+  "shares",
+  "permissions",
+  "folders",
+  "workspace_events",
+  "workspace_members",
+  "workspaces",
+] as const;
+
 const ledgerSnapshot: DatabaseSnapshot = {
   transactions: {
     columns: [
@@ -49,6 +74,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await clearWorkspace(pool, actor.workspaceId, actor.userId);
+  await clearWorkspace(pool, otherActor.workspaceId, otherActor.userId);
   await pool?.end();
 });
 
@@ -80,28 +106,17 @@ async function seedWorkspace(db: pg.Pool, workspaceId: string, userId: string) {
 }
 
 async function clearWorkspace(db: pg.Pool, workspaceId: string, userId: string) {
-  for (const table of [
-    "agent_approvals",
-    "agent_runs",
-    "app_trust_grants",
-    "app_packages",
-    "database_operations",
-    "database_files",
-    "assets",
-    "document_states",
-    "atom_revisions",
-    "atoms",
-    "locks",
-    "shares",
-    "permissions",
-    "folders",
-    "workspace_events",
-    "workspace_members",
-    "workspaces",
-  ]) {
-    await db.query(`delete from ${table} where workspace_id = $1`, [workspaceId]);
+  for (const table of WORKSPACE_SCOPED_TABLES) {
+    await db.query(`delete from ${quotePgIdent(table)} where workspace_id = $1`, [
+      workspaceId,
+    ]);
   }
   await db.query("delete from users where id = $1", [userId]);
+}
+
+function quotePgIdent(value: (typeof WORKSPACE_SCOPED_TABLES)[number]) {
+  if (!/^[a-z_]+$/.test(value)) throw new Error(`Unsafe table name: ${value}`);
+  return `"${value}"`;
 }
 
 describe("Postgres database services", () => {
@@ -218,6 +233,56 @@ describe("Postgres database services", () => {
     ).resolves.toMatchObject({
       ok: true,
       rows: [{ reviewed: "Yes" }],
+    });
+  });
+
+  it("isolates database files and rows by workspace", async () => {
+    await seedWorkspace(pool, otherActor.workspaceId, otherActor.userId);
+    const databases = createPostgresDatabaseServices(pool, {
+      blobStore: createMemoryBlobStore(),
+    });
+
+    await databases.createFromSnapshot(actor, {
+      path: "finance/ledger.sqlite",
+      snapshot: ledgerSnapshot,
+    });
+    await databases.createFromSnapshot(otherActor, {
+      path: "finance/ledger.sqlite",
+      snapshot: {
+        transactions: {
+          columns: ledgerSnapshot.transactions.columns,
+          rows: [
+            {
+              id: "txn_001",
+              merchant: "Other workspace",
+              amount: 999,
+              category: "Private",
+              reviewed: "No",
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(
+      databases.query(actor, {
+        path: "finance/ledger.sqlite",
+        sql: "select merchant from transactions where id = ?",
+        params: ["txn_001"],
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      rows: [{ merchant: "Grab" }],
+    });
+    await expect(
+      databases.query(otherActor, {
+        path: "finance/ledger.sqlite",
+        sql: "select merchant from transactions where id = ?",
+        params: ["txn_001"],
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      rows: [{ merchant: "Other workspace" }],
     });
   });
 });

@@ -26,7 +26,14 @@ export function createLocalBlobStore(
       return { objectKey, sha256, size: bytes.byteLength };
     },
     async get(objectKey) {
+      assertSafeObjectKey(objectKey);
       return new Uint8Array(await readFile(resolve(root, objectKey)));
     },
   };
+}
+
+function assertSafeObjectKey(objectKey: string) {
+  if (!/^[0-9a-f]{2}\/[0-9a-f]{64}$/.test(objectKey)) {
+    throw new Error(`invalid blob object key: ${objectKey}`);
+  }
 }

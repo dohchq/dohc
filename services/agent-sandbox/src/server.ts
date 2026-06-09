@@ -31,7 +31,7 @@ export async function startWorkspaceShellSession({
   rootDir,
   sessionId,
 }: StartWorkspaceShellSessionOptions): Promise<SandboxSession> {
-  const mountPath = await mountWorkspaceFolder({
+  const mount = await mountWorkspaceFolder({
     backend,
     actor,
     backendMode,
@@ -42,7 +42,8 @@ export async function startWorkspaceShellSession({
     workspaceId: actor.workspaceId,
     userId: actor.userId,
     backendMode,
-    mountPath,
+    mountPath: mount.mountPath,
+    cleanupDir: mount.cleanupDir,
   });
 }
 

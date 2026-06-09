@@ -48,14 +48,13 @@ export async function scanWorkspaceDiff(rootDir: string): Promise<ScannedWorkspa
   const remainingDeletes = [...deletes];
   const renames: Array<Extract<FsDiffOperation, { op: "rename" }>> = [];
 
-  for (let deleteIndex = 0; deleteIndex < remainingDeletes.length; deleteIndex += 1) {
+  for (let deleteIndex = remainingDeletes.length - 1; deleteIndex >= 0; deleteIndex -= 1) {
     const deleted = remainingDeletes[deleteIndex];
     if (!deleted.sha256) continue;
     const createIndex = remainingCreates.findIndex((created) => created.sha256 === deleted.sha256);
     if (createIndex < 0) continue;
     const [created] = remainingCreates.splice(createIndex, 1);
     remainingDeletes.splice(deleteIndex, 1);
-    deleteIndex -= 1;
     renames.push({
       op: "rename",
       fromPath: deleted.path,

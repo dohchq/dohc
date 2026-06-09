@@ -19,6 +19,8 @@ export type UploadAssetRequest = {
   bytesBase64: string;
 };
 
+export const MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024;
+
 export async function listWorkspaceFiles(backend: WorkspaceBackend, actor: Actor) {
   return {
     ok: true,
@@ -83,6 +85,7 @@ export async function uploadWorkspaceAsset(
   if (!input.path || !input.kind || !input.mediaType || !input.bytesBase64) {
     throw new Error("asset uploads require path, kind, mediaType, and bytesBase64");
   }
+  assertBase64Size(input.bytesBase64, MAX_ASSET_SIZE_BYTES, "asset upload");
   const file = await backend.saveAsset(actor, {
     path: input.path,
     kind: input.kind,
@@ -97,10 +100,27 @@ async function requireWorkspaceFile(
   actor: Actor,
   path: string,
 ): Promise<WorkspaceFile> {
+  if (backend.getFileMetadata) {
+    const file = await backend.getFileMetadata(actor, path);
+    if (!file) throw new Error(`file not found: ${path}`);
+    return file;
+  }
   const files = await backend.listFiles(actor);
   const file = files.find((candidate) => candidate.path === path);
   if (!file) {
     throw new Error(`file not found: ${path}`);
   }
   return file;
+}
+
+export function decodedBase64Size(value: string) {
+  const clean = value.trim();
+  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  return Math.floor((clean.length * 3) / 4) - padding;
+}
+
+export function assertBase64Size(value: string, maxBytes: number, label: string) {
+  if (decodedBase64Size(value) > maxBytes) {
+    throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  }
 }

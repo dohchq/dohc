@@ -1883,10 +1883,13 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     if (activePath === path) setOptimisticPath(target)
     try {
       if (backendClient) {
+        if (!row?.revision) {
+          throw new Error(`cannot rename ${path}: missing file revision`)
+        }
         const renamed = await backendClient.renameFile({
           path,
           newName: target,
-          expectedRevision: row?.revision ?? '',
+          expectedRevision: row.revision,
         })
         setBackendFiles((current) =>
           renameBackendFileRow(current, path, renamed),

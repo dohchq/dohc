@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import type { Actor, WorkspaceBackend, WorkspaceFile } from "@dohc/workspace-con
 import {
   applyWorkspaceShellDiff,
   captureWorkspaceShellDiff,
+  discardWorkspaceShellDiff,
   runWorkspaceShellCommand,
   startWorkspaceShellSession,
 } from "./server";
@@ -153,10 +154,20 @@ describe("agent workspace shell sandbox", () => {
         backendMode: "postgres",
         rootDir,
       });
+      expect(session.cleanupDir).toBeUndefined();
       await writeFile(join(dirname(session.mountPath), "secret.txt"), "outside secret");
 
       await expect(
         runWorkspaceShellCommand(session, { command: "cat", args: ["../secret.txt"] }),
+      ).rejects.toThrow(/outside mounted workspace/i);
+      await expect(
+        runWorkspaceShellCommand(session, { command: "cat", args: ["-o/tmp/file"] }),
+      ).rejects.toThrow(/outside mounted workspace/i);
+      await expect(
+        runWorkspaceShellCommand(session, { command: "cat", args: ["--opt=/etc/passwd"] }),
+      ).rejects.toThrow(/outside mounted workspace/i);
+      await expect(
+        runWorkspaceShellCommand(session, { command: "cat", args: ["-I../secret"] }),
       ).rejects.toThrow(/outside mounted workspace/i);
 
       await runWorkspaceShellCommand(session, {
@@ -182,5 +193,22 @@ describe("agent workspace shell sandbox", () => {
       expect(fixture.text.get("shared/locked.md")?.body).toBe("# Locked\n");
       expect(fixture.text.get("apps/tracker.js")?.body).toBe("export default {}\n");
     });
+  });
+
+  it("cleans up temporary mounts when a session is discarded", async () => {
+    const fixture = memoryBackend();
+    const session = await startWorkspaceShellSession({
+      backend: fixture.backend,
+      actor,
+      backendMode: "postgres",
+    });
+    const cleanupDir = session.cleanupDir;
+    expect(cleanupDir).toBeTruthy();
+    if (!cleanupDir) throw new Error("expected temporary cleanup directory");
+
+    discardWorkspaceShellDiff(session);
+
+    await expect(access(cleanupDir)).rejects.toThrow();
+    expect(session.cleanupDir).toBeUndefined();
   });
 });

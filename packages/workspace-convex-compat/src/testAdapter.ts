@@ -10,7 +10,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { WorkspaceError } from "@dohc/workspace-contracts";
+import { composeRenamedPath, WorkspaceError } from "@dohc/workspace-contracts";
 import schema from "../../../apps/app/convex/schema";
 import { api } from "../../../apps/app/convex/_generated/api";
 
@@ -79,6 +79,25 @@ function createConvexWorkspaceBackend(
         body: row.body,
         revision: String(revisionFor(revisions, actor, path)),
       };
+    },
+    async getFileMetadata(actor, path) {
+      const row = await asActor(t, actor).query(api.atoms.getByPath, {
+        path,
+        activeWorkspaceId: actor.workspaceId,
+      });
+      if (row) {
+        return rowToWorkspaceFile(
+          actor,
+          {
+            _id: row._id,
+            path: row.path,
+            updatedAt: row.updatedAt,
+            type: null,
+          },
+          revisionFor(revisions, actor, path),
+        );
+      }
+      return assets.get(assetKey(actor, path)) ?? null;
     },
     async readAsset(actor, path): Promise<ReadAssetOutput> {
       const asset = assets.get(assetKey(actor, path));
@@ -245,15 +264,6 @@ function revisionKey(actor: Actor, path: string) {
 
 function assetKey(actor: Actor, path: string) {
   return `${actor.workspaceId}:${path}`;
-}
-
-function composeRenamedPath(fromPath: string, toName: string) {
-  const folderPath = fromPath.includes("/")
-    ? fromPath.slice(0, fromPath.lastIndexOf("/"))
-    : "";
-  const cleanName = toName.trim().replace(/^\/+|\/+$/g, "");
-  if (!cleanName) throw new WorkspaceError("invalid_path", "Filename is empty");
-  return folderPath ? `${folderPath}/${cleanName}` : cleanName;
 }
 
 function revisionFor(

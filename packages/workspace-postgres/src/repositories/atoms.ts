@@ -87,6 +87,28 @@ export async function readAtomText(
   return { body: row.body, revision: String(row.revision) };
 }
 
+export async function readAtomMetadata(
+  db: PgQueryable,
+  actor: Actor,
+  path: string,
+) {
+  WorkspacePath.parse(path);
+  const result = await db.query<AtomRow>(
+    `
+      select id, workspace_id, path, kind, body, revision, updated_at
+      from atoms
+      where workspace_id = $1
+        and path = $2
+        and deleted_at is null
+      limit 1
+    `,
+    [actor.workspaceId, path],
+  );
+  const row = result.rows[0];
+  if (!row) throw new WorkspaceError("not_found", "Atom not found");
+  return row;
+}
+
 export async function insertAtom(
   db: PgQueryable,
   actor: Actor,

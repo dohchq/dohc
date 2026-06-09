@@ -88,7 +88,7 @@ export function agentMessageEventsFromMessage(
     }
     if (!isToolActivityPart(part)) continue
     const presentation = toolCallPresentation(part as ToolActivityPart)
-    if (/approval/i.test(presentation.toolName)) {
+    if (presentation.kind === 'approval') {
       events.push({
         kind: presentation.state === 'result' ? 'approval_result' : 'approval_request',
         text: presentation.label,
@@ -147,10 +147,14 @@ export function dedupeDuplicateUserPrompts<T extends MessageLike>(
   messages: T[],
 ): T[] {
   const seen = new Set<string>()
-  return messages.filter((message) => {
+  return messages.filter((message, index) => {
     if (message.role !== 'user') return true
     const text = textPartsMarkdownFromMessage(message)
-    const key = `${message._creationTime ?? ''}\u0000${text}`
+    const timestampKey =
+      typeof message._creationTime === 'number'
+        ? String(message._creationTime)
+        : `missing:${message.key ?? index}`
+    const key = `${timestampKey}\u0000${text}`
     if (seen.has(key)) return false
     seen.add(key)
     return true

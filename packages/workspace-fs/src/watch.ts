@@ -11,8 +11,17 @@ export function watchWorkspace({
   onChange,
 }: WatchWorkspaceOptions): () => void {
   if (signal?.aborted) return () => undefined;
+  let isRunning = false;
   const timer = setInterval(() => {
-    void onChange();
+    if (isRunning) return;
+    isRunning = true;
+    void Promise.resolve(onChange())
+      .catch((error) => {
+        console.error("[workspace-fs] watch onChange failed", error);
+      })
+      .finally(() => {
+        isRunning = false;
+      });
   }, pollMs);
   const stop = () => clearInterval(timer);
   signal?.addEventListener("abort", stop, { once: true });

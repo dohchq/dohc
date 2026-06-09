@@ -31,6 +31,18 @@ export type LocalSyncConflict = {
   reason: string;
 };
 
+type PendingLocalSyncConflict = LocalSyncConflict & {
+  localBody: string;
+};
+
+function toLocalSyncConflict({
+  path,
+  conflictPath,
+  reason,
+}: PendingLocalSyncConflict): LocalSyncConflict {
+  return { path, conflictPath, reason };
+}
+
 export type LocalSyncApprovalRequest = {
   path: string;
   reason: string;
@@ -104,11 +116,12 @@ export function createLocalSyncClient({
         return emptyResult();
       }
 
-      const conflicts = await writeDirtyPullConflicts(rootDir, local);
+      const conflicts = await collectDirtyPullConflicts(rootDir, local);
       await materialize();
+      await writeConflictFiles(rootDir, conflicts);
       return {
         applied: 0,
-        conflicts,
+        conflicts: conflicts.map(toLocalSyncConflict),
         approvalRequests: [],
       };
     },
@@ -119,9 +132,10 @@ export function createLocalSyncClient({
       const conflicts = await detectRevisionConflicts(rootDir, backend, actor, local);
       if (conflicts.length > 0) {
         await materialize();
+        await writeConflictFiles(rootDir, conflicts);
         return {
           applied: 0,
-          conflicts,
+          conflicts: conflicts.map(toLocalSyncConflict),
           approvalRequests: [],
         };
       }
@@ -288,29 +302,35 @@ async function detectRevisionConflicts(
   backend: WorkspaceBackend,
   actor: Actor,
   operations: FsDiffOperation[],
-): Promise<LocalSyncConflict[]> {
-  const conflicts: LocalSyncConflict[] = [];
+): Promise<PendingLocalSyncConflict[]> {
+  const conflicts: PendingLocalSyncConflict[] = [];
   for (const operation of operations) {
     const expectedRevision = "expectedRevision" in operation ? operation.expectedRevision : undefined;
     if (!expectedRevision) continue;
     const path = operation.op === "rename" ? operation.fromPath : operation.path;
     const remoteRevision = await readRemoteRevision(backend, actor, path);
     if (remoteRevision !== expectedRevision) {
-      conflicts.push(await writeConflictFile(rootDir, operation, "remote revision changed before local sync"));
+      conflicts.push(await collectConflictFile(rootDir, operation, "remote revision changed before local sync"));
     }
   }
   return conflicts;
 }
 
-async function writeDirtyPullConflicts(rootDir: string, operations: FsDiffOperation[]): Promise<LocalSyncConflict[]> {
+async function collectDirtyPullConflicts(rootDir: string, operations: FsDiffOperation[]): Promise<PendingLocalSyncConflict[]> {
   return await Promise.all(
     operations
       .filter((operation) => operation.op === "update" || operation.op === "delete")
-      .map((operation) => writeConflictFile(rootDir, operation, "remote pull found uncommitted local changes")),
+      .map((operation) => collectConflictFile(rootDir, operation, "remote pull found uncommitted local changes")),
   );
 }
 
 async function readRemoteRevision(backend: WorkspaceBackend, actor: Actor, path: string) {
+  if (backend.getFileMetadata) {
+    const file = await backend.getFileMetadata(actor, path);
+    if (!file) return undefined;
+    if (file.kind === "atom") return (await backend.readText(actor, path)).revision;
+    return (await backend.readAsset(actor, path)).revision;
+  }
   const files = await backend.listFiles(actor);
   const file = files.find((candidate) => candidate.path === path);
   if (!file) return undefined;
@@ -318,28 +338,43 @@ async function readRemoteRevision(backend: WorkspaceBackend, actor: Actor, path:
   return (await backend.readAsset(actor, path)).revision;
 }
 
-async function writeConflictFile(
+async function collectConflictFile(
   rootDir: string,
   operation: FsDiffOperation,
   reason: string,
-): Promise<LocalSyncConflict> {
+): Promise<PendingLocalSyncConflict> {
   const path = operation.op === "rename" ? operation.toPath : operation.path;
   const conflictPath = assertSafeWorkspacePath(`${path}.conflict`);
-  const fullPath = resolveWorkspacePath(rootDir, conflictPath);
-  await mkdir(dirname(fullPath), { recursive: true });
   const localBody = operation.op === "delete" ? "" : await readLocalConflictBody(rootDir, path);
+  return { path, conflictPath, reason, localBody };
+}
+
+async function writeConflictFiles(
+  rootDir: string,
+  conflicts: PendingLocalSyncConflict[],
+) {
+  for (const conflict of conflicts) {
+    await writeConflictFile(rootDir, conflict);
+  }
+}
+
+async function writeConflictFile(
+  rootDir: string,
+  conflict: PendingLocalSyncConflict,
+) {
+  const fullPath = resolveWorkspacePath(rootDir, conflict.conflictPath);
+  await mkdir(dirname(fullPath), { recursive: true });
   await writeFile(
     fullPath,
     [
-      `dohc conflict for ${path}`,
-      `reason: ${reason}`,
+      `dohc conflict for ${conflict.path}`,
+      `reason: ${conflict.reason}`,
       "",
       "local content:",
-      localBody,
+      conflict.localBody,
     ].join("\n"),
     "utf8",
   );
-  return { path, conflictPath, reason };
 }
 
 async function readLocalConflictBody(rootDir: string, path: string) {
@@ -406,7 +441,9 @@ function encodePath(path: string) {
 function isApprovalError(error: unknown): error is Error & { code?: string; path?: string } {
   return (
     error instanceof Error &&
-    (("code" in error && error.code === "approval-required") || /approval/i.test(error.message))
+    (("code" in error && error.code === "approval-required") ||
+      error.message === "approval required" ||
+      error.message === "approval-required")
   );
 }
 

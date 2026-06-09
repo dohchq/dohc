@@ -49,6 +49,7 @@ export type RenameFileInput = {
 
 export type WorkspaceBackend = {
   listFiles(actor: Actor): Promise<WorkspaceFile[]>;
+  getFileMetadata?(actor: Actor, path: string): Promise<WorkspaceFile | null>;
   readText(
     actor: Actor,
     path: string,

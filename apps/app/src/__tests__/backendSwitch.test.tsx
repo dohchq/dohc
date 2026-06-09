@@ -98,6 +98,9 @@ describe('frontend backend switch', () => {
     window.history.replaceState(null, '', '/?DOHC_BACKEND=postgres&backend=postgres')
     expect(resolveDohcBackendMode({})).toBe('convex')
     expect(resolveDohcBackendMode({ DOHC_BACKEND: 'postgres' })).toBe('postgres')
+    expect(() => resolveDohcBackendMode({ DOHC_BACKEND: 'postgress' })).toThrow(
+      /Invalid DOHC_BACKEND/,
+    )
   })
 
   it('routes common file operations through the selected Postgres client', async () => {

@@ -6,7 +6,7 @@ import type {
   WorkspaceBackend,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { WorkspaceError } from "@dohc/workspace-contracts";
+import { composeRenamedPath, WorkspaceError } from "@dohc/workspace-contracts";
 import { createLocalBlobStore, type BlobStore } from "../blobStore";
 import {
   assetRowToWorkspaceFile,
@@ -20,6 +20,7 @@ import {
   atomRowToWorkspaceFile,
   insertAtom,
   listAtomFiles,
+  readAtomMetadata,
   readAtomText,
   renameAtom,
   softDeleteAtom,
@@ -60,6 +61,20 @@ export function createPostgresWorkspaceBackend(
       await assertAuthorized(pool, actor);
       return readAtomText(pool, actor, path);
     },
+    async getFileMetadata(actor, path) {
+      await assertAuthorized(pool, actor);
+      try {
+        return atomRowToWorkspaceFile(await readAtomMetadata(pool, actor, path));
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+      try {
+        return assetRowToWorkspaceFile(await readAssetMetadata(pool, actor, path));
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
     async readAsset(actor, path) {
       await assertAuthorized(pool, actor);
       const row = await readAssetMetadata(pool, actor, path);
@@ -99,6 +114,7 @@ export function createPostgresWorkspaceBackend(
       });
     },
     async saveAsset(actor, input) {
+      await assertAuthorized(pool, actor);
       const stored = await blobStore.put(input.bytes);
       return withTransaction(pool, async (client) => {
         await assertAuthorized(client, actor);
@@ -181,15 +197,6 @@ async function softDeleteAnyFile(db: PgQueryable, actor: Actor, path: string) {
 
 function isNotFound(error: unknown) {
   return error instanceof WorkspaceError && error.code === "not_found";
-}
-
-function composeRenamedPath(fromPath: string, toName: string) {
-  const folderPath = fromPath.includes("/")
-    ? fromPath.slice(0, fromPath.lastIndexOf("/"))
-    : "";
-  const cleanName = toName.trim().replace(/^\/+|\/+$/g, "");
-  if (!cleanName) throw new WorkspaceError("invalid_path", "Filename is empty");
-  return folderPath ? `${folderPath}/${cleanName}` : cleanName;
 }
 
 async function withTransaction<T>(
