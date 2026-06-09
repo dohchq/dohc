@@ -8,10 +8,10 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 16 - Delete, Consolidate, And Debt Review
-- Current step: not started
-- Last successful commit: Phase 15 commit, `Add dual backend readiness gate`
-- Last failing command: `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (command not found; Phase 16 owns this script)
+- Current phase: complete
+- Current step: all planned phases complete
+- Last successful commit: Phase 16 commit, `Audit and reduce dual backend tech debt`
+- Last failing command: `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (first Phase 16 implementation run failed until generated/temp paths and checker self-matches were excluded)
 - Last blocker: none
 
 ## Phase Logs
@@ -733,3 +733,47 @@
 - Deferred findings with reason: `pnpm check:debt` is intentionally deferred to Phase 16, which creates the debt audit script. Hosted Postgres production readiness remains deferred because the matrix proves parity for deterministic workflows, not deployed auth/realtime/operations.
 - Remaining risk: the matrix does not yet prove real hosted Postgres workspace API sessions, live Yjs collaboration over Postgres, production migration/backup/restore, or cloud observability.
 - Next phase: Phase 16 - Delete, Consolidate, And Debt Review
+
+### Phase 16: Tech Debt Audit And Deletion Gate
+
+- Status: complete
+- Execution map: add the repo-wide debt scanner and root `check:debt` command, run static scans and typecheck, review `main...HEAD` changed areas, document code deletion/consolidation/retained compatibility paths, then run the final full verification checklist.
+- Files changed:
+  - `package.json`
+  - `scripts/check-tech-debt.mjs`
+  - `docs/superpowers/reviews/2026-06-09-dual-backend-tech-debt-audit.md`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: no additional source deletion was safe in Phase 16. The audit records earlier branch consolidations and retained compatibility code with deletion conditions. The new scanner skips generated/vendor/lock outputs and fails on unallowed debt markers.
+- Obsolete paths retained and why: Convex remains the production default; `.views` remains for existing view workflows; historical plans remain as provenance; compatibility paths are retained with test evidence and deletion conditions in the audit document.
+- Tests added: no Vitest tests; added `pnpm check:debt` as a static debt-check command.
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (RED before Phase 16 implementation: command not found)
+  - manual repo scan for the Phase 16 prohibited marker set (found only historical plan text, a retained views index marker, explanatory comments, and a lockfile false positive)
+  - `git diff --stat main...HEAD` (reviewed branch-wide touched areas)
+  - `git diff --name-status main...HEAD` (reviewed branch-wide added/modified/deleted areas)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (failed first implementation run: scanner included `.gstack/tmp` output, matched its own regex literals, and had too narrow an allowlist context window)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (passed after checker fixes: 7 documented allowlist entries)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm -r --if-present typecheck` (passed: workspace package typechecks)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:dual-backend-baseline` (passed final Phase 16 sweep: web typecheck, 197 web test files / 1619 passed / 1 skipped, app-tester 4 files / 25 tests, Hocuspocus 9 files / 78 tests, sqlite-worker 4 files / 11 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm check:debt` (passed final sweep: 7 documented allowlist entries)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 2 files, 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 5 files, 12 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (passed: 2 files, 6 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-api test` (passed: 1 file, 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox test` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=convex pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed: 1 test)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH DOHC_BACKEND=postgres pnpm test:e2e apps/app/e2e/backendMatrix.spec.ts` (passed: 1 test)
+  - `git diff --check` (passed)
+  - `coderabbit --version` (0.5.4)
+  - `coderabbit auth status --agent` (authenticated)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (Phase 16 review; completed with 0 findings)
+- Failing tests fixed: implemented `scripts/check-tech-debt.mjs`, registered `check:debt`, skipped generated/temp/vendor/lock outputs, avoided checker self-matches, and documented all remaining allowlisted markers with deletion conditions.
+- Cross-cutting regressions run: full dual-backend baseline, repo-wide typecheck, debt check, shared backend/package tests, both backend matrix modes, and `git diff --check`.
+- Convex status: remains default and green in the full baseline and Convex matrix.
+- Postgres status: remains development/self-host preview and green in shared conformance, package services, workspace API, filesystem, sandbox, and Postgres matrix tests.
+- Reviewer/subagent/CodeRabbit findings: CodeRabbit Phase 16 review raised 0 issues.
+- Relevant findings fixed: none from CodeRabbit; local scanner failures were fixed before review.
+- Deferred findings with reason: `.views` compatibility and Convex production paths remain intentionally retained until indexed discovery, migration coverage, and Postgres production deployment gates are proven.
+- Remaining risk: the debt checker catches explicit markers, not all semantic duplication; production Postgres readiness remains gated on deployed auth/realtime/operations evidence.
+- Next phase: none; implementation plan complete.
