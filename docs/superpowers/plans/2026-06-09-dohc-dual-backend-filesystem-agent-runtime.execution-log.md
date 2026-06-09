@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 11 - Agent Output, Approvals, And Run UX
+- Current phase: Phase 12 - Apps And SQLite Against Both Backends
 - Current step: not started
-- Last successful commit: Phase 10 commit, `Add workspace shell sandbox for agents`
+- Last successful commit: Phase 11 commit, `Separate agent activity from final output`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -504,3 +504,54 @@
 - Deferred findings with reason: production-grade process isolation is still deferred; this first sandbox enforces command allowlist, no shell, sanitized env, timeout/output limits, and argument path guards, but a hardened container/runtime is still required before accepting arbitrary production shell sessions.
 - Remaining risk: Node/Python scripts are guarded by argument inspection rather than an OS-level mount namespace in this first service; production deployment must add container or equivalent filesystem isolation before exposing the shell to untrusted commands.
 - Next phase: Phase 11 - Agent Output, Approvals, And Run UX
+
+### Phase 11: Agent Output, Approvals, And Run UX
+
+- Status: complete
+- Execution map: write RED UI tests for assistant final-output separation, activity events, approval card actions, duplicate prompt dedupe, and run duration first. Then replace the old inline tool trace with an `AgentActivityTimeline`, export approval-card UX for direct tests, align approval copy/resume labels, add rail duration and approval notice tone, and keep Convex approval resolution server-scoped.
+- Files changed:
+  - `apps/app/convex/agent.ts`
+  - `apps/app/convex/agentApprovals.test.ts`
+  - `apps/app/src/__tests__/agentApprovalResume.test.tsx`
+  - `apps/app/src/__tests__/agentApprovals.test.ts`
+  - `apps/app/src/__tests__/agentModeShell.test.ts`
+  - `apps/app/src/__tests__/agentOutputSeparation.test.tsx`
+  - `apps/app/src/__tests__/agentRunRail.test.ts`
+  - `apps/app/src/components/AgentActivityTimeline.tsx`
+  - `apps/app/src/components/AgentRunRail.tsx`
+  - `apps/app/src/components/Chat.tsx`
+  - `apps/app/src/components/NoticeCenter.test.ts`
+  - `apps/app/src/components/NoticeCenter.tsx`
+  - `apps/app/src/lib/chatActivity.test.ts`
+  - `apps/app/src/lib/chatActivity.ts`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: removed the old `AgentWorkTrace`, `ToolTraceDetails`, `ToolPayloadBlock`, tool trace key/icon helpers, `workedDurationForMessage`, and the now-obsolete `agentWorkTraceSummary` helper/tests. Tool presentation primitives remain in `chatActivity.ts`; final/output/activity separation now lives in `AgentActivityTimeline.tsx`.
+- Obsolete paths retained and why: `toolCallPresentation`, `formatToolPayload`, and `formatWorkedDuration` remain because the new activity timeline and run rail still use them.
+- Tests added:
+  - `apps/app/src/__tests__/agentOutputSeparation.test.tsx`
+  - `apps/app/src/__tests__/agentApprovalResume.test.tsx`
+  - added approval-tone coverage in `apps/app/src/components/NoticeCenter.test.ts`
+  - added active-run duration coverage in `apps/app/src/__tests__/agentRunRail.test.ts`
+  - added Always Allow resume-prompt coverage in `apps/app/convex/agentApprovals.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/agentOutputSeparation.test.tsx src/__tests__/agentApprovalResume.test.tsx convex/agentApprovals.test.ts` (RED: missing `AgentActivityTimeline`, missing exported `AgentApprovalCard`, old `Always allow` label)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/agentRunRail.test.ts src/components/NoticeCenter.test.ts` (RED: missing rail duration and missing `noticeIconForTone`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/agentApprovals.test.ts` (RED: resume prompt said `Always allow` instead of `Always Allow`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/agentOutputSeparation.test.tsx` (RED for new full-event helper: `agentMessageEventsFromMessage is not a function`; passed after adding it and filtering `assistant_final` out of timeline activity)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/lib/chatActivity.test.ts src/__tests__/agentModeShell.test.ts src/__tests__/agentOutputSeparation.test.tsx src/__tests__/agentApprovalResume.test.tsx convex/agentApprovals.test.ts` (passed: 5 files, 38 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/agentOutputSeparation.test.tsx src/__tests__/agentApprovalResume.test.tsx convex/agentApprovals.test.ts` (passed: 3 files, 9 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/agentApprovals.test.ts src/__tests__/agentRunRail.test.ts src/components/NoticeCenter.test.ts src/__tests__/prepareStep.test.ts src/__tests__/skillTurnGateApplied.test.ts src/lib/chatActivity.test.ts src/__tests__/agentModeShell.test.ts` (passed: 7 files, 119 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `git diff --check` (passed)
+- Failing tests fixed: implemented main-bubble final markdown extraction, structured message events (`assistant_progress`, `tool_call`, `tool_result`, `approval_request`, `approval_result`, `assistant_final`, `run_error`), activity-only timeline filtering, complete-run collapsed timeline behavior, whole-lifecycle duration calculation, duplicate server-echo user prompt dedupe, approval action buttons, automatic approve-resume prompt handling, scoped Always Allow policy evidence, rail duration display, and approval notice tone.
+- Cross-cutting regressions run: web typecheck, agent approval source/server tests, active tool/gate tests, agent shell source-contract tests, authz/app security/app trust/agent approvals slice, Hocuspocus tests, and sqlite-worker tests.
+- Convex status: approval requests remain user/workspace/thread/action/target scoped; approval resume payloads now use the same `Always Allow` label as the UI and continue to tell the agent not to infer broader permission.
+- Postgres status: unchanged directly in this phase.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 11; next major review checkpoint is after Phase 12.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: the activity timeline reads current Convex UI message parts and does not yet persist a separate normalized run-event table; that durable event store is deferred until a backend-neutral run history surface is introduced.
+- Remaining risk: run duration uses message timestamps (`previous user` to assistant `updatedAt`/streaming now), so true tool-level duration remains approximate until backend run events are persisted independently.
+- Next phase: Phase 12 - Apps And SQLite Against Both Backends

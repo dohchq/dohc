@@ -17,7 +17,6 @@ import {
   CheckCircle2,
   ChevronDown,
   Clipboard,
-  FileText,
   Folder,
   FolderPlus,
   FolderX,
@@ -41,6 +40,13 @@ import { api } from '../../convex/_generated/api'
 import { Markdown } from './Markdown'
 import { DohcMark } from '@dohc/brand'
 import {
+  AgentActivityTimeline,
+  agentActivityEventsFromMessage,
+  agentRunDurationForMessage,
+  assistantFinalMarkdownFromMessage,
+  dedupeDuplicateUserPrompts,
+} from './AgentActivityTimeline'
+import {
   AgentModelPicker,
   agentSelectionToConvexArgs,
   type AgentModelPickerSelection,
@@ -55,15 +61,6 @@ import {
 } from '../lib/agentAccess'
 import { useSetChatBusy } from '../lib/chat-busy'
 import { ChatMessagesSkeleton } from './Skeleton'
-import {
-  agentWorkTraceSummary,
-  formatToolPayload,
-  formatWorkedDuration,
-  isToolActivityPart,
-  toolCallPresentation,
-  type ToolActivityKind,
-  type ToolActivityPart,
-} from '../lib/chatActivity'
 import {
   latestUserMessageTimestamp,
   optimisticTurnHasServerEcho,
@@ -637,7 +634,7 @@ export function Chat({
 
   const uiMessages: UIMessage[] = useMemo(() => {
     if (!messagesQuery || messagesQuery.status === 'LoadingFirstPage') return []
-    return messagesQuery.results ?? []
+    return dedupeDuplicateUserPrompts(messagesQuery.results ?? []) as UIMessage[]
   }, [messagesQuery])
 
   const visibleOptimisticTurns = useMemo(
@@ -1631,7 +1628,7 @@ export function Chat({
   )
 }
 
-function AgentApprovalCard({
+export function AgentApprovalCard({
   approval,
   pendingCount,
   responding,
@@ -1683,7 +1680,7 @@ function AgentApprovalCard({
             className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rule bg-elevated px-2.5 text-[12px] font-medium text-ink transition hover:bg-hover disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Shield className="size-3.5 text-ink-dim" strokeWidth={2} />
-            Always allow
+            Always Allow
           </button>
           <button
             type="button"
@@ -2929,23 +2926,22 @@ const MessageView = memo(function MessageView({
   const now = useNow(streaming)
   if (message.role === 'system') return null
   const isUser = message.role === 'user'
-  const text = uiMessageDisplayText(message)
+  const text = isUser
+    ? uiMessageDisplayText(message)
+    : assistantFinalMarkdownFromMessage(message)
   const timestamp = (message as { _creationTime?: number })._creationTime
   const timestampLabel = formatChatTimestamp(timestamp)
-  const toolCalls = message.parts.filter(
-    (part) =>
-      part.type !== 'reasoning' &&
-      part.type !== 'text' &&
-      isToolActivityPart(part),
-  ) as ToolActivityPart[]
   const hasFileParts = message.parts.some((part) => part.type === 'file')
   const workedDurationMs = !isUser
-    ? workedDurationForMessage(message, previousMessage, now)
+    ? agentRunDurationForMessage({ previousMessage, message, now })
     : null
+  const activityEvents = !isUser
+    ? agentActivityEventsFromMessage(message, { durationMs: workedDurationMs })
+    : []
 
   if (
     !text.trim() &&
-    toolCalls.length === 0 &&
+    activityEvents.length === 0 &&
     !hasFileParts &&
     !pending &&
     !failed
@@ -3002,16 +2998,17 @@ const MessageView = memo(function MessageView({
                 : 'rounded-lg border border-rule bg-elevated/50 px-3 py-2.5'
           }
         >
-          {!isUser && toolCalls.length > 0 && (
-            <AgentWorkTrace
-              toolCalls={toolCalls}
-              durationMs={workedDurationMs}
-              streaming={streaming}
-              compact={!primary}
-              hasText={Boolean(text.trim())}
-            />
+          {!isUser && activityEvents.length > 0 && (
+            <div className={text.trim() ? 'mb-4 border-b border-rule pb-3' : ''}>
+              <AgentActivityTimeline
+                events={activityEvents}
+                durationMs={workedDurationMs}
+                complete={!streaming && !pending}
+                compact={!primary}
+              />
+            </div>
           )}
-          {!isUser && pending && !text.trim() && toolCalls.length === 0 && (
+          {!isUser && pending && !text.trim() && activityEvents.length === 0 && (
             <div className="flex items-center gap-2 text-[13px] leading-relaxed text-ink-dim">
               <span className="size-1.5 rounded-full bg-success animate-pulse" />
               <span>dohc is starting</span>
@@ -3050,135 +3047,6 @@ const MessageView = memo(function MessageView({
   )
 })
 
-function AgentWorkTrace({
-  toolCalls,
-  durationMs,
-  streaming,
-  compact,
-  hasText,
-}: {
-  toolCalls: ToolActivityPart[]
-  durationMs: number | null
-  streaming: boolean
-  compact: boolean
-  hasText: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const summary = agentWorkTraceSummary(toolCalls)
-  const duration = formatWorkedDuration(durationMs)
-  const label = streaming ? `Working for ${duration}` : `Worked for ${duration}`
-
-  return (
-    <div
-      className={`${
-        hasText ? 'mb-4 border-b border-rule pb-3' : ''
-      } ${compact ? 'text-[11px]' : 'text-[12px]'}`}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="group/trace inline-flex max-w-full items-center gap-2 rounded-md px-1 py-1 text-left text-ink-faint transition-colors hover:bg-hover hover:text-ink"
-        aria-expanded={open}
-      >
-        <span className="truncate font-medium">{label}</span>
-        <ChevronDown
-          className={`size-3 shrink-0 transition-transform ${
-            open ? 'rotate-180' : ''
-          }`}
-          strokeWidth={1.8}
-        />
-      </button>
-
-      {open && (
-        <div className="mt-3 space-y-2">
-          <div className="flex items-center gap-2 text-ink-faint">
-            <span className="h-px min-w-4 flex-1 bg-rule" />
-            <span className="truncate font-medium">{summary.label}</span>
-            <span className="h-px min-w-4 flex-1 bg-rule" />
-          </div>
-          <div className="space-y-1.5">
-            {toolCalls.map((part, index) => (
-              <ToolTraceDetails key={toolTraceKey(part, index)} part={part} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ToolTraceDetails({ part }: { part: ToolActivityPart }) {
-  const presentation = toolCallPresentation(part)
-  const inputPayload = formatToolPayload(presentation.input)
-  const outputPayload =
-    presentation.errorText ?? formatToolPayload(presentation.output)
-
-  return (
-    <details className="group/tool rounded-md border border-transparent open:border-rule open:bg-panel/55">
-      <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1 text-ink-dim transition-colors hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
-        <ToolActivityIcon kind={presentation.kind} />
-        <span className="shrink-0 font-medium text-ink">
-          {presentation.label}
-        </span>
-        {presentation.detail && (
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint">
-            {presentation.detail}
-          </span>
-        )}
-        {presentation.state && presentation.state !== 'output-available' && (
-          <span className="shrink-0 rounded-full border border-rule bg-elevated px-1.5 py-0.5 text-[10px] font-medium text-ink-faint">
-            {presentation.state}
-          </span>
-        )}
-        <ChevronDown
-          className="size-3 shrink-0 text-ink-faint transition-transform group-open/tool:rotate-180"
-          strokeWidth={1.8}
-        />
-      </summary>
-      <div className="space-y-2 px-2 pb-2 pt-1">
-        <ToolPayloadBlock label="Tool" value={presentation.toolName} />
-        {inputPayload && <ToolPayloadBlock label="Input" value={inputPayload} />}
-        {outputPayload && (
-          <ToolPayloadBlock
-            label={presentation.errorText ? 'Error' : 'Output'}
-            value={outputPayload}
-          />
-        )}
-      </div>
-    </details>
-  )
-}
-
-function ToolPayloadBlock({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-rule bg-page/70">
-      <div className="border-b border-rule px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint">
-        {label}
-      </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-2 py-2 font-mono text-[11px] leading-relaxed text-ink-dim">
-        {value}
-      </pre>
-    </div>
-  )
-}
-
-function workedDurationForMessage(
-  message: UIMessage,
-  previousMessage: UIMessage | null,
-  now: number,
-): number | null {
-  const previousTime =
-    previousMessage?.role === 'user'
-      ? (previousMessage as { _creationTime?: number })._creationTime
-      : null
-  const assistantTime = (message as { _creationTime?: number })._creationTime
-  if (typeof previousTime !== 'number') return null
-  const status = (message as { status?: string }).status
-  const end = status === 'streaming' ? now : assistantTime
-  if (typeof end !== 'number') return null
-  return Math.max(0, end - previousTime)
-}
-
 function useNow(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -3187,28 +3055,6 @@ function useNow(enabled: boolean): number {
     return () => window.clearInterval(id)
   }, [enabled])
   return now
-}
-
-function toolTraceKey(part: ToolActivityPart, index: number): string {
-  const callId =
-    typeof (part as { toolCallId?: unknown }).toolCallId === 'string'
-      ? (part as { toolCallId: string }).toolCallId
-      : null
-  return callId ?? `${part.type ?? 'tool'}-${index}`
-}
-
-function ToolActivityIcon({ kind }: { kind: ToolActivityKind }) {
-  const Icon =
-    kind === 'command'
-      ? SquareTerminal
-      : kind === 'search'
-        ? Search
-        : kind === 'file_change'
-          ? Pencil
-          : kind === 'read'
-            ? FileText
-            : Sparkles
-  return <Icon className="size-3 shrink-0 text-ink-faint" strokeWidth={1.8} />
 }
 
 function MessageActions({
