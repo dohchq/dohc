@@ -31,6 +31,7 @@ import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
 import { useDocumentMeta } from '@/lib/use-document-meta'
 import { FileTree } from '@/components/FileTree'
 import { AtomView } from '@/components/AtomView'
+import { FileTypeView } from '@/components/FileTypeView'
 import { SharedAtomView } from '@/components/SharedAtomView'
 import { ShareDialog } from '@/components/ShareDialog'
 import { ActivityBar } from '@/components/ActivityBar'
@@ -72,6 +73,7 @@ import { onboardingWorkspaceReady } from '@/lib/onboarding-ready'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { pageIdFromRef, pagePath, pageRef } from '@/lib/page-urls'
+import type { FileRow } from '@/lib/path-tree'
 import {
   agentThreadIdFromRef,
   agentThreadRef,
@@ -103,6 +105,11 @@ function AppLayout() {
 type FilesDestination =
   | { kind: 'atom'; id: string }
   | { kind: 'shared'; id: string }
+
+type AppFileRow = FileRow & {
+  kind: 'atom' | 'asset' | 'database'
+  contentType: string
+}
 
 const ACTIVITY_BAR_WIDTH = 48
 const LEFT_SIDEBAR_STORAGE_KEY = 'dohc-left-sidebar-width'
@@ -149,6 +156,40 @@ function readStoredSidebarWidth(
 function leafName(path: string): string {
   const leaf = path.split('/').pop() ?? path
   return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
+}
+
+function extensionForPath(path: string): string {
+  return path.split('/').pop()?.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function atomContentType(path: string, type?: string | null): string {
+  const extension = extensionForPath(path)
+  if (type === 'html' || extension === 'html') return 'text/html'
+  if (extension === 'csv') return 'text/csv'
+  if (extension === 'json') return 'application/json'
+  if (extension === 'txt') return 'text/plain'
+  return 'text/markdown'
+}
+
+function normalizeAtomFile(file: FileRow): AppFileRow {
+  return {
+    ...file,
+    kind: 'atom',
+    contentType: atomContentType(file.path, file.type),
+  }
+}
+
+function normalizeAssetFile(file: FileRow): AppFileRow {
+  return {
+    ...file,
+    kind: file.kind === 'database' ? 'database' : 'asset',
+    contentType: file.contentType ?? 'application/octet-stream',
+    icon: file.icon ?? null,
+  }
+}
+
+function isAssetFile(file: AppFileRow | null | undefined): boolean {
+  return file?.kind === 'asset' || file?.kind === 'database'
 }
 
 function agentSelectionFromApi(
@@ -376,7 +417,17 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     )
   }, [activeWorkspaceId, workspaces])
   const activeWorkspaceSlug = activeWorkspace?.slug ?? 'workspace'
-  const files = useQuery(api.atoms.list, { activeWorkspaceId })
+  const atomFiles = useQuery(api.atoms.list, { activeWorkspaceId })
+  const assetFiles = useQuery(api.assets.listWorkspaceFiles, {
+    activeWorkspaceId,
+  })
+  const files = useMemo<AppFileRow[] | undefined>(() => {
+    if (atomFiles === undefined || assetFiles === undefined) return undefined
+    return [
+      ...atomFiles.map((file) => normalizeAtomFile(file)),
+      ...assetFiles.map((file) => normalizeAssetFile(file)),
+    ].sort((a, b) => a.path.localeCompare(b.path))
+  }, [assetFiles, atomFiles])
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
   const fileByPath = useMemo(() => {
     const rows = new Map<string, NonNullable<typeof files>[number]>()
@@ -421,6 +472,8 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   const upsertAtom = useMutation(api.atoms.upsert)
   const removeAtom = useMutation(api.atoms.remove)
   const moveAtom = useMutation(api.atoms.move)
+  const renameWorkspaceFile = useMutation(api.assets.renameWorkspaceFile)
+  const removeWorkspaceFile = useMutation(api.assets.removeWorkspaceFile)
   // D4.7c — pendingSaveRef gets populated by AtomView with its
   // flushSave function. Rename/move handlers await it before
   // dispatching the mutation so the wikilink-rewrite cascade sees
@@ -560,6 +613,14 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         (routedPage?.kind === 'workspace' ? routedPage.path : null))
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
+  const activeFile = activePath ? fileByPath.get(activePath) : undefined
+  const activeAsset = isAssetFile(activeFile) ? activeFile : null
+  const activeAssetDetails = useQuery(
+    api.assets.resolveWorkspaceFile,
+    activeAsset
+      ? { path: activeAsset.path, activeWorkspaceId }
+      : 'skip',
+  )
   const [view, setView] = useState<View>(
     () =>
       urlView ??
@@ -1441,6 +1502,15 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       setView('atom')
       setOptimisticPath(path)
       const row = fileByPath.get(path)
+      if (isAssetFile(row)) {
+        lastFilesDestinationRef.current = null
+        void navigate({
+          to: '/$workspaceSlug/files',
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
       if (row) {
         lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
         void navigate({
@@ -1576,6 +1646,11 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     await createAtom(clean, body)
   }
 
+  function openUploadedFile(file: { path: string }) {
+    openAtom(file.path)
+    notice.success('Uploaded file', file.path)
+  }
+
   async function createFolderWithName(name: string) {
     const clean = name.trim().replace(/^\/+|\/+$/g, '')
     if (!clean) return
@@ -1695,7 +1770,12 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     // D4.30 — if we just deleted the open atom, clear the URL.
     if (activePath === path) clearOpenAtom({ replace: true })
     try {
-      await removeAtom({ path, activeWorkspaceId })
+      const row = fileByPath.get(path)
+      if (isAssetFile(row)) {
+        await removeWorkspaceFile({ path, activeWorkspaceId })
+      } else {
+        await removeAtom({ path, activeWorkspaceId })
+      }
     } catch (e) {
       if (restorePath === path) openAtom(restorePath, { replace: true })
       notice.error(`Couldn't delete file`, (e as Error).message)
@@ -1706,13 +1786,29 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   async function renameFileByPath(path: string, next: string) {
     let target = next.trim().replace(/^\/+/, '')
     if (!target) return
-    if (!/\.[a-z0-9]+$/i.test(target)) target += '.md'
+    const row = fileByPath.get(path)
+    if (!/\.[a-z0-9]+$/i.test(target)) {
+      const sourceExtension = /\.[a-z0-9]+$/i.exec(path)?.[0] ?? '.md'
+      target += isAssetFile(row)
+        ? sourceExtension
+        : '.md'
+    }
     if (target === path) return
     // D4.7c — flush autosave so the cascade reads the latest body.
-    await pendingSaveRef.current?.()
+    if (!isAssetFile(row)) {
+      await pendingSaveRef.current?.()
+    }
     if (activePath === path) setOptimisticPath(target)
     try {
-      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+      if (isAssetFile(row)) {
+        await renameWorkspaceFile({
+          fromPath: path,
+          toPath: target,
+          activeWorkspaceId,
+        })
+      } else {
+        await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+      }
     } catch (e) {
       if (activePath === path) setOptimisticPath(path)
       notice.error(`Couldn't rename file`, (e as Error).message)
@@ -1874,6 +1970,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
                 activePath={activePath}
                 view="atom"
                 onOpenSearch={() => setSearchOpen(true)}
+                activeWorkspaceId={activeWorkspaceId}
                 user={user}
                 sharedWithMe={sharedWithMe ?? []}
                 sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -1881,6 +1978,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
                 allowCreate={view !== 'graph'}
                 onOpenShared={openShared}
                 onOpen={(p) => openAtom(p)}
+                onUploadFile={openUploadedFile}
                 onCreatePage={createPageWithName}
                 onCreateFolder={createFolderWithName}
                 onDeleteFolder={deleteFolderByPath}
@@ -2018,6 +2116,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               activePath={activePath}
               view="atom"
               onOpenSearch={() => setSearchOpen(true)}
+              activeWorkspaceId={activeWorkspaceId}
               user={user}
               sharedWithMe={sharedWithMe ?? []}
               sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -2025,6 +2124,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               allowCreate={view !== 'graph'}
               onOpenShared={openShared}
               onOpen={(p) => openAtom(p)}
+              onUploadFile={openUploadedFile}
               onCreatePage={createPageWithName}
               onCreateFolder={createFolderWithName}
               onDeleteFolder={deleteFolderByPath}
@@ -2051,6 +2151,17 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               key={activeShareId}
               shareId={activeShareId as Id<'atomShares'>}
               activeWorkspaceIdOverride={routedShareActiveWorkspaceId}
+            />
+          ) : activeAsset ? (
+            <FileTypeView
+              path={activeAsset.path}
+              mediaType={
+                activeAssetDetails?.mediaType ??
+                activeAsset.contentType ??
+                'application/octet-stream'
+              }
+              extension={extensionForPath(activeAsset.path)}
+              assetUrl={activeAssetDetails?.url}
             />
           ) : (
             <AtomView

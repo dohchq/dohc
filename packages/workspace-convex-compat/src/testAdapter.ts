@@ -3,6 +3,8 @@ import { convexTest } from "convex-test";
 import type {
   Actor,
   CreateAtomInput,
+  ReadAssetOutput,
+  RenameFileInput,
   SaveAssetInput,
   WorkspaceBackend,
   WorkspaceFile,
@@ -23,12 +25,20 @@ type AtomListRow = {
   type: "html" | "command" | "skill" | null;
 };
 
+type StoredAsset = WorkspaceFile & {
+  mediaType: string;
+  assetKind: SaveAssetInput["kind"];
+  bytes: Uint8Array;
+  revisionNumber: number;
+};
+
 export const convexTestAdapter = {
   name: "convex",
   async setup() {
     const t = convexTest(schema, modules);
     const revisions = new Map<string, number>();
-    const backend = createConvexWorkspaceBackend(t, revisions);
+    const assets = new Map<string, StoredAsset>();
+    const backend = createConvexWorkspaceBackend(t, revisions, assets);
 
     return {
       backend,
@@ -42,14 +52,21 @@ export const convexTestAdapter = {
 function createConvexWorkspaceBackend(
   t: ConvexTestHandle,
   revisions: Map<string, number>,
+  assets: Map<string, StoredAsset>,
 ): WorkspaceBackend {
   return {
     async listFiles(actor) {
       const rows = await asActor(t, actor).query(api.atoms.list, {
         activeWorkspaceId: actor.workspaceId,
       });
-      return (rows as AtomListRow[]).map((row) =>
+      const atomFiles = (rows as AtomListRow[]).map((row) =>
         rowToWorkspaceFile(actor, row, revisionFor(revisions, actor, row.path)),
+      );
+      const assetFiles = [...assets.values()].filter(
+        (asset) => asset.workspaceId === actor.workspaceId,
+      );
+      return [...atomFiles, ...assetFiles].sort((a, b) =>
+        a.path.localeCompare(b.path),
       );
     },
     async readText(actor, path) {
@@ -61,6 +78,16 @@ function createConvexWorkspaceBackend(
       return {
         body: row.body,
         revision: String(revisionFor(revisions, actor, path)),
+      };
+    },
+    async readAsset(actor, path): Promise<ReadAssetOutput> {
+      const asset = assets.get(assetKey(actor, path));
+      if (!asset) throw new WorkspaceError("not_found", "Asset not found");
+      return {
+        mediaType: asset.mediaType,
+        kind: asset.assetKind,
+        bytes: new Uint8Array(asset.bytes),
+        revision: asset.revision,
       };
     },
     async createAtom(actor, input: CreateAtomInput) {
@@ -130,13 +157,75 @@ function createConvexWorkspaceBackend(
         nextRevision,
       );
     },
-    async saveAsset(_actor, _input: SaveAssetInput) {
-      throw new WorkspaceError(
-        "unsupported_media_type",
-        "Convex asset contract mapping is implemented in Phase 6",
+    async saveAsset(actor, input: SaveAssetInput) {
+      const revisionNumber = 1;
+      const asset: StoredAsset = {
+        id: `${actor.workspaceId}:${input.path}`,
+        workspaceId: actor.workspaceId,
+        path: input.path,
+        kind: "asset",
+        contentType: input.mediaType,
+        revision: String(revisionNumber),
+        updatedAt: Date.now(),
+        mediaType: input.mediaType,
+        assetKind: input.kind,
+        bytes: new Uint8Array(input.bytes),
+        revisionNumber,
+      };
+      assets.set(assetKey(actor, input.path), asset);
+      return asset;
+    },
+    async renameFile(actor, input: RenameFileInput) {
+      const asset = assets.get(assetKey(actor, input.fromPath));
+      if (asset) {
+        if (asset.revision !== input.expectedRevision) {
+          throw new WorkspaceError("conflict", "Expected revision is stale");
+        }
+        const nextPath = composeRenamedPath(input.fromPath, input.toName);
+        const nextRevision = asset.revisionNumber + 1;
+        const renamed: StoredAsset = {
+          ...asset,
+          path: nextPath,
+          revision: String(nextRevision),
+          revisionNumber: nextRevision,
+          updatedAt: Date.now(),
+        };
+        assets.delete(assetKey(actor, input.fromPath));
+        assets.set(assetKey(actor, nextPath), renamed);
+        return renamed;
+      }
+
+      const currentRevision = revisionFor(revisions, actor, input.fromPath);
+      if (String(currentRevision) !== input.expectedRevision) {
+        throw new WorkspaceError("conflict", "Expected revision is stale");
+      }
+      const toPath = composeRenamedPath(input.fromPath, input.toName);
+      await asActor(t, actor).mutation(api.atoms.move, {
+        fromPath: input.fromPath,
+        toPath,
+        activeWorkspaceId: actor.workspaceId,
+      });
+      const nextRevision = currentRevision + 1;
+      revisions.delete(revisionKey(actor, input.fromPath));
+      revisions.set(revisionKey(actor, toPath), nextRevision);
+      const row = await asActor(t, actor).query(api.atoms.getByPath, {
+        path: toPath,
+        activeWorkspaceId: actor.workspaceId,
+      });
+      if (!row) throw new WorkspaceError("not_found", "Atom not found");
+      return rowToWorkspaceFile(
+        actor,
+        {
+          _id: row._id,
+          path: row.path,
+          updatedAt: row.updatedAt,
+          type: null,
+        },
+        nextRevision,
       );
     },
     async deleteFile(actor, path) {
+      if (assets.delete(assetKey(actor, path))) return;
       await asActor(t, actor).mutation(api.atoms.remove, {
         path,
         activeWorkspaceId: actor.workspaceId,
@@ -152,6 +241,19 @@ function asActor(t: ConvexTestHandle, actor: Actor) {
 
 function revisionKey(actor: Actor, path: string) {
   return `${actor.workspaceId}:${path}`;
+}
+
+function assetKey(actor: Actor, path: string) {
+  return `${actor.workspaceId}:${path}`;
+}
+
+function composeRenamedPath(fromPath: string, toName: string) {
+  const folderPath = fromPath.includes("/")
+    ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+    : "";
+  const cleanName = toName.trim().replace(/^\/+|\/+$/g, "");
+  if (!cleanName) throw new WorkspaceError("invalid_path", "Filename is empty");
+  return folderPath ? `${folderPath}/${cleanName}` : cleanName;
 }
 
 function revisionFor(

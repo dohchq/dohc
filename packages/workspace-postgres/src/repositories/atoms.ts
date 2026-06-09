@@ -186,6 +186,63 @@ export async function softDeleteAtom(
   return row.id;
 }
 
+export async function renameAtom(
+  db: PgQueryable,
+  actor: Actor,
+  input: {
+    fromPath: string;
+    toPath: string;
+    expectedRevision: string;
+  },
+) {
+  WorkspacePath.parse(input.fromPath);
+  WorkspacePath.parse(input.toPath);
+  const current = await db.query<AtomRow>(
+    `
+      select id, workspace_id, path, kind, body, revision, updated_at
+      from atoms
+      where workspace_id = $1
+        and path = $2
+        and deleted_at is null
+      for update
+    `,
+    [actor.workspaceId, input.fromPath],
+  );
+  const row = current.rows[0];
+  if (!row) throw new WorkspaceError("not_found", "Atom not found");
+  if (String(row.revision) !== input.expectedRevision) {
+    throw new WorkspaceError("conflict", "Expected revision is stale");
+  }
+
+  const nextRevision = row.revision + 1;
+  try {
+    const updated = await db.query<AtomRow>(
+      `
+        update atoms
+        set path = $3,
+            revision = $4,
+            updated_at = now()
+        where id = $1
+          and workspace_id = $2
+        returning id, workspace_id, path, kind, body, revision, updated_at
+      `,
+      [row.id, actor.workspaceId, input.toPath, nextRevision],
+    );
+    await insertAtomRevision(db, {
+      actor,
+      atomId: row.id,
+      revision: nextRevision,
+      body: row.body,
+    });
+    return updated.rows[0];
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new WorkspaceError("conflict", "File path already exists");
+    }
+    throw error;
+  }
+}
+
 async function insertAtomRevision(
   db: PgQueryable,
   args: {

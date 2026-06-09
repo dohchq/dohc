@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 6 - Assets, Upload UI, And Type-Specific File Views
+- Current phase: Phase 7 - Agent-Native Files, Data Import, And Database Tools
 - Current step: not started
-- Last successful commit: Phase 5 commit, `Add Convex workspace conformance adapter`
+- Last successful commit: Phase 6 commit, `Add upload UI and type-specific file views`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -238,3 +238,63 @@
 - Deferred findings with reason: asset mapping intentionally throws `unsupported_media_type` until Phase 6; delete behavior maps to existing Convex `atoms.remove` but is not yet covered by the shared conformance cases; redundant index removal was skipped because the Phase 3 plan explicitly required those minimum index names; MinIO image pin stays at the planned value for now; HTML asset sanitization is deferred to Phase 6; raw Convex `getByPath` rows still map `type: null` because that public query does not project the list-row type metadata.
 - Remaining risk: Convex revision tokens are adapter-side for now because the public Convex atom API exposes `updatedAt` rather than a stable contract revision.
 - Next phase: Phase 6 - Assets, Upload UI, And Type-Specific File Views
+
+### Phase 6: Assets, Upload UI, And Type-Specific File Views
+
+- Status: complete
+- Execution map: write UI RED tests for upload/type views/short rename first, then extend shared backend conformance with asset read/write and leaf-name rename cases. Implement Postgres asset metadata plus local blob storage, Convex compatibility asset parity, Convex workspace-file asset APIs, sidebar upload controls, asset-aware app-shell routing, and `FileTypeView` previews while keeping Markdown atoms on the existing editor path.
+- Files changed:
+  - `.gitignore`
+  - `apps/app/convex/assets.test.ts`
+  - `apps/app/convex/assets.ts`
+  - `apps/app/convex/schema.ts`
+  - `apps/app/src/__tests__/uploadFiles.test.tsx`
+  - `apps/app/src/__tests__/fileTypeViews.test.tsx`
+  - `apps/app/src/__tests__/renameShortName.test.tsx`
+  - `apps/app/src/components/UploadFileButton.tsx`
+  - `apps/app/src/components/FileTypeView.tsx`
+  - `apps/app/src/components/FileTree.tsx`
+  - `apps/app/src/lib/path-tree.ts`
+  - `apps/app/src/routes/_app.tsx`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+  - `packages/workspace-contracts/src/backend.ts`
+  - `packages/workspace-contracts/src/conformance.test.ts`
+  - `packages/workspace-contracts/src/conformance.ts`
+  - `packages/workspace-contracts/src/events.ts`
+  - `packages/workspace-convex-compat/src/testAdapter.ts`
+  - `packages/workspace-postgres/src/blobStore.ts`
+  - `packages/workspace-postgres/src/repositories/assets.ts`
+  - `packages/workspace-postgres/src/repositories/atoms.ts`
+  - `packages/workspace-postgres/src/services/backend.ts`
+- Code deleted or consolidated: removed no source code; consolidated atom/asset parity through the shared conformance harness and app-shell `FileRow` normalization.
+- Obsolete paths retained and why: existing `registerUploadedAsset` chat/onboarding asset behavior is retained for compatibility; Convex compatibility adapter still keeps adapter-side revision tokens until the public Convex atom API exposes a stable revision.
+- Tests added:
+  - `apps/app/src/__tests__/uploadFiles.test.tsx`
+  - `apps/app/src/__tests__/fileTypeViews.test.tsx`
+  - `apps/app/src/__tests__/renameShortName.test.tsx`
+  - New workspace-file regression in `apps/app/convex/assets.test.ts`
+  - New asset and rename cases in `packages/workspace-contracts/src/conformance.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/uploadFiles.test.tsx src/__tests__/fileTypeViews.test.tsx src/__tests__/renameShortName.test.tsx` (RED: missing `UploadFileButton`, missing `FileTypeView`, missing `splitRenamePath`/`composeRenamedTreePath`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test src/conformance.test.ts` (RED: memory backend rejected assets and lacked `renameFile`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/uploadFiles.test.tsx src/__tests__/fileTypeViews.test.tsx src/__tests__/renameShortName.test.tsx` (passed: 3 files, 12 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 2 files, 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 2 files, 7 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (failed: merged atom/asset rows had an unsafe union shape)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed after normalizing rows to `AppFileRow`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/assets.test.ts` (passed: 1 file, 4 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/lib/storageUpload.test.ts src/lib/pastedAttachments.test.ts src/apps/AppRuntimeHost.test.tsx src/__tests__/noBrowserDialogs.test.ts` (passed: 4 files, 13 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/appSecurity.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+- Failing tests fixed: implemented workspace upload button, accepted upload types, post-upload open callback, type-specific preview surfaces, short-name rename helpers/wiring, backend asset read/write/list, and backend leaf-name rename.
+- Cross-cutting regressions run: upload/storage helpers, pasted attachment helpers, app runtime asset resolution tests, no-browser-dialog guard, Convex assets tests, and authz/app trust/agent approval security slice.
+- Convex status: workspace-file assets can register, list, resolve, rename, and delete under server-derived workspace scope; compatibility adapter passes shared asset/rename conformance.
+- Postgres status: asset metadata stores path/media type/size/sha256/object key/revision and bytes persist through local `.dohc-dev/blobs/` via `BlobStore`; shared conformance passes.
+- Reviewer/subagent/CodeRabbit findings: no review checkpoint required by the plan for Phase 6; next major review checkpoint is after Phase 8.
+- Relevant findings fixed: none in this phase.
+- Deferred findings with reason: SQLite opens a Database Studio shell with empty tables until Phase 7 imports/structures database files; Convex compatibility asset bytes are adapter-side for conformance while the production Convex app path uses storage-backed signed URLs; text asset previews fetch body client-side from the resolved asset URL rather than storing uploaded text as markdown atoms.
+- Remaining risk: Postgres local blob cleanup/orphan handling is basic; later object-store/S3 integration should add transactional cleanup and durable lifecycle policies.
+- Next phase: Phase 7 - Agent-Native Files, Data Import, And Database Tools

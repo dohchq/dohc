@@ -4,6 +4,7 @@ export type WorkspaceEventKind =
   | "atom_created"
   | "atom_updated"
   | "asset_saved"
+  | "file_renamed"
   | "file_deleted";
 
 export type WorkspaceEvent = {

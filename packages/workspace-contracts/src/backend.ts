@@ -34,6 +34,19 @@ export type SaveAssetInput = {
   bytes: Uint8Array;
 };
 
+export type ReadAssetOutput = {
+  mediaType: string;
+  kind: AssetKind;
+  bytes: Uint8Array;
+  revision: string;
+};
+
+export type RenameFileInput = {
+  fromPath: string;
+  toName: string;
+  expectedRevision: string;
+};
+
 export type WorkspaceBackend = {
   listFiles(actor: Actor): Promise<WorkspaceFile[]>;
   readText(
@@ -44,8 +57,10 @@ export type WorkspaceBackend = {
     body: string;
     revision: string;
   }>;
+  readAsset(actor: Actor, path: string): Promise<ReadAssetOutput>;
   createAtom(actor: Actor, input: CreateAtomInput): Promise<WorkspaceFile>;
   writeAtom(actor: Actor, input: WriteAtomInput): Promise<WorkspaceFile>;
   saveAsset(actor: Actor, input: SaveAssetInput): Promise<WorkspaceFile>;
+  renameFile(actor: Actor, input: RenameFileInput): Promise<WorkspaceFile>;
   deleteFile(actor: Actor, path: string): Promise<void>;
 };

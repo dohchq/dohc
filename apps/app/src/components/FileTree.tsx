@@ -38,6 +38,10 @@ import {
 } from 'lucide-react'
 import { FolderPicker } from './FolderPicker'
 import { EmojiPicker } from './EmojiPicker'
+import {
+  UploadFileButton,
+  type UploadedWorkspaceFile,
+} from './UploadFileButton'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { SidebarAccountFooter, SidebarHeader } from './SidebarChrome'
 import { SidebarListSkeleton } from './Skeleton'
@@ -123,6 +127,8 @@ type Props = {
   onOpenShared?: (shareId: string) => void
   // Opens the full-content search overlay (⌘⇧F).
   onOpenSearch?: () => void
+  activeWorkspaceId?: string
+  onUploadFile?: (file: UploadedWorkspaceFile) => void
   allowCreate?: boolean
   loading?: boolean
 }
@@ -170,6 +176,24 @@ function normalizeTreeInputPath(kind: 'page' | 'folder', path: string): string {
     return `${clean}.md`
   }
   return clean
+}
+
+export function splitRenamePath(path: string): {
+  folderPath: string
+  fileName: string
+} {
+  if (!path.includes('/')) return { folderPath: '', fileName: path }
+  const slash = path.lastIndexOf('/')
+  return {
+    folderPath: path.slice(0, slash),
+    fileName: path.slice(slash + 1),
+  }
+}
+
+export function composeRenamedTreePath(path: string, newFileName: string): string {
+  const { folderPath } = splitRenamePath(path)
+  const cleanName = newFileName.trim().replace(/^\/+|\/+$/g, '')
+  return folderPath ? `${folderPath}/${cleanName}` : cleanName
 }
 
 /** A section's open/closed state, persisted to localStorage by key. */
@@ -277,6 +301,8 @@ export function FileTree({
   activeShareId,
   onOpenShared,
   onOpenSearch,
+  activeWorkspaceId,
+  onUploadFile,
   allowCreate = true,
   loading = false,
 }: Props) {
@@ -1027,7 +1053,15 @@ export function FileTree({
           onOpenSearch={onOpenSearch}
           createControl={
             allowCreate ? (
-              <div className="relative">
+              <div className="flex items-center gap-1">
+                {onUploadFile && (
+                  <UploadFileButton
+                    activeWorkspaceId={activeWorkspaceId}
+                    defaultFolderPath={targetDir}
+                    onUploaded={onUploadFile}
+                  />
+                )}
+                <div className="relative">
                 <button
                   type="button"
                   onClick={() => setNewOpen((v) => !v)}
@@ -1085,6 +1119,7 @@ export function FileTree({
                     </div>
                   </>
                 )}
+                </div>
               </div>
             ) : null
           }
@@ -1417,7 +1452,7 @@ function InlineRenameRow({
   onInput: () => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
-  const [value, setValue] = useState(path)
+  const [value, setValue] = useState(() => splitRenamePath(path).fileName)
 
   useEffect(() => {
     ref.current?.focus()
@@ -1452,14 +1487,16 @@ function InlineRenameRow({
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
-              void onCommit(value)
+              void onCommit(composeRenamedTreePath(path, value))
             } else if (e.key === 'Escape') {
               e.preventDefault()
               onCancel()
             }
           }}
           onBlur={() => {
-            if (!error && !busy) void onCommit(value)
+            if (!error && !busy) {
+              void onCommit(composeRenamedTreePath(path, value))
+            }
           }}
           spellCheck={false}
           className="flex-1 bg-transparent border-none outline-none font-mono text-[12px] text-ink placeholder:text-ink-faint disabled:opacity-60"

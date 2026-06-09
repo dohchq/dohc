@@ -2,16 +2,26 @@ import type pg from "pg";
 import type {
   Actor,
   CreateAtomInput,
-  SaveAssetInput,
+  RenameFileInput,
   WorkspaceBackend,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
 import { WorkspaceError } from "@dohc/workspace-contracts";
+import { createLocalBlobStore, type BlobStore } from "../blobStore";
+import {
+  assetRowToWorkspaceFile,
+  insertAsset,
+  listAssetFiles,
+  readAssetMetadata,
+  renameAsset,
+  softDeleteAsset,
+} from "../repositories/assets";
 import {
   atomRowToWorkspaceFile,
   insertAtom,
   listAtomFiles,
   readAtomText,
+  renameAtom,
   softDeleteAtom,
   updateAtom,
 } from "../repositories/atoms";
@@ -24,7 +34,10 @@ import { assertWorkspaceMember } from "../policy/authorize";
 
 export function createPostgresWorkspaceBackend(
   pool: pg.Pool,
+  options: { blobStore?: BlobStore } = {},
 ): WorkspaceBackend {
+  const blobStore = options.blobStore ?? createLocalBlobStore();
+
   async function assertAuthorized(db: PgQueryable, actor: Actor) {
     await assertWorkspaceMember({
       actor,
@@ -37,11 +50,25 @@ export function createPostgresWorkspaceBackend(
   return {
     async listFiles(actor) {
       await assertAuthorized(pool, actor);
-      return listAtomFiles(pool, actor);
+      const [atoms, assets] = await Promise.all([
+        listAtomFiles(pool, actor),
+        listAssetFiles(pool, actor),
+      ]);
+      return [...atoms, ...assets].sort((a, b) => a.path.localeCompare(b.path));
     },
     async readText(actor, path) {
       await assertAuthorized(pool, actor);
       return readAtomText(pool, actor, path);
+    },
+    async readAsset(actor, path) {
+      await assertAuthorized(pool, actor);
+      const row = await readAssetMetadata(pool, actor, path);
+      return {
+        mediaType: row.media_type,
+        kind: row.kind,
+        bytes: await blobStore.get(row.object_key),
+        revision: String(row.revision),
+      };
     },
     async createAtom(actor, input: CreateAtomInput) {
       return withTransaction(pool, async (client) => {
@@ -71,26 +98,98 @@ export function createPostgresWorkspaceBackend(
         return atomRowToWorkspaceFile(row);
       });
     },
-    async saveAsset(_actor, _input: SaveAssetInput) {
-      throw new WorkspaceError(
-        "unsupported_media_type",
-        "Asset storage is implemented in Phase 6",
-      );
+    async saveAsset(actor, input) {
+      const stored = await blobStore.put(input.bytes);
+      return withTransaction(pool, async (client) => {
+        await assertAuthorized(client, actor);
+        const row = await insertAsset(client, actor, input, stored);
+        await insertWorkspaceEvent(client, {
+          actor,
+          kind: "asset_saved",
+          targetKind: "asset",
+          targetId: row.id,
+          payload: {
+            path: input.path,
+            mediaType: input.mediaType,
+            size: stored.size,
+            sha256: stored.sha256,
+            revision: row.revision,
+          },
+        });
+        return assetRowToWorkspaceFile(row);
+      });
+    },
+    async renameFile(actor, input: RenameFileInput) {
+      return withTransaction(pool, async (client) => {
+        await assertAuthorized(client, actor);
+        const toPath = composeRenamedPath(input.fromPath, input.toName);
+        const renamed = await renameAnyFile(client, actor, {
+          ...input,
+          toPath,
+        });
+        await insertWorkspaceEvent(client, {
+          actor,
+          kind: "file_renamed",
+          targetKind: renamed.kind,
+          targetId: renamed.id,
+          payload: {
+            fromPath: input.fromPath,
+            toPath,
+            revision: renamed.revision,
+          },
+        });
+        return renamed;
+      });
     },
     async deleteFile(actor, path) {
       await withTransaction(pool, async (client) => {
         await assertAuthorized(client, actor);
-        const atomId = await softDeleteAtom(client, actor, path);
+        const deleted = await softDeleteAnyFile(client, actor, path);
         await insertWorkspaceEvent(client, {
           actor,
           kind: "file_deleted",
-          targetKind: "atom",
-          targetId: atomId,
+          targetKind: deleted.kind,
+          targetId: deleted.id,
           payload: { path },
         });
       });
     },
   };
+}
+
+async function renameAnyFile(
+  db: PgQueryable,
+  actor: Actor,
+  input: RenameFileInput & { toPath: string },
+) {
+  try {
+    return atomRowToWorkspaceFile(await renameAtom(db, actor, input));
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  return assetRowToWorkspaceFile(await renameAsset(db, actor, input));
+}
+
+async function softDeleteAnyFile(db: PgQueryable, actor: Actor, path: string) {
+  try {
+    return { kind: "atom" as const, id: await softDeleteAtom(db, actor, path) };
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+  return { kind: "asset" as const, id: await softDeleteAsset(db, actor, path) };
+}
+
+function isNotFound(error: unknown) {
+  return error instanceof WorkspaceError && error.code === "not_found";
+}
+
+function composeRenamedPath(fromPath: string, toName: string) {
+  const folderPath = fromPath.includes("/")
+    ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+    : "";
+  const cleanName = toName.trim().replace(/^\/+|\/+$/g, "");
+  if (!cleanName) throw new WorkspaceError("invalid_path", "Filename is empty");
+  return folderPath ? `${folderPath}/${cleanName}` : cleanName;
 }
 
 async function withTransaction<T>(
