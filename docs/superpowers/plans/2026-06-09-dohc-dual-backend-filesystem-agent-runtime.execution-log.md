@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 8 - Filesystem Projection
+- Current phase: Phase 9 - Local Files Mode
 - Current step: not started
-- Last successful commit: Phase 7 commit, `Add agent-native file and data import tools`
+- Last successful commit: Phase 8 commit, `Add workspace filesystem projection`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -352,3 +352,50 @@
 - Deferred findings with reason: collection imports return `unsupported-import-target` until a source-backed collection backend is introduced; Convex import privacy approval currently fails closed at the data action and the agent tool reports refusal rather than completing through the existing delete-only approval-card executor; generated text-file atoms preserve raw CSV/TXT/JSON body bytes and do not seed markdown frontmatter because frontmatter would corrupt those file formats.
 - Remaining risk: SQLite import parsing is intentionally deterministic and small; richer CSV/PDF extraction should eventually move behind a dedicated extractor with stronger format coverage.
 - Next phase: Phase 8 - Filesystem Projection
+
+### Phase 8: Filesystem Projection
+
+- Status: complete
+- Execution map: create the `@dohc/workspace-fs` package and write the filesystem projection RED test first. Implement manifest metadata, materialization, recursive scan, diff generation with rename detection, and apply-through-backend operations for atom text, binary assets, and SQLite/database files.
+- Files changed:
+  - `packages/workspace-fs/package.json`
+  - `packages/workspace-fs/tsconfig.json`
+  - `packages/workspace-fs/src/apply.ts`
+  - `packages/workspace-fs/src/diff.ts`
+  - `packages/workspace-fs/src/fsProjection.test.ts`
+  - `packages/workspace-fs/src/index.ts`
+  - `packages/workspace-fs/src/materialize.ts`
+  - `packages/workspace-fs/src/metadata.ts`
+  - `packages/workspace-fs/src/scan.ts`
+  - `pnpm-lock.yaml`
+- Code deleted or consolidated: none; this phase adds the projection package only.
+- Obsolete paths retained and why: backend-specific Convex/Postgres code remains untouched; projection talks only through the shared `WorkspaceBackend` contract.
+- Tests added:
+  - `packages/workspace-fs/src/fsProjection.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (RED: missing `./apply`, proving the projection modules did not exist)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install --lockfile-only` (passed; lockfile refreshed for new package)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs typecheck` (failed before workspace symlink existed and before rename union narrowing fix)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install` (passed; workspace links rebuilt)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test` (passed after type fix: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts test` (passed: 2 files, 8 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-contracts typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 3 files, 9 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat test` (passed: 1 file, 5 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-convex-compat typecheck` (passed)
+  - `git diff --check` (passed)
+  - `coderabbit --version` (0.5.4)
+  - `coderabbit auth status --agent` (authenticated)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (Phase 8 filesystem projection review; completed with 0 issues)
+- Failing tests fixed: implemented materialization of atoms/assets/database files, manifest metadata with stable IDs/revisions/content types/backend mode and content hashes, recursive scan excluding `.dohc`, update/create/delete/rename diffing, backend-only application of text updates/asset saves/deletes/renames, path traversal rejection, binary asset creation, and SQLite/database updates through `saveAsset` instead of raw text writes.
+- Cross-cutting regressions run: shared workspace contract tests/typecheck, Postgres package tests/typecheck, Convex compatibility conformance tests/typecheck.
+- Convex status: compatibility package still passes shared conformance; projection stays backend-port based and does not remove or alter Convex support.
+- Postgres status: package tests/typecheck still pass; projection can materialize/apply through the same `WorkspaceBackend` interface Postgres implements.
+- Reviewer/subagent/CodeRabbit findings: CodeRabbit Phase 8 filesystem projection review raised 0 issues.
+- Relevant findings fixed: none.
+- Deferred findings with reason: review-required paths and locked-file approval outputs are represented by backend errors for now; explicit approval item modeling lands with Phase 9 local sync and Phase 10 sandbox apply flows.
+- Remaining risk: manifest hash tracking is sufficient for deterministic scan tests but future local sync should add conflict files/review items and manifest update after successful apply.
+- Next phase: Phase 9 - Local Files Mode
