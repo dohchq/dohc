@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 12 - Apps And SQLite Against Both Backends
+- Current phase: Phase 13 - Frontend Backend Switch
 - Current step: not started
-- Last successful commit: Phase 11 commit, `Separate agent activity from final output`
+- Last successful commit: Phase 12 commit, `Run apps and SQLite across Convex and Postgres`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -555,3 +555,62 @@
 - Deferred findings with reason: the activity timeline reads current Convex UI message parts and does not yet persist a separate normalized run-event table; that durable event store is deferred until a backend-neutral run history surface is introduced.
 - Remaining risk: run duration uses message timestamps (`previous user` to assistant `updatedAt`/streaming now), so true tool-level duration remains approximate until backend run events are persisted independently.
 - Next phase: Phase 12 - Apps And SQLite Against Both Backends
+
+### Phase 12: Apps And SQLite Against Both Backends
+
+- Status: complete
+- Execution map: write AppTester backend matrix coverage for the finance tracker fixture, then add explicit database table RPC operations to the app SDK/protocol/runtime path, Postgres app package/trust/source services, and Postgres SQLite database services with snapshot materialization, query, row operations, operation logs, version conflicts, and SQLite byte round-tripping.
+- Files changed:
+  - `apps/app/src/apps/AppRuntimeHost.database.test.ts`
+  - `apps/app/src/apps/AppRuntimeHost.tsx`
+  - `apps/app/src/apps/sdkProtocol.ts`
+  - `apps/app/src/apps/virtualDohcAppSdk.test.ts`
+  - `apps/app/src/apps/virtualDohcAppSdk.ts`
+  - `packages/workspace-postgres/package.json`
+  - `packages/workspace-postgres/src/index.ts`
+  - `packages/workspace-postgres/src/services/apps.test.ts`
+  - `packages/workspace-postgres/src/services/apps.ts`
+  - `packages/workspace-postgres/src/services/databaseFiles.ts`
+  - `packages/workspace-postgres/src/services/databaseOps.test.ts`
+  - `packages/workspace-postgres/src/services/databaseOps.ts`
+  - `services/app-tester/src/backendMatrix.test.ts`
+  - `services/app-tester/src/runAppTest.ts`
+  - `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
+- Code deleted or consolidated: app SDK database table operations now use explicit `dohc.database.table.*` RPC operations instead of reusing collection RPCs with a `database` discriminator. No source files were deleted; the Postgres package test script now runs with `--no-file-parallelism` because package tests share the same local Postgres database and existing fixture truncation is not file-parallel safe.
+- Obsolete paths retained and why: `apps/app/convex/appData.ts` was not modified because the existing Convex app-data transport already satisfies the Phase 12 app-data tests; changing it cosmetically would add churn without improving coverage. Convex remains the production app/runtime backend until the later backend switch/readiness phases.
+- Tests added:
+  - `packages/workspace-postgres/src/services/apps.test.ts`
+  - `packages/workspace-postgres/src/services/databaseOps.test.ts`
+  - `services/app-tester/src/backendMatrix.test.ts`
+  - Added explicit database table operation assertions in `apps/app/src/apps/AppRuntimeHost.database.test.ts` and `apps/app/src/apps/virtualDohcAppSdk.test.ts`.
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/apps/AppRuntimeHost.database.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/appData.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts` (RED: missing explicit `dohc.database.table.insert/update` dispatch cases in `AppRuntimeHost`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/apps.test.ts src/services/databaseOps.test.ts` (RED: missing Postgres app/database service modules)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/app-tester test src/backendMatrix.test.ts` (RED: app-tester result did not include the requested backend)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/apps.test.ts` (RED for the follow-up app-scoped DB wrapper gap: `apps.databaseTables is not a function`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/apps.test.ts` (passed after adding app-scoped database table/query/apply wrappers: 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/app-tester typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/appSecurity.test.ts convex/appTrust.test.ts convex/appData.test.ts convex/databaseFiles.test.ts convex/databaseOps.test.ts` (passed: 5 files, 29 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test src/services/apps.test.ts src/services/databaseOps.test.ts` (passed: 2 files, 3 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/app-tester test src/backendMatrix.test.ts` (passed: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/apps/AppRuntimeHost.test.tsx src/apps/AppRuntimeHost.database.test.ts src/apps/AppRuntimeHost.collection.test.ts src/apps/AppRuntimeHost.security.test.tsx src/apps/AppRuntimeHost.agent.test.tsx src/apps/AppRuntimeHost.collaboration.test.ts src/apps/AppRuntimeHost.collaboration.test.tsx src/apps/sdkProtocol.test.ts src/apps/virtualDohcAppSdk.test.ts` (passed: 9 files, 33 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/app-tester test` (passed: 4 files, 25 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-postgres test` (passed: 5 files, 12 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `git diff --check` (passed)
+  - `coderabbit --version` (0.5.4)
+  - `coderabbit auth status --agent` (authenticated)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (Phase 12 review; completed with 0 findings)
+- Failing tests fixed: implemented explicit app-runtime database table list/get/insert/update/upsert/delete protocol validation and dispatch; updated the virtual SDK to emit those operations; added backend-labeled app-tester results and a dual backend finance fixture; implemented Postgres app discovery, manifest source digest, write-key trust grants, app-scoped document read/append, app-scoped asset resolution, app-scoped database table/query/apply wrappers, SQLite ingest/materialization, SELECT-only query, row insert/update/upsert/delete, idempotent operation logging, and version conflict handling.
+- Cross-cutting regressions run: web typecheck, Postgres typecheck, app-tester typecheck, exact Phase 12 app/SQLite tests, adjacent app runtime protocol/SDK tests, full app-tester suite, full Postgres package suite, web authz/app security/app trust/agent approvals slice, Hocuspocus tests, sqlite-worker tests, and `git diff --check`.
+- Convex status: existing Convex app data/security/trust/database tests pass; explicit browser runtime table RPCs route through the existing Convex `databaseFiles`/`databaseOps` app APIs with server-side workspace args and app trust enforcement.
+- Postgres status: app services and database services pass service-level tests; full Postgres package conformance still passes after serializing package test execution.
+- Reviewer/subagent/CodeRabbit findings: CodeRabbit Phase 12 review raised 0 issues.
+- Relevant findings fixed: none from CodeRabbit; the local delete-or-justify pass found and fixed the missing app-scoped database wrappers in `createPostgresAppsService` before review.
+- Deferred findings with reason: AppTester's backend matrix currently runs the same persistent browser fixture under `backend=convex` and `backend=postgres` labels while live backend transport switching is still deferred to Phase 13 and later readiness gates. The real enforcement surface for Phase 12 is covered by Convex app/database tests plus Postgres service tests.
+- Remaining risk: Postgres app/database services enforce workspace membership, app manifest read/write scopes, per-user trust for writes, source-scoped asset/database access, and version conflicts, but lock/review-gate integration is still represented by the existing Convex runtime path and must be carried into the backend-neutral client in the frontend/backend switch phases.
+- Next phase: Phase 13 - Frontend Backend Switch

@@ -837,6 +837,95 @@ export function AppRuntimeHost({
                 ...workspaceArgs,
               }),
             )
+          case 'dohc.database.table.list':
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.query(api.databaseFiles.appCollectionRows, {
+                packageRoot,
+                databasePath: request.args.path,
+                collection: request.args.table,
+                ...(request.args.query === undefined ? {} : { query: request.args.query }),
+                ...workspaceArgs,
+              }),
+            )
+          case 'dohc.database.table.get':
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.query(api.databaseFiles.appCollectionRow, {
+                packageRoot,
+                databasePath: request.args.path,
+                collection: request.args.table,
+                id: request.args.id,
+                ...workspaceArgs,
+              }),
+            )
+          case 'dohc.database.table.insert':
+            recordAction(request.op, request.args.table)
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.mutation(api.databaseOps.appApply, {
+                packageRoot,
+                databasePath: request.args.path,
+                operationId: request.id,
+                op: 'insert',
+                collection: request.args.table,
+                table: request.args.table,
+                payload: request.args.record,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+                ...workspaceArgs,
+              }),
+            )
+          case 'dohc.database.table.update':
+            recordAction(request.op, request.args.table)
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.mutation(api.databaseOps.appApply, {
+                packageRoot,
+                databasePath: request.args.path,
+                operationId: request.id,
+                op: 'update',
+                collection: request.args.table,
+                table: request.args.table,
+                rowId: request.args.id,
+                payload: request.args.patch,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+                ...workspaceArgs,
+              }),
+            )
+          case 'dohc.database.table.upsert':
+            recordAction(request.op, request.args.table)
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.mutation(api.databaseOps.appApply, {
+                packageRoot,
+                databasePath: request.args.path,
+                operationId: request.id,
+                op: 'upsert',
+                collection: request.args.table,
+                table: request.args.table,
+                rowId: request.args.id,
+                payload: request.args.record,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+                ...workspaceArgs,
+              }),
+            )
+          case 'dohc.database.table.delete':
+            recordAction(request.op, request.args.table)
+            return makeAppRpcSuccess(
+              request.id,
+              await convex.mutation(api.databaseOps.appApply, {
+                packageRoot,
+                databasePath: request.args.path,
+                operationId: request.id,
+                op: 'delete',
+                collection: request.args.table,
+                table: request.args.table,
+                rowId: request.args.id,
+                payload: {},
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+                ...workspaceArgs,
+              }),
+            )
           case 'dohc.asset.resolve':
             return makeAppRpcSuccess(
               request.id,

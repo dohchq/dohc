@@ -105,11 +105,30 @@ function docApi(bridge: Bridge, path: string) {
 
 function databaseApi(bridge: Bridge, path: string) {
   const label = `dohc.database(${quote(path)})`
+  function tableApi(name: string) {
+    const tableLabel = `${label}.table(${quote(name)})`
+    return {
+      list: (query?: Record<string, unknown>) =>
+        call(bridge, `${tableLabel}.list`, 'dohc.database.table.list', compact({ path, table: name, query }))
+          .then(rowsResult),
+      get: (id: string) =>
+        call(bridge, `${tableLabel}.get`, 'dohc.database.table.get', { path, table: name, id })
+          .then(rowResult),
+      insert: (record: Record<string, unknown>, options: CollectionMutationOptions = {}) =>
+        call(bridge, `${tableLabel}.insert`, 'dohc.database.table.insert', compact({ path, table: name, record, ...options })),
+      update: (id: string, patch: Record<string, unknown>, options: CollectionMutationOptions = {}) =>
+        call(bridge, `${tableLabel}.update`, 'dohc.database.table.update', compact({ path, table: name, id, patch, ...options })),
+      upsert: (id: string, record: Record<string, unknown>, options: CollectionMutationOptions = {}) =>
+        call(bridge, `${tableLabel}.upsert`, 'dohc.database.table.upsert', compact({ path, table: name, id, record, ...options })),
+      delete: (id: string, options: CollectionMutationOptions = {}) =>
+        call(bridge, `${tableLabel}.delete`, 'dohc.database.table.delete', compact({ path, table: name, id, ...options })),
+    }
+  }
   return {
     tables: () => call(bridge, `${label}.tables`, 'dohc.database.tables', { path }),
     query: (sql: string, params?: unknown[]) =>
       call(bridge, `${label}.query`, 'dohc.database.query', compact({ path, sql, params })),
-    table: (name: string) => collectionApi(bridge, name, path),
+    table: (name: string) => tableApi(name),
   }
 }
 

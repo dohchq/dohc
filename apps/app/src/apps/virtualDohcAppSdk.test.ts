@@ -87,14 +87,14 @@ describe('virtual @dohc/app SDK', () => {
         args: { path: 'finance/main.sqlite', sql: 'select * from transactions where id = ?', params: ['tx_1'] },
       },
       {
-        op: 'dohc.collection.list',
-        args: { database: 'finance/main.sqlite', name: 'transactions' },
+        op: 'dohc.database.table.list',
+        args: { path: 'finance/main.sqlite', table: 'transactions' },
       },
       {
-        op: 'dohc.collection.update',
+        op: 'dohc.database.table.update',
         args: {
-          database: 'finance/main.sqlite',
-          name: 'transactions',
+          path: 'finance/main.sqlite',
+          table: 'transactions',
           id: 'tx_1',
           patch: { reviewed: true },
           expectedVersion: 2,
