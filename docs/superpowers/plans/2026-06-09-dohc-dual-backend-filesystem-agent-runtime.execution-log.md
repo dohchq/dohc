@@ -8,9 +8,9 @@
 - Convex baseline result: pass with `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH`
 - Postgres baseline command: not available before Phase 3
 - Postgres baseline result: not started; Postgres package does not exist before Phase 3
-- Current phase: Phase 10 - Cloud Agent Sandbox With Bash-Like Power
+- Current phase: Phase 11 - Agent Output, Approvals, And Run UX
 - Current step: not started
-- Last successful commit: Phase 9 commit, `Add local filesystem sync mode`
+- Last successful commit: Phase 10 commit, `Add workspace shell sandbox for agents`
 - Last failing command: `npm exec --yes pnpm@10.24.0 -- check:dual-backend-baseline` under `/usr/bin/node` v18.19.1
 - Last blocker: none
 
@@ -450,3 +450,57 @@
 - Deferred findings with reason: the watcher currently uses polling through `watchWorkspace`; deeper OS-native recursive watching can be added once local mode needs production-grade debounce and platform-specific watch semantics. The workspace API package exposes a handler and routes but no default production listener because backend selection and deployment packaging land in later phases.
 - Remaining risk: sync/apply batches are applied sequentially by the backend route; future production sync should add idempotency keys and transaction grouping where the selected backend supports it.
 - Next phase: Phase 10 - Cloud Agent Sandbox With Bash-Like Power
+
+### Phase 10: Cloud Agent Sandbox With Bash-Like Power
+
+- Status: complete
+- Execution map: add the `@dohc/agent-sandbox` service with RED tests first, then implement workspace mounting, session state, allowlisted command execution, diff capture/apply through the shared backend policy, approval surfacing, and conservative Convex agent tool registration. `apply_workspace_shell_diff` is direct-user gated; `run_workspace_shell` and `discard_workspace_shell_diff` are safe because they do not persist workspace data.
+- Files changed:
+  - `apps/app/convex/agent.ts`
+  - `apps/app/convex/agentSandboxIntegration.test.ts`
+  - `apps/app/src/__tests__/prepareStep.test.ts`
+  - `apps/app/src/__tests__/skillTurnGateApplied.test.ts`
+  - `services/agent-sandbox/package.json`
+  - `services/agent-sandbox/tsconfig.json`
+  - `services/agent-sandbox/src/agentSandbox.test.ts`
+  - `services/agent-sandbox/src/approvals.ts`
+  - `services/agent-sandbox/src/diffCapture.ts`
+  - `services/agent-sandbox/src/sandbox/commands.ts`
+  - `services/agent-sandbox/src/sandbox/session.ts`
+  - `services/agent-sandbox/src/server.ts`
+  - `services/agent-sandbox/src/workspaceMount.ts`
+  - `pnpm-lock.yaml`
+- Code deleted or consolidated: no source deletion; sandbox diff capture reuses `@dohc/workspace-fs` materialize/scan/apply primitives and `WorkspaceBackend` instead of duplicating filesystem diff logic.
+- Obsolete paths retained and why: Convex agent tools currently report the shell service as unavailable until a deployed sandbox API is wired into Convex runtime configuration; this keeps the tool names/prompt contract available without pretending shell changes persist.
+- Tests added:
+  - `services/agent-sandbox/src/agentSandbox.test.ts`
+  - `apps/app/convex/agentSandboxIntegration.test.ts`
+- Commands run:
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox test` (RED: failed to load missing `./server`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/agentSandboxIntegration.test.ts convex/agentApprovals.test.ts` (RED: missing shell tool registration and prompt contract)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm install` (passed; new workspace linked, existing app peer warnings only)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox test` (failed once on static `node:sqlite` import, then passed after using a dev/test sqlite fallback)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/agentSandboxIntegration.test.ts convex/agentApprovals.test.ts` (passed: 2 files, 6 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox typecheck` (failed on Buffer generic narrowing, then passed after typing output buffers as `Buffer<ArrayBufferLike>`)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test src/__tests__/prepareStep.test.ts src/__tests__/skillTurnGateApplied.test.ts` (failed until apply was added to the unauthorizable set and run/discard were listed as safe helpers, then passed: 2 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs test && PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/workspace-fs typecheck` (passed)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/web test convex/authzBoundaries.test.ts convex/appSecurity.test.ts convex/appTrust.test.ts convex/agentApprovals.test.ts` (passed: 4 files, 14 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/hocuspocus test` (passed: 9 files, 78 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/sqlite-worker test` (passed: 4 files, 11 tests)
+  - `git diff --check` (passed)
+  - `coderabbit --version` (0.5.4)
+  - `coderabbit auth status --agent` (authenticated)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (Phase 10 review; completed with 3 findings)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox test` (passed after review fixes: 1 file, 2 tests)
+  - `PATH=/home/ice/.local/share/nvm/v22.13.0/bin:/home/ice/.local/share/pnpm/.tools/pnpm/10.24.0/bin:$PATH pnpm --filter @dohc/agent-sandbox typecheck` (passed after review fixes)
+  - `coderabbit review --agent -t uncommitted -c AGENTS.md` (follow-up Phase 10 review; completed with 0 findings)
+- Failing tests fixed: implemented sandbox workspace materialization, command allowlist for `cat`, `rg`, `node`, `python` via `python3`, and `sqlite3` fallback, workspace-only argument checks, timeout/output caps, sanitized environment, diff capture, backend-policy diff apply, locked/app-trust approval surfacing, and Convex agent shell tool/prompt registration.
+- Cross-cutting regressions run: agent sandbox tests/typecheck, web typecheck, active tool/gate tests, workspace-fs tests/typecheck, web authz/app security/app trust/agent approvals slice, Hocuspocus tests, sqlite-worker tests.
+- Convex status: shell tool names are registered; `apply_workspace_shell_diff` is structurally absent from skill turns and calls `requireDirectUserAuthorization` before backend scope resolution. Shell run/discard return explicit unavailable/unpersisted status until a sandbox API is connected.
+- Postgres status: unchanged directly; sandbox apply uses the shared `WorkspaceBackend`, so Postgres policy remains the application path when a Postgres backend is supplied.
+- Reviewer/subagent/CodeRabbit findings: first CodeRabbit review raised 3 findings; follow-up review raised 0 findings.
+- Relevant findings fixed: command PATH is now configurable via `SANDBOX_SAFE_PATH` with fallback to `process.env.PATH`; workspace path escape checks now reject absolute paths, flag-assigned absolute paths, raw `..`, and encoded `%2e%2e`; sqlite fallback no longer writes invalid plain text under `.sqlite` and instead creates an empty SQLite file while emulating simple dev/test `select 1`.
+- Deferred findings with reason: production-grade process isolation is still deferred; this first sandbox enforces command allowlist, no shell, sanitized env, timeout/output limits, and argument path guards, but a hardened container/runtime is still required before accepting arbitrary production shell sessions.
+- Remaining risk: Node/Python scripts are guarded by argument inspection rather than an OS-level mount namespace in this first service; production deployment must add container or equivalent filesystem isolation before exposing the shell to untrusted commands.
+- Next phase: Phase 11 - Agent Output, Approvals, And Run UX

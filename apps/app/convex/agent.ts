@@ -1255,6 +1255,12 @@ missing decisions. Do not merely summarize row count. Build source files
 that preserve the useful shape of the data and an interface that helps the
 user inspect, correct, categorize, budget, or act on it.
 
+For large data/file/app work, use shell for large data/file/app work:
+\`run_workspace_shell\` can inspect and modify a projected workspace folder,
+then \`apply_workspace_shell_diff\` persists the captured diff through dohc
+policy. use dohc tools for permissions, approvals, sharing, app trust, and finalization.
+never claim shell changes are persisted until the diff is applied; before that they are only a sandbox diff.
+
 The vault MUST contain all of this before you call finish_onboarding
 (hard floor):
 - the identity atom: .context/me.md
@@ -2826,6 +2832,85 @@ export const dohcAgent = new Agent(components.agent, {
           ...input,
         })
         return JSON.stringify(result)
+      },
+    }),
+
+    run_workspace_shell: createTool({
+      description:
+        'Run an allowed command in a projected workspace shell for large file, data, or app work. Produces sandbox output and possibly an unapplied diff; nothing is persisted until apply_workspace_shell_diff succeeds.',
+      inputSchema: z.object({
+        command: z.string(),
+        args: z.array(z.string()).default([]),
+        reason: z.string().optional(),
+      }),
+      execute: async (
+        ctx,
+        input: { command: string; args: string[]; reason?: string },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        return JSON.stringify({
+          ok: false,
+          code: 'workspace-shell-service-unavailable',
+          workspaceId,
+          command: input.command,
+          args: input.args,
+          reason: input.reason ?? null,
+          message:
+            'Workspace shell service is not connected in this Convex runtime. Use dohc file/database tools directly, or run the agent sandbox service and apply its captured diff before claiming persistence.',
+        })
+      },
+    }),
+
+    apply_workspace_shell_diff: createTool({
+      description:
+        'Persist a previously captured workspace shell diff through dohc backend policy. Requires a direct user turn; never use this to bypass locks, sharing, app trust, or approval gates.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+        diffId: z.string().optional(),
+      }),
+      execute: async (
+        ctx,
+        input: { sessionId: string; diffId?: string },
+        options,
+      ): Promise<string> => {
+        await requireDirectUserAuthorization(ctx, 'apply_workspace_shell_diff')
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        return JSON.stringify({
+          ok: false,
+          code: 'workspace-shell-service-unavailable',
+          workspaceId,
+          sessionId: input.sessionId,
+          diffId: input.diffId ?? null,
+          message:
+            'Workspace shell diff apply is unavailable until the sandbox service is connected. No shell changes were persisted.',
+        })
+      },
+    }),
+
+    discard_workspace_shell_diff: createTool({
+      description:
+        'Discard a captured workspace shell diff. Safe to use when shell output is no longer needed; it does not persist any workspace changes.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+        diffId: z.string().optional(),
+      }),
+      execute: async (
+        ctx,
+        input: { sessionId: string; diffId?: string },
+        options,
+      ): Promise<string> => {
+        const workspaceId = await activeWorkspaceFromTool(ctx, options)
+        await viewerSubjectFromTool(ctx)
+        return JSON.stringify({
+          ok: true,
+          workspaceId,
+          sessionId: input.sessionId,
+          diffId: input.diffId ?? null,
+          message: 'workspace shell diff discarded; no shell changes were persisted',
+        })
       },
     }),
 
@@ -4773,6 +4858,7 @@ const UNAUTHORIZABLE_TOOLS = [
   'capture', // gated CONDITIONALLY on shared:true; absent at depth>0
   'set_lock', // file-org-v1 D4.1b — user-decision class; never at depth>0
   'write_database_rows', // existing database mutation; requires direct user turn outside saved skills/commands
+  'apply_workspace_shell_diff', // persists captured shell diffs; never at depth>0
 ] as const
 
 // At depth>0 + kind='skill' the model gets ONLY the safe
@@ -4806,6 +4892,8 @@ const SAFE_FOR_SKILL_TOOLS = [
   'save_file', // additive text-file create only; refuses overwrites and folder ACL violations
   'upload_asset', // additive asset create only; refuses overwrites and folder ACL violations
   'import_data', // additive import create only; refuses overwrites and private-boundary crossings
+  'run_workspace_shell', // sandbox-only; changes remain unapplied until a direct-user apply tool call
+  'discard_workspace_shell_diff', // discards sandbox state; does not mutate workspace data
   'propose_replace_text',
   'insert_after_heading',
   'rewrite_section',

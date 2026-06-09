@@ -59,6 +59,9 @@ describe('Track-3 P2b.4 — activeTools constants (three mutually-exclusive mode
       // Existing database row mutation — safe only in a direct user
       // turn because it changes structured data.
       'write_database_rows',
+      // Applies captured shell diffs to workspace state; run/discard
+      // are safe helpers, but persistence is direct-user only.
+      'apply_workspace_shell_diff',
     ])
     expect([...UNAUTHORIZABLE_TOOLS].sort()).toEqual([...expected].sort())
   })

@@ -60,6 +60,8 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'set_lock',
   // Existing database data mutation.
   'write_database_rows',
+  // Applies captured shell diffs to workspace state.
+  'apply_workspace_shell_diff',
 ]
 
 describe('Track-3 P2b.3 — UNAUTHORIZABLE-set gate coverage', () => {
@@ -134,7 +136,7 @@ const TOOL_BODIES: Record<string, string> = (() => {
 })()
 
 const SIDE_EFFECT_RE =
-  /\bctx\.run(Mutation|Action|Query)\b|\brequireWorkspace\(ctx\)/
+  /\bctx\.run(Mutation|Action|Query)\b|\brequireWorkspace\(ctx\)|\bactiveWorkspaceFromTool\(ctx/
 
 // Ops where the gate is UNCONDITIONAL at the top of the handler.
 // For these, the gate MUST precede the first side-effect token.
@@ -154,6 +156,8 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
   'set_lock',
   // Existing database row writes mutate structured state.
   'write_database_rows',
+  // Applying a workspace shell diff mutates atom/asset/database files.
+  'apply_workspace_shell_diff',
 ] as const
 
 // Ops where the gate is INSIDE a conditional (create_atom, capture).
@@ -276,6 +280,8 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'save_file', // additive generated text-file create; refuses overwrite and folder ACL violations
   'upload_asset', // additive generated asset create; refuses overwrite and folder ACL violations
   'import_data', // additive import create; refuses overwrite and private-boundary crossings
+  'run_workspace_shell', // sandbox run only; no workspace persistence until the direct-user apply tool
+  'discard_workspace_shell_diff', // discards sandbox state; no workspace data mutation
   'insert_after_heading',
   'propose_replace_text',
   'rewrite_section',
@@ -331,6 +337,7 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'inspect_file', 'query_database', 'export_file', 'embed_asset',
       'create_entities', 'create_folder',
       'save_file', 'upload_asset', 'import_data',
+      'run_workspace_shell', 'discard_workspace_shell_diff',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
       'run_command',
