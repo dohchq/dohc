@@ -18,6 +18,12 @@ export function effectiveHome(): string {
   return testHome() ?? homedir();
 }
 
+// Where desktop-level state files live (registry, cloud credentials):
+// userData in production, the hermetic test home under E2E.
+export function stateDir(): string {
+  return testHome() ?? app.getPath("userData");
+}
+
 let cachedStore: ReturnType<typeof createRegistryStore> | null = null;
 
 function store() {

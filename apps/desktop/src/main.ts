@@ -9,6 +9,7 @@ import {
   dialog,
   ipcMain,
   protocol,
+  safeStorage,
   shell,
   type IpcMainInvokeEvent,
 } from "electron";
@@ -22,6 +23,11 @@ import {
   AppPackagePayload,
   AppPackageResult,
   ApplyDatabaseEditPayload,
+  CloudLoginPollResult,
+  CloudLoginStartPayload,
+  CloudLoginStartResult,
+  CloudStatusResult,
+  OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   GrantAppTrustPayload,
   ImportToDatabasePayload,
@@ -46,7 +52,7 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { launchMarks } from "./performance/launchMarks";
-import { decideNavigation } from "./security/electronSecurity";
+import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { navigationPolicy } from "./window/createMainWindow";
 import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
 import {
@@ -54,7 +60,10 @@ import {
   findWorkspace,
   listWorkspaces,
   registerWorkspace,
+  stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import {
   getAppPackage as getAppPackageInfo,
@@ -94,6 +103,28 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
+}
+
+// Lazy: safeStorage and userData are only safe to touch after app ready, and
+// handlers register inside whenReady. The session token lives encrypted in
+// the credential store and never crosses IPC.
+let cachedCloudLogin: CloudLogin | null = null;
+function cloudLogin(): CloudLogin {
+  if (!cachedCloudLogin) {
+    cachedCloudLogin = createCloudLogin({
+      store: createCloudCredentialStore({
+        dir: stateDir(),
+        cipher: {
+          isAvailable: () => safeStorage.isEncryptionAvailable(),
+          encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+          decrypt: (cipherText) =>
+            safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+        },
+      }),
+      defaultServerUrl: process.env.DOHC_CLOUD_URL ?? "http://localhost:1786",
+    });
+  }
+  return cachedCloudLogin;
 }
 
 // Live file-watch → history pipeline. Pushes a renderer notification whenever
@@ -296,6 +327,38 @@ function registerIpcHandlers(): void {
     );
     const error = await shell.openPath(realTarget);
     if (error) throw new Error(error);
+  });
+
+  // The ONLY path from renderer to the OS browser (window.open is a pure
+  // deny): http(s) URLs only, used by cloud login's verification step.
+  ipcMain.handle(CHANNELS.openExternalUrl, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenExternalUrlPayload.parse(payload);
+    if (!isSafeExternalUrl(input.url)) {
+      throw new Error(`Refusing to open non-http(s) URL externally`);
+    }
+    await shell.openExternal(input.url);
+  });
+
+  ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CloudLoginStartPayload.parse(payload ?? {});
+    return CloudLoginStartResult.parse(await cloudLogin().start(input.serverUrl));
+  });
+
+  ipcMain.handle(CHANNELS.cloudLoginPoll, async (event) => {
+    assertTrustedSender(event);
+    return CloudLoginPollResult.parse(await cloudLogin().poll());
+  });
+
+  ipcMain.handle(CHANNELS.cloudStatus, async (event) => {
+    assertTrustedSender(event);
+    return CloudStatusResult.parse(await cloudLogin().status());
+  });
+
+  ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
+    assertTrustedSender(event);
+    await cloudLogin().logout();
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {

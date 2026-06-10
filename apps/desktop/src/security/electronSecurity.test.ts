@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
-  shouldOpenExternally,
+  isSafeExternalUrl,
   validateDevServerUrl,
 } from "./electronSecurity";
 
@@ -96,14 +96,14 @@ describe("dev server URL validation", () => {
 
 describe("window.open policy", () => {
   it("routes http and https targets through the external shell handler", () => {
-    expect(shouldOpenExternally("https://dohc.ai/docs")).toBe(true);
-    expect(shouldOpenExternally("http://dohc.ai/docs")).toBe(true);
+    expect(isSafeExternalUrl("https://dohc.ai/docs")).toBe(true);
+    expect(isSafeExternalUrl("http://dohc.ai/docs")).toBe(true);
   });
 
   it("never shells out non-http(s) schemes or junk", () => {
-    expect(shouldOpenExternally("file:///etc/passwd")).toBe(false);
-    expect(shouldOpenExternally("smb://share/x")).toBe(false);
-    expect(shouldOpenExternally("javascript:alert(1)")).toBe(false);
-    expect(shouldOpenExternally("not a url")).toBe(false);
+    expect(isSafeExternalUrl("file:///etc/passwd")).toBe(false);
+    expect(isSafeExternalUrl("smb://share/x")).toBe(false);
+    expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false);
+    expect(isSafeExternalUrl("not a url")).toBe(false);
   });
 });

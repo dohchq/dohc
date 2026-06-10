@@ -35,6 +35,7 @@ import type {
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { FileInspector } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
@@ -431,21 +432,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {cloudOpen ? (
         <Overlay onClose={() => setCloudOpen(false)}>
-          <div
-            data-testid="cloud-sync-panel"
-            className="w-105 max-w-[80vw] rounded-lg border border-line bg-panel p-4 shadow-lg"
-          >
-            <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold">
-              <Cloud size={14} aria-hidden />
-              dohc Cloud
-            </h2>
-            <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-              Cloud sync brings sharing, backup, and team workspaces. It
-              arrives with dohc Cloud accounts — this workspace stays fully
-              functional locally, and you can connect it then without moving
-              anything.
-            </p>
-          </div>
+          <CloudLogin />
         </Overlay>
       ) : null}
     </div>

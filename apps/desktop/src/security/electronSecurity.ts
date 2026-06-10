@@ -59,9 +59,12 @@ export function decideNavigation(
   return { action: "deny" };
 }
 
-// window.open never creates a BrowserWindow (callers always deny). http(s)
-// targets are handed to the OS browser; every other scheme is dropped.
-export function shouldOpenExternally(targetUrl: string): boolean {
+// Gate for the EXPLICIT openExternalUrl IPC (the only path to the OS
+// browser): http(s) only, everything else (file:, javascript:, custom
+// schemes, unparseable) refused. window.open itself is a pure deny with no
+// side effects — renderer content must never be able to launch a browser
+// without going through this audited affordance.
+export function isSafeExternalUrl(targetUrl: string): boolean {
   try {
     const protocol = new URL(targetUrl).protocol;
     return protocol === "https:" || protocol === "http:";

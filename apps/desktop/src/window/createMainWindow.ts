@@ -1,10 +1,9 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow } from "electron";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
-  shouldOpenExternally,
   validateDevServerUrl,
   type NavigationPolicy,
 } from "../security/electronSecurity";
@@ -43,10 +42,10 @@ export function createMainWindow(): BrowserWindow {
     webPreferences: createMainWindowWebPreferences(preloadPath),
   });
 
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    if (shouldOpenExternally(url)) void shell.openExternal(url);
-    return { action: "deny" };
-  });
+  // window.open is a pure deny with NO side effects: renderer content (file
+  // views today, app iframes in 7b) must never reach the OS browser except
+  // through the explicit, audited openExternalUrl IPC.
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   // Top-frame navigations, server redirects, and subframe navigations all
   // go through the same policy: each is a separate Electron surface.

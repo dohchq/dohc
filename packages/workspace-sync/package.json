@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-core": "workspace:*"
+    "@dohc/workspace-core": "workspace:*",
+    "@dohc/workspace-fs": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

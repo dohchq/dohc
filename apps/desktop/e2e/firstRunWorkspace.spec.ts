@@ -148,7 +148,7 @@ test("first run creates a real workspace folder and lands in a native shell", as
   // --- Cloud connect is an honest surface, not a gate ---
   await page.getByRole("button", { name: /connect dohc cloud/i }).click();
   await expect(page.getByTestId("cloud-sync-panel")).toContainText(
-    /fully functional locally/i,
+    /cloud is additive, never required/i,
   );
   await page.mouse.click(10, 10); // backdrop click closes
   await expect(page.getByTestId("cloud-sync-panel")).toHaveCount(0);

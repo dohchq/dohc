@@ -279,6 +279,39 @@ export const GrantAppTrustPayload = z.object({
 });
 export type GrantAppTrustPayload = z.infer<typeof GrantAppTrustPayload>;
 
+// dohc Cloud login (device-authorization flow): the desktop shows a short
+// code, the user approves in the system browser, the desktop polls. The
+// session token never reaches the renderer — main stores it via safeStorage
+// and the renderer only ever sees connection status + email.
+export const OpenExternalUrlPayload = z.object({
+  url: z.string().min(1).max(2048),
+});
+export type OpenExternalUrlPayload = z.infer<typeof OpenExternalUrlPayload>;
+
+export const CloudLoginStartPayload = z.object({
+  serverUrl: z.string().url().max(2048).optional(),
+});
+export type CloudLoginStartPayload = z.infer<typeof CloudLoginStartPayload>;
+
+export const CloudLoginStartResult = z.object({
+  userCode: z.string().min(1),
+  verificationUri: z.string().min(1),
+});
+export type CloudLoginStartResult = z.infer<typeof CloudLoginStartResult>;
+
+export const CloudLoginPollResult = z.object({
+  status: z.enum(["pending", "complete", "denied", "expired"]),
+  email: z.string().optional(),
+});
+export type CloudLoginPollResult = z.infer<typeof CloudLoginPollResult>;
+
+export const CloudStatusResult = z.object({
+  connected: z.boolean(),
+  email: z.string().optional(),
+  serverUrl: z.string().optional(),
+});
+export type CloudStatusResult = z.infer<typeof CloudStatusResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),
@@ -322,6 +355,11 @@ export interface DohcDesktopBridge {
   getAppPackage(payload: AppPackagePayload): Promise<AppPackageResult>;
   runAppTester(payload: RunAppTesterPayload): Promise<RunAppTesterResult>;
   grantAppTrust(payload: GrantAppTrustPayload): Promise<void>;
+  openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
+  cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
+  cloudLoginPoll(): Promise<CloudLoginPollResult>;
+  cloudStatus(): Promise<CloudStatusResult>;
+  cloudLogout(): Promise<void>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,
