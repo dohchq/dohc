@@ -1,6 +1,6 @@
 import type { CloudEnv, DohcBackendClient, WorkspaceFile } from './backendClient'
 import { resolveCloudApiOrigin } from './backendClient'
-import { mediaTypeForWorkspacePath } from '../lib/mediaTypes'
+import { mediaTypeForPath } from '@dohc/workspace-core'
 
 // HTTP client for services/workspace-api. Routes are workspace-scoped:
 //   GET  /workspaces/:id/files                 → { ok, files }
@@ -84,7 +84,7 @@ export function createPostgresBackendClient(
     async uploadFile(input) {
       const mediaType =
         input.file.type ||
-        mediaTypeForWorkspacePath(input.path) ||
+        mediaTypeForPath(input.path) ||
         'application/octet-stream'
       const result = await requestJson<FileResponse>(
         fetchImpl,

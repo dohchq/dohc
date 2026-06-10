@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { AlertCircle, Loader2, Upload } from 'lucide-react'
 import type { DohcBackendClient, WorkspaceFile } from '../backend/backendClient'
 
-export const WORKSPACE_UPLOAD_ACCEPT = [
+const WORKSPACE_UPLOAD_ACCEPT = [
   'image/png',
   'image/jpeg',
   'application/pdf',

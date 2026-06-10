@@ -474,7 +474,7 @@ describe('semantic apply API', () => {
         body: JSON.stringify({
           operationId: 'op_create_view_source',
           workspaceId: 'workspace_1',
-          path: '.views/workspace/src/App.tsx',
+          path: '.apps/workspace/src/App.tsx',
           content: source,
           actor: {
             userId: 'agent_1',

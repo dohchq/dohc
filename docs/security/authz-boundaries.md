@@ -1,72 +1,64 @@
 # Authorization boundaries
 
-dohc's safety properties are enforced server-side in Convex and must not
-be weakened by rebrand or UI work.
+dohc's safety properties are enforced server-side (`services/workspace-api`
+with Better Auth, `services/hocuspocus`) and in the Electron main process —
+never in renderer or browser code. They must not be weakened by rebrand or
+UI work. (The pre-pivot edition of this document is in git history; this
+edition describes the desktop-first/Postgres architecture.)
 
 ## Identity
 
-- The authenticated identity is derived server-side via
-  `ctx.auth.getUserIdentity()`. Functions NEVER accept a `userId` (or any
-  user identifier) as an argument for authorization from browser/client
-  callers.
-- There is intentionally **no** unauthenticated request → data escape.
-  An earlier env-gated dev bypass was removed because Convex public
-  functions are raw internet endpoints on a shared deployment.
-- Server-to-server bridges may use explicit identity/workspace arguments only
-  behind a shared server secret. The current reviewed exception is
-  `hocuspocusAuth.checkAtomAccess`, which requires
-  `HOCUSPOCUS_CONVEX_SERVER_TOKEN` and is called by the Hocuspocus service,
-  not by the browser. Its `userId` comes from the signed collab token `sub`,
-  while `workspaceId` is the owner workspace encoded in the Hocuspocus
-  document name; Convex performs the final share/org ACL decision.
+- The authenticated identity comes ONLY from a validated Better Auth session
+  (browser cookie, or the Bearer token issued by the desktop device-flow
+  login). `createSessionActorResolver` in
+  `services/workspace-api/src/auth/session.ts` is the production resolver;
+  routes never accept a `userId` (or any user identifier) from the caller as
+  authorization input.
+- There is intentionally **no** unauthenticated request → data escape, and
+  no env-gated dev bypass in shipping routes.
 
-## Ownership
+## Ownership and sharing
 
-- Every atom, folder, entity, and share is scoped to a `workspaceId`
-  derived from the authenticated identity (`requireWorkspace`).
-  `workspace` is a domain concept, not legacy brand — it stays.
-- A user cannot read or mutate another workspace's data. Sharing is the
-  only cross-user path and is consent-gated.
+- Every atom, asset, database, and share is scoped to a `workspaceId`;
+  membership is enforced server-side (`assertWorkspaceMember`) on the
+  workspace routes. A user cannot read or mutate another workspace's data.
+- Shared links are the only cross-user path. `GET /shared/atoms/:atomId`
+  requires a session, resolves capability from the live share row at request
+  time (revoked → 403, deleted → 404), and grants access to exactly that
+  atom — nothing else in the workspace.
+- A lock on a file refuses agent writes at the data layer; the user's own
+  editing still works.
 
-## Locks and gates
+## Collaboration (Hocuspocus)
 
-- A user lock on an atom refuses all agent writes at the data layer; the
-  user's own editor still works. Hocuspocus forwards signed `actorKind` into
-  the Convex ACL bridge so collaborative writes follow the same rule.
-- The skill-turn gate and inline-window caps are structural, fail-closed
-  invariants. The supporting tests (`skillTurnGate`, `strictKeystone`,
-  `r3InlineWindow`, `windows`, `atomShares`) must keep passing.
+- Connections present signed collab tokens; the document name encodes the
+  owner workspace, and `postgres-acl` makes the final access decision
+  server-side. A caller can never choose identity or workspace.
+- Proves: `services/hocuspocus/src/auth.test.ts`, `doc-name.test.ts`,
+  `postgres-acl.test.ts` (which also asserts no legacy-backend code paths).
 
-## HTML atoms
+## Desktop IPC
 
-- Author HTML is sanitized before interpolation into a trusted,
-  server-built shell. The shell is fixed and never resolves inline
-  `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
-  `style-src 'unsafe-inline'; font-src data:` with no network fetches.
+- The sandboxed renderer reaches the system only through the typed preload
+  bridge (`apps/desktop/src/preload.ts`); every channel is named in
+  `CHANNELS` and validated in the main process against the zod
+  `bridgeContract`. No raw `ipcRenderer`, no Node in the renderer
+  (`scripts/check-architecture-debt.mjs` enforces both structurally).
+- Workspace-relative paths from any client (IPC, MCP, sync) go through
+  `validateUserWritePath` in `packages/workspace-core` (traversal, reserved
+  `.dohc`, Windows alias tricks), and file serving additionally enforces
+  realpath containment (`apps/desktop/src/workspaces/workspaceAssets.ts`).
 
-## Apps
+## Apps and agents
 
-- `.apps/` source atoms are interface code, not data sources. Inline
-  `{key: value}` examples inside app source are skipped by capture,
-  live values, and imports/exports scans. Legacy `.views/` source atoms
-  receive the same treatment during migration compatibility only.
-- App code runs in a sandboxed iframe with `sandbox="allow-scripts"` and
-  without `allow-same-origin`, forms, popups, or top-navigation powers.
-- The iframe receives no Convex URL, cookies, access token, workspace id
-  authority, or raw cross-workspace handles. It talks to dohc through the
-  small `@dohc/app` `postMessage` SDK.
-- The parent bridge validates message shape before dispatch and attaches
-  `packageRoot` plus the active workspace itself. Browser code cannot
-  choose an identity or widen its workspace.
-- Convex still derives identity server-side with `requireWorkspace`; atom
-  reads still go through atom/folder access checks.
-- Imports/exports windows remain the only cross-workspace field-sharing
-  path exposed to apps.
-- App manifests define maximum read/write scopes only. They do not grant
-  permission by themselves; every read/write still goes through server-side
-  workspace, share, lock, and review-gate checks.
-- App discovery, source reads, SDK rows, and bundles are capped. Oversized
-  apps fail with diagnostics instead of rendering.
-- Agent handoffs and proposed patches from app code are reviewed actions,
-  not direct document writes; the parent emits a lightweight local
-  `dohc:app-action` event for those operations.
+- `.apps/` source folders are interface code, not data. Their files are
+  visible and editable like any other source; nothing in them executes with
+  workspace authority.
+- An app must pass the `services/app-tester` checks — including the static
+  trust check, which rejects legacy view-era code patterns among other
+  gates — and an explicit user trust grant (`grantAppTrust`, main-process
+  validated) before it can be a trusted, broadly-writing app.
+- Local agents go through the stdio MCP server (`packages/mcp`): every path
+  argument is validated, database queries are read-only and bounded, and
+  agent writes are attributed in history. Boundary-crossing actions require
+  user confirmation; nothing is auto-trusted.

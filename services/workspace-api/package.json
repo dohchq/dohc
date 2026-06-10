@@ -19,7 +19,6 @@
     "pg": "^8.21.0"
   },
   "devDependencies": {
-    "@better-auth/cli": "^1.4.21",
     "@types/node": "^22.19.19",
     "@types/pg": "^8.20.0",
     "tsx": "^4.22.3",

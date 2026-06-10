@@ -1,5 +1,5 @@
 -- Phase 3 scaffold note: foreign keys are intentionally deferred while the
--- dual-backend migration proves soft-delete, restore, and dev-reset behavior.
+-- schema proves soft-delete, restore, and dev-reset behavior.
 -- Expected relationships are documented in src/db/schema.ts and should be
 -- promoted to FK constraints once compatibility tests cover those flows.
 

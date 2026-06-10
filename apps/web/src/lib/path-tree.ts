@@ -31,7 +31,7 @@ export type FileRow = {
   fileId?: string | null
 }
 
-export type TreePage = {
+type TreePage = {
   path: string
   title: string | null
   type?: 'html' | 'command' | 'skill' | null
@@ -74,21 +74,23 @@ export type FolderInput = string | {
 }
 
 const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
-const VIEW_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
+const APP_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 
-function isViewSourcePath(path: string): boolean {
+// `.apps/<name>/…` holds app source folders (see workspace-core
+// classifyPath); source files there keep their extension in labels.
+function isAppSourcePath(path: string): boolean {
   const parts = path.split('/')
-  const viewsIndex = parts.indexOf('.views')
+  const appsIndex = parts.indexOf('.apps')
   return (
-    viewsIndex >= 0 &&
-    viewsIndex <= parts.length - 3 &&
-    Boolean(parts[viewsIndex + 1])
+    appsIndex >= 0 &&
+    appsIndex <= parts.length - 3 &&
+    Boolean(parts[appsIndex + 1])
   )
 }
 
-export function isSourceCodeFilePath(path: string): boolean {
+function isSourceCodeFilePath(path: string): boolean {
   return SOURCE_CODE_EXT_RE.test(path) || (
-    isViewSourcePath(path) && VIEW_SOURCE_EXT_RE.test(path)
+    isAppSourcePath(path) && APP_SOURCE_EXT_RE.test(path)
   )
 }
 
@@ -212,58 +214,4 @@ export function nodeLabel(node: TreeNode): string {
   // titleless file shows its clean name (e.g. `dashboard`, not
   // `dashboard.html`).
   return node.segment.replace(/\.(md|html)$/i, '')
-}
-
-// "Adjacent" pages — for Obsidian-style flat semantics, this returns
-// the siblings of the current atom (i.e., other atoms in the same
-// folder) so the bottom-of-atom "in this folder" section is useful.
-// Returns empty array for root-level atoms (no folder context).
-export function findSubpages(
-  files: FileRow[],
-  currentPath: string,
-): FileRow[] {
-  const slash = currentPath.lastIndexOf('/')
-  if (slash < 0) return []
-  const dir = currentPath.slice(0, slash + 1) // includes trailing slash
-  return files
-    .filter((f) => f.path !== currentPath && f.path.startsWith(dir))
-    .filter((f) => !f.path.slice(dir.length).includes('/'))
-    .sort((a, b) => a.path.localeCompare(b.path))
-}
-
-// Breadcrumb segments for a path. Each segment's target is what should
-// open when clicked — intermediate folders open `<folder>/index.md`,
-// the final segment is the path itself.
-export type Crumb = { label: string; target: string; isCurrent: boolean }
-
-export function pathToBreadcrumbs(path: string): Crumb[] {
-  const segs = path.split('/')
-  const out: Crumb[] = []
-  for (let i = 0; i < segs.length; i++) {
-    const isLast = i === segs.length - 1
-    const seg = segs[i]!
-    if (isLast) {
-      out.push({
-        label: isSourceCodeFilePath(path) ? seg : seg.replace(/\.(md|html)$/i, ''),
-        target: segs.slice(0, i + 1).join('/'),
-        isCurrent: true,
-      })
-    } else {
-      // Obsidian-style: folders in the breadcrumb are non-clickable
-      // (they're not pages).
-      out.push({ label: seg, target: '', isCurrent: false })
-    }
-  }
-  return out
-}
-
-// All ancestor folder paths of a given atom — used to auto-expand the
-// path leading to the active row in the file tree.
-export function ancestors(path: string): string[] {
-  const segs = path.split('/')
-  const out: string[] = []
-  for (let i = 1; i < segs.length; i++) {
-    out.push(segs.slice(0, i).join('/'))
-  }
-  return out
 }

@@ -39,17 +39,13 @@ reviews:
     - "!**/dist/**"
     - "!**/coverage/**"
     - "!**/*.tsbuildinfo"
-    - "!apps/app/src/routeTree.gen.ts"
-    - "!apps/app/convex/_generated/api.*"
-    - "!apps/app/convex/_generated/server.*"
-    - "!apps/app/convex/_generated/dataModel.d.ts"
-    - "!apps/app/convex/_generated/ai/ai-files.state.json"
+    - "!apps/web/src/routeTree.gen.ts"
 
   labeling_instructions:
     - label: "security"
       instructions: "Auth, authorization, sharing, workspace isolation, locks, skill-turn gates, secret handling, sandboxing, or dependency security."
-    - label: "convex"
-      instructions: "Convex schema, queries, mutations, actions, indexes, auth, or generated API contract changes."
+    - label: "backend"
+      instructions: "workspace-api routes, Better Auth, workspace-postgres schema/repositories, sync protocol, or API contract changes."
     - label: "editor"
       instructions: "Tiptap, Yjs, markdown import/export, inline atoms, formulas, editor readiness, collaboration, or persistence projection."
     - label: "frontend"
@@ -61,7 +57,7 @@ reviews:
     - label: "docs"
       instructions: "Product, development, security, QA, or architecture documentation."
     - label: "tests"
-      instructions: "Vitest, convex-test, Playwright, fixtures, test helpers, or coverage-only changes."
+      instructions: "Vitest, Playwright, fixtures, test helpers, or coverage-only changes."
     - label: "dependencies"
       instructions: "package.json, pnpm-lock.yaml, engines, workspace package boundaries, or dependency version changes."
     - label: "infra"
@@ -76,45 +72,27 @@ reviews:
         they affect readability or product quality. Treat AGENTS.md as product
         context: text is the primitive, user control matters, and durable,
         inspectable workspace state is more important than hidden convenience.
-    - path: "apps/app/convex/**"
+    - path: "services/workspace-api/**"
       instructions: |
-        Convex functions are raw server endpoints. Review against
-        apps/app/convex/_generated/ai/guidelines.md and
-        docs/security/authz-boundaries.md. Flag browser/client-callable code that
+        These routes are raw server endpoints. Review against
+        docs/security/authz-boundaries.md. Flag client-callable code that
         accepts userId or other caller identity as authorization input, skips
-        ctx.auth.getUserIdentity(), omits workspace scoping, weakens folder/atom
-        access, bypasses share boundaries, or weakens lock/skill-turn gates.
-        Prefer fail-closed behavior and focused convex-test coverage.
+        Better Auth session validation, omits workspace scoping, bypasses
+        share boundaries, or weakens revision guards. Prefer fail-closed
+        behavior and focused live-pg test coverage.
     - path: "services/hocuspocus/**"
       instructions: |
-        Treat this service as the collaboration and Convex ACL bridge. Check
-        signed actor/user tokens, document-name parsing, workspace ownership,
-        HOCUSPOCUS_CONVEX_SERVER_TOKEN handling, snapshot/update sequencing,
-        and final Convex ACL decisions. Flag any path that lets a browser caller
-        choose identity or workspace without server verification.
-    - path: "apps/app/src/editor-v2/**"
+        Treat this service as the collaboration authority. Check signed
+        actor/user tokens, document-name parsing, workspace ownership, the
+        Postgres ACL, and snapshot/update sequencing. Flag any path that lets
+        a caller choose identity or workspace without server verification.
+    - path: "apps/desktop/**"
       instructions: |
-        The canonical document state is the Y.Doc. Flag new behavior that treats
-        atoms.body or raw full-body markdown patching as the source of truth.
-        Review import/export, markdown extensions, provider lifecycle,
-        IndexedDB, and readiness code for deterministic round trips and safe
-        recovery after reconnects.
-    - path: "apps/app/src/components/AtomEditor*"
-      instructions: |
-        Review editor changes for Y.Doc-first behavior, command ergonomics,
-        slash commands, inline atoms, formulas, and lifecycle edge cases. Watch
-        for regressions that desync sender/receiver contracts or bypass tests.
-    - path: "apps/app/src/components/HtmlAtomFrame.tsx"
-      instructions: |
-        HTML atoms must stay sandboxed and sanitized. Flag network fetches,
-        unsafe script execution, broad CSP changes, formula evaluation inside
-        author HTML, or interpolation paths that bypass the trusted shell.
-    - path: "apps/app/src/lib/htmlSanitize*"
-      instructions: |
-        Treat sanitizer changes as security-sensitive. Verify the allowlist is
-        intentional, scripts/events/unsafe URLs remain blocked, and tests cover
-        both accepted authoring cases and rejected exploit cases.
-    - path: "apps/app/src/**"
+        The desktop app is the primary client. Review Electron security
+        (sandboxed renderer, typed preload bridge as the only seam, validated
+        IPC), workspace path containment, and local-first behavior (no cloud
+        requirement for local work).
+    - path: "apps/web/src/**"
       instructions: |
         Review React/TanStack Start code for clear state ownership, accessible
         keyboard and focus behavior, stable routing, and no client-side trust
@@ -125,7 +103,7 @@ reviews:
         Brand identity is final: lowercase dohc, drop-lobe mark, warm paper and
         graphite. Flag legacy product identity, palette drift, or duplicated
         brand constants outside the package.
-    - path: "apps/app/src/__tests__/brandNoLegacy.test.ts"
+    - path: "apps/web/src/__tests__/brandNoLegacy.test.ts"
       instructions: |
         Treat this as a shipping identity guard. Flag broad whitelists, deleted
         scan paths, or changes that would let legacy product names ship.
@@ -141,7 +119,7 @@ reviews:
         weakened authz/security/brand/editor invariants, missing regression
         coverage for changed behavior, or tests that pass by over-mocking the
         boundary under review.
-    - path: "apps/app/e2e/**"
+    - path: "apps/desktop/e2e/**"
       instructions: |
         Playwright coverage should represent real user workflows with stable
         selectors and deterministic setup. Avoid brittle timing-only waits.
@@ -178,9 +156,8 @@ reviews:
       - mode: "error"
         name: "Authz Boundaries"
         instructions: |
-          Pass if the PR does not touch auth, Convex functions, sharing,
-          folders, atoms, captures, entities, workspaces, skill gates, locks,
-          Hocuspocus ACL, HTML atoms, or server routes. Otherwise pass only if
+          Pass if the PR does not touch auth, sharing, atoms, workspaces,
+          locks, the Hocuspocus ACL, or server routes. Otherwise pass only if
           identity is derived server-side, every object remains workspace-scoped,
           browser/client callers cannot provide authorization identity, sharing
           boundaries are preserved, locks and skill gates still fail closed, and
@@ -233,12 +210,12 @@ reviews:
         name: "add focused regression tests"
         instructions: |
           Add or update the narrowest useful regression tests for the changed
-          behavior. Prefer Vitest or convex-test for unit and boundary coverage,
-          and Playwright only for user-visible flows.
+          behavior. Prefer Vitest for unit and boundary coverage, and
+          Playwright only for user-visible flows.
       - enabled: true
         name: "check dohc invariants"
         instructions: |
-          Re-read AGENTS.md, apps/app/AGENTS.md, docs/security/authz-boundaries.md,
+          Re-read AGENTS.md, apps/web/AGENTS.md, docs/security/authz-boundaries.md,
           and docs/development/testing.md, then identify any changed code that
           violates dohc's product invariants. Propose fixes rather than broad
           refactors.
@@ -304,8 +281,7 @@ knowledge_base:
     enabled: true
     filePatterns:
       - "AGENTS.md"
-      - "apps/app/AGENTS.md"
-      - "apps/app/convex/_generated/ai/guidelines.md"
+      - "apps/web/AGENTS.md"
       - "docs/security/authz-boundaries.md"
       - "docs/development/testing.md"
       - "docs/product/*.md"
@@ -327,17 +303,17 @@ code_generation:
   docstrings:
     language: "en-US"
     path_instructions:
-      - path: "apps/app/convex/**"
-        instructions: "Generate docstrings only for exported functions or non-obvious server-side authorization boundaries. Do not restate simple Convex boilerplate."
+      - path: "services/workspace-api/**"
+        instructions: "Generate docstrings only for exported functions or non-obvious server-side authorization boundaries. Do not restate route boilerplate."
       - path: "services/hocuspocus/**"
         instructions: "Document token, ACL, persistence, and sequence invariants where future agents could accidentally weaken them."
-      - path: "apps/app/src/**"
+      - path: "apps/web/src/**"
         instructions: "Prefer clear names over comments. Add comments only for non-obvious editor, auth, routing, or sanitizer behavior."
   unit_tests:
     path_instructions:
-      - path: "apps/app/convex/**"
-        instructions: "Use convex-test and mocked identities to cover workspace scoping, access denial, sharing, locks, and skill-turn gates."
-      - path: "apps/app/src/**"
+      - path: "services/workspace-api/**"
+        instructions: "Use live-pg Vitest coverage for workspace scoping, access denial, sharing, and revision guards."
+      - path: "apps/web/src/**"
         instructions: "Use Vitest for pure logic and component behavior. Add Playwright only for full user workflows that unit tests cannot cover."
       - path: "services/hocuspocus/**"
         instructions: "Use Vitest for token parsing, ACL bridge behavior, document-name parsing, persistence sequencing, and reconnect/recovery cases."

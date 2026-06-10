@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { resolveWorkspacePath } from "@dohc/workspace-fs";
 import type { SandboxSession } from "./session";
 
-export const ALLOWED_WORKSPACE_COMMANDS = [
+const ALLOWED_WORKSPACE_COMMANDS = [
   "cat",
   "head",
   "tail",
@@ -20,7 +20,7 @@ export const ALLOWED_WORKSPACE_COMMANDS = [
   "dohc",
 ] as const;
 
-export type AllowedWorkspaceCommand = typeof ALLOWED_WORKSPACE_COMMANDS[number];
+type AllowedWorkspaceCommand = typeof ALLOWED_WORKSPACE_COMMANDS[number];
 
 export type RunWorkspaceShellCommandInput = {
   command: string;

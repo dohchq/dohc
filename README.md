@@ -31,8 +31,8 @@ is ready visible and safe to build on together.
 
 ```text
 apps/desktop          Electron desktop app (the primary client)
-apps/app              web app (sharing/cloud surface; mid-migration off Convex)
-packages              workspace-core/-fs/-sync/-history/-postgres, mcp, brand, config
+apps/web              @dohc/web — dohc Cloud web client (sign-in, workspaces, shared links)
+packages              workspace-core/-fs/-sync/-history/-postgres/-contracts, mcp, brand
 services              workspace-api (auth + sync), hocuspocus, sqlite-worker, app-tester
 docs                  product, architecture, brand, development, qa, security
 ```
@@ -81,9 +81,8 @@ node scripts/check-self-host-desktop-path.mjs  # desktop -> self-host connectivi
 ## Stack
 
 Electron + React 19 + Vite on the desktop; Node services (workspace-api with
-Better Auth, Hocuspocus/Yjs) on one Postgres; Tiptap, Vitest, Playwright.
-The web app's remaining Convex code is being deleted (in flight); do not
-build new work on it.
+Better Auth, Hocuspocus/Yjs) on one Postgres; Tiptap (server-side markdown
+projection), Vitest, Playwright. Postgres is the only backend.
 
 ## Deployment
 

@@ -1,5 +1,9 @@
 # Visual QA checklist
 
+> **Historical.** This document describes the pre-desktop-pivot (Convex-era)
+> setup and is kept as a record. Current architecture and workflows:
+> desktop E2E in `apps/desktop/e2e/` (`pnpm test:desktop:e2e`).
+
 Run the app and capture screenshots across viewports and states. Paths
 are relative to `/home/ice/dev/dohc`.
 

@@ -42,7 +42,7 @@ async function sha256OrUndefined(absolute: string): Promise<string | undefined> 
 // inferred from current existence; only a confirmed-absent file (ENOENT/
 // ENOTDIR) is a delete — a transiently unreadable file (EACCES, EBUSY) is
 // still present and must not be recorded into history as "deleted".
-export async function pathsToEvents(
+async function pathsToEvents(
   rootPath: string,
   paths: string[],
 ): Promise<WatcherEvent[]> {

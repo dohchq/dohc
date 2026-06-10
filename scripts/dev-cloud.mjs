@@ -49,6 +49,9 @@ function startWorkspaceApi() {
         ...process.env,
         PATH: `${process.env.HOME}/.local/share/nvm/v22.13.0/bin:${process.env.PATH}`,
         COREPACK_INTEGRITY_KEYS: '0',
+        // The server refuses DOHC_TEST_AUTH outside development/test (the
+        // impersonation seam must never reach production), so say what this is.
+        NODE_ENV: process.env.NODE_ENV ?? 'development',
         DOHC_TEST_AUTH: '1',
         WORKSPACE_API_PORT: '1786',
       },
@@ -68,6 +71,11 @@ if (await workspaceApiHealthy()) {
   console.log(`workspace-api already healthy at ${HEALTH_URL}; leaving it running.`)
 } else {
   startWorkspaceApi()
+  // Bounded wait so the readiness probe below sees the real outcome instead
+  // of racing a server that is still booting.
+  for (let i = 0; i < 30 && !(await workspaceApiHealthy()); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+  }
 }
 
 const ready = spawnSync('node', [join(ROOT, 'scripts', 'check-cloud-ready.mjs')], {

@@ -175,3 +175,31 @@ export function classifyPath(relativePath: string): PathClassification {
   }
   return { kind: "file" };
 }
+
+// The ONE extension -> media-type table (check-architecture-debt single-owner
+// rule). Returns null for unknown extensions — each caller owns its fallback.
+const MEDIA_TYPES: Record<string, string> = {
+  csv: "text/csv",
+  db: "application/vnd.sqlite3",
+  htm: "text/html",
+  html: "text/html",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  jsonl: "application/x-ndjson",
+  m4a: "audio/mp4",
+  markdown: "text/markdown",
+  md: "text/markdown",
+  ndjson: "application/x-ndjson",
+  pdf: "application/pdf",
+  png: "image/png",
+  sqlite: "application/vnd.sqlite3",
+  sqlite3: "application/vnd.sqlite3",
+  txt: "text/plain",
+};
+
+export function mediaTypeForPath(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot === -1) return null;
+  return MEDIA_TYPES[path.slice(dot + 1).toLowerCase()] ?? null;
+}

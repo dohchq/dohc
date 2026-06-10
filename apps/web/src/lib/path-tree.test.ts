@@ -124,26 +124,26 @@ describe('nodeLabel — canonical .context files', () => {
     expect(nodeLabel(tree.children.find((c) => c.fullPath === 'me.md')!)).toBe('me')
   })
 
-  it('keeps .views folder labels literal while keeping package names literal', () => {
+  it('keeps .apps folder labels literal while keeping package names literal', () => {
     const tree = buildTree([
-      row('clients/acme/.views/overview/src/App.tsx'),
+      row('clients/acme/.apps/overview/src/App.tsx'),
     ])
     const clients = tree.children.find((c) => c.fullPath === 'clients')!
     const acme = clients.children.find((c) => c.fullPath === 'clients/acme')!
-    const views = acme.children.find((c) => c.fullPath === 'clients/acme/.views')!
+    const views = acme.children.find((c) => c.fullPath === 'clients/acme/.apps')!
     const overview = views.children.find(
-      (c) => c.fullPath === 'clients/acme/.views/overview',
+      (c) => c.fullPath === 'clients/acme/.apps/overview',
     )!
-    expect(nodeLabel(views)).toBe('.views')
+    expect(nodeLabel(views)).toBe('.apps')
     expect(nodeLabel(overview)).toBe('overview')
   })
 
   it('uses source filenames with extensions instead of code body snippets', () => {
     const tree = buildTree([
-      row('clients/acme/.views/overview/src/App.tsx', {
+      row('clients/acme/.apps/overview/src/App.tsx', {
         title: 'import React from "react"',
       }),
-      row('clients/acme/.views/overview/src/styles.css', {
+      row('clients/acme/.apps/overview/src/styles.css', {
         title: ':root {',
       }),
       row('home.html', { title: null }),
@@ -151,12 +151,12 @@ describe('nodeLabel — canonical .context files', () => {
     ])
     const clients = tree.children.find((c) => c.fullPath === 'clients')!
     const acme = clients.children.find((c) => c.fullPath === 'clients/acme')!
-    const views = acme.children.find((c) => c.fullPath === 'clients/acme/.views')!
+    const views = acme.children.find((c) => c.fullPath === 'clients/acme/.apps')!
     const overview = views.children.find(
-      (c) => c.fullPath === 'clients/acme/.views/overview',
+      (c) => c.fullPath === 'clients/acme/.apps/overview',
     )!
     const src = overview.children.find(
-      (c) => c.fullPath === 'clients/acme/.views/overview/src',
+      (c) => c.fullPath === 'clients/acme/.apps/overview/src',
     )!
     expect(src.children.map((c) => nodeLabel(c))).toEqual([
       'App.tsx',

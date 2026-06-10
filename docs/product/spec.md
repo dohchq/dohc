@@ -1,5 +1,9 @@
 # dohc — product spec (overview)
 
+> **Historical.** This document describes the pre-desktop-pivot (Convex-era)
+> setup and is kept as a record. Current architecture and workflows:
+> [`docs/architecture/desktop-local-first.md`](../architecture/desktop-local-first.md) and [`docs/architecture/dohc-cloud.md`](../architecture/dohc-cloud.md).
+
 A working summary of what the dohc app does today. The implementation
 lives in `apps/app`.
 

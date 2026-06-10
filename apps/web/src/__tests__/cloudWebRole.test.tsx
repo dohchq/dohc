@@ -15,7 +15,7 @@ import {
 // that role so a regression that re-frames the web as a local file manager —
 // or drops the "get the desktop app" affordance — fails the build.
 
-const APP_ROOT = process.cwd() // apps/app when vitest runs here
+const APP_ROOT = process.cwd() // apps/web when vitest runs here
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true

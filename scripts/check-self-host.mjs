@@ -58,7 +58,7 @@ function checkServiceScripts() {
     'package.json exposes pnpm check:self-host',
   )
   for (const [label, path] of [
-    ['web app package', 'apps/app/package.json'],
+    ['web app package', 'apps/web/package.json'],
     ['workspace API package', 'services/workspace-api/package.json'],
     ['Hocuspocus package', 'services/hocuspocus/package.json'],
     ['sqlite worker package', 'services/sqlite-worker/package.json'],

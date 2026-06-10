@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyPath,
+  mediaTypeForPath,
   defaultWorkspaceRoot,
   isReservedPath,
   validateAttachedFolder,
@@ -234,5 +235,23 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
     expect(hasIgnoredSegment(".dohcrc")).toBe(false);
     expect(hasIgnoredSegment("notes/git/readme.md")).toBe(false);
     expect(hasIgnoredSegment("my-node_modules-notes.md")).toBe(false);
+  });
+});
+
+describe("mediaTypeForPath (shared extension -> media-type table)", () => {
+  it("maps the known workspace file extensions case-insensitively", () => {
+    expect(mediaTypeForPath("notes/plan.md")).toBe("text/markdown");
+    expect(mediaTypeForPath("finance/Ledger.CSV")).toBe("text/csv");
+    expect(mediaTypeForPath("data/rows.jsonl")).toBe("application/x-ndjson");
+    expect(mediaTypeForPath("img/logo.PNG")).toBe("image/png");
+    expect(mediaTypeForPath("audio/memo.m4a")).toBe("audio/mp4");
+    expect(mediaTypeForPath("docs/spec.pdf")).toBe("application/pdf");
+    expect(mediaTypeForPath("data/app.sqlite")).toBe("application/vnd.sqlite3");
+    expect(mediaTypeForPath("data/app.db")).toBe("application/vnd.sqlite3");
+  });
+
+  it("returns null for unknown or missing extensions (fallback is the caller's)", () => {
+    expect(mediaTypeForPath("bin/blob.xyz")).toBeNull();
+    expect(mediaTypeForPath("Makefile")).toBeNull();
   });
 });

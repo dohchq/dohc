@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
+import { mediaTypeForPath as coreMediaTypeForPath } from "@dohc/workspace-core";
 
 export type WorkspaceBackendMode = "postgres";
 
@@ -86,21 +87,11 @@ export function sha256(bytes: Uint8Array | string) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// Delegates to the ONE extension -> media-type table in workspace-core;
+// sync metadata needs a concrete type, so unknown extensions become
+// octet-stream here.
 export function mediaTypeForPath(path: string): string {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown";
-  if (lower.endsWith(".txt")) return "text/plain";
-  if (lower.endsWith(".csv")) return "text/csv";
-  if (lower.endsWith(".json")) return "application/json";
-  if (lower.endsWith(".jsonl")) return "application/x-ndjson";
-  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".sqlite") || lower.endsWith(".sqlite3") || lower.endsWith(".db")) {
-    return "application/vnd.sqlite3";
-  }
-  return "application/octet-stream";
+  return coreMediaTypeForPath(path) ?? "application/octet-stream";
 }
 
 export function isSqliteMediaType(mediaType: string, path = "") {

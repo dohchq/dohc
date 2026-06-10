@@ -1,5 +1,9 @@
 # Local development
 
+> **Historical.** This document describes the pre-desktop-pivot (Convex-era)
+> setup and is kept as a record. Current architecture and workflows:
+> [`README.md`](../../README.md) and [`docs/architecture/desktop-local-first.md`](../architecture/desktop-local-first.md).
+
 ## Prerequisites
 
 - Node `24.14.0` recommended via `.node-version` / `.nvmrc` and pnpm

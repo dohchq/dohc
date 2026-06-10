@@ -48,7 +48,7 @@ function splitWikilinkInner(inner: string): [string, string | null] {
   return [inner, null]
 }
 
-export const DohcWikilink = Node.create({
+const DohcWikilink = Node.create({
   name: 'wikilink',
   priority: 1000,
   inline: true,
@@ -109,7 +109,7 @@ export const DohcWikilink = Node.create({
   },
 })
 
-export const DohcInlineAtom = Node.create({
+const DohcInlineAtom = Node.create({
   name: 'inlineAtom',
   priority: 1000,
   inline: true,
@@ -168,7 +168,7 @@ export const DohcInlineAtom = Node.create({
     `{{${node.attrs?.source || `atom:${node.attrs?.atomId ?? ''}`}}}`,
 })
 
-export const DohcFormula = Node.create({
+const DohcFormula = Node.create({
   name: 'formula',
   priority: 1000,
   inline: true,
@@ -221,7 +221,7 @@ export const DohcFormula = Node.create({
     `{{${node.attrs?.source || `formula:${node.attrs?.expression ?? ''}`}}}`,
 })
 
-export const DohcQueryBlock = Node.create({
+const DohcQueryBlock = Node.create({
   name: 'queryBlock',
   priority: 1000,
   group: 'block',

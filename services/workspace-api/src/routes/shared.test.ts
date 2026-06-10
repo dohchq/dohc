@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceApiHandler } from "../server";
 import { resolveSharedAtom } from "./shared";
 
-// Live-pg share lifecycle for the kept product (convex-deletion review,
-// triage item 1): view/edit capability honored, revocation honored, and a
+// Live-pg share lifecycle for the kept product (phase 13 backend-deletion
+// review, triage item 1): view/edit capability honored, revocation honored, and a
 // non-member with a share reads ONLY the shared atom.
 const migrationUrl = new URL(
   "../../../../packages/workspace-postgres/src/db/migrations/0001_initial.sql",

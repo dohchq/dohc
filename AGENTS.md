@@ -172,4 +172,4 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping
   source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
-- When working inside `apps/app`, also read `apps/app/AGENTS.md`. When touching Convex code, read `apps/app/convex/_generated/ai/guidelines.md` before editing.
+- When working inside `apps/web`, also read `apps/web/AGENTS.md`.

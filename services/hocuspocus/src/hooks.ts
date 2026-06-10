@@ -199,7 +199,7 @@ function bootstrapMarkdownToYDoc(bootstrap: {
   // rather than a rich ProseMirror `body` XmlFragment. The Postgres/desktop
   // path sets this for ALL its atoms: the desktop editor is a plain textarea,
   // so the shared field MUST be the plainText Y.Text it can read/write and the
-  // server projects from. View source files are plain-text by path too.
+  // server projects from. App source files are plain-text by path too.
   plainText?: boolean
 }): Y.Doc {
   const plainText =

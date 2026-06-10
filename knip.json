@@ -1,0 +1,37 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "exclude": ["types", "enumMembers"],
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"],
+      "project": ["scripts/**/*.mjs"]
+    },
+    "apps/web": {
+      "entry": ["src/router.tsx", "src/start.ts", "src/routes/**/*.tsx"],
+      "project": "src/**/*.{ts,tsx}",
+      "ignoreDependencies": ["tailwindcss", "@fontsource/ibm-plex-mono"]
+    },
+    "apps/desktop": {
+      "entry": [
+        "src/main.ts",
+        "src/preload.ts",
+        "src/renderer/main.tsx",
+        "electron.vite.config.ts",
+        "e2e/**/*.ts",
+        "scripts/*.mjs"
+      ],
+      "project": ["src/**/*.{ts,tsx}", "e2e/**/*.ts", "scripts/**/*.mjs"],
+      "ignoreDependencies": ["tailwindcss", "@dohc/brand", "@dohc/mcp"]
+    },
+    "packages/*": {
+      "project": "src/**/*.{ts,tsx}"
+    },
+    "services/*": {
+      "project": "src/**/*.ts"
+    },
+    "services/hocuspocus": {
+      "entry": ["src/integration/**/*.ts", "scripts/*.mjs"],
+      "project": ["src/**/*.ts", "scripts/**/*.mjs"]
+    }
+  }
+}

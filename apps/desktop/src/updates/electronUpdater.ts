@@ -10,7 +10,7 @@ import {
 // auto-updates. electron-updater is imported lazily so loading this module
 // (e.g. from a test) pulls in nothing Electron-shaped.
 
-export function updateFeedUrl(env: NodeJS.ProcessEnv, isPackaged: boolean): string | null {
+function updateFeedUrl(env: NodeJS.ProcessEnv, isPackaged: boolean): string | null {
   const url = env.DOHC_UPDATE_URL?.trim();
   return isPackaged && url ? url : null;
 }

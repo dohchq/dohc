@@ -53,7 +53,7 @@ export type SyncOpResult = {
   file?: WorkspaceFile | null;
 };
 
-export const MAX_SYNC_ASSET_BYTES = 10 * 1024 * 1024;
+const MAX_SYNC_ASSET_BYTES = 10 * 1024 * 1024;
 
 export async function applyWorkspaceSync(
   backend: WorkspaceBackend,

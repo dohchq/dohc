@@ -132,7 +132,7 @@ export function createProjectionWorker(
   return new ProjectionWorker(options)
 }
 
-export function markdownProjectionHash(markdown: string): string {
+function markdownProjectionHash(markdown: string): string {
   return `sha256:${createHash('sha256').update(markdown).digest('hex')}`
 }
 

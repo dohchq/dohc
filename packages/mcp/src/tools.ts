@@ -7,6 +7,7 @@
 
 import {
   databaseSyncStrategy,
+  mediaTypeForPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { createChangeSetStore, mergeMarkdown } from "@dohc/workspace-history";
@@ -258,7 +259,7 @@ export async function importData(
   const engine = await createSqliteEngine();
   const result = await engine.importData({
     name: args.sourcePath,
-    mediaType: mediaTypeForSource(args.sourcePath),
+    mediaType: mediaTypeForPath(args.sourcePath) ?? "text/plain",
     body,
     tableName: args.tableName,
   });
@@ -273,15 +274,6 @@ export async function importData(
     tableName: result.tableName,
     rowCount: result.rowCount,
   };
-}
-
-function mediaTypeForSource(path: string): string {
-  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
-  if (ext === "csv") return "text/csv";
-  if (ext === "json") return "application/json";
-  if (ext === "jsonl" || ext === "ndjson") return "application/x-ndjson";
-  if (ext === "md" || ext === "markdown") return "text/markdown";
-  return "text/plain";
 }
 
 // --- dohc_query_database ----------------------------------------------------

@@ -220,7 +220,7 @@ describe('hocuspocus hook factory', () => {
       canRead: true,
       canWrite: true,
       bootstrapMarkdown: source,
-      bootstrapPath: '.views/workspace/src/App.tsx',
+      bootstrapPath: '.apps/workspace/src/App.tsx',
     })
 
     const loaded = await hooks.onLoadDocument({

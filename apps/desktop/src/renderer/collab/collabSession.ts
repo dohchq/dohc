@@ -194,20 +194,12 @@ export function rescuePathFor(deletedPath: string): string {
   return `${deletedPath.slice(0, dot)}.recovered${deletedPath.slice(dot)}`;
 }
 
-// Synchronous FNV-1a-seeded-then-SHA-shaped hash is overkill; we want the SAME
-// sha256 the watcher/workspace-fs uses so shas compare equal across layers.
-// workspace-fs exposes sha256 over node:crypto; here in the renderer we keep a
-// tiny, dependency-free, deterministic hex digest. The model only requires
-// that equal text -> equal sha and that the watcher compares against shas this
-// function produced (the desktop wiring records via this same function). The
-// production wiring substitutes the real workspace-fs sha256 through
-// configureSha so cross-layer comparisons hold; tests use the default.
-let shaImpl: (text: string) => string = fallbackSha;
-export function configureSha(fn: (text: string) => string): void {
-  shaImpl = fn;
-}
+// Renderer-side content hash. The model only requires that equal text ->
+// equal sha and that every collab-session compare uses shas THIS function
+// produced — the renderer both records and compares through it, so it never
+// has to match workspace-fs's node:crypto sha256 across layers.
 export function sha256Hex(text: string): string {
-  return shaImpl(text);
+  return fallbackSha(text);
 }
 
 // Deterministic content hash used when no real sha256 is injected (unit tests

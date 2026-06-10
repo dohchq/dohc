@@ -35,4 +35,4 @@ confidence.
 4. **Calm by default.** Dense, technical surfaces are reserved for power
    tools — daily surfaces are friendly and readable at a glance.
 5. **Safety is not negotiable.** Authorization, data ownership, and the
-   Convex safety gates hold regardless of what the agent is asked to do.
+   server-side safety gates hold regardless of what the agent is asked to do.

@@ -77,7 +77,6 @@ services:
       object-storage:
         condition: service_healthy
     environment:
-      DOHC_BACKEND: postgres
       # production: hard-disables the /test/device/approve impersonation seam.
       # If DOHC_TEST_AUTH ever leaks into a real deployment the server crashes
       # at boot rather than exposing it.
@@ -142,7 +141,6 @@ services:
     image: node:22-bookworm-slim
     working_dir: /workspace
     environment:
-      DOHC_BACKEND: postgres
       AGENT_SANDBOX_ROOT: /tmp/dohc-agent-sandbox
       SANDBOX_SAFE_PATH: /usr/local/bin:/usr/bin:/bin
     command: >
@@ -164,8 +162,6 @@ services:
       hocuspocus:
         condition: service_healthy
     environment:
-      DOHC_BACKEND: postgres
-      VITE_DOHC_BACKEND: postgres
       VITE_WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://127.0.0.1:1786}
       VITE_HOCUSPOCUS_URL: ${HOCUSPOCUS_PUBLIC_URL:-ws://127.0.0.1:1234}
     command: >

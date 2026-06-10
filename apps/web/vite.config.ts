@@ -16,7 +16,7 @@ export default defineConfig({
   // Internal workspace packages ship raw TS/TSX source (no build step),
   // so they must be transpiled rather than externalized for SSR.
   ssr: {
-    noExternal: ['@dohc/brand'],
+    noExternal: ['@dohc/brand', '@dohc/workspace-core'],
   },
   resolve: {
     tsconfigPaths: true,

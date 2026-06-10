@@ -1,5 +1,9 @@
 # Testing
 
+> **Historical.** This document describes the pre-desktop-pivot (Convex-era)
+> setup and is kept as a record. Current architecture and workflows:
+> [`docs/architecture/codebase-map.md`](../architecture/codebase-map.md) (per-module test commands).
+
 ```bash
 cd /home/ice/dev/dohc
 pnpm typecheck    # tsc --noEmit across workspaces

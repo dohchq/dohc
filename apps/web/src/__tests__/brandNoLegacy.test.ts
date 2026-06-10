@@ -16,7 +16,7 @@ import { join, relative } from 'node:path'
 // If this test fails, a legacy identity string slipped into shipping
 // source — rename it, do not whitelist it.
 
-const ROOT = process.cwd() // apps/app when vitest runs
+const ROOT = process.cwd() // apps/web when vitest runs
 const REPO = join(ROOT, '..', '..') // monorepo root
 
 // App-scoped roots plus the monorepo-level shared packages and docs, so
@@ -119,8 +119,5 @@ describe('brand no-legacy gate', () => {
   it('enforces the new dohc namespaces are present where expected', () => {
     const styles = readFileSync(join(ROOT, 'src/styles.css'), 'utf8')
     expect(styles).toContain('--dohc-bg')
-
-    const useTheme = readFileSync(join(ROOT, 'src/lib/use-theme.ts'), 'utf8')
-    expect(useTheme).toContain('dohc-theme')
   })
 })

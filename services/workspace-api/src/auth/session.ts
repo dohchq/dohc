@@ -24,11 +24,3 @@ export function createSessionActorResolver(auth: WorkspaceAuth): ResolveActor {
     return actorFromSession(session, workspaceId);
   };
 }
-
-// Local-only desktop flows never construct a cloud client, so they never hit
-// this resolver — auth is required only once a request reaches the cloud API.
-export async function resolveSessionActor(_request: Request, _workspaceId: string): Promise<Actor> {
-  throw new Error(
-    "workspace API requires a server-side actor resolver (wire createSessionActorResolver)",
-  );
-}

@@ -145,14 +145,14 @@ export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
 // op log). Identifiers are bounded — IPC payloads are untrusted.
 const SQL_IDENT = z.string().min(1).max(256);
 
-export const DatabaseColumnView = z.object({
+const DatabaseColumnView = z.object({
   name: z.string(),
   type: z.string(),
   primaryKey: z.boolean().optional(),
   nullable: z.boolean().optional(),
 });
 
-export const DatabaseTableView = z.object({
+const DatabaseTableView = z.object({
   name: z.string(),
   columns: z.array(DatabaseColumnView),
   rows: z.array(z.record(z.unknown())),

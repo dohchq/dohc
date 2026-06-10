@@ -55,13 +55,6 @@ const allowlist = [
     reason: 'Historical implementation plan text documents an already completed placeholder scan.',
     deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
   },
-  {
-    file: 'docs/superpowers/reviews/codex/phase-05.md',
-    patterns: [term('TO', 'DO')],
-    contains: 'Our version of upath.normalize',
-    reason: 'Raw Phase 5 codex review transcript quotes third-party path-normalize source whose own to-do markers are evidence, not dohc debt.',
-    deleteWhen: 'Delete when the raw Phase 5 transcript is distilled to a findings dossier (Phase 17 cleanup).',
-  },
 ]
 
 const skippedDirectories = new Set([
