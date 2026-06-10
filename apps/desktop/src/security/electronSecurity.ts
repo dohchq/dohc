@@ -59,20 +59,32 @@ export function decideNavigation(
   return { action: "deny" };
 }
 
-export interface WindowOpenDecision {
-  action: "deny";
-  openExternal: boolean;
-}
-
-// window.open never creates a BrowserWindow. http(s) targets are handed to
-// the OS browser; every other scheme is dropped entirely.
-export function decideWindowOpen(targetUrl: string): WindowOpenDecision {
-  let openExternal = false;
+// window.open never creates a BrowserWindow (callers always deny). http(s)
+// targets are handed to the OS browser; every other scheme is dropped.
+export function shouldOpenExternally(targetUrl: string): boolean {
   try {
     const protocol = new URL(targetUrl).protocol;
-    openExternal = protocol === "https:" || protocol === "http:";
+    return protocol === "https:" || protocol === "http:";
   } catch {
-    openExternal = false;
+    return false;
   }
-  return { action: "deny", openExternal };
+}
+
+// The dev-server URL is only honored in unpackaged dev builds and only when
+// it points at loopback: a packaged app launched with ELECTRON_RENDERER_URL
+// set must never load (or IPC-trust) an arbitrary origin.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+export function validateDevServerUrl(
+  raw: string | undefined,
+  isPackaged: boolean,
+): string | null {
+  if (!raw || isPackaged) return null;
+  try {
+    const url = new URL(raw);
+    const httpLike = url.protocol === "http:" || url.protocol === "https:";
+    return httpLike && LOOPBACK_HOSTS.has(url.hostname) ? raw : null;
+  } catch {
+    return null;
+  }
 }

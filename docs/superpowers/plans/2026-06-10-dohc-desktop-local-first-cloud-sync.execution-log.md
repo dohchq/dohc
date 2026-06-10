@@ -2,13 +2,13 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 2 Step 1 — Electron install running (background); tests already written (electronSecurity.test.ts, desktopLaunch.spec.ts, playwright.config.ts, scaffold package.json/tsconfig)
-- Expected test state: post-install: `pnpm --filter @dohc/desktop test` expected RED (missing ./electronSecurity module); E2E RED (no build output)
-- Dirty files and intent: pnpm-workspace.yaml (onlyBuiltDependencies — Phase 2 commit), apps/desktop/* (Phase 2), pnpm-lock.yaml (install), this log
-- Exact next action: install completes → verify electron --version → record unit RED → implement main/preload/security/launchMarks/electron.vite.config/renderer → build → GREEN → E2E + screenshot + marks
-- Active background tasks: b0pv29olr (pnpm add electron tooling + binary verify)
+- Phase/Step + TDD position: Phase 2 COMPLETE (committed 7781d02, codex xhigh double-review in flight); Phase 3 recon underway
+- Expected test state: desktop 11/11 unit + E2E + smoke green; workspace-core 35/35; baseline green
+- Dirty files and intent: this log only
+- Exact next action: codex phase-02 triage (review still in flight) → Phase 3: install renderer deps (react/tailwind4/@dohc/brand per reuse-map digest) → failing first-run tests + native UX E2E → shell implementation per reuse map → design review loop
+- Active background tasks: b8czrzb3h (codex phase-02: commit review + targeted security prompt → docs/superpowers/reviews/codex/phase-02.md); reuse-map agent (→ docs/superpowers/reviews/2026-06-10-desktop-component-reuse-map.md)
 - Open worktrees: none
-- Pending reviews: none (phase-01 triaged: 3 findings fixed @ f405074)
+- Pending reviews: codex phase-02 (in flight)
 
 ## Environment (append-only)
 
@@ -66,6 +66,15 @@
 - Updates: electron-updater state machine idle→checking→available→downloading→downloaded→installing with reducer fns (src/updates/DesktopUpdates.ts) — ADOPT reducer-style state machine for Phase 14 tests.
 - Smoke: scripts/smoke-test.mjs spawns Electron 8s, greps stderr for fatal patterns. ADOPT for Phase 2 smoke.
 - REJECT: Effect-based layer architecture (overkill; plain TS + promises), sync IPC for hot data (async everything except immutable bootstrap), custom launcher plist patching (electron-builder instead), their no-Playwright gap (we add real Playwright Electron E2E).
+
+### Component reuse map digest (source: docs/superpowers/reviews/2026-06-10-desktop-component-reuse-map.md; 2026-06-10)
+
+- Counts: 20 reuse-as-is, 16 port-with-swap, 3 rebuild (Chat, WorkspaceSwitcher, WorkspaceManagementDialog), 3 skip (Onboarding, SharedAtomView, NotFoundPage). Exactly 18 files import convex/react|@convex-dev|@tanstack/react-router directly.
+- Styling: Tailwind v4.2.4 CSS-first, NO tailwind.config — everything via `@theme inline` + `@custom-variant dark` (data-theme) in apps/app/src/styles.css (2,695 lines). Brand tokens: packages/brand/src/tokens.css (export `@dohc/brand/tokens.css`) — warm paper #f7f6f1, graphite #151515. TRAP/consolidation target (Phase 17): styles.css duplicates the brand palette instead of importing tokens.css.
+- Desktop renderer needs: react, react-dom, tailwindcss, @tailwindcss/vite, @dohc/brand, @fontsource(s) — extract shared token layer rather than copy.
+- Phase 3 pulls as-is: ActivityBar, SidebarChrome, Skeleton, NoticeCenter, AgentActivityTimeline, AgentRunRail, AgentModelPicker. Small swaps: FileTree (fully props-driven; only Convex via UploadFileButton import), CommandPalette (3 useQuery + extract OPEN_SKETCH_EVENT constant — else drags AtomEditor+Convex transitively). Rebuild WorkspaceSwitcher against bridge WorkspaceRegistryResult. Model shell layout/keyboard map on apps/app/src/routes/_app.tsx.
+- Phase 6+: FileTypeView, DatabaseStudio, DatabaseTableGrid clean+props-driven (as-is); HtmlAtomFrame/SearchOverlay swaps; Chat transport rebuild in Phase 11 (useUIMessages is structurally Convex), presentational children reusable.
+- Traps: AgentChatSidebar transitively renders WorkspaceSwitcher (Convex+router); UploadFileButton calls useMutation unconditionally (crashes without ConvexProvider); type-only Convex imports in DatabaseTableGrid/storageUpload need re-homing before Phase 13.
 
 ### Port-source file paths (verified present 2026-06-10)
 
@@ -154,8 +163,8 @@
 - Performance measurements: cold launch appReady 194ms / firstWindow 232ms / firstPaint 315ms (budget: shell <2000ms — 6x headroom); recorded to test-results/performance/desktop-performance.json
 - Security/collaboration regressions: IPC sender-origin validation on all invoke handlers; zod-parsed results; test bridge gated on DOHC_DESKTOP_TEST; CSP in renderer; window.open denied universally
 - Reviewer/subagent findings: verifiers wf_7528cd05-564 BOTH PASS. test-quality: deletion mutation fails suite; sandbox:false mutation caught at exact assertion; E2E flake-free (no sleeps). claimed-vs-actual: probed RUNTIME bridge surface without test env (Node unreachable, exact bridge shape, test bridge double-gated); re-ran full gate chain green. Findings fixed pre-commit: (1) origin prefix-match bypass (file:// allowed any local file; dev origin matched localhost:5173.evil.com) — FIXED with NavigationPolicy (exact http origins + bundle-scoped file prefix, deny-by-default incl. unparseable), assertTrustedSender now uses the same policy; (2) http:// scheme untested in window.open — test added; (3) single-instance lock didn't gate bootstrap — restructured; (4) bridgeContract comment overstated payload validation — corrected. 11/11 after fixes; full gate chain re-run green.
-- Codex third-party review findings: pending post-commit (xhigh tier — security phase)
-- Relevant findings fixed: 4 verifier findings fixed pre-commit
-- Deferred findings with reason: desktopSmoke.test.ts from plan file list realized as scripts/smoke-test.mjs (executable smoke, not a vitest stub) — justification: a unit test asserting the smoke script exists adds no information; the script itself runs in every phase gate
+- Codex third-party review findings (full: docs/superpowers/reviews/codex/phase-02.md; commit review + targeted security prompt, both xhigh): (1) MED ELECTRON_RENDERER_URL trusted without isPackaged/loopback guard — packaged app could loadURL + IPC-trust arbitrary origin — FIXED (validateDevServerUrl: unpackaged + loopback + http(s) only, unit-tested incl. packaged rejection); (2) MED only will-navigate enforced; redirects/subframes uncovered — FIXED (will-redirect + will-frame-navigate share the same policy; about:blank/javascript: unit cases added); (3) LOW test bridge env-only gating — FIXED (env flag AND !app.isPackaged); (4) LOW window.open shells any http(s) — could become phishing primitive if renderer renders user content — DEFERRED with reason: renderer content is fully app-controlled until Phase 6 file views; user-gesture/allowlist fix scheduled with Phase 6 (tracked); (5) INFO WindowOpenDecision over-shaped — FIXED (simplified to shouldOpenExternally boolean, less code). Codex confirmed solid: IPC sender validation on every handler, no Node/ipcRenderer leak, webPreferences trio, about:/javascript: denial.
+- Relevant findings fixed: 4 verifier findings pre-commit + codex findings 1,2,3,5 in phase2(fix); 14/14 tests after
+- Deferred findings with reason: desktopSmoke.test.ts realized as scripts/smoke-test.mjs (executable smoke beats a vitest stub; runs in every phase gate); codex finding 4 (window.open user-gesture/allowlist) deferred to Phase 6 when user content first renders
 - Remaining risk: fuses configuration deferred to Phase 14 packaging (per plan); titlebar is default chrome until Phase 3
 - Next phase: 3

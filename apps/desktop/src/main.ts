@@ -50,7 +50,9 @@ function registerIpcHandlers(): void {
     }
   });
 
-  if (process.env.DOHC_DESKTOP_TEST === "1") {
+  // Double-gated: env flag AND unpackaged build. A packaged app launched
+  // with the env var set must never grow test surface.
+  if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
     ipcMain.handle(CHANNELS.getLaunchMarks, (event) => {
       assertTrustedSender(event);
       return LaunchMarksResult.parse(launchMarks.snapshot());

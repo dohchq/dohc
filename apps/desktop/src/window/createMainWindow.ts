@@ -1,20 +1,28 @@
-import { BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
-  decideWindowOpen,
+  shouldOpenExternally,
+  validateDevServerUrl,
   type NavigationPolicy,
 } from "../security/electronSecurity";
 
 // Warm paper — set before first paint so launch never flashes white.
 const BACKGROUND_COLOR = "#faf7f2";
 
+function devServerUrl(): string | null {
+  return validateDevServerUrl(
+    process.env.ELECTRON_RENDERER_URL,
+    app.isPackaged,
+  );
+}
+
 export function navigationPolicy(): NavigationPolicy {
-  const devServer = process.env.ELECTRON_RENDERER_URL;
+  const devServer = devServerUrl();
   if (devServer) {
-    // Dev: exact dev-server origin only; no file navigation at all.
+    // Dev: exact loopback dev-server origin only; no file navigation at all.
     return { httpOrigins: [new URL(devServer).origin], fileUrlPrefix: null };
   }
   // Prod: only the packaged renderer bundle directory.
@@ -36,20 +44,26 @@ export function createMainWindow(): BrowserWindow {
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    const decision = decideWindowOpen(url);
-    if (decision.openExternal) void shell.openExternal(url);
+    if (shouldOpenExternally(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
 
-  window.webContents.on("will-navigate", (event, url) => {
+  // Top-frame navigations, server redirects, and subframe navigations all
+  // go through the same policy: each is a separate Electron surface.
+  const denyDisallowed = (event: { preventDefault(): void }, url: string) => {
     if (decideNavigation(url, navigationPolicy()).action === "deny") {
       event.preventDefault();
     }
+  };
+  window.webContents.on("will-navigate", denyDisallowed);
+  window.webContents.on("will-redirect", denyDisallowed);
+  window.webContents.on("will-frame-navigate", (event) => {
+    denyDisallowed(event, event.url);
   });
 
   window.once("ready-to-show", () => window.show());
 
-  const devServer = process.env.ELECTRON_RENDERER_URL;
+  const devServer = devServerUrl();
   if (devServer) {
     void window.loadURL(devServer);
   } else {

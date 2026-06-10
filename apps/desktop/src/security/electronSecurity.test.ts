@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
-  decideWindowOpen,
+  shouldOpenExternally,
+  validateDevServerUrl,
 } from "./electronSecurity";
 
 describe("main window web preferences", () => {
@@ -63,22 +64,46 @@ describe("navigation policy", () => {
   it("denies unparseable URLs", () => {
     expect(decideNavigation("not a url", policy).action).toBe("deny");
   });
+
+  it("denies about:blank and javascript: URLs", () => {
+    expect(decideNavigation("about:blank", policy).action).toBe("deny");
+    expect(decideNavigation("javascript:alert(1)", policy).action).toBe(
+      "deny",
+    );
+  });
+});
+
+describe("dev server URL validation", () => {
+  it("accepts loopback dev servers in unpackaged builds", () => {
+    expect(validateDevServerUrl("http://localhost:5173", false)).toBe(
+      "http://localhost:5173",
+    );
+    expect(validateDevServerUrl("http://127.0.0.1:5173", false)).toBe(
+      "http://127.0.0.1:5173",
+    );
+  });
+
+  it("rejects everything in packaged builds", () => {
+    expect(validateDevServerUrl("http://localhost:5173", true)).toBeNull();
+  });
+
+  it("rejects non-loopback and non-http origins in dev", () => {
+    expect(validateDevServerUrl("http://evil.example.com:5173", false)).toBeNull();
+    expect(validateDevServerUrl("file:///tmp/x", false)).toBeNull();
+    expect(validateDevServerUrl("not a url", false)).toBeNull();
+  });
 });
 
 describe("window.open policy", () => {
-  it("denies all window.open targets", () => {
-    expect(decideWindowOpen("https://dohc.ai/docs").action).toBe("deny");
-    expect(decideWindowOpen("file:///etc/passwd").action).toBe("deny");
-  });
-
   it("routes http and https targets through the external shell handler", () => {
-    expect(decideWindowOpen("https://dohc.ai/docs").openExternal).toBe(true);
-    expect(decideWindowOpen("http://dohc.ai/docs").openExternal).toBe(true);
-    expect(decideWindowOpen("http://dohc.ai/docs").action).toBe("deny");
+    expect(shouldOpenExternally("https://dohc.ai/docs")).toBe(true);
+    expect(shouldOpenExternally("http://dohc.ai/docs")).toBe(true);
   });
 
-  it("never shells out non-http(s) schemes", () => {
-    expect(decideWindowOpen("file:///etc/passwd").openExternal).toBe(false);
-    expect(decideWindowOpen("smb://share/x").openExternal).toBe(false);
+  it("never shells out non-http(s) schemes or junk", () => {
+    expect(shouldOpenExternally("file:///etc/passwd")).toBe(false);
+    expect(shouldOpenExternally("smb://share/x")).toBe(false);
+    expect(shouldOpenExternally("javascript:alert(1)")).toBe(false);
+    expect(shouldOpenExternally("not a url")).toBe(false);
   });
 });
