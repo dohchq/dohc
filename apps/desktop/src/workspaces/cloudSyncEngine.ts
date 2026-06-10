@@ -1,4 +1,4 @@
-import { createMergeSync, type MergeSync } from "@dohc/workspace-sync";
+import { createMergeSync, UnauthorizedSyncError, type MergeSync } from "@dohc/workspace-sync";
 
 // Per-workspace cloud sync loop. Local stays canonical: pushes are debounced
 // behind the watcher's settled batches, pulls happen on engine start (app
@@ -23,6 +23,10 @@ export interface CloudSyncSnapshot {
   lastSyncedAtMs: number | null;
   pendingChangeCount: number;
   conflictCount: number;
+  // The session token is expired/revoked (a confirmed 401). The retry loop is
+  // stopped and the UI should prompt re-login; local data is safe (local-first)
+  // but cloud sync is paused until the user reconnects.
+  authExpired: boolean;
 }
 
 export interface CloudSyncEngine {
@@ -51,9 +55,24 @@ export function createCloudSyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let lastSyncedAtMs: number | null = null;
   let pendingChangeCount = 0;
   let conflictCount = 0;
+  let authExpired = false;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let chain: Promise<void> = Promise.resolve();
+
+  // A 401 is terminal for this engine: keep retrying a dead token forever would
+  // climb pendingChangeCount while claiming "connected". Flip authExpired,
+  // stop the loop, and let the UI prompt re-login.
+  function handleSyncError(error: unknown): void {
+    if (error instanceof UnauthorizedSyncError) {
+      authExpired = true;
+      stopped = true;
+      return;
+    }
+    // Other failures (transient network, oversize) never crash the app or lose
+    // local data — pending stays up and the next settled batch retries.
+    console.error(`[desktop] cloud sync failed for ${options.rootDir}:`, error);
+  }
 
   function run(task: () => Promise<void>): Promise<void> {
     const next = chain.then(async () => {
@@ -63,10 +82,7 @@ export function createCloudSyncEngine(options: CloudSyncEngineOptions): CloudSyn
       try {
         await task();
       } catch (error) {
-        // Sync failures must never crash the app or lose local data — the
-        // pending count stays up, the status bar shows unsynced changes, and
-        // the next settled batch retries.
-        console.error(`[desktop] cloud sync failed for ${options.rootDir}:`, error);
+        handleSyncError(error);
       } finally {
         syncing = false;
         options.onChange();
@@ -74,6 +90,13 @@ export function createCloudSyncEngine(options: CloudSyncEngineOptions): CloudSyn
     });
     chain = next;
     return next;
+  }
+
+  async function firstContact(): Promise<void> {
+    await sync.initialize();
+    const pulled = await sync.pull();
+    conflictCount += pulled.conflicts.length;
+    await pushNow();
   }
 
   async function pushNow(): Promise<void> {
@@ -85,16 +108,33 @@ export function createCloudSyncEngine(options: CloudSyncEngineOptions): CloudSyn
   }
 
   return {
-    start() {
-      return run(async () => {
-        await sync.initialize();
-        const pulled = await sync.pull();
-        conflictCount += pulled.conflicts.length;
-        await pushNow();
+    // Enable-sync MUST see a first-contact failure (e.g. a dead token), so
+    // start() rethrows instead of swallowing it the way run() does — otherwise
+    // the UI would falsely report success. It still serializes on the chain so
+    // it never interleaves with a debounced push.
+    async start() {
+      const result = chain.then(async () => {
+        if (stopped) return;
+        syncing = true;
+        options.onChange();
+        try {
+          await firstContact();
+        } catch (error) {
+          handleSyncError(error);
+          throw error;
+        } finally {
+          syncing = false;
+          options.onChange();
+        }
       });
+      // Keep the chain alive even if this start rejects (caller handles it).
+      chain = result.catch(() => undefined);
+      await result;
     },
 
     queueSync() {
+      // A known-dead session does not accumulate work or retry.
+      if (authExpired || stopped) return;
       pendingChangeCount += 1;
       options.onChange();
       if (timer !== undefined) clearTimeout(timer);
@@ -105,7 +145,7 @@ export function createCloudSyncEngine(options: CloudSyncEngineOptions): CloudSyn
     },
 
     snapshot() {
-      return { syncing, lastSyncedAtMs, pendingChangeCount, conflictCount };
+      return { syncing, lastSyncedAtMs, pendingChangeCount, conflictCount, authExpired };
     },
 
     async stop() {

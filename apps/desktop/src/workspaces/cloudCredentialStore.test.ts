@@ -121,4 +121,19 @@ describe("cloud credential store", () => {
     const { readdirSync } = await import("node:fs");
     expect(readdirSync(dir).filter((f) => f.includes(".tmp-"))).toEqual([]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "writes the credential file 0600 (owner-only) and heals lax perms on load",
+    async () => {
+      const { statSync, chmodSync } = await import("node:fs");
+      const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+      await store.save(credentials);
+      expect(statSync(credentialFile()).mode & 0o777).toBe(0o600);
+
+      // A pre-existing world-readable file is healed to 0600 on the next load.
+      chmodSync(credentialFile(), 0o644);
+      await store.load();
+      expect(statSync(credentialFile()).mode & 0o777).toBe(0o600);
+    },
+  );
 });

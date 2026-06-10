@@ -43,6 +43,9 @@ test.beforeAll(async () => {
       env: {
         ...process.env,
         DOHC_TEST_AUTH: "1",
+        // The seam now fails closed unless NODE_ENV is dev/test (so a stray
+        // DOHC_TEST_AUTH in a real deployment crashes instead of opening).
+        NODE_ENV: "test",
         WORKSPACE_API_PORT: String(PORT),
       },
       stdio: "ignore",

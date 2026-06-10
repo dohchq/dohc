@@ -149,22 +149,45 @@ async function refreshCredentialCache(): Promise<void> {
   cachedCredentials = await cloudLogin().credentials();
 }
 
+// Trailing-slash-insensitive server-URL compare: the registry's recorded
+// serverUrl must match the server that ISSUED the cached token, or the workspace
+// stays local-only. Otherwise machine B's token could be POSTed to server A
+// (account takeover) and a re-pointed registry could mass-delete.
+function normalizeServerUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+function credentialMatchesRemote(remoteServerUrl: string): boolean {
+  return (
+    cachedCredentials !== null &&
+    normalizeServerUrl(cachedCredentials.serverUrl) === normalizeServerUrl(remoteServerUrl)
+  );
+}
+
+function engineForWorkspace(workspace: { workspaceId: string; rootPath: string }) {
+  const remote = findWorkspace(workspace.workspaceId)?.remote;
+  if (!remote || !cachedCredentials) return null;
+  // Only sync when the session belongs to the server this workspace is bound
+  // to; a mismatch keeps it local-only (no token leak, no mass-delete).
+  if (!credentialMatchesRemote(remote.serverUrl)) return null;
+  return createCloudSyncEngine({
+    rootDir: workspace.rootPath,
+    remoteWorkspaceId: remote.remoteWorkspaceId,
+    serverUrl: remote.serverUrl,
+    token: cachedCredentials.token,
+    onChange: notifyRenderer,
+  });
+}
+
 const activity = createWorkspaceActivity(notifyRenderer, {
-  cloudStateFor: (workspaceId) => ({
-    enabled: !!findWorkspace(workspaceId)?.remote,
-    connected: cachedCredentials !== null,
-  }),
-  engineFor: (workspace) => {
-    const remote = findWorkspace(workspace.workspaceId)?.remote;
-    if (!remote || !cachedCredentials) return null;
-    return createCloudSyncEngine({
-      rootDir: workspace.rootPath,
-      remoteWorkspaceId: remote.remoteWorkspaceId,
-      serverUrl: remote.serverUrl,
-      token: cachedCredentials.token,
-      onChange: notifyRenderer,
-    });
+  cloudStateFor: (workspaceId) => {
+    const remote = findWorkspace(workspaceId)?.remote;
+    return {
+      enabled: !!remote,
+      // connected requires the session to belong to this workspace's server.
+      connected: !!remote && credentialMatchesRemote(remote.serverUrl),
+    };
   },
+  engineFor: engineForWorkspace,
 });
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
@@ -387,7 +410,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.cloudLoginPoll, async (event) => {
     assertTrustedSender(event);
     const result = await cloudLogin().poll();
-    if (result.status === "complete") await refreshCredentialCache();
+    if (result.status === "complete") {
+      await refreshCredentialCache();
+      // Attach engines to already-open cloud-enabled workspaces that were
+      // opened local-only because no session existed yet.
+      activity.reconcileCloud(engineForWorkspace);
+    }
     return CloudLoginPollResult.parse(result);
   });
 
@@ -407,6 +435,9 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     await cloudLogin().logout();
     cachedCredentials = null;
+    // Stop + drop active engines so edits after Disconnect never push with the
+    // now-cleared session.
+    await activity.stopEngines();
     notifyRenderer();
   });
 

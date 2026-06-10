@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChangeSet } from "@dohc/workspace-core";
-import { decideCollaboration } from "./collaborationPolicy";
+import { decideCollaboration, type CollaborationDecision } from "./collaborationPolicy";
+
+// Only the non-sync decisions carry a reason; narrow for the assertions.
+function reasonOf(decision: CollaborationDecision): string {
+  return "reason" in decision ? decision.reason : "";
+}
 
 const user = { kind: "user" as const, userId: "maya" };
 const agent = { kind: "agent" as const, agentId: "codex-local", onBehalfOf: "maya" };
@@ -34,7 +39,7 @@ describe("liberal collaboration policy", () => {
       protectedPaths: ["finance"],
     });
     expect(decision.action).toBe("propose");
-    expect(decision.reason).toMatch(/protected/i);
+    expect(reasonOf(decision)).toMatch(/protected/i);
   });
 
   it("does not treat sibling paths as protected (finance-notes is not finance/)", () => {
@@ -50,14 +55,14 @@ describe("liberal collaboration policy", () => {
       set: set({ boundaryCrossings: ["permission-change"] }),
     });
     expect(decision.action).toBe("confirm");
-    expect(decision.reason).toMatch(/permission/i);
+    expect(reasonOf(decision)).toMatch(/permission/i);
   });
 
   it("keeps a permission-denied change local with a plain-language explanation", () => {
     const decision = decideCollaboration({ set: set(), permissionDenied: true });
     expect(decision.action).toBe("keep-local");
-    expect(decision.reason).toMatch(/stays on this device|kept locally|don't have access/i);
-    expect(decision.reason).not.toMatch(/403|forbidden|ERR/);
+    expect(reasonOf(decision)).toMatch(/stays on this device|kept locally|don't have access/i);
+    expect(reasonOf(decision)).not.toMatch(/403|forbidden|ERR/);
   });
 
   it("protection outranks liberal sync; denial outranks everything", () => {

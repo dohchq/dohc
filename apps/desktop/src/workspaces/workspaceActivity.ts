@@ -51,7 +51,10 @@ export function createWorkspaceActivity(
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: (snap?.conflictCount ?? 0) > 0,
       cloudEnabled: cloud.enabled,
-      cloudConnected: cloud.connected,
+      // A confirmed-401 engine reads as disconnected (the existing
+      // "cloud-disconnected" surface) so the UI stops saying "connected" and
+      // prompts re-login, instead of spinning on a dead token.
+      cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
   }
@@ -102,7 +105,47 @@ export function createWorkspaceActivity(
     const engine = options.engineFor?.(workspace) ?? null;
     if (!engine) throw new Error("Cloud sync requires a signed-in dohc Cloud session");
     entry.engine = engine;
-    await engine.start();
+    try {
+      // Propagate first-contact failure: a dead token must surface here, not be
+      // swallowed while the UI claims sync is enabled.
+      await engine.start();
+    } catch (error) {
+      // Roll back so a retry can re-attach a fresh engine.
+      await engine.stop().catch(() => undefined);
+      entry.engine = null;
+      throw error;
+    }
+    notify();
+  }
+
+  // After a login completes, attach engines to already-open cloud-enabled
+  // workspaces that don't have one yet (they were opened local-only because no
+  // session existed). engineFor returns null when the workspace is local-only
+  // or signed into a different server.
+  function reconcileCloud(
+    engineFor: (workspace: CreatedWorkspace) => CloudSyncEngine | null,
+  ): void {
+    for (const entry of watched.values()) {
+      if (entry.engine) continue;
+      const engine = engineFor(entry.workspace);
+      if (!engine) continue;
+      entry.engine = engine;
+      void engine.start();
+    }
+    notify();
+  }
+
+  // Logout path: stop and detach every cloud engine so edits after Disconnect
+  // never push with the now-cleared session. The watchers keep running (local
+  // history is unaffected).
+  async function stopEngines(): Promise<void> {
+    const stops: Array<Promise<void>> = [];
+    for (const entry of watched.values()) {
+      if (!entry.engine) continue;
+      stops.push(entry.engine.stop().catch(() => undefined));
+      entry.engine = null;
+    }
+    await Promise.all(stops);
     notify();
   }
 
@@ -137,5 +180,5 @@ export function createWorkspaceActivity(
     await Promise.all(stops);
   }
 
-  return { open, enableCloud, listChangeSets, getStatus, stopAll };
+  return { open, enableCloud, reconcileCloud, stopEngines, listChangeSets, getStatus, stopAll };
 }

@@ -1,5 +1,5 @@
 import { readManifest, type WorkspaceManifest } from "./metadata";
-import { scanWorkspaceFiles } from "./scan";
+import { scanWorkspaceFiles, type ScannedWorkspaceFile } from "./scan";
 
 export type FsDiffOperation =
   | { op: "create"; path: string; mediaType: string }
@@ -18,6 +18,10 @@ export type FsDiff = {
 
 export type ScannedWorkspaceDiff = FsDiff & {
   manifest: WorkspaceManifest;
+  // The T0 disk scan the operations were computed from. Push builds the new
+  // baseline from THESE hashes (never a post-push rescan), so an edit landing
+  // during the push window is not absorbed into the baseline as already-synced.
+  scanned: ScannedWorkspaceFile[];
 };
 
 export async function scanWorkspaceDiff(rootDir: string): Promise<ScannedWorkspaceDiff> {
@@ -65,6 +69,7 @@ export async function scanWorkspaceDiff(rootDir: string): Promise<ScannedWorkspa
 
   return {
     manifest,
+    scanned: diskFiles,
     operations: [
       ...updates.sort((a, b) => a.path.localeCompare(b.path)),
       ...renames.sort((a, b) => a.fromPath.localeCompare(b.fromPath)),

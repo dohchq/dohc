@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // dohc Cloud session credentials for this desktop install. The token is
@@ -40,6 +40,9 @@ export function createCloudCredentialStore(options: {
       let parsed: unknown;
       try {
         parsed = JSON.parse(await readFile(file, "utf8"));
+        // Heal lax perms on existing installs: the file holds a full account
+        // credential, so it must be owner-only. No-op/ignored on Windows.
+        await chmod(file, 0o600).catch(() => undefined);
       } catch {
         return null;
       }
@@ -87,11 +90,16 @@ export function createCloudCredentialStore(options: {
         email: credentials.email,
         token,
       };
-      await mkdir(dir, { recursive: true });
+      // 0700 dir + 0600 file: the session token is a full account credential,
+      // so it must never be world-readable (the plain: fallback fires exactly
+      // on Linux/WSL without a secret service). Mode args are ignored on
+      // Windows, so this stays cross-platform safe.
+      await mkdir(dir, { recursive: true, mode: 0o700 });
       // Atomic: write a temp file then rename over the target so a crash or
-      // concurrent reader never sees a half-written credential file.
+      // concurrent reader never sees a half-written credential file. The 0600
+      // mode is set on the temp file so the rename preserves it.
       const tmp = `${file}.tmp-${process.pid}`;
-      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`);
+      await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
       await rename(tmp, file);
     },
 

@@ -1,3 +1,4 @@
+import { isNull } from "drizzle-orm";
 import {
   index,
   integer,
@@ -118,7 +119,11 @@ export const atoms = pgTable(
     ...scopedTimestamps,
   },
   (table) => [
-    uniqueIndex("atoms_workspace_path_unique").on(table.workspaceId, table.path),
+    // Partial: uniqueness constrains LIVE rows only, so a soft-delete tombstone
+    // never blocks recreating or renaming onto the same path (migration 0003).
+    uniqueIndex("atoms_workspace_path_unique")
+      .on(table.workspaceId, table.path)
+      .where(isNull(table.deletedAt)),
   ],
 );
 
@@ -156,10 +161,10 @@ export const assets = pgTable(
     ...scopedTimestamps,
   },
   (table) => [
-    uniqueIndex("assets_workspace_path_unique").on(
-      table.workspaceId,
-      table.path,
-    ),
+    // Partial: see atoms_workspace_path_unique (migration 0003).
+    uniqueIndex("assets_workspace_path_unique")
+      .on(table.workspaceId, table.path)
+      .where(isNull(table.deletedAt)),
   ],
 );
 

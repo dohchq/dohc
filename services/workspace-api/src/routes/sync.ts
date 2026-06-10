@@ -42,6 +42,17 @@ export type ApplySyncRequest = {
   operations: WorkspaceSyncOperation[];
 };
 
+// Per-op outcome so a mid-batch failure does NOT wedge the whole workspace:
+// the client advances its baseline only for ops that report ok, and retries
+// the failed ones cleanly on the next push. file carries the new revision so
+// the client can rebuild the baseline without a post-push rescan.
+export type SyncOpResult = {
+  path: string;
+  ok: boolean;
+  error?: string;
+  file?: WorkspaceFile | null;
+};
+
 export const MAX_SYNC_ASSET_BYTES = 10 * 1024 * 1024;
 
 export async function applyWorkspaceSync(
@@ -53,23 +64,47 @@ export async function applyWorkspaceSync(
     throw new Error("sync apply requires an operations array");
   }
 
-  const files: WorkspaceFile[] = [];
-  let applied = 0;
-  // Sync apply is fail-fast and non-transactional for now: callers get the
-  // failing operation path attached to the error, and prior operations may
-  // already be applied by the backend.
+  // Structural validation is a CONTRACT violation, not a per-op data failure:
+  // reject the whole batch (400) so a malformed client is told to fix itself,
+  // rather than silently dropping the bad op. The client decomposes
+  // cross-folder renames into delete+create before it ever reaches here.
   for (const operation of request.operations) {
-    try {
-      const file = await applyOperation(backend, actor, operation);
-      if (file) files.push(file);
-      applied += 1;
-    } catch (error) {
-      attachOperationPath(error, operation);
+    if (operation.op === "rename" && dirname(operation.fromPath) !== dirname(operation.toPath)) {
+      const error = new Error("cross-folder renames are not supported by workspace sync");
+      (error as { path?: string }).path = operation.fromPath;
       throw error;
     }
   }
 
-  return { ok: true, applied, files };
+  const files: WorkspaceFile[] = [];
+  const results: SyncOpResult[] = [];
+  let applied = 0;
+  // Resilient (not fail-fast): every operation is attempted independently and
+  // reports its own outcome. A single failing op (stale revision, oversize,
+  // transient) no longer blocks the ops behind it, and the client never has to
+  // surgically un-wedge a half-applied batch.
+  for (const operation of request.operations) {
+    const path = operationPath(operation);
+    try {
+      const file = await applyOperation(backend, actor, operation);
+      if (file) files.push(file);
+      applied += 1;
+      results.push({ path, ok: true, file });
+    } catch (error) {
+      results.push({ path, ok: false, error: errorMessage(error) });
+    }
+  }
+
+  return { ok: true, applied, files, results };
+}
+
+function operationPath(operation: WorkspaceSyncOperation): string {
+  return operation.op === "rename" ? operation.toPath : operation.path;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 async function applyOperation(
@@ -101,8 +136,11 @@ async function applyOperation(
         body: operation.body,
       });
     }
-    return await backend.saveAsset(actor, {
+    // Binary update: updateAsset (NOT saveAsset, which is create-only) so the
+    // expectedRevision arbitrates instead of last-writer-wins.
+    return await backend.updateAsset(actor, {
       path: operation.path,
+      expectedRevision: operation.expectedRevision,
       kind: operation.kind ?? "file",
       mediaType: operation.mediaType ?? "application/octet-stream",
       bytes: bytesFromOperation(operation),
@@ -110,13 +148,11 @@ async function applyOperation(
   }
 
   if (operation.op === "delete") {
-    await backend.deleteFile(actor, operation.path);
+    await backend.deleteFile(actor, operation.path, operation.expectedRevision);
     return null;
   }
 
-  if (dirname(operation.fromPath) !== dirname(operation.toPath)) {
-    throw new Error("cross-folder renames are not supported by workspace sync");
-  }
+  // Cross-folder renames are pre-validated (rejected) in applyWorkspaceSync.
   const toName = operation.toPath.includes("/")
     ? operation.toPath.slice(operation.toPath.lastIndexOf("/") + 1)
     : operation.toPath;
@@ -158,8 +194,3 @@ function assetKind(kind: AtomKind | AssetKind | undefined): AssetKind {
   return "file";
 }
 
-function attachOperationPath(error: unknown, operation: WorkspaceSyncOperation) {
-  if (!error || typeof error !== "object") return;
-  const path = operation.op === "rename" ? operation.fromPath : operation.path;
-  (error as { path?: string }).path = path;
-}

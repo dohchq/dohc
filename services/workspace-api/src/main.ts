@@ -19,7 +19,23 @@ import { createWorkspaceApiHandler } from "./server";
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
 const secret = process.env.BETTER_AUTH_SECRET ?? "";
-const testAuthSeam = process.env.DOHC_TEST_AUTH === "1";
+
+// The /test/device/approve impersonation seam is fail-CLOSED: it requires an
+// explicit dev/test signal, never merely "not production". An operator who
+// copies a dev .env (DOHC_TEST_AUTH=1) into a real deployment must crash the
+// server, not silently expose a full-impersonation endpoint with a
+// source-visible secret.
+const nodeEnv = process.env.NODE_ENV;
+const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
+const testAuthSeam = process.env.DOHC_TEST_AUTH === "1" && isDevOrTest;
+
+if (process.env.DOHC_TEST_AUTH === "1" && !isDevOrTest) {
+  console.error(
+    `FATAL: DOHC_TEST_AUTH=1 requires NODE_ENV=development or test, got NODE_ENV=${nodeEnv ?? "(unset)"}. ` +
+      "This is a dangerous impersonation seam — refusing to start.",
+  );
+  process.exit(1);
+}
 
 if (!testAuthSeam && secret.length < 32) {
   console.error(
@@ -82,20 +98,19 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   if (url.pathname === "/health") {
     return Response.json({ ok: true, service: "workspace-api" });
   }
-  if (
-    testAuthSeam &&
-    process.env.NODE_ENV !== "production" &&
-    url.pathname === "/test/device/approve" &&
-    request.method === "POST"
-  ) {
+  // testAuthSeam already encodes the dev/test gate (fail-closed above).
+  if (testAuthSeam && url.pathname === "/test/device/approve" && request.method === "POST") {
     return handleTestDeviceApprove(request);
   }
   return workspaceHandler(request);
 };
 
 const server = createServer(toNodeHandler(fetchHandler));
-server.listen(port, () => {
-  console.log(`[workspace-api] listening on :${port} (auth at /api/auth)`);
+// When the impersonation seam is on, bind loopback only so the dev-cloud
+// test server is never reachable off-host.
+const host = testAuthSeam ? "127.0.0.1" : "0.0.0.0";
+server.listen(port, host, () => {
+  console.log(`[workspace-api] listening on ${host}:${port} (auth at /api/auth)`);
   if (testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
 });
 

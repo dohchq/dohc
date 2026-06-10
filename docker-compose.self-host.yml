@@ -76,6 +76,10 @@ services:
         condition: service_healthy
     environment:
       DOHC_BACKEND: postgres
+      # production: hard-disables the /test/device/approve impersonation seam.
+      # If DOHC_TEST_AUTH ever leaks into a real deployment the server crashes
+      # at boot rather than exposing it.
+      NODE_ENV: production
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}

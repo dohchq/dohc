@@ -37,7 +37,7 @@ test.beforeAll(async () => {
     [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],
     {
       cwd: join(process.cwd(), "services/workspace-api"),
-      env: { ...process.env, DOHC_TEST_AUTH: "1", WORKSPACE_API_PORT: String(PORT) },
+      env: { ...process.env, DOHC_TEST_AUTH: "1", NODE_ENV: "test", WORKSPACE_API_PORT: String(PORT) },
       stdio: "ignore",
     },
   );

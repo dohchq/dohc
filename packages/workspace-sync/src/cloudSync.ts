@@ -63,17 +63,20 @@ export function syncDecision(set: ChangeSet): "auto" | "needs-confirmation" {
 // anything the user touched since the last sync.
 // ---------------------------------------------------------------------------
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   assertSafeWorkspacePath,
+  CorruptManifestError,
   enrichOperation,
-  isTextMediaType,
+  isConflictOperation,
+  MAX_INLINE_FILE_SIZE,
   readManifest,
   resolveWorkspacePath,
   sha256,
   scanWorkspaceDiff,
-  scanWorkspaceFiles,
+  type FsDiffOperation,
+  type ScannedWorkspaceFile,
   writeManifest,
   type WorkspaceManifest,
   type WorkspaceManifestEntry,
@@ -85,6 +88,9 @@ export interface MergeSyncResult {
   deletedLocally: number;
   // Workspace-relative paths whose remote content landed as <path>.conflict.
   conflicts: string[];
+  // Files skipped (e.g. too large for the server cap) so the UI can surface
+  // them; they stay out of the baseline so they retry if shrunk later.
+  skipped: string[];
 }
 
 interface RemoteFile {
@@ -95,6 +101,11 @@ interface RemoteFile {
   revision: string;
 }
 
+// Mirrors the server's per-op result; file carries the new revision so the
+// baseline rebuilds without a post-push rescan.
+type SyncOpFile = Pick<RemoteFile, "id" | "kind" | "contentType" | "revision">;
+type SyncOpResult = { path: string; ok: boolean; error?: string; file?: SyncOpFile | null };
+
 export interface MergeSync {
   // Creates the empty sync baseline for a workspace that has never synced.
   initialize(): Promise<void>;
@@ -104,6 +115,26 @@ export interface MergeSync {
   pull(): Promise<MergeSyncResult>;
 }
 
+// Raised when the manifest's server binding does not match the engine's
+// configured server: refuse all sync rather than mass-delete clean local files
+// against the wrong (or empty) remote.
+export class ServerBindingMismatchError extends Error {}
+
+// Raised when the server returns 401: the session token is expired/revoked.
+// The engine stops retrying and surfaces "session expired — reconnect" rather
+// than spinning forever while claiming "connected".
+export class UnauthorizedSyncError extends Error {
+  readonly status = 401;
+}
+
+const EMPTY_RESULT: MergeSyncResult = {
+  pushed: 0,
+  pulled: 0,
+  deletedLocally: 0,
+  conflicts: [],
+  skipped: [],
+};
+
 export function createMergeSync({
   rootDir,
   remoteWorkspaceId,
@@ -112,10 +143,14 @@ export function createMergeSync({
   fetch: base = fetch,
 }: CloudSyncOptions): MergeSync {
   const authedFetch = createAuthorizedFetch(token, base);
-  const apiBase = `${serverUrl.replace(/\/+$/, "")}/workspaces/${encodeURIComponent(remoteWorkspaceId)}`;
+  const normalizedServerUrl = serverUrl.replace(/\/+$/, "");
+  const apiBase = `${normalizedServerUrl}/workspaces/${encodeURIComponent(remoteWorkspaceId)}`;
 
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await authedFetch(`${apiBase}/${path}`, init);
+    if (response.status === 401) {
+      throw new UnauthorizedSyncError("cloud session expired or revoked (401)");
+    }
     const data = (await response.json()) as T & { ok?: boolean; error?: string };
     if (!response.ok || data.ok === false) {
       throw new Error(data.error ?? `sync request failed (${response.status}): ${path}`);
@@ -128,25 +163,54 @@ export function createMergeSync({
     return files;
   }
 
-  // The baseline records, per path, the server revision and the LOCAL content
-  // hash at the moment they matched — "dirty" means the file changed locally
-  // since then.
-  async function refreshBaseline(manifest: WorkspaceManifest): Promise<void> {
-    const [remote, local] = await Promise.all([listRemote(), scanWorkspaceFiles(rootDir)]);
-    const localByPath = new Map(local.map((file) => [file.path, file]));
-    const files: WorkspaceManifest["files"] = {};
-    for (const file of remote) {
-      const localFile = localByPath.get(file.path);
-      if (!localFile) continue;
-      files[file.path] = {
-        id: file.id,
-        kind: file.kind,
-        contentType: file.contentType,
-        revision: file.revision,
-        sha256: localFile.sha256,
-      };
+  // Read the baseline AND verify the server binding: a baseline produced
+  // against a different server/workspace must never drive deletes here.
+  async function readBoundManifest(): Promise<WorkspaceManifest> {
+    const manifest = await readManifest(rootDir);
+    const boundServer = manifest.serverUrl?.replace(/\/+$/, "");
+    if (
+      (boundServer !== undefined && boundServer !== normalizedServerUrl) ||
+      (manifest.remoteWorkspaceId !== undefined &&
+        manifest.remoteWorkspaceId !== remoteWorkspaceId)
+    ) {
+      throw new ServerBindingMismatchError(
+        `sync manifest is bound to ${manifest.serverUrl ?? "?"}/${manifest.remoteWorkspaceId ?? "?"}, ` +
+          `not ${normalizedServerUrl}/${remoteWorkspaceId} — refusing to sync`,
+      );
     }
-    await writeManifest(rootDir, { ...manifest, files });
+    return manifest;
+  }
+
+  function assertNotMetadata(path: string): void {
+    if (path === ".dohc" || path.startsWith(".dohc/")) {
+      throw new Error(`remote file path collides with dohc metadata: ${path}`);
+    }
+  }
+
+  // The server caps inline binaries; text atoms are uncapped. A create/update
+  // whose scanned size exceeds the cap is skipped (kept out of the baseline)
+  // rather than wedging the whole push.
+  function isOversize(scanned: ScannedWorkspaceFile | undefined): boolean {
+    return !!scanned && scanned.size > MAX_INLINE_FILE_SIZE;
+  }
+
+  // Cross-folder renames are rejected server-side; with the partial unique
+  // index a delete+create is safe and content-equivalent. Same-folder renames
+  // stay as rename ops.
+  function decomposeRenames(operations: FsDiffOperation[]): FsDiffOperation[] {
+    const out: FsDiffOperation[] = [];
+    for (const operation of operations) {
+      if (
+        operation.op === "rename" &&
+        dirname(operation.fromPath) !== dirname(operation.toPath)
+      ) {
+        out.push({ op: "delete", path: operation.fromPath, expectedRevision: operation.expectedRevision });
+        out.push({ op: "create", path: operation.toPath, mediaType: mediaTypeFor(operation.toPath) });
+        continue;
+      }
+      out.push(operation);
+    }
+    return out;
   }
 
   return {
@@ -154,38 +218,90 @@ export function createMergeSync({
       try {
         await readManifest(rootDir);
         return;
-      } catch {
-        // No baseline yet — first sync of this workspace.
+      } catch (error) {
+        // CORRUPT is not "fresh": resetting it to empty would re-create and
+        // conflict-spam every previously-synced file. Only a genuinely ABSENT
+        // manifest (ENOENT) starts an empty baseline.
+        if (error instanceof CorruptManifestError) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
       await writeManifest(rootDir, {
         version: 1,
         workspaceId: remoteWorkspaceId,
         backend: "postgres",
+        serverUrl: normalizedServerUrl,
+        remoteWorkspaceId,
         files: {},
       });
     },
 
     async push() {
-      const { manifest, operations } = await scanWorkspaceDiff(rootDir);
-      if (operations.length === 0) {
-        return { pushed: 0, pulled: 0, deletedLocally: 0, conflicts: [] };
-      }
-      const enriched = await Promise.all(
-        operations.map((operation) => enrichOperation(rootDir, operation)),
-      );
-      const { applied } = await api<{ applied: number }>("sync/apply", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operations: enriched }),
+      const { manifest, operations, scanned } = await scanWorkspaceDiff(rootDir);
+      // Bind/verify even on push so a re-pointed engine fails loudly here too.
+      await readBoundManifest();
+      const scannedByPath = new Map(scanned.map((file) => [file.path, file]));
+
+      const skipped: string[] = [];
+      const candidate = decomposeRenames(
+        operations.filter((operation) => !isConflictOperation(operation)),
+      ).filter((operation) => {
+        if (operation.op === "create" || operation.op === "update") {
+          if (isOversize(scannedByPath.get(operation.path))) {
+            skipped.push(operation.path);
+            return false;
+          }
+        }
+        return true;
       });
-      await refreshBaseline(manifest);
-      return { pushed: applied, pulled: 0, deletedLocally: 0, conflicts: [] };
+
+      if (candidate.length === 0) {
+        return { ...EMPTY_RESULT, skipped };
+      }
+
+      const enriched = await Promise.all(
+        candidate.map((operation) => enrichOperation(rootDir, operation)),
+      );
+      const { applied, results } = await api<{ applied: number; results: SyncOpResult[] }>(
+        "sync/apply",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ operations: enriched }),
+        },
+      );
+
+      // Build the new baseline from the T0 scan hashes + the per-op revisions
+      // the server returned — NEVER a post-push rescan. Only ops that reported
+      // ok advance the baseline, so a partial failure leaves the rest pending
+      // for a clean retry, and an edit during the push window stays dirty.
+      const files = { ...manifest.files };
+      const okByPath = new Map(results.filter((result) => result.ok).map((result) => [result.path, result]));
+      for (const operation of candidate) {
+        const path = operation.op === "rename" ? operation.toPath : operation.path;
+        const result = okByPath.get(path);
+        if (operation.op === "delete") {
+          if (result) delete files[operation.path];
+          continue;
+        }
+        if (!result?.file) continue; // failed op: leave baseline untouched (still pending)
+        const scannedFile = scannedByPath.get(path);
+        if (!scannedFile) continue;
+        files[path] = {
+          id: result.file.id,
+          kind: result.file.kind,
+          contentType: result.file.contentType,
+          revision: result.file.revision,
+          sha256: scannedFile.sha256,
+        };
+      }
+
+      await writeManifest(rootDir, withBinding({ ...manifest, files }));
+      return { pushed: applied, pulled: 0, deletedLocally: 0, conflicts: [], skipped };
     },
 
     async pull() {
-      const manifest = await readManifest(rootDir);
-      const [remote, local] = await Promise.all([listRemote(), scanWorkspaceFiles(rootDir)]);
-      const localByPath = new Map(local.map((file) => [file.path, file]));
+      const manifest = await readBoundManifest();
+      const remote = await listRemote();
       const remotePaths = new Set(remote.map((file) => file.path));
       const files = { ...manifest.files };
       let pulled = 0;
@@ -195,15 +311,16 @@ export function createMergeSync({
       for (const file of remote) {
         const path = assertSafeWorkspacePath(file.path);
         // The server is outside the local trust boundary: a hostile or buggy
-        // remote must never write into dohc's own metadata (mirrors the
-        // materialize() guard).
-        if (path === ".dohc" || path.startsWith(".dohc/")) {
-          throw new Error(`remote file path collides with dohc metadata: ${path}`);
-        }
+        // remote must never write into dohc's own metadata. *.conflict markers
+        // are local-only artifacts; never pull them down.
+        assertNotMetadata(path);
+        if (path.endsWith(".conflict")) continue;
+
         const entry = files[path];
-        const localFile = localByPath.get(path);
-        // Baseline current and nothing changed remotely: local state (clean
-        // or mid-edit) is exactly where it should be.
+        const liveSha = await diskSha(rootDir, path);
+
+        // Baseline current AND nothing changed remotely: local state (clean or
+        // mid-edit) is exactly where it should be.
         if (entry && entry.revision === file.revision) continue;
 
         const read = await api<{
@@ -213,49 +330,112 @@ export function createMergeSync({
           read.file.body !== undefined
             ? Buffer.from(read.file.body, "utf8")
             : Buffer.from(read.file.bytesBase64 ?? "", "base64");
+        const remoteSha = sha256(bytes);
 
-        const dirty = localFile && (!entry || localFile.sha256 !== entry.sha256);
-        if (dirty) {
-          // Both sides changed: the user's file stays untouched; remote
-          // content lands beside it for a human merge. The baseline is NOT
-          // advanced, so the local edit still pushes (and the server-side
-          // revision check arbitrates).
-          const conflictPath = assertSafeWorkspacePath(`${path}.conflict`);
-          const target = resolveWorkspacePath(rootDir, conflictPath);
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, bytes);
+        // LOCAL DELETION: a baseline entry whose local file is gone is a local
+        // change (the user deleted it), NOT a clean slot to fill. Never
+        // resurrect: land the remote content beside it as .conflict and leave
+        // the baseline so the deletion still pushes.
+        if (entry && liveSha === null) {
+          await writeWorkspaceFile(rootDir, `${path}.conflict`, bytes);
           conflicts.push(path);
           continue;
         }
 
-        const target = resolveWorkspacePath(rootDir, path);
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, bytes);
+        // SELF-HEAL: if the fetched bytes already match the live local file,
+        // just adopt them into the baseline (revision + sha) without rewriting
+        // the file or spawning a spurious conflict. This recovers any wedge
+        // where the baseline drifted (corrupt/empty/partial push) but disk is
+        // actually in sync.
+        if (liveSha !== null && liveSha === remoteSha) {
+          files[path] = baselineEntry(file, read.file.revision, remoteSha);
+          continue;
+        }
+
+        // Dirty: the live local file differs from BOTH the baseline and the
+        // remote. (Re-hashing live disk — not an initial scan — catches an
+        // edit made mid-pull.) Land remote beside it for a human merge; do NOT
+        // advance the baseline, so the local edit still pushes.
+        const dirty = liveSha !== null && (!entry || liveSha !== entry.sha256);
+        if (dirty) {
+          await writeWorkspaceFile(rootDir, `${path}.conflict`, bytes);
+          conflicts.push(path);
+          continue;
+        }
+
+        await writeWorkspaceFile(rootDir, path, bytes);
         pulled += 1;
-        files[path] = {
-          id: file.id,
-          kind: file.kind,
-          contentType: file.contentType,
-          revision: read.file.revision,
-          sha256: sha256(bytes),
-        };
+        files[path] = baselineEntry(file, read.file.revision, remoteSha);
       }
 
-      // Remote deletions: only a CLEAN local copy follows them; a dirty file
-      // stays (the baseline entry drops, so the next push re-creates it).
+      // Baseline paths absent remotely. A still-present local copy that matches
+      // the baseline (clean) follows the remote deletion. A LOCALLY-DELETED
+      // file (baseline entry, no local file) is a local change, NOT a clean
+      // follow: write remote content as .conflict instead of resurrecting it.
       for (const [path, entry] of Object.entries(manifest.files)) {
         if (remotePaths.has(path)) continue;
-        const localFile = localByPath.get(path);
-        if (localFile && localFile.sha256 === entry.sha256) {
+        if (path.endsWith(".conflict")) {
+          delete files[path];
+          continue;
+        }
+        const liveSha = await diskSha(rootDir, path);
+        if (liveSha === null) {
+          // Locally deleted; remote also gone — nothing to resurrect. The
+          // deletion will push on the next push (entry dropped from baseline).
+          delete files[path];
+          continue;
+        }
+        if (liveSha === entry.sha256) {
           await rm(resolveWorkspacePath(rootDir, path), { force: true });
           deletedLocally += 1;
         }
+        // Dirty local copy stays; entry drops so the next push re-creates it.
         delete files[path];
       }
 
-      await writeManifest(rootDir, { ...manifest, files });
-      return { pushed: 0, pulled, deletedLocally, conflicts };
+      await writeManifest(rootDir, withBinding({ ...manifest, files }));
+      return { pushed: 0, pulled, deletedLocally, conflicts, skipped: [] };
     },
   };
+
+  function withBinding(manifest: WorkspaceManifest): WorkspaceManifest {
+    return { ...manifest, serverUrl: normalizedServerUrl, remoteWorkspaceId };
+  }
+}
+
+function baselineEntry(file: RemoteFile, revision: string, sha: string): WorkspaceManifestEntry {
+  return {
+    id: file.id,
+    kind: file.kind,
+    contentType: file.contentType,
+    revision,
+    sha256: sha,
+  };
+}
+
+function mediaTypeFor(path: string): string {
+  // Re-derive on the create half of a decomposed rename; enrichOperation maps
+  // it to the proper atom/asset kind.
+  return path.toLowerCase().endsWith(".md") ? "text/markdown" : "application/octet-stream";
+}
+
+async function writeWorkspaceFile(rootDir: string, path: string, bytes: Buffer): Promise<void> {
+  const safe = assertSafeWorkspacePath(path);
+  const target = resolveWorkspacePath(rootDir, safe);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, bytes);
+}
+
+// Live content hash of a workspace file, or null if it does not exist. Read
+// IMMEDIATELY before any overwrite/delete decision so a mid-pull edit is seen.
+async function diskSha(rootDir: string, path: string): Promise<string | null> {
+  const target = resolveWorkspacePath(rootDir, path);
+  try {
+    await stat(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return sha256(await readFile(target));
 }
 

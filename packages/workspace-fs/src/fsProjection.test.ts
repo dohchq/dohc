@@ -106,6 +106,15 @@ function memoryBackend(initial: MemoryFile[]) {
       files.set(input.path, file);
       return file;
     },
+    async updateAsset(_actor, input) {
+      calls.push({ method: "updateAsset", input });
+      const existing = files.get(input.path);
+      if (!existing) throw new Error("not found");
+      if (existing.revision !== input.expectedRevision) throw new Error("stale revision");
+      const file = binaryFile(input.path, input.mediaType, input.bytes, input.kind === "sqlite" ? "database" : "asset", "rev-updated");
+      files.set(input.path, file);
+      return file;
+    },
     async renameFile(_actor, input) {
       calls.push({ method: "renameFile", input });
       const file = files.get(input.fromPath);
@@ -283,11 +292,14 @@ describe("workspace filesystem projection", () => {
 
       await applyFsDiff({ backend, actor, rootDir: dir, diff: await scanWorkspaceDiff(dir) });
 
-      expect(calls.map((call) => call.method)).toEqual(["saveAsset"]);
+      // Updating an EXISTING asset routes through updateAsset (saveAsset is
+      // create-only) so the expectedRevision arbitrates.
+      expect(calls.map((call) => call.method)).toEqual(["updateAsset"]);
       expect(calls[0].input).toMatchObject({
         path: "finance/ledger.sqlite",
         kind: "sqlite",
         mediaType: "application/vnd.sqlite3",
+        expectedRevision: "rev-db",
         bytes: expect.any(Uint8Array),
       });
     });

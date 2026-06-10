@@ -80,6 +80,7 @@ function memoryBackend() {
     },
     async saveAsset(resolvedActor, input: SaveAssetInput) {
       calls.push({ method: "saveAsset", input, actor: resolvedActor });
+      if (assets.has(input.path)) throw new WorkspaceError("conflict", "File path already exists");
       assets.set(input.path, {
         bytes: input.bytes,
         mediaType: input.mediaType,
@@ -87,11 +88,25 @@ function memoryBackend() {
       });
       return file(input.path, "asset", input.mediaType);
     },
+    async updateAsset(resolvedActor, input) {
+      calls.push({ method: "updateAsset", input, actor: resolvedActor });
+      const row = assets.get(input.path);
+      if (!row) throw new WorkspaceError("not_found", "Asset not found");
+      if (row.revision !== input.expectedRevision) {
+        throw new WorkspaceError("conflict", "Expected revision is stale");
+      }
+      assets.set(input.path, {
+        bytes: input.bytes,
+        mediaType: input.mediaType,
+        revision: "rev-asset-updated",
+      });
+      return file(input.path, "asset", input.mediaType);
+    },
     async renameFile() {
       throw new Error("not used");
     },
-    async deleteFile(resolvedActor, path) {
-      calls.push({ method: "deleteFile", input: path, actor: resolvedActor });
+    async deleteFile(resolvedActor, path, expectedRevision) {
+      calls.push({ method: "deleteFile", input: { path, expectedRevision }, actor: resolvedActor });
       text.delete(path);
       assets.delete(path);
     },
@@ -347,5 +362,59 @@ describe("workspace API service", () => {
       error: "cross-folder renames are not supported by workspace sync",
       path: "notes/day.md",
     });
+  });
+
+  it("applies a batch resiliently: a failing op reports per-op ok=false without blocking the rest", async () => {
+    const fixture = memoryBackend();
+    const handler = createWorkspaceApiHandler({
+      backend: fixture.backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+
+    const response = await handler(new Request("http://api.test/workspaces/ws_api/sync/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        operations: [
+          // Fails: stale revision for the existing atom.
+          { op: "update", path: "notes/day.md", expectedRevision: "rev-stale", body: "x" },
+          // Succeeds even though it follows the failed op (not fail-fast).
+          { op: "create", path: "notes/new.md", body: "# New" },
+        ],
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const body = await json(response);
+    expect(body).toMatchObject({ ok: true, applied: 1 });
+    expect(body.results).toEqual([
+      expect.objectContaining({ path: "notes/day.md", ok: false }),
+      expect.objectContaining({ path: "notes/new.md", ok: true }),
+    ]);
+    // The failed op left the original atom untouched; the later op still landed.
+    expect(fixture.text.get("notes/day.md")).toEqual({ body: "# Day\n", revision: "rev-1" });
+    expect(fixture.text.get("notes/new.md")?.body).toBe("# New");
+  });
+
+  it("routes a binary update through updateAsset, not saveAsset", async () => {
+    const fixture = memoryBackend();
+    const handler = createWorkspaceApiHandler({
+      backend: fixture.backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+    const apply = (operations: unknown[]) =>
+      handler(new Request("http://api.test/workspaces/ws_api/sync/apply", {
+        method: "POST",
+        body: JSON.stringify({ operations }),
+      }));
+
+    await apply([
+      { op: "create", path: "img/p.png", kind: "image", mediaType: "image/png", bytesBase64: Buffer.from([1]).toString("base64") },
+    ]);
+    await apply([
+      { op: "update", path: "img/p.png", expectedRevision: "rev-asset", kind: "image", mediaType: "image/png", bytesBase64: Buffer.from([2]).toString("base64") },
+    ]);
+
+    expect(fixture.calls.some((call) => call.method === "updateAsset")).toBe(true);
+    expect([...(fixture.assets.get("img/p.png")?.bytes ?? [])]).toEqual([2]);
   });
 });
