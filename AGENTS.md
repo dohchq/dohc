@@ -8,7 +8,7 @@ dohc is basically rethinking notion, obsidian, google docs, spreadsheets, jira, 
 
 ## Current status
 
-We are currently building the MVP for dohc and haven't launched with users yet.
+We are currently building the MVP for dohc and haven't launched with users yet. We are pivoting dohc to be desktop-first and local-file-first: workspaces are real folders on the user's disk, agents work directly in them, and dohc Cloud is the collaboration engine on top. See `docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.md`.
 
 ## Some thoughts from the author (Ice)
 
@@ -26,7 +26,7 @@ Here's some philosophical things to consider as we build and work together:
 
 ### Boil the ocean
 
-This project would have been way too bold beforer agents existed. We effectively have to build an entire AI OS from scratch and rebuild Notion, Text editors, docs, spreadsheets, dashboards, and perhaps even text/markdown itself for it to work as we want long term.
+This project would have been way too bold before agents existed. We effectively have to build an entire AI OS from scratch and rebuild Notion, Text editors, docs, spreadsheets, dashboards, and perhaps even text/markdown itself for it to work as we want long term.
 
 When planning, do not be afraid to suggest seeminlgy insane solutions. For example, creating our own implementation of markdown better suited for AI. Seems insane, but it's absolutely doable with modern tools.
 
@@ -93,6 +93,49 @@ Teams and companies matter, but they are not the starting point. The starting po
 If dohc only works after a whole company adopts it, we built the wrong thing.
 
 The product should feel valuable even when the entire "organization" is just one human and their agents.
+
+### Three legs, one moat
+
+Local files, markdown, speed, and a command palette are table stakes. We adopt them from tools like Obsidian, but they are not why dohc exists. If we ship only those, we built a worse Obsidian.
+
+What separates dohc is three legs:
+
+1. **Agents are first-class workers, not plugins.** Anyone can point an agent at a folder. dohc gives agent work *infrastructure*: change sets, provenance, attribution, review gates at real boundaries, workspace-aware tools, and testing that catches fake or broken output. Access is cheap; accountability is the product.
+2. **Work primitives beyond notes.** Real databases, data imports, and source-backed apps that an agent can build and dohc can test. A second brain stores what you know; dohc runs what you do.
+3. **Building together** — git-grade collaboration (next section).
+
+Each leg alone is copyable. The combination forces every competitor to abandon their own architecture: Obsidian can't grow servers and agent infrastructure without betraying what it is; Notion and Google Docs can't hand you local files you own without rebuilding their foundations. We stand in the structural gap between them.
+
+When evaluating any feature, ask which leg it strengthens. If the answer is none, question the feature.
+
+### Git for everyday people
+
+Imagine software engineers without git: no history, no merge, no blame, no working in parallel. Everyone emails final files around. That is how everyday people still build in Obsidian, Google Docs, and Notion — they build alone and share end products.
+
+dohc brings building-collaboration to everyone. Change sets are commits. Provenance is blame. AI-assisted conflict resolution is merge. Shared workspaces are repos. AI is what finally makes this possible for normal people: the agent explains what changed, proposes merges, and summarizes in plain language — the parts of git that were too hard for non-engineers simply dissolve.
+
+The agent era makes this urgent, not just nice. When your agent and my agent both worked in our shared workspace overnight, ad-hoc sync is chaos. "Here is the change set your agent produced; review it" is the killer flow.
+
+Two rules keep this honest:
+
+- The semantics must be useful solo, with no account: history, undo, and agent change review work offline. By the time someone shares a workspace, sharing adds zero new concepts. That funnel is the business: local-first accountless use is the free trust wedge; dohc Cloud is the paid collaboration engine.
+- Emphasis flows into *visibility* — timelines, attribution, catch-up summaries — never into approval ceremonies. Git won because committing is frictionless. Review happens at real boundaries only.
+
+### Fast is a feature
+
+dohc is the antithesis of bloated workspace software. Slowness is a bug, not polish debt.
+
+The bar is native: instant launch, instant typing, instant file trees, instant search. Performance budgets are tests that fail builds, not aspirations in a doc. Every dependency must justify its weight. The renderer renders; heavy work happens elsewhere.
+
+People feel speed before they can name any feature. A workspace tool that hesitates teaches the user to keep their thoughts somewhere else.
+
+### Less code is more product
+
+Deletion is valued work. The fewer lines we deliver, the better.
+
+Reuse before you write. Build the smallest implementation that passes the tests. No speculative abstraction, no options nobody asked for, no wrappers around single call sites. When a replacement lands with tests, the replaced path dies in the same change.
+
+We are a small team building something enormous. The only way that math works is if the codebase stays lean enough that any agent or human can hold a subsystem in their head.
 
 ### Product invariants
 

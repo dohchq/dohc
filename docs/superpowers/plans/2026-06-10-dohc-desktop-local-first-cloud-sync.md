@@ -1,12 +1,16 @@
 # dohc Desktop Local-First Cloud Sync Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. If those skills are unavailable, use native orchestration instead: a lead agent implements phases sequentially, fans out parallel subagent review workflows at every major checkpoint (security, UX/screenshot, performance, deletion-safety), runs long test suites in the background, and self-paces with scheduled wakeups so execution continues unattended. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Pivot dohc from a web-first Convex workspace into an Electron-first, local-file-first workspace that syncs to dohc Cloud or self-hosted Postgres, lets local Codex/Claude Code work directly on files, and preserves dohc's collaboration, apps, SQLite, provenance, and agent-testing strengths.
 
+**Product thesis:** Files are local and owned, but they are not *just* local files — they are building blocks people share and build on together. dohc brings git-grade building-collaboration (change sets, history, attribution, review at real boundaries, AI-assisted merge) to everyday people, the way git brought it to engineers. Local-first accountless use is the free trust wedge; dohc Cloud is the paid collaboration engine. Without the collaboration layer, dohc is arguably an Obsidian clone — with it, it is a new category. Collaboration surfaces are first-class product, never sync plumbing.
+
+What separates dohc from Obsidian-class tools is three legs, and the combination is the moat: (1) agents are first-class workers with infrastructure — change sets, provenance, attribution, review gates, MCP tools, tested apps — not bolted-on plugins with folder access; (2) work primitives beyond notes — real SQLite databases, data imports, and source-backed apps a user's agent can build and dohc can test; (3) git-grade collaboration. Local files, markdown, speed, and a command palette are table stakes adopted from Obsidian, not differentiation — every phase should protect all three legs, and users' agents (not a plugin marketplace) are dohc's ecosystem.
+
 **Architecture:** Workspaces are real folders on disk. The desktop app is the primary product surface and runs a local dohc core that watches folders, batches changes, maintains `.dohc/` metadata, serves the React renderer, exposes MCP/tools to local agents, and syncs with dohc Cloud/self-hosted Postgres when enabled. The existing dual-backend branch is treated as a completed prototype: keep/port the useful Postgres, filesystem, app, SQLite, sandbox, upload, and AppTester pieces; delete Convex and web-first compatibility paths once equivalent local-first tests prove the replacement.
 
-**Tech Stack:** Electron, React/TanStack Start renderer, TypeScript, Vite/electron-vite or equivalent Electron Vite build tooling, Playwright Electron automation, Vitest, Postgres, Drizzle ORM, Hocuspocus/Yjs where collaborative text needs CRDTs, local filesystem storage, S3-compatible object storage for cloud/self-host, SQLite worker/AppTester services, MCP server for Codex/Claude integration, Docker Compose for self-host/dev.
+**Tech Stack:** Electron, React/TanStack Start renderer, TypeScript, Vite/electron-vite or equivalent Electron Vite build tooling, Playwright Electron automation, Vitest, Postgres, Drizzle ORM, Better Auth (inside workspace-api, Drizzle adapter on the same Postgres) for cloud/self-host authentication, Hocuspocus/Yjs for live collaborative text in shared workspaces, local filesystem storage, S3-compatible object storage for cloud/self-host, SQLite worker/AppTester services, MCP server for Codex/Claude integration, Docker Compose for self-host/dev.
 
 ---
 
@@ -26,6 +30,9 @@ Use these references while implementing:
 - Chromium performance APIs for renderer marks/measures: `https://developer.mozilla.org/docs/Web/API/Performance`
 - React profiler for targeted render-cost investigation: `https://react.dev/reference/react/Profiler`
 - Local reference implementation: `/home/ice/dev/oss-repos/t3code/apps/desktop`
+- Better Auth docs (Drizzle adapter, organization plugin, device authorization, SSO): `https://www.better-auth.com/docs`
+- Hocuspocus server/provider docs: `https://tiptap.dev/docs/hocuspocus`
+- Yjs docs: `https://docs.yjs.dev`
 
 Important lessons from the references:
 
@@ -43,6 +50,9 @@ Important lessons from the references:
 
 - Cut Convex in the new architecture.
 - Use Postgres for dohc Cloud and self-hosted sync/collaboration.
+- Use Better Auth (running inside workspace-api on the Drizzle/Postgres stack) for dohc Cloud and self-host authentication: email/password plus the device authorization flow for desktop login and the organization plugin for teams. Self-hosters get working auth with no external vendor account. WorkOS is deferred as an optional enterprise SSO/SCIM provider plugged in behind Better Auth when a business customer requires it.
+- Live real-time co-editing (Yjs/Hocuspocus) for markdown/text in shared workspaces is in scope for this plan. Raw SQLite bytes and binary assets are still never CRDT-synced. Hocuspocus ACL must be ported off Convex to Postgres.
+- Collaboration is the business model: local-first accountless use is the free wedge; dohc Cloud monetizes shared building — team workspaces, sync, live co-editing, change-set history, attribution, and AI-assisted merge. The history/attribution/catch-up surfaces are user-facing product, required even in local-only mode so sharing adds zero new concepts.
 - Build Electron desktop first.
 - Keep web, but make it secondary: cloud access, shared links, mobile-friendly access, and users without desktop.
 - Local-only use works with no account.
@@ -103,6 +113,79 @@ This plan should delete:
 - Reduce tech debt while implementing. Delete obsolete code when tests prove it is safe.
 - Performance is a product invariant. The desktop app must feel native and fast; do not accept slow startup, janky typing, sluggish file trees, expensive sync loops, or slow agent/app/database flows as "good enough."
 
+## UI/UX Direction
+
+dohc Desktop should preserve the current dohc feel: simple, clean, muted, warm, and work-focused. The evolution should make it feel more native and capable, not louder.
+
+Take inspiration from:
+
+- Obsidian: local files, calm sidebar, fast command palette, keyboard-first navigation, no heavy chrome.
+- Codex/Claude Code: agent work feels active, inspectable, and powerful without decorative UI.
+- t3code: desktop-first shell, local agent/runtime affordances, useful status surfaces, app-like polish.
+- Linear/Raycast-level restraint: dense but readable controls, crisp typography, responsive interactions.
+
+Do:
+
+- keep warm paper + graphite as the product base.
+- keep spacing compact and calm.
+- make the file tree, command palette, editor, app runtime, sync status, and agent activity feel like native desktop surfaces.
+- use subtle dividers, hover states, and active states.
+- prefer icons plus short labels for commands.
+- preserve keyboard shortcuts and quick switching.
+- make local/cloud/sync state obvious without banners everywhere.
+- make first launch immediately usable: create/open a workspace, not a marketing page.
+- use screenshots and E2E checks to verify layout, text fit, and nonblank rendering.
+
+Do not:
+
+- add marketing-style hero sections to the desktop app.
+- add gradient/orb decoration.
+- make card-heavy dashboards for core workspace UI.
+- make one-note purple/blue/dark-slate palettes.
+- hide real files behind abstract product terms.
+- ship a web page inside Electron without desktop affordances.
+- make agent progress one giant paragraph.
+- let text overflow, wrap badly, or occlude controls.
+
+UI quality bar:
+
+- default desktop shell should feel boring in the best way: obvious, fast, and trustworthy.
+- every primary screen should be usable at 1280x800 and 1536x960.
+- empty states should offer the next real action, not explain the product.
+- file/app/database/media views should feel like different file types, not markdown with costumes.
+- sync/conflict/agent activity should be inspectable but not noisy.
+
+Native app feel requirements (what separates a legit desktop app from a website in a frame):
+
+- custom titlebar integrated with the shell: draggable regions, platform-correct window controls, no default browser chrome.
+- window state persists across launches: size, position, maximized state, last workspace.
+- real menus: application menu and right-click context menus on files, folders, tabs, and editor selections — not web dropdowns pretending.
+- keyboard-first everywhere: every primary action reachable without the mouse; platform-correct modifiers; visible focus states for keyboard users only.
+- no web artifacts: no text-selection cursor on chrome, no image/link dragging, no pull-to-refresh or rubber-band on static surfaces, no FOUC or white flash on launch (background color set before first paint), no browser zoom on ctrl+scroll unless intentional.
+- typography tuned for UI density: UI font stack for chrome, content font for documents; crisp rendering; no document-scale headings inside tool surfaces.
+- one spacing grid (4px base) and one restrained token set: current dohc warm paper + graphite, one accent, subtle radii, shadows only for true elevation (menus, palette, dialogs).
+- system theme (light/dark) followed without flashing or interrupting running work.
+- resize behaves natively: panels reflow without jank, sidebar widths persist, no layout shift on font load.
+- interactions acknowledge instantly: hover/active states under 50ms, skeletons only where real latency exists.
+
+### Design Review Loop (required for every UI phase)
+
+Phases 3, 6, 7 (app runtime UI), 9 (login UI), 10 (collab/conflict UI), 11 (settings/agent UI), and 18 must run this loop before their phase commit:
+
+1. Before first implementation in Phase 3: recon the t3code renderer (`/home/ice/dev/oss-repos/t3code/apps/desktop`) and record which layout, titlebar, panel, and status-surface patterns to adopt or reject.
+2. Capture screenshots of every new/changed surface at 1280x800 and 1536x960, light and dark, via the Playwright Electron tests.
+3. Run a dedicated design-review subagent over the screenshots with this rubric, each item scored pass/fail:
+   - looks like a native desktop app, not a web page in Electron.
+   - clean, professional, calm: would not look out of place next to Obsidian, Linear, or Raycast.
+   - consistent with dohc's warm paper + graphite identity; no palette drift.
+   - spacing, alignment, and type hierarchy are deliberate; nothing cramped, floating, or misaligned.
+   - no text overflow, truncation surprises, or occluded controls.
+   - empty/loading/error states designed, not defaulted.
+   - no marketing chrome, gradients/orbs, or card-heavy dashboard syndrome.
+4. Fix every fail and re-run the loop. Maximum 3 iterations per UI phase. Hard items (text overflow, occluded controls, blank render, marketing chrome, palette drift from tokens) block the phase unconditionally. Soft aesthetic items still failing after 3 iterations become explicit deferred findings with screenshots in the execution log, re-judged at the Phase 18 readiness review.
+5. A UI phase is not complete while any hard rubric item fails.
+6. Screenshot convention (established by the Phase 2 launch E2E): tests write to `test-results/screenshots/phase-<NN>/<surface>--<width>x<height>--<light|dark>.png`. The design-review brief is fixed: "Review every PNG under `test-results/screenshots/phase-<NN>/` against the rubric; output per-file, per-item pass/fail with the failing region described." Include 2-3 reference screenshots from earlier passing phases to anchor consistency across fresh-context judges.
+
 ## Performance Budgets
 
 These budgets are initial targets for the implementation. If a target is impossible in CI due to hardware/display limitations, the agent must record the local measured number, explain the environment, and keep a tighter relative regression budget.
@@ -125,29 +208,70 @@ Desktop UX budgets:
 
 Resource budgets:
 
-- renderer idle CPU should return near idle after sync/app/test operations finish.
+- renderer idle CPU should return near idle (~0%) after sync/app/test operations finish.
 - no unbounded polling loops.
 - large file indexing must be incremental or worker-backed.
 - sync, import, AppTester, and SQLite work must not block the Electron renderer.
-- desktop memory after opening a 1,000-file workspace should be measured and recorded; regressions over 20% require investigation.
+- desktop memory after opening a 1,000-file workspace: initial target under 400MB working set, measured and recorded; regressions over 20% require investigation.
+- initial renderer JS loaded before first shell paint: initial target under 3MB; the build must print bundle size, and unexplained growth over 10% between phases fails the performance check.
+- no memory growth across repeated workspace open/close cycles (leak check).
+
+Performance engineering rules (anti-bloat):
+
+dohc Desktop is the antithesis of Notion-class bloated Electron apps. Slowness is a bug, not polish debt. These rules apply to every phase, not just Phase 16:
+
+- dependency discipline: every new dependency is justified in the execution log — what it does, its size and transitive cost, and the alternative considered. Prefer the platform/stdlib. No kitchen-sink UI kits.
+- first-paint discipline: only code needed to paint the shell loads at startup. Everything else is lazy-loaded or deferred to idle. No blocking IPC round trips before first paint. Window background color is set before first paint (no white flash).
+- the renderer renders; it does not compute: parsing, scanning, hashing, indexing, imports, SQLite, and app builds run in main-process services or workers. A renderer long task over 50ms on a hot path is a bug.
+- virtualize every unbounded surface: file tree, tables, search results, history, agent activity.
+- IPC is batched and coalesced: no per-keystroke or per-file-event round trips.
+- animations use transform/opacity only; nothing that forces layout on a hot path.
+- React hot paths are profiled: no full-tree re-renders on keystroke, file event, or sync tick.
+- measure first, optimize second: every optimization records before/after numbers in the execution log.
+
+Continuous enforcement (do not defer performance to Phase 16):
+
+- Phase 2 ships the minimal measurement harness with the scaffold: launch/first-paint marks and a measurements JSON written by the Playwright Electron tests.
+- Every subsequent phase that adds a measurable surface (file tree, editor, sync, apps, SQLite, imports, agents) adds its marks and measurements in that phase and records the numbers in the execution log.
+- Phase 16 formalizes budgets into the hard `check:performance` gate and ratchets existing measurements — it must not be the first time a number is seen.
+- A phase that makes a previously recorded measurement materially worse must fix it in that phase, not defer it.
 
 Every phase touching UI, filesystem watching, sync, database import, app runtime, or agent tooling must add or update a performance check.
+
+## Code Size And Deletion Rules
+
+The fewer lines delivered, the better. This pivot must shrink the codebase, not grow a second product beside the old one. Code deletion is highly valued work.
+
+- Deletion is part of every phase's definition of done, not a Phase 17 sweep. When a replacement lands with passing tests, the replaced path dies in the same phase. Phase 17 is the final audit, not where deletion starts.
+- Reuse before write: before creating any new helper, module, or component, search for an existing one to promote or extend — the dual-backend substrate and current app are large. Duplication discovered later is a phase bug, not acceptable drift.
+- Smallest implementation that passes the tests: no speculative abstraction, no config options nobody asked for, no wrapper layers around single call sites, no manager/factory/registry indirection without at least two real consumers today.
+- Track net LOC per phase: record `git diff --shortstat` for every phase commit in the execution log. Product-surface phases may be net-positive; integration, repositioning, and deletion phases (12, 13, 17) must be strongly net-negative. Unexplained growth is a review finding to fix.
+- Track branch-total LOC versus main at every major checkpoint. Deleting Convex, the compat package, dual-backend switching, and web-first duplicates should offset much of the new desktop/sync/auth code; record the honest number and justify the trend.
+- Codex per-phase reviews must be prompted to flag over-engineering, orphaned/unreachable code, and simplification opportunities — not just bugs.
+- Never record deferred work as code comments — the debt gate (`check:debt`) fails on the literal deferred-work marker tokens it scans for, and the failure surfaces phases later, far from its cause. Deferred work goes in the execution log's deferred-findings list with a completion condition. Adding entries to the check-tech-debt or knip allowlists for code this branch authored is forbidden; allowlists are for pre-existing/historical paths only, and every addition must be named in that phase's Codex review prompt.
 
 ## AI Agent Execution Contract
 
 The implementing agent should assume the user is AFK and keep going until completion or a real blocker.
 
-### Required Read Order
+### Required Read Order (Tiered For Finite Context)
 
-Before editing code, read:
+The lead reads inline, once per fresh context:
 
-1. `AGENTS.md`
-2. `apps/app/AGENTS.md` if touching current app code
-3. `apps/app/convex/_generated/ai/guidelines.md` before deleting or porting Convex code
-4. `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md`
-5. `docs/superpowers/reviews/2026-06-09-dual-backend-readiness-review.md`
-6. `docs/superpowers/reviews/2026-06-09-dual-backend-tech-debt-audit.md`
-7. this plan from top to bottom
+1. `AGENTS.md` (auto-injected) and `apps/app/AGENTS.md` (short)
+2. `docs/superpowers/reviews/2026-06-09-dual-backend-readiness-review.md` and `...-tech-debt-audit.md` (short)
+3. This plan's front matter (top through "Planned Repository Shape") and ONLY the current phase's section
+
+The lead delegates to read-only digest subagents (Phase 0, digests stored in the execution log's Reference Digests section, ≤25 lines each):
+
+- `docs/superpowers/plans/2026-06-09-dohc-dual-backend-filesystem-agent-runtime.execution-log.md` (95KB)
+- `apps/app/convex/_generated/ai/guidelines.md` (20KB) — required before deleting or porting Convex code
+- the t3code renderer (`/home/ice/dev/oss-repos/t3code/apps/desktop`)
+- external reference URLs (Electron security/fuses, Better Auth, Hocuspocus, Yjs)
+
+Resumed contexts read digests, never sources; go to a source only when the digest is demonstrably insufficient for the immediate task, and update the digest afterward. The lead never WebFetches or bulk-reads reference material inline.
+
+Governance exception (hard rule): digests may summarize historical plans, reviews, and reference repos. They may NOT replace direct reading of active governance files before editing code under those rules — `AGENTS.md`, `apps/app/AGENTS.md`, and `apps/app/convex/_generated/ai/guidelines.md` (before any Convex edit/port/deletion) are read directly by whoever edits the governed code, lead or lane.
 
 ### Continuous TDD Loop
 
@@ -165,6 +289,7 @@ For every phase:
 10. run a user-level smoke for the phase where applicable.
 11. update the execution log.
 12. commit the phase.
+13. run independent third-party review of the phase commit (`codex exec review -m gpt-5.5 --commit <phase-sha>` at the effort tier specified in the Codex third-party review section: xhigh for high-risk phases 2, 4, 5, 9, 10, 11, 13, 16, 17, 18; high for low-risk phases 0, 1, 12, 14, 15); record findings in the execution log; fix or explicitly reject every finding; land fixes as follow-up commits.
 
 If a named test/helper does not exist, create it.
 
@@ -185,18 +310,123 @@ After every phase, the agent must answer in the execution log:
 - What did I test at unit/integration/E2E level?
 - What did I delete or consolidate?
 - What old code did I keep and why?
+- Could this phase have shipped with less code? What did I deliberately not build?
 - What could still regress?
 - Which command proves this phase is safe?
 
 If any answer is weak, fix before moving on.
 
+### Orchestration, Loops, And Third-Party Review
+
+Execution uses native multi-agent orchestration. This is required, not optional:
+
+- A lead agent implements phases sequentially (phases are dependency-ordered) and owns the execution log and all commits.
+- Recon fan-out: before heavy phases (0, 5, 9, 10, 16), the lead fans out parallel read-only subagents to digest prior art, reference repos, and current docs instead of reading everything inline.
+- Design judge panels: before implementing the sync protocol (Phase 9) and the conflict/co-editing model (Phase 10), generate at least 3 independent designs and score them with parallel judges against concrete failure scenarios: concurrent edit, offline rename, half-written file, watcher storm, clock skew, partial upload, reconnect-after-divergence. Each candidate is a doc with fixed sections: data model, message/protocol flow, behavior under each named failure scenario, estimated LOC and new dependencies, what it deletes. Judges receive identical briefs (candidate docs + Non-Negotiables + sync payload list + settle windows + perf budgets) and output a scored matrix (scenario × design, 0-2) plus a one-paragraph verdict. The winning design goes to `docs/architecture/` (losing designs and fatal flaws included); the Decision Ledger gets a one-line entry.
+- Per-phase verification workflow: after the lead believes a phase is complete, fan out parallel verifier subagents before the phase commit: claimed-vs-actual completion check, test-quality check (do the tests actually fail without the implementation?), and UI screenshot review for UI phases.
+- Checkpoint review workflows: at each major checkpoint below, run a multi-agent adversarial review with distinct lenses (security, collaboration/authz, performance, deletion-safety, data-loss) where each finding is independently verified before being accepted as real.
+- Loops: the lead self-paces with scheduled wakeups and keeps executing while the user is AFK. Long test suites, builds, and dev servers run in the background; the lead never blocks the session foreground on a slow suite.
+
+Codex third-party review (required):
+
+- Tool: `codex exec review` (Codex CLI, verified installed and authenticated in this environment).
+- Model: always pass `-m gpt-5.5` (verified working on this account; `gpt-5.5-fast` is not available under ChatGPT-account auth and adds output speed, not review depth). Do not modify the user's global `~/.codex/config.toml`.
+- Effort tiering: checkpoint `--base main` reviews, per-phase reviews for security/sync/data-loss/deletion phases (2, 4, 5, 9, 10, 11, 13), design red-teams, the Phase 13 pre-deletion audit, and recovery consults run at `model_reasoning_effort="xhigh"`. Per-phase reviews for low-risk phases (0, 1, 12, 14, 15), adversarial scenario consults, and screenshot judging run at `"high"`. Remaining phases default to xhigh.
+- For Phases 5, 8, and 10, the review prompt must additionally ask: "name any silent-data-loss scenario the tests do not cover" — scenario-completeness is a different question than code correctness.
+- After every phase commit: run `codex exec review -m gpt-5.5 --commit <phase-sha>` at the phase's effort tier (see Effort tiering below) with a short prompt naming the phase's risk areas and explicitly asking for over-engineering, dead-code, and simplification findings alongside bugs. Record findings in the execution log.
+- At every major checkpoint: run `codex exec review -m gpt-5.5 -c model_reasoning_effort="xhigh" --base main` (checkpoints are always xhigh) over the cumulative branch diff with targeted questions for that checkpoint's risk area (e.g., IPC validation at Phase 4, merge/data-loss at Phase 10, deletion completeness at Phase 13).
+- Accountability: every Codex finding is either fixed (with a test where applicable) or explicitly rejected with reasoning in the execution log. Fixes land as follow-up commits in the same phase; do not amend or squash.
+- Codex runs read-only as a reviewer; it must not edit the repo. The lead implements fixes.
+- Pipelining: Codex reviews ALWAYS run as background tasks with stdout redirected to `docs/superpowers/reviews/codex/phase-NN.md`, launched immediately after the phase commit. While a review runs, the lead performs only read-only next-phase work (recon fan-outs, execution-map drafting, failing-test design — no commits, no shared-file mutation). A triage subagent reads the output file, dedupes, verifies each finding against actual code, and returns ≤15 numbered one-line actionable findings; the lead reads the raw transcript only when a triaged finding is ambiguous. Findings are triaged before the next phase's first commit.
+- Re-review cap: follow-up fix commits get at most ONE targeted re-review per phase; residue rolls into the next checkpoint's cumulative `--base main` review.
+- Invoke codex by the absolute path recorded in the execution log Environment section (PATH drift in fresh shells must not break the gate). If codex is temporarily unavailable, mark the phase "codex review pending," continue, and retry via self-paced wakeups (~10/30/60 min, max 3); a pending review is never silently dropped — the acceptance criteria remain the backstop.
+- The gate is "independent third-party review," not one vendor binary. Phase 0 preflight verifies `codex` + `gpt-5.5` availability and records the result. If the exact tool/model is unavailable to the runner (different machine, CI, auth limits), the gate is satisfied by the first available fallback, recorded per phase in the execution log: (1) another available Codex model at the highest reasoning effort, (2) CodeRabbit review, (3) an independent adversarial verifier-subagent panel using the Checkpoint Review Recipe plus manual reviewer signoff. A runner without the preferred tool can therefore still complete every phase and the acceptance criteria.
+
+Codex hard rules (independence and budget):
+
+- Independence rule: Codex never reviews an artifact Codex authored or materially shaped. Codex authors no code, no tests, and no candidate designs in this repo — its only write target is its own transcript under `docs/superpowers/reviews/codex/`. Codex is never assigned an implementation lane, utility module, script, or migration, in any worktree or phase: commit-scoped reviews must never audit their own author, and ChatGPT usage limits are reserved for judgment, not keystrokes. Where Codex consults influence landed work (adversarial scenarios, recovery diagnoses, design-review findings), the phase log records provenance in one line each; the Phase 18 readiness review audits that no phase-commit review covered Codex-originated artifacts beyond triaged review findings.
+- Budget rule: mandatory calls (phase-commit reviews, the single re-review, checkpoint reviews) have absolute priority. Discretionary calls (design red-teams, adversarial scenario consults, recovery consults, pre-deletion audit, screenshot passes) are capped at ONE per phase, must not launch while a mandatory review is pending or deferred for cap reasons, get zero retries, and are always skippable — nothing in the acceptance criteria depends on them. If any call hits a usage limit, all discretionary use suspends until the next mandatory call succeeds (recorded in the Resume Snapshot). Degradation order when limits bite, cut from the top: screenshot judging → adversarial scenario consults → pre-deletion audit → design red-teams → recovery consults → low-risk phase reviews (fallback chain) → never the high-risk phase or checkpoint reviews.
+- Call ledger: the execution log Environment section gains an append-only Codex Calls table (date | purpose | effort | duration | outcome). Every codex invocation of any kind is logged.
+- Discretionary-call hardening: same invocation discipline as the mandatory gate — absolute codex path, background task registered in the Resume Snapshot, stdout to `docs/superpowers/reviews/codex/`, hard timebox stated at launch (20 min recovery consult, 30 min screenshot pass, 45 min design red-team), terminated via the tracked task id on timeout, never pattern kills. Flag experiments (`--output-schema`, `-i`, session resume) happen on discretionary calls only — never change the mandatory review invocation mid-run.
+
+Discretionary Codex uses (adopted set — nothing else without a Decision Ledger entry):
+
+1. Design red-team (Phases 9 and 10; 2 calls, xhigh, 45-min timebox): after the judges select a winning design and BEFORE implementation lanes launch, run `codex exec` (read-only sandbox) over the winning doc in `docs/architecture/` plus the Non-Negotiables and the named failure scenarios, prompted for data-loss holes, ordering/idempotency flaws, hand-waved failure scenarios, and simpler alternatives. Findings go through the standard triage→verify→fix-or-reject pipeline before lane briefs are issued; the design doc gains a Red-team Findings section. While it runs the lead does only read-only phase prep. On failure/timeout, fold the design questions into that phase's commit-review prompt and proceed. Codex never authors judge-panel candidates — all candidates are Claude subagents; cross-model input enters only here, post-verdict.
+2. Adversarial scenario consult (post-Phase-4 checkpoint: IPC validation; Phase 10: the six data-loss cases; post-Phase-11 checkpoint: MCP path scoping; 3 calls, high effort): `codex exec` read-only, prompted to ENUMERATE concrete attack/loss scenarios (inputs, sequence, expected invariant violation) — output is scenario descriptions, never test files or repo writes. The lead transcribes chosen scenarios into owned tests under normal TDD (recorded RED required), discards duplicates per the code-size rules, and logs which landed scenarios were Codex-origin. A scenario asserting behavior that contradicts the plan's contracts is rejected with reasoning, never satisfied by weakening the implementation.
+3. Recovery consult (rare; see Recovery Protocol): one bounded fresh-model diagnosis before any blocked declaration or Phase 16 deferral.
+4. Pre-deletion audit (Phase 13, 1 call, xhigh): see Phase 13 Step 2.5.
+5. Advisory screenshot pass (Phases 3 and 18 only; 2 calls, high effort, via `-i` attachments; conditional on the Phase 0 `-i` preflight): score ≤8 representative PNGs against the Design Review Loop rubric verbatim. Strictly advisory — the Claude design-review subagent remains the sole gating judge. Hard-item disagreements are re-examined once by the lead against the actual pixels before the phase commit; soft-item disagreements become deferred findings for the Phase 18 re-judge. On `-i` error or timeout, skip silently.
+
+### Parallel Lane Contract
+
+Intra-phase implementation fan-outs are allowed only under these rules:
+
+- Only the lead runs `pnpm add`/`pnpm install` and touches `pnpm-lock.yaml`/root `package.json`. Before fanning out, the lead scaffolds new package stubs and installs declared dependencies once; lanes never modify the lockfile.
+- Lanes never write the execution log or this plan. Each lane returns a structured report (files changed, tests added, RED output, GREEN output, deletions, open questions) that the lead merges into the log.
+- Every lane brief is self-contained (lanes share no conversation memory): phase goal, exact files owned, the TDD requirement (failing test recorded before implementation), file-ownership boundary, exact test commands, relevant Non-Negotiables. Never reference "as discussed above."
+- File-mutating lanes are worktree-isolated. The lead merges lanes, regenerates the lockfile once if needed, runs the phase's combined test commands, then commits.
+
+Per-phase parallelism map:
+
+```txt
+Phase 0:  fan out read-only explorers (one per required digest + one per existing package classification); baseline runs in background.
+Phase 1:  none — single lead lane (tiny phase, shared scaffolding).
+Phase 2:  none — single lead lane (coupled security posture). t3code recon fan-out may start here.
+Phase 3:  implementation single-lane (shared shell/CSS). Fan out only read-only work: t3code recon, screenshot capture, design judges.
+Phase 5:  lead defines watcher-event/change-set contracts first, then 3 worktree TDD lanes: A=workspace-fs watch/scan/diff, B=workspace-sync batchedSync, C=workspace-history changeSetStore. Lead-owned tail: shell wiring (shared DesktopWorkspaceShell.tsx).
+Phase 6:  lead writes failing fileTypes E2E + scaffolds FileInspector as dispatch table with one file per view; optional 2-4 lanes by affinity (text/data, media, SQLite studio, app affordance). Skip fan-out if moving fast single-lane.
+Phase 9:  start `pnpm dev:postgres` in background at phase start. After judge panel: Lane A=Better Auth (services/workspace-api), Lane B=sync protocol+backend (workspace-sync, workspace-postgres; stub actor shape from fixed ResolveActor contract), Lane C=compose/docs. Lane D (CloudLogin + E2E) starts after Lane A lands — dependency-ordered. cloudSync E2E runs last against background dev server.
+Phase 10: after judge panel: Lane A=collaborationPolicy (workspace-sync), Lane B=conflictResolution (workspace-history), Lane C=postgres-acl (hocuspocus). Lead-owned tail: useCollabDoc, sync UI, both E2E specs (two-client E2E in background).
+Phase 12: none — global rename is single-agent by nature.
+Phase 13: Step 1 fans out one read-only verifier per ported-test-map row (locate test, run it, confirm it fails when implementation is stubbed). Steps 3-5 deletion is explicitly single-agent (global lockfile/import surgery). Post-deletion battery in background.
+Phase 14: optional 2 lanes: A=update state machine, B=builder config+smoke+docs. Packaging build in background.
+Phase 15: fan out one doc-writer per document (5 lanes, self-contained briefs incl. product-shape bullets + thesis + phase outcomes). Lead writes the check script; smokes in background.
+Phase 16: measurement runs require quiescence (below). Optimization fixes MAY lane per disjoint target; authoritative re-measure on merged tree, quiesced.
+Phase 17: discovery findings partitioned across read-only classifiers; consolidation rows lane per owner package when duplicate sites are disjoint. Verification battery sequential-in-background.
+Phase 18: none — the readiness E2E is one intentionally sequential flow.
+```
+
+### Background/Foreground Rules
+
+ALWAYS background (registered in Resume Snapshot, with completion notification): docker compose stacks; workspace-api/hocuspocus/web dev servers (never foreground — WSL safety); the baseline script; full `pnpm -r` test/typecheck; full `pnpm test:desktop:e2e`; electron-builder packaging; `pnpm check:self-host`; Phase 17/18 verification batteries; all `codex exec review` runs; the two-client liveCoEditing E2E.
+
+ALWAYS foreground: the TDD inner loop's targeted commands — single-package vitest runs, single-spec Playwright runs, single-package typechecks. The red/green cycle needs immediate feedback.
+
+Phase-end full regression goes background while the lead does the delete-or-justify pass and log update; the commit waits for the background green.
+
+Measurement quiescence: before any measured performance run (Phase 2 launch marks onward, especially performance.spec.ts), drain or pause all background tasks, parallel subagents, and Codex reviews; verify no docker build/test suite is running; record the quiesced state in the log. Perf measurement owns the machine.
+
+### Checkpoint Review Recipe
+
+1. Lead computes `git diff --stat main...HEAD` and writes a 10-line range summary into the log.
+2. Fan out one read-only finder per relevant lens (security, authz/collab, data-loss/deletion-safety, performance, over-engineering/code-size). Each brief is self-contained: repo path, branch, diff command, lens definition copied from Non-Negotiables, output format per finding: {claim, evidence file:line, severity, repro command, proposed fix}. Cap 10 highest-confidence findings per finder.
+3. Launch the Codex `--base main` review in parallel (background); merge its findings into the same pipeline.
+4. Lead dedupes; one fresh verifier per candidate finding, given ONLY the finding text and repo (not the finder's reasoning), must confirm by repro or exact code citation. Unconfirmed → rejected-with-reason. Verifiers are always Claude subagents; Codex participates in checkpoints only as a finder via the `--base main` review, and Codex findings are verified by non-Codex verifiers like any other finding.
+5. Fix confirmed findings with targeted tests; re-run affected suites.
+6. Stop rule: max 2 rounds, or stop early when a round yields zero new confirmed medium+ findings.
+
+### Verifier Task Contracts (per-phase, before phase-closing commit)
+
+- Claimed-vs-actual: input = phase plan section + commit range + log entry; method = re-run every command the log claims passed, check every checkbox against the diff; output = table of claim / evidence command / verdict (confirmed | unsupported | contradicted).
+- Test-quality: method = disposable `git worktree add`, revert all non-test files in the phase range there, run the phase's test commands, expect failure; output = list of tests that still pass without the implementation (each is a finding). NEVER mutate the lead's checkout.
+- Screenshot review: input = the Design Review Loop rubric + the fixed artifact glob `test-results/screenshots/phase-<NN>/`; output = per-rubric-item pass/fail with offending screenshot path.
+
+### Recovery Protocol
+
+- Flaky test: re-run the single failing spec in isolation once to classify. Pass-on-retry = flake — deflake in the same phase by replacing sleeps/races with event-driven waits (performance marks, IPC signals); max 3 attempts, then quarantine the spec with a log entry and a mandatory item at the next checkpoint. NEVER add Playwright `retries:`, broaden timeouts beyond 2x, or weaken assertions to mask flake.
+- External service down (Postgres, minio, hocuspocus): the lead is authorized to start/restart via the documented compose commands (background, per WSL safety — no pattern kills). Not a blocker. An ECONNREFUSED/timeout from a service port is an environment failure, never a test failure; fix the environment, never the test.
+- Electron launch failure on this machine: the fix is ALWAYS environmental, never webPreferences (see Phase 2).
+- Toolchain freeze: Phase 0 records `node -v`, `pnpm -v`, and `command -v codex` in the Environment section. Tests must run under the Node version that reproduces the dual-backend green sweep (22.13.0 verified — Node 25 breaks 17 web tests); pin via PATH prefix in scripts, do not run `nvm use` mid-run. Codex is invoked by absolute path.
+- Fresh-model consult (required before declaring blocked): when the same blocker survives three concrete attempts, or a Phase 16 metric is still over budget after its 3 optimization attempts, the lead writes a self-contained brief to `docs/superpowers/reviews/codex/blocker-<phase>-<slug>.md` (symptom, exact failing command, path to full output, files inspected, the three attempts and why each failed) and makes ONE `codex exec` consult — read-only sandbox, xhigh, 20-minute timebox, backgrounded — asking for the most likely root cause and the smallest concrete fix or next experiment. Rules: this is attempt 4-of-4, never a counter reset; any proposed diagnosis must be independently confirmed by the lead via repro or exact code citation before any code change; if Codex is unavailable or the timebox expires, proceed directly to the blocked report (zero retries). The diagnosis file is attached to any blocked report. This consult is exempt from the per-phase review budget but logged in the call ledger.
+
 ### Major Review Checkpoints
 
-Use CodeRabbit/subagents/manual review if available:
+Use Codex third-party review plus multi-agent adversarial review workflows (and manual review if the user is present):
 
 - after Phase 4: Electron security and IPC review.
 - after Phase 7: local workspace/sync review.
 - after Phase 9: cloud sync/collaboration review.
+- after Phase 10: merge/data-loss and live co-editing review.
 - after Phase 11: MCP/agent-power review.
 - after Phase 13: Convex deletion review.
 - after Phase 16: performance review.
@@ -209,7 +439,7 @@ Fix relevant findings before continuing. If a finding is rejected, record why.
 
 Stop only if:
 
-- the same blocker remains after three concrete attempts.
+- the same blocker remains after three concrete attempts plus the Recovery Protocol fresh-model consult.
 - a missing external secret/service is genuinely required.
 - a product/security decision is genuinely required from the user.
 - continuing would violate a non-negotiable.
@@ -226,28 +456,40 @@ Blocked report must include:
 
 ## Branch And Execution Strategy
 
-- Start after the completed dual-backend branch is merged or explicitly chosen as base.
-- Suggested branch: `codex/desktop-local-first-cloud-sync`.
+- The dual-backend plan is MERGED into main at bc62bd2 (PR #30). All "old plan" code lives in the current working tree. Never check out, diff against, or port from the stale local branch `codex/dual-backend-filesystem-agent-runtime`.
+- Branch: `claude/desktop-local-first-cloud-sync`.
 - Create an execution log at:
   - `docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md`
-- Commit after every phase.
-- Do not squash phase commits during implementation; traceability matters.
+- Commit at every green-test milestone within a phase, message prefix `phaseN(step M): ...`; the final phase commit closes the phase. Git is the primary resume substrate — never leave hours of work in a dirty tree.
+- Do not amend or squash phase commits during implementation; traceability matters.
 
 Execution log template:
 
 ```md
 # Desktop Local-First Cloud Sync Execution Log
 
-## Baseline
+## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Branch:
-- Base commit:
-- Old dual-backend commit:
-- Current phase:
-- Current step:
-- Last successful commit:
-- Last failing command:
-- Last blocker:
+- Phase/Step + TDD position: (e.g., "Phase 5 Step 3, tests written, expected RED")
+- Expected test state: (exact command + which assertions should currently fail/pass)
+- Dirty files and intent:
+- Exact next action: (one imperative sentence)
+- Active background tasks: (id, command, expected artifact path)
+- Open worktrees: (path, purpose, merged?)
+- Pending reviews: (codex/verifier in flight)
+
+## Environment (append-only)
+
+- Toolchain freeze: node version, pnpm version, absolute codex path
+- Services state, display server, quirks
+
+## Decision Ledger (append-only, one line each)
+
+- D-NN | decision | why | phase
+
+## Reference Digests (append-only, ≤25 lines each, source path + date)
+
+## Gotchas (append-only one-liners, incl. learned file locations)
 
 ## Phase Logs
 
@@ -255,21 +497,35 @@ Execution log template:
 
 - Status: not started | in progress | complete | blocked
 - Execution map:
+- Resume notes: (one sentence: what is half-done, exact next command)
 - Files changed:
 - Code deleted or consolidated:
+- Net LOC delta (`git diff --shortstat`):
 - Old paths retained and why:
+- Dependencies added (name, size, justification):
+- Decisions made (D-NN ids):
 - Tests added:
 - Commands run:
 - Failing tests fixed:
 - Electron E2E/manual smoke:
-- Performance measurements:
+- UI/UX screenshot/design review:
+- Performance measurements: (compact table rows, not prose)
 - Security/collaboration regressions:
-- Reviewer/subagent/CodeRabbit findings:
+- Reviewer/subagent findings: (numbered one-liners, status: fixed @ sha | rejected: reason)
+- Codex third-party review findings: (one-liners + pointer to docs/superpowers/reviews/codex/phase-NN.md)
 - Relevant findings fixed:
 - Deferred findings with reason:
 - Remaining risk:
 - Next phase:
 ```
+
+Log update cadence and hygiene (mandatory):
+
+- Update the Resume Snapshot at every TDD-step transition, before launching anything long-running (codex review, full suite, fan-out, worktree), and immediately after every commit. Register background tasks and worktrees in the snapshot BEFORE launching; clear entries on completion/merge. On resume, reconcile the snapshot against `git status`, `git worktree list`, and on-disk artifacts before doing anything else.
+- The log is append-only except the Resume Snapshot.
+- No raw command output, stack traces, or codex transcripts over ~10 lines — write full output to `test-results/` or `docs/superpowers/reviews/codex/phase-NN.md` and link the path.
+- Soft cap ~80 lines per phase section; overflow goes to a per-phase appendix file.
+- The resume read-set is: Resume Snapshot + Environment + Decision Ledger + Gotchas + Reference Digests + the current phase's section ONLY.
 
 ## Planned Repository Shape
 
@@ -389,13 +645,19 @@ Add:
 "check:desktop-local-first-baseline": "node scripts/check-desktop-local-first-baseline.mjs"
 ```
 
-- [ ] **Step 5: Run baseline**
+- [ ] **Step 5: Environment preflight, then run baseline**
+
+Preflight first: start `pnpm dev:postgres` as a background task and poll readiness (bounded, ~60s max); record `node -v`, `pnpm -v`, and `command -v codex` in the execution log Environment section (toolchain freeze — tests run under Node 22.13.0 via PATH prefix; Node 25 breaks 17 web tests); record display server state. The baseline script must pin the test Node via PATH.
+
+Codex capability preflight (one cheap call each, recorded in Environment): verify `codex exec review` works; verify plain `codex exec` completes under a read-only sandbox; verify `-i` correctly describes a known test PNG. If optional capabilities (`codex exec`, `-i`) fail, disable only the discretionary uses needing them. If `codex exec review` or the preferred model itself fails, the review gate is NOT disabled — it switches to the independent-review fallback chain from the Codex third-party review section, recorded in the execution log.
 
 ```bash
 pnpm check:desktop-local-first-baseline
 ```
 
-Expected: pass, or execution log records exact pre-existing failures.
+Run as a background task. Expected: pass, or execution log records exact pre-existing failures. An ECONNREFUSED from Postgres is an environment failure — fix services, do not record it as a pre-existing test failure.
+
+The Step 2 inventory may fan out read-only explorer subagents (one per existing package/service, one per digest doc) per the parallelism map; the inventory must record exact file paths for app runtime, upload, and file-type code so later phases cite paths, not memories.
 
 - [ ] **Step 6: Commit**
 
@@ -508,11 +770,15 @@ git commit -m "Add local-first workspace core contract"
 - Create: `apps/desktop/src/window/createMainWindow.ts`
 - Create: `apps/desktop/src/security/electronSecurity.ts`
 - Create: `apps/desktop/src/security/electronSecurity.test.ts`
+- Create: `apps/desktop/src/performance/launchMarks.ts`
 - Create: `apps/desktop/src/smoke/desktopSmoke.test.ts`
 - Create: `apps/desktop/e2e/desktopLaunch.spec.ts`
 - Create: `apps/desktop/scripts/smoke-test.mjs`
+- Create: `apps/desktop/playwright.config.ts`
 - Modify: `package.json`
-- Modify: `playwright.config.ts`
+- Modify: `pnpm-workspace.yaml` (onlyBuiltDependencies allowlist)
+
+Root `playwright.config.ts` is NOT modified in this phase — it stays pointed at the web app so `pnpm test:e2e` keeps working.
 
 - [ ] **Step 1: Install Electron desktop tooling**
 
@@ -539,6 +805,11 @@ Expected dependency intent:
 - `playwright` and `@playwright/test`: launch and test Electron windows.
 - `electron-updater`: future update flow tests.
 - `zod`: validate IPC payloads.
+
+Install preconditions (verified landmines on this repo/host):
+
+- pnpm 10 ignores dependency postinstall scripts by default and the repo has no allowlist. BEFORE installing, add to `pnpm-workspace.yaml`: `onlyBuiltDependencies: [electron, esbuild, electron-winstaller]` (extend for native deps later). After install, verify the Electron binary with `pnpm --filter @dohc/desktop exec electron --version` (under xvfb-run if needed) BEFORE writing any test. If it fails, run `pnpm approve-builds` and record in the log. Same applies in Phase 8 if native SQLite deps are added (plus electron-rebuild for the Electron ABI).
+- Desktop E2E gets its own `apps/desktop/playwright.config.ts` (testDir `./e2e`, `workers: 1` — Electron instances can't parallelize on one display, NO webServer block, ~60s per-test timeout). Root script becomes `"test:desktop:e2e": "playwright test --config apps/desktop/playwright.config.ts"`. The root `playwright.config.ts` (testDir `./apps/app/e2e`, web dev-server bootstrap) must remain untouched so `pnpm test:e2e` keeps working.
 
 - [ ] **Step 2: Write failing Electron security tests**
 
@@ -600,13 +871,15 @@ window.dohcDesktop.getWorkspaceRegistry()
 
 through `contextBridge`.
 
+Also ship the minimal performance measurement harness required by the Continuous enforcement rules: marks for app-ready, first window, and first renderer paint in `launchMarks.ts`, exposed through a test-only bridge so the launch E2E writes `test-results/performance/desktop-performance.json` from day one. Later phases append their own marks to the same file; Phase 16 turns it into the hard gate.
+
 - [ ] **Step 5: Add root scripts**
 
 ```json
 "dev:desktop": "pnpm --filter @dohc/desktop dev",
 "build:desktop": "pnpm --filter @dohc/desktop build",
 "test:desktop": "pnpm --filter @dohc/desktop test",
-"test:desktop:e2e": "playwright test apps/desktop/e2e",
+"test:desktop:e2e": "playwright test --config apps/desktop/playwright.config.ts",
 "smoke:desktop": "node apps/desktop/scripts/smoke-test.mjs"
 ```
 
@@ -619,6 +892,8 @@ pnpm test:desktop:e2e
 ```
 
 Expected: pass. If the environment lacks a display server, run under `xvfb-run` and record that in the execution log.
+
+WSL2 sandbox rule: if Electron fails to launch on this machine, the fix is ALWAYS environmental, never webPreferences. Allowed: install missing system libraries (record them), run under xvfb-run, or pass `--no-sandbox` as a LAUNCH ARGUMENT in the Playwright harness only, gated on `DOHC_E2E_NO_CHROMIUM_SANDBOX=1` and recorded in the log. Forbidden: `sandbox: false`, `contextIsolation: false`, `nodeIntegration: true` in product code, or deleting/weakening the security tests. The security unit test asserts the webPreferences object as configured, so it passes regardless of host sandbox capability.
 
 - [ ] **Step 7: Review against t3code**
 
@@ -635,7 +910,7 @@ Record which patterns were reused and which were intentionally avoided.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add apps/desktop package.json pnpm-lock.yaml playwright.config.ts docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
+git add apps/desktop package.json pnpm-lock.yaml pnpm-workspace.yaml docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
 git commit -m "Scaffold secure Electron desktop app"
 ```
 
@@ -674,10 +949,13 @@ Playwright Electron test must assert:
 - keyboard shortcuts work: new file, command palette, quick open.
 - theme follows system but does not interrupt running agent/sync work.
 - text does not overflow at 1280x800 and 1536x960.
+- screenshot comparison or screenshot artifact exists for first-run, workspace shell, command palette, and file preview.
+- app chrome uses muted dohc styling and does not render marketing/landing-page UI.
+- agent activity renders as a timeline/panel, not as one giant final paragraph.
 
 - [ ] **Step 3: Implement desktop-first shell**
 
-Reuse current React components where sensible, but change UX that feels web-first.
+Reuse current React components per the component reuse map: the Phase 3 recon must produce `docs/superpowers/reviews/2026-06-10-desktop-component-reuse-map.md`, classifying each candidate in `apps/app/src/components/` as (a) reuse as-is, (b) port with data-layer swap, or (c) rebuild — using the mechanical criterion: a component is reusable only if it has no imports from `convex/react`, `apps/app/convex/_generated`, or web router internals; otherwise its data access must be lifted to props fed by the typed desktop bridge. Implementer briefs cite this artifact, never "where sensible". Change UX that feels web-first.
 
 Desktop shell must include:
 
@@ -692,6 +970,18 @@ Desktop shell must include:
 
 Avoid landing-page UI. First screen should be the usable workspace.
 
+Visual style requirements:
+
+- preserve dohc's current simple muted styling.
+- use warm paper/graphite foundations.
+- keep sidebar density close to Obsidian/t3code rather than a SaaS dashboard.
+- use restrained hover/active states.
+- keep cards only for repeated items, modals, and genuinely framed tools.
+- make command palette and file switcher keyboard-first.
+- keep text readable and compact; no hero-sized type inside tool surfaces.
+- no decorative gradients/orbs/bokeh.
+- no AI-generated marketing copy inside the app shell.
+
 - [ ] **Step 4: Run visual smoke**
 
 ```bash
@@ -704,6 +994,8 @@ Expected:
 - nonblank desktop shell.
 - no overlapping text.
 - first workspace created.
+- first-run and workspace shell screenshots look native, muted, and consistent with dohc.
+- command palette and file tree are visibly usable.
 
 - [ ] **Step 5: Delete-or-justify**
 
@@ -835,6 +1127,7 @@ Tests must assert:
 - provenance points to source prompt/import/agent run where available.
 - human summary is generated or stored.
 - no Git conflict markers appear in user files.
+- the history store exposes an ordered change-set timeline queryable by the desktop UI: kind, author (human or agent), plain-language summary, files touched.
 
 - [ ] **Step 4: Implement batched sync**
 
@@ -858,7 +1151,7 @@ Store history under:
 
 Do not require Git.
 
-- [ ] **Step 6: Wire desktop sync status**
+- [ ] **Step 6: Wire desktop sync status and history surface**
 
 Desktop shell shows:
 
@@ -867,6 +1160,12 @@ Desktop shell shows:
 - local changes
 - conflict
 - cloud disconnected
+
+Also wire the workspace history surface — the "git log for everyday people":
+
+- a change-set timeline panel showing each change set's kind, author (human or agent), plain-language summary, and files touched.
+- clicking a change set reveals what changed.
+- this surface exists from this phase onward, in local-only mode with no account — so when sharing arrives later, collaboration adds zero new concepts.
 
 - [ ] **Step 7: Run tests**
 
@@ -927,7 +1226,7 @@ Test must assert:
 
 - [ ] **Step 2: Implement FileInspector**
 
-Port useful file-type view code from the old branch into desktop renderer.
+Port file-type view code from the current working tree (the dual-backend work is merged — never the stale branch): `apps/app/src/components/FileTypeView.tsx`, Database Studio components, and related media views, per the exact paths recorded in the Phase 0 inventory. Porting criterion: strip Convex/web data hooks; data arrives via the typed desktop bridge. FileInspector is a thin dispatch table with one file per view type (keeps later lanes conflict-free).
 
 - [ ] **Step 3: Implement upload/import**
 
@@ -1082,10 +1381,15 @@ git commit -m "Support visible SQLite data files"
 
 ---
 
-## Phase 9: Postgres Cloud Sync And Self-Hosted Server
+## Phase 9: Better Auth, Postgres Cloud Sync, And Self-Hosted Server
 
 **Files:**
 
+- Create: `services/workspace-api/src/auth/betterAuth.ts`
+- Create: `services/workspace-api/src/auth/betterAuth.test.ts`
+- Modify: `services/workspace-api/src/auth/session.ts`
+- Create: `apps/desktop/src/renderer/CloudLogin.tsx`
+- Create: `apps/desktop/e2e/cloudLogin.spec.ts`
 - Modify: `services/workspace-api/src/server.ts`
 - Modify: `packages/workspace-postgres`
 - Create: `packages/workspace-sync/src/cloudSync.ts`
@@ -1095,7 +1399,35 @@ git commit -m "Support visible SQLite data files"
 - Modify: `docker-compose.self-host.yml`
 - Modify: `docs/self-hosting.md`
 
-- [ ] **Step 1: Write failing cloud sync tests**
+- [ ] **Step 1: Write failing Better Auth tests**
+
+`services/workspace-api/src/auth/betterAuth.test.ts` must assert:
+
+- email/password signup and login work against Postgres via the Drizzle adapter.
+- device authorization flow issues a usable desktop session (request device code, approve in browser-session context, poll succeeds, token works against the API).
+- organization plugin supports create/invite/role for team workspaces.
+- session validation middleware rejects missing/invalid/expired tokens with `unauthorized`.
+- `ResolveActor` resolves a Better Auth session to the same actor shape existing authz checks use.
+- local-only desktop flows never require auth.
+- no WorkOS/Convex auth dependency remains in workspace-api.
+
+- [ ] **Step 2: Implement Better Auth in workspace-api**
+
+- Mount Better Auth (Drizzle adapter, provider `pg`) inside workspace-api on the existing Postgres instance.
+- Enable `organization` and `deviceAuthorization` plugins.
+- Wire `ResolveActor` to Better Auth sessions; keep all downstream authz unchanged.
+- Email delivery: SMTP env config with console fallback for dev/self-host; production provider deferred.
+- Document the WorkOS-behind-Better-Auth enterprise SSO/SCIM upgrade path in `docs/architecture/dohc-cloud.md`.
+
+- [ ] **Step 3: Implement desktop device-flow login**
+
+- `CloudLogin.tsx` shows the device code, opens the verification URL in the system browser (via safe shell handler), polls for approval, and stores the session token with Electron `safeStorage`.
+- Login is only reachable from "Enable dohc Cloud sync"; local-only use never sees it.
+- `apps/desktop/e2e/cloudLogin.spec.ts` drives the flow against the local dev server with a test-approved device code.
+- Test seam (required — do not improvise): workspace-api under `DOHC_TEST_AUTH=1` (dev/test only, asserted absent in production builds) exposes a test-only approval route (e.g., `POST /test/device/approve`) backed by a seeded test user; the desktop app under `DOHC_DESKTOP_TEST=1` surfaces the verification URL/code via the test bridge instead of opening the system browser. The E2E reads the code from the bridge, approves via the API as the seeded user, asserts polling succeeds and the stored token authenticates a real API request. Mocking the entire device flow client-side is a test-quality failure the verifier must flag.
+- Service bring-up: add root scripts `dev:cloud` (compose up postgres/minio + workspace-api dev server as background tasks; hocuspocus added in Phase 10) and `check:cloud-ready` (bounded readiness poll of postgres/object storage/API — and hocuspocus when enabled — printing the exact remediation command for any unreachable service). The desktop Playwright config gets a helper that fails fast naming the bring-up command. Every cloud/collab E2E command block in Phases 9, 10, 15, and 18 starts with `pnpm dev:cloud && pnpm check:cloud-ready`.
+
+- [ ] **Step 4: Write failing cloud sync tests**
 
 Tests must assert:
 
@@ -1106,7 +1438,7 @@ Tests must assert:
 - permission changes/public sharing require explicit confirmation.
 - another collaborator sees synced updates.
 
-- [ ] **Step 2: Implement sync protocol**
+- [ ] **Step 5: Implement sync protocol**
 
 Sync protocol carries:
 
@@ -1118,31 +1450,35 @@ Sync protocol carries:
 - provenance.
 - conflict summaries.
 
-- [ ] **Step 3: Implement Postgres sync backend**
+- [ ] **Step 6: Implement Postgres sync backend**
 
 Use `workspace-postgres` as the only cloud/self-host backend for new architecture.
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 7: Run tests**
 
 ```bash
+pnpm --filter @dohc/workspace-api test src/auth
 pnpm --filter @dohc/workspace-sync test
 pnpm --filter @dohc/workspace-postgres test
 pnpm --filter @dohc/workspace-api test
+pnpm dev:cloud
+pnpm check:cloud-ready
+pnpm test:desktop:e2e apps/desktop/e2e/cloudLogin.spec.ts
 pnpm test:desktop:e2e apps/desktop/e2e/cloudSync.spec.ts
 ```
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add packages/workspace-sync packages/workspace-postgres services/workspace-api apps/desktop docker-compose.dev.yml docker-compose.self-host.yml docs/self-hosting.md docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
-git commit -m "Add Postgres cloud sync for desktop workspaces"
+git add packages/workspace-sync packages/workspace-postgres services/workspace-api apps/desktop docker-compose.dev.yml docker-compose.self-host.yml docs/self-hosting.md docs/architecture/dohc-cloud.md docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
+git commit -m "Add Better Auth and Postgres cloud sync for desktop workspaces"
 ```
 
 ---
 
-## Phase 10: Liberal Collaboration And AI-Assisted Conflicts
+## Phase 10: Liberal Collaboration, Live Co-Editing, And AI-Assisted Conflicts
 
 **Files:**
 
@@ -1150,7 +1486,11 @@ git commit -m "Add Postgres cloud sync for desktop workspaces"
 - Create: `packages/workspace-sync/src/collaborationPolicy.test.ts`
 - Create: `packages/workspace-history/src/conflictResolution.ts`
 - Create: `packages/workspace-history/src/conflictResolution.test.ts`
+- Create: `services/hocuspocus/src/postgres-acl.ts`
+- Create: `services/hocuspocus/src/postgres-acl.test.ts`
+- Create: `apps/desktop/src/renderer/collab/useCollabDoc.ts`
 - Create: `apps/desktop/e2e/collaboration.spec.ts`
+- Create: `apps/desktop/e2e/liveCoEditing.spec.ts`
 - Modify: desktop sync UI
 
 - [ ] **Step 1: Write failing liberal policy tests**
@@ -1162,6 +1502,8 @@ Tests must assert:
 - no approval is required for ordinary file edits.
 - explicit protected folder blocks or proposes changes.
 - boundary crossings require confirmation.
+- collaborator edits appear in the shared workspace history timeline with correct attribution: which human, and which agent acting for whom.
+- returning to a shared workspace after time away surfaces a plain-language catch-up of change sets since the user last looked.
 
 - [ ] **Step 2: Write failing conflict tests**
 
@@ -1174,7 +1516,41 @@ Tests must assert:
 - user can apply, keep both, or dismiss.
 - no Git conflict markers are inserted by default.
 
-- [ ] **Step 3: Implement collaboration policy**
+- [ ] **Step 3: Write failing Hocuspocus Postgres ACL tests**
+
+`services/hocuspocus/src/postgres-acl.test.ts` must assert:
+
+- edit access resolved from workspace-postgres grants allows document writes.
+- read-only access allows connect/read but rejects writes.
+- no access rejects the connection.
+- Better Auth session tokens are accepted as the connection credential.
+- no Convex import or Convex env var remains in the ACL path.
+
+- [ ] **Step 4: Write failing two-client live co-editing E2E**
+
+`apps/desktop/e2e/liveCoEditing.spec.ts` must launch two Electron clients on the same shared workspace markdown doc and assert:
+
+- concurrent edits from both clients converge to identical content.
+- remote presence/cursor is visible while the peer edits.
+- a client that disconnects, edits offline, and reconnects converges without data loss and without Git markers.
+- local-first personal workspaces work fully without Hocuspocus running.
+- typing latency stays within the existing typing budget while co-editing is active; propagation time between clients is measured and recorded.
+
+- [ ] **Step 5: Implement live co-editing**
+
+- Port `services/hocuspocus/src/convex-acl.ts` to `postgres-acl.ts` (workspace-postgres grants + Better Auth sessions). Mark `convex-acl.ts` for deletion in Phase 13.
+- Wire the desktop markdown editor to Yjs/Hocuspocus via `useCollabDoc.ts` for shared cloud-first workspaces only.
+- Canonical-state model (default, adopted): the CRDT doc is canonical while a shared text file has an active editor session; the filesystem is canonical while closed. The CRDT materializes back to the file on settle through the same batched sync/change-set path. The Phase 10 judge-panel design doc must define, and the implementation must TEST, each of these data-loss cases:
+  - active canonical state while a shared text file is open (and what "open" means across two clients).
+  - a base version/hash recorded for every materialization.
+  - watcher suppression for self-materialized writes (no materialize → watch → materialize loops).
+  - conflict behavior when the on-disk file changes outside Yjs while the doc is open (external agent edit during a live session).
+  - offline edit + reconnect convergence without loss.
+  - rename/delete of a file with an active Yjs doc.
+  - Every case above gets an explicit data-loss test; "preserves both versions" is the floor, silent loss is never acceptable.
+- CRDT applies to markdown/text only — never raw SQLite bytes or binary assets.
+
+- [ ] **Step 6: Implement collaboration policy**
 
 Policy should lean liberal:
 
@@ -1186,21 +1562,25 @@ conflict -> AI-assisted resolution
 permission denied -> keep local unsynced and explain
 ```
 
-- [ ] **Step 4: Run collaboration E2E**
+- [ ] **Step 7: Run collaboration E2E**
 
 ```bash
 pnpm --filter @dohc/workspace-sync test
 pnpm --filter @dohc/workspace-history test
+pnpm --filter @dohc/hocuspocus test src/postgres-acl.test.ts
+pnpm dev:cloud
+pnpm check:cloud-ready
 pnpm test:desktop:e2e apps/desktop/e2e/collaboration.spec.ts
+pnpm test:desktop:e2e apps/desktop/e2e/liveCoEditing.spec.ts
 ```
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add packages/workspace-sync packages/workspace-history apps/desktop docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
-git commit -m "Add liberal collaboration and AI conflicts"
+git add packages/workspace-sync packages/workspace-history services/hocuspocus apps/desktop docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
+git commit -m "Add liberal collaboration, live co-editing, and AI conflicts"
 ```
 
 ---
@@ -1216,7 +1596,7 @@ git commit -m "Add liberal collaboration and AI conflicts"
 - Create: `apps/desktop/src/agents/AgentIntegration.ts`
 - Create: `apps/desktop/src/agents/AgentIntegration.test.ts`
 - Create: `apps/desktop/e2e/localAgent.spec.ts`
-- Modify: desktop settings UI
+- Create: `apps/desktop/src/renderer/settings/DesktopSettings.tsx` (+ test) — a single settings surface reachable from the command palette and app menu, following the Design Review Loop rubric; created here because Phase 11 is its first consumer (no earlier phase builds settings)
 
 - [ ] **Step 1: Write failing MCP tests**
 
@@ -1305,7 +1685,7 @@ Tests must assert web supports:
 
 If safe, rename `apps/app` to `apps/web` and update package names/imports.
 
-If not safe in one phase, keep path temporarily but rename product/package surfaces to `@dohc/web` and record deletion condition.
+The rename is "safe" iff after `git mv apps/app apps/web` plus updating pnpm-workspace.yaml, root scripts, tsconfig path aliases, and playwright config: (1) `grep -rn 'apps/app'` over `*.{ts,tsx,json,yml,yaml,mjs}` (excluding docs/ and node_modules) returns zero hits, (2) `pnpm -r --if-present typecheck && pnpm --filter @dohc/web test` passes, (3) `pnpm test:e2e` passes. If any condition fails after one focused fix pass, keep the path, record the failing condition verbatim in the execution log as the deletion condition, and move on. (Note: the package is already named `@dohc/web` while living at `apps/app`.)
 
 - [ ] **Step 3: Update web UX**
 
@@ -1350,6 +1730,8 @@ The review must list every important Convex-era behavior and its replacement tes
 |---|---|---|
 | atom create/read/write | workspace-core/workspace-sync/workspace-postgres tests | pass |
 | authz boundaries | workspace-api + sync policy tests | pass |
+| auth/login (WorkOS via Convex) | Better Auth tests + desktop cloudLogin E2E | pass |
+| hocuspocus ACL (convex-acl) | postgres-acl tests + live co-editing E2E | pass |
 | app trust | local app trust + cloud sync tests | pass |
 | uploads/assets | desktop file type + workspace sync tests | pass |
 | onboarding/setup | desktop first-run tests | pass |
@@ -1363,9 +1745,13 @@ pnpm check:desktop-local-first-baseline
 
 Expected: pass.
 
+- [ ] **Step 2.5: Cross-model pre-deletion audit**
+
+Run in background, registered in the Resume Snapshot (1 call, xhigh): `codex exec` (read-only sandbox) reading the Convex sources (`apps/app/convex` or `apps/web/convex`), `packages/workspace-convex-compat`, and `services/hocuspocus/src/convex-acl.ts` in full against the ported test map, asked to list (a) every user-visible or security-relevant behavior implemented in Convex code with NO row in the map, and (b) every map row whose named replacement test does not actually cover the behavior — with file:line citations. The triage subagent verifies each claimed gap; confirmed gaps get a map row plus a replacement test before Step 3 runs. Step 3 MUST NOT start while this audit is in flight. This hunts unknown-unknowns the diff-shaped reviews cannot see: a behavior missing from the map appears in no diff.
+
 - [ ] **Step 3: Delete Convex**
 
-Remove Convex-specific packages, scripts, generated API files, env examples, and compatibility package.
+Remove Convex-specific packages, scripts, generated API files, env examples, and compatibility package. This includes `services/hocuspocus/src/convex-acl.ts` (replaced by `postgres-acl.ts` in Phase 10) and the `@convex-dev/workos-authkit` dependency (replaced by Better Auth in Phase 9).
 
 Do not delete product behavior; delete only after replacement tests exist.
 
@@ -1384,7 +1770,10 @@ Expected: pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A docs/superpowers/reviews/2026-06-10-convex-deletion-review.md docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md
+# Full reviewed stage — the deletion touches sources, packages, lockfile, env examples
+git status --short   # paste this into the execution log so deletion scope is inspectable
+git add -A
+git status --short   # verify nothing unexpected remains unstaged
 git commit -m "Delete Convex after local-first replacements"
 ```
 
@@ -1468,6 +1857,7 @@ Docs must state:
 - self-hosted dohc runs the cloud/sync/collab server.
 - local-only works with no account.
 - federation is deferred.
+- the collaboration thesis: dohc brings git-grade building-collaboration (change sets, history, attribution, AI-assisted merge) to everyday people. dohc Cloud is the paid engine for shared building — this is why dohc is not an Obsidian clone, and why the history/attribution/catch-up surfaces are core product.
 
 - [ ] **Step 2: Write self-host check**
 
@@ -1485,6 +1875,8 @@ Check:
 - [ ] **Step 3: Run docs/smoke**
 
 ```bash
+pnpm dev:cloud
+pnpm check:cloud-ready
 pnpm check:self-host
 pnpm check:self-host-desktop-path
 ```
@@ -1547,7 +1939,8 @@ export const performanceBudgets = {
 
 - passing measurements under budget pass.
 - over-budget measurements fail with a helpful message.
-- CI environment multipliers require explicit `PERF_BUDGET_MULTIPLIER`.
+- CI environment multipliers require explicit `PERF_BUDGET_MULTIPLIER`, capped at 3.0, with a per-budget written justification naming the hardware constraint. Multipliers never apply to relative-regression ratchets (the 20% memory and 10% bundle rules) — those are environment-independent.
+- any edit to `budgets.ts` after its first commit must be named explicitly in that commit's Codex review prompt ("budget X changed from A to B because C").
 - missing measurements fail.
 
 - [ ] **Step 3: Instrument desktop**
@@ -1609,7 +2002,7 @@ Add root script:
 
 - [ ] **Step 6: Fix performance issues**
 
-If any measurement is over budget, optimize before moving on.
+If any measurement is over budget, optimize before moving on. Exit rule: per over-budget metric, maximum 3 optimization attempts with recorded before/after numbers; after the third failed attempt, run the Recovery Protocol fresh-model consult (one Codex diagnosis of the hot path) before deferral; if still over, record the gap as a deferred finding for the Phase 16 checkpoint review rather than looping — but a metric that regressed relative to an earlier phase's recorded number is never deferrable.
 
 Expected optimization areas:
 
@@ -1873,6 +2266,8 @@ This branch should leave dohc in a lean, coherent state that a top-tier engineer
 - [ ] **Step 9: Run post-cleanup verification**
 
 ```bash
+pnpm dev:cloud
+pnpm check:cloud-ready
 pnpm -r --if-present typecheck
 pnpm -r --if-present test
 pnpm build:desktop
@@ -1929,6 +2324,8 @@ The test must run this full flow:
 - [ ] **Step 2: Run full verification**
 
 ```bash
+pnpm dev:cloud
+pnpm check:cloud-ready
 pnpm -r --if-present typecheck
 pnpm -r --if-present test
 pnpm build:desktop
@@ -1982,6 +2379,10 @@ The plan is complete only when:
 - conflicts are AI-assisted/human-readable and do not use Git markers by default.
 - normal shared edits sync without approval when the user has edit access.
 - real boundary crossings ask for confirmation.
+- dohc Cloud login works from desktop via the Better Auth device authorization flow; self-host gets working auth with no external vendor account.
+- two desktop clients can live co-edit shared workspace markdown through Hocuspocus/Yjs with convergence, presence, and offline-reconnect safety; the Hocuspocus ACL has no Convex dependency.
+- workspace history is a visible first-class surface: a change-set timeline with kind, human/agent attribution, plain-language summaries, and files touched — working in local-only mode and in shared workspaces.
+- returning to a shared workspace surfaces a plain-language catch-up of what changed since the user last looked.
 - apps are visible `.apps/<name>` source folders.
 - user-meaningful SQLite databases can be visible `.sqlite` files.
 - uploads/import/export support CSV, TXT, JSON, PNG/JPEG/WebP/GIF/SVG, PDF, audio, video, SQLite, and generic files.
@@ -1993,6 +2394,7 @@ The plan is complete only when:
 - Electron E2E tests, screenshots, and smoke tests pass.
 - performance budgets are measured and pass.
 - a dedicated evolution cleanup phase deletes or consolidates obsolete code before final readiness.
+- every phase commit received an independent third-party review and every checkpoint received a cumulative third-party review (Codex gpt-5.5 xhigh preferred; a recorded fallback reviewer otherwise), with all findings fixed or explicitly rejected in the execution log.
 - `pnpm check:lean` passes.
 - tech debt audit proves obsolete code was deleted, consolidated, or justified with deletion conditions.
 
@@ -2003,12 +2405,13 @@ The implementation must score `2` in every row before it can be called complete.
 | Area | 0 | 1 | 2 |
 |---|---|---|---|
 | Desktop | absent | launches but incomplete | Electron desktop is primary usable client |
-| Native UX | web shell in Electron | partial desktop polish | native-feeling first-run/workspace shell with tested shortcuts/layout |
+| Native UX | web shell in Electron | partial desktop polish | native-feeling muted dohc shell with tested screenshots, shortcuts, layout, and no marketing chrome |
 | Performance | unmeasured or slow | partial measurements | explicit budgets pass for launch, file tree, sync, apps, SQLite, imports |
 | Local files | projection only | partial folder support | real local folders are the main workspace surface |
 | Accountless local | login required | partial local-only | local-only works with no account |
 | Sync | manual/noisy | partial batching | settled batched sync with history and conflict tests |
-| Collaboration | restrictive or unsafe | partial liberal policy | edit access syncs freely; real boundary crossings guarded |
+| Auth | absent or vendor-locked | login works but untested edge cases | Better Auth email/device-flow/orgs tested for cloud and self-host with no vendor dependency |
+| Collaboration | restrictive or unsafe | partial liberal policy | edit access syncs freely; live co-editing converges with presence and offline-reconnect tests; change-set history with human/agent attribution and catch-up surfaces visible and tested; real boundary crossings guarded |
 | Apps | hidden/static | visible but untested | visible `.apps` source folders with tested persistent runtime |
 | SQLite/data | markdown fallback | partial imports | visible SQLite/data imports tested end to end |
 | Agents/MCP | absent | folder only | local agents edit files and MCP exposes dohc-aware tools |
@@ -2029,6 +2432,7 @@ Final response must include:
 - tests run.
 - failing tests, if any.
 - Electron screenshots/manual smoke results.
+- UI/UX screenshot/design review notes.
 - performance measurements and budget result.
 - self-host smoke result.
 - self-grade table.
@@ -2045,10 +2449,10 @@ Work in /home/ice/dev/dohc.
 
 Branching:
 - Start after the completed dual-backend branch is merged or explicitly chosen as base.
-- Create branch: codex/desktop-local-first-cloud-sync.
+- Create branch: claude/desktop-local-first-cloud-sync.
 
 Outcome:
-Implement docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.md fully. Pivot dohc to Electron-first and local-file-first. Cut Convex after replacement tests prove the behavior. Keep/port the useful Postgres, filesystem, app, SQLite, sandbox, upload, AppTester, and agent-output pieces from the completed old plan.
+Implement docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.md fully. Pivot dohc to Electron-first and local-file-first. Cut Convex after replacement tests prove the behavior. Keep/port the useful Postgres, filesystem, app, SQLite, sandbox, upload, AppTester, and agent-output pieces from the completed old plan. Auth is Better Auth inside workspace-api (WorkOS deferred as the enterprise SSO path behind it). Live co-editing via Hocuspocus/Yjs for shared workspace markdown is in scope, with the Hocuspocus ACL ported from Convex to Postgres.
 
 Read first:
 1. AGENTS.md
@@ -2063,6 +2467,10 @@ Read first:
 Execution mode:
 - Work phase by phase in order.
 - Use strict TDD: failing test, confirmed failure, implementation, passing targeted test, regression tests, E2E/smoke where relevant, delete-or-justify, execution log, commit.
+- Use native multi-agent orchestration per the plan's Orchestration section: recon fan-outs before heavy phases, design judge panels before Phases 9 and 10, per-phase verifier subagents before each commit, multi-agent adversarial reviews at checkpoints, background long-running tasks, and self-paced loops while AFK.
+- After every phase commit and at every checkpoint, run independent third-party review using the effort tier from the plan's Codex third-party review section: xhigh for checkpoints and high-risk phases (2, 4, 5, 9, 10, 11, 13, 16, 17, 18); high for low-risk phases (0, 1, 12, 14, 15) and advisory screenshot/scenario passes. If preferred Codex gpt-5.5 is unavailable, use the fallback chain and record the reviewer in the execution log. Fix or explicitly reject every finding.
+- Role split: the lead implementation agent owns code, tests, commits, and the execution log; Codex is used only as read-only independent reviewer/red-team/consultant, and all Codex findings are verified by non-Codex verifiers before fixes land.
+- For UI phases, inspect screenshots and explicitly record whether the UI feels native, muted, fast, and consistent with dohc.
 - Keep going while I am AFK.
 - Do not stop because work is long, difficult, slow, or partially complete.
 - If interrupted/resumed, read the execution log, inspect git status, run nearest test for last changed area, and continue from first incomplete phase.
@@ -2078,11 +2486,12 @@ Non-negotiables:
 - Delete Convex only after replacement tests prove behavior.
 - Reduce tech debt; deletion is valuable work.
 - Performance is a product invariant. The app must feel native and fast. Do not accept slow startup, sluggish file trees, janky typing, slow sync, slow app opens, or slow SQLite/import flows.
+- Preserve dohc's current simple, clean, muted style. Take inspiration from Obsidian, Codex, t3code, Linear, and Raycast. Do not add marketing heroes, decorative gradients/orbs, card-heavy dashboards, or loud palettes.
 
 Testing:
 - Install and use Electron E2E tooling, including Playwright Electron automation.
 - Run targeted tests in every phase.
-- Run Electron screenshots/smokes for desktop phases.
+- Run Electron screenshots/smokes for desktop phases and check layout, text fit, command palette, file tree, first-run, file views, and agent activity UI.
 - Add/update performance measurements for phases that touch desktop UX, file trees, sync, apps, SQLite, imports, or agents.
 - Run security/collaboration regressions after touching auth, sync, sharing, sandbox, IPC, apps, SQLite, or agents.
 - Run Phase 16 performance verification before cleanup.
@@ -2093,12 +2502,12 @@ Testing:
 - Do not skip, delete, or weaken tests to move forward.
 
 Stop only if:
-- same blocker remains after three concrete attempts.
+- the same blocker remains after three concrete attempts plus the Recovery Protocol fresh-model consult.
 - missing external secret/service is genuinely required.
 - user decision is genuinely required.
 - continuing would violate a non-negotiable.
 
 Final response:
-- If complete, include changed file summary, deleted/consolidated code, commits, tests, Electron smoke screenshots/results, performance measurements, self-host smoke, self-grade table, and remaining risks.
+- If complete, include changed file summary, deleted/consolidated code, commits, tests, Electron smoke screenshots/results, UI/UX review notes, performance measurements, self-host smoke, self-grade table, and remaining risks.
 - If blocked, say blocked and list incomplete phases, attempts, files inspected, commands run, failing tests, and smallest required input.
 ```

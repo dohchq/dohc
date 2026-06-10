@@ -25,6 +25,7 @@
     "sync:local": "pnpm --filter @dohc/workspace-fs sync",
     "lint": "pnpm -r --if-present lint",
     "check:dual-backend-baseline": "node scripts/check-dual-backend-baseline.mjs",
+    "check:desktop-local-first-baseline": "node scripts/check-desktop-local-first-baseline.mjs",
     "check:self-host": "node scripts/check-self-host.mjs",
     "check:debt": "node scripts/check-tech-debt.mjs"
   },
