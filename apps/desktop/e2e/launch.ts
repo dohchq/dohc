@@ -7,6 +7,11 @@ export async function launchApp(
 ): Promise<ElectronApplication> {
   const args = ["apps/desktop/dist/main/main.js"];
   if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
+  // A distinct userData dir per launch lets two clients run CONCURRENTLY
+  // (live co-editing): the single-instance lock keys on userData, so without
+  // this the second instance would quit on launch. Test-only state
+  // (registry, credentials) already lives under DOHC_TEST_HOME.
+  if (env.DOHC_TEST_USER_DATA) args.push(`--user-data-dir=${env.DOHC_TEST_USER_DATA}`);
   return electron.launch({
     args,
     cwd: process.cwd(),

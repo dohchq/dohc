@@ -9,6 +9,7 @@ import Markdown from "react-markdown";
 import { AppPackageView } from "./AppPackageView";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
+import { useCollabDoc } from "./collab/useCollabDoc";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
@@ -156,6 +157,16 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestDraft = useRef(props.body);
 
+  // Live co-editing only ever activates for SHARED cloud workspaces with a
+  // signed-in session (the collabToken IPC returns available:false otherwise).
+  // When it does, the textarea is driven by the shared Y.Text instead of the
+  // local autosave path — personal/local-only stays byte-identical to today.
+  const collab = useCollabDoc({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    enabled: true,
+  });
+
   // External changes (agent edits, sync pulls) flow into the open document
   // only while NOT editing — mid-edit, the user's draft wins until saved.
   useEffect(() => {
@@ -192,6 +203,59 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, []);
+
+  // Materialize the converged CRDT back to the file on settle: while a live
+  // session is canonical in-memory, the FILE is what enters history and cloud
+  // sync, so every settle writes the shared text through the bounded write IPC.
+  // No feedback loop — the collab editor is driven by Y.Text, not the file, so
+  // the resulting watcher event never re-enters the doc. Idempotent across
+  // peers (identical converged bytes → same sha → sync no-ops).
+  useEffect(() => {
+    if (!collab.enabled) return;
+    const timer = setTimeout(() => {
+      void bridge()
+        .writeWorkspaceText({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+          text: collab.text,
+        })
+        .catch(() => undefined);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [collab.enabled, collab.text, props.workspaceId, props.path]);
+
+  // Collab mode: the shared Y.Text drives the editor. There is no local save
+  // state (the CRDT is canonical; main materializes to disk at settle points),
+  // so the toolbar shows live presence instead. The textarea is always
+  // editable — co-editing has no separate "Edit" gate.
+  if (collab.enabled) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1">
+          <span
+            data-testid="collab-presence"
+            data-peer-count={collab.peerCount}
+            className="flex items-center gap-1 text-[11px] text-accent"
+          >
+            <span
+              aria-hidden
+              className="inline-block h-1.5 w-1.5 rounded-full bg-success"
+            />
+            {collab.peerCount === 0
+              ? "Live · just you"
+              : `${collab.peerCount + 1} editing`}
+          </span>
+        </div>
+        <textarea
+          data-testid="collab-editor"
+          value={collab.text}
+          onChange={(e) => collab.setText(e.target.value)}
+          spellCheck={false}
+          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[13px] leading-relaxed text-ink outline-none"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

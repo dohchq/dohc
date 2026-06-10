@@ -231,6 +231,9 @@ importers:
       '@dohc/workspace-sync':
         specifier: workspace:*
         version: link:../../packages/workspace-sync
+      '@hocuspocus/provider':
+        specifier: ^4.1.0
+        version: 4.1.0(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -249,6 +252,12 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      y-protocols:
+        specifier: ^1.0.7
+        version: 1.0.7(yjs@13.6.30)
+      yjs:
+        specifier: ^13.6.30
+        version: 13.6.30
       zod:
         specifier: ^3.25.76
         version: 3.25.76

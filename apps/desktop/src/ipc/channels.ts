@@ -22,6 +22,7 @@ export const CHANNELS = {
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
   cloudEnableSync: "desktop:cloud-enable-sync",
+  collabToken: "desktop:collab-token",
   openWorkspace: "desktop:open-workspace",
   listChangeSets: "desktop:list-change-sets",
   getSyncStatus: "desktop:get-sync-status",

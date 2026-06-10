@@ -36,12 +36,15 @@
     "@dohc/workspace-fs": "workspace:*",
     "@dohc/workspace-history": "workspace:*",
     "@dohc/workspace-sync": "workspace:*",
+    "@hocuspocus/provider": "^4.1.0",
     "electron-updater": "^6.8.9",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^9.1.0",
     "typescript": "^5.9.3",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.30",
     "zod": "^3.25.76"
   }
 }
