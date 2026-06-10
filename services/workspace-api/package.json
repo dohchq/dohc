@@ -11,10 +11,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-contracts": "workspace:*"
+    "@dohc/workspace-contracts": "workspace:*",
+    "better-auth": "^1.6.16",
+    "pg": "^8.21.0"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.21",
     "@types/node": "^22.19.19",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.22.3",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
