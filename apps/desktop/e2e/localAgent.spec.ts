@@ -1,0 +1,157 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { expect, test } from "@playwright/test";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { launchApp } from "./launch";
+
+// Phase 11: local agent + MCP. Two surfaces are proven end to end:
+//  1. The DESKTOP settings panel honestly exposes the MCP integration — the
+//     workspace path, a copyable config snippet (the exact command + args the
+//     user pastes into Claude Code / Codex), and a user-controlled Enable toggle
+//     that starts/ends an attributed agent run. Nothing runs until the user opts
+//     in here.
+//  2. The REAL stdio MCP server (what the configured AI tool launches) boots,
+//     advertises its tools, scaffolds + statically tests a local app, reports a
+//     clean local-first sync state, and — the #1 security property — refuses any
+//     path that escapes the workspace root.
+
+async function seedWorkspace(workspaceId: string): Promise<{ home: string; root: string }> {
+  const home = await mkdtemp(join(tmpdir(), "dohc-agent-home-"));
+  const root = join(await mkdtemp(join(tmpdir(), "dohc-agent-")), "workspace");
+  await mkdir(join(root, ".dohc"), { recursive: true });
+  await mkdir(join(root, "notes"), { recursive: true });
+  await writeFile(
+    join(root, ".dohc", "manifest.json"),
+    JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" }),
+  );
+  await writeFile(join(root, "notes", "budget.md"), "# Budget\n");
+  return { home, root };
+}
+
+test("desktop settings expose the MCP config and toggle an attributed agent run", async () => {
+  const { home, root } = await seedWorkspace("agent-ui-ws");
+  const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: root });
+  const page = await app.firstWindow();
+
+  await page.getByRole("button", { name: /open an existing folder/i }).click();
+  await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+  // Open the settings surface from the status-bar gear.
+  await page.getByRole("button", { name: /^settings$/i }).click();
+  const panel = page.getByTestId("settings-panel");
+  await expect(panel).toBeVisible();
+
+  // The config snippet is the literal thing the user pastes into their AI tool:
+  // it names THIS workspace root and the desktop state home, scoping the server.
+  const snippet = page.getByTestId("mcp-config-snippet");
+  await expect(snippet).toContainText("--workspace");
+  await expect(snippet).toContainText(root);
+  await expect(snippet).toContainText("--home");
+  await expect(snippet).toContainText(home);
+
+  // The server is opt-in: stopped until the user enables it.
+  await expect(page.getByTestId("mcp-status")).toHaveAttribute("data-state", "stopped");
+  await page.getByTestId("mcp-enable-toggle").click();
+  await expect(page.getByTestId("mcp-status")).toHaveAttribute("data-state", "running");
+
+  // Enabling records a visible, inspectable agent run in the workspace.
+  await expect
+    .poll(() => existsSync(join(root, ".dohc", "agent-runs.json")), { timeout: 10_000 })
+    .toBe(true);
+  const runs = JSON.parse(readFileSync(join(root, ".dohc", "agent-runs.json"), "utf8"));
+  expect(runs.at(-1)).toMatchObject({ status: "running" });
+
+  // And it is just as easily turned back off.
+  await page.getByTestId("mcp-enable-toggle").click();
+  await expect(page.getByTestId("mcp-status")).toHaveAttribute("data-state", "stopped");
+
+  await app.close();
+});
+
+test("the dohc MCP server serves workspace tools over stdio and refuses traversal", async () => {
+  const { home, root } = await seedWorkspace("agent-mcp-ws");
+  // The desktop registry the AI tool's server reads for list_workspaces.
+  await writeFile(
+    join(home, "dohc-workspaces.json"),
+    JSON.stringify({
+      version: 1,
+      workspaces: [{ workspaceId: "agent-mcp-ws", rootPath: root, kind: "personal", mode: "local-first" }],
+    }),
+  );
+
+  // Exactly what Claude Code / Codex do: launch the server as a stdio child
+  // scoped to the workspace root + state home.
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      join(process.cwd(), "node_modules/tsx/dist/cli.mjs"),
+      join(process.cwd(), "packages/mcp/src/server.ts"),
+      "--workspace",
+      root,
+      "--home",
+      home,
+    ],
+  });
+  const client = new Client({ name: "dohc-e2e-agent", version: "1.0.0" });
+  await client.connect(transport);
+
+  try {
+    const parse = async (name: string, args: Record<string, unknown> = {}) => {
+      const res = (await client.callTool({ name, arguments: args })) as {
+        content: Array<{ type: string; text: string }>;
+      };
+      return JSON.parse(res.content[0].text);
+    };
+
+    // All ten advertised tools are present.
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual(
+      [
+        "dohc_create_app",
+        "dohc_import_data",
+        "dohc_list_workspaces",
+        "dohc_open_in_dohc",
+        "dohc_query_database",
+        "dohc_resolve_conflict",
+        "dohc_share",
+        "dohc_sync_now",
+        "dohc_test_app",
+        "dohc_workspace_status",
+      ].sort(),
+    );
+
+    // The server sees the registered workspace and reports it local-first.
+    expect((await parse("dohc_list_workspaces")).workspaces).toContainEqual(
+      expect.objectContaining({ workspaceId: "agent-mcp-ws", rootPath: root }),
+    );
+    expect(await parse("dohc_workspace_status")).toMatchObject({ synced: false, scope: "local" });
+
+    // An agent scaffolds an app, then statically tests it — both contained.
+    expect(await parse("dohc_create_app", { area: "finance", name: "ledger", title: "Ledger" })).toMatchObject({
+      ok: true,
+      trusted: false,
+      appRoot: "finance/.apps/ledger",
+    });
+    expect(existsSync(join(root, "finance", ".apps", "ledger", "src", "App.tsx"))).toBe(true);
+    expect(
+      await parse("dohc_test_app", {
+        appRoot: "finance/.apps/ledger",
+        sourcePaths: ["finance/.apps/ledger/src/App.tsx"],
+      }),
+    ).toMatchObject({ ok: true });
+
+    // Local-first: nothing has been recorded as pending, so sync reports clean.
+    expect(await parse("dohc_sync_now")).toMatchObject({ clean: true, pendingChangeCount: 0 });
+
+    // #1 security property: a path that escapes the workspace root is refused.
+    const escaped = await parse("dohc_open_in_dohc", { path: "../../../etc/passwd" });
+    expect(escaped.ok).toBe(false);
+    expect(escaped.reason).toMatch(/path rejected/i);
+  } finally {
+    await client.close();
+  }
+});

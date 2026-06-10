@@ -87,6 +87,9 @@ function memoryBackend() {
         contentType: input.mediaType,
       };
     },
+    async updateAsset() {
+      throw new Error("not used");
+    },
     async renameFile() {
       throw new Error("not used");
     },
@@ -113,7 +116,6 @@ describe("agent workspace shell sandbox", () => {
       const session = await startWorkspaceShellSession({
         backend: fixture.backend,
         actor,
-        backendMode: "postgres",
         rootDir,
       });
 
@@ -151,7 +153,6 @@ describe("agent workspace shell sandbox", () => {
       const session = await startWorkspaceShellSession({
         backend: fixture.backend,
         actor,
-        backendMode: "postgres",
         rootDir,
       });
       expect(session.cleanupDir).toBeUndefined();
@@ -200,7 +201,6 @@ describe("agent workspace shell sandbox", () => {
     const session = await startWorkspaceShellSession({
       backend: fixture.backend,
       actor,
-      backendMode: "postgres",
     });
     const cleanupDir = session.cleanupDir;
     expect(cleanupDir).toBeTruthy();

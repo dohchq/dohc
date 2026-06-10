@@ -9,6 +9,7 @@ import {
   History,
   Import,
   LayoutGrid,
+  Settings,
   User,
 } from "lucide-react";
 
@@ -40,6 +41,7 @@ import { CommandPalette, type Command } from "./CommandPalette";
 import { FileInspector } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
+import { DesktopSettings } from "./settings/DesktopSettings";
 import { toggleTheme } from "./theme";
 
 export type Workspace = WorkspaceSummary;
@@ -91,6 +93,7 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const workspaceId = props.workspace.workspaceId;
 
@@ -176,6 +179,11 @@ export function DesktopWorkspaceShell(props: {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
         run: () => setCloudOpen(true),
+      },
+      {
+        id: "settings",
+        label: "Settings: Agents & MCP",
+        run: () => setSettingsOpen(true),
       },
       {
         id: "toggle-theme",
@@ -391,14 +399,26 @@ export function DesktopWorkspaceShell(props: {
           />
           {SYNC_LABEL[syncStatus?.state ?? "synced"]}
         </span>
-        <button
-          type="button"
-          onClick={() => setCloudOpen(true)}
-          className="flex items-center gap-1.5 text-[11px] text-subtle hover:text-ink"
-        >
-          <Cloud size={12} aria-hidden />
-          Connect dohc Cloud
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setCloudOpen(true)}
+            className="flex items-center gap-1.5 text-[11px] text-subtle hover:text-ink"
+          >
+            <Cloud size={12} aria-hidden />
+            Connect dohc Cloud
+          </button>
+          <button
+            type="button"
+            data-testid="open-settings"
+            aria-label="Settings"
+            onClick={() => setSettingsOpen(true)}
+            className="flex items-center gap-1.5 text-[11px] text-subtle hover:text-ink"
+          >
+            <Settings size={12} aria-hidden />
+            Settings
+          </button>
+        </div>
       </footer>
 
       {paletteOpen ? (
@@ -433,6 +453,15 @@ export function DesktopWorkspaceShell(props: {
       {cloudOpen ? (
         <Overlay onClose={() => setCloudOpen(false)}>
           <CloudLogin workspaceId={workspaceId} />
+        </Overlay>
+      ) : null}
+      {settingsOpen ? (
+        <Overlay onClose={() => setSettingsOpen(false)}>
+          <DesktopSettings
+            workspaceId={workspaceId}
+            workspacePath={props.workspace.rootPath}
+            onClose={() => setSettingsOpen(false)}
+          />
         </Overlay>
       ) : null}
     </div>

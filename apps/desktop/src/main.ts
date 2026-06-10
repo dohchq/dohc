@@ -46,6 +46,11 @@ import {
   ListWorkspaceFilesResult,
   OpenFileExternallyPayload,
   OpenWorkspacePayload,
+  AgentRunPayload,
+  EndAgentRunPayload,
+  StartAgentRunResult,
+  AgentRunStatusResult,
+  McpConfigResult,
   PickWorkspaceRootResult,
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
@@ -72,6 +77,7 @@ import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import { createAgentIntegration } from "./agents/AgentIntegration";
 import {
   getAppPackage as getAppPackageInfo,
   grantAppTrust as grantAppTrustState,
@@ -186,6 +192,27 @@ function deriveHocuspocusUrl(serverUrl: string): string {
   }
 }
 
+// The copyable MCP launch config for a workspace. The user's AI tool spawns the
+// dohc MCP stdio server with these args; --workspace scopes every tool to this
+// root (path containment), --home points it at the desktop registry/state dir.
+// DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
+// binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
+function mcpConfigFor(rootPath: string): {
+  command: string;
+  args: string[];
+  workspacePath: string;
+  home: string;
+} {
+  const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
+  const home = stateDir();
+  return {
+    command,
+    args: ["--workspace", rootPath, "--home", home],
+    workspacePath: rootPath,
+    home,
+  };
+}
+
 function engineForWorkspace(workspace: { workspaceId: string; rootPath: string }) {
   const remote = findWorkspace(workspace.workspaceId)?.remote;
   if (!remote || !cachedCredentials) return null;
@@ -212,6 +239,18 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   },
   engineFor: engineForWorkspace,
 });
+// Local agent integration: owns the per-workspace MCP child + active-run slot
+// and persists agent-run records. The run slot is wired into the watcher
+// (workspaceActivity.setAgentRun) so a run's writes are attributed to the
+// agent. The MCP child is spawned only in a packaged/dev runtime where a server
+// entry resolves; otherwise the toggle still flips and the user's AI tool
+// launches its own copy via the Settings config snippet.
+const agentIntegration = createAgentIntegration({
+  rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
+  setAgentRun: (workspaceId, run) => activity.setAgentRun(workspaceId, run),
+  home: stateDir(),
+});
+
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
@@ -220,6 +259,7 @@ app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
+  agentIntegration.stopAll();
   void Promise.race([
     activity.stopAll(),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
@@ -634,6 +674,39 @@ function registerIpcHandlers(): void {
     const input = ListWorkspaceFilesPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     return SyncStatusResult.parse(activity.getStatus(input.workspaceId));
+  });
+
+  // Enabling agents starts a local run: the workspace must already be OPEN (the
+  // watcher must be live for the run slot to attach), so open it first.
+  ipcMain.handle(CHANNELS.startAgentRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await activity.open(workspace);
+    return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
+  });
+
+  ipcMain.handle(CHANNELS.endAgentRun, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = EndAgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
+  });
+
+  ipcMain.handle(CHANNELS.getAgentRunStatus, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    return AgentRunStatusResult.parse(await agentIntegration.getAgentRunStatus(input.workspaceId));
+  });
+
+  // The copyable MCP config snippet for the user's AI tool. Main owns the real
+  // command/args so the renderer never invents a launch path.
+  ipcMain.handle(CHANNELS.getMcpConfig, (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath));
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {

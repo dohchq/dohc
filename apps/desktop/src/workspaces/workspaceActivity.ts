@@ -9,6 +9,7 @@ import {
   createChangeSetStore,
   humanSummary,
   startWorkspaceWatch,
+  type ActiveAgentRun,
   type WorkspaceWatchHandle,
 } from "./workspaceWatcher";
 
@@ -18,6 +19,9 @@ interface WatchedWorkspace {
   inFlight: boolean;
   lastSyncedAtMs: number | null;
   engine: CloudSyncEngine | null;
+  // The agent run whose writes this workspace's settled batches attribute to
+  // right now; null when the local user is editing. AgentIntegration sets it.
+  agentRun: ActiveAgentRun | null;
 }
 
 export interface WorkspaceActivityOptions {
@@ -67,9 +71,13 @@ export function createWorkspaceActivity(
         lastSyncedAtMs: null,
         handle: { stop: async () => {}, ready: Promise.resolve() },
         engine: null,
+        agentRun: null,
       };
       watched.set(workspace.workspaceId, entry);
       entry.handle = startWorkspaceWatch(workspace, {
+        // Read live at settle time so a batch is attributed to whatever run is
+        // active then — the slot may flip between batches within one open.
+        activeAgentRun: () => entry.agentRun,
         onRecorded: () => {
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
@@ -169,6 +177,16 @@ export function createWorkspaceActivity(
     return statusFor(workspaceId);
   }
 
+  // Sets (or clears) the active agent run for an OPEN workspace. The watcher
+  // reads this slot when a batch settles, so writes made during the run are
+  // attributed to the agent. Throws if the workspace isn't open — a run can
+  // only attach to a live watcher.
+  function setAgentRun(workspaceId: string, run: ActiveAgentRun | null): void {
+    const entry = watched.get(workspaceId);
+    if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    entry.agentRun = run;
+  }
+
   // Resolves once every watcher has flushed AND its in-flight records are
   // written — the quit path awaits this so the last save is never dropped.
   async function stopAll(): Promise<void> {
@@ -180,5 +198,5 @@ export function createWorkspaceActivity(
     await Promise.all(stops);
   }
 
-  return { open, enableCloud, reconcileCloud, stopEngines, listChangeSets, getStatus, stopAll };
+  return { open, enableCloud, reconcileCloud, stopEngines, listChangeSets, getStatus, setAgentRun, stopAll };
 }

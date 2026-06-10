@@ -356,6 +356,51 @@ export const CollabTokenResult = z.union([
 ]);
 export type CollabTokenResult = z.infer<typeof CollabTokenResult>;
 
+// Local agent integration (Phase 11). An agent run is a LOCAL concept: a small
+// record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
+// the managed MCP stdio child for the workspace and sets the watcher's
+// active-run slot, so the run's writes are attributed to the agent.
+export const AgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type AgentRunPayload = z.infer<typeof AgentRunPayload>;
+
+export const EndAgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  runId: z.string().min(1).max(200),
+  status: z.enum(["complete", "failed"]).optional(),
+});
+export type EndAgentRunPayload = z.infer<typeof EndAgentRunPayload>;
+
+const AgentRunRecordSchema = z.object({
+  id: z.string().min(1),
+  startedAt: z.number(),
+  endedAt: z.number().optional(),
+  agentId: z.string(),
+  onBehalfOf: z.string(),
+  status: z.enum(["running", "complete", "failed"]),
+});
+
+export const StartAgentRunResult = AgentRunRecordSchema;
+export type StartAgentRunResult = z.infer<typeof StartAgentRunResult>;
+
+export const AgentRunStatusResult = z.object({
+  mcpEnabled: z.boolean(),
+  activeRun: AgentRunRecordSchema.nullable(),
+  lastRun: AgentRunRecordSchema.nullable(),
+});
+export type AgentRunStatusResult = z.infer<typeof AgentRunStatusResult>;
+
+// The copyable MCP config the user pastes into their AI tool. Main owns the
+// real command/args (the renderer never invents a path or argv).
+export const McpConfigResult = z.object({
+  command: z.string(),
+  args: z.array(z.string()),
+  workspacePath: z.string(),
+  home: z.string(),
+});
+export type McpConfigResult = z.infer<typeof McpConfigResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),
@@ -412,6 +457,10 @@ export interface DohcDesktopBridge {
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
+  startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
+  endAgentRun(payload: EndAgentRunPayload): Promise<void>;
+  getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
+  getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Returns an
   // unsubscribe function.

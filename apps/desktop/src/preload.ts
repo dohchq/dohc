@@ -53,6 +53,11 @@ const bridge: DohcDesktopBridge = {
   listChangeSets: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChangeSets, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
+  startAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.startAgentRun, payload),
+  endAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.endAgentRun, payload),
+  getAgentRunStatus: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getAgentRunStatus, payload),
+  getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
   onWorkspaceActivity: (listener: () => void) => {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);

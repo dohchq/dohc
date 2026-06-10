@@ -1,5 +1,6 @@
 import type {
   ChangeAuthor,
+  ChangeProvenance,
   WatcherEvent,
   WatcherEventBatch,
 } from "@dohc/workspace-core";
@@ -15,9 +16,18 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
-// Local user is the implicit author of filesystem edits (an external agent's
-// writes also land here; provenance/attribution sharpens in later phases).
+// Local user is the implicit author of filesystem edits. When an agent run is
+// active (an MCP-driven turn the user started), its writes are attributed to
+// the agent instead — see ActiveAgentRun below.
 const LOCAL_USER: ChangeAuthor = { kind: "user", userId: "local" };
+
+// The active-run fact a batch attributes to: who the agent is and which run it
+// belongs to. workspaceActivity owns the slot; the watcher only reads it.
+export interface ActiveAgentRun {
+  agentId: string;
+  onBehalfOf: string;
+  agentRunId: string;
+}
 
 async function sha256OrUndefined(absolute: string): Promise<string | undefined> {
   try {
@@ -76,6 +86,9 @@ export function startWorkspaceWatch(
     settleMs?: number;
     now?: () => number;
     onRecorded?: () => void;
+    // Read at the moment a batch settles: a non-null run attributes the batch
+    // to that agent (kind:"agent") with agent-run provenance, else local user.
+    activeAgentRun?: () => ActiveAgentRun | null;
   } = {},
 ): WorkspaceWatchHandle {
   const store = createChangeSetStore(workspace.rootPath);
@@ -97,7 +110,18 @@ export function startWorkspaceWatch(
       windowMs: options.settleMs ?? 500,
       events,
     };
-    const changeSet = batchToChangeSet(batch, { author: LOCAL_USER });
+    // Attribute to the active agent run if one is in flight when the batch
+    // settles, else to the local user. The agent-run provenance both sets
+    // kind:"agent-run" (via batchToChangeSet) and keeps agentRunId locally
+    // meaningful (the .dohc/agent-runs.json record AgentIntegration persists).
+    const run = options.activeAgentRun?.() ?? null;
+    const author: ChangeAuthor = run
+      ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf }
+      : LOCAL_USER;
+    const provenance: ChangeProvenance | undefined = run
+      ? { source: "agent-run", agentRunId: run.agentRunId }
+      : undefined;
+    const changeSet = batchToChangeSet(batch, { author, ...(provenance ? { provenance } : {}) });
     await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
     options.onRecorded?.();
   }
