@@ -1,14 +1,42 @@
+import { defaultWorkspaceRoot } from "@dohc/workspace-core";
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import {
+  CreateLocalWorkspacePayload,
+  CreateWorkspaceFilePayload,
+  CreateWorkspaceFileResult,
+  DefaultWorkspaceRootResult,
+  ImportWorkspaceFilesPayload,
+  ImportWorkspaceFilesResult,
   LaunchMarksResult,
+  ListWorkspaceFilesPayload,
+  ListWorkspaceFilesResult,
   PickWorkspaceRootResult,
   VersionResult,
   WorkspaceRegistryResult,
+  WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { launchMarks } from "./performance/launchMarks";
 import { decideNavigation } from "./security/electronSecurity";
 import { navigationPolicy } from "./window/createMainWindow";
+import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
+import {
+  effectiveHome,
+  findWorkspace,
+  listWorkspaces,
+  registerWorkspace,
+} from "./workspaces/WorkspaceRegistry";
+import {
+  copyIntoWorkspace,
+  createFile,
+  listFiles,
+} from "./workspaces/workspaceFiles";
+
+function requireWorkspace(workspaceId: string) {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+  return workspace;
+}
 
 // IPC is an untrusted boundary: handlers only answer frames the navigation
 // policy itself would allow (exact dev origin or the packaged bundle).
@@ -40,8 +68,53 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.getWorkspaceRegistry, (event) => {
     assertTrustedSender(event);
-    // Real registry lands in Phase 4.
-    return WorkspaceRegistryResult.parse({ workspaces: [] });
+    return WorkspaceRegistryResult.parse({ workspaces: listWorkspaces() });
+  });
+
+  ipcMain.handle(CHANNELS.getDefaultWorkspaceRoot, (event) => {
+    assertTrustedSender(event);
+    return DefaultWorkspaceRootResult.parse(
+      defaultWorkspaceRoot(effectiveHome()),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.createLocalWorkspace, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateLocalWorkspacePayload.parse(payload);
+    const created = await createWorkspaceFolder(input);
+    registerWorkspace(created);
+    return WorkspaceSummary.parse(created);
+  });
+
+  ipcMain.handle(CHANNELS.listWorkspaceFiles, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return ListWorkspaceFilesResult.parse({
+      files: await listFiles(workspace.rootPath),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.createWorkspaceFile, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateWorkspaceFilePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const path = await createFile(workspace.rootPath, input.relativePath);
+    return CreateWorkspaceFileResult.parse({ path });
+  });
+
+  ipcMain.handle(CHANNELS.importWorkspaceFiles, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ImportWorkspaceFilesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile", "multiSelections"],
+      title: "Import files into workspace",
+    });
+    const imported = result.canceled
+      ? []
+      : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
+    return ImportWorkspaceFilesResult.parse({ imported });
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {

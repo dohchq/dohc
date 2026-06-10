@@ -1,0 +1,40 @@
+@import "@dohc/brand/tokens.css";
+@import "tailwindcss";
+
+@custom-variant dark ([data-theme='dark'] &);
+
+/* Semantic layer over the shared brand tokens. The desktop renderer never
+ * redefines brand colors — packages/brand/src/tokens.css is the source. */
+@theme inline {
+  --color-bg: var(--dohc-bg);
+  --color-panel: var(--dohc-panel);
+  --color-panel-2: var(--dohc-panel-2);
+  --color-ink: var(--dohc-ink);
+  --color-muted: var(--dohc-muted);
+  --color-subtle: var(--dohc-subtle);
+  --color-accent: var(--dohc-accent);
+  --color-line: var(--dohc-line);
+  --color-success: var(--dohc-success);
+  --color-warning: var(--dohc-warning);
+  --color-danger: var(--dohc-danger);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--dohc-bg);
+  color: var(--dohc-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Desktop app, not a web page: no text cursor or selection on chrome. */
+.app-chrome {
+  user-select: none;
+  cursor: default;
+}

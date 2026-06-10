@@ -2,13 +2,14 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 2 COMPLETE (committed 7781d02, codex xhigh double-review in flight); Phase 3 recon underway
-- Expected test state: desktop 11/11 unit + E2E + smoke green; workspace-core 35/35; baseline green
-- Dirty files and intent: this log only
-- Exact next action: codex phase-02 triage (review still in flight) → Phase 3: install renderer deps (react/tailwind4/@dohc/brand per reuse-map digest) → failing first-run tests + native UX E2E → shell implementation per reuse map → design review loop
-- Active background tasks: b8czrzb3h (codex phase-02: commit review + targeted security prompt → docs/superpowers/reviews/codex/phase-02.md); reuse-map agent (→ docs/superpowers/reviews/2026-06-10-desktop-component-reuse-map.md)
+- Phase/Step + TDD position: Phase 3 implementation GREEN (20/20 unit, 3/3 E2E, typecheck, build); Design Review Loop iteration 1 in flight
+- Expected test state: desktop unit 20/20 (14 security + 6 first-run), E2E 3/3 (desktopLaunch, firstRunWorkspace x2); workspace-core 35/35
+- Dirty files and intent: apps/desktop/* uncommitted Phase 3 work (bridge extensions: registry/createWorkspace/listFiles/createFile; React renderer: DesktopRoot/FirstRun/Shell/CommandPalette/NewFileDialog/theme/styles.css w/ @dohc/brand tokens; electron.vite bundles workspace-core via externalizeDepsPlugin exclude — Node ESM can't load raw workspace TS); pnpm-lock (react deps); this log
+- Exact next action: design judges (wf_d8c4c7e3-6a7) + advisory codex -i (bhbk63g2s → docs/superpowers/reviews/codex/ui-phase-03.md) return → fix hard fails (max 3 iterations) → smoke → verifier fan-out → commit phase3 → codex review (xhigh, UI phase... tier says phases 2,4,5 xhigh; 3 not listed high-risk → default xhigh) → Phase 4
+- Active background tasks: w1iy497do (design judges), bhbk63g2s (codex -i advisory)
 - Open worktrees: none
-- Pending reviews: codex phase-02 (in flight)
+- Pending reviews: design loop iteration 1; codex phase-03 commit review after commit
+- Known nits for design loop: redundant PERSONAL badge next to "personal" name; sidebar is flat path list not hierarchical tree (v0)
 
 ## Environment (append-only)
 
@@ -168,3 +169,28 @@
 - Deferred findings with reason: desktopSmoke.test.ts realized as scripts/smoke-test.mjs (executable smoke beats a vitest stub; runs in every phase gate); codex finding 4 (window.open user-gesture/allowlist) deferred to Phase 6 when user content first renders
 - Remaining risk: fuses configuration deferred to Phase 14 packaging (per plan); titlebar is default chrome until Phase 3
 - Next phase: 3
+
+### Phase 3: Native-Feeling Desktop Shell UX
+
+- Status: in progress (design loop iteration 1 PASSED; verifiers running; commit pending)
+- Execution map: reuse-map recon (artifact committed in phase2 fix) → renderer deps installed (react 19.2.6/tailwind 4/@dohc/brand/lucide, TS+types repinned to repo standards) → failing tests written (6 first-run component tests + 2-test native UX E2E) → RED recorded (incl. catching vitest glob missing .tsx — fixed) → bridge extensions (4 new validated channels) + workspaces service (registry w/ test-home seam, createWorkspaceFolder w/ workspace-core manifest, file ops via validateUserWritePath) → React shell (FirstRun/Shell/Palette/NewFileDialog/theme/styles on shared brand tokens) → ESM crash fixed (electron-vite must bundle workspace pkgs — externalizeDepsPlugin exclude) → GREEN 20/20 unit + 3/3 E2E + smoke → design loop (2 Claude judges gating + codex -i advisory) → 3 soft fixes → all green again
+- Resume notes: verifiers wf_5ff43339-c71 in flight; commit phase3 on pass.
+- Files changed: apps/desktop renderer (9 new React/TS files + styles.css), workspaces/ (3 new), ipc (channels+contract extended), main.ts/preload.ts (4 new handlers), electron.vite.config.ts, vitest.config.ts (.tsx glob), e2e/firstRunWorkspace.spec.ts, package.json deps, pnpm-lock
+- Code deleted or consolidated: src/renderer/main.ts (replaced by main.tsx); redundant kind badge removed in design loop
+- Net LOC delta: recorded at commit
+- Old paths retained and why: web components NOT copied yet — Phase 3 shell is purpose-built per reuse map (smaller than porting); FileTree/CommandPalette ports deferred to when their features (virtualization, multi-command surface) are actually needed (reuse-before-write cuts both ways: this shell is ~400 lines total)
+- Dependencies added: react/react-dom 19.2.6, lucide-react, @dohc/brand + @dohc/workspace-core (workspace), tailwindcss 4 + @tailwindcss/vite, @vitejs/plugin-react, testing-library trio + jsdom (dev)
+- Decisions made: D-12 | Phase 3 ships minimal real bridge (registry/create/list/createFile), Phase 4 formalizes | first-run must create real folders to be honest | phase 3. D-13 | shell purpose-built, not ported: reuse map showed ports carry transitive web coupling; 400-line shell beats 16 swapped components for v1 | less code | phase 3
+- Tests added: 7 component (first-run: suggest/choose/create/no-auth/cloud-optional/cloud-offer-truthful/no-marketing), 7 workspaceFiles unit (createFile validation/no-overwrite, listFiles ignores, copyIntoWorkspace basename/skip-existing — RED recorded for copyIntoWorkspace), 2 E2E expanded (adds: palette 5 commands incl. import+cloud, quick-open Ctrl+P file jump, switcher listbox, cloud panel honest copy + backdrop close, file-preview screenshot)
+- Commands run: RED→GREEN cycles + full gate chain (all pinned Node 22.13)
+- Failing tests fixed: ESM workspace-core load crash (bundling); vitest .tsx glob gap
+- Electron E2E/manual smoke: 3/3 E2E + smoke green
+- UI/UX screenshot/design review: Design Review Loop iteration 1 — Claude judges (gating): ALL 7 PASS, zero hard fails, pixel-sampled token verification (#f7f6f1/#100f0e/#151515/#f4f1ea exact). Codex -i advisory: shell screens all-pass ("strongest calibration hit"); 4 fails dispositioned: path truncation FIXED (wrap, never truncate), first-run card-feel REJECTED (Claude evidence: utilitarian tool card, no marketing), dark-mode-too-black REJECTED (faithful to final brand tokens — flagged to Ice as brand-level observation), palette modal-feel REJECTED (Raycast-calibrated). Claude soft fixes applied: clickable empty-state actions, redundant PERSONAL badge removed. Accent #2d342e green-cast note REJECTED (it IS the brand accent token).
+- Performance measurements: launch marks pipeline intact (E2E re-verified); shell adds React — bundle size watch begins Phase 16 ratchet
+- Security/collaboration regressions: all new channels sender-validated + zod-parsed payloads/results; file ops traversal-guarded via workspace-core
+- Reviewer/subagent findings: verifiers wf_5ff43339-c71 — test-quality PASS (deletion mutation bites; manifest-content/keyboard-file/relaunch assertions all real, no sleeps; createFile traversal-proof incl. wx no-overwrite; listFiles skips ignored dirs, doesn't follow symlinks; doctored workspaceId fails closed). One tracked note → Phase 4: CreateLocalWorkspacePayload.rootPath is only z.string().min(1) — a compromised renderer could register "/" or $HOME as a workspace then enumerate/create-empty broadly; Phase 4 attachment rules MUST add root validation (validateAttachedFolder + reject root/home-itself). claimed-vs-actual initially killed by session limit; re-run via workflow resume (cached test-quality) — verdict FAIL on plan-completeness (every claim true, gates green, hunts clean, but 5 plan-required shell elements missing). HONORED: all 5 built in iteration 2 rather than deferred. Design loop iteration 2 judge: PASS, zero hard fails, all 10 plan shell elements verified present (code+screenshot evidence); 2 polish notes (offer-row gutter, Ctrl P hint) applied same-pass.
+- Codex third-party review findings: pending post-commit
+- Relevant findings fixed: pending
+- Deferred findings with reason: SUPERSEDED — claimed-vs-actual verifier correctly failed the deferral as gate-softening; all five missing plan elements built in iteration 2: workspace switcher (real listbox over registry), import action (real file-copy via dialog + copyIntoWorkspace, unit-tested incl. no-overwrite), cloud-sync offer (truthful surface in first-run + status bar + palette — explains, never gates), quick-open Ctrl+P (palette-pattern file jump, E2E-tested), file-preview screenshot (selected-state artifact). Also fixed from verifier nits: me.md catch narrowed to EEXIST-only. Flat path list (not hierarchical tree) remains v0 — hierarchy + virtualization with Phase 5/16. Verifier note on rootPath validation → Phase 4 requirement (recorded).
+- Remaining risk: shell density will be rejudged when editor surface lands (Phase 6)
+- Next phase: 4

@@ -2,6 +2,11 @@ export const CHANNELS = {
   getVersion: "desktop:get-version",
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
+  getDefaultWorkspaceRoot: "desktop:get-default-workspace-root",
+  createLocalWorkspace: "desktop:create-local-workspace",
+  listWorkspaceFiles: "desktop:list-workspace-files",
+  createWorkspaceFile: "desktop:create-workspace-file",
+  importWorkspaceFiles: "desktop:import-workspace-files",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",
 } as const;

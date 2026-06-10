@@ -1,7 +1,12 @@
-import { defineConfig } from "electron-vite";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
 export default defineConfig({
   main: {
+    // Workspace packages ship raw TS — they must be bundled, not
+    // externalized, or Node ESM fails on their extensionless imports.
+    plugins: [externalizeDepsPlugin({ exclude: ["@dohc/workspace-core"] })],
     build: {
       outDir: "dist/main",
       lib: { entry: "src/main.ts" },
@@ -16,6 +21,7 @@ export default defineConfig({
   },
   renderer: {
     root: "src/renderer",
+    plugins: [react(), tailwindcss()],
     build: {
       outDir: "dist/renderer",
       rollupOptions: { input: "src/renderer/index.html" },

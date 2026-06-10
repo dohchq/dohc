@@ -7,6 +7,18 @@ contextBridge.exposeInMainWorld("dohcDesktop", {
   getVersion: () => ipcRenderer.invoke(CHANNELS.getVersion),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
+  getDefaultWorkspaceRoot: () =>
+    ipcRenderer.invoke(CHANNELS.getDefaultWorkspaceRoot),
+  createLocalWorkspace: (payload: { rootPath: string; kind: string }) =>
+    ipcRenderer.invoke(CHANNELS.createLocalWorkspace, payload),
+  listWorkspaceFiles: (payload: { workspaceId: string }) =>
+    ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
+  createWorkspaceFile: (payload: {
+    workspaceId: string;
+    relativePath: string;
+  }) => ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
+  importWorkspaceFiles: (payload: { workspaceId: string }) =>
+    ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
 });
 
 // One-shot paint signal for launch instrumentation (no data, no response).
