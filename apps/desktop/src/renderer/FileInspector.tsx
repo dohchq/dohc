@@ -5,7 +5,8 @@ import {
   Table,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import { rendererMarks } from "../performance/rendererMarks";
+import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { AppPackageView } from "./AppPackageView";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
@@ -67,6 +68,11 @@ function useTextContent(
   refreshKey: number,
 ) {
   const [text, setText] = useState<string | null>(null);
+  // Which path `text` belongs to. Consumers must not render text under a
+  // different path: switching files otherwise shows the PREVIOUS file's
+  // content under the new header for one render (and corrupts the
+  // open-latency measure with a near-zero stale sample).
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState(false);
   const lastPathRef = useRef<string | null>(null);
@@ -85,6 +91,7 @@ function useTextContent(
       .then((r) => {
         if (cancelled) return;
         setText(r.text);
+        setLoadedPath(path);
         setTruncated(r.truncated);
         setError(false);
       })
@@ -99,7 +106,7 @@ function useTextContent(
     // refreshKey bumps on workspace activity so an open file re-reads when it
     // changes on disk (e.g. an agent edits it).
   }, [workspaceId, path, enabled, refreshKey]);
-  return { text, truncated, error };
+  return { text, loadedPath, truncated, error };
 }
 
 function ViewHeader(props: { icon: React.ReactNode; path: string; label: string }) {
@@ -157,6 +164,17 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestDraft = useRef(props.body);
 
+  // Parse-once + visible-first (Phase 16): the memo stops re-parses on
+  // unrelated re-renders (collab status flips, save-state ticks), and the
+  // incremental document commits only the opening window up front, idle-
+  // backfilling the rest — a 250KB doc opens in tens of ms, not ~575ms.
+  const renderedDocument = useMemo(
+    () => (
+      <IncrementalMarkdownDocument body={props.body} components={MARKDOWN_COMPONENTS} />
+    ),
+    [props.body],
+  );
+
   // Live co-editing only ever activates for SHARED cloud workspaces with a
   // signed-in session (the collabToken IPC returns available:false otherwise).
   // When it does, the textarea is driven by the shared Y.Text instead of the
@@ -169,6 +187,16 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
     onDiskText: props.body,
     enabled: true,
   });
+
+  // Performance measure: MarkdownView only mounts once the document body is
+  // loaded, so this post-commit effect brackets click → IPC read → markdown
+  // parse → rendered document.
+  useEffect(() => {
+    rendererMarks.measureSince("markdown-open", "file-open-start");
+    // Last-wins: readers poll this epoch to know the measure above belongs to
+    // the open they triggered (never a stale value from the previous file).
+    rendererMarks.mark("markdown-opened");
+  }, [props.path]);
 
   // External changes (agent edits, sync pulls) flow into the open document
   // only while NOT editing — mid-edit, the user's draft wins until saved.
@@ -293,7 +321,7 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto p-6 text-[14px]"
         >
-          <Markdown components={MARKDOWN_COMPONENTS}>{props.body}</Markdown>
+          {renderedDocument}
         </div>
       )}
     </div>
@@ -334,6 +362,11 @@ function CsvView({
     [body],
   );
   const [header, ...data] = rows;
+  // Bounded preview (Phase 16): an unbounded <table> over 10,000+ rows
+  // freezes the renderer for tens of seconds. The first rows are enough to
+  // inspect a CSV; working with all of them is what Import to SQLite is for.
+  const MAX_PREVIEW_ROWS = 500;
+  const previewRows = data.length > MAX_PREVIEW_ROWS ? data.slice(0, MAX_PREVIEW_ROWS) : data;
 
   async function importToSqlite() {
     if (importing) return;
@@ -408,7 +441,7 @@ function CsvView({
               </tr>
             </thead>
             <tbody>
-              {data.map((row, r) => (
+              {previewRows.map((row, r) => (
                 <tr key={r}>
                   {row.map((cell, c) => (
                     <td key={c} className="border border-line px-2 py-1">
@@ -419,6 +452,15 @@ function CsvView({
               ))}
             </tbody>
           </table>
+          {data.length > previewRows.length ? (
+            <p
+              data-testid="csv-preview-bound"
+              className="mb-0 mt-2 text-[11px] text-subtle"
+            >
+              Showing the first {MAX_PREVIEW_ROWS} of {data.length} rows — import
+              to SQLite to work with all of them.
+            </p>
+          ) : null}
         </div>
       )}
     </div>
@@ -549,7 +591,7 @@ export function FileInspector(props: {
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
-  const { text, truncated, error } = useTextContent(
+  const { text, loadedPath, truncated, error } = useTextContent(
     props.workspaceId,
     props.path,
     isText,
@@ -561,7 +603,7 @@ export function FileInspector(props: {
       <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
     ) : null;
 
-  if (isText && text === null) {
+  if (isText && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (

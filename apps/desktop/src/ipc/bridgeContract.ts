@@ -401,6 +401,14 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
+// Test-only snapshot of the main-process mark/measure recorder (Phase 16):
+// named marks as wall-clock epochs, measures as durations between marks.
+export const DesktopMarksResult = z.object({
+  marks: z.record(z.number()),
+  measures: z.record(z.number()),
+});
+export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),

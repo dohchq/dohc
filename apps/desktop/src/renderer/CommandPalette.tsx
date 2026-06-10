@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { rendererMarks } from "../performance/rendererMarks";
 import { Overlay } from "./Overlay";
 
 export interface Command {
@@ -24,11 +25,22 @@ export function CommandPalette(props: {
   // Cap rendered rows: a workspace can have thousands of files (quick-open),
   // and rendering them all per keystroke is wasted work.
   const MAX_MATCHES = 50;
+  const filterStart = performance.now();
+  const needle = query.toLowerCase();
   const matches = props.commands
-    .filter((command) =>
-      command.label.toLowerCase().includes(query.toLowerCase()),
-    )
+    .filter((command) => command.label.toLowerCase().includes(needle))
     .slice(0, MAX_MATCHES);
+  const filterMs = useRef(0);
+  filterMs.current = performance.now() - filterStart;
+
+  // Performance measures: the pure filter cost (query operation) and
+  // keystroke→committed-results latency (visible result). Recorded only for
+  // a real query so opening the palette doesn't log an empty-filter number.
+  useEffect(() => {
+    if (query === "") return;
+    rendererMarks.record("file-tree-search-query", filterMs.current);
+    rendererMarks.measureSince("file-tree-search-visible", "file-tree-search-input");
+  }, [query]);
 
   function runCommand(command: Command | undefined) {
     if (!command) return;
@@ -48,7 +60,10 @@ export function CommandPalette(props: {
           aria-label={props.ariaLabel ?? "Command"}
           placeholder={props.placeholder ?? "Type a command…"}
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            rendererMarks.mark("file-tree-search-input");
+            setQuery(event.target.value);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Escape") props.onClose();
             if (event.key === "Enter") runCommand(matches[0]);

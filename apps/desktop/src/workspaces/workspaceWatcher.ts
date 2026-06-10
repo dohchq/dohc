@@ -14,6 +14,7 @@ import { batchToChangeSet } from "@dohc/workspace-sync";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { desktopMarks } from "../performance/desktopMarks";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
 // Local user is the implicit author of filesystem edits. When an agent run is
@@ -100,6 +101,9 @@ export function startWorkspaceWatch(
     // watcher. The watcher already ignores these; this guards a leak.
     const userPaths = paths.filter((p) => !shouldIgnoreWatchPath(p));
     if (userPaths.length === 0) return;
+    // Sync-batch instrumentation: brackets the real settle→record work
+    // (existence checks, hashing, sidecar collapse, durable history write).
+    desktopMarks.mark("sync-batch-start");
     const rawEvents = await pathsToEvents(workspace.rootPath, userPaths);
     // Fold SQLite WAL/journal/shm churn into a single base-db update so the
     // history shows "wallet.sqlite changed", never the transient sidecars.
@@ -123,6 +127,8 @@ export function startWorkspaceWatch(
       : undefined;
     const changeSet = batchToChangeSet(batch, { author, ...(provenance ? { provenance } : {}) });
     await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
+    desktopMarks.measureSince("sync-batch", "sync-batch-start");
+    desktopMarks.mark("sync-batch-complete");
     options.onRecorded?.();
   }
 

@@ -1,6 +1,7 @@
 import { CheckCircle2, LayoutGrid, ShieldCheck, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { AppPackageResult } from "../ipc/bridgeContract";
+import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 
 type AppInfo = NonNullable<AppPackageResult>;
@@ -42,6 +43,16 @@ export function AppPackageView(props: { workspaceId: string; path: string }) {
     setMissing(false);
     void reload();
   }, [reload]);
+
+  // Performance mark: the app PACKAGE surface opened (manifest + readiness
+  // rendered). The in-app RUNTIME open is Phase 7b — measured there.
+  useEffect(() => {
+    if (info) {
+      rendererMarks.measureSince("app-package-open", "file-open-start");
+      // Last-wins: readers poll this epoch for freshness (see FileInspector).
+      rendererMarks.mark("app-package-opened");
+    }
+  }, [info]);
 
   if (missing) {
     return (

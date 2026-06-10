@@ -33,6 +33,7 @@ export const CHANNELS = {
   workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",
+  getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

@@ -114,7 +114,7 @@ test("first run creates a real workspace folder and lands in a native shell", as
   await page.keyboard.press("ControlOrMeta+k");
   const palette = page.getByTestId("command-palette");
   await expect(palette).toBeVisible();
-  await expect(palette.getByRole("option")).toHaveCount(5);
+  await expect(palette.getByRole("option")).toHaveCount(6);
   await expect(palette).toContainText(/import files/i);
   await expect(palette).toContainText(/connect dohc cloud/i);
   await page.keyboard.type("new");

@@ -115,23 +115,33 @@ function assertSnapshot(snapshot: DatabaseSnapshot) {
 
 function createTables(db: SQLiteDatabase, snapshot: DatabaseSnapshot) {
   assertSnapshot(snapshot)
-  for (const [tableName, table] of Object.entries(snapshot)) {
-    const columns = table.columns.map((column) => {
-      const parts = [quoteIdent(column.name), sqliteType(column.type)]
-      if (column.primaryKey) parts.push('PRIMARY KEY')
-      if (column.nullable !== true && column.primaryKey) parts.push('NOT NULL')
-      return parts.join(' ')
-    })
-    db.exec(`CREATE TABLE ${quoteIdent(tableName)} (${columns.join(', ')})`)
-    if (table.rows.length === 0) continue
-    const columnNames = table.columns.map((column) => column.name)
-    const placeholders = columnNames.map(() => '?').join(', ')
-    const statement = db.prepare(
-      `INSERT INTO ${quoteIdent(tableName)} (${columnNames.map(quoteIdent).join(', ')}) VALUES (${placeholders})`,
-    )
-    for (const row of table.rows) {
-      statement.run(...columnNames.map((column) => bindValue(row[column])))
+  // One transaction for the whole load: without it every INSERT autocommits
+  // (its own fsync on file-backed databases), which turned a 10,000-row CSV
+  // import into minutes of frozen main process. Batched, it is sub-second.
+  db.exec('BEGIN')
+  try {
+    for (const [tableName, table] of Object.entries(snapshot)) {
+      const columns = table.columns.map((column) => {
+        const parts = [quoteIdent(column.name), sqliteType(column.type)]
+        if (column.primaryKey) parts.push('PRIMARY KEY')
+        if (column.nullable !== true && column.primaryKey) parts.push('NOT NULL')
+        return parts.join(' ')
+      })
+      db.exec(`CREATE TABLE ${quoteIdent(tableName)} (${columns.join(', ')})`)
+      if (table.rows.length === 0) continue
+      const columnNames = table.columns.map((column) => column.name)
+      const placeholders = columnNames.map(() => '?').join(', ')
+      const statement = db.prepare(
+        `INSERT INTO ${quoteIdent(tableName)} (${columnNames.map(quoteIdent).join(', ')}) VALUES (${placeholders})`,
+      )
+      for (const row of table.rows) {
+        statement.run(...columnNames.map((column) => bindValue(row[column])))
+      }
     }
+    db.exec('COMMIT')
+  } catch (cause) {
+    db.exec('ROLLBACK')
+    throw cause
   }
 }
 

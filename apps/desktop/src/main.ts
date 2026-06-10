@@ -38,6 +38,7 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
+  DesktopMarksResult,
   LaunchMarksResult,
   RunAppTesterPayload,
   RunAppTesterResult,
@@ -61,6 +62,7 @@ import {
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
+import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
 import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
@@ -363,10 +365,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.createLocalWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateLocalWorkspacePayload.parse(payload);
+    desktopMarks.mark("workspace-create-start");
     const created = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       kind: input.kind,
     });
+    desktopMarks.measureSince("workspace-create", "workspace-create-start");
     // Parse BEFORE register: a summary that fails the contract must never be
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
@@ -713,6 +717,7 @@ function registerIpcHandlers(): void {
   ipcMain.on(CHANNELS.firstPaint, (event) => {
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();
+      desktopMarks.markOnce("first-renderer-paint");
     }
   });
 
@@ -723,6 +728,10 @@ function registerIpcHandlers(): void {
       assertTrustedSender(event);
       return LaunchMarksResult.parse(launchMarks.snapshot());
     });
+    ipcMain.handle(CHANNELS.getDesktopMarks, (event) => {
+      assertTrustedSender(event);
+      return DesktopMarksResult.parse(desktopMarks.snapshot());
+    });
   }
 }
 
@@ -732,6 +741,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   void app.whenReady().then(async () => {
     launchMarks.appReady();
+    desktopMarks.markOnce("app-ready");
     // Load any persisted cloud session before workspaces open, so engines
     // attach on open instead of waiting for the next login.
     await refreshCredentialCache().catch(() => undefined);
@@ -774,6 +784,7 @@ if (!app.requestSingleInstanceLock()) {
     const { createMainWindow } = await import("./window/createMainWindow");
     createMainWindow();
     launchMarks.firstWindow();
+    desktopMarks.markOnce("first-window");
 
     // Auto-updates: only a packaged app with DOHC_UPDATE_URL set ever checks
     // (local/dev builds never self-mutate). Failures are absorbed — updates

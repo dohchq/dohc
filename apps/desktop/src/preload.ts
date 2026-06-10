@@ -80,5 +80,6 @@ contextBridge.exposeInMainWorld("dohcDesktopInternal", {
 if (process.env.DOHC_DESKTOP_TEST === "1") {
   contextBridge.exposeInMainWorld("dohcDesktopTest", {
     getLaunchMarks: () => ipcRenderer.invoke(CHANNELS.getLaunchMarks),
+    getDesktopMarks: () => ipcRenderer.invoke(CHANNELS.getDesktopMarks),
   });
 }

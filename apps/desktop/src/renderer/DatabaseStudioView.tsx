@@ -1,6 +1,7 @@
 import { Database } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
+import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 
 type Snapshot = DatabaseSnapshotResult;
@@ -84,6 +85,16 @@ export function DatabaseStudioView(props: {
       cancelled = true;
     };
   }, [workspaceId, path, refreshKey]);
+
+  // Performance measure (post-commit, snapshot rendered): click → read-only
+  // snapshot read → first page of rows on screen.
+  useEffect(() => {
+    if (snapshot) {
+      rendererMarks.measureSince("sqlite-first-page", "file-open-start");
+      // Last-wins: readers poll this epoch for freshness (see FileInspector).
+      rendererMarks.mark("sqlite-first-page-rendered");
+    }
+  }, [snapshot]);
 
   const active =
     snapshot?.tables.find((t) => t.name === activeName) ?? snapshot?.tables[0] ?? null;

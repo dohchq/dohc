@@ -10,9 +10,10 @@ behavior; delete only after replacement tests exist."
 - Step 2 baseline (`pnpm check:desktop-local-first-baseline`): **PASS** (EXIT 0).
   All 14 packages green; `@dohc/web test` carries 5 recorded known-fail
   Convex-era tests (tolerated baseline); `check:debt` green.
-- Step 2.5 cross-model pre-deletion audit: **launched** (codex gpt-5.5 xhigh,
-  read-only) — see Resume Snapshot. Step 3 (deletion) MUST NOT begin while it is
-  in flight.
+- Step 2.5 cross-model pre-deletion audit: **COMPLETE** (codex gpt-5.5 xhigh,
+  663,812 tokens over the full Convex sources → `/tmp/codex-phase13-audit.log`)
+  and **triaged below**. Step 3 may begin once the two concrete pre-deletion
+  work items in the triage are part of its scope.
 
 ## Ported test map (Convex-era behavior → local-first replacement)
 
@@ -79,3 +80,84 @@ The Step 2.5 audit must enumerate any Convex behavior missing a replacement row
 above, evaluating rewire-vs-gut FROM the seam inventory described here. The
 deletion is staged deliberately, not a single rm -rf, precisely because of this
 coupling.
+
+## Step 2.5 audit triage (lead decision per finding)
+
+The audit surfaced 15 findings (7 missing rows, 8 overclaims). Triage verdicts
+against the REPOSITIONED product (desktop-first local files; web = cloud client
++ shared links; collaboration = the paid engine):
+
+**Concrete pre-deletion work (folded into Step 3 scope):**
+
+1. **Share lifecycle for the kept product** (audit a2/b1, P1): the repositioned
+   web KEEPS shared links. Step 3 must ship the workspace-api shared-link
+   resolution endpoint over the Postgres `shares` table WITH lifecycle tests:
+   view/edit capability honored, **revocation honored** (soft-deleted share →
+   403), non-member with share can read only the shared atom. Pending-email
+   and org-wide audiences are future cloud features (schema's
+   `recipient_user_id` model holds them later) — recorded, not silently lost.
+2. **Database op idempotency payload-compare** (audit b5, P1): Convex rejected
+   a reused operation id with a DIFFERENT op/payload; the Postgres
+   `databaseFiles` apply returns idempotent success on any reused id. Step 3
+   fixes `packages/workspace-postgres/src/services/databaseFiles.ts` to compare
+   the stored op payload and reject mismatched reuse, with a test. This is a
+   kept desktop path (sqlite op-log sync).
+
+**Deliberate simplifications / retirements (decisions, not silent loss):**
+
+3. **atomAccess/folderAccess private-restricted ACLs + tombstones** (a1, b1):
+   the post-pivot authorization model IS the simplification — workspace
+   membership grants the workspace's files; finer grain = atom `shares` +
+   `locks` (tested in postgres-acl) + the desktop collaboration policy
+   (protected targets → propose/review; boundary crossings → confirm; 30
+   tests). Private-within-shared ACL trees are not in the repositioned product.
+4. **Web agent approval cards / skill-turn gates** (a3, b4): the web agent
+   surface is retired. The local agent goes through the MCP boundary: every
+   share returns needs-confirmation (tested), boundary crossings queue for
+   explicit confirmation (collaborationPolicy tests), nothing auto-trusts an
+   app (tested). A persisted approval inbox is named future work (phase 11
+   notes), not a deletion casualty.
+5. **Trash/restore/30-day purge** (a4): replaced by architecture. Locally,
+   files are user-owned on disk — dohc never hard-deletes user files (the MCP
+   deliberately ships no delete tool) and history records change sets. Cloud
+   rows are soft-deleted (`deleted_at` everywhere) and the sync engine's
+   no-resurrect rule is tested. A restore UI over soft-deletes is future
+   product work; the cron purge was a Convex-era ops artifact.
+6. **Captures/windows/viewData reviewed-by-default** (a5): the cross-desk
+   live-data dashboard surface is retired with the Convex web product. The
+   audit itself conditions this finding on that surface staying. Post-pivot
+   apps are local source folders behind the fingerprint-bound trust gate.
+7. **Stable atom-id hijack + formula/query leakage** (a6): formula/query blocks
+   are retired web-editor surfaces. The kept stable-id property is enforced
+   where it matters now: the hocuspocus projection rejects frontmatter-id
+   mismatch (`frontmatter-id-mismatch`, tested) and Postgres atoms are keyed by
+   server-side UUIDs.
+8. **Workspace slugs / URL identity** (a7): the repositioned web routes by
+   workspace id; pretty slugs and verified-email share routes are future
+   naming work (Phase 15 recorded cloud naming; nothing in the kept product
+   resolves slugs).
+9. **Org lifecycle breadth — invites, last-owner guard, member removal**
+   (b3): the Better Auth `organization` plugin ships these primitives, and the
+   post-pivot member-management API is named FUTURE work for the collab
+   product. Deleting Convex loses no working post-pivot flow (the Convex flows
+   served the retired web app); recorded as a tracked gap, not a regression.
+10. **Hocuspocus live revocation** (b2): bounded today, not absent — writes
+    are re-checked per update (`beforeSync` ACL), and reads die with the 5-min
+    collab JWT whose re-mint re-checks membership at `/collab/token`. What is
+    missing is the immediate socket kick (authz-version bump), already
+    explicitly tracked in `postgres-acl.ts` with its bump-condition comment.
+    Exposure window ≤ token TTL; recorded, deletion-safe.
+11. **App trust freshness** (b6): local trust is fingerprint-bound (trust
+    resets when sources change — covered in apps tests); Convex's seed/digest
+    freshness checks belonged to the retired hosted runtime.
+12. **Cloud asset registry idempotency / dohc-asset refs** (b7): the web
+    editor's hosted asset registry is retired; local assets are plain files,
+    cloud sync dedupes by sha256 (merge-sync tests).
+13. **Onboarding lease/CAS** (b8, audit-rated P3 if retired): retired — the
+    desktop first-run replaces agentic web onboarding (tested).
+14. **Conformance breadth** (b8/atom row): row wording amended — conformance
+    covers CRUD/stale-write/asset/rename; lock classes and agent overwrite
+    guards live in the desktop policy + locks model.
+
+Routed from phase 15's review: Step 3 also deletes the trailing
+`VITE_CONVEX_URL` block from `.env.self-host.example`.

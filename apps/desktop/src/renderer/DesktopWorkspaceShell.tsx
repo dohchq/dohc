@@ -35,6 +35,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
@@ -116,7 +117,20 @@ export function DesktopWorkspaceShell(props: {
     await refreshFiles();
   }, [workspaceId, refreshFiles]);
 
-  const selectFile = useCallback((path: string) => setSelected(path), []);
+  const selectFile = useCallback((path: string) => {
+    // Performance mark: file views measure open latency from this click.
+    rendererMarks.mark("file-open-start");
+    setSelected(path);
+  }, []);
+
+  // Performance marks (post-commit, so the rendered surface is included):
+  // file tree populated, and shell interactive once status/history landed.
+  useEffect(() => {
+    if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
+  }, [files]);
+  useEffect(() => {
+    if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
+  }, [syncStatus]);
 
   // Open the workspace (starts the file watcher in main), load the initial
   // file tree + history, and refresh everything whenever a settled batch is

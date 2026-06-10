@@ -216,6 +216,9 @@ importers:
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand
+      '@dohc/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
@@ -262,6 +265,9 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@dohc/performance':
+        specifier: workspace:*
+        version: link:../../packages/performance
       '@electron/fuses':
         specifier: ^2.1.2
         version: 2.1.2
@@ -352,6 +358,18 @@ importers:
       tsx:
         specifier: ^4.22.3
         version: 4.22.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
+
+  packages/performance:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

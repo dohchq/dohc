@@ -37,7 +37,8 @@
     "check:self-host": "node scripts/check-self-host.mjs",
     "check:self-host-desktop-path": "node scripts/check-self-host-desktop-path.mjs",
     "check:cloud-ready": "node scripts/check-cloud-ready.mjs",
-    "check:debt": "node scripts/check-tech-debt.mjs"
+    "check:debt": "node scripts/check-tech-debt.mjs",
+    "check:performance": "node scripts/check-performance.mjs"
   },
   "packageManager": "pnpm@10.24.0",
   "devDependencies": {
