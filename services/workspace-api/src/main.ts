@@ -43,6 +43,9 @@ const workspaceHandler = createWorkspaceApiHandler({
   backend,
   resolveActor: createSessionActorResolver(auth),
   createWorkspace: createPostgresWorkspaceProvisioner(pool),
+  // Same secret hocuspocus verifies with; self-hosts without a collab server
+  // leave it unset and POST /workspaces/:id/collab/token errors collab-disabled.
+  collab: { pool, jwtSecret: process.env.HOCUSPOCUS_JWT_SECRET },
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded

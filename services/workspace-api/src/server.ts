@@ -8,6 +8,7 @@ import {
   type UploadAssetRequest,
   type WriteTextFileRequest,
 } from "./routes/files";
+import { mintCollabToken, type CollabTokenDeps, type CollabTokenRequest } from "./routes/collab";
 import { applyWorkspaceSync, type ApplySyncRequest } from "./routes/sync";
 import {
   createWorkspace as createWorkspaceRoute,
@@ -23,12 +24,14 @@ export type CreateWorkspaceApiHandlerOptions = {
   resolveActor: ResolveActor;
   events?: WorkspaceEventSource;
   createWorkspace?: CreateWorkspaceFn;
+  collab?: CollabTokenDeps;
 };
 
 type WorkspaceRoute =
   | { route: "files"; workspaceId: string; filePath?: string }
   | { route: "assets"; workspaceId: string }
   | { route: "sync"; workspaceId: string; action: "apply" }
+  | { route: "collab"; workspaceId: string; action: "token" }
   | { route: "events"; workspaceId: string };
 
 export function createWorkspaceApiHandler({
@@ -36,6 +39,7 @@ export function createWorkspaceApiHandler({
   resolveActor,
   events,
   createWorkspace,
+  collab,
 }: CreateWorkspaceApiHandlerOptions): WorkspaceApiHandler {
   return async (request) => {
     try {
@@ -73,6 +77,11 @@ export function createWorkspaceApiHandler({
       }
       if (route.route === "sync" && route.action === "apply" && request.method === "POST") {
         return jsonResponse(await applyWorkspaceSync(backend, actor, await readJson<ApplySyncRequest>(request)));
+      }
+      if (route.route === "collab" && route.action === "token" && request.method === "POST") {
+        return jsonResponse(
+          await mintCollabToken(collab, actor, await readJson<CollabTokenRequest>(request)),
+        );
       }
       if (route.route === "events" && request.method === "GET") {
         return jsonResponse(await listWorkspaceEvents(actor, events));
@@ -112,6 +121,9 @@ function parseWorkspaceRoute(request: Request): WorkspaceRoute {
   }
   if (section === "sync" && parts[3] === "apply" && parts.length === 4) {
     return { route: "sync", workspaceId, action: "apply" };
+  }
+  if (section === "collab" && parts[3] === "token" && parts.length === 4) {
+    return { route: "collab", workspaceId, action: "token" };
   }
   if (section === "events" && parts.length === 3) {
     return { route: "events", workspaceId };

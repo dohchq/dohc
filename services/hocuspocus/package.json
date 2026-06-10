@@ -2,6 +2,10 @@
   "name": "@dohc/hocuspocus",
   "private": true,
   "type": "module",
+  "exports": {
+    "./auth": "./src/auth.ts",
+    "./doc-name": "./src/doc-name.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",

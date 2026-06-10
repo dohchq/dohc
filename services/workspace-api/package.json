@@ -12,6 +12,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@dohc/hocuspocus": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-postgres": "workspace:*",
     "better-auth": "^1.6.16",

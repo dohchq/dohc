@@ -563,6 +563,9 @@ importers:
 
   services/workspace-api:
     dependencies:
+      '@dohc/hocuspocus':
+        specifier: workspace:*
+        version: link:../hocuspocus
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../../packages/workspace-contracts
