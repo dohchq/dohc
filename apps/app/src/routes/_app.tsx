@@ -30,6 +30,7 @@ import { api } from '../../convex/_generated/api'
 import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
 import { useDocumentMeta } from '@/lib/use-document-meta'
 import { FileTree } from '@/components/FileTree'
+import { InstallDesktopPrompt } from '@/components/InstallDesktopPrompt'
 import { AtomView } from '@/components/AtomView'
 import { FileTypeView } from '@/components/FileTypeView'
 import { SharedAtomView } from '@/components/SharedAtomView'
@@ -426,6 +427,8 @@ function SignInPrompt() {
         <p className="mt-5 text-center font-mono text-[10.5px] uppercase tracking-[0.14em] text-ink-faint">
           secure sign-in · your work stays private
         </p>
+
+        <InstallDesktopPrompt className="mt-7" />
       </div>
     </div>
   )
