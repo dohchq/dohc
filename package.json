@@ -14,6 +14,8 @@
     "test:desktop": "pnpm --filter @dohc/desktop test",
     "test:desktop:e2e": "playwright test --config apps/desktop/playwright.config.ts",
     "smoke:desktop": "node apps/desktop/scripts/smoke-test.mjs",
+    "smoke:package:desktop": "node apps/desktop/scripts/package-smoke.mjs",
+    "smoke:fuses:desktop": "pnpm --filter @dohc/desktop smoke:fuses",
     "dev:sync": "node scripts/dev-sync.mjs",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
@@ -33,6 +35,7 @@
     "check:dual-backend-baseline": "node scripts/check-dual-backend-baseline.mjs",
     "check:desktop-local-first-baseline": "node scripts/check-desktop-local-first-baseline.mjs",
     "check:self-host": "node scripts/check-self-host.mjs",
+    "check:self-host-desktop-path": "node scripts/check-self-host-desktop-path.mjs",
     "check:cloud-ready": "node scripts/check-cloud-ready.mjs",
     "check:debt": "node scripts/check-tech-debt.mjs"
   },

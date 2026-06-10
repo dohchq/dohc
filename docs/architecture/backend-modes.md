@@ -1,5 +1,12 @@
 # Backend Modes
 
+> **Historical.** Convex is being deleted from the codebase; Postgres is the
+> only backend going forward. Current architecture lives in
+> [`desktop-local-first.md`](desktop-local-first.md),
+> [`dohc-cloud.md`](dohc-cloud.md), and
+> [`workspace-sync.md`](workspace-sync.md). This file remains only as a
+> record of the migration-era dual-backend setup.
+
 dohc currently supports two backend modes during the migration to a
 self-hostable core.
 

@@ -46,12 +46,14 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN}
+      HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN:?Set HOCUSPOCUS_ADMIN_TOKEN in .env.self-host}
       HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-false}
-      HOCUSPOCUS_CONVEX_SERVER_TOKEN: ${HOCUSPOCUS_CONVEX_SERVER_TOKEN:-}
-      HOCUSPOCUS_CONVEX_URL: ${HOCUSPOCUS_CONVEX_URL:-}
+      # Ydoc persistence and the workspace ACL both live on the one Postgres.
       HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
-      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
+      HOCUSPOCUS_WORKSPACE_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+      # Shared with workspace-api: it mints 5-minute collab JWTs this server
+      # verifies. Same value in both services or live co-editing fails closed.
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host (openssl rand -base64 32)}
       HOCUSPOCUS_PORT: "1234"
       HOCUSPOCUS_QUIET: ${HOCUSPOCUS_QUIET:-true}
     healthcheck:
@@ -86,6 +88,11 @@ services:
       # Auth lives inside workspace-api (Better Auth on the same Postgres).
       # Generate with: openssl rand -base64 32
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host (openssl rand -base64 32)}
+      # Same secret hocuspocus verifies with; without it the collab-token
+      # route fails closed (collab-disabled) and sync still works.
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET:?Set HOCUSPOCUS_JWT_SECRET in .env.self-host (openssl rand -base64 32)}
+      # File bodies above the inline cap are stored on this volume.
+      DOHC_BLOB_DIR: /var/lib/dohc/blobs
     command: >
       sh -lc "corepack enable &&
       corepack prepare pnpm@10.24.0 --activate &&
@@ -95,6 +102,7 @@ services:
       - "${WORKSPACE_API_BIND:-127.0.0.1}:${WORKSPACE_API_PORT:-1786}:1786"
     volumes:
       - .:/workspace
+      - dohc_self_host_blobs:/var/lib/dohc/blobs
 
   sqlite-worker:
     image: node:22-bookworm-slim
@@ -160,12 +168,11 @@ services:
       VITE_DOHC_BACKEND: postgres
       VITE_WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://127.0.0.1:1786}
       VITE_HOCUSPOCUS_URL: ${HOCUSPOCUS_PUBLIC_URL:-ws://127.0.0.1:1234}
-      VITE_CONVEX_URL: ${VITE_CONVEX_URL:-}
     command: >
       sh -lc "corepack enable &&
       corepack prepare pnpm@10.24.0 --activate &&
       pnpm install --frozen-lockfile &&
-      pnpm --filter @dohc/web dev --host 0.0.0.0"
+      pnpm --filter @dohc/web dev:vite --host 0.0.0.0"
     ports:
       - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
     volumes:
@@ -175,3 +182,4 @@ volumes:
   dohc_self_host_postgres:
   dohc_self_host_object_storage:
   dohc_self_host_agent_sandbox:
+  dohc_self_host_blobs:
