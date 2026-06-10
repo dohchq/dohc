@@ -76,6 +76,13 @@ const allowlist = [
     reason: 'This comment explains a mode-specific unreachable branch in shared entity update logic.',
     deleteWhen: 'Remove the comment or split the helper when entity creation and update paths are separated.',
   },
+  {
+    file: 'docs/superpowers/reviews/codex/phase-05.md',
+    patterns: [term('TO', 'DO')],
+    contains: 'Our version of upath.normalize',
+    reason: 'Raw Phase 5 codex review transcript quotes third-party path-normalize source whose own to-do markers are evidence, not dohc debt.',
+    deleteWhen: 'Delete when the raw Phase 5 transcript is distilled to a findings dossier (Phase 17 cleanup).',
+  },
 ]
 
 const skippedDirectories = new Set([

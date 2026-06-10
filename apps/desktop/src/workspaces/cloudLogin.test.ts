@@ -92,7 +92,7 @@ describe("cloud device-flow login", () => {
     });
   });
 
-  it("poll() maps denial and expiry, and a dead code cannot be re-polled", async () => {
+  it("poll() maps denial and expiry, and an expired device code cannot be re-polled", async () => {
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ status: 400, body: { error: "access_denied" } }),

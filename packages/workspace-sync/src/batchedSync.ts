@@ -1,7 +1,7 @@
 // Phase 5: map a settled batch of file-watcher events to a reviewable
 // ChangeSet. An agent run touching 18 files becomes ONE change set, not 18.
 // (The settle-window debounce itself lives in workspace-fs watchEvents — the
-// shipping implementation; a duplicate batcher here was deleted as dead code.)
+// shipping implementation; a duplicate batcher here was removed as redundant.)
 
 import {
   addFileChanges,

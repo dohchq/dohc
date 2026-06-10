@@ -29,9 +29,10 @@ Closed by `phase10(fix)`.
   `enabled` and all materialization are gated on `synced`. Until synced the
   local autosave editor (real on-disk content) owns the surface.
 
-- **[P1] External edits clobbered (model was dead code).** `collabSession.ts`
-  (reconcileExternalEdit / shouldMaterialize / recordMaterialization) was only
-  referenced by its own test; the live loop was a blind write of `collab.text`.
+- **[P1] External edits clobbered (model never wired into the live path).**
+  `collabSession.ts` (reconcileExternalEdit / shouldMaterialize /
+  recordMaterialization) was referenced only by its own test; the live loop was
+  a blind write of `collab.text`.
   An agent edit or sync pull during a live session was overwritten.
   **Fix:** wired the model into `useCollabDoc`. Every settle and every on-disk
   change runs `reconcileExternalEdit` against the last-materialized base: an
