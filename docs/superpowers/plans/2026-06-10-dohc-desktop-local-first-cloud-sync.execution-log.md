@@ -87,6 +87,7 @@
 - pnpm 10 ignores postinstall — Electron needs onlyBuiltDependencies in pnpm-workspace.yaml BEFORE install (Phase 2).
 - Root playwright.config.ts is web-only (testDir apps/app/e2e + webServer); desktop gets own config.
 - check:debt bans the literal deferred-work marker tokens it scans for, in any file including docs — never write them, even when describing the rule itself (this line was rewritten once for exactly that reason).
+- RED runs of path-handling tests can pollute the working tree (a not-yet-rejected relative path created real dirs under apps/desktop cwd). Inspect `git status --short` BEFORE every `git add` of a directory; never blind-add after running new filesystem tests.
 - Package named @dohc/web already, but lives at apps/app (Phase 12 renames path).
 - ECONNREFUSED from :5432/:9000/:1234 = environment failure, never a test failure.
 - codex exec with `-i`: pass the prompt via stdin pipe + `-` arg (`echo "prompt" | codex exec -i img.png -`); positional prompt is silently dropped when stdin is detached.
@@ -193,3 +194,28 @@
 - Deferred findings with reason: SUPERSEDED — claimed-vs-actual verifier correctly failed the deferral as gate-softening; all five missing plan elements built in iteration 2: workspace switcher (real listbox over registry), import action (real file-copy via dialog + copyIntoWorkspace, unit-tested incl. no-overwrite), cloud-sync offer (truthful surface in first-run + status bar + palette — explains, never gates), quick-open Ctrl+P (palette-pattern file jump, E2E-tested), file-preview screenshot (selected-state artifact). Also fixed from verifier nits: me.md catch narrowed to EEXIST-only. Flat path list (not hierarchical tree) remains v0 — hierarchy + virtualization with Phase 5/16. Verifier note on rootPath validation → Phase 4 requirement (recorded).
 - Remaining risk: shell density will be rejudged when editor surface lands (Phase 6)
 - Next phase: 4
+
+### Phase 4: Local Workspace Registry And Folder Creation
+
+- Status: in progress (all gates green; verifiers running; commit pending)
+- Execution map: workspace-core validateWorkspaceRootChoice tests-first (RED 3) → impl (rejects "/", home-itself, drive roots, relative) → registryStore extracted as pure module, tests-first (RED: missing module; 5 tests: multi-attach, duplicate rejection w/ message, persistence across instances, local-only-no-remote, remote-identity-only-after-setRemote) → WorkspaceRegistry rewired as electron shim over store → attachWorkspaceFolder IPC (validated, adopts-or-creates) + DOHC_TEST_PICK_PATH dialog seam (test+unpackaged gated) → first-run "Open an existing folder" + component test → attach-preserves-identity E2E → 36/36 unit + 4/4 E2E + typecheck + build + smoke green
+- Resume notes: verifiers wf_76209a51-999 in flight; commit phase4 on pass; then POST-PHASE-4 CHECKPOINT (Electron security/IPC review: finder fan-out + codex --base main + verify pipeline + adversarial scenario consult per plan).
+- Files changed: packages/workspace-core/src/paths.{ts,test.ts} (+validateWorkspaceRootChoice), apps/desktop/src/workspaces/{registryStore.ts,registryStore.test.ts,WorkspaceRegistry.ts}, ipc/{channels,bridgeContract}.ts (+attach), main.ts (root-choice enforcement on create+attach, attach handler, pick seam), preload.ts, renderer/DesktopFirstRun.{tsx,test.tsx}, e2e/firstRunWorkspace.spec.ts (+attach test)
+- Code deleted or consolidated: WorkspaceRegistry's inline persistence replaced by pure registryStore (was untestable electron-coupled code); registerWorkspace silent-skip became explicit duplicate rejection
+- Net LOC delta: recorded at commit
+- Old paths retained and why: none affected
+- Dependencies added: none
+- Decisions made: D-14 | registry naming keeps getWorkspaceRegistry/pickWorkspaceRoot (plan: listLocalWorkspaces/chooseWorkspaceRoot) — same surface, earlier names already shipped in phase2/3; renaming = churn without behavior | less code | phase 4
+- Tests added: 3 workspace-core (root-choice), 5 registryStore, 1 first-run component (attach), 1 E2E (attach preserves manifest identity, file tree shows existing files)
+- Commands run: RED→GREEN per module; full gate chain green (pinned Node)
+- Failing tests fixed: none beyond planned REDs
+- Electron E2E/manual smoke: 4/4 E2E + smoke green
+- UI/UX screenshot/design review: not a design-loop phase; first-run gained one quiet secondary button (screenshot regenerates in E2E artifacts)
+- Performance measurements: launch marks pipeline intact via E2E
+- Security/collaboration regressions: closes tracked finding (workspace root cannot be "/", home, or drive root — enforced on BOTH create and attach paths); pick seam double-gated; duplicate attachment rejected
+- Reviewer/subagent findings: verifiers wf_76209a51-999 — test-quality FAIL with two PROBE-CONFIRMED escapes, both FIXED pre-commit with pinning tests: (1) dot-segment disguises ("/home/ice/.", "/x/..") defeated the root guard — fixed via lexical normalizeAbsolutePath (drive/UNC-aware) + validateWorkspaceRootChoice returns canonical path used by ALL downstream fs/registry ops (also kills trailing-slash duplicate registrations); (2) attaching a copied workspace folder registered a duplicate workspaceId, silently mistargeting file IPC to the first root — fixed: register rejects identity duplicates with remediation message. Also added missing Windows drive-root test case. Mutation checks passed (store deletion + throw-removal both bite). claimed-vs-actual PASS (all plan Step 1/2/4 claims verified by re-run; metadata.ts divergence judged no-gap; D-14 naming accepted; registerWorkspace behavior change judged low-risk). Residuals tracked: symlink-variant duplicate roots (needs realpath — fs-touching, deferred to Phase 5 watcher work where fs identity matters), mixed separators cosmetic on Windows.
+- Codex third-party review findings: pending post-commit (xhigh + targeted security prompt — high-risk phase)
+- Relevant findings fixed: 2 verifier escapes + 1 test gap fixed pre-commit; 40/40 core + 37/37 desktop after
+- Deferred findings with reason: registry uses userData JSON (plan mentions Electron safeStorage as an option — registry holds no secrets, paths only; safeStorage encryption adds keychain dependency for zero confidentiality gain; revisit when cloud tokens arrive in Phase 9)
+- Remaining risk: same-workspaceId-two-roots edge (foreign manifest copy) — findWorkspace returns first match; harmless today (both roots valid), revisit with sync identity in Phase 9
+- Next phase: 5

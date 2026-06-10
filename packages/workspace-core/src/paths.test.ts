@@ -106,6 +106,54 @@ describe("path traversal", () => {
   });
 });
 
+describe("workspace root choice", () => {
+  it("accepts ordinary folders, including outside the default root", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    expect(
+      validateWorkspaceRootChoice("/home/ice/dohc/personal", "/home/ice").ok,
+    ).toBe(true);
+    expect(
+      validateWorkspaceRootChoice("/mnt/data/research", "/home/ice").ok,
+    ).toBe(true);
+  });
+
+  it("rejects the filesystem root and the home directory itself", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    for (const dangerous of ["/", "/home/ice", "/home/ice/", "C:\\", "C:/"]) {
+      const result = validateWorkspaceRootChoice(dangerous, "/home/ice");
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("rejects dot-segment disguises of root and home", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    for (const disguised of [
+      "/.",
+      "/..",
+      "/home/ice/.",
+      "/home/ice/x/..",
+      "/home/./ice",
+    ]) {
+      const result = validateWorkspaceRootChoice(disguised, "/home/ice");
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("returns the normalized root so equality checks are canonical", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    const result = validateWorkspaceRootChoice(
+      "/home/ice/dohc//personal/.",
+      "/home/ice",
+    );
+    expect(result).toEqual({ ok: true, normalized: "/home/ice/dohc/personal" });
+  });
+
+  it("rejects relative paths", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    expect(validateWorkspaceRootChoice("notes", "/home/ice").ok).toBe(false);
+  });
+});
+
 describe("path classification", () => {
   it("treats .apps/<name>/app.json as visible app source", () => {
     expect(classifyPath("finance/.apps/ledger/app.json")).toEqual({

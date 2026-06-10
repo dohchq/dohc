@@ -1,6 +1,10 @@
-import { defaultWorkspaceRoot } from "@dohc/workspace-core";
+import {
+  defaultWorkspaceRoot,
+  validateWorkspaceRootChoice,
+} from "@dohc/workspace-core";
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import {
+  AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
   CreateWorkspaceFilePayload,
   CreateWorkspaceFileResult,
@@ -59,6 +63,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
     assertTrustedSender(event);
+    // Test seam: native dialogs cannot be driven by Playwright.
+    const testPick = process.env.DOHC_TEST_PICK_PATH;
+    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testPick) {
+      return PickWorkspaceRootResult.parse(testPick);
+    }
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
     });
@@ -78,12 +87,37 @@ function registerIpcHandlers(): void {
     );
   });
 
+  // Validates AND canonicalizes: all downstream fs/registry operations use
+  // the normalized root, so dot-segment or separator variants of the same
+  // folder cannot bypass guards or register twice.
+  function usableRoot(rootPath: string): string {
+    const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
+    if (!check.ok) throw new Error(check.reason);
+    return check.normalized;
+  }
+
   ipcMain.handle(CHANNELS.createLocalWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateLocalWorkspacePayload.parse(payload);
-    const created = await createWorkspaceFolder(input);
+    const created = await createWorkspaceFolder({
+      rootPath: usableRoot(input.rootPath),
+      kind: input.kind,
+    });
     registerWorkspace(created);
     return WorkspaceSummary.parse(created);
+  });
+
+  ipcMain.handle(CHANNELS.attachWorkspaceFolder, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AttachWorkspaceFolderPayload.parse(payload);
+    // Adopts an existing dohc workspace (manifest identity preserved) or
+    // turns the folder into a fresh personal workspace in place.
+    const attached = await createWorkspaceFolder({
+      rootPath: usableRoot(input.rootPath),
+      kind: "personal",
+    });
+    registerWorkspace(attached);
+    return WorkspaceSummary.parse(attached);
   });
 
   ipcMain.handle(CHANNELS.listWorkspaceFiles, async (event, payload) => {

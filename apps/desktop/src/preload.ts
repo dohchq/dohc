@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("dohcDesktop", {
     ipcRenderer.invoke(CHANNELS.getDefaultWorkspaceRoot),
   createLocalWorkspace: (payload: { rootPath: string; kind: string }) =>
     ipcRenderer.invoke(CHANNELS.createLocalWorkspace, payload),
+  attachWorkspaceFolder: (payload: { rootPath: string }) =>
+    ipcRenderer.invoke(CHANNELS.attachWorkspaceFolder, payload),
   listWorkspaceFiles: (payload: { workspaceId: string }) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   createWorkspaceFile: (payload: {

@@ -10,3 +10,4 @@ coverage/
 .tanstack/tmp/
 .gstack/tmp/
 .dohc-dev/
+test-results/

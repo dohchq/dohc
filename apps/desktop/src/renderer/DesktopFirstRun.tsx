@@ -37,6 +37,19 @@ export function DesktopFirstRun(props: {
     }
   }
 
+  async function openExisting() {
+    const picked = await bridge().pickWorkspaceRoot();
+    if (!picked) return;
+    try {
+      const workspace = await bridge().attachWorkspaceFolder({
+        rootPath: picked,
+      });
+      props.onWorkspaceReady(workspace);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   return (
     <div className="app-chrome flex h-screen flex-col items-center justify-center gap-6 bg-bg text-ink">
       <div className="flex flex-col items-center gap-1">
@@ -73,6 +86,14 @@ export function DesktopFirstRun(props: {
           className="rounded bg-accent px-3 py-2 text-sm font-medium text-bg hover:opacity-90 disabled:opacity-50"
         >
           {creating ? "Creating…" : "Create workspace"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => void openExisting()}
+          className="rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+        >
+          Open an existing folder as a workspace
         </button>
 
         {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}

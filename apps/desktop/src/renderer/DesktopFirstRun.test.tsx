@@ -14,9 +14,16 @@ const bridge = {
     kind: "personal" as const,
     mode: "local-first" as const,
   })),
+  attachWorkspaceFolder: vi.fn(async () => ({
+    workspaceId: "ws-attached",
+    rootPath: "/home/ice/projects/research",
+    kind: "personal" as const,
+    mode: "local-first" as const,
+  })),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   listWorkspaceFiles: vi.fn(async () => ({ files: [] })),
   createWorkspaceFile: vi.fn(async () => ({ path: "notes/welcome.md" })),
+  importWorkspaceFiles: vi.fn(async () => ({ imported: [] })),
 };
 
 beforeEach(() => {
@@ -57,6 +64,21 @@ describe("first run", () => {
     );
     expect(onReady).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "ws-1" }),
+    );
+  });
+
+  it("attaches an existing folder as a workspace", async () => {
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    render(<DesktopFirstRun onWorkspaceReady={onReady} />);
+    await user.click(
+      await screen.findByRole("button", { name: /open an existing folder/i }),
+    );
+    expect(bridge.attachWorkspaceFolder).toHaveBeenCalledWith({
+      rootPath: "/home/ice/projects/research",
+    });
+    expect(onReady).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "ws-attached" }),
     );
   });
 

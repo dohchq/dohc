@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright";
@@ -166,6 +166,54 @@ test("first run creates a real workspace folder and lands in a native shell", as
   await expect(
     page.getByText(/get started free|pricing|trusted by/i),
   ).toHaveCount(0);
+
+  await app.close();
+});
+
+test("attaching an existing dohc workspace preserves its identity", async () => {
+  // Pre-create a workspace folder with a known manifest identity.
+  const elsewhere = await mkdtemp(join(tmpdir(), "dohc-existing-"));
+  const existingRoot = join(elsewhere, "finance");
+  await mkdir(join(existingRoot, ".dohc"), { recursive: true });
+  await writeFile(
+    join(existingRoot, ".dohc", "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      workspaceId: "ws-keep-this-identity",
+      kind: "personal",
+      mode: "local-first",
+    }),
+  );
+  await writeFile(join(existingRoot, "budget.md"), "# Budget");
+
+  const testHome = await mkdtemp(join(tmpdir(), "dohc-e2e-"));
+  const launchArgs = ["apps/desktop/dist/main/main.js"];
+  if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") {
+    launchArgs.push("--no-sandbox");
+  }
+  const app = await electron.launch({
+    args: launchArgs,
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      DOHC_DESKTOP_TEST: "1",
+      DOHC_TEST_HOME: testHome,
+      DOHC_TEST_PICK_PATH: existingRoot,
+    },
+  });
+  const page = await app.firstWindow();
+
+  await page
+    .getByRole("button", { name: /open an existing folder/i })
+    .click();
+  await expect(page.getByTestId("workspace-shell")).toBeVisible();
+  await expect(page.getByTestId("file-tree")).toContainText("budget.md");
+
+  // Identity preserved: the manifest still carries the original workspaceId.
+  const manifest = JSON.parse(
+    readFileSync(join(existingRoot, ".dohc", "manifest.json"), "utf8"),
+  );
+  expect(manifest.workspaceId).toBe("ws-keep-this-identity");
 
   await app.close();
 });

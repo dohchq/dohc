@@ -34,6 +34,10 @@ export type CreateLocalWorkspacePayload = z.infer<
   typeof CreateLocalWorkspacePayload
 >;
 
+export const AttachWorkspaceFolderPayload = z.object({
+  rootPath: z.string().min(1),
+});
+
 export const ListWorkspaceFilesPayload = z.object({
   workspaceId: z.string().min(1),
 });
@@ -81,6 +85,9 @@ export interface DohcDesktopBridge {
   createLocalWorkspace(
     payload: CreateLocalWorkspacePayload,
   ): Promise<WorkspaceSummary>;
+  attachWorkspaceFolder(payload: {
+    rootPath: string;
+  }): Promise<WorkspaceSummary>;
   listWorkspaceFiles(payload: {
     workspaceId: string;
   }): Promise<ListWorkspaceFilesResult>;

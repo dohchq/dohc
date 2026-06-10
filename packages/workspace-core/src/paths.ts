@@ -59,6 +59,54 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
   return { ok: true, normalized };
 }
 
+// Lexical normalization: resolves "." and ".." segments and separator noise
+// WITHOUT touching the filesystem, so dot-segment disguises ("/home/ice/.")
+// cannot slip past string comparisons. Preserves drive and UNC prefixes.
+export function normalizeAbsolutePath(path: string): string {
+  const drive = /^[A-Za-z]:/.exec(path)?.[0] ?? "";
+  const rest = drive ? path.slice(drive.length) : path;
+  const unc = rest.startsWith("\\\\") || rest.startsWith("//");
+  const segments = rest.replaceAll("\\", "/").split("/");
+  const out: string[] = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  const prefix = unc ? "//" : "/";
+  const joined = `${drive}${prefix}${out.join("/")}`;
+  const trimmed = joined.replace(/\/+$/, "");
+  return trimmed || (drive ? drive : "/");
+}
+
+export type RootChoiceValidation =
+  | { ok: true; normalized: string }
+  | { ok: false; reason: string };
+
+// Registry policy: a workspace root must be a real folder choice — never the
+// filesystem root or the home directory itself, which would hand workspace
+// file operations the user's entire disk or home. Callers must use the
+// returned normalized path so registry equality checks are canonical.
+export function validateWorkspaceRootChoice(
+  rootPath: string,
+  homeDir: string,
+): RootChoiceValidation {
+  const attached = validateAttachedFolder(rootPath);
+  if (!attached.ok) return attached;
+  const normalized = normalizeAbsolutePath(rootPath);
+  const home = normalizeAbsolutePath(homeDir);
+  if (normalized === "/" || /^[A-Za-z]:$/.test(normalized) || normalized === "//") {
+    return { ok: false, reason: "workspace root cannot be the filesystem root" };
+  }
+  if (normalized === home) {
+    return { ok: false, reason: "workspace root cannot be the home directory itself" };
+  }
+  return { ok: true, normalized };
+}
+
 export type PathClassification =
   | { kind: "app-source"; appName: string }
   | { kind: "database" }

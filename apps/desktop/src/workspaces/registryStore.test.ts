@@ -1,0 +1,73 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createRegistryStore } from "./registryStore";
+
+let store: ReturnType<typeof createRegistryStore>;
+
+const personal = {
+  workspaceId: "ws-1",
+  rootPath: "/home/ice/dohc/personal",
+  kind: "personal" as const,
+  mode: "local-first" as const,
+};
+
+beforeEach(async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-registry-"));
+  store = createRegistryStore(join(dir, "workspaces.json"));
+});
+
+describe("registry store", () => {
+  it("supports multiple attached folders", () => {
+    store.register(personal);
+    store.register({
+      workspaceId: "ws-2",
+      rootPath: "/mnt/data/research",
+      kind: "personal",
+      mode: "local-first",
+    });
+    expect(store.list()).toHaveLength(2);
+  });
+
+  it("rejects duplicate folder attachment", () => {
+    store.register(personal);
+    expect(() =>
+      store.register({ ...personal, workspaceId: "ws-other" }),
+    ).toThrow(/already attached/i);
+  });
+
+  it("rejects a second root carrying an already-registered workspace identity", () => {
+    store.register(personal);
+    expect(() =>
+      store.register({ ...personal, rootPath: "/home/ice/dohc/personal-copy" }),
+    ).toThrow(/identity .* already attached|already attached .* identity/i);
+  });
+
+  it("persists across store instances", () => {
+    store.register(personal);
+    const reopened = createRegistryStore(store.registryFile);
+    expect(reopened.find("ws-1")?.rootPath).toBe(personal.rootPath);
+  });
+
+  it("local-only workspaces carry no account or remote identity", () => {
+    store.register(personal);
+    const entry = store.find("ws-1");
+    expect(entry).toBeTruthy();
+    expect(entry && "remote" in entry && entry.remote).toBeFalsy();
+  });
+
+  it("records remote identity only when sync is explicitly enabled", () => {
+    store.register({ ...personal, kind: "shared", mode: "cloud-first-local-copy" });
+    expect(store.find("ws-1")?.remote).toBeUndefined();
+
+    store.setRemote("ws-1", {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-99",
+    });
+    expect(store.find("ws-1")?.remote).toEqual({
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-99",
+    });
+  });
+});

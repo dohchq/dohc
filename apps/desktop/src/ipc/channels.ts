@@ -4,6 +4,7 @@ export const CHANNELS = {
   getWorkspaceRegistry: "desktop:get-workspace-registry",
   getDefaultWorkspaceRoot: "desktop:get-default-workspace-root",
   createLocalWorkspace: "desktop:create-local-workspace",
+  attachWorkspaceFolder: "desktop:attach-workspace-folder",
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
   importWorkspaceFiles: "desktop:import-workspace-files",
