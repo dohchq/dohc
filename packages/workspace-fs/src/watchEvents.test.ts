@@ -58,6 +58,27 @@ describe("shouldIgnoreWatchPath", () => {
     ).toEqual([{ path: "finance/wallet.sqlite", operation: "update" }]);
   });
 
+  it("preserves a real database delete even when sidecars are present", () => {
+    // Deleting wallet.sqlite removes its sidecars too; the base's own delete
+    // must NOT be downgraded to 'update' (history would lie about the delete).
+    expect(
+      collapseSqliteSidecars([
+        { path: "finance/wallet.sqlite-wal", operation: "delete" },
+        { path: "finance/wallet.sqlite", operation: "delete" },
+        { path: "finance/wallet.sqlite-shm", operation: "delete" },
+      ]),
+    ).toEqual([{ path: "finance/wallet.sqlite", operation: "delete" }]);
+  });
+
+  it("treats a sidecar-only delete (WAL checkpoint) as a db update, not a delete", () => {
+    // A checkpoint can remove the -wal while the database itself still exists.
+    expect(
+      collapseSqliteSidecars([
+        { path: "finance/wallet.sqlite-wal", operation: "delete" },
+      ]),
+    ).toEqual([{ path: "finance/wallet.sqlite", operation: "update" }]);
+  });
+
   it("keeps normal user files watchable", () => {
     expect(shouldIgnoreWatchPath("notes/today.md")).toBe(false);
     expect(shouldIgnoreWatchPath("finance/wallet.sqlite")).toBe(false);

@@ -78,38 +78,41 @@ function baseDbPath(path: string): string | undefined {
 // to preserve ordering relative to other (non-sqlite) files.
 export function collapseSqliteSidecars(events: WatcherEvent[]): WatcherEvent[] {
   const out: WatcherEvent[] = [];
-  // Maps a base-db path to the index in `out` holding its single update, so a
+  // Maps a base-db path to the index in `out` holding its single event, so a
   // later base or sidecar event for the same db folds into that one slot.
   const baseDbIndex = new Map<string, number>();
 
-  const ensureBaseDbUpdate = (dbPath: string): void => {
+  // Default to "update" — a sidecar event (incl. a WAL checkpoint that reads
+  // as a sidecar delete) means the database CHANGED, not that it was deleted.
+  // Only the base db's OWN delete event means the database was deleted, so a
+  // delete of the base path takes precedence over any sidecar churn.
+  const foldBaseDb = (dbPath: string, baseOwnOperation?: WatcherEvent["operation"]): void => {
     const existing = baseDbIndex.get(dbPath);
     if (existing !== undefined) {
-      // Force "update": a checkpoint may have arrived as create/delete, but the
-      // database content changing is always an update from the user's view.
-      out[existing] = { path: dbPath, operation: "update" };
+      const current = out[existing].operation;
+      // A real delete (base's own delete event) wins and is never downgraded.
+      const operation =
+        baseOwnOperation === "delete" || current === "delete" ? "delete" : "update";
+      out[existing] = { path: dbPath, operation };
       return;
     }
     baseDbIndex.set(dbPath, out.length);
-    out.push({ path: dbPath, operation: "update" });
+    out.push({ path: dbPath, operation: baseOwnOperation === "delete" ? "delete" : "update" });
   };
 
   for (const event of events) {
     const sidecarBase = baseDbPath(event.path);
     if (sidecarBase !== undefined) {
-      // A sidecar event stands in for (or accompanies) its base db.
-      ensureBaseDbUpdate(sidecarBase);
+      // A sidecar event stands in for (or accompanies) its base db; a sidecar
+      // alone never implies the base db was deleted.
+      foldBaseDb(sidecarBase);
       continue;
     }
     const normalized = toPosix(event.path);
-    if (baseDbIndex.has(normalized)) {
-      // The base db itself changed and we already have a slot for it.
-      ensureBaseDbUpdate(normalized);
-      continue;
-    }
-    // Track base-db paths so a sidecar arriving later folds into this event.
     if (/\.(?:db|sqlite)$/i.test(normalized)) {
-      baseDbIndex.set(normalized, out.length);
+      // The base db itself — carry its real operation (delete must survive).
+      foldBaseDb(normalized, event.operation);
+      continue;
     }
     out.push(event);
   }
