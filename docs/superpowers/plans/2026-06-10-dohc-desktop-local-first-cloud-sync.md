@@ -1392,6 +1392,9 @@ git commit -m "Support visible SQLite data files"
 
 ## Phase 9: Better Auth, Postgres Cloud Sync, And Self-Hosted Server
 
+> **STATUS (2026-06-11): CORE COMPLETE.** Better Auth (email/password + organization + device-authorization + bearer) mounted inside workspace-api on the shared Postgres (0002 migration); real HTTP entrypoint with /health and the double-gated test approval seam; ResolveActor from validated sessions; POST /workspaces race-safe claim; desktop device-flow login with safeStorage credentials (token never crosses IPC); window.open hard-denied in favor of the audited openExternalUrl IPC; **merge sync engine** (push scan-diff + in-place baseline refresh, per-file merge pull with `<path>.conflict` for dirty overlaps — the old clone-style materializer is desktop-fatal and is not used); live sync status; dev:cloud/check:cloud-ready; self-host compose requires BETTER_AUTH_SECRET. E2E: cloudLogin (relaunch persistence) + cloudSync (two-way over real Postgres). **Deferred to Phase 10:** boundary-crossing confirmation ENFORCEMENT (syncDecision policy exists; no producers until sharing/permissions), team/org workspaces, collaborator-visibility flows. Sync-manifest now lives at `.dohc/sync-manifest.json` (identity manifest split, see D-33).
+
+
 **Files:**
 
 - Create: `services/workspace-api/src/auth/betterAuth.ts`

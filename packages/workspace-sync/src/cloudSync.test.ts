@@ -7,7 +7,7 @@ import {
   createChangeSet,
   type BoundaryCrossing,
 } from "@dohc/workspace-core";
-import { writeManifest } from "@dohc/workspace-fs";
+import { MANIFEST_PATH, writeManifest } from "@dohc/workspace-fs";
 import {
   createAuthorizedFetch,
   createCloudSync,
@@ -99,7 +99,7 @@ describe("createCloudSync", () => {
     expect(String(calls[0]!.input)).toBe("https://cloud.example/api/workspaces/ws-1/files");
     expect(sentHeaders(calls[0]!).get("authorization")).toBe("Bearer device-tok");
 
-    const manifest = JSON.parse(await readFile(join(rootDir, ".dohc/manifest.json"), "utf8"));
+    const manifest = JSON.parse(await readFile(join(rootDir, MANIFEST_PATH), "utf8"));
     expect(manifest.workspaceId).toBe("ws-1");
   });
 

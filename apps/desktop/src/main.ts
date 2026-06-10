@@ -23,9 +23,11 @@ import {
   AppPackagePayload,
   AppPackageResult,
   ApplyDatabaseEditPayload,
+  CloudEnableSyncPayload,
   CloudLoginPollResult,
   CloudLoginStartPayload,
   CloudLoginStartResult,
+  CloudStatusPayload,
   CloudStatusResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
@@ -60,10 +62,12 @@ import {
   findWorkspace,
   listWorkspaces,
   registerWorkspace,
+  setWorkspaceRemote,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
+import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import {
   getAppPackage as getAppPackageInfo,
@@ -130,10 +134,35 @@ function cloudLogin(): CloudLogin {
 // Live file-watch → history pipeline. Pushes a renderer notification whenever
 // a settled batch is recorded so the file tree, timeline, and sync status
 // refresh without polling.
-const activity = createWorkspaceActivity(() => {
+function notifyRenderer(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.workspaceActivity);
   }
+}
+
+// Synchronous mirror of the credential store for status derivation (the
+// status handler path is hot). Refreshed at ready, login, and logout.
+let cachedCredentials: Awaited<ReturnType<CloudLogin["credentials"]>> = null;
+async function refreshCredentialCache(): Promise<void> {
+  cachedCredentials = await cloudLogin().credentials();
+}
+
+const activity = createWorkspaceActivity(notifyRenderer, {
+  cloudStateFor: (workspaceId) => ({
+    enabled: !!findWorkspace(workspaceId)?.remote,
+    connected: cachedCredentials !== null,
+  }),
+  engineFor: (workspace) => {
+    const remote = findWorkspace(workspace.workspaceId)?.remote;
+    if (!remote || !cachedCredentials) return null;
+    return createCloudSyncEngine({
+      rootDir: workspace.rootPath,
+      remoteWorkspaceId: remote.remoteWorkspaceId,
+      serverUrl: remote.serverUrl,
+      token: cachedCredentials.token,
+      onChange: notifyRenderer,
+    });
+  },
 });
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
@@ -348,17 +377,65 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.cloudLoginPoll, async (event) => {
     assertTrustedSender(event);
-    return CloudLoginPollResult.parse(await cloudLogin().poll());
+    const result = await cloudLogin().poll();
+    if (result.status === "complete") await refreshCredentialCache();
+    return CloudLoginPollResult.parse(result);
   });
 
-  ipcMain.handle(CHANNELS.cloudStatus, async (event) => {
+  ipcMain.handle(CHANNELS.cloudStatus, async (event, payload) => {
     assertTrustedSender(event);
-    return CloudStatusResult.parse(await cloudLogin().status());
+    const input = CloudStatusPayload.parse(payload ?? {});
+    const status = await cloudLogin().status();
+    return CloudStatusResult.parse({
+      ...status,
+      ...(input.workspaceId
+        ? { workspaceSynced: !!findWorkspace(input.workspaceId)?.remote }
+        : {}),
+    });
   });
 
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
     await cloudLogin().logout();
+    cachedCredentials = null;
+    notifyRenderer();
+  });
+
+  // Enabling sync claims the workspace id on the server (first claimant owns
+  // it; members re-enable idempotently; strangers are refused), records the
+  // remote identity, and starts the merge engine: pull, then push everything
+  // local. Requires a signed-in session.
+  ipcMain.handle(CHANNELS.cloudEnableSync, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CloudEnableSyncPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const credentials = await cloudLogin().credentials();
+    if (!credentials) throw new Error("Sign in to dohc Cloud first");
+    cachedCredentials = credentials;
+
+    const response = await fetch(`${credentials.serverUrl}/workspaces`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentials.token}`,
+      },
+      body: JSON.stringify({ workspaceId: workspace.workspaceId, kind: workspace.kind }),
+    });
+    const body = (await response.json()) as { ok?: boolean; error?: string };
+    if (!response.ok || body.ok === false) {
+      throw new Error(
+        response.status === 403
+          ? "This workspace id is already claimed by another account"
+          : (body.error ?? `Enabling sync failed (${response.status})`),
+      );
+    }
+
+    setWorkspaceRemote(workspace.workspaceId, {
+      serverUrl: credentials.serverUrl,
+      remoteWorkspaceId: workspace.workspaceId,
+    });
+    await activity.enableCloud(workspace);
+    return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
@@ -469,6 +546,9 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   void app.whenReady().then(async () => {
     launchMarks.appReady();
+    // Load any persisted cloud session before workspaces open, so engines
+    // attach on open instead of waiting for the next login.
+    await refreshCredentialCache().catch(() => undefined);
     registerIpcHandlers();
 
     // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.

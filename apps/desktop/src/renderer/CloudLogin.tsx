@@ -13,16 +13,20 @@ type Phase =
 // the user to the browser to approve it, poll until the session lands. The
 // token never reaches this process — main stores it encrypted; we only ever
 // render status + email. Local-only use never opens this panel.
-export function CloudLogin() {
+export function CloudLogin(props: { workspaceId?: string }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [workspaceSynced, setWorkspaceSynced] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void bridge()
-      .cloudStatus()
+      .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
         if (cancelled) return;
+        setWorkspaceSynced(status.workspaceSynced ?? false);
         setPhase(
           status.connected
             ? { kind: "connected", email: status.email ?? "" }
@@ -34,7 +38,22 @@ export function CloudLogin() {
       cancelled = true;
       if (pollTimer.current) clearTimeout(pollTimer.current);
     };
-  }, []);
+  }, [props.workspaceId]);
+
+  async function enableSync() {
+    if (!props.workspaceId || syncBusy) return;
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      await bridge().cloudEnableSync({ workspaceId: props.workspaceId });
+      setWorkspaceSynced(true);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
+    } finally {
+      setSyncBusy(false);
+    }
+  }
 
   function pollUntilDone() {
     pollTimer.current = setTimeout(() => {
@@ -148,6 +167,30 @@ export function CloudLogin() {
             </span>
             .
           </p>
+          {props.workspaceId ? (
+            workspaceSynced ? (
+              <p data-testid="cloud-workspace-synced" className="mb-0 mt-2 text-xs text-success">
+                This workspace syncs to the cloud — edits flow automatically.
+              </p>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  data-testid="cloud-enable-sync"
+                  disabled={syncBusy}
+                  onClick={() => void enableSync()}
+                  className="mt-3 rounded bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50"
+                >
+                  {syncBusy ? "Enabling sync…" : "Sync this workspace"}
+                </button>
+                {syncError ? (
+                  <p data-testid="cloud-sync-error" className="mb-0 mt-2 text-xs text-danger">
+                    {syncError}
+                  </p>
+                ) : null}
+              </>
+            )
+          ) : null}
           <button
             type="button"
             data-testid="cloud-disconnect"

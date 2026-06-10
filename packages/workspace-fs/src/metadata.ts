@@ -20,13 +20,15 @@ export type WorkspaceManifest = {
   files: Record<string, WorkspaceManifestEntry>;
 };
 
-export const MANIFEST_PATH = ".dohc/manifest.json";
+// Must never be .dohc/manifest.json: that path is the workspace IDENTITY
+// manifest owned by workspace-core/desktop; this file is the sync baseline.
+export const MANIFEST_PATH = ".dohc/sync-manifest.json";
 
 export async function readManifest(rootDir: string): Promise<WorkspaceManifest> {
   const raw = await readFile(join(rootDir, MANIFEST_PATH), "utf8");
   const parsed = JSON.parse(raw) as WorkspaceManifest;
   if (parsed.version !== 1 || !parsed.workspaceId || !parsed.backend) {
-    throw new Error("Invalid dohc workspace manifest.");
+    throw new Error("Invalid dohc sync manifest.");
   }
   return parsed;
 }

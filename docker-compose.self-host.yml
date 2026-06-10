@@ -79,6 +79,9 @@ services:
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       WORKSPACE_API_PORT: "1786"
       WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
+      # Auth lives inside workspace-api (Better Auth on the same Postgres).
+      # Generate with: openssl rand -base64 32
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host (openssl rand -base64 32)}
     command: >
       sh -lc "corepack enable &&
       corepack prepare pnpm@10.24.0 --activate &&

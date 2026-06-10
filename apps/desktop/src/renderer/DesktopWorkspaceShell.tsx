@@ -432,7 +432,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {cloudOpen ? (
         <Overlay onClose={() => setCloudOpen(false)}>
-          <CloudLogin />
+          <CloudLogin workspaceId={workspaceId} />
         </Overlay>
       ) : null}
     </div>

@@ -69,7 +69,7 @@ export type LocalSyncClient = {
   watch(options?: Partial<Omit<WatchWorkspaceOptions, "rootDir" | "onChange">>): () => void;
 };
 
-type ApiSyncOperation =
+export type ApiSyncOperation =
   | {
       op: "create";
       path: string;
@@ -382,7 +382,7 @@ async function readLocalConflictBody(rootDir: string, path: string) {
   return new TextDecoder().decode(bytes);
 }
 
-async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
+export async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
   if (operation.op === "delete" || operation.op === "rename") return operation;
 
   const path = assertSafeWorkspacePath(operation.path);

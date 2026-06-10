@@ -45,3 +45,10 @@ export function registerWorkspace(workspace: CreatedWorkspace): void {
 export function findWorkspace(workspaceId: string): RegistryEntry | null {
   return store().find(workspaceId);
 }
+
+export function setWorkspaceRemote(
+  workspaceId: string,
+  remote: { serverUrl: string; remoteWorkspaceId: string },
+): void {
+  store().setRemote(workspaceId, remote);
+}

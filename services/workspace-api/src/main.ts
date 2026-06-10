@@ -1,6 +1,7 @@
 import {
   createLocalBlobStore,
   createPostgresWorkspaceBackend,
+  createPostgresWorkspaceProvisioner,
   defaultPostgresUrl,
 } from "@dohc/workspace-postgres";
 import { toNodeHandler } from "better-auth/node";
@@ -41,6 +42,7 @@ const backend = createPostgresWorkspaceBackend(pool, {
 const workspaceHandler = createWorkspaceApiHandler({
   backend,
   resolveActor: createSessionActorResolver(auth),
+  createWorkspace: createPostgresWorkspaceProvisioner(pool),
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded

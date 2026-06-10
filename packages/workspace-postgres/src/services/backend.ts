@@ -198,7 +198,7 @@ function isNotFound(error: unknown) {
   return error instanceof WorkspaceError && error.code === "not_found";
 }
 
-async function withTransaction<T>(
+export async function withTransaction<T>(
   pool: pg.Pool,
   fn: (client: pg.PoolClient) => Promise<T>,
 ) {

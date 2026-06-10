@@ -42,8 +42,10 @@ const bridge: DohcDesktopBridge = {
   cloudLoginStart: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudLoginStart, payload),
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
-  cloudStatus: () => ipcRenderer.invoke(CHANNELS.cloudStatus),
+  cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
+  cloudEnableSync: (payload) =>
+    ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
   listChangeSets: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChangeSets, payload),

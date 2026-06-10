@@ -32,6 +32,11 @@ Important variables live in `.env.self-host.example`:
 
 - `DOHC_BACKEND=postgres`
 - `POSTGRES_*` for the SQL core.
+- `BETTER_AUTH_SECRET` — auth lives inside workspace-api (Better Auth on the
+  same Postgres; no auth vendor). Generate with `openssl rand -base64 32`.
+  The desktop signs in with the device flow: it shows a short code, you
+  approve it in a browser against your server, and the session token stays
+  encrypted on the device.
 - `MINIO_*` for S3-compatible object storage.
 - `HOCUSPOCUS_*` for collaborative document sync.
 - `WORKSPACE_API_*` for the backend-neutral workspace API.
@@ -42,7 +47,8 @@ Important variables live in `.env.self-host.example`:
   set it only when intentionally running the web app against Convex.
 
 Replace every `change-me` value before starting the stack. Compose refuses to
-start without explicit Postgres and object-storage passwords.
+start without explicit Postgres and object-storage passwords or without
+`BETTER_AUTH_SECRET`.
 
 ## First Boot
 

@@ -9,6 +9,11 @@ import {
   type WriteTextFileRequest,
 } from "./routes/files";
 import { applyWorkspaceSync, type ApplySyncRequest } from "./routes/sync";
+import {
+  createWorkspace as createWorkspaceRoute,
+  parseCreateWorkspaceRequest,
+  type CreateWorkspaceFn,
+} from "./routes/workspaces";
 import { listWorkspaceEvents, type WorkspaceEventSource } from "./realtime/events";
 
 export type WorkspaceApiHandler = (request: Request) => Promise<Response>;
@@ -17,6 +22,7 @@ export type CreateWorkspaceApiHandlerOptions = {
   backend: WorkspaceBackend;
   resolveActor: ResolveActor;
   events?: WorkspaceEventSource;
+  createWorkspace?: CreateWorkspaceFn;
 };
 
 type WorkspaceRoute =
@@ -29,9 +35,20 @@ export function createWorkspaceApiHandler({
   backend,
   resolveActor,
   events,
+  createWorkspace,
 }: CreateWorkspaceApiHandlerOptions): WorkspaceApiHandler {
   return async (request) => {
     try {
+      if (
+        createWorkspace &&
+        request.method === "POST" &&
+        new URL(request.url).pathname === "/workspaces"
+      ) {
+        const input = parseCreateWorkspaceRequest(await readJson(request));
+        const actor = await actorForRequest(resolveActor, request, input.workspaceId);
+        return jsonResponse(await createWorkspaceRoute(createWorkspace, actor, input));
+      }
+
       const route = parseWorkspaceRoute(request);
       const actor = await actorForRequest(resolveActor, request, route.workspaceId);
 

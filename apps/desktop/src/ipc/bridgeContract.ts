@@ -305,12 +305,24 @@ export const CloudLoginPollResult = z.object({
 });
 export type CloudLoginPollResult = z.infer<typeof CloudLoginPollResult>;
 
+export const CloudStatusPayload = z.object({
+  workspaceId: WORKSPACE_ID.optional(),
+});
+export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
+
 export const CloudStatusResult = z.object({
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
+  // Whether the named workspace has cloud sync enabled (registry remote set).
+  workspaceSynced: z.boolean().optional(),
 });
 export type CloudStatusResult = z.infer<typeof CloudStatusResult>;
+
+export const CloudEnableSyncPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
@@ -358,8 +370,9 @@ export interface DohcDesktopBridge {
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
-  cloudStatus(): Promise<CloudStatusResult>;
+  cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
+  cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,

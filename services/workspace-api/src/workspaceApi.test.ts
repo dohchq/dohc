@@ -6,6 +6,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
+import { WorkspaceError } from "@dohc/workspace-contracts";
 import { createWorkspaceApiHandler } from "./server";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_api" };
@@ -197,6 +198,63 @@ describe("workspace API service", () => {
       error: "stale revision",
     });
     expect(fixture.text.get("notes/day.md")).toEqual({ body: "# Day\n", revision: "rev-1" });
+  });
+
+  it("creates workspaces through POST /workspaces with the server-resolved actor", async () => {
+    const created: Array<{ actor: Actor; input: unknown }> = [];
+    const handler = createWorkspaceApiHandler({
+      backend: memoryBackend().backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+      createWorkspace: async (resolvedActor, input) => {
+        created.push({ actor: resolvedActor, input });
+        return { created: created.length === 1 };
+      },
+    });
+    const post = (body: unknown) =>
+      handler(new Request("http://api.test/workspaces", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+
+    await expect(json(await post({ workspaceId: "ws-local-1" }))).resolves.toEqual({
+      ok: true,
+      created: true,
+      workspaceId: "ws-local-1",
+    });
+    await expect(
+      json(await post({ workspaceId: "ws-local-1", name: "Notes", kind: "shared" })),
+    ).resolves.toEqual({ ok: true, created: false, workspaceId: "ws-local-1" });
+    expect(created).toEqual([
+      {
+        actor: { userId: "server_user", workspaceId: "ws-local-1" },
+        input: { workspaceId: "ws-local-1", name: "ws-local-1", kind: "personal" },
+      },
+      {
+        actor: { userId: "server_user", workspaceId: "ws-local-1" },
+        input: { workspaceId: "ws-local-1", name: "Notes", kind: "shared" },
+      },
+    ]);
+
+    for (const body of [{ workspaceId: "Bad_ID!" }, {}, { workspaceId: "ws", kind: "team" }]) {
+      expect((await post(body)).status).toBe(400);
+    }
+    expect(created).toHaveLength(2);
+  });
+
+  it("maps workspace id collisions to 403", async () => {
+    const handler = createWorkspaceApiHandler({
+      backend: memoryBackend().backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+      createWorkspace: async () => {
+        throw new WorkspaceError("forbidden", "workspace id belongs to another user");
+      },
+    });
+
+    const response = await handler(new Request("http://api.test/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId: "stolen-id" }),
+    }));
+    expect(response.status).toBe(403);
   });
 
   it("rejects cross-folder sync renames", async () => {
