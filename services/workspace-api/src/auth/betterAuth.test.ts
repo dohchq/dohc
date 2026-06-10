@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
+import { createSessionActorResolver, UnauthorizedError } from "./session";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
 // conformance tests): pnpm dev:postgres first. The 0002_better_auth migration
@@ -176,6 +177,35 @@ describe("session validation middleware shape", () => {
       await auth.api.getSession({ headers: { authorization: "Bearer not-a-token" } }),
     ).toBeNull();
     expect(await auth.api.getSession({ headers: {} })).toBeNull();
+  });
+
+  it("ResolveActor maps a Bearer session to the downstream Actor and 401s everything else", async () => {
+    const email = `${unique()}@dohc.test`;
+    const signup = await signUp(email);
+    const signin = await auth.api.signInEmail({
+      body: { email, password: PASSWORD },
+    });
+    const resolve = createSessionActorResolver(auth);
+
+    const actor = await resolve(
+      new Request("http://localhost/workspaces/ws-1/files", {
+        headers: { authorization: `Bearer ${signin.token}` },
+      }),
+      "ws-1",
+    );
+    expect(actor).toEqual({ userId: signup.user.id, workspaceId: "ws-1" });
+
+    // Missing/expired/invalid tokens are rejected with the unauthorized shape
+    // the API layer maps to a 401 — identity never falls back to client input.
+    await expect(
+      resolve(new Request("http://localhost/workspaces/ws-1/files"), "ws-1"),
+    ).rejects.toBeInstanceOf(UnauthorizedError);
+    await expect(
+      resolve(
+        new Request("http://localhost/x", { headers: { authorization: "Bearer bogus" } }),
+        "ws-1",
+      ),
+    ).rejects.toMatchObject({ statusCode: 401, message: "unauthorized" });
   });
 });
 

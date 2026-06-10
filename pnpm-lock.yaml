@@ -563,6 +563,9 @@ importers:
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../../packages/workspace-contracts
+      '@dohc/workspace-postgres':
+        specifier: workspace:*
+        version: link:../../packages/workspace-postgres
       better-auth:
         specifier: ^1.6.16
         version: 1.6.16(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vite@5.4.21(@types/node@22.19.19)(lightningcss@1.32.0)))(better-sqlite3@12.10.0)(drizzle-orm@0.41.0(@opentelemetry/api@1.9.1)(@prisma/client@5.22.0)(@types/pg@8.20.0)(better-sqlite3@12.10.0)(kysely@0.29.2)(pg@8.21.0))(pg@8.21.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vitest@2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0))
