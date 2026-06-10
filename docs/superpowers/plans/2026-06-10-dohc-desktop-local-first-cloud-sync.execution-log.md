@@ -2,15 +2,15 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 5 COMPLETE (committed eb6c0c3 + review-record commit). Verifiers + codex phase-05 in flight. Phase 6 next.
-- Expected test state: workspace-core 54, workspace-fs 26, workspace-sync 15, workspace-history 9, desktop 42; 4 E2E; smoke — all green at HEAD
+- Phase/Step + TDD position: Phase 5 FULLY COMPLETE (committed d87f2f1; all data-loss findings closed). Phase 6 starting.
+- Expected test state: workspace-core 54, workspace-fs 27, workspace-sync 15, workspace-history 10, desktop 42; 4 E2E; smoke — all green at d87f2f1
 - Dirty files and intent: this log only
-- Exact next action: triage Phase 5 verifier findings (wt3n2lhba) + codex phase-05 (buiavg06m) → fix/disposition → Phase 6 (real file UX: FileInspector dispatch table, markdown/CSV/JSON/image/PDF/audio/SQLite/.apps views — port from apps/app/src/components/FileTypeView.tsx etc per reuse map; UI phase → design review loop). Note: codex finding #4 (window.open user-gesture) is DUE in Phase 6 (deferred there).
-- Active background tasks: buiavg06m (codex phase-05 review xhigh → codex/phase-05.md); wt3n2lhba (Phase 5 verifier fan-out)
+- Exact next action: Phase 6 (real file UX) — lead writes failing fileTypes E2E + fixture workspace (notes/today.md, data/transactions.csv, data/config.json, uploads/{receipt.png,contract.pdf,voice.m4a}, finance/wallet.sqlite, finance/.apps/ledger/app.json) + scaffolds FileInspector as a dispatch table (one file per view); port FileTypeView/DatabaseStudio/DatabaseTableGrid from apps/app/src/components (reuse-map: clean/props-driven, strip Convex/web hooks, data via bridge); optional 2-4 view lanes; DESIGN REVIEW LOOP (UI phase). DUE THIS PHASE: codex phase-02 finding #4 (window.open user-gesture/allowlist — user content first renders here).
+- Active background tasks: b0zn3ojhz (codex phase-05-fix re-review, one per cap → codex/phase-05-fix.md)
 - Open worktrees: none
-- Pending reviews: codex phase-05 + verifiers (in flight)
-- Git state: 17 commits atop e2de7a3; HEAD = review-record commit on eb6c0c3
-- GOTCHA: codex review transcripts are large (~5-20k lines, full exec trace) — DISTILL to findings before committing going forward (decided after phase-04-fix).
+- Pending reviews: codex phase-05-fix (in flight; residue rolls to Phase 7 checkpoint)
+- Git state: 19 commits atop e2de7a3; HEAD d87f2f1
+- GOTCHA: codex review transcripts are large (~5-20k lines, full exec trace) — DISTILL to findings before committing from Phase 6 onward.
 
 ## Environment (append-only)
 
@@ -148,6 +148,27 @@ Consult high-value batches (await verifier confirmation before fixing; transcrib
 - Likely-rejects/low (24,26 already covered by canonicalization+separator normalization; 25 multi-process race is out of scope for single-instance-locked app; 19,23 TOCTOU are defense-in-depth, lower priority than the static symlink escapes).
 
 ## Phase Logs
+
+### Phase 6: Real File UX For Text, Data, Media, Apps, Databases
+
+- Status: in progress (gates green; design judge + verifiers running; commit pending)
+- Execution map: dohc-file:// privileged protocol (serves workspace bytes, path-contained) + readWorkspaceText IPC (text family — file:// renderer can't fetch a custom scheme) → FileInspector dispatch (classifyForView, 10 kinds) ported from clean apps/app FileTypeView → views: markdown(doc)/csv(table)/json+text(code)/image(<img> via protocol)/audio(<audio>)/pdf+sqlite+app(affordance cards)/binary → CSP img/media/connect from dohc-file → openFileExternally IPC (shell.openPath on validated+contained real file; closes deferred window.open finding #4) → fileTypes E2E (all 8 types, image naturalWidth>0 proves real bytes) → screenshots → design loop + verifiers
+- Files changed: apps/desktop/src/renderer/FileInspector.{tsx,test.tsx}, workspaces/workspaceAssets.ts, ipc channels/contract (readWorkspaceText, openFileExternally), main.ts (protocol + 2 handlers), preload, index.html CSP, DesktopWorkspaceShell (main area → FileInspector), e2e/fileTypes.spec.ts
+- Code deleted or consolidated: main-area "File editing arrives" placeholder → real FileInspector
+- Net LOC delta: recorded at commit
+- Dependencies added: none (lucide already present)
+- Decisions made: D-19 | text via IPC (readWorkspaceText, 2MB cap), media via dohc-file:// protocol src — file:// renderer can't fetch custom scheme; media src is exempt | phase 6. D-20 | external open = openFileExternally IPC (shell.openPath, contained real file only); window.open stays fully denied — the audited external path the deferred finding wanted | phase 6. D-21 | PDF/SQLite/app are affordance cards in Phase 6; PDF opens externally, SQLite studio = Phase 8, app runtime = Phase 7
+- Tests added: 15 classifier unit (FileInspector.test), 1 fileTypes E2E (8 types by distinct testid + content, image bytes loaded)
+- Commands run: desktop 57 unit + typecheck + build + 5 E2E + smoke — green (pinned Node)
+- Failing tests fixed: E2E surfaced two real bugs pre-commit — (a) markdown/csv/json fetch of dohc-file from file:// origin blocked (CORS then file:// fetch restriction) → switched text to IPC; (b) "Open externally" was a dead target=_blank on a non-http dohc-file URL (window-open handler denies it) → real openFileExternally IPC via shell.openPath
+- Electron E2E/manual smoke: 5/5 E2E + smoke green
+- UI/UX screenshot/design review: phase-06 screenshots (markdown/csv/image) — lead inspected CSV: real table, DATA label, per-type tree icons, consistent chrome ("different file types, not markdown with costumes"). Design judge verdict pending.
+- Security: dohc-file protocol + openFileExternally both validate workspaceId (findWorkspace) + path (validateUserWritePath) + realpath containment; CSP adds img/media/connect dohc-file only (no script loosening); window.open still denies all
+- Reviewer/subagent findings: workflow w03c5h8gg — test-quality PASS (worktree mutation bites; classifier exhaustive over 10 kinds + app-source precedence; E2E asserts distinct testid+content incl. image naturalWidth>0 = real bytes; no .only/.skip). claimed-vs-actual PASS (security clean: dohc-file protocol + openFileExternally both validate workspaceId + path + realpath-containment; CSP correct; window.open denies all). DESIGN judge iter-1 FAIL 2 hard: markdown echoed raw source; image body empty. FIXED iter-2: react-markdown renders document (H1 etc, links inert per nav lockdown); ImageView framed (checkerboard) + filename+dimensions caption + bigger fixture; ALSO added CSV raw-toggle (closes plan "raw toggle" gap claimed-vs-actual flagged). E2E now asserts h1 render + raw-toggle + image bytes. Re-judge wf_4aa14aa6-d93 pending.
+- Codex third-party review findings: pending post-commit
+- Dependencies added: react-markdown ^9.1 (document rendering, renders to React nodes — no raw-HTML execution)
+- Remaining risk: markdown render is read-only (no editor yet); react-markdown default has no raw-HTML (safe) but also no GFM tables (CSV covers tabular); per-file-type views share one inspector (future merge surface)
+- Next phase: 7
 
 ### Phase 5: File Watcher, Batched Sync, And Local-First History
 

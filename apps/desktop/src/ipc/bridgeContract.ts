@@ -100,6 +100,28 @@ export const OpenWorkspacePayload = z.object({
 });
 export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
 
+export const ReadWorkspaceTextPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+});
+export type ReadWorkspaceTextPayload = z.infer<typeof ReadWorkspaceTextPayload>;
+
+export const OpenFileExternallyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+});
+export type OpenFileExternallyPayload = z.infer<
+  typeof OpenFileExternallyPayload
+>;
+
+export const ReadWorkspaceTextResult = z.object({
+  // Capped: text views are for human-scale files; very large files fall back
+  // to a download affordance rather than streaming megabytes through IPC.
+  text: z.string(),
+  truncated: z.boolean(),
+});
+export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
+
 export const SyncStatusResult = z.object({
   state: z.enum([
     "synced",
@@ -165,6 +187,10 @@ export interface DohcDesktopBridge {
   importWorkspaceFiles(
     payload: ImportWorkspaceFilesPayload,
   ): Promise<ImportWorkspaceFilesResult>;
+  readWorkspaceText(
+    payload: ReadWorkspaceTextPayload,
+  ): Promise<ReadWorkspaceTextResult>;
+  openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,

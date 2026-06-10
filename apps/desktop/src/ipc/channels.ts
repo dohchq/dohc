@@ -7,6 +7,8 @@ export const CHANNELS = {
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
   importWorkspaceFiles: "desktop:import-workspace-files",
+  readWorkspaceText: "desktop:read-workspace-text",
+  openFileExternally: "desktop:open-file-externally",
   openWorkspace: "desktop:open-workspace",
   listChangeSets: "desktop:list-change-sets",
   getSyncStatus: "desktop:get-sync-status",

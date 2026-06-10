@@ -3,7 +3,15 @@ import {
   normalizeAbsolutePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  protocol,
+  shell,
+  type IpcMainInvokeEvent,
+} from "electron";
 import { isAbsolute, relative, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
@@ -17,8 +25,11 @@ import {
   ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  OpenFileExternallyPayload,
   OpenWorkspacePayload,
   PickWorkspaceRootResult,
+  ReadWorkspaceTextPayload,
+  ReadWorkspaceTextResult,
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
@@ -36,10 +47,28 @@ import {
 } from "./workspaces/WorkspaceRegistry";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import {
+  readWorkspaceAsset,
+  readWorkspaceText,
+  resolveWorkspaceFile,
+} from "./workspaces/workspaceAssets";
+import {
   copyIntoWorkspace,
   createFile,
   listFiles,
 } from "./workspaces/workspaceFiles";
+
+// Custom scheme that serves a workspace file's bytes to the renderer:
+//   dohc-file://<workspaceId>/<relative/path>
+// Registered privileged so the renderer can fetch() text and use it as
+// <img>/<audio> src, without piping large binaries through IPC as base64.
+// Must be declared before app `ready`.
+const DOHC_FILE_SCHEME = "dohc-file";
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: DOHC_FILE_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
@@ -205,6 +234,30 @@ function registerIpcHandlers(): void {
     return ImportWorkspaceFilesResult.parse({ imported });
   });
 
+  ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadWorkspaceTextPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return ReadWorkspaceTextResult.parse(
+      await readWorkspaceText(workspace.rootPath, input.relativePath),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenFileExternallyPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Resolve+contain first: only a real file inside the workspace can be
+    // handed to the OS opener — never an arbitrary path or URL. window.open
+    // remains fully denied; this is the only sanctioned external-open path.
+    const { realTarget } = await resolveWorkspaceFile(
+      workspace.rootPath,
+      input.relativePath,
+    );
+    const error = await shell.openPath(realTarget);
+    if (error) throw new Error(error);
+  });
+
   ipcMain.handle(CHANNELS.openWorkspace, (event, payload) => {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
@@ -251,6 +304,31 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(async () => {
     launchMarks.appReady();
     registerIpcHandlers();
+
+    // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
+    protocol.handle(DOHC_FILE_SCHEME, async (request) => {
+      try {
+        const url = new URL(request.url);
+        const workspace = findWorkspace(url.hostname);
+        if (!workspace) return new Response("Unknown workspace", { status: 404 });
+        const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+        const { bytes, mediaType } = await readWorkspaceAsset(
+          workspace.rootPath,
+          relPath,
+        );
+        return new Response(new Uint8Array(bytes), {
+          headers: {
+            "content-type": mediaType,
+            // The renderer fetch()es text files from this scheme; a custom
+            // scheme is a distinct origin, so allow the cross-origin read.
+            "access-control-allow-origin": "*",
+          },
+        });
+      } catch {
+        return new Response("Not found", { status: 404 });
+      }
+    });
+
     const { createMainWindow } = await import("./window/createMainWindow");
     createMainWindow();
     launchMarks.firstWindow();

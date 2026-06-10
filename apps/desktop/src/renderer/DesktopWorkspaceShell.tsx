@@ -36,6 +36,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { FileInspector } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { toggleTheme } from "./theme";
@@ -290,16 +291,11 @@ export function DesktopWorkspaceShell(props: {
         </aside>
 
         {/* Main area */}
-        <main className="flex min-w-0 flex-1 items-center justify-center bg-bg">
+        <main className="flex min-w-0 flex-1 flex-col bg-bg">
           {selected ? (
-            <div className="flex flex-col items-center gap-1 text-center">
-              <span className="font-mono text-[13px] text-ink">{selected}</span>
-              <span className="text-xs text-subtle">
-                File editing arrives with the editor surface.
-              </span>
-            </div>
+            <FileInspector workspaceId={workspaceId} path={selected} />
           ) : (
-            <div className="flex flex-col items-center gap-2 text-center">
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <span className="text-sm text-muted">
                 Select a file, or create one
               </span>
