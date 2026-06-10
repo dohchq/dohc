@@ -23,20 +23,38 @@ export interface FileChange {
   operation: "write" | "delete" | "rename";
 }
 
+// Where a change came from — a prompt, an import source, an agent run — so
+// history can answer "why did this change?" not just "what changed?".
+export interface ChangeProvenance {
+  source: "user-edit" | "agent-run" | "import" | "sync" | "app-build";
+  prompt?: string;
+  agentRunId?: string;
+  importPath?: string;
+}
+
 export interface ChangeSet {
   kind: ChangeSetKind;
   author: ChangeAuthor;
   summary: string;
   files: FileChange[];
   boundaryCrossings: BoundaryCrossing[];
+  provenance?: ChangeProvenance;
 }
 
 export function createChangeSet(input: {
   kind: ChangeSetKind;
   author: ChangeAuthor;
   summary: string;
+  provenance?: ChangeProvenance;
 }): ChangeSet {
-  return { ...input, files: [], boundaryCrossings: [] };
+  return {
+    kind: input.kind,
+    author: input.author,
+    summary: input.summary,
+    files: [],
+    boundaryCrossings: [],
+    ...(input.provenance ? { provenance: input.provenance } : {}),
+  };
 }
 
 export function addFileChanges(set: ChangeSet, files: FileChange[]): ChangeSet {

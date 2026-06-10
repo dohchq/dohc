@@ -2,14 +2,15 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 4 COMMITTED (ce6910a) — POST-PHASE-4 CHECKPOINT in flight (first major checkpoint: Electron security/IPC)
-- Expected test state: workspace-core 40/40, desktop 37/37, E2E 4/4, smoke green — all committed
+- Phase/Step + TDD position: Phase 4 + CHECKPOINT 1 COMPLETE (committed b3dd383). Phase 5 starting: recon fan-out, then contracts-first, then 3 worktree lanes.
+- Expected test state: workspace-core 47/47, desktop 42/42, E2E 4/4, smoke green — all committed at b3dd383
 - Dirty files and intent: this log only
-- Exact next action: checkpoint results return → triage confirmed findings (fix round, max 2) → transcribe valuable adversarial scenarios into owned tests → phase4(fix) commit if needed → checkpoint section in log → Phase 5 (watcher/batched-sync/history: recon fan-out + contracts-first, then 3 worktree lanes per parallelism map)
-- Active background tasks: weh6pbxub (checkpoint workflow: 4 finders → per-finding verifiers), bmrbeuj0b (codex commit review phase-04 + checkpoint --base main, sequential xhigh → docs/superpowers/reviews/codex/{phase-04,checkpoint-phase-04}.md), bhdmd3rzd (adversarial scenario consult → adversarial-scenarios-phase-04.md)
-- Open worktrees: none (verifier worktrees are self-cleaning)
-- Pending reviews: codex phase-04 + checkpoint (in flight)
-- Git state: 11 commits on branch; commits ce6910a/f630682/c2c288c/529c0d4/d9a5883/7781d02/f405074/67d692f/26f9f70/7df1553 atop e2de7a3
+- Exact next action: Phase 5 recon digest returns → define watcher-event + change-set contracts in workspace-core (lead, sequential) → fan out 3 worktree lanes (A: workspace-fs watch/scan/diff + chokidar + temp/WAL ignore; B: workspace-sync batchedSync + settle windows; C: workspace-history changeSetStore + provenance/timeline) → merge → lead-owned shell wiring (sync status + history timeline in DesktopWorkspaceShell) → gate → verifiers → commit
+- Active background tasks: codex phase4(fix) review of b3dd383 (background); Phase 5 recon fan-out
+- Open worktrees: none
+- Pending reviews: codex b3dd383 (in flight, one targeted re-review per cap; residue rolls to next checkpoint)
+- Git state: 13 commits atop e2de7a3; HEAD b3dd383
+- GOTCHA: codex review transcripts are large (full exec trace, ~5-20k lines each) — they bloat commits. For future phases, distill to findings-only before committing or gitignore raw transcripts. (Checkpoint-1 ones already committed as the audit record.)
 
 ## Environment (append-only)
 
@@ -76,6 +77,20 @@
 - Phase 3 pulls as-is: ActivityBar, SidebarChrome, Skeleton, NoticeCenter, AgentActivityTimeline, AgentRunRail, AgentModelPicker. Small swaps: FileTree (fully props-driven; only Convex via UploadFileButton import), CommandPalette (3 useQuery + extract OPEN_SKETCH_EVENT constant — else drags AtomEditor+Convex transitively). Rebuild WorkspaceSwitcher against bridge WorkspaceRegistryResult. Model shell layout/keyboard map on apps/app/src/routes/_app.tsx.
 - Phase 6+: FileTypeView, DatabaseStudio, DatabaseTableGrid clean+props-driven (as-is); HtmlAtomFrame/SearchOverlay swaps; Chat transport rebuild in Phase 11 (useUIMessages is structurally Convex), presentational children reusable.
 - Traps: AgentChatSidebar transitively renders WorkspaceSwitcher (Convex+router); UploadFileButton calls useMutation unconditionally (crashes without ConvexProvider); type-only Convex imports in DatabaseTableGrid/storageUpload need re-homing before Phase 13.
+
+### Phase 5 substrate digest (recon a8332feebe; 2026-06-10)
+
+- workspace-fs: watch.ts is POLLING (setInterval, default 1000ms, "something changed" signal only — no event stream). scan.ts = full-tree snapshot w/ sha256 + rename detection + SQLite-header detection, excludes .dohc/. diff.ts = create/update/delete/rename ops vs .dohc/manifest.json. apply.ts = per-op backend writes (no batching). syncClient.ts = dual-backend orchestrator, watch() calls syncLocalChanges() every poll — NO debounce/batch, NO change-set concept. metadata.ts = manifest + media-type/atom-kind/asset-kind inference + path-safety.
+- workspace-core ready to consume (TEST-ONLY today, Phase 5 = first real consumer): changeSet.ts (ChangeSetKind, BoundaryCrossing, ChangeAuthor, FileChange, ChangeSet, createChangeSet/addFileChanges/addBoundaryCrossing/requiresReview), conflicts.describeConflict (no git markers), paths.classifyPath, metadata.checkManifest.
+- chokidar: NOT a dependency anywhere. Plan mandates adding it.
+- No settle-window/batching prior art anywhere — must build.
+- Shell integration: sync-status footer is HARDCODED "Local · saved" (testid sync-status); agent-panel is placeholder ("changes show up here as a timeline") — the natural home for the change-set timeline.
+- GOTCHAS: SQLite keeps .db-wal/.db-journal sidecars — collapse to the base .db, never sync as separate ops; exclude temp files (*.tmp, .swp/.swo, ~, #*#) and .dohc/cache/**; never sync .dohc/manifest.json (derived) or cache; conflict files must be explicitly named (path.conflict), never look like user content.
+
+### Phase 5 decisions
+- D-15 | Lane boundaries: workspace-core owns event/status TYPES (lead, first); workspace-fs owns ignore-rules + chokidar watch + fs→WatcherEvent[]; workspace-sync owns settle-window batcher + batch→ChangeSet; workspace-history owns changeSetStore (persist + timeline). Disjoint packages → lanes are file-disjoint.
+- D-16 | History stored as inspectable JSON under .dohc/history/ (NOT a SQLite history.db as recon suggested) — matches plan ("Store history under .dohc/history/"), the "user-meaningful work remains inspectable" ethos, and avoids pulling sqlite-worker into Phase 5. One JSON file per change set + an ordered index.
+- D-17 | chokidar added per plan, but pure logic (ignore rules, sidecar collapse, settle batching) is unit-tested as pure functions independent of chokidar; chokidar wrapper is thin and covered by E2E (keeps tests fast/deterministic).
 
 ### Port-source file paths (verified present 2026-06-10)
 
