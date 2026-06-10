@@ -204,3 +204,32 @@ describe("humanSummary", () => {
     expect(new Set(listed.map((r) => r.id)).size).toBe(25);
   });
 });
+
+describe("listSince (cloud sync cursor)", () => {
+  it("returns only records strictly newer than the cursor, oldest first", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "dohc-hist-"));
+    try {
+      const store = createChangeSetStore(root);
+      const set = (summary: string) => ({
+        kind: "user-edit" as const,
+        author: { kind: "user" as const, userId: "u1" },
+        summary,
+        files: [{ path: "a.md", operation: "write" as const }],
+        boundaryCrossings: [],
+      });
+      await store.record(set("first"), { id: "a", recordedAtMs: 100 });
+      await store.record(set("second"), { id: "b", recordedAtMs: 200 });
+      await store.record(set("third"), { id: "c", recordedAtMs: 300 });
+
+      const since = await store.listSince(100);
+      expect(since.map((r) => r.id)).toEqual(["b", "c"]);
+      expect(await store.listSince(300)).toEqual([]);
+      expect((await store.listSince(0)).map((r) => r.id)).toEqual(["a", "b", "c"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

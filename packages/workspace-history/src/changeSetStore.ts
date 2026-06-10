@@ -39,6 +39,9 @@ export interface ChangeSetStore {
     opts: { id: string; recordedAtMs: number },
   ): Promise<HistoryRecord>;
   list(): Promise<HistoryRecord[]>;
+  // Records strictly newer than afterMs, oldest first — the cloud sync cursor
+  // ("everything not yet uploaded") without loading the whole timeline.
+  listSince(afterMs: number): Promise<HistoryRecord[]>;
   get(id: string): Promise<HistoryRecord | null>;
 }
 
@@ -144,6 +147,31 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
         // summary, the per-record file is the source of full detail. One
         // corrupt/truncated record (crash mid-write, hand edit) must cost that
         // one entry, never brick the entire timeline.
+        try {
+          const record = await readJson<HistoryRecord>(
+            join(historyDir, recordFileName(entry)),
+          );
+          if (record) records.push(record);
+        } catch (error) {
+          console.error(
+            `[workspace-history] skipping unreadable record ${entry.id}:`,
+            error,
+          );
+        }
+      }
+      return records;
+    },
+
+    async listSince(afterMs) {
+      const index = await readIndex();
+      const ordered = index
+        .filter((entry) => entry.recordedAtMs > afterMs)
+        .sort(
+          (a, b) =>
+            a.recordedAtMs - b.recordedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        );
+      const records: HistoryRecord[] = [];
+      for (const entry of ordered) {
         try {
           const record = await readJson<HistoryRecord>(
             join(historyDir, recordFileName(entry)),
