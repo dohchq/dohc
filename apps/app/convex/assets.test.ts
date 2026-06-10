@@ -7,6 +7,76 @@ import { api } from './_generated/api'
 const modules = import.meta.glob('./**/*.ts')
 
 describe('workspace assets', () => {
+  it('registers path-bearing workspace files and supports list, resolve, rename, and delete', async () => {
+    const t = convexTest(schema, modules)
+    const storageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(
+        new Blob(['a,b\n1,2\n'], { type: 'text/csv' }),
+      )
+    })
+
+    const created = await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.registerWorkspaceFile,
+      {
+        storageId,
+        filename: 'wallet.csv',
+        mediaType: 'text/csv',
+        path: 'uploads/wallet.csv',
+      },
+    )
+
+    expect(created).toMatchObject({
+      path: 'uploads/wallet.csv',
+      title: 'wallet.csv',
+      source: 'user',
+      kind: 'asset',
+      contentType: 'text/csv',
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'bob' }).query(api.assets.resolveWorkspaceFile, {
+        path: 'uploads/wallet.csv',
+      }),
+    ).resolves.toBeNull()
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.listWorkspaceFiles, {}),
+    ).resolves.toEqual([
+      expect.objectContaining({ path: 'uploads/wallet.csv' }),
+    ])
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.resolveWorkspaceFile, {
+        path: 'uploads/wallet.csv',
+      }),
+    ).resolves.toMatchObject({
+      path: 'uploads/wallet.csv',
+      mediaType: 'text/csv',
+      url: expect.stringMatching(/^http/),
+    })
+
+    await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.renameWorkspaceFile,
+      {
+        fromPath: 'uploads/wallet.csv',
+        toPath: 'uploads/wallet-renamed.csv',
+      },
+    )
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.listWorkspaceFiles, {}),
+    ).resolves.toEqual([
+      expect.objectContaining({ path: 'uploads/wallet-renamed.csv' }),
+    ])
+
+    await t.withIdentity({ subject: 'alice' }).mutation(
+      api.assets.removeWorkspaceFile,
+      { path: 'uploads/wallet-renamed.csv' },
+    )
+    await expect(
+      t.withIdentity({ subject: 'alice' }).query(api.assets.listWorkspaceFiles, {}),
+    ).resolves.toEqual([])
+  })
+
   it('registers storage metadata in the caller workspace and resolves only inside that workspace', async () => {
     const t = convexTest(schema, modules)
     const storageId = await t.run(async (ctx) => {
@@ -45,6 +115,42 @@ describe('workspace assets', () => {
         assetId: asset.assetId,
       }),
     ).rejects.toThrow(/asset not found/)
+  })
+
+  it('allows filenames with embedded dot-dot but rejects traversal segments', async () => {
+    const t = convexTest(schema, modules)
+    const storageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['ok'], { type: 'text/plain' }))
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).mutation(
+        api.assets.registerWorkspaceFile,
+        {
+          storageId,
+          filename: 'my..file.txt',
+          mediaType: 'text/plain',
+          path: 'uploads/my..file.txt',
+        },
+      ),
+    ).resolves.toMatchObject({
+      path: 'uploads/my..file.txt',
+    })
+
+    const traversalStorageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['bad'], { type: 'text/plain' }))
+    })
+    await expect(
+      t.withIdentity({ subject: 'alice' }).mutation(
+        api.assets.registerWorkspaceFile,
+        {
+          storageId: traversalStorageId,
+          filename: 'bad.txt',
+          mediaType: 'text/plain',
+          path: 'uploads/../bad.txt',
+        },
+      ),
+    ).rejects.toThrow(/invalid workspace file path/)
   })
 
   it('returns the existing asset when the same storage object is registered twice in a workspace', async () => {

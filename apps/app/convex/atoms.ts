@@ -119,6 +119,9 @@ export async function upsertAtomImpl(
     /** When set on a brand-new atom, create it as private to this
      *  user. Used for user/agent-created docs in org workspaces. */
     defaultPrivateOwnerUserId?: string
+    /** Refuse existing paths inside the write transaction. Used by
+     *  create-only surfaces such as agent save_file. */
+    failIfExists?: boolean
   },
 ): Promise<Id<'atoms'>> {
   const {
@@ -131,6 +134,7 @@ export async function upsertAtomImpl(
     allowSystemOverride,
     writeSystemLocked,
     defaultPrivateOwnerUserId,
+    failIfExists,
   } = args
   // R3 §8 (Codex R3-build): reject a NUL note path at the write
   // surface — `refKey`'s in-memory delimiter is U+0000; a NUL in the
@@ -152,6 +156,11 @@ export async function upsertAtomImpl(
     .unique()
   const now = Date.now()
   if (existing) {
+    if (failIfExists === true) {
+      throw Object.assign(new Error(`File already exists: ${path}`), {
+        code: 'file-exists',
+      })
+    }
     // file-org-v1 §2.3 (Track-4 D4.1a). Lock-guard chokepoint #1.
     // Fires BEFORE the user-content-overwrite guard so the more
     // specific taxonomy wins: a userLocked user-authored atom throws
@@ -1062,6 +1071,7 @@ export const _upsertInternal = internalMutation({
     // write over user content THROWS unless explicitly allowed (the
     // write_atom tool only sets this after user confirmation).
     allowUserOverwrite: v.optional(v.boolean()),
+    failIfExists: v.optional(v.boolean()),
     // P1 (multiplayer-and-h-followups §6.5) — when present, gate the
     // write through canWriteAtomPath against THIS user's access. The
     // agent-tool callers (write_atom + capture etc.) pass the actor
@@ -1071,7 +1081,7 @@ export const _upsertInternal = internalMutation({
   },
   handler: async (
     ctx,
-    { workspaceId, path, body, source, allowUserOverwrite, viewerSubject },
+    { workspaceId, path, body, source, allowUserOverwrite, failIfExists, viewerSubject },
   ) => {
     if (
       viewerSubject &&
@@ -1088,6 +1098,7 @@ export const _upsertInternal = internalMutation({
       body,
       source,
       allowUserOverwrite,
+      failIfExists,
       defaultPrivateOwnerUserId:
         viewerSubject && workspaceId !== viewerSubject ? viewerSubject : undefined,
     })

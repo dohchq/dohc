@@ -13,6 +13,8 @@ describe('AppRuntimeHost database RPC dispatch', () => {
     expect(source).toContain('api.databaseFiles.appTables')
     expect(source).toContain("case 'dohc.database.query'")
     expect(source).toContain('api.databaseFiles.appQuery')
+    expect(source).toContain("case 'dohc.database.table.insert'")
+    expect(source).toContain("case 'dohc.database.table.update'")
     expect(source).toContain('api.databaseFiles.appCollectionRows')
     expect(source).toContain('api.databaseOps.appApply')
     expect(source).toContain('expectedVersion: request.args.expectedVersion')

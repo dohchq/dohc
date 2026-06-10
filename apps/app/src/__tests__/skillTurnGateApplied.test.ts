@@ -58,6 +58,10 @@ const UNAUTHORIZABLE_OPS: ReadonlyArray<string> = [
   'capture',
   // file-org-v1 D4.1b ATOMIC — lock-toggle (user-decision class)
   'set_lock',
+  // Existing database data mutation.
+  'write_database_rows',
+  // Applies captured shell diffs to workspace state.
+  'apply_workspace_shell_diff',
 ]
 
 describe('Track-3 P2b.3 — UNAUTHORIZABLE-set gate coverage', () => {
@@ -132,7 +136,7 @@ const TOOL_BODIES: Record<string, string> = (() => {
 })()
 
 const SIDE_EFFECT_RE =
-  /\bctx\.run(Mutation|Action|Query)\b|\brequireWorkspace\(ctx\)/
+  /\bctx\.run(Mutation|Action|Query)\b|\brequireWorkspace\(ctx\)|\bactiveWorkspaceFromTool\(ctx/
 
 // Ops where the gate is UNCONDITIONAL at the top of the handler.
 // For these, the gate MUST precede the first side-effect token.
@@ -150,6 +154,10 @@ const UNCONDITIONAL_TOP_GATE_OPS = [
   // file-org-v1 D4.1b ATOMIC — set_lock gate is at the top of the
   // handler (no early-return branch; no conditional input).
   'set_lock',
+  // Existing database row writes mutate structured state.
+  'write_database_rows',
+  // Applying a workspace shell diff mutates atom/asset/database files.
+  'apply_workspace_shell_diff',
 ] as const
 
 // Ops where the gate is INSIDE a conditional (create_atom, capture).
@@ -259,12 +267,21 @@ const SAFE_NO_GATE_OPS = new Set<string>([
   'review_window_sharing',
   'onboarding_state',
   'read_asset', // read-only saved attachment fetch; scoped by activeWorkspaceFromTool and no mutation path
+  'inspect_file', // read-only metadata/preview for atoms/assets/databases
+  'query_database', // read-only SELECT-only database query
+  'export_file', // export metadata only; no destructive workspace mutation
+  'embed_asset', // returns a stable markdown reference, no write
   // sanity-check
   'run_query',
   'test_app', // app verification only; server-side resolver gathers authorized app/source data and records a test result, but does not change workspace content or permissions
   // explicitly-additive writes (no overwrite path)
   'create_entities', // gated via mutation-level strictCreate (P2b.2 BRACE) — no `requireDirectUserAuthorization` needed at the tool layer; the depth-read + strictCreate mode is the structural enforcement
   'create_folder',
+  'save_file', // additive generated text-file create; refuses overwrite and folder ACL violations
+  'upload_asset', // additive generated asset create; refuses overwrite and folder ACL violations
+  'import_data', // additive import create; refuses overwrite and private-boundary crossings
+  'run_workspace_shell', // sandbox run only; no workspace persistence until the direct-user apply tool
+  'discard_workspace_shell_diff', // discards sandbox state; no workspace data mutation
   'insert_after_heading',
   'propose_replace_text',
   'rewrite_section',
@@ -317,7 +334,10 @@ describe('Track-3 P2b.3 fold (indep F2) — bidirectional gate coverage (catches
       'find_entity', 'list_skills', 'list_commands',
       'pending_captures', 'review_window_sharing',
       'onboarding_state', 'read_asset', 'run_query', 'test_app',
+      'inspect_file', 'query_database', 'export_file', 'embed_asset',
       'create_entities', 'create_folder',
+      'save_file', 'upload_asset', 'import_data',
+      'run_workspace_shell', 'discard_workspace_shell_diff',
       'insert_after_heading', 'propose_replace_text', 'rewrite_section',
       'run_skill', // P2c — structurally safe; see SAFE_NO_GATE_OPS comment
       'run_command',

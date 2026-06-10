@@ -44,7 +44,7 @@ describe('agent approvals UI/source contract', () => {
     expect(CHAT_SRC).toContain('api.agent.listPendingApprovals')
     expect(CHAT_SRC).toContain('api.agent.respondToApproval')
     expect(CHAT_SRC).toContain('Allow')
-    expect(CHAT_SRC).toContain('Always allow')
+    expect(CHAT_SRC).toContain('Always Allow')
     expect(CHAT_SRC).toContain('Deny')
   })
 

@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 .tanstack/tmp/
 .gstack/tmp/
+.dohc-dev/

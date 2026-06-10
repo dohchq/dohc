@@ -167,7 +167,7 @@ export function WorkspaceSwitcher() {
     if (personal) {
       void navigate({
         to: '/$workspaceSlug',
-        params: { workspaceSlug: personal.slug },
+        params: () => ({ workspaceSlug: personal.slug }),
         replace: true,
       })
     }
@@ -218,7 +218,7 @@ export function WorkspaceSwitcher() {
                     )
                     void navigate({
                       to: '/$workspaceSlug',
-                      params: { workspaceSlug: w.slug },
+                      params: () => ({ workspaceSlug: w.slug }),
                     })
                     setOpen(false)
                   }}

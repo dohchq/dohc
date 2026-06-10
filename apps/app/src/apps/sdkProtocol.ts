@@ -15,6 +15,12 @@ export type AppRpcOp =
   | 'dohc.doc.section.replace'
   | 'dohc.database.tables'
   | 'dohc.database.query'
+  | 'dohc.database.table.list'
+  | 'dohc.database.table.get'
+  | 'dohc.database.table.insert'
+  | 'dohc.database.table.update'
+  | 'dohc.database.table.upsert'
+  | 'dohc.database.table.delete'
   | 'dohc.asset.resolve'
   | 'dohc.presence.list'
   | 'dohc.sources.list'
@@ -42,6 +48,12 @@ export type AppRpcRequest =
   | { id: string; op: 'dohc.doc.section.replace'; args: { path: string; heading: string; markdown: string } }
   | { id: string; op: 'dohc.database.tables'; args: { path: string } }
   | { id: string; op: 'dohc.database.query'; args: { path: string; sql: string; params?: JsonValue[] } }
+  | { id: string; op: 'dohc.database.table.list'; args: { path: string; table: string; query?: Record<string, JsonValue> } }
+  | { id: string; op: 'dohc.database.table.get'; args: { path: string; table: string; id: string } }
+  | { id: string; op: 'dohc.database.table.insert'; args: { path: string; table: string; record: Record<string, JsonValue>; expectedVersion?: number } }
+  | { id: string; op: 'dohc.database.table.update'; args: { path: string; table: string; id: string; patch: Record<string, JsonValue>; expectedVersion?: number } }
+  | { id: string; op: 'dohc.database.table.upsert'; args: { path: string; table: string; id: string; record: Record<string, JsonValue>; expectedVersion?: number } }
+  | { id: string; op: 'dohc.database.table.delete'; args: { path: string; table: string; id: string; expectedVersion?: number } }
   | { id: string; op: 'dohc.asset.resolve'; args: { assetId: string } }
   | { id: string; op: 'dohc.presence.list'; args: Record<string, never> }
   | { id: string; op: 'dohc.sources.list'; args: { source?: string } }
@@ -77,6 +89,12 @@ const OPS = new Set<AppRpcOp>([
   'dohc.doc.section.replace',
   'dohc.database.tables',
   'dohc.database.query',
+  'dohc.database.table.list',
+  'dohc.database.table.get',
+  'dohc.database.table.insert',
+  'dohc.database.table.update',
+  'dohc.database.table.upsert',
+  'dohc.database.table.delete',
   'dohc.asset.resolve',
   'dohc.presence.list',
   'dohc.sources.list',
@@ -236,6 +254,21 @@ function validateDocArgs(
   return validNonEmptyString(args.heading) && typeof args.markdown === 'string'
 }
 
+function validateDatabaseTableArgs(
+  args: Record<string, unknown>,
+  kind: 'list' | 'get' | 'insert' | 'update' | 'upsert' | 'delete',
+): boolean {
+  if (!validRelativePath(args.path)) return false
+  const collectionArgs: Record<string, unknown> = {
+    ...args,
+    name: args.table,
+    database: args.path,
+  }
+  delete collectionArgs.path
+  delete collectionArgs.table
+  return validateCollectionArgs(collectionArgs, kind)
+}
+
 function validateArgs(op: AppRpcOp, args: Record<string, unknown>): boolean {
   switch (op) {
     case 'dohc.collection.list':
@@ -271,6 +304,18 @@ function validateArgs(op: AppRpcOp, args: Record<string, unknown>): boolean {
         validNonEmptyString(args.sql) &&
         (args.params === undefined || validJsonArray(args.params))
       )
+    case 'dohc.database.table.list':
+      return validateDatabaseTableArgs(args, 'list')
+    case 'dohc.database.table.get':
+      return validateDatabaseTableArgs(args, 'get')
+    case 'dohc.database.table.insert':
+      return validateDatabaseTableArgs(args, 'insert')
+    case 'dohc.database.table.update':
+      return validateDatabaseTableArgs(args, 'update')
+    case 'dohc.database.table.upsert':
+      return validateDatabaseTableArgs(args, 'upsert')
+    case 'dohc.database.table.delete':
+      return validateDatabaseTableArgs(args, 'delete')
     case 'dohc.asset.resolve':
       return hasOnlyKeys(args, ['assetId']) && validId(args.assetId)
     case 'dohc.presence.list':

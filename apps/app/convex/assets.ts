@@ -1,16 +1,19 @@
 import { v } from 'convex/values'
 import {
+  action,
   internalMutation,
   internalQuery,
   mutation,
   query,
 } from './_generated/server'
 import type { Id } from './_generated/dataModel'
+import { internal } from './_generated/api'
 import { requireWorkspace } from './auth'
-import { canReadAtom } from './atomAccess'
+import { canReadAtom, canWriteInFolder, folderPathForPath } from './atomAccess'
 import { isNonDataAtom } from './atomId'
 import { scopeAllowsPath } from './appScopes'
 import { isAppDescriptorError, resolveAppDescriptor } from './apps'
+import { mediaTypeForWorkspacePath } from '../src/lib/mediaTypes'
 
 const assetPurposeValidator = v.union(v.literal('chat'), v.literal('workspace'))
 const APP_ASSET_SOURCE_SCAN_CAP = 5000
@@ -29,6 +32,15 @@ type AppAssetError = {
 
 function appAssetError(code: AppAssetError['code'], message: string): AppAssetError {
   return { ok: false, code, message }
+}
+
+function arrayBufferFromBase64(value: string): ArrayBuffer {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes.buffer
 }
 
 export const generateUploadUrl = mutation({
@@ -88,6 +100,266 @@ export const registerUploadedAsset = mutation({
     const asset = await ctx.db.get(assetId)
     if (!asset) throw new Error('asset registration failed')
     return toClientAsset(asset)
+  },
+})
+
+export const registerWorkspaceFile = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    storageId: v.id('_storage'),
+    filename: v.string(),
+    mediaType: v.optional(v.string()),
+    path: v.string(),
+  },
+  handler: async (
+    ctx,
+    { activeWorkspaceId, storageId, filename, mediaType, path },
+  ) => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const metadata = await ctx.db.system.get('_storage', storageId)
+    if (!metadata) throw new Error('uploaded file not found')
+    const cleanPath = normalizeWorkspaceAssetPath(path || filename)
+    const existingAtPath = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanPath),
+      )
+      .unique()
+    if (existingAtPath) throw new Error(`file already exists: ${cleanPath}`)
+
+    const normalizedMediaType =
+      normalizeMediaType(mediaType) ??
+      normalizeMediaType(metadata.contentType) ??
+      mediaTypeForWorkspacePath(cleanPath) ??
+      'application/octet-stream'
+    const now = Date.now()
+    const assetId = await ctx.db.insert('workspaceAssets', {
+      workspaceId,
+      storageId,
+      path: cleanPath,
+      filename: normalizeFilename(filename),
+      mediaType: normalizedMediaType,
+      kind: kindForMediaType(normalizedMediaType),
+      size: metadata.size,
+      sha256: metadata.sha256,
+      purpose: 'workspace',
+      createdByUserId: identity.subject,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1,
+    })
+
+    const asset = await ctx.db.get(assetId)
+    if (!asset) throw new Error('asset registration failed')
+    return toWorkspaceFile(asset)
+  },
+})
+
+export const _registerGeneratedWorkspaceAsset = internalMutation({
+  args: {
+    workspaceId: v.string(),
+    actorUserId: v.string(),
+    storageId: v.id('_storage'),
+    filename: v.string(),
+    mediaType: v.string(),
+    path: v.string(),
+  },
+  handler: async (
+    ctx,
+    { workspaceId, actorUserId, storageId, filename, mediaType, path },
+  ) => {
+    const cleanPath = normalizeWorkspaceAssetPath(path || filename)
+    if (!(await canWriteInFolder(
+      ctx,
+      workspaceId,
+      folderPathForPath(cleanPath),
+      actorUserId,
+    ))) {
+      return {
+        ok: false as const,
+        code: 'asset-write-not-authorized',
+        message: 'Not authorized to write this asset.',
+      }
+    }
+    const metadata = await ctx.db.system.get('_storage', storageId)
+    if (!metadata) {
+      return {
+        ok: false as const,
+        code: 'asset-blob-not-found',
+        message: 'Generated asset blob was not found.',
+      }
+    }
+    const existingAtPath = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanPath),
+      )
+      .unique()
+    if (existingAtPath) {
+      return {
+        ok: false as const,
+        code: 'asset-exists',
+        message: `File already exists: ${cleanPath}`,
+      }
+    }
+    const normalizedMediaType =
+      normalizeMediaType(mediaType) ??
+      normalizeMediaType(metadata.contentType) ??
+      mediaTypeForWorkspacePath(cleanPath) ??
+      'application/octet-stream'
+    const now = Date.now()
+    const assetId = await ctx.db.insert('workspaceAssets', {
+      workspaceId,
+      storageId,
+      path: cleanPath,
+      filename: normalizeFilename(filename),
+      mediaType: normalizedMediaType,
+      kind: kindForMediaType(normalizedMediaType),
+      size: metadata.size,
+      sha256: metadata.sha256,
+      purpose: 'workspace',
+      createdByUserId: actorUserId,
+      createdAt: now,
+      updatedAt: now,
+      revision: 1,
+    })
+    const asset = await ctx.db.get(assetId)
+    if (!asset) throw new Error('asset registration failed')
+    return { ok: true as const, ...toWorkspaceFile(asset), size: asset.size }
+  },
+})
+
+export const saveGeneratedAsset = action({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    path: v.string(),
+    mediaType: v.string(),
+    bytesBase64: v.string(),
+  },
+  handler: async (
+    ctx,
+    { activeWorkspaceId, path, mediaType, bytesBase64 },
+  ): Promise<unknown> => {
+    const identity = await ctx.auth.getUserIdentity()
+    if (!identity) throw new Error('Not authenticated')
+    const workspaceId = await ctx.runQuery(internal.agent._resolveWorkspaceForCaller, {
+      activeWorkspaceId,
+    }) as string
+    const storageId = await ctx.storage.store(new Blob([arrayBufferFromBase64(bytesBase64)], {
+      type: mediaType,
+    }))
+    return await ctx.runMutation(internal.assets._registerGeneratedWorkspaceAsset, {
+      workspaceId,
+      actorUserId: identity.subject,
+      storageId,
+      path,
+      filename: path.split('/').pop() ?? 'asset',
+      mediaType,
+    })
+  },
+})
+
+export const listWorkspaceFiles = query({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+  },
+  handler: async (ctx, { activeWorkspaceId }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const rows = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .collect()
+    return rows
+      .filter((asset) => asset.purpose === 'workspace' && Boolean(asset.path))
+      .map(toWorkspaceFile)
+      .sort((a, b) => a.path.localeCompare(b.path))
+  },
+})
+
+export const resolveWorkspaceFile = query({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    path: v.string(),
+  },
+  handler: async (ctx, { activeWorkspaceId, path }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const cleanPath = normalizeWorkspaceAssetPath(path)
+    const asset = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanPath),
+      )
+      .unique()
+    if (!asset) return null
+    const url = await ctx.storage.getUrl(asset.storageId)
+    if (!url) throw new Error('asset blob not found')
+    return {
+      ...toWorkspaceFile(asset),
+      url,
+      filename: asset.filename,
+      size: asset.size,
+      mediaType: asset.mediaType,
+      revision: String(asset.revision ?? 1),
+    }
+  },
+})
+
+export const renameWorkspaceFile = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    fromPath: v.string(),
+    toPath: v.string(),
+  },
+  handler: async (ctx, { activeWorkspaceId, fromPath, toPath }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const cleanFrom = normalizeWorkspaceAssetPath(fromPath)
+    const cleanTo = normalizeWorkspaceAssetPath(toPath)
+    const existing = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanFrom),
+      )
+      .unique()
+    if (!existing) throw new Error(`not found: ${cleanFrom}`)
+    const collision = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanTo),
+      )
+      .unique()
+    if (collision) throw new Error(`already exists: ${cleanTo}`)
+    const now = Date.now()
+    await ctx.db.patch(existing._id, {
+      path: cleanTo,
+      filename: cleanTo.split('/').pop() ?? existing.filename,
+      updatedAt: now,
+      revision: (existing.revision ?? 1) + 1,
+    })
+    const renamed = await ctx.db.get(existing._id)
+    if (!renamed) throw new Error('asset rename failed')
+    return toWorkspaceFile(renamed)
+  },
+})
+
+export const removeWorkspaceFile = mutation({
+  args: {
+    activeWorkspaceId: v.optional(v.string()),
+    path: v.string(),
+  },
+  handler: async (ctx, { activeWorkspaceId, path }) => {
+    const workspaceId = await requireWorkspace(ctx, activeWorkspaceId)
+    const cleanPath = normalizeWorkspaceAssetPath(path)
+    const asset = await ctx.db
+      .query('workspaceAssets')
+      .withIndex('by_workspace_path', (q) =>
+        q.eq('workspaceId', workspaceId).eq('path', cleanPath),
+      )
+      .unique()
+    if (!asset) return null
+    await ctx.db.delete(asset._id)
+    return { ok: true as const }
   },
 })
 
@@ -218,6 +490,14 @@ function normalizeFilename(filename: string): string {
   return trimmed.length > 0 ? trimmed : 'untitled attachment'
 }
 
+function normalizeWorkspaceAssetPath(path: string): string {
+  const clean = path.trim().replace(/^\/+|\/+$/g, '')
+  if (!clean || clean.split('/').includes('..')) {
+    throw new Error(`invalid workspace file path: ${JSON.stringify(path)}`)
+  }
+  return clean
+}
+
 function normalizeMediaType(value?: string | null): string | null {
   const trimmed = value?.trim().toLowerCase()
   return trimmed || null
@@ -235,6 +515,7 @@ function toClientAsset(asset: {
   _id: Id<'workspaceAssets'>
   workspaceId: string
   storageId: Id<'_storage'>
+  path?: string
   filename: string
   mediaType: string
   kind: AssetKind
@@ -243,6 +524,8 @@ function toClientAsset(asset: {
   purpose: 'chat' | 'workspace'
   createdByUserId: string
   createdAt: number
+  updatedAt?: number
+  revision?: number
   threadId?: string
   messageId?: string
   usedAt?: number
@@ -251,6 +534,7 @@ function toClientAsset(asset: {
     assetId: asset._id,
     workspaceId: asset.workspaceId,
     storageId: asset.storageId,
+    path: asset.path,
     filename: asset.filename,
     mediaType: asset.mediaType,
     kind: asset.kind,
@@ -259,8 +543,36 @@ function toClientAsset(asset: {
     purpose: asset.purpose,
     createdByUserId: asset.createdByUserId,
     createdAt: asset.createdAt,
+    updatedAt: asset.updatedAt,
+    revision: asset.revision,
     threadId: asset.threadId,
     messageId: asset.messageId,
     usedAt: asset.usedAt,
+  }
+}
+
+function toWorkspaceFile(asset: {
+  _id: Id<'workspaceAssets'>
+  workspaceId: string
+  path?: string
+  filename: string
+  mediaType: string
+  createdByUserId: string
+  updatedAt?: number
+  createdAt: number
+  revision?: number
+}) {
+  const path = asset.path ?? asset.filename
+  return {
+    _id: asset._id,
+    assetId: asset._id,
+    path,
+    title: asset.filename || path.split('/').pop() || path,
+    source: 'user' as const,
+    kind: 'asset' as const,
+    contentType: asset.mediaType,
+    updatedAt: asset.updatedAt ?? asset.createdAt,
+    revision: String(asset.revision ?? 1),
+    fileId: String(asset._id),
   }
 }

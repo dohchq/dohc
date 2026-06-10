@@ -7,12 +7,15 @@ export type FileRow = {
   path: string
   title?: string | null
   source: string
+  kind?: 'atom' | 'asset' | 'database'
+  contentType?: string
+  revision?: string
   // Last-write timestamp (projected by api.atoms.list). Absent on callers
   // that don't project it.
   updatedAt?: number
   // html-atoms-v1 §5 — 'html' ⇒ tree badges it as a page (no `.html`
   // extension exists). Advisory/additive; absent on legacy rows.
-  type?: string | null
+  type?: 'html' | 'command' | 'skill' | null
   // file-org-v1 §3.1 (Track-4 D4.4a) — lock/star surface for the
   // tree's affordance rendering. Defaults to false on rows that
   // predate Track-4.
@@ -31,7 +34,7 @@ export type FileRow = {
 export type TreePage = {
   path: string
   title: string | null
-  type?: string | null
+  type?: 'html' | 'command' | 'skill' | null
   // file-org-v1 D4.4a — passed through to TreeNode so leaf rows
   // can render the lock/star icons. Folder rows carry these via
   // their own folderMetadata join (D4.5).

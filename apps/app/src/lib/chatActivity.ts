@@ -3,6 +3,7 @@ export type ToolActivityKind =
   | 'read'
   | 'file_change'
   | 'search'
+  | 'approval'
   | 'other'
 
 export type ToolActivityPart = {
@@ -35,6 +36,16 @@ export function toolActivityKind(
 ): ToolActivityKind {
   const name = toolName.toLowerCase()
   const kind = typeof input?.kind === 'string' ? input.kind.toLowerCase() : ''
+  const semanticType =
+    typeof input?.type === 'string' ? input.type.toLowerCase() : ''
+  if (
+    kind === 'approval' ||
+    kind === 'approval_request' ||
+    semanticType === 'approval' ||
+    semanticType === 'approval_request'
+  ) {
+    return 'approval'
+  }
   if (
     kind === 'execute' ||
     name.includes('command') ||
@@ -89,6 +100,7 @@ export function toolActivityLabel(
   if (kind === 'search') return 'Searched'
   if (kind === 'file_change') return 'Changed file'
   if (kind === 'read') return 'Read file'
+  if (kind === 'approval') return 'Approval requested'
   return humanizeToolName(fallback)
 }
 
@@ -142,39 +154,6 @@ export function toolCallPresentation(
   }
 }
 
-export function agentWorkTraceSummary(
-  parts: ReadonlyArray<ToolActivityPart>,
-): {
-  total: number
-  byKind: Record<ToolActivityKind, number>
-  label: string
-} {
-  const byKind: Record<ToolActivityKind, number> = {
-    command: 0,
-    file_change: 0,
-    other: 0,
-    read: 0,
-    search: 0,
-  }
-  for (const part of parts) {
-    const presentation = toolCallPresentation(part)
-    byKind[presentation.kind] += 1
-  }
-  const fragments = [
-    pluralFragment('Changed', byKind.file_change, 'file'),
-    pluralFragment('read', byKind.read, 'file'),
-    pluralFragment('searched', byKind.search, 'time'),
-    pluralFragment('ran', byKind.command, 'command'),
-    pluralFragment('used', byKind.other, 'tool'),
-  ].filter((fragment): fragment is string => Boolean(fragment))
-
-  return {
-    total: parts.length,
-    byKind,
-    label: sentenceLabel(fragments) || 'Used tools',
-  }
-}
-
 export function formatWorkedDuration(durationMs: number | null): string {
   if (durationMs === null || !Number.isFinite(durationMs)) return 'a moment'
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000))
@@ -196,24 +175,6 @@ export function formatToolPayload(value: unknown): string | null {
     typeof value === 'string' ? value : JSON.stringify(value, null, 2)
   if (!raw) return null
   return raw.length > 4000 ? `${raw.slice(0, 4000)}\n...` : raw
-}
-
-function pluralFragment(
-  verb: string,
-  count: number,
-  noun: string,
-): string | null {
-  if (count === 0) return null
-  return `${verb} ${count} ${noun}${count === 1 ? '' : 's'}`
-}
-
-function sentenceLabel(fragments: string[]): string {
-  if (fragments.length === 0) return ''
-  return [capitalizeFirst(fragments[0]), ...fragments.slice(1)].join(', ')
-}
-
-function capitalizeFirst(value: string): string {
-  return value ? `${value[0].toUpperCase()}${value.slice(1)}` : value
 }
 
 function humanizeToolName(toolName: string): string {

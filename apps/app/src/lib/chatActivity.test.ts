@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  agentWorkTraceSummary,
   formatToolPayload,
   formatWorkedDuration,
   toolCallPresentation,
@@ -14,38 +13,6 @@ describe('chat activity presentation', () => {
     expect(formatWorkedDuration(15 * 60_000 + 55_000)).toBe('15m 55s')
     expect(formatWorkedDuration(2 * 60 * 60_000 + 3 * 60_000 + 4_000)).toBe(
       '2h 03m',
-    )
-  })
-
-  it('summarizes tool work into human activity instead of raw tool names', () => {
-    const calls = [
-      { type: 'tool-read_atom', input: { path: 'notes/plan.md' } },
-      { type: 'tool-search', input: { query: 'agent view' } },
-      { type: 'tool-apply_patch', input: { path: 'apps/app/src/Chat.tsx' } },
-      { type: 'tool-exec_command', input: { cmd: 'vitest run' } },
-    ]
-
-    expect(agentWorkTraceSummary(calls)).toEqual({
-      total: 4,
-      byKind: {
-        command: 1,
-        file_change: 1,
-        other: 0,
-        read: 1,
-        search: 1,
-      },
-      label: 'Changed 1 file, read 1 file, searched 1 time, ran 1 command',
-    })
-  })
-
-  it('capitalizes the first work summary fragment even without file edits', () => {
-    const calls = [
-      { type: 'tool-read_atom', input: { path: 'notes/plan.md' } },
-      { type: 'tool-search', input: { query: 'agent view' } },
-    ]
-
-    expect(agentWorkTraceSummary(calls).label).toBe(
-      'Read 1 file, searched 1 time',
     )
   })
 

@@ -1,0 +1,170 @@
+name: dohc-self-host
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dohc}
+      POSTGRES_USER: ${POSTGRES_USER:-dohc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dohc} -d ${POSTGRES_DB:-dohc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - dohc_self_host_postgres:/var/lib/postgresql/data
+
+  object-storage:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dohc}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.self-host}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${OBJECT_STORAGE_BIND:-127.0.0.1}:${OBJECT_STORAGE_PORT:-9000}:9000"
+      - "${OBJECT_STORAGE_CONSOLE_BIND:-127.0.0.1}:${OBJECT_STORAGE_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - dohc_self_host_object_storage:/data
+
+  hocuspocus:
+    build:
+      context: .
+      dockerfile: services/hocuspocus/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOCUSPOCUS_ADMIN_TOKEN: ${HOCUSPOCUS_ADMIN_TOKEN}
+      HOCUSPOCUS_ALLOW_DEV_ACL: ${HOCUSPOCUS_ALLOW_DEV_ACL:-false}
+      HOCUSPOCUS_CONVEX_SERVER_TOKEN: ${HOCUSPOCUS_CONVEX_SERVER_TOKEN:-}
+      HOCUSPOCUS_CONVEX_URL: ${HOCUSPOCUS_CONVEX_URL:-}
+      HOCUSPOCUS_DATABASE_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+      HOCUSPOCUS_JWT_SECRET: ${HOCUSPOCUS_JWT_SECRET}
+      HOCUSPOCUS_PORT: "1234"
+      HOCUSPOCUS_QUIET: ${HOCUSPOCUS_QUIET:-true}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:1234/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${HOCUSPOCUS_BIND:-127.0.0.1}:${HOCUSPOCUS_PORT:-1234}:1234"
+
+  workspace-api:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+    environment:
+      DOHC_BACKEND: postgres
+      POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
+      WORKSPACE_API_PORT: "1786"
+      WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/workspace-api dev"
+    ports:
+      - "${WORKSPACE_API_BIND:-127.0.0.1}:${WORKSPACE_API_PORT:-1786}:1786"
+    volumes:
+      - .:/workspace
+
+  sqlite-worker:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    environment:
+      SQLITE_WORKER_ALLOW_INSECURE_LOCAL: ${SQLITE_WORKER_ALLOW_INSECURE_LOCAL:-0}
+      SQLITE_WORKER_PORT: "1787"
+      SQLITE_WORKER_TOKEN: ${SQLITE_WORKER_TOKEN}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/sqlite-worker dev"
+    ports:
+      - "${SQLITE_WORKER_BIND:-127.0.0.1}:${SQLITE_WORKER_PORT:-1787}:1787"
+    volumes:
+      - .:/workspace
+
+  app-tester:
+    image: mcr.microsoft.com/playwright:v1.60.0-noble
+    working_dir: /workspace
+    environment:
+      APP_TESTER_ALLOW_INSECURE_LOCAL: ${APP_TESTER_ALLOW_INSECURE_LOCAL:-0}
+      APP_TESTER_PORT: "1788"
+      APP_TESTER_TOKEN: ${APP_TESTER_TOKEN}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/app-tester dev"
+    ports:
+      - "${APP_TESTER_BIND:-127.0.0.1}:${APP_TESTER_PORT:-1788}:1788"
+    volumes:
+      - .:/workspace
+
+  agent-sandbox:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    environment:
+      DOHC_BACKEND: postgres
+      AGENT_SANDBOX_ROOT: /tmp/dohc-agent-sandbox
+      SANDBOX_SAFE_PATH: /usr/local/bin:/usr/bin:/bin
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/agent-sandbox typecheck &&
+      sleep infinity"
+    volumes:
+      - .:/workspace
+      - dohc_self_host_agent_sandbox:/tmp/dohc-agent-sandbox
+
+  web:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    depends_on:
+      workspace-api:
+        condition: service_started
+      hocuspocus:
+        condition: service_healthy
+    environment:
+      DOHC_BACKEND: postgres
+      VITE_DOHC_BACKEND: postgres
+      VITE_WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://127.0.0.1:1786}
+      VITE_HOCUSPOCUS_URL: ${HOCUSPOCUS_PUBLIC_URL:-ws://127.0.0.1:1234}
+      VITE_CONVEX_URL: ${VITE_CONVEX_URL:-}
+    command: >
+      sh -lc "corepack enable &&
+      corepack prepare pnpm@10.24.0 --activate &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @dohc/web dev --host 0.0.0.0"
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    volumes:
+      - .:/workspace
+
+volumes:
+  dohc_self_host_postgres:
+  dohc_self_host_object_storage:
+  dohc_self_host_agent_sandbox:

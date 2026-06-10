@@ -1,10 +1,12 @@
 import {
+  Clock,
   FileDiff,
   Folder,
   ListChecks,
 } from 'lucide-react'
 import { memo, useMemo, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
+import { formatWorkedDuration } from '../lib/chatActivity'
 
 export type AgentRailFileRow = {
   path: string
@@ -76,6 +78,13 @@ export function agentRailChangeSummary(
   }
 }
 
+export function agentRailRunDuration(activeThread: ActiveThread | null): string {
+  if (!activeThread) return 'none'
+  return formatWorkedDuration(
+    Math.max(0, activeThread.updatedAt - activeThread.createdAt),
+  )
+}
+
 export const AgentRunRail = memo(function AgentRunRail({
   files,
   activeThread,
@@ -96,6 +105,7 @@ export const AgentRunRail = memo(function AgentRunRail({
     [activeProjectPath, activeThread?.createdAt, files],
   )
   const scopeLabel = activeProjectPath ?? 'Whole workspace'
+  const runDuration = agentRailRunDuration(activeThread)
 
   return (
     <aside className="flex h-screen min-w-0 flex-col border-l border-rule bg-panel px-4 py-5">
@@ -106,7 +116,9 @@ export const AgentRunRail = memo(function AgentRunRail({
               <span className="block truncate font-medium text-ink-strong">
                 {activeThread.title}
               </span>
-              <span className="mt-0.5 block text-ink-faint">Chat active</span>
+              <span className="mt-0.5 block text-ink-faint">
+                Active for {runDuration}
+              </span>
             </div>
           ) : (
             <EmptyLine label="No active run" />
@@ -115,6 +127,12 @@ export const AgentRunRail = memo(function AgentRunRail({
 
         <RailSection title="Environment" Icon={Folder}>
           <div className="flex flex-col gap-1.5">
+            <MetricRow
+              Icon={Clock}
+              label="Duration"
+              value={runDuration}
+              title="Time from chat start to latest agent activity"
+            />
             <MetricRow
               Icon={FileDiff}
               label="Changes"

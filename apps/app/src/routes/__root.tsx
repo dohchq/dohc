@@ -12,7 +12,7 @@ import { convexClient } from '@/lib/convex-client'
 import { useAuthForConvex } from '@/lib/use-auth-bridge'
 import '@/styles.css'
 
-export const Route = createRootRoute({
+export const Route: ReturnType<typeof createRootRoute> = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },

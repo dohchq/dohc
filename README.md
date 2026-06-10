@@ -9,6 +9,7 @@ clear, traceable, and ready. Spoken "dock"; always written lowercase.
 apps/app              TanStack Start + Convex product app
 packages/brand        dohc mark, lockups, CSS tokens, brand constants
 packages/config       shared TypeScript config
+services              Hocuspocus, workspace API, SQLite worker, app tester
 docs                  product, brand, development, qa, security
 ```
 
@@ -19,6 +20,19 @@ pnpm install
 cp apps/app/.env.example apps/app/.env.local   # fill in real values
 pnpm dev        # local Postgres + Hocuspocus sync, vite (:3000), Convex dev
 ```
+
+## Backend modes
+
+Convex remains the default backend during the migration. Postgres is the
+self-host/cloud candidate backend:
+
+```bash
+DOHC_BACKEND=postgres VITE_DOHC_BACKEND=postgres pnpm dev:app
+pnpm check:self-host
+```
+
+See [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md)
+and [`docs/self-hosting.md`](docs/self-hosting.md).
 
 ## Reset dev data
 
@@ -32,6 +46,7 @@ pnpm test        # vitest (incl. the brand no-legacy guard)
 pnpm build       # vite build (TanStack Start + Nitro)
 pnpm dev:sync    # start only local Postgres + Hocuspocus
 pnpm dev:app     # start only Vite + Convex dev
+pnpm check:self-host # validate the self-host compose/service matrix
 ```
 
 ## Docs
@@ -44,6 +59,8 @@ pnpm dev:app     # start only Vite + Convex dev
   [`testing.md`](docs/development/testing.md)
 - QA: [`docs/qa/playwright-checklist.md`](docs/qa/playwright-checklist.md)
 - Security: [`docs/security/authz-boundaries.md`](docs/security/authz-boundaries.md)
+- Architecture: [`docs/architecture/backend-modes.md`](docs/architecture/backend-modes.md),
+  [`docs/architecture/local-files-and-cloud-sandbox.md`](docs/architecture/local-files-and-cloud-sandbox.md)
 
 ## Stack
 

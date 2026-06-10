@@ -31,6 +31,7 @@ import { applyFrontmatter, parseFrontmatter } from '@/lib/frontmatter'
 import { useDocumentMeta } from '@/lib/use-document-meta'
 import { FileTree } from '@/components/FileTree'
 import { AtomView } from '@/components/AtomView'
+import { FileTypeView } from '@/components/FileTypeView'
 import { SharedAtomView } from '@/components/SharedAtomView'
 import { ShareDialog } from '@/components/ShareDialog'
 import { ActivityBar } from '@/components/ActivityBar'
@@ -72,11 +73,18 @@ import { onboardingWorkspaceReady } from '@/lib/onboarding-ready'
 import { firePaletteCommand, firePaletteSkill } from '@/lib/palette-fire'
 import { decodeViewRef, encodeViewRef } from '@/lib/viewRefs'
 import { pageIdFromRef, pagePath, pageRef } from '@/lib/page-urls'
+import type { FileRow } from '@/lib/path-tree'
 import {
   agentThreadIdFromRef,
   agentThreadRef,
 } from '@/lib/agent-thread-urls'
 import { useDialogFocus } from '../lib/dialog-focus'
+import {
+  resolveDohcBackendMode,
+  type DohcBackendClient,
+  type WorkspaceFile,
+} from '@/backend/backendClient'
+import { createPostgresBackendClient } from '@/backend/postgresBackendClient'
 
 // Pathless layout. The open atom now lives in the URL as
 // `/<workspaceSlug>/<pageSlug>-<atomId>`. This layout holds the whole
@@ -103,6 +111,11 @@ function AppLayout() {
 type FilesDestination =
   | { kind: 'atom'; id: string }
   | { kind: 'shared'; id: string }
+
+type AppFileRow = FileRow & {
+  kind: 'atom' | 'asset' | 'database'
+  contentType: string
+}
 
 const ACTIVITY_BAR_WIDTH = 48
 const LEFT_SIDEBAR_STORAGE_KEY = 'dohc-left-sidebar-width'
@@ -149,6 +162,72 @@ function readStoredSidebarWidth(
 function leafName(path: string): string {
   const leaf = path.split('/').pop() ?? path
   return leaf.replace(/\.[a-z0-9]+$/i, '') || leaf
+}
+
+function extensionForPath(path: string): string {
+  return path.split('/').pop()?.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function atomContentType(path: string, type?: string | null): string {
+  const extension = extensionForPath(path)
+  if (type === 'html' || extension === 'html') return 'text/html'
+  if (extension === 'csv') return 'text/csv'
+  if (extension === 'json') return 'application/json'
+  if (extension === 'txt') return 'text/plain'
+  return 'text/markdown'
+}
+
+function normalizeAtomFile(file: FileRow): AppFileRow {
+  return {
+    ...file,
+    kind: 'atom',
+    contentType: atomContentType(file.path, file.type),
+  }
+}
+
+function normalizeAssetFile(file: FileRow): AppFileRow {
+  return {
+    ...file,
+    kind: file.kind === 'database' ? 'database' : 'asset',
+    contentType: file.contentType ?? 'application/octet-stream',
+    icon: file.icon ?? null,
+  }
+}
+
+function normalizeBackendFile(file: WorkspaceFile): AppFileRow {
+  return {
+    ...file,
+    kind: file.kind,
+    contentType: file.contentType,
+  }
+}
+
+function sortAppFiles(files: AppFileRow[]): AppFileRow[] {
+  return [...files].sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function upsertBackendFileRow(
+  rows: AppFileRow[] | undefined,
+  file: WorkspaceFile,
+): AppFileRow[] {
+  const next = new Map<string, AppFileRow>()
+  for (const row of rows ?? []) next.set(row.path, row)
+  next.set(file.path, normalizeBackendFile(file))
+  return sortAppFiles([...next.values()])
+}
+
+function renameBackendFileRow(
+  rows: AppFileRow[] | undefined,
+  fromPath: string,
+  file: WorkspaceFile,
+): AppFileRow[] {
+  const next = (rows ?? []).filter((row) => row.path !== fromPath)
+  next.push(normalizeBackendFile(file))
+  return sortAppFiles(next)
+}
+
+function isAssetFile(file: AppFileRow | null | undefined): boolean {
+  return file?.kind === 'asset' || file?.kind === 'database'
 }
 
 function agentSelectionFromApi(
@@ -376,7 +455,47 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     )
   }, [activeWorkspaceId, workspaces])
   const activeWorkspaceSlug = activeWorkspace?.slug ?? 'workspace'
-  const files = useQuery(api.atoms.list, { activeWorkspaceId })
+  const backendMode = resolveDohcBackendMode()
+  const backendClient = useMemo<DohcBackendClient | null>(
+    () => backendMode === 'postgres' ? createPostgresBackendClient() : null,
+    [backendMode],
+  )
+  const [backendFiles, setBackendFiles] = useState<AppFileRow[] | undefined>(
+    undefined,
+  )
+  const atomFiles = useQuery(api.atoms.list, { activeWorkspaceId })
+  const assetFiles = useQuery(api.assets.listWorkspaceFiles, {
+    activeWorkspaceId,
+  })
+  const convexFiles = useMemo<AppFileRow[] | undefined>(() => {
+    if (atomFiles === undefined || assetFiles === undefined) return undefined
+    return [
+      ...atomFiles.map((file) => normalizeAtomFile(file)),
+      ...assetFiles.map((file) => normalizeAssetFile(file)),
+    ].sort((a, b) => a.path.localeCompare(b.path))
+  }, [assetFiles, atomFiles])
+  useEffect(() => {
+    if (!backendClient) {
+      setBackendFiles(undefined)
+      return
+    }
+    let cancelled = false
+    setBackendFiles(undefined)
+    void backendClient.listFiles()
+      .then((rows) => {
+        if (cancelled) return
+        setBackendFiles(sortAppFiles(rows.map((row) => normalizeBackendFile(row))))
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setBackendFiles([])
+        notice.error(`Couldn't load files`, (error as Error).message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [backendClient, notice])
+  const files = backendClient ? backendFiles : convexFiles
   const folders = useQuery(api.folders.list, { activeWorkspaceId })
   const fileByPath = useMemo(() => {
     const rows = new Map<string, NonNullable<typeof files>[number]>()
@@ -421,6 +540,8 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   const upsertAtom = useMutation(api.atoms.upsert)
   const removeAtom = useMutation(api.atoms.remove)
   const moveAtom = useMutation(api.atoms.move)
+  const renameWorkspaceFile = useMutation(api.assets.renameWorkspaceFile)
+  const removeWorkspaceFile = useMutation(api.assets.removeWorkspaceFile)
   // D4.7c — pendingSaveRef gets populated by AtomView with its
   // flushSave function. Rename/move handlers await it before
   // dispatching the mutation so the wikilink-rewrite cascade sees
@@ -560,6 +681,14 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         (routedPage?.kind === 'workspace' ? routedPage.path : null))
       : null
   const activePath = optimisticPath ?? derivedFromUrl ?? null
+  const activeFile = activePath ? fileByPath.get(activePath) : undefined
+  const activeAsset = isAssetFile(activeFile) ? activeFile : null
+  const activeAssetDetails = useQuery(
+    api.assets.resolveWorkspaceFile,
+    activeAsset
+      ? { path: activeAsset.path, activeWorkspaceId }
+      : 'skip',
+  )
   const [view, setView] = useState<View>(
     () =>
       urlView ??
@@ -597,10 +726,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
     void navigate({
       to: '/$workspaceSlug/$pageRef',
-      params: {
+      params: () => ({
         workspaceSlug: routedPage.workspaceSlug,
         pageRef: canonicalRef,
-      },
+      }),
       replace: true,
     })
   }, [navigate, routedPage, urlPageRef, urlWorkspaceSlug])
@@ -616,10 +745,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     }
     void navigate({
       to: '/$workspaceSlug/agent/$threadRef',
-      params: {
+      params: () => ({
         workspaceSlug: routedAgentThread.workspaceSlug,
         threadRef: canonicalRef,
-      },
+      }),
       replace: true,
     })
   }, [navigate, routedAgentThread, urlAgentThreadRef, urlWorkspaceSlug])
@@ -992,10 +1121,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     (thread: AgentThreadSummary, opts?: { replace?: boolean }) => {
       void navigate({
         to: '/$workspaceSlug/agent/$threadRef',
-        params: {
+        params: () => ({
           workspaceSlug: activeWorkspaceSlug,
           threadRef: agentThreadRef(thread),
-        },
+        }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1014,7 +1143,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         }
         void navigate({
           to: '/$workspaceSlug/agent',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1023,7 +1152,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setSharingOpen(false)
         void navigate({
           to: '/$workspaceSlug/graph',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1032,7 +1161,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setSharingOpen(false)
         void navigate({
           to: '/$workspaceSlug/apps',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1049,17 +1178,17 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         if (!row) {
           void navigate({
             to: '/$workspaceSlug/files',
-            params: { workspaceSlug: activeWorkspaceSlug },
+            params: () => ({ workspaceSlug: activeWorkspaceSlug }),
             replace: opts?.replace ?? false,
           })
           return
         }
         void navigate({
           to: '/$workspaceSlug/$pageRef',
-          params: {
+          params: () => ({
             workspaceSlug: activeWorkspaceSlug,
             pageRef: pageRef(row),
-          },
+          }),
           replace: opts?.replace ?? false,
         })
         return
@@ -1067,14 +1196,14 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       if (destination?.kind === 'shared') {
         void navigate({
           to: '/shared/$shareId',
-          params: { shareId: destination.id },
+          params: () => ({ shareId: destination.id }),
           replace: opts?.replace ?? false,
         })
         return
       }
       void navigate({
         to: '/$workspaceSlug/files',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1161,7 +1290,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       setSharingOpen(false)
       void navigate({
         to: '/$workspaceSlug/agent',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1336,7 +1465,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
         setAgentDraft(true)
         void navigate({
           to: '/$workspaceSlug/agent',
-          params: { workspaceSlug: activeWorkspaceSlug },
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
           replace: true,
         })
       }
@@ -1441,14 +1570,23 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       setView('atom')
       setOptimisticPath(path)
       const row = fileByPath.get(path)
+      if (isAssetFile(row)) {
+        lastFilesDestinationRef.current = null
+        void navigate({
+          to: '/$workspaceSlug/files',
+          params: () => ({ workspaceSlug: activeWorkspaceSlug }),
+          replace: opts?.replace ?? false,
+        })
+        return
+      }
       if (row) {
         lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
         void navigate({
           to: '/$workspaceSlug/$pageRef',
-          params: {
+          params: () => ({
             workspaceSlug: activeWorkspaceSlug,
             pageRef: pageRef(row),
-          },
+          }),
           replace: opts?.replace ?? false,
         })
       }
@@ -1464,7 +1602,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       // Stay in the Files surface after deleting/clearing the open atom.
       void navigate({
         to: '/$workspaceSlug/files',
-        params: { workspaceSlug: activeWorkspaceSlug },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug }),
         replace: opts?.replace ?? false,
       })
     },
@@ -1479,7 +1617,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       lastFilesDestinationRef.current = { kind: 'shared', id: sid }
       void navigate({
         to: '/shared/$shareId',
-        params: { shareId: sid },
+        params: () => ({ shareId: sid }),
       })
     },
     [navigate],
@@ -1492,7 +1630,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       const appRef = encodeViewRef(packageRoot)
       void navigate({
         to: '/$workspaceSlug/a/$appRef',
-        params: { workspaceSlug: activeWorkspaceSlug, appRef },
+        params: () => ({ workspaceSlug: activeWorkspaceSlug, appRef }),
       })
     },
     [activeWorkspaceSlug, navigate],
@@ -1515,10 +1653,10 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
       lastFilesDestinationRef.current = { kind: 'atom', id: row._id }
       void navigate({
         to: '/$workspaceSlug/$pageRef',
-        params: {
+        params: () => ({
           workspaceSlug: activeWorkspaceSlug,
           pageRef: pageRef(row),
-        },
+        }),
         replace: true,
       })
     }
@@ -1549,7 +1687,16 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     openAtom(path)
     setEnterEdit(true)
     try {
-      await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+      if (backendClient) {
+        const created = await backendClient.createTextFile({
+          path,
+          body,
+          contentType: atomContentType(path),
+        })
+        setBackendFiles((current) => upsertBackendFileRow(current, created))
+      } else {
+        await upsertAtom({ path, body, source: 'user', activeWorkspaceId })
+      }
     } catch (e) {
       if (previousPath) openAtom(previousPath, { replace: true })
       else clearOpenAtom({ replace: true })
@@ -1574,6 +1721,16 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     const title = leaf.replace(/\.[a-z0-9]+$/i, '').trim()
     const body = title ? applyFrontmatter('', { title }) : ''
     await createAtom(clean, body)
+  }
+
+  function openUploadedFile(file: { path: string }) {
+    if (backendClient && 'kind' in file && 'contentType' in file && '_id' in file) {
+      setBackendFiles((current) =>
+        upsertBackendFileRow(current, file as WorkspaceFile),
+      )
+    }
+    openAtom(file.path)
+    notice.success('Uploaded file', file.path)
   }
 
   async function createFolderWithName(name: string) {
@@ -1695,7 +1852,12 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
     // D4.30 — if we just deleted the open atom, clear the URL.
     if (activePath === path) clearOpenAtom({ replace: true })
     try {
-      await removeAtom({ path, activeWorkspaceId })
+      const row = fileByPath.get(path)
+      if (isAssetFile(row)) {
+        await removeWorkspaceFile({ path, activeWorkspaceId })
+      } else {
+        await removeAtom({ path, activeWorkspaceId })
+      }
     } catch (e) {
       if (restorePath === path) openAtom(restorePath, { replace: true })
       notice.error(`Couldn't delete file`, (e as Error).message)
@@ -1706,13 +1868,41 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
   async function renameFileByPath(path: string, next: string) {
     let target = next.trim().replace(/^\/+/, '')
     if (!target) return
-    if (!/\.[a-z0-9]+$/i.test(target)) target += '.md'
+    const row = fileByPath.get(path)
+    if (!/\.[a-z0-9]+$/i.test(target)) {
+      const sourceExtension = /\.[a-z0-9]+$/i.exec(path)?.[0] ?? '.md'
+      target += isAssetFile(row)
+        ? sourceExtension
+        : '.md'
+    }
     if (target === path) return
     // D4.7c — flush autosave so the cascade reads the latest body.
-    await pendingSaveRef.current?.()
+    if (!isAssetFile(row)) {
+      await pendingSaveRef.current?.()
+    }
     if (activePath === path) setOptimisticPath(target)
     try {
-      await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+      if (backendClient) {
+        if (!row?.revision) {
+          throw new Error(`cannot rename ${path}: missing file revision`)
+        }
+        const renamed = await backendClient.renameFile({
+          path,
+          newName: target,
+          expectedRevision: row.revision,
+        })
+        setBackendFiles((current) =>
+          renameBackendFileRow(current, path, renamed),
+        )
+      } else if (isAssetFile(row)) {
+        await renameWorkspaceFile({
+          fromPath: path,
+          toPath: target,
+          activeWorkspaceId,
+        })
+      } else {
+        await moveAtom({ fromPath: path, toPath: target, activeWorkspaceId })
+      }
     } catch (e) {
       if (activePath === path) setOptimisticPath(path)
       notice.error(`Couldn't rename file`, (e as Error).message)
@@ -1874,6 +2064,8 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
                 activePath={activePath}
                 view="atom"
                 onOpenSearch={() => setSearchOpen(true)}
+                activeWorkspaceId={activeWorkspaceId}
+                backendClient={backendClient ?? undefined}
                 user={user}
                 sharedWithMe={sharedWithMe ?? []}
                 sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -1881,6 +2073,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
                 allowCreate={view !== 'graph'}
                 onOpenShared={openShared}
                 onOpen={(p) => openAtom(p)}
+                onUploadFile={openUploadedFile}
                 onCreatePage={createPageWithName}
                 onCreateFolder={createFolderWithName}
                 onDeleteFolder={deleteFolderByPath}
@@ -2018,6 +2211,8 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               activePath={activePath}
               view="atom"
               onOpenSearch={() => setSearchOpen(true)}
+              activeWorkspaceId={activeWorkspaceId}
+              backendClient={backendClient ?? undefined}
               user={user}
               sharedWithMe={sharedWithMe ?? []}
               sharedByMeFileIds={sharedByMeFileIds ?? []}
@@ -2025,6 +2220,7 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               allowCreate={view !== 'graph'}
               onOpenShared={openShared}
               onOpen={(p) => openAtom(p)}
+              onUploadFile={openUploadedFile}
               onCreatePage={createPageWithName}
               onCreateFolder={createFolderWithName}
               onDeleteFolder={deleteFolderByPath}
@@ -2052,11 +2248,23 @@ function App({ initialView, initialAgentHandoff = false }: AppProps = {}) {
               shareId={activeShareId as Id<'atomShares'>}
               activeWorkspaceIdOverride={routedShareActiveWorkspaceId}
             />
+          ) : activeAsset ? (
+            <FileTypeView
+              path={activeAsset.path}
+              mediaType={
+                activeAssetDetails?.mediaType ??
+                activeAsset.contentType ??
+                'application/octet-stream'
+              }
+              extension={extensionForPath(activeAsset.path)}
+              assetUrl={activeAssetDetails?.url}
+            />
           ) : (
             <AtomView
               path={activePath}
               files={files ?? []}
               activeWorkspaceIdOverride={routedWorkspaceActiveId}
+              backendClient={backendClient ?? undefined}
               onRunAction={onRunAction}
               onOpenAtom={openAtom}
               onOpenView={openView}

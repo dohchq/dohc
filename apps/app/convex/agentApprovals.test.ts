@@ -196,10 +196,12 @@ describe('agent approval requests', () => {
       args: { path: 'tmp/retry.md' },
     })) as { approvalId: string }
 
-    await asAlice.mutation((api as any).agent.respondToApproval, {
+    const result = await asAlice.mutation((api as any).agent.respondToApproval, {
       approvalId: created.approvalId,
       decision: 'always_allow',
     })
+    expect(result.resumePrompt).toContain('The user clicked Always Allow')
+    expect(result.resumePrompt).toContain('do not infer any broader permission')
 
     const policy = await t.run(async (ctx) =>
       ctx.db

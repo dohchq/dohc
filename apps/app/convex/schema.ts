@@ -445,6 +445,7 @@ export default defineSchema({
   workspaceAssets: defineTable({
     workspaceId: v.string(),
     storageId: v.id('_storage'),
+    path: v.optional(v.string()),
     filename: v.string(),
     mediaType: v.string(),
     kind: v.union(
@@ -458,11 +459,14 @@ export default defineSchema({
     purpose: v.union(v.literal('chat'), v.literal('workspace')),
     createdByUserId: v.string(),
     createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+    revision: v.optional(v.number()),
     threadId: v.optional(v.string()),
     messageId: v.optional(v.string()),
     usedAt: v.optional(v.number()),
   })
     .index('by_workspace', ['workspaceId'])
+    .index('by_workspace_path', ['workspaceId', 'path'])
     .index('by_workspace_storage', ['workspaceId', 'storageId'])
     .index('by_workspace_thread', ['workspaceId', 'threadId']),
 

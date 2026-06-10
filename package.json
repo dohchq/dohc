@@ -11,15 +11,22 @@
     "dev:app": "pnpm --filter @dohc/web --if-present run dev",
     "dev:sync": "node scripts/dev-sync.mjs",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
+    "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
+    "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres minio",
     "build": "pnpm -r --if-present build",
     "start": "pnpm --filter @dohc/web --if-present run start",
     "preview": "pnpm --filter @dohc/web --if-present run preview",
     "reset:dev": "node scripts/reset-dev-data.mjs",
+    "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",
     "test:hocuspocus:integration": "pnpm --filter @dohc/hocuspocus run test:integration",
-    "lint": "pnpm -r --if-present lint"
+    "sync:local": "pnpm --filter @dohc/workspace-fs sync",
+    "lint": "pnpm -r --if-present lint",
+    "check:dual-backend-baseline": "node scripts/check-dual-backend-baseline.mjs",
+    "check:self-host": "node scripts/check-self-host.mjs",
+    "check:debt": "node scripts/check-tech-debt.mjs"
   },
   "packageManager": "pnpm@10.24.0",
   "devDependencies": {

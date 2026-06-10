@@ -75,7 +75,7 @@ describe('AgentRunRail scope', () => {
           title: 'dohc run',
           projectPath: 'dohc',
           createdAt: 100,
-          updatedAt: 250,
+          updatedAt: 250_100,
           pinnedAt: null,
         },
         files: [
@@ -89,6 +89,7 @@ describe('AgentRunRail scope', () => {
 
     expect(html).toContain('Changes')
     expect(html).toContain('Files touched since this chat started')
+    expect(html).toContain('4m 10s')
     expect(html).toContain('+2')
     expect(html).toContain('files')
     expect(html).toContain('Scope')

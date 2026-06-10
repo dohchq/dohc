@@ -85,7 +85,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
     if (!fallbackSlug) return
     void navigate({
       to: '/$workspaceSlug',
-      params: { workspaceSlug: fallbackSlug },
+      params: () => ({ workspaceSlug: fallbackSlug }),
     })
   }
 
@@ -100,7 +100,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
       setActiveWorkspaceId(orgId)
       void navigate({
         to: '/$workspaceSlug',
-        params: { workspaceSlug: slug },
+        params: () => ({ workspaceSlug: slug }),
       })
       onClose()
     } catch (e) {
@@ -118,7 +118,7 @@ export function WorkspaceManagementDialog({ open, onClose }: Props) {
       setActiveWorkspaceId(orgId)
       void navigate({
         to: '/$workspaceSlug',
-        params: { workspaceSlug: slug },
+        params: () => ({ workspaceSlug: slug }),
       })
       onClose()
     } catch (e) {

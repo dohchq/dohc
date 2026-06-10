@@ -44,6 +44,7 @@ import {
   pathToBreadcrumbs,
   type FileRow,
 } from '../lib/path-tree'
+import type { DohcBackendClient } from '../backend/backendClient'
 
 function hasPostFrontmatterContent(body: string): boolean {
   return splitFrontmatter(body).rest.trim().length > 0
@@ -86,6 +87,7 @@ type Props = {
   enterEdit?: boolean
   onEnteredEdit?: () => void
   activeWorkspaceIdOverride?: string
+  backendClient?: Pick<DohcBackendClient, 'readText' | 'createTextFile'>
   // file-org-v1 D4.7c (save-flush race fix) — when rename/move
   // mutations are about to fire from elsewhere, the caller can
   // populate this ref with our flushSave function and `await` it
@@ -106,6 +108,7 @@ export function AtomView({
   enterEdit,
   onEnteredEdit,
   activeWorkspaceIdOverride,
+  backendClient,
   pendingSaveRef,
 }: Props) {
   // No path → no atom is open. We skip the Convex query and render an
@@ -114,9 +117,11 @@ export function AtomView({
   const contextActiveWorkspaceId = useActiveWorkspaceId()
   const activeWorkspaceId =
     activeWorkspaceIdOverride ?? contextActiveWorkspaceId
-  const row = useQuery(
+  const convexRow = useQuery(
     api.atoms.getByPath,
-    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
+    backendClient || !effectivePath
+      ? 'skip'
+      : { path: effectivePath, activeWorkspaceId },
   )
   const upsert = useMutation(api.atoms.upsert)
   // atom-address-v1 §1.4 — proactively learn if THIS file's address
@@ -124,8 +129,17 @@ export function AtomView({
   // unexplained). Rendered as a calm inline line by AtomShell.
   const idAdvisory = useQuery(
     api.atoms.idAdvisory,
-    effectivePath ? { path: effectivePath, activeWorkspaceId } : 'skip',
+    backendClient || !effectivePath
+      ? 'skip'
+      : { path: effectivePath, activeWorkspaceId },
   )
+  const [backendRow, setBackendRow] = useState<
+    { body: string; revision: string; migrationNotice?: string | null } | null | undefined
+  >(undefined)
+  const row:
+    | { body: string; revision?: string; migrationNotice?: string | null }
+    | null
+    | undefined = backendClient ? backendRow : convexRow
 
   // Always-editor: the rendered doc IS the editor. There's no separate read
   // mode to swap to on blur, so the doc layout is identical whether the
@@ -145,11 +159,44 @@ export function AtomView({
   // empty content while the row is still in flight.
   const [syncedPath, setSyncedPath] = useState<string | null>(null)
 
+  function writeText(path: string, body: string) {
+    if (backendClient) {
+      return backendClient.createTextFile({
+        path,
+        body,
+        contentType: contentTypeForTextPath(path),
+      })
+    }
+    return upsert({ path, body, source: 'user', activeWorkspaceId })
+  }
+
   // Reset sync state when the path changes.
   useEffect(() => {
     remoteBodyRef.current = null
     setSyncedPath(null)
   }, [path])
+
+  useEffect(() => {
+    if (!backendClient) return
+    if (!effectivePath) {
+      setBackendRow(null)
+      return
+    }
+    let cancelled = false
+    setBackendRow(undefined)
+    void backendClient.readText(effectivePath)
+      .then((text) => {
+        if (cancelled) return
+        setBackendRow({ body: text.body, revision: text.revision })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setBackendRow(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [backendClient, effectivePath])
 
   // First-load sync: once the row arrives for the current path, seed draft
   // and mark synced. Subsequent remote updates while editing are NOT pulled
@@ -177,15 +224,10 @@ export function AtomView({
         return
       }
       remoteBodyRef.current = toSave
-      void upsert({
-        path: effectivePath,
-        body: toSave,
-        source: 'user',
-        activeWorkspaceId,
-      })
+      void writeText(effectivePath, toSave)
     }, 500)
     return () => clearTimeout(t)
-  }, [draft, row, upsert, effectivePath, activeWorkspaceId])
+  }, [backendClient, draft, row, upsert, effectivePath, activeWorkspaceId])
 
   // D4.28 — immediate commit (no debounce) for the raw-source
   // textarea. Editing the frontmatter `id:` per-keystroke on the
@@ -203,7 +245,7 @@ export function AtomView({
     setDraft(next)
     if (next === remoteBodyRef.current) return
     remoteBodyRef.current = next
-    await upsert({ path: effectivePath, body: next, source: 'user', activeWorkspaceId })
+    await writeText(effectivePath, next)
   }
 
   function changeDraft(next: string) {
@@ -241,17 +283,12 @@ export function AtomView({
         return
       }
       remoteBodyRef.current = toSave
-      await upsert({
-        path: effectivePath,
-        body: toSave,
-        source: 'user',
-        activeWorkspaceId,
-      })
+      await writeText(effectivePath, toSave)
     }
     return () => {
       if (pendingSaveRef.current) pendingSaveRef.current = null
     }
-  }, [effectivePath, upsert, pendingSaveRef, activeWorkspaceId])
+  }, [backendClient, effectivePath, upsert, pendingSaveRef, activeWorkspaceId])
 
   // enterEdit signals "focus the editor on arrival" for new-page flows.
   // Clear the flag upstream
@@ -375,6 +412,15 @@ export function AtomView({
       )}
     </div>
   )
+}
+
+function contentTypeForTextPath(path: string): string {
+  const clean = path.toLowerCase()
+  if (clean.endsWith('.html')) return 'text/html'
+  if (clean.endsWith('.json')) return 'application/json'
+  if (clean.endsWith('.txt')) return 'text/plain'
+  if (clean.endsWith('.csv')) return 'text/csv'
+  return 'text/markdown'
 }
 
 function NoFile() {

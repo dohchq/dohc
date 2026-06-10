@@ -47,5 +47,28 @@ services:
     ports:
       - "127.0.0.1:1234:1234"
 
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    container_name: dohc-v2-minio
+    environment:
+      MINIO_ROOT_USER: dohc
+      MINIO_ROOT_PASSWORD: dohc-password
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - dohc_v2_minio:/data
+
 volumes:
   dohc_v2_postgres:
+  dohc_v2_minio:

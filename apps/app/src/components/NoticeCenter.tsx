@@ -12,10 +12,12 @@ import {
   AlertCircle,
   CheckCircle2,
   Info,
+  ShieldCheck,
   X,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 
-type NoticeTone = 'info' | 'success' | 'danger'
+type NoticeTone = 'info' | 'success' | 'danger' | 'approval'
 
 type NoticeInput = {
   tone?: NoticeTone
@@ -35,6 +37,7 @@ type NoticeApi = {
   success: (title: string, detail?: string) => void
   error: (title: string, detail?: string) => void
   info: (title: string, detail?: string) => void
+  approval: (title: string, detail?: string) => void
 }
 
 const NoticeContext = createContext<NoticeApi | null>(null)
@@ -74,6 +77,7 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
       success: (title, detail) => notify({ tone: 'success', title, detail }),
       error: (title, detail) => notify({ tone: 'danger', title, detail }),
       info: (title, detail) => notify({ tone: 'info', title, detail }),
+      approval: (title, detail) => notify({ tone: 'approval', title, detail }),
     }),
     [notify],
   )
@@ -106,17 +110,14 @@ function NoticeCard({
     return () => window.clearTimeout(timeoutId)
   }, [notice.id, notice.timeoutMs, onClose])
 
-  const Icon =
-    notice.tone === 'success'
-      ? CheckCircle2
-      : notice.tone === 'danger'
-        ? AlertCircle
-        : Info
+  const Icon = noticeIconForTone(notice.tone)
   const toneClass =
     notice.tone === 'success'
       ? 'text-success'
       : notice.tone === 'danger'
         ? 'text-danger'
+        : notice.tone === 'approval'
+          ? 'text-accent'
         : 'text-ink-dim'
 
   return (
@@ -146,4 +147,14 @@ function NoticeCard({
       </button>
     </div>
   )
+}
+
+export function noticeIconForTone(tone: NoticeTone): LucideIcon {
+  return tone === 'success'
+    ? CheckCircle2
+    : tone === 'danger'
+      ? AlertCircle
+      : tone === 'approval'
+        ? ShieldCheck
+        : Info
 }

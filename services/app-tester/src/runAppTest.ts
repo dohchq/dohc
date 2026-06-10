@@ -16,6 +16,7 @@ export type AppTestCheck = {
 export type RunAppTestInput = {
   packageRoot: string
   files: AppTestFile[]
+  backend?: 'convex' | 'postgres'
   manifest?: {
     collections?: Record<string, unknown>
     databases?: Record<string, unknown>
@@ -28,6 +29,7 @@ export type RunAppTestInput = {
 export type RunAppTestResult = {
   ok: boolean
   packageRoot: string
+  backend: 'convex' | 'postgres'
   checks: AppTestCheck[]
   failures: AppTestCheck[]
   artifacts?: {
@@ -967,6 +969,7 @@ export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResu
   return {
     ok: failures.length === 0,
     packageRoot: input.packageRoot,
+    backend: input.backend ?? 'convex',
     checks,
     failures,
     ...(artifacts === undefined ? {} : { artifacts }),

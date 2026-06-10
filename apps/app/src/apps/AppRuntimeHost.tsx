@@ -837,6 +837,72 @@ export function AppRuntimeHost({
                 ...workspaceArgs,
               }),
             )
+          case 'dohc.database.table.list':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.list',
+              args: {
+                name: request.args.table,
+                database: request.args.path,
+                ...(request.args.query === undefined ? {} : { query: request.args.query }),
+              },
+            })
+          case 'dohc.database.table.get':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.get',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                database: request.args.path,
+              },
+            })
+          case 'dohc.database.table.insert':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.insert',
+              args: {
+                name: request.args.table,
+                record: request.args.record,
+                database: request.args.path,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+              },
+            })
+          case 'dohc.database.table.update':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.update',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                patch: request.args.patch,
+                database: request.args.path,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+              },
+            })
+          case 'dohc.database.table.upsert':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.upsert',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                record: request.args.record,
+                database: request.args.path,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+              },
+            })
+          case 'dohc.database.table.delete':
+            return await runRequest({
+              id: request.id,
+              op: 'dohc.collection.delete',
+              args: {
+                name: request.args.table,
+                id: request.args.id,
+                database: request.args.path,
+                ...(request.args.expectedVersion === undefined ? {} : { expectedVersion: request.args.expectedVersion }),
+              },
+            })
           case 'dohc.asset.resolve':
             return makeAppRpcSuccess(
               request.id,

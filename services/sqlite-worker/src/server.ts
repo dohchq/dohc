@@ -82,6 +82,23 @@ export function createSqliteWorkerHandler({ engine, adminToken, allowInsecureLoc
       )
     }
 
+    if (pathname === '/import-data') {
+      return jsonResponse(
+        200,
+        await engine.importData({
+          name: String(body.name ?? ''),
+          mediaType: String(body.mediaType ?? 'text/plain'),
+          body: String(body.body ?? ''),
+          tableName: String(body.tableName ?? 'rows'),
+          mode: body.mode === 'provided-schema' ? 'provided-schema' : 'infer-schema',
+          schema:
+            body.schema && typeof body.schema === 'object' && !Array.isArray(body.schema)
+              ? body.schema as never
+              : undefined,
+        }),
+      )
+    }
+
     if (pathname === '/transaction') {
       return jsonResponse(
         200,
