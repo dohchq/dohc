@@ -16,6 +16,7 @@ export default defineConfig({
           "@dohc/workspace-sync",
           "@dohc/workspace-history",
           "@dohc/app-tester",
+          "@dohc/sqlite-worker",
         ],
         // typescript is a CommonJS compiler that relies on __filename — bundling
         // it into the ESM main crashes at load. Keep it external and load it

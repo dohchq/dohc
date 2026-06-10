@@ -122,6 +122,65 @@ export const ReadWorkspaceTextResult = z.object({
 });
 export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
 
+// Visible SQLite: the studio reads a snapshot (tables/columns/bounded rows),
+// edits rows in place, and imports a source file into a new database. The
+// on-disk .sqlite is canonical; raw bytes never CRDT-sync (edits flow as an
+// op log). Identifiers are bounded — IPC payloads are untrusted.
+const SQL_IDENT = z.string().min(1).max(256);
+
+export const DatabaseColumnView = z.object({
+  name: z.string(),
+  type: z.string(),
+  primaryKey: z.boolean().optional(),
+  nullable: z.boolean().optional(),
+});
+
+export const DatabaseTableView = z.object({
+  name: z.string(),
+  columns: z.array(DatabaseColumnView),
+  rows: z.array(z.record(z.unknown())),
+});
+
+export const DatabaseSnapshotResult = z.object({
+  path: z.string(),
+  tables: z.array(DatabaseTableView),
+});
+export type DatabaseSnapshotResult = z.infer<typeof DatabaseSnapshotResult>;
+
+export const ReadWorkspaceDatabasePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+});
+export type ReadWorkspaceDatabasePayload = z.infer<typeof ReadWorkspaceDatabasePayload>;
+
+export const ApplyDatabaseEditPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+  edit: z.object({
+    table: SQL_IDENT,
+    op: z.enum(["insert", "update", "upsert", "delete"]),
+    pkColumn: SQL_IDENT,
+    rowId: z.union([z.string().max(4096), z.number()]),
+    payload: z.record(z.unknown()).optional(),
+  }),
+});
+export type ApplyDatabaseEditPayload = z.infer<typeof ApplyDatabaseEditPayload>;
+
+export const ImportToDatabasePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  sourceRelativePath: PATH_STRING,
+  databaseRelativePath: PATH_STRING,
+  tableName: SQL_IDENT,
+});
+export type ImportToDatabasePayload = z.infer<typeof ImportToDatabasePayload>;
+
+export const ImportToDatabaseResult = z.object({
+  path: z.string(),
+  tableName: z.string(),
+  rowCount: z.number().int().nonnegative(),
+});
+export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
+
 export const SyncStatusResult = z.object({
   state: z.enum([
     "synced",
@@ -242,6 +301,15 @@ export interface DohcDesktopBridge {
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
+  readWorkspaceDatabase(
+    payload: ReadWorkspaceDatabasePayload,
+  ): Promise<DatabaseSnapshotResult>;
+  applyDatabaseEdit(
+    payload: ApplyDatabaseEditPayload,
+  ): Promise<DatabaseSnapshotResult>;
+  importToDatabase(
+    payload: ImportToDatabasePayload,
+  ): Promise<ImportToDatabaseResult>;
   getAppPackage(payload: AppPackagePayload): Promise<AppPackageResult>;
   runAppTester(payload: RunAppTesterPayload): Promise<RunAppTesterResult>;
   grantAppTrust(payload: GrantAppTrustPayload): Promise<void>;

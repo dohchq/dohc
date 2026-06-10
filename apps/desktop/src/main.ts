@@ -21,7 +21,11 @@ import {
   DefaultWorkspaceRootResult,
   AppPackagePayload,
   AppPackageResult,
+  ApplyDatabaseEditPayload,
+  DatabaseSnapshotResult,
   GrantAppTrustPayload,
+  ImportToDatabasePayload,
+  ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
   LaunchMarksResult,
@@ -33,6 +37,7 @@ import {
   OpenFileExternallyPayload,
   OpenWorkspacePayload,
   PickWorkspaceRootResult,
+  ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   SyncStatusResult,
@@ -61,6 +66,11 @@ import {
   readWorkspaceText,
   resolveWorkspaceFile,
 } from "./workspaces/workspaceAssets";
+import {
+  applyDatabaseEdit,
+  importToDatabase,
+  readDatabaseSnapshot,
+} from "./workspaces/workspaceDatabase";
 import {
   copyIntoWorkspace,
   createFile,
@@ -266,6 +276,44 @@ function registerIpcHandlers(): void {
     );
     const error = await shell.openPath(realTarget);
     if (error) throw new Error(error);
+  });
+
+  ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadWorkspaceDatabasePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return DatabaseSnapshotResult.parse(
+      await readDatabaseSnapshot(workspace.rootPath, input.relativePath),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.applyDatabaseEdit, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ApplyDatabaseEditPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return DatabaseSnapshotResult.parse(
+      await applyDatabaseEdit(
+        workspace.rootPath,
+        input.relativePath,
+        input.edit,
+        { kind: "user", userId: "local" },
+        Date.now(),
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ImportToDatabasePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return ImportToDatabaseResult.parse(
+      await importToDatabase(
+        workspace.rootPath,
+        input.sourceRelativePath,
+        input.databaseRelativePath,
+        input.tableName,
+      ),
+    );
   });
 
   ipcMain.handle(CHANNELS.getAppPackage, async (event, payload) => {

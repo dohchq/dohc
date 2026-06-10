@@ -6,3 +6,4 @@ export * from "./conflicts";
 export * from "./watcher";
 export * from "./syncStatus";
 export * from "./apps";
+export * from "./databases";

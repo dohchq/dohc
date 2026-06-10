@@ -297,6 +297,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               path={selected}
               refreshKey={changeSets.length}
+              onOpenPath={selectFile}
             />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">

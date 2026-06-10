@@ -216,6 +216,9 @@ importers:
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand
+      '@dohc/sqlite-worker':
+        specifier: workspace:*
+        version: link:../../services/sqlite-worker
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core

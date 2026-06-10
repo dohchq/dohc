@@ -28,6 +28,12 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.readWorkspaceText, payload),
   openFileExternally: (payload) =>
     ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
+  readWorkspaceDatabase: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
+  applyDatabaseEdit: (payload) =>
+    ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
+  importToDatabase: (payload) =>
+    ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
   getAppPackage: (payload) => ipcRenderer.invoke(CHANNELS.getAppPackage, payload),
   runAppTester: (payload) => ipcRenderer.invoke(CHANNELS.runAppTester, payload),
   grantAppTrust: (payload) => ipcRenderer.invoke(CHANNELS.grantAppTrust, payload),

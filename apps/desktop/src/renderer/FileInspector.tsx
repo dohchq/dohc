@@ -8,6 +8,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import { AppPackageView } from "./AppPackageView";
+import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
@@ -144,8 +145,29 @@ function MarkdownView({ body }: { body: string }) {
   );
 }
 
-function CsvView({ body }: { body: string }) {
+// Derives where a CSV/JSON import materializes: a sibling .sqlite, table named
+// after the file. Keeps the import one click and the result next to its source.
+function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: string } {
+  const slash = sourcePath.lastIndexOf("/");
+  const dir = slash === -1 ? "" : sourcePath.slice(0, slash + 1);
+  const base = sourcePath.slice(slash + 1).replace(/\.[^.]+$/, "");
+  const tableName = base.replace(/[^a-zA-Z0-9_]/g, "_") || "imported";
+  return { dbPath: `${dir}${base}.sqlite`, tableName };
+}
+
+function CsvView({
+  body,
+  workspaceId,
+  path,
+  onOpenPath,
+}: {
+  body: string;
+  workspaceId: string;
+  path: string;
+  onOpenPath?: (path: string) => void;
+}) {
   const [raw, setRaw] = useState(false);
+  const [importing, setImporting] = useState(false);
   const rows = useMemo(
     () =>
       body
@@ -156,9 +178,38 @@ function CsvView({ body }: { body: string }) {
     [body],
   );
   const [header, ...data] = rows;
+
+  async function importToSqlite() {
+    if (importing) return;
+    setImporting(true);
+    try {
+      const { dbPath, tableName } = deriveImportTarget(path);
+      const result = await bridge().importToDatabase({
+        workspaceId,
+        sourceRelativePath: path,
+        databaseRelativePath: dbPath,
+        tableName,
+      });
+      onOpenPath?.(result.path);
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
-      <div className="flex items-center justify-end border-b border-line px-3 py-1">
+      <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
+        {onOpenPath ? (
+          <button
+            type="button"
+            onClick={() => void importToSqlite()}
+            disabled={importing}
+            className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink disabled:opacity-50"
+            data-testid="csv-import-sqlite"
+          >
+            {importing ? "Importing…" : "Import to SQLite"}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => setRaw((r) => !r)}
@@ -327,6 +378,7 @@ export function FileInspector(props: {
   workspaceId: string;
   path: string;
   refreshKey?: number;
+  onOpenPath?: (path: string) => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -367,7 +419,12 @@ export function FileInspector(props: {
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<Table size={13} aria-hidden />} path={props.path} label="data" />
           {truncatedNotice}
-          <CsvView body={text ?? ""} />
+          <CsvView
+            body={text ?? ""}
+            workspaceId={props.workspaceId}
+            path={props.path}
+            onOpenPath={props.onOpenPath}
+          />
         </div>
       );
     case "json":
@@ -409,14 +466,11 @@ export function FileInspector(props: {
       );
     case "database":
       return (
-        <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<Database size={13} aria-hidden />} path={props.path} label="database" />
-          <AffordanceCard
-            testId="view-database"
-            title="SQLite database"
-            body="Database Studio — browse and query tables — arrives with the SQLite phase."
-          />
-        </div>
+        <DatabaseStudioView
+          workspaceId={props.workspaceId}
+          path={props.path}
+          refreshKey={props.refreshKey}
+        />
       );
     case "app-source":
       return <AppPackageView workspaceId={props.workspaceId} path={props.path} />;

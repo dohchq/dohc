@@ -58,11 +58,14 @@ type RowOperation = 'insert' | 'update' | 'upsert' | 'delete'
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const MAX_SQL_BYTES = 64 * 1024
 
-const require = createRequire(import.meta.url)
+// Named requireModule (not `require`): bundlers that emit an ESM chunk with a
+// CommonJS shim inject their own top-level `const require`, and a second
+// declaration is a SyntaxError at load time.
+const requireModule = createRequire(import.meta.url)
 let sqliteModulePromise: Promise<SQLiteModule> | null = null
 
 function sqliteModule() {
-  sqliteModulePromise ??= Promise.resolve(require('node:sqlite') as SQLiteModule)
+  sqliteModulePromise ??= Promise.resolve(requireModule('node:sqlite') as SQLiteModule)
   return sqliteModulePromise
 }
 
