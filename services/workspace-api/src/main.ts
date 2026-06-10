@@ -9,6 +9,7 @@ import { createServer } from "node:http";
 import { Pool } from "pg";
 import { createWorkspaceAuth } from "./auth/betterAuth";
 import { createSessionActorResolver } from "./auth/session";
+import { withCors } from "./cors";
 import { createWorkspaceApiHandler } from "./server";
 
 // The dohc Cloud / self-host server process: ONE Postgres, Better Auth mounted
@@ -44,6 +45,11 @@ if (!testAuthSeam && secret.length < 32) {
   process.exit(1);
 }
 
+// Browser web client (dohc Cloud): setting DOHC_WEB_ORIGIN enables CORS with
+// credentials for that ONE origin plus Better Auth origin trust. Unset (the
+// default) leaves the API same-origin/Bearer only.
+const webOrigin = process.env.DOHC_WEB_ORIGIN;
+
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
 });
@@ -51,6 +57,7 @@ const auth = createWorkspaceAuth({
   pool,
   baseURL,
   secret: secret || "dev-test-only-secret-0123456789abcdef",
+  ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
 });
 const backend = createPostgresWorkspaceBackend(pool, {
   blobStore: createLocalBlobStore(),
@@ -62,6 +69,7 @@ const workspaceHandler = createWorkspaceApiHandler({
   // Same secret hocuspocus verifies with; self-hosts without a collab server
   // leave it unset and POST /workspaces/:id/collab/token errors collab-disabled.
   collab: { pool, jwtSecret: process.env.HOCUSPOCUS_JWT_SECRET },
+  shared: { pool },
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
@@ -92,7 +100,7 @@ async function handleTestDeviceApprove(request: Request): Promise<Response> {
   return Response.json({ ok: true, email: testEmail });
 }
 
-const fetchHandler = async (request: Request): Promise<Response> => {
+const fetchHandler = withCors(async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/api/auth/")) return auth.handler(request);
   if (url.pathname === "/health") {
@@ -103,7 +111,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
     return handleTestDeviceApprove(request);
   }
   return workspaceHandler(request);
-};
+}, webOrigin);
 
 const server = createServer(toNodeHandler(fetchHandler));
 // When the impersonation seam is on, bind loopback only so the dev-cloud

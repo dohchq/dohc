@@ -56,27 +56,6 @@ const allowlist = [
     deleteWhen: 'Remove this allowlist entry when historical plans are moved out of repo-wide debt scans.',
   },
   {
-    file: 'apps/app/convex/confirmTier.ts',
-    patterns: [term('dead ', 'code')],
-    contains: 'single source of truth',
-    reason: 'This comment records that the confirm-tier helper is wired and reviewed, not obsolete code.',
-    deleteWhen: 'Remove the comment or this allowlist entry if confirm-tier policy is moved into a shared package.',
-  },
-  {
-    file: 'apps/app/convex/views.ts',
-    patterns: [term('TO', 'DO')],
-    contains: 'prefix-aware index',
-    reason: 'The bounded scan is retained for existing views compatibility until a prefix-aware view index exists.',
-    deleteWhen: 'Delete after view package discovery uses an indexed prefix lookup and the views regression suite covers the replacement.',
-  },
-  {
-    file: 'apps/app/convex/entities.ts',
-    patterns: [term('dead ', 'code')],
-    contains: 'existing` branch',
-    reason: 'This comment explains a mode-specific unreachable branch in shared entity update logic.',
-    deleteWhen: 'Remove the comment or split the helper when entity creation and update paths are separated.',
-  },
-  {
     file: 'docs/superpowers/reviews/codex/phase-05.md',
     patterns: [term('TO', 'DO')],
     contains: 'Our version of upath.normalize',

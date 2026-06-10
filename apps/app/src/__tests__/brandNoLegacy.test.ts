@@ -24,7 +24,6 @@ const REPO = join(ROOT, '..', '..') // monorepo root
 // string reintroduced into packages/* or docs/* is caught here too).
 const SCAN_ROOTS = [
   join(ROOT, 'src'),
-  join(ROOT, 'convex'),
   join(ROOT, 'public'),
   join(ROOT, 'package.json'),
   join(REPO, 'packages'),
@@ -41,6 +40,10 @@ const SKIP_DIR = new Set([
   'dist',
   'coverage',
   '.tanstack',
+  // Verbatim third-party review transcripts quote external repo paths
+  // (including pre-rebrand ones). They are evidence, not shipping
+  // source — same reasoning as the check-tech-debt allowlist.
+  'codex',
 ])
 const SCANNER = 'brandNoLegacy.test.ts'
 
@@ -90,7 +93,7 @@ function collectFiles(): string[] {
 }
 
 describe('brand no-legacy gate', () => {
-  it('ships no legacy product identity in src/convex/public/metadata', () => {
+  it('ships no legacy product identity in src/public/metadata', () => {
     const violations: string[] = []
     for (const file of collectFiles()) {
       const text = readFileSync(file, 'utf8')
@@ -114,8 +117,8 @@ describe('brand no-legacy gate', () => {
   })
 
   it('enforces the new dohc namespaces are present where expected', () => {
-    const fileTree = readFileSync(join(ROOT, 'src/components/FileTree.tsx'), 'utf8')
-    expect(fileTree).toContain('application/dohc-tree-row')
+    const styles = readFileSync(join(ROOT, 'src/styles.css'), 'utf8')
+    expect(styles).toContain('--dohc-bg')
 
     const useTheme = readFileSync(join(ROOT, 'src/lib/use-theme.ts'), 'utf8')
     expect(useTheme).toContain('dohc-theme')

@@ -6,7 +6,6 @@ import {
   RevocationRegistry,
   writeNodeAdminResponse,
 } from './admin.js'
-import { createConvexAcl } from './convex-acl.js'
 import { createHocuspocusHooks, type HocuspocusAcl } from './hooks.js'
 import { createPostgresAcl } from './postgres-acl.js'
 import {
@@ -27,7 +26,7 @@ function requiredEnv(name: string): string {
 function createDevAllowAllAcl(): HocuspocusAcl {
   if (process.env.HOCUSPOCUS_ALLOW_DEV_ACL !== 'true') {
     throw new Error(
-      'Configure HOCUSPOCUS_WORKSPACE_DATABASE_URL (or HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN), or set HOCUSPOCUS_ALLOW_DEV_ACL=true for local development only',
+      'Configure HOCUSPOCUS_WORKSPACE_DATABASE_URL, or set HOCUSPOCUS_ALLOW_DEV_ACL=true for local development only',
     )
   }
 
@@ -51,16 +50,6 @@ function createAclFromEnv(): { acl: HocuspocusAcl; close?: () => Promise<void> }
   if (workspaceDatabaseUrl) {
     const pool = new Pool({ connectionString: workspaceDatabaseUrl })
     return { acl: createPostgresAcl({ pool }), close: () => pool.end() }
-  }
-  const convexUrl = process.env.HOCUSPOCUS_CONVEX_URL
-  const serverToken = process.env.HOCUSPOCUS_CONVEX_SERVER_TOKEN
-  if (convexUrl || serverToken) {
-    if (!convexUrl || !serverToken) {
-      throw new Error(
-        'Both HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN are required for Convex ACL',
-      )
-    }
-    return { acl: createConvexAcl({ convexUrl, serverToken }) }
   }
   return { acl: createDevAllowAllAcl() }
 }

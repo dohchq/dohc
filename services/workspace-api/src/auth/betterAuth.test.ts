@@ -1,5 +1,7 @@
+import type { WorkspaceBackend } from "@dohc/workspace-contracts";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createWorkspaceApiHandler } from "../server";
 import { actorFromSession, createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createSessionActorResolver, UnauthorizedError } from "./session";
 
@@ -108,32 +110,33 @@ describe("device authorization flow (desktop login)", () => {
     });
     expect(approve).toMatchObject({ success: true });
 
-    // 4. Desktop polls and receives a session token... (interval throttling
-    //    can answer slow_down for an immediate re-poll; retry once after it.)
-    let token: { access_token?: string };
-    try {
-      token = await auth.api.deviceToken({
-        body: {
-          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          device_code: device.device_code,
-          client_id: "dohc-desktop",
-        },
-      });
-    } catch {
-      await new Promise((r) => setTimeout(r, 3100));
-      token = await auth.api.deviceToken({
-        body: {
-          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          device_code: device.device_code,
-          client_id: "dohc-desktop",
-        },
-      });
+    // 4. Desktop polls and receives a session token. The server throttles
+    //    polls to one per `interval` measured from the LAST accepted poll's
+    //    server-side timestamp, so a single fixed sleep can still land in
+    //    the window (observed flake). Loop until slow_down clears, waiting
+    //    interval + margin each time; any other error is a real failure.
+    const pollDelayMs = (device.interval ?? 3) * 1000 + 500;
+    let token: { access_token?: string } | undefined;
+    for (let attempt = 0; attempt < 5 && !token; attempt += 1) {
+      try {
+        token = await auth.api.deviceToken({
+          body: {
+            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+            device_code: device.device_code,
+            client_id: "dohc-desktop",
+          },
+        });
+      } catch (error) {
+        const code = (error as { body?: { error?: string } }).body?.error;
+        if (code !== "slow_down") throw error;
+        await new Promise((r) => setTimeout(r, pollDelayMs));
+      }
     }
-    expect(token.access_token).toBeTruthy();
+    expect(token?.access_token).toBeTruthy();
 
     // 5. ...which authenticates API requests as a Bearer session.
     const session = await auth.api.getSession({
-      headers: { authorization: `Bearer ${token.access_token}` },
+      headers: { authorization: `Bearer ${token!.access_token}` },
     });
     expect(session?.user.id).toBe(signup.user.id);
 
@@ -206,6 +209,39 @@ describe("session validation middleware shape", () => {
         "ws-1",
       ),
     ).rejects.toMatchObject({ statusCode: 401, message: "unauthorized" });
+  });
+});
+
+describe("browser cookie sessions (web client)", () => {
+  it("resolves the route-level actor from a signed-in cookie jar and 401s anonymous requests", async () => {
+    const email = `${unique()}@dohc.test`;
+    const signup = await signUp(email);
+    const cookie = await sessionCookieFor(email);
+
+    // getSession reads the session cookie the same way it reads a Bearer
+    // token, so the SAME resolver serves the browser web client.
+    const resolve = createSessionActorResolver(auth);
+    const actor = await resolve(
+      new Request("http://localhost:1786/workspaces/ws-cookie/files", { headers: { cookie } }),
+      "ws-cookie",
+    );
+    expect(actor).toEqual({ userId: signup.user.id, workspaceId: "ws-cookie" });
+
+    // Route-level: the full API handler serves a cookie-authenticated request.
+    const handler = createWorkspaceApiHandler({
+      backend: { listFiles: async () => [] } as unknown as WorkspaceBackend,
+      resolveActor: resolve,
+    });
+    const response = await handler(
+      new Request("http://localhost:1786/workspaces/ws-cookie/files", { headers: { cookie } }),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, files: [] });
+
+    const anonymous = await handler(
+      new Request("http://localhost:1786/workspaces/ws-cookie/files"),
+    );
+    expect(anonymous.status).toBe(401);
   });
 });
 

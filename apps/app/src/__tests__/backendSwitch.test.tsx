@@ -5,34 +5,24 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resolveCloudApiOrigin, type DohcBackendClient } from '../backend/backendClient'
 import {
   createDohcBackendClient,
-  resolveDohcBackendMode,
-  type DohcBackendClient,
-} from '../backend/backendClient'
-import { createPostgresBackendClient } from '../backend/postgresBackendClient'
+  createPostgresBackendClient,
+} from '../backend/postgresBackendClient'
 import { UploadFileButton } from '../components/UploadFileButton'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true
 
-const uploadState = vi.hoisted(() => ({
-  mutationIndex: 0,
-  generateUploadUrl: vi.fn(),
-  registerWorkspaceFile: vi.fn(),
-}))
-
-vi.mock('convex/react', () => ({
-  useMutation: () =>
-    uploadState.mutationIndex++ === 0
-      ? uploadState.generateUploadUrl
-      : uploadState.registerWorkspaceFile,
-}))
-
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const APP_ROUTE_SRC = readFileSync(resolve(__dirname, '../routes/_app.tsx'), 'utf8')
-const ATOM_VIEW_SRC = readFileSync(resolve(__dirname, '../components/AtomView.tsx'), 'utf8')
-const FILE_TREE_SRC = readFileSync(resolve(__dirname, '../components/FileTree.tsx'), 'utf8')
+const WORKSPACE_ROUTE_SRC = readFileSync(
+  resolve(__dirname, '../routes/_app.$workspaceSlug.tsx'),
+  'utf8',
+)
+const CLOUD_SHELL_SRC = readFileSync(resolve(__dirname, '../cloud/CloudShell.tsx'), 'utf8')
+const FILE_VIEWER_SRC = readFileSync(resolve(__dirname, '../cloud/FileViewer.tsx'), 'utf8')
 
 function fakeClient(label: string): DohcBackendClient {
   return {
@@ -55,6 +45,14 @@ function fakeClient(label: string): DohcBackendClient {
       contentType: 'text/markdown',
       revision: '1',
     })),
+    writeText: vi.fn(async ({ path }) => ({
+      _id: `${label}_written`,
+      path,
+      source: 'user',
+      kind: 'atom' as const,
+      contentType: 'text/markdown',
+      revision: '2',
+    })),
     uploadFile: vi.fn(async ({ path }) => ({
       _id: `${label}_uploaded`,
       path,
@@ -63,25 +61,14 @@ function fakeClient(label: string): DohcBackendClient {
       contentType: 'text/csv',
       revision: '1',
     })),
-    renameFile: vi.fn(async ({ newName }) => ({
-      _id: `${label}_renamed`,
-      path: newName,
-      source: 'user',
-      kind: 'atom' as const,
-      contentType: 'text/markdown',
-      revision: '2',
-    })),
   }
 }
 
-describe('frontend backend switch', () => {
+describe('cloud backend client seam', () => {
   let container: HTMLDivElement
   let root: Root
 
   beforeEach(() => {
-    uploadState.mutationIndex = 0
-    uploadState.generateUploadUrl.mockReset()
-    uploadState.registerWorkspaceFile.mockReset()
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -90,27 +77,17 @@ describe('frontend backend switch', () => {
   afterEach(() => {
     act(() => root.unmount())
     container.remove()
-    window.history.replaceState(null, '', '/')
   })
 
-  it('defaults to Convex and ignores browser-controlled query strings', () => {
-    expect(resolveDohcBackendMode({})).toBe('convex')
-    window.history.replaceState(null, '', '/?DOHC_BACKEND=postgres&backend=postgres')
-    expect(resolveDohcBackendMode({})).toBe('convex')
-    expect(resolveDohcBackendMode({ DOHC_BACKEND: 'postgres' })).toBe('postgres')
-    expect(() => resolveDohcBackendMode({ DOHC_BACKEND: 'postgress' })).toThrow(
-      /Invalid DOHC_BACKEND/,
+  it('resolves the cloud API origin from env, defaulting to same-origin', () => {
+    expect(resolveCloudApiOrigin({})).toBe('')
+    expect(resolveCloudApiOrigin({ VITE_DOHC_CLOUD_URL: 'https://cloud.dohc.app/' })).toBe(
+      'https://cloud.dohc.app',
     )
   })
 
-  it('routes common file operations through the selected Postgres client', async () => {
-    const convex = fakeClient('convex')
-    const postgres = fakeClient('postgres')
-    const client = createDohcBackendClient({
-      env: { DOHC_BACKEND: 'postgres' },
-      convex,
-      postgres,
-    })
+  it('routes all file operations through the provided client (op-routing contract)', async () => {
+    const client = fakeClient('pg')
 
     await client.listFiles()
     await client.readText('finance/ledger.md')
@@ -119,38 +96,35 @@ describe('frontend backend switch', () => {
       body: '# Ledger',
       contentType: 'text/markdown',
     })
+    await client.writeText({
+      path: 'finance/ledger.md',
+      body: '# Ledger v2',
+      expectedRevision: '1',
+    })
     await client.uploadFile({
       file: new File(['a,b\n'], 'ledger.csv', { type: 'text/csv' }),
       path: 'finance/ledger.csv',
     })
-    await client.renameFile({
+
+    expect(client.listFiles).toHaveBeenCalledTimes(1)
+    expect(client.readText).toHaveBeenCalledWith('finance/ledger.md')
+    expect(client.createTextFile).toHaveBeenCalledTimes(1)
+    expect(client.writeText).toHaveBeenCalledWith({
       path: 'finance/ledger.md',
-      newName: 'finance/books.md',
+      body: '# Ledger v2',
       expectedRevision: '1',
     })
-
-    expect(postgres.listFiles).toHaveBeenCalledTimes(1)
-    expect(postgres.readText).toHaveBeenCalledWith('finance/ledger.md')
-    expect(postgres.createTextFile).toHaveBeenCalledTimes(1)
-    expect(postgres.uploadFile).toHaveBeenCalledTimes(1)
-    expect(postgres.renameFile).toHaveBeenCalledTimes(1)
-    expect(convex.listFiles).not.toHaveBeenCalled()
-    expect(convex.readText).not.toHaveBeenCalled()
-    expect(convex.createTextFile).not.toHaveBeenCalled()
-    expect(convex.uploadFile).not.toHaveBeenCalled()
-    expect(convex.renameFile).not.toHaveBeenCalled()
+    expect(client.uploadFile).toHaveBeenCalledTimes(1)
   })
 
-  it('calls services/workspace-api from the Postgres client', async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+  it('calls the workspace-scoped services/workspace-api routes', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('/files/text?')) {
-        return Response.json({ body: '# Ledger', revision: '4' })
-      }
-      if (url.endsWith('/files')) {
-        return Response.json({ files: [] })
+      if (url.endsWith('/files') && init?.method !== 'POST') {
+        return Response.json({ ok: true, files: [] })
       }
       return Response.json({
+        ok: true,
         file: {
           _id: 'pg_file',
           path: 'finance/ledger.md',
@@ -158,11 +132,13 @@ describe('frontend backend switch', () => {
           kind: 'atom',
           contentType: 'text/markdown',
           revision: '5',
+          body: '# Ledger',
         },
       })
     })
     const client = createPostgresBackendClient({
-      baseUrl: '/services/workspace-api',
+      workspaceId: 'ws-1',
+      baseUrl: 'https://cloud.example',
       fetch: fetchImpl,
     })
 
@@ -173,48 +149,73 @@ describe('frontend backend switch', () => {
       body: '# Ledger',
       contentType: 'text/markdown',
     })
+    await client.writeText({
+      path: 'finance/ledger.md',
+      body: '# Ledger v2',
+      expectedRevision: '5',
+    })
     await client.uploadFile({
       file: new File(['a,b\n'], 'ledger.csv', { type: 'text/csv' }),
       path: 'finance/ledger.csv',
     })
-    await client.renameFile({
-      path: 'finance/ledger.md',
-      newName: 'finance/books.md',
-      expectedRevision: '5',
-    })
 
-    expect(fetchImpl).toHaveBeenNthCalledWith(1, '/services/workspace-api/files', expect.any(Object))
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://cloud.example/workspaces/ws-1/files',
+      expect.objectContaining({ credentials: 'include' }),
+    )
     expect(fetchImpl).toHaveBeenNthCalledWith(
       2,
-      '/services/workspace-api/files/text?path=finance%2Fledger.md',
-      expect.any(Object),
+      'https://cloud.example/workspaces/ws-1/files/finance/ledger.md',
+      expect.objectContaining({ credentials: 'include' }),
     )
     expect(fetchImpl).toHaveBeenNthCalledWith(
       3,
-      '/services/workspace-api/files/text',
+      'https://cloud.example/workspaces/ws-1/files/finance/ledger.md',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect(fetchImpl).toHaveBeenNthCalledWith(
-      4,
-      '/services/workspace-api/files/upload',
-      expect.objectContaining({ method: 'POST' }),
-    )
+    // The create body has NO expectedRevision (createAtom path); the
+    // write body carries the revision guard (writeAtom path).
+    const createBody = JSON.parse(String((fetchImpl.mock.calls[2]![1] as RequestInit).body))
+    expect(createBody).toEqual({ body: '# Ledger', kind: 'markdown' })
+    const writeBody = JSON.parse(String((fetchImpl.mock.calls[3]![1] as RequestInit).body))
+    expect(writeBody).toEqual({ body: '# Ledger v2', expectedRevision: '5' })
     expect(fetchImpl).toHaveBeenNthCalledWith(
       5,
-      '/services/workspace-api/files/rename',
+      'https://cloud.example/workspaces/ws-1/assets',
       expect.objectContaining({ method: 'POST' }),
+    )
+    const uploadBody = JSON.parse(String((fetchImpl.mock.calls[4]![1] as RequestInit).body))
+    expect(uploadBody).toMatchObject({
+      path: 'finance/ledger.csv',
+      kind: 'csv',
+      mediaType: 'text/csv',
+    })
+    expect(atob(uploadBody.bytesBase64)).toBe('a,b\n')
+  })
+
+  it('binds the workspace id into the default client factory', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, files: [] }))
+    const client = createDohcBackendClient({
+      workspaceId: 'ws-9',
+      env: { VITE_DOHC_CLOUD_URL: 'https://cloud.example' },
+      fetch: fetchImpl,
+    })
+    await client.listFiles()
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://cloud.example/workspaces/ws-9/files',
+      expect.objectContaining({ credentials: 'include' }),
     )
   })
 
-  it('keeps upload UI behavior when a backend client handles the upload', async () => {
-    const postgres = fakeClient('postgres')
+  it('keeps upload UI behavior when the backend client handles the upload', async () => {
+    const client = fakeClient('pg')
     const onUploaded = vi.fn()
 
     await act(async () => {
       root.render(
         React.createElement(UploadFileButton, {
-          activeWorkspaceId: 'ws_test',
-          backendClient: postgres,
+          backendClient: client,
           defaultFolderPath: 'uploads',
           onUploaded,
         }),
@@ -223,13 +224,8 @@ describe('frontend backend switch', () => {
 
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')
     expect(input).not.toBeNull()
-    const file = new File(['a,b\n1,2\n'], 'wallet.csv', {
-      type: 'text/csv',
-    })
-    Object.defineProperty(input, 'files', {
-      configurable: true,
-      value: [file],
-    })
+    const file = new File(['a,b\n1,2\n'], 'wallet.csv', { type: 'text/csv' })
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
 
     await act(async () => {
       input!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -238,24 +234,22 @@ describe('frontend backend switch', () => {
       await Promise.resolve()
     })
 
-    expect(postgres.uploadFile).toHaveBeenCalledWith({
-      file,
-      path: 'uploads/wallet.csv',
-    })
-    expect(uploadState.generateUploadUrl).not.toHaveBeenCalled()
-    expect(uploadState.registerWorkspaceFile).not.toHaveBeenCalled()
+    expect(client.uploadFile).toHaveBeenCalledWith({ file, path: 'uploads/wallet.csv' })
     expect(onUploaded).toHaveBeenCalledWith(
       expect.objectContaining({ path: 'uploads/wallet.csv', kind: 'asset' }),
     )
   })
 
-  it('wires the selected backend client through route, editor, and file tree flows', () => {
-    expect(APP_ROUTE_SRC).toMatch(/resolveDohcBackendMode/)
-    expect(APP_ROUTE_SRC).toMatch(/createPostgresBackendClient/)
-    expect(APP_ROUTE_SRC).toMatch(/backendMode === 'postgres'/)
-    expect(APP_ROUTE_SRC).toContain('backendClient={backendClient ?? undefined}')
-    expect(ATOM_VIEW_SRC).toContain('backendClient.readText')
-    expect(ATOM_VIEW_SRC).toContain('backendClient.createTextFile')
-    expect(FILE_TREE_SRC).toContain('backendClient={backendClient}')
+  it('wires the backend client through the cloud shell and viewer (wiring guard)', () => {
+    // The /_app layout is the session gate; the workspace route mounts
+    // the CloudShell, which owns the client and passes it down.
+    expect(APP_ROUTE_SRC).toMatch(/createCloudApi/)
+    expect(WORKSPACE_ROUTE_SRC).toMatch(/<CloudShell workspaceId=/)
+    expect(CLOUD_SHELL_SRC).toMatch(/createDohcBackendClient\(\{ workspaceId \}\)/)
+    expect(CLOUD_SHELL_SRC).toMatch(/client\.listFiles\(\)/)
+    expect(CLOUD_SHELL_SRC).toMatch(/client\.createTextFile/)
+    expect(CLOUD_SHELL_SRC).toMatch(/backendClient=\{client\}/)
+    expect(FILE_VIEWER_SRC).toMatch(/backendClient\.readText/)
+    expect(FILE_VIEWER_SRC).toMatch(/backendClient\.writeText/)
   })
 })

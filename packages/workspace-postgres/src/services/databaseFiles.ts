@@ -80,6 +80,22 @@ function sha256(bytes: Uint8Array) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// Key-order-insensitive JSON identity: jsonb does not preserve object key
+// order, so a stored operation read back must compare equal to the same
+// payload freshly serialized. undefined-valued keys vanish, as in
+// JSON.stringify.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJson(entryValue)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 export function createMemoryBlobStore(): BlobStore {
   const blobs = new Map<string, Uint8Array>();
   return {
@@ -481,6 +497,15 @@ export function createPostgresDatabaseServices(
           [actor.workspaceId, input.operationId],
         );
         if (existing.rows[0]) {
+          // Idempotent ONLY for a true retry: the same operation id carrying a
+          // different op/payload is a client bug (or id collision) and must be
+          // rejected, never silently "succeed" without applying anything.
+          if (canonicalJson(existing.rows[0].operation) !== canonicalJson(input)) {
+            return error(
+              "operation-id-conflict",
+              "Operation id was already used by a different operation.",
+            );
+          }
           return { ok: true as const, version: existing.rows[0].result_version, idempotent: true };
         }
         const row = await databaseByPath(client, actor, input.path);

@@ -41,7 +41,7 @@ for (const metric of Object.keys(performanceBudgets)) {
 // ignores its multiplier argument by contract). Baselines come from the
 // COMMITTED packages/performance/baselines.json — the measurements JSON is
 // gitignored and freshly written every run, so a baseline stored there would
-// never survive into CI and the growth rules would be dead code. An absent
+// never survive into CI and the growth rules would never fire. An absent
 // committed entry is a true first run (establish it by committing the value).
 const baselinesFile = join(root, "packages/performance/baselines.json");
 const baselines = existsSync(baselinesFile)

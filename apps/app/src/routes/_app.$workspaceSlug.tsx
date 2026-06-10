@@ -1,8 +1,15 @@
-import { createFileRoute, Outlet } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
+import { CloudShell } from '@/cloud/CloudShell'
 
-// Workspace-slug routes live under `/<workspaceSlug>/...`, e.g.
-// `/ice`, `/ice/files`, `/ice/features-<atomId>`. The shell reads the
-// URL with useLocation; these files declare the route shape.
+// Cloud workspace access. The path param is the WORKSPACE ID (the
+// desktop's workspace UUID becomes the cloud workspace id verbatim);
+// pretty slugs are future cloud-naming work. The file keeps its
+// `$workspaceSlug` name so the route path stays stable for that work.
 export const Route = createFileRoute('/_app/$workspaceSlug')({
-  component: () => <Outlet />,
+  component: WorkspacePage,
 })
+
+function WorkspacePage() {
+  const { workspaceSlug } = Route.useParams()
+  return <CloudShell workspaceId={workspaceSlug} />
+}

@@ -1,9 +1,5 @@
 import { createStart } from '@tanstack/react-start'
-import { authkitMiddleware } from '@workos/authkit-tanstack-react-start'
 
-// Global request middleware. AuthKit handles WorkOS sealed-session
-// refresh + access-token rotation. Available everywhere via the
-// request handlers + server functions.
-export const startInstance = createStart(() => ({
-  requestMiddleware: [authkitMiddleware()],
-}))
+// Global request setup. Auth is Better Auth cookie sessions on the
+// cloud API origin — no request middleware needed in the web shell.
+export const startInstance = createStart(() => ({}))

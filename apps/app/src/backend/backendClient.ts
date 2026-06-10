@@ -1,4 +1,6 @@
-export type BackendMode = 'convex' | 'postgres'
+// The dohc Cloud backend seam. There is ONE backend — the Postgres
+// workspace-api — but the client stays behind this contract so the
+// shell, tests, and any future transport keep a single seam.
 
 export type WorkspaceFile = {
   _id: string
@@ -9,12 +11,6 @@ export type WorkspaceFile = {
   contentType: string
   revision?: string
   updatedAt?: number
-  type?: 'html' | 'command' | 'skill' | null
-  systemLocked?: boolean
-  userLocked?: boolean
-  starred?: boolean
-  icon?: string | null
-  fileId?: string | null
 }
 
 export type DohcBackendClient = {
@@ -25,48 +21,29 @@ export type DohcBackendClient = {
     body: string
     contentType: string
   }): Promise<WorkspaceFile>
-  uploadFile(input: { file: File; path: string }): Promise<WorkspaceFile>
-  renameFile(input: {
+  writeText(input: {
     path: string
-    newName: string
+    body: string
     expectedRevision: string
   }): Promise<WorkspaceFile>
+  uploadFile(input: { file: File; path: string }): Promise<WorkspaceFile>
 }
 
-export type BackendEnv = {
-  DOHC_BACKEND?: string
-  VITE_DOHC_BACKEND?: string
+export type CloudEnv = {
+  VITE_DOHC_CLOUD_URL?: string
 }
 
-export function resolveDohcBackendMode(env: BackendEnv = runtimeBackendEnv()): BackendMode {
-  const raw = env.DOHC_BACKEND ?? env.VITE_DOHC_BACKEND ?? ''
-  const mode = raw.trim().toLowerCase()
-  if (mode === '' || mode === 'convex') return 'convex'
-  if (mode === 'postgres') return 'postgres'
-  throw new Error(`Invalid DOHC_BACKEND value: ${raw}`)
+// API origin for dohc Cloud (workspace-api + Better Auth). Default is
+// same-origin ('') — the deployment proxies /workspaces, /shared, and
+// /api/auth to the workspace-api service.
+export function resolveCloudApiOrigin(env: CloudEnv = runtimeCloudEnv()): string {
+  return (env.VITE_DOHC_CLOUD_URL ?? '').trim().replace(/\/+$/g, '')
 }
 
-export function createDohcBackendClient({
-  env,
-  convex,
-  postgres,
-}: {
-  env?: BackendEnv
-  convex: DohcBackendClient
-  postgres: DohcBackendClient
-}): DohcBackendClient {
-  return resolveDohcBackendMode(env) === 'postgres' ? postgres : convex
-}
-
-function runtimeBackendEnv(): BackendEnv {
-  const viteEnv =
-    (import.meta as unknown as { env?: BackendEnv }).env ?? {}
+function runtimeCloudEnv(): CloudEnv {
+  const viteEnv = (import.meta as unknown as { env?: CloudEnv }).env ?? {}
   const processEnv =
-    (globalThis as typeof globalThis & {
-      process?: { env?: BackendEnv }
-    }).process?.env ?? {}
-  return {
-    ...processEnv,
-    ...viteEnv,
-  }
+    (globalThis as typeof globalThis & { process?: { env?: CloudEnv } }).process
+      ?.env ?? {}
+  return { ...processEnv, ...viteEnv }
 }

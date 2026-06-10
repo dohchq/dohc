@@ -287,6 +287,34 @@ describe("workspace API service", () => {
     expect(created).toHaveLength(2);
   });
 
+  it("lists the session user's workspaces through GET /workspaces", async () => {
+    // listUserWorkspaces issues one parameterized select; stub the pool rows.
+    const pool = {
+      async query(_sql: string, params: unknown[]) {
+        expect(params).toEqual(["server_user"]);
+        return { rows: [{ workspace_id: "ws-a", name: "Notes" }], rowCount: 1 };
+      },
+    } as unknown as pg.Pool;
+    const handler = createWorkspaceApiHandler({
+      backend: memoryBackend().backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+      shared: { pool },
+    });
+
+    await expect(json(await handler(new Request("http://api.test/workspaces")))).resolves.toEqual({
+      ok: true,
+      workspaces: [{ workspaceId: "ws-a", name: "Notes" }],
+    });
+
+    // Deployments without the shared/cloud pool 404 both workspace-less routes.
+    const bare = createWorkspaceApiHandler({
+      backend: memoryBackend().backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+    expect((await bare(new Request("http://api.test/workspaces"))).status).toBe(404);
+    expect((await bare(new Request("http://api.test/shared/atoms/atom-1"))).status).toBe(404);
+  });
+
   it("maps workspace id collisions to 403", async () => {
     const handler = createWorkspaceApiHandler({
       backend: memoryBackend().backend,

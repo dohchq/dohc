@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
 
-export type WorkspaceBackendMode = "convex" | "postgres";
+export type WorkspaceBackendMode = "postgres";
 
 export type WorkspaceManifestEntry = {
   id: string;

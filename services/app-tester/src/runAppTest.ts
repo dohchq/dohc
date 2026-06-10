@@ -13,7 +13,7 @@ export type { AppTestCheck, AppTestFile } from './staticCheck'
 export type RunAppTestInput = {
   packageRoot: string
   files: AppTestFile[]
-  backend?: 'convex' | 'postgres'
+  backend?: 'postgres'
   manifest?: {
     collections?: Record<string, unknown>
     databases?: Record<string, unknown>
@@ -26,7 +26,7 @@ export type RunAppTestInput = {
 export type RunAppTestResult = {
   ok: boolean
   packageRoot: string
-  backend: 'convex' | 'postgres'
+  backend: 'postgres'
   checks: AppTestCheck[]
   failures: AppTestCheck[]
   artifacts?: {
@@ -896,7 +896,7 @@ export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResu
   // checks need the live runtime and only run in browser or integration mode.
   if (input.mode === 'static') {
     const { ok, checks, failures } = runStaticAppCheck(input.files)
-    return { ok, packageRoot: input.packageRoot, backend: input.backend ?? 'convex', checks, failures }
+    return { ok, packageRoot: input.packageRoot, backend: input.backend ?? 'postgres', checks, failures }
   }
   const runtime = compileCheck.status === 'ok'
     ? await runRenderedApp(input, code)
@@ -921,7 +921,7 @@ export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResu
   return {
     ok: failures.length === 0,
     packageRoot: input.packageRoot,
-    backend: input.backend ?? 'convex',
+    backend: input.backend ?? 'postgres',
     checks,
     failures,
     ...(artifacts === undefined ? {} : { artifacts }),

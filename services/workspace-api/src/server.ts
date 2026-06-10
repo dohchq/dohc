@@ -9,9 +9,11 @@ import {
   type WriteTextFileRequest,
 } from "./routes/files";
 import { mintCollabToken, type CollabTokenDeps, type CollabTokenRequest } from "./routes/collab";
+import { resolveSharedAtom, type SharedAtomDeps } from "./routes/shared";
 import { applyWorkspaceSync, type ApplySyncRequest } from "./routes/sync";
 import {
   createWorkspace as createWorkspaceRoute,
+  listWorkspaces,
   parseCreateWorkspaceRequest,
   type CreateWorkspaceFn,
 } from "./routes/workspaces";
@@ -25,6 +27,9 @@ export type CreateWorkspaceApiHandlerOptions = {
   events?: WorkspaceEventSource;
   createWorkspace?: CreateWorkspaceFn;
   collab?: CollabTokenDeps;
+  // Routes that resolve access directly against Postgres (workspace listing,
+  // shared-atom links). Unset deployments 404 those routes.
+  shared?: SharedAtomDeps;
 };
 
 type WorkspaceRoute =
@@ -40,6 +45,7 @@ export function createWorkspaceApiHandler({
   events,
   createWorkspace,
   collab,
+  shared,
 }: CreateWorkspaceApiHandlerOptions): WorkspaceApiHandler {
   return async (request) => {
     try {
@@ -51,6 +57,22 @@ export function createWorkspaceApiHandler({
         const input = parseCreateWorkspaceRequest(await readJson(request));
         const actor = await actorForRequest(resolveActor, request, input.workspaceId);
         return jsonResponse(await createWorkspaceRoute(createWorkspace, actor, input));
+      }
+
+      // Workspace-less routes: the session alone identifies the user; the
+      // workspace (if any) comes from the data, so the resolver gets "" and
+      // only actor.userId is consumed.
+      if (shared && request.method === "GET") {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/workspaces") {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await listWorkspaces(shared.pool, actor));
+        }
+        const sharedAtomId = parseSharedAtomRoute(pathname);
+        if (sharedAtomId) {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await resolveSharedAtom(shared, actor.userId, sharedAtomId));
+        }
       }
 
       const route = parseWorkspaceRoute(request);
@@ -101,6 +123,16 @@ async function actorForRequest(
 ): Promise<Actor> {
   const actor = await resolveActor(request, workspaceId);
   return { ...actor, workspaceId };
+}
+
+// GET /shared/atoms/:atomId — returns the atom id or null when the path is
+// some other route.
+function parseSharedAtomRoute(pathname: string): string | null {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts.length === 3 && parts[0] === "shared" && parts[1] === "atoms" && parts[2]) {
+    return parts[2];
+  }
+  return null;
 }
 
 function parseWorkspaceRoute(request: Request): WorkspaceRoute {

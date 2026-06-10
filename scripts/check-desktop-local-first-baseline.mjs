@@ -21,16 +21,10 @@ const env = {
   PATH: `${pinnedNodeBin}:${pnpmBin}:${process.env.PATH ?? ""}`,
 };
 
-// Known pre-existing failures on main @ e2de7a3: 4 @dohc/web tests (see
-// execution log Gotchas). This allowance dies when those tests are fixed or
-// deleted with Convex in Phase 13 — do not add entries for new failures.
-const knownFailingBaseline = new Set(["pnpm --filter @dohc/web test"]);
-
 const commands = [
   ["pnpm", ["--filter", "@dohc/web", "typecheck"]],
   ["pnpm", ["--filter", "@dohc/web", "test"]],
   ["pnpm", ["--filter", "@dohc/workspace-contracts", "test"]],
-  ["pnpm", ["--filter", "@dohc/workspace-convex-compat", "test"]],
   ["pnpm", ["--filter", "@dohc/workspace-postgres", "test"]],
   ["pnpm", ["--filter", "@dohc/workspace-fs", "test"]],
   ["pnpm", ["--filter", "@dohc/workspace-api", "test"]],
@@ -56,16 +50,14 @@ for (const [cmd, args] of commands) {
 }
 
 console.log("\n=== Baseline summary ===");
-let unexpected = 0;
+let failures = 0;
 for (const { label, status } of results) {
-  const known = status !== 0 && knownFailingBaseline.has(label);
-  const tag = status === 0 ? "PASS" : known ? "KNOWN-FAIL (recorded baseline)" : "FAIL";
-  if (status !== 0 && !known) unexpected += 1;
-  console.log(`${tag.padEnd(32)} ${label}`);
+  if (status !== 0) failures += 1;
+  console.log(`${(status === 0 ? "PASS" : "FAIL").padEnd(8)} ${label}`);
 }
 
-if (unexpected > 0) {
-  console.error(`\n${unexpected} unexpected failure(s) beyond the recorded baseline.`);
+if (failures > 0) {
+  console.error(`\n${failures} failure(s).`);
   process.exit(1);
 }
-console.log("\nBaseline check passed (known baseline failures tolerated).");
+console.log("\nBaseline check passed.");

@@ -1,4 +1,6 @@
 import type { Actor } from "@dohc/workspace-contracts";
+import { listUserWorkspaces } from "@dohc/workspace-postgres";
+import type pg from "pg";
 
 export type CreateWorkspaceInput = {
   workspaceId: string;
@@ -27,6 +29,11 @@ export function parseCreateWorkspaceRequest(body: unknown): CreateWorkspaceInput
     throw new Error('kind must be "personal" or "shared"');
   }
   return { workspaceId, name: name ?? workspaceId, kind: kind ?? "personal" };
+}
+
+// GET /workspaces for the web shell: everything the session user can open.
+export async function listWorkspaces(pool: pg.Pool, actor: Actor) {
+  return { ok: true, workspaces: await listUserWorkspaces(pool, actor.userId) };
 }
 
 export async function createWorkspace(

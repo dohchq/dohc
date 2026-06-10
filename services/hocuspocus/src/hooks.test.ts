@@ -170,7 +170,7 @@ describe('hocuspocus hook factory', () => {
     expect(loaded.getText('body').toString()).toBe('persisted')
   })
 
-  it('bootstraps missing Y.Docs from Convex markdown and stores a sequence-zero snapshot', async () => {
+  it('bootstraps missing Y.Docs from backend markdown and stores a sequence-zero snapshot', async () => {
     const markdown = '---\nid: atom_1\ntitle: Boot\n---\n# Bootstrapped\n\nBody'
     const { acl, backend, hooks } = makeHooks({
       canRead: true,
@@ -233,7 +233,7 @@ describe('hocuspocus hook factory', () => {
   })
 
   it('loads persisted state when concurrent writes win the bootstrap race', async () => {
-    const markdown = '---\nid: atom_1\n---\n# From Convex'
+    const markdown = '---\nid: atom_1\n---\n# From the backend'
     const { hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
@@ -325,7 +325,7 @@ describe('hocuspocus hook factory', () => {
     const { acl, hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
-      bootstrapMarkdown: '---\nid: atom_1\n---\n# From Convex',
+      bootstrapMarkdown: '---\nid: atom_1\n---\n# From the backend',
     })
     const persisted = new Y.Doc()
     persisted.getText('body').insert(0, 'already persisted')
@@ -346,8 +346,8 @@ describe('hocuspocus hook factory', () => {
     expect(loaded.getText('body').toString()).toBe('already persisted')
   })
 
-  it('repairs an uninitialized persisted Y.Doc from the Convex markdown cache', async () => {
-    const markdown = '---\nid: atom_1\n---\n# From Convex\n\nAgent output'
+  it('repairs an uninitialized persisted Y.Doc from the backend markdown cache', async () => {
+    const markdown = '---\nid: atom_1\n---\n# From the backend\n\nAgent output'
     const { acl, hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
@@ -659,7 +659,7 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
-  it('debounces Y.Doc projection jobs and writes the body cache through Convex', async () => {
+  it('debounces Y.Doc projection jobs and writes the body cache through the backend', async () => {
     vi.useFakeTimers()
     const setAtomBodyCache = vi.fn(async () => ({ ok: true as const }))
     const { backend, hooks } = makeHooks({
@@ -711,10 +711,10 @@ describe('hocuspocus hook factory', () => {
     )
   })
 
-  it('keeps projection jobs retryable when Convex cache writes fail', async () => {
+  it('keeps projection jobs retryable when backend cache writes fail', async () => {
     vi.useFakeTimers()
     const setAtomBodyCache = vi.fn(async () => {
-      throw new Error('Convex unavailable')
+      throw new Error('backend unavailable')
     })
     const { backend, hooks } = makeHooks({
       canRead: true,
@@ -737,7 +737,7 @@ describe('hocuspocus hook factory', () => {
       {
         status: 'failed',
         attempts: 1,
-        lastError: 'Convex unavailable',
+        lastError: 'backend unavailable',
       },
     ])
   })

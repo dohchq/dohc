@@ -54,8 +54,7 @@ export type TreeNode = {
   page: TreePage | null       // the atom that IS this node (leaf, or folder's index.md)
   children: TreeNode[]
   // file-org-v1 §4.3 / D4.5 — folder-row cosmetic state. Only set
-  // on folder nodes (page === null). Mirrors the folderMetadata
-  // columns from convex/folders.ts:list.
+  // on folder nodes (page === null).
   icon?: string | null
   color?: string | null
   starred?: boolean

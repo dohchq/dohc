@@ -27,13 +27,7 @@ export default defineConfig({
       '@tanstack/router-core/ssr/client',
       'seroval',
       '@tanstack/react-router',
-      'convex/browser',
-      'convex/react',
-      'convex/server',
-      'convex/values',
-      '@workos/authkit-session',
     ],
-    exclude: ['@workos/authkit-tanstack-react-start'],
   },
   plugins: [
     tanstackStart(),

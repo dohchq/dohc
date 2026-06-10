@@ -1,11 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
-import { useMutation } from 'convex/react'
 import { AlertCircle, Loader2, Upload } from 'lucide-react'
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
-import type { DohcBackendClient } from '../backend/backendClient'
-import { mediaTypeForWorkspacePath } from '../lib/mediaTypes'
-import { uploadBlobToStorageUrl } from '../lib/storageUpload'
+import type { DohcBackendClient, WorkspaceFile } from '../backend/backendClient'
 
 export const WORKSPACE_UPLOAD_ACCEPT = [
   'image/png',
@@ -22,33 +17,20 @@ export const WORKSPACE_UPLOAD_ACCEPT = [
   'application/octet-stream',
 ].join(',')
 
-export type UploadedWorkspaceFile = {
-  _id: string
-  path: string
-  title?: string | null
-  source: string
-  kind: 'asset'
-  contentType: string
-}
-
 type UploadState =
   | { status: 'idle' }
-  | { status: 'uploading'; progress: number }
+  | { status: 'uploading' }
   | { status: 'error'; message: string }
 
 export function UploadFileButton({
-  activeWorkspaceId,
   backendClient,
   defaultFolderPath = '',
   onUploaded,
 }: {
-  activeWorkspaceId?: string
-  backendClient?: Pick<DohcBackendClient, 'uploadFile'>
+  backendClient: Pick<DohcBackendClient, 'uploadFile'>
   defaultFolderPath?: string
-  onUploaded: (file: UploadedWorkspaceFile) => void
+  onUploaded: (file: WorkspaceFile) => void
 }) {
-  const generateUploadUrl = useMutation(api.assets.generateUploadUrl)
-  const registerWorkspaceFile = useMutation(api.assets.registerWorkspaceFile)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [state, setState] = useState<UploadState>({ status: 'idle' })
 
@@ -60,33 +42,12 @@ export function UploadFileButton({
   }, [])
 
   async function uploadFile(file: File) {
-    const filename = file.name || 'uploaded file'
-    const mediaType =
-      file.type || mediaTypeForWorkspacePath(filename) || 'application/octet-stream'
-    const path = workspaceUploadPath(defaultFolderPath, filename)
-    setState({ status: 'uploading', progress: 1 })
+    const path = workspaceUploadPath(defaultFolderPath, file.name || 'uploaded file')
+    setState({ status: 'uploading' })
     try {
-      if (backendClient) {
-        const created = await backendClient.uploadFile({ file, path })
-        setState({ status: 'idle' })
-        onUploaded(created as UploadedWorkspaceFile)
-        return
-      }
-      const uploadUrl = await generateUploadUrl({ activeWorkspaceId })
-      const storageId = await uploadBlobToStorageUrl(uploadUrl, file, {
-        mediaType,
-        onProgress: ({ percent }) =>
-          setState({ status: 'uploading', progress: percent }),
-      })
-      const created = await registerWorkspaceFile({
-        activeWorkspaceId,
-        storageId: storageId as Id<'_storage'>,
-        filename,
-        mediaType,
-        path,
-      })
+      const created = await backendClient.uploadFile({ file, path })
       setState({ status: 'idle' })
-      onUploaded(created as UploadedWorkspaceFile)
+      onUploaded(created)
     } catch (error) {
       setState({
         status: 'error',
@@ -124,9 +85,6 @@ export function UploadFileButton({
           event.currentTarget.value = ''
         }}
       />
-      {state.status === 'uploading' && (
-        <span className="sr-only">Uploading {state.progress}%</span>
-      )}
       {state.status === 'error' && (
         <span
           role="status"

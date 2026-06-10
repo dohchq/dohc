@@ -9,31 +9,12 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SignedOutRouteImport } from './routes/signed-out'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as RAtomIdRouteImport } from './routes/r/$atomId'
 import { Route as AppWorkspaceSlugRouteImport } from './routes/_app.$workspaceSlug'
-import { Route as AppWorkspaceSlugIndexRouteImport } from './routes/_app.$workspaceSlug.index'
-import { Route as ApiAuthSignOutRouteImport } from './routes/api/auth/sign-out'
-import { Route as ApiAuthSignInRouteImport } from './routes/api/auth/sign-in'
-import { Route as ApiAuthCallbackRouteImport } from './routes/api/auth/callback'
 import { Route as AppSharedShareIdRouteImport } from './routes/_app.shared.$shareId'
-import { Route as AppWorkspaceSlugViewsRouteImport } from './routes/_app.$workspaceSlug.views'
-import { Route as AppWorkspaceSlugGraphRouteImport } from './routes/_app.$workspaceSlug.graph'
-import { Route as AppWorkspaceSlugFilesRouteImport } from './routes/_app.$workspaceSlug.files'
-import { Route as AppWorkspaceSlugAppsRouteImport } from './routes/_app.$workspaceSlug.apps'
-import { Route as AppWorkspaceSlugAgentRouteImport } from './routes/_app.$workspaceSlug.agent'
-import { Route as AppWorkspaceSlugPageRefRouteImport } from './routes/_app.$workspaceSlug.$pageRef'
-import { Route as AppWorkspaceSlugVViewRefRouteImport } from './routes/_app.$workspaceSlug.v.$viewRef'
-import { Route as AppWorkspaceSlugAgentThreadRefRouteImport } from './routes/_app.$workspaceSlug.agent.$threadRef'
-import { Route as AppWorkspaceSlugAAppRefRouteImport } from './routes/_app.$workspaceSlug.a.$appRef'
 
-const SignedOutRoute = SignedOutRouteImport.update({
-  id: '/signed-out',
-  path: '/signed-out',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const AppRoute = AppRouteImport.update({
   id: '/_app',
   getParentRoute: () => rootRouteImport,
@@ -53,221 +34,53 @@ const AppWorkspaceSlugRoute = AppWorkspaceSlugRouteImport.update({
   path: '/$workspaceSlug',
   getParentRoute: () => AppRoute,
 } as any)
-const AppWorkspaceSlugIndexRoute = AppWorkspaceSlugIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const ApiAuthSignOutRoute = ApiAuthSignOutRouteImport.update({
-  id: '/api/auth/sign-out',
-  path: '/api/auth/sign-out',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiAuthSignInRoute = ApiAuthSignInRouteImport.update({
-  id: '/api/auth/sign-in',
-  path: '/api/auth/sign-in',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiAuthCallbackRoute = ApiAuthCallbackRouteImport.update({
-  id: '/api/auth/callback',
-  path: '/api/auth/callback',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const AppSharedShareIdRoute = AppSharedShareIdRouteImport.update({
   id: '/shared/$shareId',
   path: '/shared/$shareId',
   getParentRoute: () => AppRoute,
 } as any)
-const AppWorkspaceSlugViewsRoute = AppWorkspaceSlugViewsRouteImport.update({
-  id: '/views',
-  path: '/views',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugGraphRoute = AppWorkspaceSlugGraphRouteImport.update({
-  id: '/graph',
-  path: '/graph',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugFilesRoute = AppWorkspaceSlugFilesRouteImport.update({
-  id: '/files',
-  path: '/files',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugAppsRoute = AppWorkspaceSlugAppsRouteImport.update({
-  id: '/apps',
-  path: '/apps',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugAgentRoute = AppWorkspaceSlugAgentRouteImport.update({
-  id: '/agent',
-  path: '/agent',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugPageRefRoute = AppWorkspaceSlugPageRefRouteImport.update({
-  id: '/$pageRef',
-  path: '/$pageRef',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
-const AppWorkspaceSlugVViewRefRoute =
-  AppWorkspaceSlugVViewRefRouteImport.update({
-    id: '/v/$viewRef',
-    path: '/v/$viewRef',
-    getParentRoute: () => AppWorkspaceSlugRoute,
-  } as any)
-const AppWorkspaceSlugAgentThreadRefRoute =
-  AppWorkspaceSlugAgentThreadRefRouteImport.update({
-    id: '/$threadRef',
-    path: '/$threadRef',
-    getParentRoute: () => AppWorkspaceSlugAgentRoute,
-  } as any)
-const AppWorkspaceSlugAAppRefRoute = AppWorkspaceSlugAAppRefRouteImport.update({
-  id: '/a/$appRef',
-  path: '/a/$appRef',
-  getParentRoute: () => AppWorkspaceSlugRoute,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
-  '/signed-out': typeof SignedOutRoute
-  '/$workspaceSlug': typeof AppWorkspaceSlugRouteWithChildren
+  '/$workspaceSlug': typeof AppWorkspaceSlugRoute
   '/r/$atomId': typeof RAtomIdRoute
-  '/$workspaceSlug/$pageRef': typeof AppWorkspaceSlugPageRefRoute
-  '/$workspaceSlug/agent': typeof AppWorkspaceSlugAgentRouteWithChildren
-  '/$workspaceSlug/apps': typeof AppWorkspaceSlugAppsRoute
-  '/$workspaceSlug/files': typeof AppWorkspaceSlugFilesRoute
-  '/$workspaceSlug/graph': typeof AppWorkspaceSlugGraphRoute
-  '/$workspaceSlug/views': typeof AppWorkspaceSlugViewsRoute
   '/shared/$shareId': typeof AppSharedShareIdRoute
-  '/api/auth/callback': typeof ApiAuthCallbackRoute
-  '/api/auth/sign-in': typeof ApiAuthSignInRoute
-  '/api/auth/sign-out': typeof ApiAuthSignOutRoute
-  '/$workspaceSlug/': typeof AppWorkspaceSlugIndexRoute
-  '/$workspaceSlug/a/$appRef': typeof AppWorkspaceSlugAAppRefRoute
-  '/$workspaceSlug/agent/$threadRef': typeof AppWorkspaceSlugAgentThreadRefRoute
-  '/$workspaceSlug/v/$viewRef': typeof AppWorkspaceSlugVViewRefRoute
 }
 export interface FileRoutesByTo {
-  '/signed-out': typeof SignedOutRoute
+  '/$workspaceSlug': typeof AppWorkspaceSlugRoute
   '/r/$atomId': typeof RAtomIdRoute
   '/': typeof AppIndexRoute
-  '/$workspaceSlug/$pageRef': typeof AppWorkspaceSlugPageRefRoute
-  '/$workspaceSlug/agent': typeof AppWorkspaceSlugAgentRouteWithChildren
-  '/$workspaceSlug/apps': typeof AppWorkspaceSlugAppsRoute
-  '/$workspaceSlug/files': typeof AppWorkspaceSlugFilesRoute
-  '/$workspaceSlug/graph': typeof AppWorkspaceSlugGraphRoute
-  '/$workspaceSlug/views': typeof AppWorkspaceSlugViewsRoute
   '/shared/$shareId': typeof AppSharedShareIdRoute
-  '/api/auth/callback': typeof ApiAuthCallbackRoute
-  '/api/auth/sign-in': typeof ApiAuthSignInRoute
-  '/api/auth/sign-out': typeof ApiAuthSignOutRoute
-  '/$workspaceSlug': typeof AppWorkspaceSlugIndexRoute
-  '/$workspaceSlug/a/$appRef': typeof AppWorkspaceSlugAAppRefRoute
-  '/$workspaceSlug/agent/$threadRef': typeof AppWorkspaceSlugAgentThreadRefRoute
-  '/$workspaceSlug/v/$viewRef': typeof AppWorkspaceSlugVViewRefRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
-  '/signed-out': typeof SignedOutRoute
-  '/_app/$workspaceSlug': typeof AppWorkspaceSlugRouteWithChildren
+  '/_app/$workspaceSlug': typeof AppWorkspaceSlugRoute
   '/r/$atomId': typeof RAtomIdRoute
   '/_app/': typeof AppIndexRoute
-  '/_app/$workspaceSlug/$pageRef': typeof AppWorkspaceSlugPageRefRoute
-  '/_app/$workspaceSlug/agent': typeof AppWorkspaceSlugAgentRouteWithChildren
-  '/_app/$workspaceSlug/apps': typeof AppWorkspaceSlugAppsRoute
-  '/_app/$workspaceSlug/files': typeof AppWorkspaceSlugFilesRoute
-  '/_app/$workspaceSlug/graph': typeof AppWorkspaceSlugGraphRoute
-  '/_app/$workspaceSlug/views': typeof AppWorkspaceSlugViewsRoute
   '/_app/shared/$shareId': typeof AppSharedShareIdRoute
-  '/api/auth/callback': typeof ApiAuthCallbackRoute
-  '/api/auth/sign-in': typeof ApiAuthSignInRoute
-  '/api/auth/sign-out': typeof ApiAuthSignOutRoute
-  '/_app/$workspaceSlug/': typeof AppWorkspaceSlugIndexRoute
-  '/_app/$workspaceSlug/a/$appRef': typeof AppWorkspaceSlugAAppRefRoute
-  '/_app/$workspaceSlug/agent/$threadRef': typeof AppWorkspaceSlugAgentThreadRefRoute
-  '/_app/$workspaceSlug/v/$viewRef': typeof AppWorkspaceSlugVViewRefRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/signed-out'
-    | '/$workspaceSlug'
-    | '/r/$atomId'
-    | '/$workspaceSlug/$pageRef'
-    | '/$workspaceSlug/agent'
-    | '/$workspaceSlug/apps'
-    | '/$workspaceSlug/files'
-    | '/$workspaceSlug/graph'
-    | '/$workspaceSlug/views'
-    | '/shared/$shareId'
-    | '/api/auth/callback'
-    | '/api/auth/sign-in'
-    | '/api/auth/sign-out'
-    | '/$workspaceSlug/'
-    | '/$workspaceSlug/a/$appRef'
-    | '/$workspaceSlug/agent/$threadRef'
-    | '/$workspaceSlug/v/$viewRef'
+  fullPaths: '/' | '/$workspaceSlug' | '/r/$atomId' | '/shared/$shareId'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/signed-out'
-    | '/r/$atomId'
-    | '/'
-    | '/$workspaceSlug/$pageRef'
-    | '/$workspaceSlug/agent'
-    | '/$workspaceSlug/apps'
-    | '/$workspaceSlug/files'
-    | '/$workspaceSlug/graph'
-    | '/$workspaceSlug/views'
-    | '/shared/$shareId'
-    | '/api/auth/callback'
-    | '/api/auth/sign-in'
-    | '/api/auth/sign-out'
-    | '/$workspaceSlug'
-    | '/$workspaceSlug/a/$appRef'
-    | '/$workspaceSlug/agent/$threadRef'
-    | '/$workspaceSlug/v/$viewRef'
+  to: '/$workspaceSlug' | '/r/$atomId' | '/' | '/shared/$shareId'
   id:
     | '__root__'
     | '/_app'
-    | '/signed-out'
     | '/_app/$workspaceSlug'
     | '/r/$atomId'
     | '/_app/'
-    | '/_app/$workspaceSlug/$pageRef'
-    | '/_app/$workspaceSlug/agent'
-    | '/_app/$workspaceSlug/apps'
-    | '/_app/$workspaceSlug/files'
-    | '/_app/$workspaceSlug/graph'
-    | '/_app/$workspaceSlug/views'
     | '/_app/shared/$shareId'
-    | '/api/auth/callback'
-    | '/api/auth/sign-in'
-    | '/api/auth/sign-out'
-    | '/_app/$workspaceSlug/'
-    | '/_app/$workspaceSlug/a/$appRef'
-    | '/_app/$workspaceSlug/agent/$threadRef'
-    | '/_app/$workspaceSlug/v/$viewRef'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
-  SignedOutRoute: typeof SignedOutRoute
   RAtomIdRoute: typeof RAtomIdRoute
-  ApiAuthCallbackRoute: typeof ApiAuthCallbackRoute
-  ApiAuthSignInRoute: typeof ApiAuthSignInRoute
-  ApiAuthSignOutRoute: typeof ApiAuthSignOutRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/signed-out': {
-      id: '/signed-out'
-      path: '/signed-out'
-      fullPath: '/signed-out'
-      preLoaderRoute: typeof SignedOutRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/_app': {
       id: '/_app'
       path: ''
@@ -296,34 +109,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppWorkspaceSlugRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/$workspaceSlug/': {
-      id: '/_app/$workspaceSlug/'
-      path: '/'
-      fullPath: '/$workspaceSlug/'
-      preLoaderRoute: typeof AppWorkspaceSlugIndexRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/api/auth/sign-out': {
-      id: '/api/auth/sign-out'
-      path: '/api/auth/sign-out'
-      fullPath: '/api/auth/sign-out'
-      preLoaderRoute: typeof ApiAuthSignOutRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/auth/sign-in': {
-      id: '/api/auth/sign-in'
-      path: '/api/auth/sign-in'
-      fullPath: '/api/auth/sign-in'
-      preLoaderRoute: typeof ApiAuthSignInRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/auth/callback': {
-      id: '/api/auth/callback'
-      path: '/api/auth/callback'
-      fullPath: '/api/auth/callback'
-      preLoaderRoute: typeof ApiAuthCallbackRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/_app/shared/$shareId': {
       id: '/_app/shared/$shareId'
       path: '/shared/$shareId'
@@ -331,120 +116,17 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSharedShareIdRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/$workspaceSlug/views': {
-      id: '/_app/$workspaceSlug/views'
-      path: '/views'
-      fullPath: '/$workspaceSlug/views'
-      preLoaderRoute: typeof AppWorkspaceSlugViewsRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/graph': {
-      id: '/_app/$workspaceSlug/graph'
-      path: '/graph'
-      fullPath: '/$workspaceSlug/graph'
-      preLoaderRoute: typeof AppWorkspaceSlugGraphRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/files': {
-      id: '/_app/$workspaceSlug/files'
-      path: '/files'
-      fullPath: '/$workspaceSlug/files'
-      preLoaderRoute: typeof AppWorkspaceSlugFilesRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/apps': {
-      id: '/_app/$workspaceSlug/apps'
-      path: '/apps'
-      fullPath: '/$workspaceSlug/apps'
-      preLoaderRoute: typeof AppWorkspaceSlugAppsRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/agent': {
-      id: '/_app/$workspaceSlug/agent'
-      path: '/agent'
-      fullPath: '/$workspaceSlug/agent'
-      preLoaderRoute: typeof AppWorkspaceSlugAgentRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/$pageRef': {
-      id: '/_app/$workspaceSlug/$pageRef'
-      path: '/$pageRef'
-      fullPath: '/$workspaceSlug/$pageRef'
-      preLoaderRoute: typeof AppWorkspaceSlugPageRefRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/v/$viewRef': {
-      id: '/_app/$workspaceSlug/v/$viewRef'
-      path: '/v/$viewRef'
-      fullPath: '/$workspaceSlug/v/$viewRef'
-      preLoaderRoute: typeof AppWorkspaceSlugVViewRefRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
-    '/_app/$workspaceSlug/agent/$threadRef': {
-      id: '/_app/$workspaceSlug/agent/$threadRef'
-      path: '/$threadRef'
-      fullPath: '/$workspaceSlug/agent/$threadRef'
-      preLoaderRoute: typeof AppWorkspaceSlugAgentThreadRefRouteImport
-      parentRoute: typeof AppWorkspaceSlugAgentRoute
-    }
-    '/_app/$workspaceSlug/a/$appRef': {
-      id: '/_app/$workspaceSlug/a/$appRef'
-      path: '/a/$appRef'
-      fullPath: '/$workspaceSlug/a/$appRef'
-      preLoaderRoute: typeof AppWorkspaceSlugAAppRefRouteImport
-      parentRoute: typeof AppWorkspaceSlugRoute
-    }
   }
 }
 
-interface AppWorkspaceSlugAgentRouteChildren {
-  AppWorkspaceSlugAgentThreadRefRoute: typeof AppWorkspaceSlugAgentThreadRefRoute
-}
-
-const AppWorkspaceSlugAgentRouteChildren: AppWorkspaceSlugAgentRouteChildren = {
-  AppWorkspaceSlugAgentThreadRefRoute: AppWorkspaceSlugAgentThreadRefRoute,
-}
-
-const AppWorkspaceSlugAgentRouteWithChildren =
-  AppWorkspaceSlugAgentRoute._addFileChildren(
-    AppWorkspaceSlugAgentRouteChildren,
-  )
-
-interface AppWorkspaceSlugRouteChildren {
-  AppWorkspaceSlugPageRefRoute: typeof AppWorkspaceSlugPageRefRoute
-  AppWorkspaceSlugAgentRoute: typeof AppWorkspaceSlugAgentRouteWithChildren
-  AppWorkspaceSlugAppsRoute: typeof AppWorkspaceSlugAppsRoute
-  AppWorkspaceSlugFilesRoute: typeof AppWorkspaceSlugFilesRoute
-  AppWorkspaceSlugGraphRoute: typeof AppWorkspaceSlugGraphRoute
-  AppWorkspaceSlugViewsRoute: typeof AppWorkspaceSlugViewsRoute
-  AppWorkspaceSlugIndexRoute: typeof AppWorkspaceSlugIndexRoute
-  AppWorkspaceSlugAAppRefRoute: typeof AppWorkspaceSlugAAppRefRoute
-  AppWorkspaceSlugVViewRefRoute: typeof AppWorkspaceSlugVViewRefRoute
-}
-
-const AppWorkspaceSlugRouteChildren: AppWorkspaceSlugRouteChildren = {
-  AppWorkspaceSlugPageRefRoute: AppWorkspaceSlugPageRefRoute,
-  AppWorkspaceSlugAgentRoute: AppWorkspaceSlugAgentRouteWithChildren,
-  AppWorkspaceSlugAppsRoute: AppWorkspaceSlugAppsRoute,
-  AppWorkspaceSlugFilesRoute: AppWorkspaceSlugFilesRoute,
-  AppWorkspaceSlugGraphRoute: AppWorkspaceSlugGraphRoute,
-  AppWorkspaceSlugViewsRoute: AppWorkspaceSlugViewsRoute,
-  AppWorkspaceSlugIndexRoute: AppWorkspaceSlugIndexRoute,
-  AppWorkspaceSlugAAppRefRoute: AppWorkspaceSlugAAppRefRoute,
-  AppWorkspaceSlugVViewRefRoute: AppWorkspaceSlugVViewRefRoute,
-}
-
-const AppWorkspaceSlugRouteWithChildren =
-  AppWorkspaceSlugRoute._addFileChildren(AppWorkspaceSlugRouteChildren)
-
 interface AppRouteChildren {
-  AppWorkspaceSlugRoute: typeof AppWorkspaceSlugRouteWithChildren
+  AppWorkspaceSlugRoute: typeof AppWorkspaceSlugRoute
   AppIndexRoute: typeof AppIndexRoute
   AppSharedShareIdRoute: typeof AppSharedShareIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
-  AppWorkspaceSlugRoute: AppWorkspaceSlugRouteWithChildren,
+  AppWorkspaceSlugRoute: AppWorkspaceSlugRoute,
   AppIndexRoute: AppIndexRoute,
   AppSharedShareIdRoute: AppSharedShareIdRoute,
 }
@@ -453,11 +135,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
-  SignedOutRoute: SignedOutRoute,
   RAtomIdRoute: RAtomIdRoute,
-  ApiAuthCallbackRoute: ApiAuthCallbackRoute,
-  ApiAuthSignInRoute: ApiAuthSignInRoute,
-  ApiAuthSignOutRoute: ApiAuthSignOutRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
