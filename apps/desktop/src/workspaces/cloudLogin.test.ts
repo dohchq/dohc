@@ -92,19 +92,43 @@ describe("cloud device-flow login", () => {
     });
   });
 
-  it("poll() maps denial and expiry, and an expired device code cannot be re-polled", async () => {
-    const { impl } = fakeFetch({
-      "/api/auth/device/code": () => ({ body: DEVICE }),
-      "/api/auth/device/token": () => ({ status: 400, body: { error: "access_denied" } }),
-    });
-    const login = createCloudLogin({
+  it("poll() maps denial and expiry, and a finished device code cannot be re-polled", async () => {
+    const denied = createCloudLogin({
       store: memoryStore(),
       defaultServerUrl: "http://cloud.test",
-      fetch: impl,
+      fetch: fakeFetch({
+        "/api/auth/device/code": () => ({ body: DEVICE }),
+        "/api/auth/device/token": () => ({ status: 400, body: { error: "access_denied" } }),
+      }).impl,
     });
-    await login.start();
-    expect(await login.poll()).toEqual({ status: "denied" });
-    await expect(login.poll()).rejects.toThrow(/no cloud login/i);
+    await denied.start();
+    expect(await denied.poll()).toEqual({ status: "denied" });
+    await expect(denied.poll()).rejects.toThrow(/no cloud login/i);
+
+    const expired = createCloudLogin({
+      store: memoryStore(),
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({
+        "/api/auth/device/code": () => ({ body: DEVICE }),
+        "/api/auth/device/token": () => ({ status: 400, body: { error: "expired_token" } }),
+      }).impl,
+    });
+    await expired.start();
+    expect(await expired.poll()).toEqual({ status: "expired" });
+    await expect(expired.poll()).rejects.toThrow(/no cloud login/i);
+
+    // The default branch is fail-dead: an unrecognized error also kills the code
+    // (never an infinite pending loop on a server speaking a different dialect).
+    const unknown = createCloudLogin({
+      store: memoryStore(),
+      defaultServerUrl: "http://cloud.test",
+      fetch: fakeFetch({
+        "/api/auth/device/code": () => ({ body: DEVICE }),
+        "/api/auth/device/token": () => ({ status: 400, body: { error: "weird_new_error" } }),
+      }).impl,
+    });
+    await unknown.start();
+    expect(await unknown.poll()).toEqual({ status: "expired" });
   });
 
   it("logout() clears credentials and status reads disconnected", async () => {

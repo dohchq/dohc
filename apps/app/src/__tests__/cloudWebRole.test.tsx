@@ -42,10 +42,18 @@ describe('web is the dohc Cloud client', () => {
     const link = container.querySelector<HTMLAnchorElement>('[data-testid="install-desktop-link"]')
     expect(link).not.toBeNull()
     expect(link?.getAttribute('href')).toBe(DESKTOP_DOWNLOAD_URL)
-    expect(DESKTOP_DOWNLOAD_URL).toMatch(/desktop/)
+    // Pin the exact origin+path (D-37): the URL is a deliberate pre-launch
+    // placeholder — any change (or typo-squat) must be a conscious edit here.
+    expect(DESKTOP_DOWNLOAD_URL).toBe('https://dohc.app/desktop')
     // It positions the web as cloud and points local-folder/agent work to desktop.
     expect(container.textContent ?? '').toMatch(/dohc Cloud/i)
     expect(container.textContent ?? '').toMatch(/local folders|local-first|agents/i)
+
+    // And the affordance is actually WIRED into the product, not just a unit:
+    // the signed-out splash in _app.tsx must render it. Removing that one line
+    // must fail this build (same file-pinning style as the false-claims test).
+    const appRoute = readFileSync(join(APP_ROOT, 'src/routes/_app.tsx'), 'utf8')
+    expect(appRoute).toMatch(/<InstallDesktopPrompt\b/)
   })
 
   it('makes no local-filesystem CLAIM on its user-facing surfaces', () => {

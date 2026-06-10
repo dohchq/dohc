@@ -27,7 +27,7 @@ behavior; delete only after replacement tests exist."
 | live co-editing (Yjs over Postgres) | `@dohc/hocuspocus` hooks/persistence/import-export tests + `liveCoEditing.spec` (content survives, converges, no markers) | pass |
 | collaboration policy / conflict resolution | `@dohc/workspace-sync` collaborationPolicy + `@dohc/workspace-history` conflictResolution (3-way merge) | pass |
 | app discovery / trust / test | `@dohc/workspace-core` apps + desktop `appPackage.test` + `appPackage.spec` E2E (static AppTester) | pass |
-| uploads / assets (blob storage) | desktop `workspaceAssets`/`workspaceFiles` tests + `FileInspector.test` + file-type E2E | pass |
+| uploads / assets (blob storage) | `@dohc/workspace-contracts` conformance (saveAsset/readAsset, run against the postgres adapter) + desktop `workspaceAssets.test` (path containment, symlink escape, size caps) + `workspaceFiles.test` + `FileInspector.test` + file-type E2E | pass |
 | visible SQLite / data import / query | `@dohc/sqlite-worker` tests + desktop `workspaceDatabase.test` + MCP `import_data`/`query_database` | pass |
 | local history / change sets | `@dohc/workspace-history` `changeSetStore.test` + desktop watcher history | pass |
 | onboarding / first-run setup | desktop `DesktopFirstRun.test` + `firstRunWorkspace.spec` E2E | pass |
@@ -36,20 +36,46 @@ behavior; delete only after replacement tests exist."
 
 ## CRITICAL OPEN QUESTION (must be resolved before Step 3 deletion)
 
-The replacement tests above cover the local-first **data + behavior** layer. But
-the **web app UI** (`apps/app`, `@dohc/web`) is still hard-wired to Convex:
-`ConvexProviderWithAuth` at the route root and `useQuery(api.*)` / `useMutation`
-throughout (~64 source files), with auth via `@convex-dev/workos-authkit`. There
-is no UI-level backend indirection — the dual-backend switch lives in the
-workspace data packages, not in the web UI.
+The replacement tests above cover the local-first **data + behavior** layer.
+The **web app UI** (`apps/app`, `@dohc/web`) already has a real — but narrow —
+backend seam, and is Convex-coupled everywhere else. Precisely:
 
-Therefore deleting `apps/app/convex` + the generated `api` + `@convex-dev/workos-authkit`
-WITHOUT first either (a) rewiring the web UI's data layer to the Postgres /
-workspace-api backend, or (b) gutting the Convex-coupled UI to the repositioned
-cloud shell, would break `@dohc/web` typecheck and the entire web app — which
-fails this phase's own Step 4 gate (`pnpm -r typecheck && pnpm -r test`).
+**The existing seam** (from the dual-backend work, tested): an env-selected
+(`DOHC_BACKEND` / `VITE_DOHC_BACKEND`; browser query strings deliberately
+ignored; default `convex`) `DohcBackendClient` in `apps/app/src/backend/`
+(`backendClient.ts`, `postgresBackendClient.ts`, `convexBackendClient.ts`)
+covering five file ops — `listFiles` / `readText` / `createTextFile` /
+`uploadFile` / `renameFile` — where the postgres client is a real HTTP client
+for `services/workspace-api` (`GET /files`, `GET/POST /files/text`,
+`POST /files/upload`, `POST /files/rename`). It is wired through `_app.tsx`
+(client instantiation + file-list source switch + create/rename delegation) and
+passed into `FileTree`, `AtomView`, and `UploadFileButton`. Tested by
+`src/__tests__/backendSwitch.test.tsx` (mode resolution, op routing, endpoint
+shapes, source-level wiring guard) and parameterized in
+`e2e/backendMatrix.spec.ts` (contract-level: synthetic UI + in-memory backend,
+NOT the real web UI against a live workspace-api).
+
+**What the seam does NOT cover:** auth (`ConvexProviderWithAuth` at the route
+root, WorkOS AuthKit — no Better Auth client exists in the web app), workspace
+listing (`api.orgs.myWorkspaces`), folders, sharing (`atomShares`), agent chat,
+search, graph, onboarding, HTML atoms (`r/$atomId` uses `ConvexHttpClient`
+server-side), command palette skills, and AtomEditor formula queries. Measured
+coupling: ~31 non-test src files use Convex hooks, ~23 import `_generated/api`,
+~30 hook call sites in `_app.tsx` alone — and those hooks mount UNCONDITIONALLY
+even in postgres mode, so a Convex deployment is still required at runtime.
+The seam alone does not make deletion safe.
+
+Therefore deleting `apps/app/convex` + the generated `api` + the WorkOS bridge
+WITHOUT first (a) extending the existing `DohcBackendClient` seam for the kept
+surfaces (files/editor/viewing — a concrete, already-tested starting point) and
+(b) gutting the Convex-only surfaces the repositioning retires (agent chat,
+graph, search, onboarding, HTML atoms, app runtime in browser) plus replacing
+web auth (Better Auth) and shared links (a workspace-api endpoint over the
+existing Postgres `shares` table) would break `@dohc/web` typecheck and the
+entire web app — failing this phase's own Step 4 gate
+(`pnpm -r typecheck && pnpm -r test`).
 
 The Step 2.5 audit must enumerate any Convex behavior missing a replacement row
-above; SEPARATELY, the web-UI-post-Convex decision (rewire vs gut) is the
-prerequisite that makes the physical deletion safe. The deletion is staged
-deliberately, not a single rm -rf, precisely because of this coupling.
+above, evaluating rewire-vs-gut FROM the seam inventory described here. The
+deletion is staged deliberately, not a single rm -rf, precisely because of this
+coupling.
