@@ -158,9 +158,12 @@ describe('agent-native file tools', () => {
       ctx.db.query('atoms').withIndex('by_workspace', (q) => q.eq('workspaceId', W)).collect(),
     )
     expect(atoms.map((atom) => [atom.path, atom.body]).sort()).toEqual([
-      ['generated/notes.txt', 'plain text'],
-      ['generated/report.csv', 'id,name\n1,Ice'],
-      ['generated/rows.json', JSON.stringify([{ id: 'row_1' }])],
+      ['generated/notes.txt', '---\nid: generated.notes\n---\nplain text'],
+      ['generated/report.csv', '---\nid: generated.report\n---\nid,name\n1,Ice'],
+      [
+        'generated/rows.json',
+        `---\nid: generated.rows\n---\n${JSON.stringify([{ id: 'row_1' }])}`,
+      ],
     ])
   })
 

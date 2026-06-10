@@ -28,7 +28,6 @@ import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
 import { canWriteInFolder, folderPathForPath } from './atomAccess'
-import { deriveSearchFields } from './searchText'
 import type { ToolCtx } from '@convex-dev/agent'
 import {
   agentProviderOptions,
@@ -398,21 +397,19 @@ export const _saveFileForAgent = internalMutation({
         message: `File already exists: ${path}`,
       }
     }
-    const now = Date.now()
-    const atomId = await ctx.db.insert('atoms', {
+    const atomId = await ctx.runMutation(internal.atoms._upsertInternal, {
       workspaceId: args.workspaceId,
       path,
       body: args.content,
       source: 'agent',
-      updatedAt: now,
-      ...deriveSearchFields(path, args.content),
+      viewerSubject: args.actorUserId,
     })
     return {
       ok: true as const,
       path,
       kind: 'atom' as const,
       atomKind: atomKindForGeneratedFile(path, args.mediaType),
-      atomId,
+      atomId: String(atomId),
     }
   },
 })

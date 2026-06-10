@@ -71,7 +71,7 @@ export function mediaTypeForPath(path: string): string {
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".sqlite") || lower.endsWith(".sqlite3")) {
+  if (lower.endsWith(".sqlite") || lower.endsWith(".sqlite3") || lower.endsWith(".db")) {
     return "application/vnd.sqlite3";
   }
   return "application/octet-stream";
@@ -79,7 +79,12 @@ export function mediaTypeForPath(path: string): string {
 
 export function isSqliteMediaType(mediaType: string, path = "") {
   const lower = `${mediaType} ${path}`.toLowerCase();
-  return lower.includes("sqlite") || lower.endsWith(".sqlite") || lower.endsWith(".sqlite3");
+  return (
+    lower.includes("sqlite") ||
+    lower.endsWith(".sqlite") ||
+    lower.endsWith(".sqlite3") ||
+    lower.endsWith(".db")
+  );
 }
 
 export function isTextMediaType(mediaType: string, path = "") {

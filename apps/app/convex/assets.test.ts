@@ -117,6 +117,42 @@ describe('workspace assets', () => {
     ).rejects.toThrow(/asset not found/)
   })
 
+  it('allows filenames with embedded dot-dot but rejects traversal segments', async () => {
+    const t = convexTest(schema, modules)
+    const storageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['ok'], { type: 'text/plain' }))
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'alice' }).mutation(
+        api.assets.registerWorkspaceFile,
+        {
+          storageId,
+          filename: 'my..file.txt',
+          mediaType: 'text/plain',
+          path: 'uploads/my..file.txt',
+        },
+      ),
+    ).resolves.toMatchObject({
+      path: 'uploads/my..file.txt',
+    })
+
+    const traversalStorageId = await t.run(async (ctx) => {
+      return await ctx.storage.store(new Blob(['bad'], { type: 'text/plain' }))
+    })
+    await expect(
+      t.withIdentity({ subject: 'alice' }).mutation(
+        api.assets.registerWorkspaceFile,
+        {
+          storageId: traversalStorageId,
+          filename: 'bad.txt',
+          mediaType: 'text/plain',
+          path: 'uploads/../bad.txt',
+        },
+      ),
+    ).rejects.toThrow(/invalid workspace file path/)
+  })
+
   it('returns the existing asset when the same storage object is registered twice in a workspace', async () => {
     const t = convexTest(schema, modules)
     const storageId = await t.run(async (ctx) => {

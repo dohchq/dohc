@@ -7,7 +7,7 @@ import type {
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
 import { composeRenamedPath, WorkspaceError } from "@dohc/workspace-contracts";
-import { createLocalBlobStore, type BlobStore } from "../blobStore";
+import { createLocalBlobStore, type BlobStore, type StoredBlob } from "../blobStore";
 import {
   assetRowToWorkspaceFile,
   insertAsset,
@@ -114,26 +114,34 @@ export function createPostgresWorkspaceBackend(
       });
     },
     async saveAsset(actor, input) {
-      await assertAuthorized(pool, actor);
-      const stored = await blobStore.put(input.bytes);
-      return withTransaction(pool, async (client) => {
-        await assertAuthorized(client, actor);
-        const row = await insertAsset(client, actor, input, stored);
-        await insertWorkspaceEvent(client, {
-          actor,
-          kind: "asset_saved",
-          targetKind: "asset",
-          targetId: row.id,
-          payload: {
-            path: input.path,
-            mediaType: input.mediaType,
-            size: stored.size,
-            sha256: stored.sha256,
-            revision: row.revision,
-          },
+      const cleanup: { stored?: StoredBlob } = {};
+      try {
+        return await withTransaction(pool, async (client) => {
+          await assertAuthorized(client, actor);
+          const stored = await blobStore.put(input.bytes);
+          cleanup.stored = stored;
+          const row = await insertAsset(client, actor, input, stored);
+          await insertWorkspaceEvent(client, {
+            actor,
+            kind: "asset_saved",
+            targetKind: "asset",
+            targetId: row.id,
+            payload: {
+              path: input.path,
+              mediaType: input.mediaType,
+              size: stored.size,
+              sha256: stored.sha256,
+              revision: row.revision,
+            },
+          });
+          return assetRowToWorkspaceFile(row);
         });
-        return assetRowToWorkspaceFile(row);
-      });
+      } catch (error) {
+        if (cleanup.stored && blobStore.delete) {
+          await blobStore.delete(cleanup.stored.objectKey).catch(() => undefined);
+        }
+        throw error;
+      }
     },
     async renameFile(actor, input: RenameFileInput) {
       return withTransaction(pool, async (client) => {

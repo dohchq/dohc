@@ -229,4 +229,63 @@ describe("Postgres data import service", () => {
       }),
     ]);
   });
+
+  it("returns import errors for unsupported or undecodable asset sources", async () => {
+    const fixture = fakeBackend();
+    fixture.assets.set("uploads/receipt.pdf", {
+      mediaType: "application/pdf",
+      bytes: new TextEncoder().encode("%PDF"),
+    });
+    fixture.assets.set("uploads/bad.csv", {
+      mediaType: "text/csv",
+      bytes: new Uint8Array([0xff, 0xfe, 0xfd]),
+    });
+
+    const baseRequest = {
+      target: {
+        kind: "sqlite",
+        path: "finance/ledger.sqlite",
+        tableName: "transactions",
+      },
+      mode: "infer-schema",
+    } satisfies Omit<ImportDataRequest, "source">;
+
+    await expect(
+      importData({
+        backend: fixture.backend,
+        actor,
+        request: {
+          ...baseRequest,
+          source: { kind: "asset", path: "uploads/receipt.pdf" },
+        },
+        sqlite: {
+          importData: async () => {
+            throw new Error("should not import binary source");
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: "unsupported_media_type",
+    });
+
+    await expect(
+      importData({
+        backend: fixture.backend,
+        actor,
+        request: {
+          ...baseRequest,
+          source: { kind: "asset", path: "uploads/bad.csv" },
+        },
+        sqlite: {
+          importData: async () => {
+            throw new Error("should not import undecodable source");
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: "invalid_text_encoding",
+    });
+  });
 });

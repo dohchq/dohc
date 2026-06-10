@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export type StoredBlob = {
@@ -11,6 +11,7 @@ export type StoredBlob = {
 export type BlobStore = {
   put(bytes: Uint8Array): Promise<StoredBlob>;
   get(objectKey: string): Promise<Uint8Array>;
+  delete?(objectKey: string): Promise<void>;
 };
 
 export function createLocalBlobStore(
@@ -28,6 +29,10 @@ export function createLocalBlobStore(
     async get(objectKey) {
       assertSafeObjectKey(objectKey);
       return new Uint8Array(await readFile(resolve(root, objectKey)));
+    },
+    async delete(objectKey) {
+      assertSafeObjectKey(objectKey);
+      await rm(resolve(root, objectKey), { force: true });
     },
   };
 }

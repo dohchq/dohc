@@ -73,6 +73,7 @@ export async function importData({
   sqlite,
 }: ImportDataServiceOptions): Promise<ImportDataResult> {
   const source = await readSource(backend, actor, request);
+  if (isImportSourceError(source)) return source;
 
   if (request.target.kind === "atom") {
     await backend.createAtom(actor, {
@@ -130,7 +131,7 @@ async function readSource(
   backend: WorkspaceBackend,
   actor: Actor,
   request: ImportDataRequest,
-): Promise<ImportSourceText> {
+): Promise<ImportSourceText | Extract<ImportDataResult, { ok: false }>> {
   if (request.source.kind === "inline") return request.source;
   if (request.source.kind === "atom") {
     const text = await backend.readText(actor, request.source.path);
@@ -142,13 +143,21 @@ async function readSource(
   }
   const asset = await backend.readAsset(actor, request.source.path);
   if (!isTextImportMediaType(asset.mediaType, request.source.path)) {
-    throw new Error(`import source ${request.source.path} is not text-compatible: ${asset.mediaType}`);
+    return {
+      ok: false,
+      code: "unsupported_media_type",
+      message: `import source ${request.source.path} is not text-compatible: ${asset.mediaType}`,
+    };
   }
   let body: string;
   try {
     body = new TextDecoder("utf-8", { fatal: true }).decode(asset.bytes);
   } catch (error) {
-    throw new Error(`could not decode text import source ${request.source.path}: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      ok: false,
+      code: "invalid_text_encoding",
+      message: `could not decode text import source ${request.source.path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   return {
     name: request.source.path.split("/").pop() ?? request.source.path,
@@ -172,6 +181,12 @@ function isTextImportMediaType(mediaType: string, path: string) {
     lowerPath.endsWith(".json") ||
     lowerPath.endsWith(".jsonl")
   );
+}
+
+function isImportSourceError(
+  source: ImportSourceText | Extract<ImportDataResult, { ok: false }>,
+): source is Extract<ImportDataResult, { ok: false }> {
+  return "ok" in source && source.ok === false;
 }
 
 function sha256(value: string) {
