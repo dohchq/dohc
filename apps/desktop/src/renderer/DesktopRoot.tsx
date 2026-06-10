@@ -18,6 +18,14 @@ export function DesktopRoot() {
       });
   }, []);
 
+  // Signal first paint when real content is about to mount (not while the
+  // registry IPC is still pending and the root renders null).
+  useEffect(() => {
+    if (loaded) {
+      requestAnimationFrame(() => window.dohcDesktopInternal?.firstPaint());
+    }
+  }, [loaded]);
+
   if (!loaded) return null;
   if (!workspace) {
     return (

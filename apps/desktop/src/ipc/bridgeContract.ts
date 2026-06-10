@@ -1,21 +1,28 @@
+import { WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 
 // Typed contract for everything the preload bridge exposes. Main-process
-// handlers validate results against these before returning them. Payload
-// validation starts with the first payload-accepting channel (Phase 4).
+// handlers validate payloads on arrival and results before returning them.
 // The renderer never sees raw Electron APIs.
 
-export const VersionResult = z.string().min(1);
-export type VersionResult = z.infer<typeof VersionResult>;
+// Length caps: IPC payloads are untrusted; bound every renderer-supplied
+// string so a hostile/buggy caller cannot cause memory/latency pressure.
+const WORKSPACE_ID = z.string().min(1).max(200);
+const PATH_STRING = z.string().min(1).max(4096);
 
-export const PickWorkspaceRootResult = z.string().min(1).nullable();
+// Enums derive from the workspace-core tuples (single source of truth) so a
+// new kind/mode cannot make the type and the runtime validator disagree.
+const KIND_ENUM = z.enum(WORKSPACE_KINDS);
+const MODE_ENUM = z.enum(WORKSPACE_MODES);
+
+export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
 export const WorkspaceSummary = z.object({
-  workspaceId: z.string().min(1),
-  rootPath: z.string().min(1),
-  kind: z.enum(["personal", "shared", "cloud-only"]),
-  mode: z.enum(["local-first", "cloud-first-local-copy", "cloud-only"]),
+  workspaceId: WORKSPACE_ID,
+  rootPath: PATH_STRING,
+  kind: KIND_ENUM,
+  mode: MODE_ENUM,
 });
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummary>;
 
@@ -24,10 +31,10 @@ export const WorkspaceRegistryResult = z.object({
 });
 export type WorkspaceRegistryResult = z.infer<typeof WorkspaceRegistryResult>;
 
-export const DefaultWorkspaceRootResult = z.string().min(1);
+export const DefaultWorkspaceRootResult = PATH_STRING;
 
 export const CreateLocalWorkspacePayload = z.object({
-  rootPath: z.string().min(1),
+  rootPath: PATH_STRING,
   kind: z.enum(["personal", "shared"]),
 });
 export type CreateLocalWorkspacePayload = z.infer<
@@ -35,15 +42,21 @@ export type CreateLocalWorkspacePayload = z.infer<
 >;
 
 export const AttachWorkspaceFolderPayload = z.object({
-  rootPath: z.string().min(1),
+  rootPath: PATH_STRING,
 });
+export type AttachWorkspaceFolderPayload = z.infer<
+  typeof AttachWorkspaceFolderPayload
+>;
 
 export const ListWorkspaceFilesPayload = z.object({
-  workspaceId: z.string().min(1),
+  workspaceId: WORKSPACE_ID,
 });
+export type ListWorkspaceFilesPayload = z.infer<
+  typeof ListWorkspaceFilesPayload
+>;
 
 export const WorkspaceFileEntry = z.object({
-  path: z.string().min(1),
+  path: PATH_STRING,
   kind: z.enum(["file", "database", "app-source"]),
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
@@ -54,48 +67,59 @@ export const ListWorkspaceFilesResult = z.object({
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
 export const CreateWorkspaceFilePayload = z.object({
-  workspaceId: z.string().min(1),
-  relativePath: z.string().min(1),
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
 });
+export type CreateWorkspaceFilePayload = z.infer<
+  typeof CreateWorkspaceFilePayload
+>;
 
 export const CreateWorkspaceFileResult = z.object({
-  path: z.string().min(1),
+  path: PATH_STRING,
 });
+export type CreateWorkspaceFileResult = z.infer<
+  typeof CreateWorkspaceFileResult
+>;
 
 export const ImportWorkspaceFilesPayload = z.object({
-  workspaceId: z.string().min(1),
+  workspaceId: WORKSPACE_ID,
 });
+export type ImportWorkspaceFilesPayload = z.infer<
+  typeof ImportWorkspaceFilesPayload
+>;
 
 export const ImportWorkspaceFilesResult = z.object({
-  imported: z.array(z.string().min(1)),
+  imported: z.array(PATH_STRING),
 });
+export type ImportWorkspaceFilesResult = z.infer<
+  typeof ImportWorkspaceFilesResult
+>;
 
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),
   firstPaintMs: z.number().positive(),
+  shellVisibleMs: z.number().positive().optional(),
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
-  getVersion(): Promise<VersionResult>;
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;
   createLocalWorkspace(
     payload: CreateLocalWorkspacePayload,
   ): Promise<WorkspaceSummary>;
-  attachWorkspaceFolder(payload: {
-    rootPath: string;
-  }): Promise<WorkspaceSummary>;
-  listWorkspaceFiles(payload: {
-    workspaceId: string;
-  }): Promise<ListWorkspaceFilesResult>;
-  createWorkspaceFile(payload: {
-    workspaceId: string;
-    relativePath: string;
-  }): Promise<{ path: string }>;
-  importWorkspaceFiles(payload: {
-    workspaceId: string;
-  }): Promise<{ imported: string[] }>;
+  attachWorkspaceFolder(
+    payload: AttachWorkspaceFolderPayload,
+  ): Promise<WorkspaceSummary>;
+  listWorkspaceFiles(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<ListWorkspaceFilesResult>;
+  createWorkspaceFile(
+    payload: CreateWorkspaceFilePayload,
+  ): Promise<CreateWorkspaceFileResult>;
+  importWorkspaceFiles(
+    payload: ImportWorkspaceFilesPayload,
+  ): Promise<ImportWorkspaceFilesResult>;
 }

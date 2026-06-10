@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _electron as electron, type ElectronApplication, type Page } from "playwright";
+import { type ElectronApplication, type Page } from "playwright";
+import { launchApp } from "./launch";
 
 const SCREENSHOT_DIR = "test-results/screenshots/phase-03";
 
@@ -13,19 +14,7 @@ async function launchFirstRun(): Promise<{
   testHome: string;
 }> {
   const testHome = await mkdtemp(join(tmpdir(), "dohc-e2e-"));
-  const launchArgs = ["apps/desktop/dist/main/main.js"];
-  if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") {
-    launchArgs.push("--no-sandbox");
-  }
-  const app = await electron.launch({
-    args: launchArgs,
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      DOHC_DESKTOP_TEST: "1",
-      DOHC_TEST_HOME: testHome,
-    },
-  });
+  const app = await launchApp({ DOHC_TEST_HOME: testHome });
   const page = await app.firstWindow();
   return { app, page, testHome };
 }
@@ -187,19 +176,9 @@ test("attaching an existing dohc workspace preserves its identity", async () => 
   await writeFile(join(existingRoot, "budget.md"), "# Budget");
 
   const testHome = await mkdtemp(join(tmpdir(), "dohc-e2e-"));
-  const launchArgs = ["apps/desktop/dist/main/main.js"];
-  if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") {
-    launchArgs.push("--no-sandbox");
-  }
-  const app = await electron.launch({
-    args: launchArgs,
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      DOHC_DESKTOP_TEST: "1",
-      DOHC_TEST_HOME: testHome,
-      DOHC_TEST_PICK_PATH: existingRoot,
-    },
+  const app = await launchApp({
+    DOHC_TEST_HOME: testHome,
+    DOHC_TEST_PICK_PATH: existingRoot,
   });
   const page = await app.firstWindow();
 
@@ -225,19 +204,7 @@ test("returning user lands directly in the shell, not first-run", async () => {
   await app.close();
 
   // Relaunch with the same test home: registry remembers the workspace.
-  const relaunchArgs = ["apps/desktop/dist/main/main.js"];
-  if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") {
-    relaunchArgs.push("--no-sandbox");
-  }
-  const second = await electron.launch({
-    args: relaunchArgs,
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      DOHC_DESKTOP_TEST: "1",
-      DOHC_TEST_HOME: testHome,
-    },
-  });
+  const second = await launchApp({ DOHC_TEST_HOME: testHome });
   const page2 = await second.firstWindow();
   await expect(page2.getByTestId("workspace-shell")).toBeVisible();
   await expect(

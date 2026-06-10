@@ -1,5 +1,4 @@
 export const CHANNELS = {
-  getVersion: "desktop:get-version",
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
   getDefaultWorkspaceRoot: "desktop:get-default-workspace-root",

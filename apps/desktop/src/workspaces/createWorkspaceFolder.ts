@@ -1,9 +1,9 @@
 import {
+  checkManifest,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   validateAttachedFolder,
   type WorkspaceKind,
-  type WorkspaceManifest,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -22,18 +22,44 @@ Tell your agents who you are and how you like to work.
 This file lives at .context/me.md inside your workspace folder.
 `;
 
-async function readExistingManifest(
-  rootPath: string,
-): Promise<WorkspaceManifest | null> {
+type ManifestState =
+  | { kind: "absent" }
+  | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] }
+  | { kind: "blocked"; reason: string };
+
+async function inspectManifest(rootPath: string): Promise<ManifestState> {
+  let raw: string;
   try {
-    const raw = await readFile(join(rootPath, ".dohc", "manifest.json"), "utf8");
-    const parsed = JSON.parse(raw) as WorkspaceManifest;
-    return parsed.version === 1 && typeof parsed.workspaceId === "string"
-      ? parsed
-      : null;
+    raw = await readFile(join(rootPath, ".dohc", "manifest.json"), "utf8");
   } catch {
-    return null;
+    return { kind: "absent" };
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: "blocked", reason: "this folder has a corrupt .dohc/manifest.json" };
+  }
+  const check = checkManifest(parsed);
+  if (check.status === "valid") {
+    return {
+      kind: "valid",
+      workspaceId: check.manifest.workspaceId,
+      workspaceKind: check.manifest.kind,
+      mode: check.manifest.mode,
+    };
+  }
+  if (check.status === "newer-version") {
+    return {
+      kind: "blocked",
+      reason: `this workspace was created by a newer version of dohc (manifest v${check.version})`,
+    };
+  }
+  // A present-but-broken manifest must never be silently overwritten (it may
+  // be the user's data). checkManifest never returns "absent" for a file that
+  // exists, but narrow defensively.
+  const reason = check.status === "invalid" ? check.reason : "unrecognized manifest";
+  return { kind: "blocked", reason: `this folder has an invalid .dohc/manifest.json: ${reason}` };
 }
 
 export async function createWorkspaceFolder(input: {
@@ -45,15 +71,18 @@ export async function createWorkspaceFolder(input: {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
   }
 
+  const state = await inspectManifest(input.rootPath);
+  if (state.kind === "blocked") {
+    throw new Error(state.reason);
+  }
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
-  const existing = await readExistingManifest(input.rootPath);
-  if (existing) {
+  if (state.kind === "valid") {
     return {
-      workspaceId: existing.workspaceId,
+      workspaceId: state.workspaceId,
       rootPath: input.rootPath,
-      kind: existing.kind === "cloud-only" ? input.kind : existing.kind,
-      mode: existing.mode,
+      kind: state.workspaceKind === "cloud-only" ? input.kind : state.workspaceKind,
+      mode: state.mode,
     };
   }
 
@@ -64,9 +93,12 @@ export async function createWorkspaceFolder(input: {
 
   await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
   await mkdir(join(input.rootPath, ".context"), { recursive: true });
+  // wx: manifest is absent (inspectManifest returned "absent"); never clobber
+  // an unexpected file that appeared between the check and the write.
   await writeFile(
     join(input.rootPath, ".dohc", "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
+    { flag: "wx" },
   );
   await writeFile(join(input.rootPath, ".context", "me.md"), FIRST_CONTEXT, {
     flag: "wx",

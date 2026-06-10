@@ -1,8 +1,10 @@
 import {
   defaultWorkspaceRoot,
+  normalizeAbsolutePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { relative, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -15,7 +17,6 @@ import {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   PickWorkspaceRootResult,
-  VersionResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
@@ -42,10 +43,40 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
+// Workspace roots the main process itself produced — the default suggestion
+// and any folder the user chose through the real OS dialog. A renderer cannot
+// invent a path (e.g. ~/.ssh) it was never handed; create/attach roots must
+// be one of these or a descendant. Populated by getDefaultWorkspaceRoot and
+// pickWorkspaceRoot before the renderer can create/attach.
+const approvedRoots = new Set<string>();
+
+function approveRoot(rootPath: string): void {
+  approvedRoots.add(normalizeAbsolutePath(rootPath));
+}
+
+function isApprovedRoot(normalized: string): boolean {
+  for (const approved of approvedRoots) {
+    if (normalized === approved) return true;
+    const rel = relative(approved, normalized);
+    if (rel.length > 0 && !rel.startsWith("..") && !rel.startsWith(sep)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The navigation policy is constant for the process lifetime (env var and
+// packaged bundle dir cannot change), so compute it once.
+let cachedPolicy: ReturnType<typeof navigationPolicy> | null = null;
+function policy() {
+  if (!cachedPolicy) cachedPolicy = navigationPolicy();
+  return cachedPolicy;
+}
+
 // IPC is an untrusted boundary: handlers only answer frames the navigation
 // policy itself would allow (exact dev origin or the packaged bundle).
 function isTrustedFrame(frameUrl: string): boolean {
-  return decideNavigation(frameUrl, navigationPolicy()).action === "allow";
+  return decideNavigation(frameUrl, policy()).action === "allow";
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
@@ -56,22 +87,19 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle(CHANNELS.getVersion, (event) => {
-    assertTrustedSender(event);
-    return VersionResult.parse(app.getVersion());
-  });
-
   ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
     assertTrustedSender(event);
     // Test seam: native dialogs cannot be driven by Playwright.
     const testPick = process.env.DOHC_TEST_PICK_PATH;
     if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testPick) {
+      approveRoot(testPick);
       return PickWorkspaceRootResult.parse(testPick);
     }
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
     });
     const picked = result.canceled ? null : (result.filePaths[0] ?? null);
+    if (picked) approveRoot(picked);
     return PickWorkspaceRootResult.parse(picked);
   });
 
@@ -82,17 +110,22 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.getDefaultWorkspaceRoot, (event) => {
     assertTrustedSender(event);
-    return DefaultWorkspaceRootResult.parse(
-      defaultWorkspaceRoot(effectiveHome()),
-    );
+    const root = defaultWorkspaceRoot(effectiveHome());
+    approveRoot(root);
+    return DefaultWorkspaceRootResult.parse(root);
   });
 
-  // Validates AND canonicalizes: all downstream fs/registry operations use
-  // the normalized root, so dot-segment or separator variants of the same
-  // folder cannot bypass guards or register twice.
+  // Validates, canonicalizes, AND confirms the root traces to a main-process
+  // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
+  // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
     const check = validateWorkspaceRootChoice(rootPath, effectiveHome());
     if (!check.ok) throw new Error(check.reason);
+    if (!isApprovedRoot(check.normalized)) {
+      throw new Error(
+        "Workspace root must be chosen through dohc (the default location or the folder picker).",
+      );
+    }
     return check.normalized;
   }
 

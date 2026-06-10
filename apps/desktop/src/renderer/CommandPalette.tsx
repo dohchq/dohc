@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Overlay } from "./Overlay";
 
 export interface Command {
   id: string;
@@ -20,9 +21,14 @@ export function CommandPalette(props: {
     inputRef.current?.focus();
   }, []);
 
-  const matches = props.commands.filter((command) =>
-    command.label.toLowerCase().includes(query.toLowerCase()),
-  );
+  // Cap rendered rows: a workspace can have thousands of files (quick-open),
+  // and rendering them all per keystroke is wasted work.
+  const MAX_MATCHES = 50;
+  const matches = props.commands
+    .filter((command) =>
+      command.label.toLowerCase().includes(query.toLowerCase()),
+    )
+    .slice(0, MAX_MATCHES);
 
   function runCommand(command: Command | undefined) {
     if (!command) return;
@@ -31,14 +37,10 @@ export function CommandPalette(props: {
   }
 
   return (
-    <div
-      className="absolute inset-0 z-10 flex items-start justify-center bg-black/20 pt-24"
-      onClick={props.onClose}
-    >
+    <Overlay onClose={props.onClose}>
       <div
         data-testid={props.testId ?? "command-palette"}
         className="w-130 max-w-[80vw] overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
-        onClick={(event) => event.stopPropagation()}
       >
         <input
           ref={inputRef}
@@ -73,6 +75,6 @@ export function CommandPalette(props: {
           )}
         </ul>
       </div>
-    </div>
+    </Overlay>
   );
 }

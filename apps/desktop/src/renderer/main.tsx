@@ -9,7 +9,6 @@ const container = document.getElementById("root");
 if (container) {
   createRoot(container).render(<DesktopRoot />);
 }
-
-requestAnimationFrame(() => {
-  window.dohcDesktopInternal?.firstPaint();
-});
+// firstPaint is signalled from DesktopRoot when real content (first-run or the
+// workspace shell) actually mounts — not here, where the root is still null
+// until the registry IPC resolves (that would mark a blank background frame).

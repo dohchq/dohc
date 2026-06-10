@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DesktopFirstRun } from "./DesktopFirstRun";
 
 const bridge = {
-  getVersion: vi.fn(async () => "0.1.0"),
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/ice/dohc"),
   pickWorkspaceRoot: vi.fn(async () => "/home/ice/projects/research"),
   createLocalWorkspace: vi.fn(async () => ({

@@ -2,13 +2,14 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 3 COMPLETE (committed 529c0d4; codex review in flight). Phase 4 next: registry/folder-creation formalization.
-- Expected test state: desktop 27/27 unit + 3/3 E2E + smoke green; workspace-core 35/35; baseline green
+- Phase/Step + TDD position: Phase 4 COMMITTED (ce6910a) — POST-PHASE-4 CHECKPOINT in flight (first major checkpoint: Electron security/IPC)
+- Expected test state: workspace-core 40/40, desktop 37/37, E2E 4/4, smoke green — all committed
 - Dirty files and intent: this log only
-- Exact next action: Phase 4 read-only prep while codex phase-03 runs: failing tests for WorkspaceRegistry (default root suggestion, multiple attached folders, duplicate rejection, no-account local, remote identity only post-sync) + createWorkspaceFolder unit tests + MUST close verifier finding: rootPath validation (validateAttachedFolder + reject filesystem root/home-itself as workspace root) in CreateLocalWorkspacePayload/attachWorkspaceFolder
-- Active background tasks: codex phase-03 review → docs/superpowers/reviews/codex/phase-03.md
-- Open worktrees: none
-- Pending reviews: codex phase-03 (in flight)
+- Exact next action: checkpoint results return → triage confirmed findings (fix round, max 2) → transcribe valuable adversarial scenarios into owned tests → phase4(fix) commit if needed → checkpoint section in log → Phase 5 (watcher/batched-sync/history: recon fan-out + contracts-first, then 3 worktree lanes per parallelism map)
+- Active background tasks: weh6pbxub (checkpoint workflow: 4 finders → per-finding verifiers), bmrbeuj0b (codex commit review phase-04 + checkpoint --base main, sequential xhigh → docs/superpowers/reviews/codex/{phase-04,checkpoint-phase-04}.md), bhdmd3rzd (adversarial scenario consult → adversarial-scenarios-phase-04.md)
+- Open worktrees: none (verifier worktrees are self-cleaning)
+- Pending reviews: codex phase-04 + checkpoint (in flight)
+- Git state: 11 commits on branch; commits ce6910a/f630682/c2c288c/529c0d4/d9a5883/7781d02/f405074/67d692f/26f9f70/7df1553 atop e2de7a3
 
 ## Environment (append-only)
 
@@ -92,6 +93,42 @@
 - ECONNREFUSED from :5432/:9000/:1234 = environment failure, never a test failure.
 - codex exec with `-i`: pass the prompt via stdin pipe + `-` arg (`echo "prompt" | codex exec -i img.png -`); positional prompt is silently dropped when stdin is detached.
 - Pre-existing failures on main @ e2de7a3 (fail under BOTH Node 22.13 and 25; broke between dual-backend sweep and merge): apps/app/convex/agentSandboxIntegration.test.ts ("teaches the model when to use shell" — AGENT_SRC prompt strings), src/__tests__/agentApprovalResume.test.tsx ("returns explicit scoped approval decisions"), src/__tests__/searchWriteAudit.test.ts ("no atom-inserting convex file outside the known set"), src/__tests__/uploadFiles.test.tsx ("exposes an upload button in the file sidebar area"). 4 tests / 1618 passed. NOT fixed in Phase 0 — these are main's bugs; several die with Convex in Phase 13 anyway.
+
+## Checkpoint 1 (post-Phase-4): Electron security & IPC — FIXES APPLIED (commit pending)
+
+Range reviewed: git diff main...HEAD (11 commits). Three streams: workflow weh6pbxub (4 finders → 31 agents → 25 confirmed, 2 rejected); codex commit phase-04 (+2: UNC root, case-variant home) + checkpoint --base main (re-listed already-fixed Phase 3 items, stale); adversarial consult (26 scenarios).
+
+Fix round (one disciplined grouped pass; re-verify wf_29173c80-3a2):
+- HIGH symlink write-escape (createFile) → realpath parent + containment assert; regression test added.
+- HIGH registry version-wipe + non-atomic write → read() throws on version!=1/corrupt (never collapses to empty); write() temp+rename atomic; parsed cache; tests added.
+- HIGH malformed-manifest adoption → checkManifest (workspace-core) validates version/workspaceId/kind/mode; adopt only valid; refuse newer-version; corrupt/invalid blocked not overwritten; wx on fresh manifest; tests added.
+- MED renderer-controlled arbitrary root (#4) → approvedRoots binding in main (only the default suggestion + real dialog picks, or descendants, are usable); pick seam double-gated.
+- MED listFiles follows symlinks → skip all symlinks; test added.
+- MED // leading-double-slash home bypass + UNC root + case-variant home → normalizeAbsolutePath collapses POSIX //, UNC-root regex, case-insensitive home compare; tests added.
+- MED future-version manifest overwrite → folded into checkManifest newer-version refusal.
+- LOW manifest no-wx → wx flag.
+- code-size/lean: deleted createFileRecord+FileRecord (dead), deleted getVersion channel/handler/schema/preload/mock (consumer-less), single-sourced WORKSPACE_KINDS/MODES tuples (workspace-core) feeding zod enums, preload typed as DohcDesktopBridge (kills kind:string drift), listFiles identity-ternary removed, importFiles calls refreshFiles, Overlay component extracted (3 modals), e2e launchApp helper (4 sites), IPC string length caps.
+- perf-structure correctness: registry parsed-data cache (no readFileSync per IPC), navigationPolicy module-memo, firstPaint fires on real content mount (not blank-frame rAF), memoized FileRow + stable onSelect, capped palette rows (50). DEFERRED to Phase 16: true windowing/virtualization of file tree + palette (logged); IPC launch-waterfall + per-create re-list merge (#24).
+- Rejected by verifiers (2): setRemote/RemoteIdentity speculative (kept — Phase 9 consumer, logged); listFiles caps "unbounded" (Phase 16 perf gate owns depth/entry caps).
+- DEFERRED with reason: test-bridge build-strip (preload env-only gate; handler is authoritative double-gate; build define → Phase 14); TOCTOU symlink swaps (#19,23 defense-in-depth vs static escapes now fixed); changeSet/conflicts still test-only (Phase 1-mandated, Phase 5/10 consume).
+- Codex re-listed Phase-3 items in --base main (idempotent manifest, require-absolute, clear-state-on-switch) — all already fixed in c2c288c/phase4; confirmed not regressions.
+
+Post-fix gate: workspace-core 47/47, desktop 42/42, typecheck, build, E2E 4/4, smoke — all green.
+
+Re-verification (wf_29173c80-3a2): all 3 HIGH fixes confirmed FIXED with empirical proof — symlink verifier ran live tests (O_EXCL blocks final-segment symlink escape; realpath resolves relative targets); registry verifier confirmed read() throws before any write() so a real file is never clobbered, cache can't mask corruption; root verifier confirmed approvedRoots is renderer-unreachable except via dialog/default and legitimate create+attach still pass. One LOW residual flagged (mkdir-before-containment could create empty dirs outside via pre-planted symlink) — CLOSED: containment now checked against deepest-existing-ancestor BEFORE mkdir, plus post-mkdir re-check. CHECKPOINT 1 PASS.
+
+## Checkpoint 1 (post-Phase-4): Electron security & IPC — original triage notes
+
+Streams: workflow weh6pbxub (4 finders → per-finding verifiers); codex commit phase-04 + checkpoint --base main (bmrbeuj0b); adversarial scenario consult (DONE → docs/superpowers/reviews/codex/adversarial-scenarios-phase-04.md, 26 scenarios).
+
+Consult high-value batches (await verifier confirmation before fixing; transcribe confirmed into owned tests):
+- SYMLINK ESCAPES (15,18-23): lexical normalization doesn't resolve symlinks — a workspace root, subdirectory, or import path that's a symlink can escape the workspace/home guard. Coherent fix: realpath + containment assertion at root-choice (createWorkspaceFolder service boundary, not just main.ts) and at createFile/listFiles/import real-destination. Threat model justifies it: user opens a folder they were given; their agent operates on files.
+- REGISTRY READ-TIME TRUST (8,9): findWorkspace returns persisted entries without revalidation — poisoned registry root="/" or duplicate-id → file ops mistargeted. Fix: revalidate entry root + reject duplicate-id at READ, not only register.
+- REGISTRY JSON ROBUSTNESS (6,7): __proto__ pollution + non-array workspaces shape → fail closed. Fix: null-proto parse / shape guard / zod on read.
+- IPC PAYLOAD CAPS (2,3): no length cap on relativePath/workspaceId → DoS. Fix: zod .max() bounds.
+- SERVICE-BOUNDARY GUARD (14): createWorkspaceFolder only runs validateAttachedFolder, not the root-choice guard — guard belongs at the service, not only the handler.
+- IPC-LEVEL SENDER/PAYLOAD TESTS (1,4,5,10,11,12): mostly covered behaviorally but no direct IPC-handler unit tests. Consider a thin handler test harness.
+- Likely-rejects/low (24,26 already covered by canonicalization+separator normalization; 25 multi-process race is out of scope for single-instance-locked app; 19,23 TOCTOU are defense-in-depth, lower priority than the static symlink escapes).
 
 ## Phase Logs
 

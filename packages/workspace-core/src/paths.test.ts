@@ -139,6 +139,19 @@ describe("workspace root choice", () => {
     }
   });
 
+  it("rejects leading-double-slash and UNC disguises of root and home", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    expect(validateWorkspaceRootChoice("//home/ice", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("///", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("//server", "/home/ice").ok).toBe(false);
+    expect(validateWorkspaceRootChoice("//server/share", "/home/ice").ok).toBe(false);
+  });
+
+  it("rejects case variants of the home directory (case-insensitive filesystems)", async () => {
+    const { validateWorkspaceRootChoice } = await import("./paths");
+    expect(validateWorkspaceRootChoice("/Home/Ice", "/home/ice").ok).toBe(false);
+  });
+
   it("returns the normalized root so equality checks are canonical", async () => {
     const { validateWorkspaceRootChoice } = await import("./paths");
     const result = validateWorkspaceRootChoice(

@@ -9,11 +9,12 @@ import {
   Import,
   LayoutGrid,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { WorkspaceFileEntry, WorkspaceSummary } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { NewFileDialog } from "./NewFileDialog";
+import { Overlay } from "./Overlay";
 import { toggleTheme } from "./theme";
 
 export type Workspace = WorkspaceSummary;
@@ -28,6 +29,29 @@ function FileIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   return <FileText size={13} aria-hidden />;
 }
 
+// Memoized so selecting a file only re-renders the two rows whose selected
+// state changed, not the entire tree (onSelect takes the path, not a closure).
+const FileRow = memo(function FileRow(props: {
+  file: WorkspaceFileEntry;
+  selected: boolean;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => props.onSelect(props.file.path)}
+        className={`flex w-full items-center gap-1.5 px-3 py-1 text-left text-[13px] ${
+          props.selected ? "bg-panel text-ink" : "text-muted hover:text-ink"
+        }`}
+      >
+        <FileIcon kind={props.file.kind} />
+        <span className="truncate">{props.file.path}</span>
+      </button>
+    </li>
+  );
+});
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -41,22 +65,21 @@ export function DesktopWorkspaceShell(props: {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
 
-  const importFiles = useCallback(async () => {
-    await bridge().importWorkspaceFiles({
-      workspaceId: props.workspace.workspaceId,
-    });
-    const result = await bridge().listWorkspaceFiles({
-      workspaceId: props.workspace.workspaceId,
-    });
-    setFiles(result.files);
-  }, [props.workspace.workspaceId]);
-
   const refreshFiles = useCallback(async () => {
     const result = await bridge().listWorkspaceFiles({
       workspaceId: props.workspace.workspaceId,
     });
     setFiles(result.files);
   }, [props.workspace.workspaceId]);
+
+  const importFiles = useCallback(async () => {
+    await bridge().importWorkspaceFiles({
+      workspaceId: props.workspace.workspaceId,
+    });
+    await refreshFiles();
+  }, [props.workspace.workspaceId, refreshFiles]);
+
+  const selectFile = useCallback((path: string) => setSelected(path), []);
 
   useEffect(() => {
     void refreshFiles();
@@ -183,20 +206,12 @@ export function DesktopWorkspaceShell(props: {
             ) : (
               <ul className="m-0 list-none p-0">
                 {files.map((file) => (
-                  <li key={file.path}>
-                    <button
-                      type="button"
-                      onClick={() => setSelected(file.path)}
-                      className={`flex w-full items-center gap-1.5 px-3 py-1 text-left text-[13px] ${
-                        selected === file.path
-                          ? "bg-panel text-ink"
-                          : "text-muted hover:text-ink"
-                      }`}
-                    >
-                      <FileIcon kind={file.kind} />
-                      <span className="truncate">{file.path}</span>
-                    </button>
-                  </li>
+                  <FileRow
+                    key={file.path}
+                    file={file}
+                    selected={selected === file.path}
+                    onSelect={selectFile}
+                  />
                 ))}
               </ul>
             )}
@@ -338,14 +353,10 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {cloudOpen ? (
-        <div
-          className="absolute inset-0 z-10 flex items-start justify-center bg-black/20 pt-24"
-          onClick={() => setCloudOpen(false)}
-        >
+        <Overlay onClose={() => setCloudOpen(false)}>
           <div
             data-testid="cloud-sync-panel"
             className="w-105 max-w-[80vw] rounded-lg border border-line bg-panel p-4 shadow-lg"
-            onClick={(event) => event.stopPropagation()}
           >
             <h2 className="m-0 flex items-center gap-1.5 text-sm font-semibold">
               <Cloud size={14} aria-hidden />
@@ -358,7 +369,7 @@ export function DesktopWorkspaceShell(props: {
               anything.
             </p>
           </div>
-        </div>
+        </Overlay>
       ) : null}
     </div>
   );

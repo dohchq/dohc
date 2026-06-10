@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
@@ -22,18 +22,55 @@ interface RegistryFile {
 }
 
 export function createRegistryStore(registryFile: string) {
+  // The process exclusively owns this file (single-instance lock), so the
+  // parsed registry is cached after first read and refreshed on write.
+  let cache: RegistryFile | null = null;
+
   function read(): RegistryFile {
+    if (cache) return cache;
+    let text: string;
     try {
-      const parsed = JSON.parse(readFileSync(registryFile, "utf8")) as RegistryFile;
-      return parsed.version === 1 ? parsed : { version: 1, workspaces: [] };
+      text = readFileSync(registryFile, "utf8");
     } catch {
-      return { version: 1, workspaces: [] };
+      // Genuinely absent: a fresh empty registry is correct.
+      cache = { version: 1, workspaces: [] };
+      return cache;
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // A present-but-corrupt file is NOT "no workspaces" — refuse rather
+      // than let the next write() collapse real data to empty.
+      throw new Error(
+        `Workspace registry is corrupt (${registryFile}); refusing to overwrite it.`,
+      );
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Workspace registry has an unexpected shape (${registryFile}).`);
+    }
+    const obj = parsed as Record<string, unknown>;
+    if (obj.version !== 1) {
+      // A future-version registry must be preserved, never silently wiped.
+      throw new Error(
+        `Workspace registry version ${String(obj.version)} is newer than supported; refusing to overwrite it.`,
+      );
+    }
+    if (!Array.isArray(obj.workspaces)) {
+      throw new Error(`Workspace registry "workspaces" is not an array (${registryFile}).`);
+    }
+    cache = { version: 1, workspaces: obj.workspaces as RegistryEntry[] };
+    return cache;
   }
 
   function write(registry: RegistryFile): void {
     mkdirSync(dirname(registryFile), { recursive: true });
-    writeFileSync(registryFile, `${JSON.stringify(registry, null, 2)}\n`);
+    // Atomic: write a temp file then rename over the target so a crash or
+    // concurrent reader never sees a half-written registry.
+    const tmp = `${registryFile}.tmp-${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`);
+    renameSync(tmp, registryFile);
+    cache = registry;
   }
 
   return {

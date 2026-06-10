@@ -1,10 +1,11 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createRegistryStore } from "./registryStore";
 
 let store: ReturnType<typeof createRegistryStore>;
+let registryPath: string;
 
 const personal = {
   workspaceId: "ws-1",
@@ -15,7 +16,8 @@ const personal = {
 
 beforeEach(async () => {
   const dir = await mkdtemp(join(tmpdir(), "dohc-registry-"));
-  store = createRegistryStore(join(dir, "workspaces.json"));
+  registryPath = join(dir, "workspaces.json");
+  store = createRegistryStore(registryPath);
 });
 
 describe("registry store", () => {
@@ -69,5 +71,32 @@ describe("registry store", () => {
       serverUrl: "https://cloud.dohc.example",
       remoteWorkspaceId: "rw-99",
     });
+  });
+
+  it("refuses to wipe a future-version registry", async () => {
+    await writeFile(
+      registryPath,
+      JSON.stringify({ version: 2, workspaces: [personal] }),
+    );
+    const future = createRegistryStore(registryPath);
+    expect(() => future.list()).toThrow(/newer than supported|refusing to overwrite/i);
+  });
+
+  it("refuses to overwrite a corrupt registry instead of collapsing it to empty", async () => {
+    await writeFile(registryPath, "{ this is not json");
+    const corrupt = createRegistryStore(registryPath);
+    expect(() => corrupt.list()).toThrow(/corrupt|refusing to overwrite/i);
+  });
+
+  it("writes atomically and leaves no temp file behind", async () => {
+    store.register(personal);
+    const onDisk = JSON.parse(await readFile(registryPath, "utf8"));
+    expect(onDisk.workspaces).toHaveLength(1);
+    // The temp file used during the atomic rename must not survive.
+    const { readdirSync } = await import("node:fs");
+    const leftovers = readdirSync(join(registryPath, "..")).filter((f) =>
+      f.includes(".tmp-"),
+    );
+    expect(leftovers).toEqual([]);
   });
 });

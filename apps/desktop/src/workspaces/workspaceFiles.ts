@@ -3,11 +3,33 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { constants } from "node:fs";
-import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { copyFile, mkdir, readdir, realpath, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, sep } from "node:path";
+
+// Deepest already-existing ancestor of a (possibly not-yet-created) path —
+// the part realpath can resolve, so we can check containment BEFORE mkdir.
+async function existingAncestor(path: string): Promise<string> {
+  let current = path;
+  for (;;) {
+    try {
+      return await realpath(current);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
+  }
+}
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
+
+// True iff `child` is the same as or nested under `parent` (both real paths).
+function isInside(parent: string, child: string): boolean {
+  if (child === parent) return true;
+  const rel = relative(parent, child);
+  return rel.length > 0 && !rel.startsWith("..") && !rel.startsWith(`${sep}`);
+}
 
 export async function listFiles(
   rootPath: string,
@@ -18,16 +40,13 @@ export async function listFiles(
     const dirents = await readdir(dir, { withFileTypes: true });
     for (const dirent of dirents) {
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+      // Never follow symlinks: a dir/file symlink could point outside the
+      // workspace and leak names or recurse into foreign trees.
+      if (dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
         if (!IGNORED_DIRS.has(dirent.name)) await walk(join(dir, dirent.name), rel);
-      } else {
-        const classified = classifyPath(rel);
-        entries.push({
-          path: rel,
-          kind: classified.kind === "database" ? "database"
-            : classified.kind === "app-source" ? "app-source"
-            : "file",
-        });
+      } else if (dirent.isFile()) {
+        entries.push({ path: rel, kind: classifyPath(rel).kind });
       }
     }
   }
@@ -46,7 +65,20 @@ export async function createFile(
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
   const absolute = join(rootPath, validated.normalized);
+  // Lexical validation can't see symlinks: a workspace-internal symlinked
+  // ancestor ("link/evil.md") could resolve outside the root. Check the real
+  // deepest-existing ancestor BEFORE mkdir, so a symlinked ancestor can't even
+  // cause directories to be created outside the workspace.
+  const realRoot = await realpath(rootPath);
+  if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
   await mkdir(dirname(absolute), { recursive: true });
+  // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
+  // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
+  if (!isInside(realRoot, await realpath(dirname(absolute)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
   await writeFile(absolute, "", { flag: "wx" }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   });

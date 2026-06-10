@@ -65,7 +65,11 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
 export function normalizeAbsolutePath(path: string): string {
   const drive = /^[A-Za-z]:/.exec(path)?.[0] ?? "";
   const rest = drive ? path.slice(drive.length) : path;
-  const unc = rest.startsWith("\\\\") || rest.startsWith("//");
+  // A real UNC path needs a server segment after \\ or //; a bare POSIX
+  // leading // (or ///) is just the filesystem root and must collapse to /,
+  // otherwise "//home/ice" would dodge the home-directory guard.
+  const uncMatch = /^([\\/])\1+([^\\/])/.exec(rest);
+  const unc = drive === "" && uncMatch !== undefined && uncMatch !== null;
   const segments = rest.replaceAll("\\", "/").split("/");
   const out: string[] = [];
   for (const segment of segments) {
@@ -98,10 +102,18 @@ export function validateWorkspaceRootChoice(
   if (!attached.ok) return attached;
   const normalized = normalizeAbsolutePath(rootPath);
   const home = normalizeAbsolutePath(homeDir);
-  if (normalized === "/" || /^[A-Za-z]:$/.test(normalized) || normalized === "//") {
+  // Filesystem root, a drive root (C:), or a UNC server/share root (//server,
+  // //server/share) — never a workspace.
+  if (
+    normalized === "/" ||
+    /^[A-Za-z]:$/.test(normalized) ||
+    /^\/\/[^/]*(\/[^/]*)?$/.test(normalized)
+  ) {
     return { ok: false, reason: "workspace root cannot be the filesystem root" };
   }
-  if (normalized === home) {
+  // Case-insensitive compare: on macOS/Windows "/Home/Ice" aliases the home
+  // directory, so a case variant must not slip past this guard.
+  if (normalized.toLowerCase() === home.toLowerCase()) {
     return { ok: false, reason: "workspace root cannot be the home directory itself" };
   }
   return { ok: true, normalized };

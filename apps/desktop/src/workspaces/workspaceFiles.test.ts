@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +28,13 @@ describe("createFile", () => {
     await createFile(root, "keep.md");
     expect(await readFile(join(root, "keep.md"), "utf8")).toBe("original");
   });
+
+  it("refuses to write through a symlinked directory that escapes the workspace", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    await symlink(outside, join(root, "link"), "dir");
+    await expect(createFile(root, "link/evil.md")).rejects.toThrow(/escapes workspace/);
+    expect(existsSync(join(outside, "evil.md"))).toBe(false);
+  });
 });
 
 describe("listFiles", () => {
@@ -41,6 +49,18 @@ describe("listFiles", () => {
       { path: "notes/a.md", kind: "file" },
       { path: "wallet.sqlite", kind: "database" },
     ]);
+  });
+
+  it("does not follow symlinks (file or directory) out of the workspace", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    await writeFile(join(outside, "secret.md"), "leak");
+    await mkdir(join(outside, "sub"), { recursive: true });
+    await writeFile(join(outside, "sub", "deep.md"), "leak");
+    await writeFile(join(root, "real.md"), "");
+    await symlink(join(outside, "secret.md"), join(root, "link.md"), "file");
+    await symlink(outside, join(root, "linkdir"), "dir");
+    const files = await listFiles(root);
+    expect(files).toEqual([{ path: "real.md", kind: "file" }]);
   });
 });
 
