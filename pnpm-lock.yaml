@@ -216,6 +216,15 @@ importers:
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core
+      '@dohc/workspace-fs':
+        specifier: workspace:*
+        version: link:../../packages/workspace-fs
+      '@dohc/workspace-history':
+        specifier: workspace:*
+        version: link:../../packages/workspace-history
+      '@dohc/workspace-sync':
+        specifier: workspace:*
+        version: link:../../packages/workspace-sync
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -347,6 +356,9 @@ importers:
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../workspace-core
       chokidar:
         specifier: ^5.0.0
         version: 5.0.0

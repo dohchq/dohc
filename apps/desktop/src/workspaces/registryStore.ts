@@ -31,8 +31,15 @@ export function createRegistryStore(registryFile: string) {
     let text: string;
     try {
       text = readFileSync(registryFile, "utf8");
-    } catch {
-      // Genuinely absent: a fresh empty registry is correct.
+    } catch (error) {
+      // Only a genuinely absent file is a fresh empty registry. A permission
+      // or I/O error must NOT be treated as "no workspaces" — that would let
+      // the next write() clobber a registry we simply failed to read.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(
+          `Cannot read workspace registry (${registryFile}); refusing to overwrite it.`,
+        );
+      }
       cache = { version: 1, workspaces: [] };
       return cache;
     }

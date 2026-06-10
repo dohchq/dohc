@@ -6,11 +6,34 @@ import {
   Database,
   FilePlus2,
   FileText,
+  History,
   Import,
   LayoutGrid,
+  User,
 } from "lucide-react";
+
+const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
+  synced: "Local · saved",
+  syncing: "Saving…",
+  "local-changes": "Local changes",
+  conflict: "Conflict",
+  "cloud-disconnected": "Cloud disconnected",
+};
+
+const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
+  synced: "bg-success",
+  syncing: "bg-warning",
+  "local-changes": "bg-warning",
+  conflict: "bg-danger",
+  "cloud-disconnected": "bg-subtle",
+};
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import type { WorkspaceFileEntry, WorkspaceSummary } from "../ipc/bridgeContract";
+import type {
+  ChangeSetRecord,
+  SyncStatusResult,
+  WorkspaceFileEntry,
+  WorkspaceSummary,
+} from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { NewFileDialog } from "./NewFileDialog";
@@ -58,6 +81,8 @@ export function DesktopWorkspaceShell(props: {
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
+  const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
@@ -65,25 +90,49 @@ export function DesktopWorkspaceShell(props: {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
 
+  const workspaceId = props.workspace.workspaceId;
+
   const refreshFiles = useCallback(async () => {
-    const result = await bridge().listWorkspaceFiles({
-      workspaceId: props.workspace.workspaceId,
-    });
+    const result = await bridge().listWorkspaceFiles({ workspaceId });
     setFiles(result.files);
-  }, [props.workspace.workspaceId]);
+  }, [workspaceId]);
+
+  const refreshHistory = useCallback(async () => {
+    const [history, status] = await Promise.all([
+      bridge().listChangeSets({ workspaceId }),
+      bridge().getSyncStatus({ workspaceId }),
+    ]);
+    setChangeSets(history.changeSets);
+    setSyncStatus(status);
+  }, [workspaceId]);
 
   const importFiles = useCallback(async () => {
-    await bridge().importWorkspaceFiles({
-      workspaceId: props.workspace.workspaceId,
-    });
+    await bridge().importWorkspaceFiles({ workspaceId });
     await refreshFiles();
-  }, [props.workspace.workspaceId, refreshFiles]);
+  }, [workspaceId, refreshFiles]);
 
   const selectFile = useCallback((path: string) => setSelected(path), []);
 
+  // Open the workspace (starts the file watcher in main), load the initial
+  // file tree + history, and refresh everything whenever a settled batch is
+  // recorded — the timeline and status stay live without polling.
   useEffect(() => {
-    void refreshFiles();
-  }, [refreshFiles]);
+    let cancelled = false;
+    void (async () => {
+      const status = await bridge().openWorkspace({ workspaceId });
+      if (!cancelled) setSyncStatus(status);
+      await refreshFiles();
+      await refreshHistory();
+    })();
+    const unsubscribe = bridge().onWorkspaceActivity(() => {
+      void refreshFiles();
+      void refreshHistory();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [workspaceId, refreshFiles, refreshHistory]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -281,23 +330,49 @@ export function DesktopWorkspaceShell(props: {
           )}
         </main>
 
-        {/* Agent activity panel */}
+        {/* History timeline — the "git log for everyday people". Every
+            settled change (yours or your agent's) lands here, newest first. */}
         <aside
-          data-testid="agent-panel"
-          aria-label="Agent activity"
+          data-testid="history-timeline"
+          aria-label="History"
           className="flex w-64 shrink-0 flex-col border-l border-line bg-panel-2"
         >
           <header className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[13px] font-semibold">
-            <Bot size={14} aria-hidden />
-            Agent activity
+            <History size={14} aria-hidden />
+            History
           </header>
-          <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-            <span className="text-xs text-muted">No agent runs yet</span>
-            <span className="text-[11px] text-subtle">
-              Point Codex or Claude Code at this folder — changes show up here
-              as a timeline.
-            </span>
-          </div>
+          {changeSets.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
+              <span className="text-xs text-muted">No changes yet</span>
+              <span className="text-[11px] text-subtle">
+                Edits — yours or your agent's — show up here as a timeline you
+                can review.
+              </span>
+            </div>
+          ) : (
+            <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
+              {changeSets.map((change) => (
+                <li
+                  key={change.id}
+                  className="flex flex-col gap-0.5 border-b border-line px-3 py-2"
+                >
+                  <span className="flex items-center gap-1.5 text-[12px] text-ink">
+                    {change.author.kind === "agent" ? (
+                      <Bot size={12} aria-hidden className="shrink-0 text-subtle" />
+                    ) : (
+                      <User size={12} aria-hidden className="shrink-0 text-subtle" />
+                    )}
+                    <span className="truncate">{change.humanSummary}</span>
+                  </span>
+                  <span className="text-[10px] text-subtle">
+                    {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
+                    {" · "}
+                    {change.kind}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </aside>
       </div>
 
@@ -305,13 +380,14 @@ export function DesktopWorkspaceShell(props: {
       <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3">
         <span
           data-testid="sync-status"
+          data-state={syncStatus?.state ?? "synced"}
           className="flex items-center gap-1.5 text-[11px] text-muted"
         >
           <span
             aria-hidden
-            className="inline-block h-1.5 w-1.5 rounded-full bg-success"
+            className={`inline-block h-1.5 w-1.5 rounded-full ${SYNC_DOT[syncStatus?.state ?? "synced"]}`}
           />
-          Local · saved
+          {SYNC_LABEL[syncStatus?.state ?? "synced"]}
         </span>
         <button
           type="button"

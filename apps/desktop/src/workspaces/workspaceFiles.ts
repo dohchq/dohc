@@ -4,7 +4,7 @@ import {
 } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { copyFile, mkdir, readdir, realpath, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
 // the part realpath can resolve, so we can check containment BEFORE mkdir.
@@ -25,10 +25,17 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
 
 // True iff `child` is the same as or nested under `parent` (both real paths).
+// On Windows, relative() across drives returns an absolute path (e.g.
+// C:\ws -> D:\evil gives "D:\evil"), which is not a descendant.
 function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
-  return rel.length > 0 && !rel.startsWith("..") && !rel.startsWith(`${sep}`);
+  return (
+    rel.length > 0 &&
+    !isAbsolute(rel) &&
+    !rel.startsWith("..") &&
+    !rel.startsWith(`${sep}`)
+  );
 }
 
 export async function listFiles(

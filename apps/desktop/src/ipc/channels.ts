@@ -7,6 +7,10 @@ export const CHANNELS = {
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
   importWorkspaceFiles: "desktop:import-workspace-files",
+  openWorkspace: "desktop:open-workspace",
+  listChangeSets: "desktop:list-change-sets",
+  getSyncStatus: "desktop:get-sync-status",
+  workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",
 } as const;

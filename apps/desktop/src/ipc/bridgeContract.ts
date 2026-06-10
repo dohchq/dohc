@@ -95,6 +95,49 @@ export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
 >;
 
+export const OpenWorkspacePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
+
+export const SyncStatusResult = z.object({
+  state: z.enum([
+    "synced",
+    "syncing",
+    "local-changes",
+    "conflict",
+    "cloud-disconnected",
+  ]),
+  pendingChangeCount: z.number().int().nonnegative(),
+  lastSyncedAtMs: z.number().nullable(),
+});
+export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
+
+const ChangeAuthorSchema = z.union([
+  z.object({ kind: z.literal("user"), userId: z.string() }),
+  z.object({
+    kind: z.literal("agent"),
+    agentId: z.string(),
+    onBehalfOf: z.string(),
+  }),
+]);
+
+export const ChangeSetRecord = z.object({
+  id: z.string().min(1),
+  recordedAtMs: z.number(),
+  kind: z.enum(["user-edit", "agent-run", "import", "sync", "app-build"]),
+  author: ChangeAuthorSchema,
+  summary: z.string(),
+  humanSummary: z.string(),
+  fileCount: z.number().int().nonnegative(),
+});
+export type ChangeSetRecord = z.infer<typeof ChangeSetRecord>;
+
+export const ListChangeSetsResult = z.object({
+  changeSets: z.array(ChangeSetRecord),
+});
+export type ListChangeSetsResult = z.infer<typeof ListChangeSetsResult>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),
@@ -122,4 +165,13 @@ export interface DohcDesktopBridge {
   importWorkspaceFiles(
     payload: ImportWorkspaceFilesPayload,
   ): Promise<ImportWorkspaceFilesResult>;
+  openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
+  listChangeSets(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<ListChangeSetsResult>;
+  getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
+  // Live push: main signals the renderer when the active workspace's files
+  // or history changed (settled filesystem batch recorded). Returns an
+  // unsubscribe function.
+  onWorkspaceActivity(listener: () => void): () => void;
 }

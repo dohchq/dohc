@@ -147,6 +147,30 @@ Consult high-value batches (await verifier confirmation before fixing; transcrib
 
 ## Phase Logs
 
+### Phase 5: File Watcher, Batched Sync, And Local-First History
+
+- Status: in progress (all gates green; commit pending; then verifiers + codex)
+- Execution map: recon fan-out → lock 4 contracts in workspace-core (committed ce589f3) → scaffold workspace-sync + workspace-history, add chokidar → 3 parallel worktree-equivalent lanes (file-disjoint packages) → merge → lead-owned shell wiring (sync status binding + history timeline panel + IPC) → live-pipeline E2E → bug found via screenshot (feedback loop) → fixed + regressed → gate green.
+- Resume notes: ready to commit phase5; then verifier fan-out + codex review.
+- Files changed: packages/workspace-core (watcher.ts, syncStatus.ts + test, changeSet provenance — committed ce589f3); packages/workspace-fs (watchEvents.ts + test — lane A + absolute-path ignore fix); packages/workspace-sync (batchedSync.ts + test + index — lane B); packages/workspace-history (changeSetStore.ts + test + index — lane C); apps/desktop (workspaceWatcher.ts, workspaceActivity.ts, ipc channels/contract, main handlers, preload, DesktopWorkspaceShell history timeline + sync-status binding, e2e); deps + lockfile
+- Code deleted or consolidated: agent-panel placeholder → real History timeline; hardcoded "Local · saved" → live SyncStatus binding
+- Net LOC delta: recorded at commit
+- Dependencies added: chokidar ^5 (workspace-fs); workspace-fs/sync/history added as desktop deps; workspace-core added as workspace-fs dep (lane A discovered it was unlinked)
+- Decisions made: D-15/16/17 (lane boundaries, JSON history not SQLite, chokidar+pure-logic split — all in pre-phase section); D-18 | createSettleBatcher (workspace-sync) is public package API for Phase 9 cloud-push settling; live local pipeline uses the watcher's own settle + batchToChangeSet (the watcher debounces fs noise; the batcher will settle change-sets before remote POST) — both legitimate, knip-allowlisted as public exports
+- Tests added: workspace-core +6 (syncStatus); workspace-fs +18 (ignore rules, sidecar collapse, watcher wrapper incl. .dohc-absolute-path regression); workspace-sync +15 (settle batcher, 18-writes→1-changeset, batch→ChangeSet); workspace-history +9 (JSON store, newest-first, attributed humanSummary, no git markers); desktop E2E +live-pipeline assertions (file edit → timeline entry; NO .dohc in timeline)
+- Commands run: per-lane RED→GREEN; all 5 package suites (core 54, fs 26, sync 15, history 9, desktop 42) + typechecks + build + 4 E2E + smoke — green under pinned Node
+- Failing tests fixed: feedback-loop bug (watcher recorded its own .dohc/history writes — chokidar passes ABSOLUTE paths to ignored predicate, shouldIgnoreWatchPath expected relative) — FIXED: relativize in watcher ignored predicate + defense-in-depth filter in workspaceWatcher; regressed at fs-unit AND E2E level. Caught by the Phase-5 design screenshot.
+- Electron E2E/manual smoke: 4/4 E2E + smoke green
+- UI/UX screenshot/design review: History timeline screenshot inspected — clean (warm panel, user/agent icon, "You edited notes/today.md", file count + kind), no .dohc noise after fix. Sync-status footer binds to live state (synced/syncing/local-changes/conflict/cloud-disconnected with state-driven dot color).
+- Performance measurements: watcher settle 500ms; no polling loop (chokidar event-driven); registry parsed-cache from checkpoint-1 avoids per-IPC reads. Virtualization of timeline/tree deferred to Phase 16.
+- Security/collaboration regressions: .dohc never recorded (feedback-loop guard, 2 layers); history is inspectable JSON under .dohc/history; no git markers in summaries (asserted)
+- Reviewer/subagent findings: 3 lanes all GREEN with recorded RED; pending pre-commit verifier fan-out
+- Codex third-party review findings: pending post-commit (high-risk phase — data/sync)
+- Relevant findings fixed: feedback-loop pre-commit
+- Deferred findings with reason: live co-editing/conflict states (Phase 10); cloud-disconnected reachable Phase 9; timeline virtualization Phase 16
+- Remaining risk: chokidar timing under heavy load unmeasured (Phase 16); settle window fixed at 500ms (per-file-type windows from plan deferred — markdown/app/sqlite all use one window for now)
+- Next phase: 6
+
 ### Phase 0: Baseline, Tooling, And Old-Plan Inventory
 
 - Status: in progress

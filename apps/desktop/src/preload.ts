@@ -24,6 +24,15 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
   importWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
+  openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
+  listChangeSets: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChangeSets, payload),
+  getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
+  onWorkspaceActivity: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on(CHANNELS.workspaceActivity, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
+  },
 };
 
 contextBridge.exposeInMainWorld("dohcDesktop", bridge);

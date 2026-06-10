@@ -3,8 +3,8 @@ import {
   normalizeAbsolutePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
-import { app, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
-import { relative, sep } from "node:path";
+import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { isAbsolute, relative, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -14,9 +14,12 @@ import {
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
   LaunchMarksResult,
+  ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  OpenWorkspacePayload,
   PickWorkspaceRootResult,
+  SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
@@ -31,6 +34,7 @@ import {
   listWorkspaces,
   registerWorkspace,
 } from "./workspaces/WorkspaceRegistry";
+import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import {
   copyIntoWorkspace,
   createFile,
@@ -42,6 +46,16 @@ function requireWorkspace(workspaceId: string) {
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
 }
+
+// Live file-watch → history pipeline. Pushes a renderer notification whenever
+// a settled batch is recorded so the file tree, timeline, and sync status
+// refresh without polling.
+const activity = createWorkspaceActivity(() => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(CHANNELS.workspaceActivity);
+  }
+});
+app.on("will-quit", () => activity.stopAll());
 
 // Workspace roots the main process itself produced — the default suggestion
 // and any folder the user chose through the real OS dialog. A renderer cannot
@@ -58,7 +72,14 @@ function isApprovedRoot(normalized: string): boolean {
   for (const approved of approvedRoots) {
     if (normalized === approved) return true;
     const rel = relative(approved, normalized);
-    if (rel.length > 0 && !rel.startsWith("..") && !rel.startsWith(sep)) {
+    // On Windows, relative() across drives returns an absolute path
+    // (C:\ws -> D:\evil gives "D:\evil"), which is NOT a descendant.
+    if (
+      rel.length > 0 &&
+      !isAbsolute(rel) &&
+      !rel.startsWith("..") &&
+      !rel.startsWith(sep)
+    ) {
       return true;
     }
   }
@@ -182,6 +203,29 @@ function registerIpcHandlers(): void {
       ? []
       : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
     return ImportWorkspaceFilesResult.parse({ imported });
+  });
+
+  ipcMain.handle(CHANNELS.openWorkspace, (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenWorkspacePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return SyncStatusResult.parse(activity.open(workspace));
+  });
+
+  ipcMain.handle(CHANNELS.listChangeSets, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return ListChangeSetsResult.parse({
+      changeSets: await activity.listChangeSets(workspace),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    return SyncStatusResult.parse(activity.getStatus(input.workspaceId));
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {

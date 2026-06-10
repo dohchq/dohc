@@ -6,7 +6,18 @@ export default defineConfig({
   main: {
     // Workspace packages ship raw TS — they must be bundled, not
     // externalized, or Node ESM fails on their extensionless imports.
-    plugins: [externalizeDepsPlugin({ exclude: ["@dohc/workspace-core"] })],
+    // chokidar and other real npm deps stay external (loaded from node_modules).
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: [
+          "@dohc/workspace-core",
+          "@dohc/workspace-contracts",
+          "@dohc/workspace-fs",
+          "@dohc/workspace-sync",
+          "@dohc/workspace-history",
+        ],
+      }),
+    ],
     build: {
       outDir: "dist/main",
       lib: { entry: "src/main.ts" },

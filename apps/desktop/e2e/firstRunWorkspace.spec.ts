@@ -71,12 +71,14 @@ test("first run creates a real workspace folder and lands in a native shell", as
     mode: "local-first",
   });
 
-  // --- Shell surfaces: sidebar/file tree, status, agent panel ---
+  // --- Shell surfaces: sidebar/file tree, status, history timeline ---
   await expect(page.getByTestId("file-tree")).toBeVisible();
   await expect(page.getByTestId("sync-status")).toBeVisible();
-  await expect(page.getByTestId("agent-panel")).toBeVisible();
-  // Agent activity is a panel with an empty-state action, not a paragraph.
-  await expect(page.getByTestId("agent-panel")).toContainText(/no agent runs/i);
+  await expect(page.getByTestId("history-timeline")).toBeVisible();
+  // History is a panel with a designed empty state, not a paragraph dump.
+  await expect(page.getByTestId("history-timeline")).toContainText(
+    /no changes yet/i,
+  );
 
   // --- Keyboard: new file ---
   await page.keyboard.press("ControlOrMeta+n");
@@ -88,6 +90,15 @@ test("first run creates a real workspace folder and lands in a native shell", as
     page.getByTestId("file-tree").getByText("today.md"),
   ).toBeVisible();
   expect(existsSync(join(workspaceRoot, "notes", "today.md"))).toBe(true);
+
+  // --- The watcher records the change into the visible history timeline ---
+  await expect(page.getByTestId("history-timeline")).toContainText(
+    /today\.md/i,
+    { timeout: 15_000 },
+  );
+  // The watcher must NEVER record its own .dohc writes (feedback loop): the
+  // timeline shows user files only.
+  await expect(page.getByTestId("history-timeline")).not.toContainText(".dohc");
 
   // --- Keyboard: command palette opens, filters, closes ---
   await page.keyboard.press("ControlOrMeta+k");
