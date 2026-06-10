@@ -21,6 +21,9 @@ const FATAL_PATTERNS = [
   /Unable to load preload script/,
   /Renderer process crashed/i,
   /ERR_FILE_NOT_FOUND/,
+  // Renderer assets CORS-blocked over file:// (grantFileProtocolExtraPrivileges
+  // fuse regression): the app stays alive but every window is blank.
+  /blocked by CORS policy/,
 ];
 
 // --enable-logging routes renderer console/load errors to stderr so the
@@ -29,7 +32,9 @@ const args = [mainEntry, "--enable-logging"];
 if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
 
 const child = spawn(
-  join(repoRoot, "node_modules/.bin/electron"),
+  // fuse-smoke.mjs points this at a fuse-flipped Electron copy whose
+  // resources/app.asar takes precedence over the argv entry path.
+  process.env.DOHC_SMOKE_ELECTRON ?? join(repoRoot, "node_modules/.bin/electron"),
   args,
   {
     env: { ...process.env, DOHC_DESKTOP_TEST: "1" },

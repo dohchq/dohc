@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "package": "electron-vite build && electron-builder --publish never",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "smoke:fuses": "node scripts/fuse-smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

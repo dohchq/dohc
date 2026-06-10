@@ -62,6 +62,7 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { launchMarks } from "./performance/launchMarks";
+import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { navigationPolicy } from "./window/createMainWindow";
 import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
@@ -773,6 +774,12 @@ if (!app.requestSingleInstanceLock()) {
     const { createMainWindow } = await import("./window/createMainWindow");
     createMainWindow();
     launchMarks.firstWindow();
+
+    // Auto-updates: only a packaged app with DOHC_UPDATE_URL set ever checks
+    // (local/dev builds never self-mutate). Failures are absorbed — updates
+    // must never take the app down. No UI surface yet; downloaded updates
+    // install on quit (electron-updater autoInstallOnAppQuit).
+    void startAutoUpdates({ isPackaged: app.isPackaged }).catch(() => undefined);
   });
 
   app.on("window-all-closed", () => {
