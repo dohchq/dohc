@@ -96,7 +96,7 @@ export type HocuspocusAcl = {
   canWriteAtom(input: AtomAccessInput): Promise<boolean>
   loadAtomBootstrap?(
     input: AtomAccessInput,
-  ): Promise<{ markdown: string; path?: string } | null>
+  ): Promise<{ markdown: string; path?: string; plainText?: boolean } | null>
   setAtomBodyCache?(
     input: AtomBodyCacheProjectionInput,
   ): Promise<AtomBodyCacheProjectionResult>
@@ -195,8 +195,17 @@ function hasPersistedBodyContent(doc: Y.Doc): boolean {
 function bootstrapMarkdownToYDoc(bootstrap: {
   markdown: string
   path?: string
+  // True when the atom is plain-text-canonical (one Y.Text in `plainText`)
+  // rather than a rich ProseMirror `body` XmlFragment. The Postgres/desktop
+  // path sets this for ALL its atoms: the desktop editor is a plain textarea,
+  // so the shared field MUST be the plainText Y.Text it can read/write and the
+  // server projects from. View source files are plain-text by path too.
+  plainText?: boolean
 }): Y.Doc {
-  return bootstrap.path && isPlainTextAtomPath(bootstrap.path)
+  const plainText =
+    bootstrap.plainText ||
+    (bootstrap.path ? isPlainTextAtomPath(bootstrap.path) : false)
+  return plainText
     ? plainTextToYDoc(bootstrap.markdown)
     : markdownToYDoc(bootstrap.markdown)
 }

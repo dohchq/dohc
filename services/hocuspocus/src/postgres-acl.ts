@@ -92,7 +92,15 @@ export function createPostgresAcl({ pool }: { pool: pg.Pool }): HocuspocusAcl {
          where id = $1 and workspace_id = $2 and deleted_at is null limit 1`,
         [input.atomId, input.workspaceId],
       )
-      return rows[0] ? { markdown: rows[0].body, path: rows[0].path } : null
+      // Plain-text-canonical for every atom on this path: the only live editor
+      // is the desktop's plain-text textarea, so the shared Y.Doc body MUST be
+      // the `plainText` Y.Text it binds — and the markdown projection
+      // (onChange -> setAtomBodyCache) reads that same field. Binding a rich
+      // `body` XmlFragment here would open the desktop blank and let an empty
+      // body-projection blank atoms.body (cross-channel data loss vs merge-sync).
+      return rows[0]
+        ? { markdown: rows[0].body, path: rows[0].path, plainText: true }
+        : null
     },
 
     // The postgres body cache keeps only body + revision (+ an atom_revisions

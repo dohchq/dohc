@@ -121,10 +121,14 @@ describe('Postgres ACL', () => {
     await expect(acl().canWriteAtom(input(memberId, lockedAtomId))).resolves.toBe(false)
   })
 
-  it('bootstraps body+path for live atoms and null for deleted ones', async () => {
+  it('bootstraps body+path (plain-text-canonical) for live atoms and null for deleted ones', async () => {
+    // plainText:true — the desktop's plain-text editor is the only live editor
+    // on this path, so the shared Y.Doc body is a `plainText` Y.Text (not a
+    // rich `body` XmlFragment) and the markdown projection reads it back.
     await expect(acl().loadAtomBootstrap?.(input(memberId))).resolves.toEqual({
       markdown: '# Hello',
       path: 'notes/hello.md',
+      plainText: true,
     })
     await expect(
       acl().loadAtomBootstrap?.(input(memberId, deletedAtomId)),

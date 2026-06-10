@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchApp } from "./launch";
@@ -120,6 +121,10 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   await signInAndEnableSync(pageA);
   await pageA.getByTestId("file-tree").getByText("notes/doc.md", { exact: true }).click();
   await expect(pageA.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
+  // The bootstrapped content MUST survive — the editor opens with it, never
+  // blank. (Regression guard: a wrong-field bind / pre-sync materialize would
+  // silently blank "# Shared doc".)
+  await expect(pageA.getByTestId("collab-editor")).toHaveValue(/# Shared doc/, { timeout: 20_000 });
 
   // Client B: same remote workspace id; enable-sync pulls (self-heals — same
   // bytes), opens the doc, joins the same shared Y.Doc.
@@ -128,6 +133,7 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   await signInAndEnableSync(pageB);
   await pageB.getByTestId("file-tree").getByText("notes/doc.md", { exact: true }).click();
   await expect(pageB.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
+  await expect(pageB.getByTestId("collab-editor")).toHaveValue(/# Shared doc/, { timeout: 20_000 });
 
   // Presence: each side sees the other editing.
   await expect(pageA.getByTestId("collab-presence")).toContainText(/editing/i, { timeout: 20_000 });
@@ -145,6 +151,18 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   await expect(pageA.getByTestId("collab-editor")).toHaveValue(/Edited by B\./, { timeout: 20_000 });
   await expect(pageA.getByTestId("collab-editor")).toHaveValue(/Edited by A\./);
   expect(await pageA.getByTestId("collab-editor").inputValue()).not.toMatch(/<<<<<<<|>>>>>>>/);
+
+  // The CRDT materializes back to the file on settle: A's disk must converge to
+  // the full document — the original header AND both edits — so nothing is lost
+  // when the session closes. (Wait for the settle to land.)
+  const docPath = join(a.root, "notes", "doc.md");
+  await expect
+    .poll(async () => readFile(docPath, "utf8").catch(() => ""), { timeout: 30_000 })
+    .toMatch(/Edited by A\./);
+  const onDisk = await readFile(docPath, "utf8");
+  expect(onDisk).toMatch(/# Shared doc/);
+  expect(onDisk).not.toMatch(/<<<<<<<|>>>>>>>/);
+  expect(existsSync(`${docPath}.conflict`)).toBe(false);
 
   await appA.close();
   await appB.close();

@@ -164,6 +164,9 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
   const collab = useCollabDoc({
     workspaceId: props.workspaceId,
     path: props.path,
+    // The on-disk text so the collab session can reconcile external changes
+    // (agent edits, sync pulls) into the live doc instead of clobbering them.
+    onDiskText: props.body,
     enabled: true,
   });
 
@@ -204,25 +207,10 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
     };
   }, []);
 
-  // Materialize the converged CRDT back to the file on settle: while a live
-  // session is canonical in-memory, the FILE is what enters history and cloud
-  // sync, so every settle writes the shared text through the bounded write IPC.
-  // No feedback loop — the collab editor is driven by Y.Text, not the file, so
-  // the resulting watcher event never re-enters the doc. Idempotent across
-  // peers (identical converged bytes → same sha → sync no-ops).
-  useEffect(() => {
-    if (!collab.enabled) return;
-    const timer = setTimeout(() => {
-      void bridge()
-        .writeWorkspaceText({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-          text: collab.text,
-        })
-        .catch(() => undefined);
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [collab.enabled, collab.text, props.workspaceId, props.path]);
+  // Materialization of the converged CRDT back to the file lives inside
+  // useCollabDoc, gated on sync and routed through the canonical-state model
+  // (collabSession.ts) so a stale/empty doc folds the on-disk text in rather
+  // than clobbering it — never a blind write of the live text over the file.
 
   // Collab mode: the shared Y.Text drives the editor. There is no local save
   // state (the CRDT is canonical; main materializes to disk at settle points),
