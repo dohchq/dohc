@@ -31,6 +31,9 @@ export function DesktopRoot() {
   }
   return (
     <DesktopWorkspaceShell
+      // Remount on switch: file list and selection are workspace-local and
+      // must never leak from workspace A into workspace B.
+      key={workspace.workspaceId}
       workspace={workspace}
       workspaces={workspaces}
       onSwitchWorkspace={setWorkspace}

@@ -2,14 +2,13 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 3 implementation GREEN (20/20 unit, 3/3 E2E, typecheck, build); Design Review Loop iteration 1 in flight
-- Expected test state: desktop unit 20/20 (14 security + 6 first-run), E2E 3/3 (desktopLaunch, firstRunWorkspace x2); workspace-core 35/35
-- Dirty files and intent: apps/desktop/* uncommitted Phase 3 work (bridge extensions: registry/createWorkspace/listFiles/createFile; React renderer: DesktopRoot/FirstRun/Shell/CommandPalette/NewFileDialog/theme/styles.css w/ @dohc/brand tokens; electron.vite bundles workspace-core via externalizeDepsPlugin exclude — Node ESM can't load raw workspace TS); pnpm-lock (react deps); this log
-- Exact next action: design judges (wf_d8c4c7e3-6a7) + advisory codex -i (bhbk63g2s → docs/superpowers/reviews/codex/ui-phase-03.md) return → fix hard fails (max 3 iterations) → smoke → verifier fan-out → commit phase3 → codex review (xhigh, UI phase... tier says phases 2,4,5 xhigh; 3 not listed high-risk → default xhigh) → Phase 4
-- Active background tasks: w1iy497do (design judges), bhbk63g2s (codex -i advisory)
+- Phase/Step + TDD position: Phase 3 COMPLETE (committed 529c0d4; codex review in flight). Phase 4 next: registry/folder-creation formalization.
+- Expected test state: desktop 27/27 unit + 3/3 E2E + smoke green; workspace-core 35/35; baseline green
+- Dirty files and intent: this log only
+- Exact next action: Phase 4 read-only prep while codex phase-03 runs: failing tests for WorkspaceRegistry (default root suggestion, multiple attached folders, duplicate rejection, no-account local, remote identity only post-sync) + createWorkspaceFolder unit tests + MUST close verifier finding: rootPath validation (validateAttachedFolder + reject filesystem root/home-itself as workspace root) in CreateLocalWorkspacePayload/attachWorkspaceFolder
+- Active background tasks: codex phase-03 review → docs/superpowers/reviews/codex/phase-03.md
 - Open worktrees: none
-- Pending reviews: design loop iteration 1; codex phase-03 commit review after commit
-- Known nits for design loop: redundant PERSONAL badge next to "personal" name; sidebar is flat path list not hierarchical tree (v0)
+- Pending reviews: codex phase-03 (in flight)
 
 ## Environment (append-only)
 
@@ -189,8 +188,8 @@
 - Performance measurements: launch marks pipeline intact (E2E re-verified); shell adds React — bundle size watch begins Phase 16 ratchet
 - Security/collaboration regressions: all new channels sender-validated + zod-parsed payloads/results; file ops traversal-guarded via workspace-core
 - Reviewer/subagent findings: verifiers wf_5ff43339-c71 — test-quality PASS (deletion mutation bites; manifest-content/keyboard-file/relaunch assertions all real, no sleeps; createFile traversal-proof incl. wx no-overwrite; listFiles skips ignored dirs, doesn't follow symlinks; doctored workspaceId fails closed). One tracked note → Phase 4: CreateLocalWorkspacePayload.rootPath is only z.string().min(1) — a compromised renderer could register "/" or $HOME as a workspace then enumerate/create-empty broadly; Phase 4 attachment rules MUST add root validation (validateAttachedFolder + reject root/home-itself). claimed-vs-actual initially killed by session limit; re-run via workflow resume (cached test-quality) — verdict FAIL on plan-completeness (every claim true, gates green, hunts clean, but 5 plan-required shell elements missing). HONORED: all 5 built in iteration 2 rather than deferred. Design loop iteration 2 judge: PASS, zero hard fails, all 10 plan shell elements verified present (code+screenshot evidence); 2 polish notes (offer-row gutter, Ctrl P hint) applied same-pass.
-- Codex third-party review findings: pending post-commit
-- Relevant findings fixed: pending
+- Codex third-party review findings (full: docs/superpowers/reviews/codex/phase-03.md): (1) P1 creating over an existing dohc workspace overwrote its manifest, severing workspaceId identity for sync/history — FIXED (adopt existing manifest, keep identity; unit-tested with recorded RED); (2) P2 rootPath accepted relative paths (created .dohc relative to process cwd) — FIXED (validateAttachedFolder in createWorkspaceFolder; also closes the verifier's tracked rootPath note at the absolute-path level — Phase 4 still adds root/home-itself rejection); (3) P2 stale files/selection leaked across workspace switch — FIXED (shell keyed by workspaceId, remount on switch). 30/30 unit + 3/3 E2E + smoke green after fixes.
+- Relevant findings fixed: all 3 codex findings in phase3(fix) commit
 - Deferred findings with reason: SUPERSEDED — claimed-vs-actual verifier correctly failed the deferral as gate-softening; all five missing plan elements built in iteration 2: workspace switcher (real listbox over registry), import action (real file-copy via dialog + copyIntoWorkspace, unit-tested incl. no-overwrite), cloud-sync offer (truthful surface in first-run + status bar + palette — explains, never gates), quick-open Ctrl+P (palette-pattern file jump, E2E-tested), file-preview screenshot (selected-state artifact). Also fixed from verifier nits: me.md catch narrowed to EEXIST-only. Flat path list (not hierarchical tree) remains v0 — hierarchy + virtualization with Phase 5/16. Verifier note on rootPath validation → Phase 4 requirement (recorded).
 - Remaining risk: shell density will be rejudged when editor surface lands (Phase 6)
 - Next phase: 4
