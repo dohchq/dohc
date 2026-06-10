@@ -130,6 +130,8 @@ Fix round (one disciplined grouped pass; re-verify wf_29173c80-3a2):
 
 Post-fix gate: workspace-core 47/47, desktop 42/42, typecheck, build, E2E 4/4, smoke — all green.
 
+Codex review of the fix commit b3dd383 (phase-04-fix.md) raised 3 more, all fixed in eb6c0c3 (Phase 5 commit, made while lanes ran): P1 cross-drive `relative()` bypass in isApprovedRoot (main.ts) + isInside (workspaceFiles.ts) — both now reject when `isAbsolute(rel)`; P2 registry treated any read error as absent — now only ENOENT is "absent", other errors throw rather than risk overwrite.
+
 Re-verification (wf_29173c80-3a2): all 3 HIGH fixes confirmed FIXED with empirical proof — symlink verifier ran live tests (O_EXCL blocks final-segment symlink escape; realpath resolves relative targets); registry verifier confirmed read() throws before any write() so a real file is never clobbered, cache can't mask corruption; root verifier confirmed approvedRoots is renderer-unreachable except via dialog/default and legitimate create+attach still pass. One LOW residual flagged (mkdir-before-containment could create empty dirs outside via pre-planted symlink) — CLOSED: containment now checked against deepest-existing-ancestor BEFORE mkdir, plus post-mkdir re-check. CHECKPOINT 1 PASS.
 
 ## Checkpoint 1 (post-Phase-4): Electron security & IPC — original triage notes
