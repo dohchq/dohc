@@ -186,7 +186,14 @@ function isTextImportMediaType(mediaType: string, path: string) {
 function isImportSourceError(
   source: ImportSourceText | Extract<ImportDataResult, { ok: false }>,
 ): source is Extract<ImportDataResult, { ok: false }> {
-  return "ok" in source && source.ok === false;
+  return (
+    "ok" in source &&
+    source.ok === false &&
+    "code" in source &&
+    typeof source.code === "string" &&
+    "message" in source &&
+    typeof source.message === "string"
+  );
 }
 
 function sha256(value: string) {

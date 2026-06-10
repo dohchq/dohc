@@ -27,7 +27,8 @@ import { requireWorkspace } from './auth'
 import { readWorkspaceSlug, workspaceIdForSlug } from './workspaceSlugs'
 import { requiresConfirmation } from './confirmTier'
 import { moveFolderImpl } from './folders'
-import { canWriteInFolder, folderPathForPath } from './atomAccess'
+import { canWriteAtomPath } from './atomAccess'
+import { upsertAtomImpl } from './atoms'
 import type { ToolCtx } from '@convex-dev/agent'
 import {
   agentProviderOptions,
@@ -372,10 +373,10 @@ export const _saveFileForAgent = internalMutation({
         message: 'Generated binary files must be saved as assets.',
       }
     }
-    if (!(await canWriteInFolder(
+    if (!(await canWriteAtomPath(
       ctx,
       args.workspaceId,
-      folderPathForPath(path),
+      path,
       args.actorUserId,
     ))) {
       return {
@@ -384,26 +385,32 @@ export const _saveFileForAgent = internalMutation({
         message: 'Not authorized to write this file.',
       }
     }
-    const existing = await ctx.db
-      .query('atoms')
-      .withIndex('by_workspace_path', (q) =>
-        q.eq('workspaceId', args.workspaceId).eq('path', path),
-      )
-      .unique()
-    if (existing) {
-      return {
-        ok: false as const,
-        code: 'file-exists',
-        message: `File already exists: ${path}`,
+    let atomId: Id<'atoms'>
+    try {
+      atomId = await upsertAtomImpl(ctx, {
+        workspaceId: args.workspaceId,
+        path,
+        body: args.content,
+        source: 'agent',
+        failIfExists: true,
+        defaultPrivateOwnerUserId:
+          args.workspaceId !== args.actorUserId ? args.actorUserId : undefined,
+      })
+    } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        error.code === 'file-exists'
+      ) {
+        return {
+          ok: false as const,
+          code: 'file-exists',
+          message: `File already exists: ${path}`,
+        }
       }
+      throw error
     }
-    const atomId = await ctx.runMutation(internal.atoms._upsertInternal, {
-      workspaceId: args.workspaceId,
-      path,
-      body: args.content,
-      source: 'agent',
-      viewerSubject: args.actorUserId,
-    })
     return {
       ok: true as const,
       path,

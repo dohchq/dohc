@@ -7,7 +7,7 @@ import type {
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
 import { composeRenamedPath, WorkspaceError } from "@dohc/workspace-contracts";
-import { createLocalBlobStore, type BlobStore, type StoredBlob } from "../blobStore";
+import { createLocalBlobStore, type BlobStore } from "../blobStore";
 import {
   assetRowToWorkspaceFile,
   insertAsset,
@@ -114,34 +114,25 @@ export function createPostgresWorkspaceBackend(
       });
     },
     async saveAsset(actor, input) {
-      const cleanup: { stored?: StoredBlob } = {};
-      try {
-        return await withTransaction(pool, async (client) => {
-          await assertAuthorized(client, actor);
-          const stored = await blobStore.put(input.bytes);
-          cleanup.stored = stored;
-          const row = await insertAsset(client, actor, input, stored);
-          await insertWorkspaceEvent(client, {
-            actor,
-            kind: "asset_saved",
-            targetKind: "asset",
-            targetId: row.id,
-            payload: {
-              path: input.path,
-              mediaType: input.mediaType,
-              size: stored.size,
-              sha256: stored.sha256,
-              revision: row.revision,
-            },
-          });
-          return assetRowToWorkspaceFile(row);
+      return withTransaction(pool, async (client) => {
+        await assertAuthorized(client, actor);
+        const stored = await blobStore.put(input.bytes);
+        const row = await insertAsset(client, actor, input, stored);
+        await insertWorkspaceEvent(client, {
+          actor,
+          kind: "asset_saved",
+          targetKind: "asset",
+          targetId: row.id,
+          payload: {
+            path: input.path,
+            mediaType: input.mediaType,
+            size: stored.size,
+            sha256: stored.sha256,
+            revision: row.revision,
+          },
         });
-      } catch (error) {
-        if (cleanup.stored && blobStore.delete) {
-          await blobStore.delete(cleanup.stored.objectKey).catch(() => undefined);
-        }
-        throw error;
-      }
+        return assetRowToWorkspaceFile(row);
+      });
     },
     async renameFile(actor, input: RenameFileInput) {
       return withTransaction(pool, async (client) => {

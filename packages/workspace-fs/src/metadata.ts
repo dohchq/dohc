@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
 
 export type WorkspaceBackendMode = "convex" | "postgres";
@@ -78,12 +78,21 @@ export function mediaTypeForPath(path: string): string {
 }
 
 export function isSqliteMediaType(mediaType: string, path = "") {
-  const lower = `${mediaType} ${path}`.toLowerCase();
+  const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const name = basename(path).toLowerCase();
+  const extension = name.match(/(\.[^.]+)$/)?.[1] ?? "";
   return (
-    lower.includes("sqlite") ||
-    lower.endsWith(".sqlite") ||
-    lower.endsWith(".sqlite3") ||
-    lower.endsWith(".db")
+    type === "application/vnd.sqlite3" ||
+    type === "application/x-sqlite3" ||
+    type === "application/x-sqlite" ||
+    type === "application/sqlite3" ||
+    type === "application/sqlite" ||
+    type === "sqlite" ||
+    type.endsWith("+sqlite") ||
+    type.endsWith("/sqlite") ||
+    extension === ".sqlite" ||
+    extension === ".sqlite3" ||
+    extension === ".db"
   );
 }
 

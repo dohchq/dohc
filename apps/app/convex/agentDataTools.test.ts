@@ -1,9 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from 'convex-test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import schema from './schema'
 import { api, internal } from './_generated/api'
 
@@ -13,16 +10,6 @@ const ALICE = 'ws_agent_data_alice'
 const BOB = 'ws_agent_data_bob'
 const SQLITE_URL = 'http://sqlite-worker.local'
 const SQLITE_TOKEN = 'sqlite-token'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const AGENT_SRC = readFileSync(resolve(__dirname, './agent.ts'), 'utf8')
-
-function toolSource(name: string) {
-  const start = AGENT_SRC.indexOf(`    ${name}: createTool({`)
-  expect(start, `missing ${name} tool`).toBeGreaterThan(0)
-  const next = AGENT_SRC.indexOf('\n\n    ', start + 1)
-  return AGENT_SRC.slice(start, next > start ? next : AGENT_SRC.length)
-}
 
 async function seedOrgWithMembers(t: ReturnType<typeof convexTest>) {
   const { orgId, inviteCode } = await t
@@ -57,6 +44,43 @@ async function storedCsvAsset(
       createdAt: Date.now(),
       updatedAt: Date.now(),
       revision: 1,
+    })
+  })
+}
+
+async function storedDatabaseFile(
+  t: ReturnType<typeof convexTest>,
+  workspaceId: string,
+  path: string,
+  createdByUserId: string,
+) {
+  const storageId = await t.run(async (ctx) => {
+    return await ctx.storage.store(new Blob(['SQLite format 3\0'], {
+      type: 'application/vnd.sqlite3',
+    }))
+  })
+  await t.run(async (ctx) => {
+    await ctx.db.insert('databaseFiles', {
+      workspaceId,
+      storageId: storageId as never,
+      path,
+      filename: path.split('/').pop() ?? 'ledger.sqlite',
+      size: 16,
+      canonicalFormat: 'structured-snapshot',
+      bytesOutOfDate: false,
+      version: 1,
+      tables: {
+        transactions: {
+          columns: [
+            { name: 'id', type: 'TEXT', primaryKey: true },
+            { name: 'amount', type: 'REAL' },
+          ],
+          rows: [{ id: 'tx_1', amount: 1 }],
+        },
+      },
+      createdByUserId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
     })
   })
 }
@@ -197,33 +221,107 @@ describe('agent-native file tools', () => {
     })
   })
 
-  it('wires all agent data tools through server-derived workspace and actor identity', () => {
-    for (const name of [
-      'save_file',
-      'upload_asset',
-      'inspect_file',
-      'import_data',
-      'query_database',
-      'write_database_rows',
-      'export_file',
-      'embed_asset',
-    ]) {
-      expect(AGENT_SRC).toContain(`    ${name}: createTool({`)
-    }
+  it('enforces workspace and actor authorization at the data-tool boundaries', async () => {
+    const t = convexTest(schema, modules)
+    const orgId = await seedOrgWithMembers(t)
+    const asAlice = t.withIdentity({ subject: ALICE })
 
-    const saveFile = toolSource('save_file')
-    expect(saveFile).toContain('activeWorkspaceFromTool(ctx, options)')
-    expect(saveFile).toContain('viewerSubjectFromTool(ctx)')
-    expect(saveFile).toContain('internal.agent._saveFileForAgent')
+    await asAlice.mutation(api.atoms.upsert, {
+      activeWorkspaceId: orgId,
+      path: 'private/seed.md',
+      body: 'seed',
+    })
+    await asAlice.mutation(api.atomAccess.setFolderAccess, {
+      activeWorkspaceId: orgId,
+      folderPath: 'private',
+      mode: 'private',
+    })
 
-    const importData = toolSource('import_data')
-    expect(importData).toContain('activeWorkspaceFromTool(ctx, options)')
-    expect(importData).toContain('viewerSubjectFromTool(ctx)')
-    expect(importData).toContain('api.databaseFiles.importData')
+    await expect(
+      t.mutation((internal as any).agent._saveFileForAgent, {
+        workspaceId: orgId,
+        actorUserId: BOB,
+        path: 'private/bob-note.txt',
+        mediaType: 'text/plain',
+        content: 'blocked',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'file-write-not-authorized',
+    })
 
-    const writeRows = toolSource('write_database_rows')
-    expect(writeRows).toContain('api.databaseOps.apply')
-    expect(writeRows).toContain('expectedVersion')
+    await expect(
+      t.mutation((internal as any).agent._saveFileForAgent, {
+        workspaceId: orgId,
+        actorUserId: BOB,
+        path: 'shared/bob-note.txt',
+        mediaType: 'text/plain',
+        content: 'allowed',
+      }),
+    ).resolves.toMatchObject({ ok: true, path: 'shared/bob-note.txt' })
+
+    await expect(
+      t.mutation((internal as any).agent._saveFileForAgent, {
+        workspaceId: orgId,
+        actorUserId: BOB,
+        path: 'shared/bob-note.txt',
+        mediaType: 'text/plain',
+        content: 'duplicate',
+      }),
+    ).resolves.toMatchObject({ ok: false, code: 'file-exists' })
+
+    const savedAccess = await t.run(async (ctx) => {
+      const atom = await ctx.db
+        .query('atoms')
+        .withIndex('by_workspace_path', (q) =>
+          q.eq('workspaceId', orgId).eq('path', 'shared/bob-note.txt'),
+        )
+        .unique()
+      expect(atom).not.toBeNull()
+      return await ctx.db
+        .query('atomAccess')
+        .withIndex('by_atom', (q) => q.eq('atomId', atom!._id))
+        .unique()
+    })
+    expect(savedAccess).toMatchObject({
+      mode: 'private',
+      ownerUserId: BOB,
+    })
+
+    await expect(
+      t.withIdentity({ subject: 'ws_agent_data_intruder' }).action((api as any).databaseFiles.importData, {
+        activeWorkspaceId: orgId,
+        source: {
+          kind: 'inline',
+          name: 'people.json',
+          mediaType: 'application/json',
+          body: JSON.stringify([{ id: 'p1' }]),
+        },
+        target: {
+          kind: 'sqlite',
+          path: 'people.sqlite',
+          tableName: 'people',
+        },
+        mode: 'infer-schema',
+      }),
+    ).rejects.toThrow(/Not a member of workspace/)
+
+    await storedDatabaseFile(t, orgId, 'private/ledger.sqlite', ALICE)
+    await expect(
+      t.withIdentity({ subject: BOB }).mutation(api.databaseOps.apply, {
+        activeWorkspaceId: orgId,
+        databasePath: 'private/ledger.sqlite',
+        operationId: 'op_private_denied',
+        expectedVersion: 1,
+        op: 'update',
+        table: 'transactions',
+        rowId: 'tx_1',
+        payload: { amount: 2 },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'database-write-not-authorized',
+    })
   })
 })
 

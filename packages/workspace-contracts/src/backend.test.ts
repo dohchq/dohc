@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { WorkspacePath } from "./domain";
+import { WorkspaceError } from "./errors";
 import { composeRenamedPath } from "./path";
+
+function expectInvalidPath(fn: () => unknown) {
+  try {
+    fn();
+    throw new Error("Expected invalid_path");
+  } catch (error) {
+    expect(error).toBeInstanceOf(WorkspaceError);
+    expect((error as WorkspaceError).code).toBe("invalid_path");
+  }
+}
 
 describe("WorkspacePath", () => {
   it("accepts relative workspace paths", () => {
@@ -26,7 +37,11 @@ describe("composeRenamedPath", () => {
   });
 
   it("rejects traversal and nested path segments in the new filename", () => {
-    expect(() => composeRenamedPath("finance/ledger.md", "../secret.md")).toThrow();
-    expect(() => composeRenamedPath("finance/ledger.md", "nested/book.md")).toThrow();
+    expectInvalidPath(() =>
+      composeRenamedPath("finance/ledger.md", "../secret.md"),
+    );
+    expectInvalidPath(() =>
+      composeRenamedPath("finance/ledger.md", "nested/book.md"),
+    );
   });
 });
