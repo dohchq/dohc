@@ -85,6 +85,27 @@ export async function readWorkspaceAsset(
 // download affordance in the renderer.
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
+// The editor's save path: same validation + real-path containment as reads,
+// atomic temp+rename so the watcher (and any reader) never sees a torn file,
+// and the same byte bound as reads — the editor can never write a file it
+// couldn't have loaded.
+export async function writeWorkspaceText(
+  rootPath: string,
+  relativePath: string,
+  text: string,
+): Promise<void> {
+  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
+    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
+  }
+  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  const { writeFile, rename } = await import("node:fs/promises");
+  // .tmp.<suffix> matches the watcher's editor-noise filter, so autosave
+  // staging files never pollute history.
+  const temp = `${realTarget}.tmp.${process.pid}-${Date.now()}`;
+  await writeFile(temp, text, "utf8");
+  await rename(temp, realTarget);
+}
+
 export async function readWorkspaceText(
   rootPath: string,
   relativePath: string,

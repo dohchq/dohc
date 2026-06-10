@@ -8,6 +8,7 @@ export const CHANNELS = {
   createWorkspaceFile: "desktop:create-workspace-file",
   importWorkspaceFiles: "desktop:import-workspace-files",
   readWorkspaceText: "desktop:read-workspace-text",
+  writeWorkspaceText: "desktop:write-workspace-text",
   openFileExternally: "desktop:open-file-externally",
   readWorkspaceDatabase: "desktop:read-workspace-database",
   applyDatabaseEdit: "desktop:apply-database-edit",

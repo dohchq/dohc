@@ -144,13 +144,106 @@ const MARKDOWN_COMPONENTS = {
   ),
 };
 
-function MarkdownView({ body }: { body: string }) {
+// Document + source-mode editor. Edits autosave on a short settle (and
+// Ctrl/Cmd+S) through the bounded write IPC; the watcher then records the
+// change into history like any other file change — the editor is just another
+// writer, never a privileged one. Live co-editing (Yjs) layers onto this
+// surface for shared workspaces in the collab step.
+function MarkdownView(props: { body: string; workspaceId: string; path: string }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(props.body);
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestDraft = useRef(props.body);
+
+  // External changes (agent edits, sync pulls) flow into the open document
+  // only while NOT editing — mid-edit, the user's draft wins until saved.
+  useEffect(() => {
+    if (!editing) {
+      setDraft(props.body);
+      latestDraft.current = props.body;
+    }
+  }, [props.body, editing]);
+
+  async function saveNow(): Promise<void> {
+    setSaveState("saving");
+    try {
+      await bridge().writeWorkspaceText({
+        workspaceId: props.workspaceId,
+        relativePath: props.path,
+        text: latestDraft.current,
+      });
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  }
+
+  function onDraft(next: string) {
+    setDraft(next);
+    latestDraft.current = next;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void saveNow(), 800);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, []);
+
   return (
-    <div
-      data-testid="view-markdown"
-      className="min-h-0 flex-1 overflow-auto p-6 text-[14px]"
-    >
-      <Markdown components={MARKDOWN_COMPONENTS}>{body}</Markdown>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1">
+        {editing ? (
+          <span
+            data-testid="markdown-save-state"
+            data-state={saveState}
+            className={`text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
+          >
+            {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          data-testid="markdown-edit-toggle"
+          onClick={() => {
+            if (editing && saveTimer.current) {
+              clearTimeout(saveTimer.current);
+              void saveNow();
+            }
+            setEditing((e) => !e);
+          }}
+          className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink"
+        >
+          {editing ? "Done" : "Edit"}
+        </button>
+      </div>
+      {editing ? (
+        <textarea
+          data-testid="markdown-editor"
+          autoFocus
+          value={draft}
+          onChange={(e) => onDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+              e.preventDefault();
+              if (saveTimer.current) clearTimeout(saveTimer.current);
+              void saveNow();
+            }
+          }}
+          spellCheck={false}
+          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[13px] leading-relaxed text-ink outline-none"
+        />
+      ) : (
+        <div
+          data-testid="view-markdown"
+          className="min-h-0 flex-1 overflow-auto p-6 text-[14px]"
+        >
+          <Markdown components={MARKDOWN_COMPONENTS}>{props.body}</Markdown>
+        </div>
+      )}
     </div>
   );
 }
@@ -433,7 +526,7 @@ export function FileInspector(props: {
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="document" />
           {truncatedNotice}
-          <MarkdownView body={text ?? ""} />
+          <MarkdownView body={text ?? ""} workspaceId={props.workspaceId} path={props.path} />
         </div>
       );
     case "csv":

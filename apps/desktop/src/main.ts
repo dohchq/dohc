@@ -48,6 +48,7 @@ import {
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
+  WriteWorkspaceTextPayload,
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
@@ -78,6 +79,7 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
+  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
   applyDatabaseEdit,
@@ -341,6 +343,13 @@ function registerIpcHandlers(): void {
     return ReadWorkspaceTextResult.parse(
       await readWorkspaceText(workspace.rootPath, input.relativePath),
     );
+  });
+
+  ipcMain.handle(CHANNELS.writeWorkspaceText, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WriteWorkspaceTextPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await writeWorkspaceText(workspace.rootPath, input.relativePath, input.text);
   });
 
   ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {

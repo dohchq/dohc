@@ -123,6 +123,14 @@ export type OpenFileExternallyPayload = z.infer<
   typeof OpenFileExternallyPayload
 >;
 
+export const WriteWorkspaceTextPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+  // Editor saves are bounded like reads (2MB); the handler re-checks bytes.
+  text: z.string().max(2 * 1024 * 1024),
+});
+export type WriteWorkspaceTextPayload = z.infer<typeof WriteWorkspaceTextPayload>;
+
 export const ReadWorkspaceTextResult = z.object({
   // Capped: text views are for human-scale files; very large files fall back
   // to a download affordance rather than streaming megabytes through IPC.
@@ -354,6 +362,7 @@ export interface DohcDesktopBridge {
   readWorkspaceText(
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;
+  writeWorkspaceText(payload: WriteWorkspaceTextPayload): Promise<void>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
