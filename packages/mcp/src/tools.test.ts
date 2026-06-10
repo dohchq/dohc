@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -44,11 +44,35 @@ const TRAVERSALS = [
 describe("mcp tool path containment", () => {
   it("safeResolve accepts an in-root path and rejects every traversal", async () => {
     await withWorkspace(async (ctx) => {
-      const ok = safeResolve(ctx, "notes/day.md");
+      const ok = await safeResolve(ctx, "notes/day.md");
       expect(ok.ok).toBe(true);
       if (ok.ok) expect(ok.absolute.startsWith(ctx.root)).toBe(true);
       for (const evil of TRAVERSALS) {
-        expect(safeResolve(ctx, evil).ok).toBe(false);
+        expect((await safeResolve(ctx, evil)).ok).toBe(false);
+      }
+    });
+  });
+
+  it("refuses a path that escapes via an in-tree symlink (realpath containment)", async () => {
+    await withWorkspace(async (ctx) => {
+      // A symlink that already exists INSIDE the workspace but points outside
+      // it: lexical validation passes, realpath containment must still refuse.
+      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-outside-"));
+      await writeFile(join(outside, "secret.txt"), "top secret");
+      await symlink(outside, join(ctx.root, "escape"));
+      const escaped = await safeResolve(ctx, "escape/secret.txt");
+      expect(escaped.ok).toBe(false);
+      if (!escaped.ok) expect(escaped.reason).toMatch(/symlink/i);
+      // And the tools that follow it refuse too.
+      expect(await openInDohc(ctx, { path: "escape/secret.txt" })).toMatchObject({ ok: false });
+      await rm(outside, { recursive: true, force: true });
+    });
+  });
+
+  it("refuses a reserved .dohc segment at ANY depth", async () => {
+    await withWorkspace(async (ctx) => {
+      for (const p of [".dohc/x", "notes/.dohc/x", "a/b/.DOHC/x"]) {
+        expect((await safeResolve(ctx, p)).ok).toBe(false);
       }
     });
   });
@@ -63,7 +87,7 @@ describe("mcp tool path containment", () => {
   it("query_database, import_data, test_app, open_in_dohc, share all refuse traversal", async () => {
     await withWorkspace(async (ctx) => {
       for (const evil of TRAVERSALS) {
-        expect(openInDohc(ctx, { path: evil })).toMatchObject({ ok: false });
+        expect(await openInDohc(ctx, { path: evil })).toMatchObject({ ok: false });
         await expect(share(ctx, { path: evil, scope: "public" })).resolves.toMatchObject({ ok: false });
         await expect(
           queryDatabase(ctx, { databasePath: evil, sql: "SELECT 1" }),
@@ -208,9 +232,33 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("open_in_dohc returns the contained absolute path", async () => {
     await withWorkspace(async (ctx) => {
-      const result = openInDohc(ctx, { path: "notes/day.md" });
+      const result = await openInDohc(ctx, { path: "notes/day.md" });
       expect(result).toMatchObject({ ok: true, relativePath: "notes/day.md" });
       if (result.ok) expect(result.path).toBe(join(ctx.root, "notes/day.md"));
+    });
+  });
+
+  it("query_database refuses a non-visible-database target and bounds large results", async () => {
+    await withWorkspace(async (ctx) => {
+      // A real SQLite file that is NOT a visible-db path (wrong extension): the
+      // visible-database guard refuses it even though the bytes are a database.
+      await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
+      await importData(ctx, { sourcePath: "people.csv", databasePath: "p.sqlite", tableName: "p" });
+      await expect(
+        queryDatabase(ctx, { databasePath: "notes/data.txt", sql: "SELECT 1" }),
+      ).resolves.toMatchObject({ ok: false });
+
+      // Result work is bounded: a self cross-join would yield 40*40=1600 rows,
+      // but the wrapper LIMITs to the cap so SQLite never materializes them all.
+      const rows = Array.from({ length: 40 }, (_, i) => `${i},n${i}`).join("\n");
+      await writeFile(join(ctx.root, "big.csv"), `id,name\n${rows}\n`);
+      await importData(ctx, { sourcePath: "big.csv", databasePath: "big.sqlite", tableName: "big" });
+      const queried = await queryDatabase(ctx, {
+        databasePath: "big.sqlite",
+        sql: "SELECT a.id FROM big a, big b",
+      });
+      expect(queried.ok).toBe(true);
+      if (queried.ok) expect(queried.rows.length).toBe(1000);
     });
   });
 });

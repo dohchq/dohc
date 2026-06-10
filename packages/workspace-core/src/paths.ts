@@ -28,10 +28,16 @@ function stripWindowsAliasSuffix(segment: string): string {
 }
 
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
-// so a case-sensitive guard would let writes overwrite dohc metadata.
+// so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
+// at ANY depth — a nested `notes/.dohc/x` is just as internal as a top-level
+// one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
+// a user/agent write into one must be refused, not just the first segment.
 export function isReservedPath(relativePath: string): boolean {
-  const first = relativePath.split("/")[0] ?? "";
-  return stripWindowsAliasSuffix(first.toLowerCase()) === ".dohc";
+  return relativePath
+    .replaceAll("\\", "/")
+    .toLowerCase()
+    .split("/")
+    .some((segment) => stripWindowsAliasSuffix(segment) === ".dohc");
 }
 
 // Path segments that are dohc/system internals at ANY depth — hidden from the

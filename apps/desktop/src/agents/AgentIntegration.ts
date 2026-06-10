@@ -69,8 +69,10 @@ async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
 async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void> {
   const path = join(rootPath, RUNS_FILE);
   await mkdir(join(rootPath, ".dohc"), { recursive: true });
-  // Atomic temp+rename so a crash never truncates the run log.
-  const tmp = `${path}.tmp-${process.pid}`;
+  // Atomic temp+rename so a crash never truncates the run log. A unique suffix
+  // (not just pid) means a leftover temp from a crashed run can never be
+  // reused/clobbered by a later write.
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(tmp, `${JSON.stringify(runs, null, 2)}\n`);
   await rename(tmp, path);
 }
@@ -151,11 +153,16 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   ): Promise<void> {
     const root = rootOrThrow(workspaceId);
     const s = stateFor(workspaceId);
-    options.setAgentRun(workspaceId, null);
-    if (s.activeRun?.id === runId) s.activeRun = null;
-    if (s.mcp) {
-      s.mcp.stop();
-      s.mcp = null;
+    // Only the run that currently OWNS the workspace may clear its live state.
+    // Otherwise ending a stale/older runId would silently clear a newer active
+    // run's attribution slot + child (start A, start B, end A must not unhook B).
+    if (s.activeRun?.id === runId) {
+      options.setAgentRun(workspaceId, null);
+      s.activeRun = null;
+      if (s.mcp) {
+        s.mcp.stop();
+        s.mcp = null;
+      }
     }
     await serialize(s, async () => {
       const runs = await readRuns(root);

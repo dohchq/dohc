@@ -143,7 +143,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       description: "Return the contained absolute path for the desktop to open/select.",
       inputSchema: { path: z.string().min(1).max(4096) },
     },
-    async (args) => text(openInDohc(ctx, args)),
+    async (args) => text(await openInDohc(ctx, args)),
   );
 
   return server;

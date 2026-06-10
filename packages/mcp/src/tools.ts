@@ -12,8 +12,8 @@ import {
 import { createChangeSetStore, mergeMarkdown } from "@dohc/workspace-history";
 import { runStaticAppCheck } from "@dohc/app-tester/static";
 import { createRequire } from "node:module";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { dirname, join, sep } from "node:path";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -23,21 +23,50 @@ export interface ToolContext {
   home: string;
 }
 
+// Is `absolute` REALLY inside `root` after resolving symlinks? Lexical
+// containment (validateUserWritePath) stops ../ and friends, but a symlink that
+// already exists inside the workspace can still point outside it; every later
+// fs call would follow it. We realpath the deepest EXISTING ancestor (the file
+// itself for reads, its parent chain for not-yet-created targets) and require
+// it to stay under the canonical root. The root itself may legitimately be a
+// symlink, so we compare against realpath(root). Fails closed on any error.
+async function isWithinRealRoot(root: string, absolute: string): Promise<boolean> {
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    return false;
+  }
+  let probe = absolute;
+  for (;;) {
+    try {
+      const real = await realpath(probe);
+      return real === realRoot || real.startsWith(realRoot + sep);
+    } catch {
+      const parent = dirname(probe);
+      if (parent === probe) return false; // reached fs root without resolving
+      probe = parent;
+    }
+  }
+}
+
 // A tool's path arg, resolved to an absolute path INSIDE the root, or a reason
-// it was refused. Centralizes the containment guard so no tool can forget it.
-function safeResolve(
+// it was refused. Centralizes BOTH guards so no tool can forget them: lexical
+// validation (traversal/encoding/reserved) then realpath containment (symlink
+// escape). Async because the symlink check touches the filesystem.
+async function safeResolve(
   ctx: ToolContext,
   relativePath: string,
-): { ok: true; absolute: string; normalized: string } | { ok: false; reason: string } {
+): Promise<{ ok: true; absolute: string; normalized: string } | { ok: false; reason: string }> {
   const validated = validateUserWritePath(relativePath);
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }
-  return {
-    ok: true,
-    absolute: join(ctx.root, validated.normalized),
-    normalized: validated.normalized,
-  };
+  const absolute = join(ctx.root, validated.normalized);
+  if (!(await isWithinRealRoot(ctx.root, absolute))) {
+    return { ok: false, reason: `path rejected (symlink escapes workspace): ${relativePath}` };
+  }
+  return { ok: true, absolute, normalized: validated.normalized };
 }
 
 const requireFromHere = createRequire(import.meta.url);
@@ -136,9 +165,9 @@ export async function createApp(
   const manifestPath = `${appRoot}/app.json`;
   const entryPath = `${appRoot}/src/App.tsx`;
 
-  const manifest = safeResolve(ctx, manifestPath);
+  const manifest = await safeResolve(ctx, manifestPath);
   if (!manifest.ok) return { ok: false as const, reason: manifest.reason };
-  const entry = safeResolve(ctx, entryPath);
+  const entry = await safeResolve(ctx, entryPath);
   if (!entry.ok) return { ok: false as const, reason: entry.reason };
 
   const appJson = {
@@ -167,18 +196,23 @@ export async function createApp(
 
 // --- dohc_test_app ----------------------------------------------------------
 
+const MAX_TEST_APP_BYTES = 2 * 1024 * 1024;
+
 // Runs the Playwright-free static AppTester over an app's source files (the
 // caller supplies the relative source paths it wants checked, each contained).
 export async function testApp(
   ctx: ToolContext,
   args: { appRoot: string; sourcePaths: string[] },
 ) {
-  const root = safeResolve(ctx, args.appRoot);
+  const root = await safeResolve(ctx, args.appRoot);
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
   const files: Array<{ relativePath: string; body: string }> = [];
+  // Bound total source so an agent can't point the transpiler at huge files
+  // and burn memory/CPU. The static check is for app sources, not data dumps.
+  let totalBytes = 0;
   for (const rel of args.sourcePaths) {
-    const resolved = safeResolve(ctx, rel);
+    const resolved = await safeResolve(ctx, rel);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
     // The path must live inside the app root — no smuggling foreign source.
     if (
@@ -187,9 +221,14 @@ export async function testApp(
     ) {
       return { ok: false as const, reason: `not inside app: ${rel}` };
     }
+    const body = await readFile(resolved.absolute, "utf8");
+    totalBytes += Buffer.byteLength(body, "utf8");
+    if (totalBytes > MAX_TEST_APP_BYTES) {
+      return { ok: false as const, reason: "app source too large to test (>2MB)" };
+    }
     files.push({
       relativePath: resolved.normalized.slice(root.normalized.length + 1),
-      body: await readFile(resolved.absolute, "utf8"),
+      body,
     });
   }
 
@@ -206,9 +245,9 @@ export async function importData(
   ctx: ToolContext,
   args: { sourcePath: string; databasePath: string; tableName: string },
 ) {
-  const sourceRel = safeResolve(ctx, args.sourcePath);
+  const sourceRel = await safeResolve(ctx, args.sourcePath);
   if (!sourceRel.ok) return { ok: false as const, reason: sourceRel.reason };
-  const dbRel = safeResolve(ctx, args.databasePath);
+  const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
   if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
     return { ok: false as const, reason: `not a visible database target: ${args.databasePath}` };
@@ -255,16 +294,25 @@ export async function queryDatabase(
   ctx: ToolContext,
   args: { databasePath: string; sql: string },
 ) {
-  const dbRel = safeResolve(ctx, args.databasePath);
+  const dbRel = await safeResolve(ctx, args.databasePath);
   if (!dbRel.ok) return { ok: false as const, reason: dbRel.reason };
+  // Only a VISIBLE user database (parity with import_data): never a sidecar,
+  // hidden internal, or a non-db file that merely contains SQLite bytes.
+  if (databaseSyncStrategy(dbRel.normalized) !== "operation-log") {
+    return { ok: false as const, reason: `not a visible database: ${args.databasePath}` };
+  }
   if (!isReadOnlySelect(args.sql)) {
     return { ok: false as const, reason: "only a single read-only SELECT is allowed" };
   }
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(dbRel.absolute, { readOnly: true });
   try {
-    const rows = db.prepare(args.sql).all();
-    return { ok: true as const, rows: rows.slice(0, MAX_QUERY_ROWS) };
+    // Bound the work the DB does, not just the result we keep: wrap the SELECT
+    // so SQLite stops after MAX_QUERY_ROWS rather than materializing a huge or
+    // unbounded result (e.g. a giant join or randomblob) before we slice.
+    const bounded = `select * from (${stripTrailingSemicolon(args.sql)}) limit ${MAX_QUERY_ROWS}`;
+    const rows = db.prepare(bounded).all();
+    return { ok: true as const, rows };
   } catch (cause) {
     return { ok: false as const, reason: cause instanceof Error ? cause.message : "query failed" };
   } finally {
@@ -272,11 +320,16 @@ export async function queryDatabase(
   }
 }
 
+function stripTrailingSemicolon(sql: string): string {
+  const trimmed = sql.trim();
+  return trimmed.endsWith(";") ? trimmed.slice(0, -1) : trimmed;
+}
+
 function isReadOnlySelect(sql: string): boolean {
   const trimmed = sql.trim();
   if (!/^select\b/i.test(trimmed)) return false;
-  const withoutFinalSemicolon = trimmed.endsWith(";") ? trimmed.slice(0, -1) : trimmed;
-  return !withoutFinalSemicolon.includes(";");
+  // No second statement after the (optional) trailing semicolon.
+  return !stripTrailingSemicolon(trimmed).includes(";");
 }
 
 // --- dohc_share -------------------------------------------------------------
@@ -286,7 +339,7 @@ function isReadOnlySelect(sql: string): boolean {
 // human-readable reason; only the desktop, with the user's explicit OK, applies
 // the share.
 export async function share(ctx: ToolContext, args: { path: string; scope: "public" | "workspace" }) {
-  const resolved = safeResolve(ctx, args.path);
+  const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return {
     ok: true as const,
@@ -317,8 +370,8 @@ export function resolveConflict(args: { base: string; local: string; remote: str
 
 // Returns the absolute path the desktop should surface (open/select). Path is
 // contained first so it can never point outside the workspace.
-export function openInDohc(ctx: ToolContext, args: { path: string }) {
-  const resolved = safeResolve(ctx, args.path);
+export async function openInDohc(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return { ok: true as const, path: resolved.absolute, relativePath: resolved.normalized };
 }

@@ -36,6 +36,14 @@ describe("reserved paths", () => {
     expect(isReservedPath("notes/today.md")).toBe(false);
   });
 
+  it("reserves a nested .dohc at ANY depth, not just the first segment", () => {
+    expect(isReservedPath("notes/.dohc/x")).toBe(true);
+    expect(isReservedPath("a/b/.DOHC/x")).toBe(true);
+    const result = validateUserWritePath("notes/.dohc/secret");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("reserved");
+  });
+
   it("reserves case-insensitive .dohc variants (case-insensitive filesystems)", () => {
     expect(isReservedPath(".DOHC/manifest.json")).toBe(true);
     const result = validateUserWritePath(".DoHc/manifest.json");

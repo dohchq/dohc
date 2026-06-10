@@ -74,6 +74,25 @@ describe("AgentIntegration", () => {
     });
   });
 
+  it("ending a non-active run never clears a newer active run's slot", async () => {
+    await withWorkspace(async ({ root, setSlot, slots }) => {
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, run) => setSlot(run),
+      });
+      const a = await integration.startAgentRun("ws");
+      const b = await integration.startAgentRun("ws");
+      // End the OLDER run A: B still owns the workspace, so its attribution
+      // slot must stay set (not silently cleared to local).
+      await integration.endAgentRun("ws", a.id);
+      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: b.id });
+      expect(await integration.getAgentRunStatus("ws")).toMatchObject({
+        mcpEnabled: true,
+        activeRun: { id: b.id },
+      });
+    });
+  });
+
   it("throws for an unknown workspace and never writes a record", async () => {
     const integration = createAgentIntegration({
       rootFor: () => null,
