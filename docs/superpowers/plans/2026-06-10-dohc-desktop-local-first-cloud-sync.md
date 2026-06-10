@@ -254,6 +254,10 @@ The fewer lines delivered, the better. This pivot must shrink the codebase, not 
 
 The implementing agent should assume the user is AFK and keep going until completion or a real blocker.
 
+### Continuous Execution Mandate (binding)
+
+The user has directed continuous execution: do NOT pause to surface status, summarize progress, or ask whether to continue between phases. Roll straight from each phase's commit into the next phase's first action. Surface to the user ONLY at: (a) genuine completion of Phase 18 with the full final report, or (b) a real Stop Condition below. Background reviews (codex, verifiers) run while the lead proceeds; triage their findings as they land and fold fixes into the current or just-closed phase without halting forward motion. Per-phase Codex re-review is capped at one; residual re-review findings roll to the next checkpoint rather than stalling. Keep commits flowing (green-milestone + per-phase). The execution log's Resume Snapshot is updated continuously so any context boundary resumes seamlessly. "The work is long" is explicitly not a reason to stop.
+
 ### Required Read Order (Tiered For Finite Context)
 
 The lead reads inline, once per fresh context:
@@ -1262,6 +1266,11 @@ git commit -m "Add native file type UX"
 ---
 
 ## Phase 7: Apps As Local Source Folders
+
+> **STATUS (2026-06-10): COMPLETE for the source-folder + tester + trust model; in-app RUNTIME split to Phase 7b (below).**
+> Delivered: `packages/workspace-core/src/apps.ts` (manifest/discovery/trust/readiness model), `apps/desktop/src/workspaces/appPackage.ts` (getAppPackage/runAppTesterStatic/grantAppTrust, state persisted to inspectable `.dohc/apps-state.json`), `AppPackageView` wired into the file inspector, IPC, and `apps/desktop/e2e/appPackage.spec.ts` (valid `@dohc/app` app passes the static gate → ready → trustable; legacy `@dohc/view` app rejected). AppTester runs in a Playwright-free **static** mode (compile + SDK-import check) exposed via the new `@dohc/app-tester/static` subpath, so the desktop never bundles a headless browser. E2E spec is `appPackage.spec.ts`, not `localApps.spec.ts`.
+>
+> **Phase 7b (deferred):** the in-app app RUNTIME — Step 2's "use a persistent control → reload → confirm persistence" flow — needs a file-backed RPC + persistence bridge and live in-iframe render. That, plus AppTester's browser-render checks (source-backed-data, mutation-persistence, manifest-tests), lands in Phase 7b once the runtime substrate exists. Apps today are inspectable, testable, and trustable source folders — not yet executable inside dohc.
 
 **Files:**
 

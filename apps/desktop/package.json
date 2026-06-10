@@ -30,6 +30,7 @@
     "vitest": "^2.1.9"
   },
   "dependencies": {
+    "@dohc/app-tester": "workspace:*",
     "@dohc/brand": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",

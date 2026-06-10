@@ -1,5 +1,5 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { readFile, realpath } from "node:fs/promises";
+import { open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
 
@@ -82,9 +82,17 @@ export async function readWorkspaceText(
   rootPath: string,
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean }> {
-  const { bytes } = await readWorkspaceAsset(rootPath, relativePath);
-  if (bytes.length > MAX_TEXT_BYTES) {
-    return { text: bytes.subarray(0, MAX_TEXT_BYTES).toString("utf8"), truncated: true };
+  const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  // Bounded read: only the first MAX_TEXT_BYTES (+1 byte to detect overflow)
+  // ever enters memory, so a multi-GB file can't freeze the main process.
+  const handle = await open(realTarget, "r");
+  try {
+    const buf = Buffer.alloc(MAX_TEXT_BYTES + 1);
+    const { bytesRead } = await handle.read(buf, 0, MAX_TEXT_BYTES + 1, 0);
+    const truncated = bytesRead > MAX_TEXT_BYTES;
+    const slice = buf.subarray(0, Math.min(bytesRead, MAX_TEXT_BYTES));
+    return { text: slice.toString("utf8"), truncated };
+  } finally {
+    await handle.close();
   }
-  return { text: bytes.toString("utf8"), truncated: false };
 }

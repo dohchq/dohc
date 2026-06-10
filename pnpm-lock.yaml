@@ -210,6 +210,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@dohc/app-tester':
+        specifier: workspace:*
+        version: link:../../services/app-tester
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand

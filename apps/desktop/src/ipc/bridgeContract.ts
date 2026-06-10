@@ -160,6 +160,57 @@ export const ListChangeSetsResult = z.object({
 });
 export type ListChangeSetsResult = z.infer<typeof ListChangeSetsResult>;
 
+const AppCheck = z.object({
+  name: z.string(),
+  status: z.string(),
+  message: z.string().optional(),
+});
+
+export const AppPackagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+});
+export type AppPackagePayload = z.infer<typeof AppPackagePayload>;
+
+export const AppPackageResult = z
+  .object({
+    name: z.string(),
+    root: z.string(),
+    manifest: z.object({
+      title: z.string().optional(),
+      entry: z.string(),
+      read: z.array(z.string()),
+      write: z.array(z.string()),
+      agent: z.enum(["run", "patch.propose"]).optional(),
+      network: z.literal(false),
+    }),
+    sourceFiles: z.array(z.string()),
+    requiresTrust: z.boolean(),
+    trusted: z.boolean(),
+    readiness: z.enum(["needs-testing", "failed", "ready"]),
+    lastTestChecks: z.array(AppCheck),
+  })
+  .nullable();
+export type AppPackageResult = z.infer<typeof AppPackageResult>;
+
+export const RunAppTesterPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: PATH_STRING,
+});
+export type RunAppTesterPayload = z.infer<typeof RunAppTesterPayload>;
+
+export const RunAppTesterResult = z.object({
+  ok: z.boolean(),
+  checks: z.array(AppCheck),
+});
+export type RunAppTesterResult = z.infer<typeof RunAppTesterResult>;
+
+export const GrantAppTrustPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: PATH_STRING,
+});
+export type GrantAppTrustPayload = z.infer<typeof GrantAppTrustPayload>;
+
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
   firstWindowMs: z.number().positive(),
@@ -191,6 +242,9 @@ export interface DohcDesktopBridge {
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
+  getAppPackage(payload: AppPackagePayload): Promise<AppPackageResult>;
+  runAppTester(payload: RunAppTesterPayload): Promise<RunAppTesterResult>;
+  grantAppTrust(payload: GrantAppTrustPayload): Promise<void>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(
     payload: ListWorkspaceFilesPayload,

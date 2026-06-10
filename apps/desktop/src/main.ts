@@ -19,9 +19,14 @@ import {
   CreateWorkspaceFilePayload,
   CreateWorkspaceFileResult,
   DefaultWorkspaceRootResult,
+  AppPackagePayload,
+  AppPackageResult,
+  GrantAppTrustPayload,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
   LaunchMarksResult,
+  RunAppTesterPayload,
+  RunAppTesterResult,
   ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -46,6 +51,11 @@ import {
   registerWorkspace,
 } from "./workspaces/WorkspaceRegistry";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import {
+  getAppPackage as getAppPackageInfo,
+  grantAppTrust as grantAppTrustState,
+  runAppTesterStatic,
+} from "./workspaces/appPackage";
 import {
   readWorkspaceAsset,
   readWorkspaceText,
@@ -256,6 +266,31 @@ function registerIpcHandlers(): void {
     );
     const error = await shell.openPath(realTarget);
     if (error) throw new Error(error);
+  });
+
+  ipcMain.handle(CHANNELS.getAppPackage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AppPackagePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return AppPackageResult.parse(
+      await getAppPackageInfo(workspace.rootPath, input.path),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.runAppTester, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RunAppTesterPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return RunAppTesterResult.parse(
+      await runAppTesterStatic(workspace.rootPath, input.appRoot),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.grantAppTrust, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GrantAppTrustPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await grantAppTrustState(workspace.rootPath, input.appRoot);
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, (event, payload) => {

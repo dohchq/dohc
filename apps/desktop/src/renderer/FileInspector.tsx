@@ -2,12 +2,12 @@ import {
   Database,
   FileText,
   Image as ImageIcon,
-  LayoutGrid,
   Music,
   Table,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import Markdown from "react-markdown";
+import { AppPackageView } from "./AppPackageView";
 import { bridge } from "./bridge";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
@@ -59,8 +59,14 @@ export function classifyForView(path: string): FileViewKind {
 // Text content comes over IPC, not via fetch — a file:// renderer can't fetch
 // a custom scheme. Media (image/audio) instead use the dohc-file URL as an
 // element src, which is not subject to that restriction.
-function useTextContent(workspaceId: string, path: string, enabled: boolean) {
+function useTextContent(
+  workspaceId: string,
+  path: string,
+  enabled: boolean,
+  refreshKey: number,
+) {
   const [text, setText] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState(false);
   useEffect(() => {
     if (!enabled) return;
@@ -69,13 +75,19 @@ function useTextContent(workspaceId: string, path: string, enabled: boolean) {
     setError(false);
     void bridge()
       .readWorkspaceText({ workspaceId, relativePath: path })
-      .then((r) => !cancelled && setText(r.text))
+      .then((r) => {
+        if (cancelled) return;
+        setText(r.text);
+        setTruncated(r.truncated);
+      })
       .catch(() => !cancelled && setError(true));
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, path, enabled]);
-  return { text, error };
+    // refreshKey bumps on workspace activity so an open file re-reads when it
+    // changes on disk (e.g. an agent edits it).
+  }, [workspaceId, path, enabled, refreshKey]);
+  return { text, truncated, error };
 }
 
 function ViewHeader(props: { icon: React.ReactNode; path: string; label: string }) {
@@ -199,6 +211,12 @@ function ImageView({ url, path }: { url: string; path: string }) {
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
   const [failed, setFailed] = useState(false);
   const name = path.split("/").pop() ?? path;
+  // Reset load state when switching to a different image, so stale
+  // dimensions/error from the previous file don't linger.
+  useEffect(() => {
+    setDims(null);
+    setFailed(false);
+  }, [url]);
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-image">
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-6">
@@ -251,6 +269,29 @@ function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
+function TruncatedNotice(props: { workspaceId: string; path: string }) {
+  return (
+    <div
+      data-testid="truncated-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>Showing the start of a large file.</span>
+      <button
+        type="button"
+        onClick={() =>
+          void bridge().openFileExternally({
+            workspaceId: props.workspaceId,
+            relativePath: props.path,
+          })
+        }
+        className="text-subtle hover:text-ink"
+      >
+        Open the full file externally
+      </button>
+    </div>
+  );
+}
+
 function AffordanceCard(props: {
   testId: string;
   title: string;
@@ -282,11 +323,24 @@ function AffordanceCard(props: {
   );
 }
 
-export function FileInspector(props: { workspaceId: string; path: string }) {
+export function FileInspector(props: {
+  workspaceId: string;
+  path: string;
+  refreshKey?: number;
+}) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
-  const { text, error } = useTextContent(props.workspaceId, props.path, isText);
+  const { text, truncated, error } = useTextContent(
+    props.workspaceId,
+    props.path,
+    isText,
+    props.refreshKey ?? 0,
+  );
   const url = assetUrl(props.workspaceId, props.path);
+  const truncatedNotice =
+    isText && truncated ? (
+      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
+    ) : null;
 
   if (isText && text === null) {
     // Keep the inspector frame mounted while loading/erroring so the surface
@@ -304,6 +358,7 @@ export function FileInspector(props: { workspaceId: string; path: string }) {
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="document" />
+          {truncatedNotice}
           <MarkdownView body={text ?? ""} />
         </div>
       );
@@ -311,6 +366,7 @@ export function FileInspector(props: { workspaceId: string; path: string }) {
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<Table size={13} aria-hidden />} path={props.path} label="data" />
+          {truncatedNotice}
           <CsvView body={text ?? ""} />
         </div>
       );
@@ -319,6 +375,7 @@ export function FileInspector(props: { workspaceId: string; path: string }) {
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label={kind === "json" ? "json" : "text"} />
+          {truncatedNotice}
           <CodeView body={text ?? ""} testId={kind === "json" ? "view-json" : "view-text"} />
         </div>
       );
@@ -362,16 +419,7 @@ export function FileInspector(props: { workspaceId: string; path: string }) {
         </div>
       );
     case "app-source":
-      return (
-        <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<LayoutGrid size={13} aria-hidden />} path={props.path} label="app" />
-          <AffordanceCard
-            testId="view-app"
-            title="App source"
-            body="This file is part of a dohc app package. The app runtime arrives with the apps phase."
-          />
-        </div>
-      );
+      return <AppPackageView workspaceId={props.workspaceId} path={props.path} />;
     default:
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">

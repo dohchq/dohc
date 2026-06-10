@@ -293,7 +293,11 @@ export function DesktopWorkspaceShell(props: {
         {/* Main area */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
           {selected ? (
-            <FileInspector workspaceId={workspaceId} path={selected} />
+            <FileInspector
+              workspaceId={workspaceId}
+              path={selected}
+              refreshKey={changeSets.length}
+            />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <span className="text-sm text-muted">

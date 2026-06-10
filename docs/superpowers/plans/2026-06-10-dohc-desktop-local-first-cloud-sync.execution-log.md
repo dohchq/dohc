@@ -2,15 +2,16 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 5 FULLY COMPLETE (committed d87f2f1; all data-loss findings closed). Phase 6 starting.
-- Expected test state: workspace-core 54, workspace-fs 27, workspace-sync 15, workspace-history 10, desktop 42; 4 E2E; smoke — all green at d87f2f1
-- Dirty files and intent: this log only
-- Exact next action: Phase 6 (real file UX) — lead writes failing fileTypes E2E + fixture workspace (notes/today.md, data/transactions.csv, data/config.json, uploads/{receipt.png,contract.pdf,voice.m4a}, finance/wallet.sqlite, finance/.apps/ledger/app.json) + scaffolds FileInspector as a dispatch table (one file per view); port FileTypeView/DatabaseStudio/DatabaseTableGrid from apps/app/src/components (reuse-map: clean/props-driven, strip Convex/web hooks, data via bridge); optional 2-4 view lanes; DESIGN REVIEW LOOP (UI phase). DUE THIS PHASE: codex phase-02 finding #4 (window.open user-gesture/allowlist — user content first renders here).
-- Active background tasks: b0zn3ojhz (codex phase-05-fix re-review, one per cap → codex/phase-05-fix.md)
+- Phase/Step + TDD position: Phase 7 FULLY COMPLETE (apps as local source folders; AppTester static gate + trust model). Committing phase7 now. Phase 8 next.
+- Expected test state (verified this session under Node 22.13): workspace-core 66, desktop 62, app-tester 25; desktop E2E 6 (desktopLaunch, fileTypes, appPackage, firstRunWorkspace×3); smoke green. workspace-fs 27 / workspace-sync 15 / workspace-history 10 unchanged since Phase 5 (not re-run this session).
+- Dirty files and intent: this log + plan (Phase 7b deferral note) — being committed with phase7.
+- Exact next action: Phase 8 (visible SQLite + data import) — see plan Phase 8. Lead writes failing E2E for importing CSV/JSON into a workspace folder + viewing a real SQLite db in the studio; DatabaseStudio/DatabaseTableGrid port lands here (D-21 deferred SQLite studio from Phase 6). Watch provenance=import (deferred from Phase 5 finding #2).
+- Active background tasks: none
 - Open worktrees: none
-- Pending reviews: codex phase-05-fix (in flight; residue rolls to Phase 7 checkpoint)
-- Git state: 19 commits atop e2de7a3; HEAD d87f2f1
+- Pending reviews: codex phase7 (to run against the phase7 commit SHA after commit) + verifier fan-out.
+- Git state: HEAD at phase6 (313658d); phase7 commit pending (this change).
 - GOTCHA: codex review transcripts are large (~5-20k lines, full exec trace) — DISTILL to findings before committing from Phase 6 onward.
+- TOOLCHAIN (CORRECTED 2026-06-10): the mise/`.tools/pnpm` paths in the Environment freeze are stale this session. Working invocation: `export PATH="$HOME/.local/share/nvm/v22.13.0/bin:$PATH" COREPACK_INTEGRITY_KEYS=0; corepack pnpm ...` (corepack signature verification fails without the integrity bypass; resolves pnpm 10.24.0 from packageManager pin). E2E needs `DOHC_E2E_NO_CHROMIUM_SANDBOX=1` on WSL.
 
 ## Environment (append-only)
 
@@ -148,6 +149,27 @@ Consult high-value batches (await verifier confirmation before fixing; transcrib
 - Likely-rejects/low (24,26 already covered by canonicalization+separator normalization; 25 multi-process race is out of scope for single-instance-locked app; 19,23 TOCTOU are defense-in-depth, lower priority than the static symlink escapes).
 
 ## Phase Logs
+
+### Phase 7: Apps As Local Source Folders
+
+- Status: gates green; committing phase7 (codex + verifier fan-out to run against the commit SHA).
+- Execution map: workspace-core apps model (apps.ts: AppManifest{title?,entry,read[],write[],agent?,network:false}, discoverApps, parseAppManifest, requiresTrust, appWriteAllowed [own-folder always; else write-glob match AND trusted], appReadiness, appScope, globToRegExp) → desktop appPackage.ts (getAppPackage assembles manifest+source+persisted trust/test state from .dohc/apps-state.json; runAppTesterStatic via @dohc/app-tester/static; grantAppTrust) → AppPackageView (manifest summary, source list, readiness badge, Run AppTester + Trust buttons, per-check list) wired into FileInspector app-source case → IPC getAppPackage/runAppTester/grantAppTrust → appPackage E2E (valid @dohc/app app passes static gate → ready → trustable; legacy @dohc/view app rejected → failed).
+- App-tester refactor: extracted Playwright-free static check into services/app-tester/src/staticCheck.ts (source/checkCompile/runStaticAppCheck + shared AppTestFile/AppTestCheck types); runAppTest.ts imports them and its `mode:"static"` branch now delegates to runStaticAppCheck; added `@dohc/app-tester/static` subpath export. Desktop imports ONLY the /static entry → its bundle never pulls in the browser runtime.
+- Folded Phase 6 review fixes (from codex/phase-06.md + design judge): bounded readWorkspaceText (2MB cap via file handle), TruncatedNotice, ImageView reset on url change + dims caption, useTextContent refreshKey wiring, fileTypes spec SQLite fixture NUL→Buffer + markdown-h1/csv-raw-toggle/image-naturalWidth assertions, react-markdown document render.
+- Files changed: NEW packages/workspace-core/src/apps.{ts,test.ts} (+index re-export), apps/desktop/src/workspaces/appPackage.{ts,test.ts}, apps/desktop/src/renderer/AppPackageView.tsx, apps/desktop/e2e/appPackage.spec.ts, services/app-tester/src/{staticCheck.ts,index.ts}. MODIFIED apps/desktop/src/{main.ts,preload.ts,ipc/channels.ts,ipc/bridgeContract.ts,renderer/FileInspector.tsx,renderer/DesktopWorkspaceShell.tsx,workspaces/workspaceAssets.ts,e2e/fileTypes.spec.ts,electron.vite.config.ts,package.json}, services/app-tester/{package.json,src/runAppTest.ts}.
+- Code deleted or consolidated: app-tester compile-check helpers (source/checkCompile/isCodeFile/stripDohcFrontmatter + AppTestFile/AppTestCheck types) moved out of runAppTest.ts into staticCheck.ts (no duplication — runAppTest imports them); static branch DRYed to one runStaticAppCheck call. Net: removed the 8MB typescript-compiler bundle from desktop main (externalized) and kept Playwright entirely out of the desktop graph.
+- Decisions made: D-22 | desktop AppTester gate = STATIC only (compile + @dohc/app SDK import check; legacy @dohc/view rejected); Playwright browser render (source-backed-data/mutation-persistence/manifest-tests checks) stays a web/Phase-7b concern. Static mode is now genuinely Playwright-free in app-tester (was always launching chromium; only screenshot artifacts were mode-gated) | phase 7. D-23 | typescript externalized in desktop electron.vite main build via externalizeDepsPlugin `include:["typescript"]` — it is CJS using __filename and crashes bundled into the ESM main; loaded from node_modules at runtime when AppTester runs | phase 7. D-24 | electron-vite externals must be composed via the plugin's include/exclude options, NEVER a raw build.rollupOptions.external array — an array clobbers the baseline (electron+builtins) external list and bundles electron's installer shim, crashing launch (verified this session) | phase 7.
+- Tests added: workspace-core apps unit (66 total, app model exhaustive), 5 desktop appPackage unit (getAppPackage, runAppTesterStatic pass/fail, grantAppTrust), 1 appPackage E2E (pass+trust+legacy-reject).
+- Commands run (Node 22.13 pinned, corepack pnpm): workspace-core 66 + desktop 62 + app-tester 25 unit; workspace-core/desktop/app-tester typecheck; desktop build; desktop E2E 6/6; smoke — all green.
+- Failing tests fixed: appPackage "passes a valid @dohc/app app" was RED (static mode still ran chromium render → blank-render on `return null`). Root fix: make app-tester `mode:"static"` actually skip the browser runtime (compile-only); fixture also upgraded to a real renderable dohc app. Then build broke (rolldown followed app-tester's @playwright/test dynamic import → unresolvable chromium-bidi); then a rollupOptions.external array fixed the build but bundled electron (crash); then the typescript compiler bundled into ESM crashed on __filename. Final clean resolution: /static subpath entry (no Playwright in desktop graph) + `include:["typescript"]` (compiler external). All four failure modes verified fixed by relaunching the built main.
+- Electron E2E/manual smoke: 6/6 E2E + smoke green; built main launches clean (zero stderr error markers).
+- UI/UX screenshot/design review: phase-07 screenshots (app-ready, app-failed) captured by the E2E.
+- Security: app trust model — broad writes require explicit trust (requiresTrust + grantAppTrust), own-folder writes always allowed; AppTester static gate blocks legacy SDK + broken builds before an app can be trusted; trust/test state persisted as inspectable .dohc/apps-state.json.
+- Reviewer/subagent findings: pending (codex phase7 + verifier fan-out post-commit).
+- Codex third-party review findings: pending post-commit.
+- Dependencies added: none.
+- Remaining risk / Phase 7b (deferred): full in-iframe app RUNTIME (file-backed RPC + persistence + live render) is NOT in Phase 7 — apps are inspectable/testable/trustable source folders, not yet executable in-app. The browser-render half of AppTester (source-backed-data, mutation-persistence, manifest-tests) is unused by the desktop until the runtime lands. Recorded as Phase 7b follow-up in the plan.
+- Next phase: 8
 
 ### Phase 6: Real File UX For Text, Data, Media, Apps, Databases
 
