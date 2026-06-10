@@ -1,20 +1,40 @@
 import { Database } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 
 type Snapshot = DatabaseSnapshotResult;
 type Table = Snapshot["tables"][number];
+type Row = Record<string, unknown>;
 
-// The primary key column — what a row edit keys on. Prefer the declared PK,
-// then a conventional "id", then the first column.
-function pkColumnOf(table: Table): string | null {
-  return (
+// Identity a row EDIT keys on. SQLite rowid (carried by the snapshot as
+// __dohc_rowid) is always unique; a guessed "id" column may not be — editing
+// one visible row must never update several. WITHOUT ROWID tables fall back to
+// a single-column declared primary key; with neither, edits are disabled.
+function editKeyFor(table: Table, row: Row): { pkColumn: string; rowId: string | number } | null {
+  const rowid = row.__dohc_rowid;
+  if (typeof rowid === "number" || typeof rowid === "bigint") {
+    return { pkColumn: "rowid", rowId: Number(rowid) };
+  }
+  const declared = table.columns.filter((c) => c.primaryKey);
+  if (declared.length === 1) {
+    return { pkColumn: declared[0].name, rowId: String(row[declared[0].name]) };
+  }
+  return null;
+}
+
+// Human-meaningful row label for testids/keys only — never used for edits.
+function rowLabelOf(table: Table, row: Row, index: number): string {
+  const display =
     table.columns.find((c) => c.primaryKey)?.name ??
-    table.columns.find((c) => c.name.toLowerCase() === "id")?.name ??
-    table.columns[0]?.name ??
-    null
-  );
+    table.columns.find((c) => c.name.toLowerCase() === "id")?.name;
+  return display ? String(row[display]) : String(row.__dohc_rowid ?? index);
+}
+
+interface EditingCell {
+  rowLabel: string;
+  column: string;
+  key: { pkColumn: string; rowId: string | number };
 }
 
 // Visible SQLite studio: browse tables, see schema, and edit a cell. An edit
@@ -27,35 +47,51 @@ export function DatabaseStudioView(props: {
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [activeName, setActiveName] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ rowId: string; column: string } | null>(null);
+  const [editing, setEditing] = useState<EditingCell | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState(false);
 
   const { workspaceId, path, refreshKey } = props;
+  const currentPathRef = useRef(path);
 
-  const load = useCallback(async () => {
-    setError(false);
-    try {
-      const result = await bridge().readWorkspaceDatabase({ workspaceId, relativePath: path });
-      setSnapshot(result);
-    } catch {
-      setError(true);
-    }
-  }, [workspaceId, path]);
-
+  // One effect handles both path switches and activity refreshes. Switching
+  // paths blanks the view immediately — stale rows from the previous database
+  // must never stay visible (or editable) under the new header. A failed
+  // (re)load also clears the snapshot for the same reason. The cancelled flag
+  // drops slow responses that arrive after another switch.
   useEffect(() => {
-    void load();
-  }, [load, refreshKey]);
+    let cancelled = false;
+    if (currentPathRef.current !== path) {
+      currentPathRef.current = path;
+      setSnapshot(null);
+      setError(false);
+      setActiveName(null);
+      setEditing(null);
+    }
+    bridge()
+      .readWorkspaceDatabase({ workspaceId, relativePath: path })
+      .then((result) => {
+        if (cancelled) return;
+        setSnapshot(result);
+        setError(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSnapshot(null);
+        setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, path, refreshKey]);
 
   const active =
     snapshot?.tables.find((t) => t.name === activeName) ?? snapshot?.tables[0] ?? null;
 
   async function commitEdit(table: Table) {
     if (!editing) return;
-    const pk = pkColumnOf(table);
     const current = editing;
     setEditing(null);
-    if (!pk || current.column === pk) return; // never edit the key cell
     try {
       const result = await bridge().applyDatabaseEdit({
         workspaceId,
@@ -63,14 +99,15 @@ export function DatabaseStudioView(props: {
         edit: {
           table: table.name,
           op: "update",
-          pkColumn: pk,
-          rowId: current.rowId,
+          pkColumn: current.key.pkColumn,
+          rowId: current.key.rowId,
           payload: { [current.column]: draft },
         },
       });
-      setSnapshot(result);
+      // Drop the response if the user switched databases mid-flight.
+      if (currentPathRef.current === path) setSnapshot(result);
     } catch {
-      setError(true);
+      if (currentPathRef.current === path) setError(true);
     }
   }
 
@@ -114,13 +151,21 @@ export function DatabaseStudioView(props: {
         </aside>
 
         <main className="min-w-0 overflow-auto p-3">
+          {error ? (
+            <p
+              data-testid="db-edit-error"
+              className="mb-2 mt-0 rounded border border-line bg-panel-2 px-2 py-1 text-[12px] text-danger"
+            >
+              Couldn't apply the last change.
+            </p>
+          ) : null}
           {active ? (
             <>
-              <div className="mb-3 flex flex-wrap gap-1.5 text-[11px] text-subtle">
+              <div className="mb-3 flex flex-wrap gap-1.5 text-[11px]">
                 {active.columns.map((column) => (
                   <span key={column.name} className="rounded border border-line px-1.5 py-0.5">
-                    {column.name}
-                    <span className="ml-1 text-muted">{column.type}</span>
+                    <span className="text-ink">{column.name}</span>
+                    <span className="ml-1 text-subtle">{column.type}</span>
                     {column.primaryKey ? <span className="ml-1 text-accent">pk</span> : null}
                   </span>
                 ))}
@@ -130,9 +175,9 @@ export function DatabaseStudioView(props: {
                 editing={editing}
                 draft={draft}
                 onDraft={setDraft}
-                onBeginEdit={(rowId, column) => {
-                  setDraft(displayValue(active, rowId, column));
-                  setEditing({ rowId, column });
+                onBeginEdit={(cell, value) => {
+                  setDraft(value);
+                  setEditing(cell);
                 }}
                 onCommit={() => void commitEdit(active)}
                 onCancel={() => setEditing(null)}
@@ -157,23 +202,21 @@ function Header({ path }: { path: string }) {
   );
 }
 
-function displayValue(table: Table, rowId: string, column: string): string {
-  const pk = pkColumnOf(table);
-  const row = table.rows.find((r) => String(r[pk ?? ""]) === rowId);
-  return row ? String(row[column] ?? "") : "";
-}
-
 function DatabaseGrid(props: {
   table: Table;
-  editing: { rowId: string; column: string } | null;
+  editing: EditingCell | null;
   draft: string;
   onDraft: (value: string) => void;
-  onBeginEdit: (rowId: string, column: string) => void;
+  onBeginEdit: (cell: EditingCell, currentValue: string) => void;
   onCommit: () => void;
   onCancel: () => void;
 }) {
   const { table } = props;
-  const pk = pkColumnOf(table);
+  const numeric = new Set(
+    table.columns
+      .filter((c) => /int|real|num|floa|doub/.test(c.type))
+      .map((c) => c.name),
+  );
   return (
     <div className="overflow-auto rounded border border-line" data-testid="db-table">
       <table className="w-full border-collapse text-left text-[12px]">
@@ -182,28 +225,42 @@ function DatabaseGrid(props: {
             {table.columns.map((column) => (
               <th
                 key={column.name}
-                className="border-b border-line bg-panel-2 px-2 py-1 font-medium text-ink"
+                className={`border-b border-line bg-panel-2 px-2 py-1 font-medium text-ink ${
+                  numeric.has(column.name) ? "text-right" : ""
+                }`}
               >
                 {column.name}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody className="[&>tr:last-child>td]:border-b-0">
           {table.rows.map((row, index) => {
-            const rowId = pk ? String(row[pk]) : String(index);
+            const rowLabel = rowLabelOf(table, row, index);
+            const editKey = editKeyFor(table, row);
             return (
-              <tr key={rowId}>
+              <tr key={String(row.__dohc_rowid ?? `${rowLabel}-${index}`)}>
                 {table.columns.map((column) => {
                   const isEditing =
-                    props.editing?.rowId === rowId && props.editing.column === column.name;
-                  const editable = pk !== null && column.name !== pk;
+                    props.editing?.rowLabel === rowLabel &&
+                    props.editing.column === column.name;
+                  // Editable only with a unique key; the key column itself
+                  // stays read-only (when it's a real column, not rowid).
+                  const editable = editKey !== null && column.name !== editKey.pkColumn;
                   return (
                     <td
                       key={column.name}
-                      data-testid={`db-cell-${column.name}-${rowId}`}
-                      onClick={() => editable && props.onBeginEdit(rowId, column.name)}
-                      className={`border-b border-line px-2 py-1 text-ink ${editable ? "cursor-text" : "text-muted"}`}
+                      data-testid={`db-cell-${column.name}-${rowLabel}`}
+                      onClick={() =>
+                        editable &&
+                        props.onBeginEdit(
+                          { rowLabel, column: column.name, key: editKey },
+                          String(row[column.name] ?? ""),
+                        )
+                      }
+                      className={`border-b border-line px-2 py-1 ${
+                        numeric.has(column.name) ? "text-right tabular-nums" : ""
+                      } ${editable ? "cursor-text text-ink hover:bg-panel-2" : "text-muted"}`}
                     >
                       {isEditing ? (
                         <input

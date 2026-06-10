@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyDatabaseFile,
+  isDatabaseFile,
+  sidecarBasePath,
   createDatabaseOperation,
   databaseOpLogPath,
   databaseSyncStrategy,
@@ -26,8 +28,19 @@ describe("classifyDatabaseFile", () => {
     expect(classifyDatabaseFile("finance/wallet.sqlite-wal")).toBe("sidecar");
     expect(classifyDatabaseFile("finance/wallet.sqlite-shm")).toBe("sidecar");
     expect(classifyDatabaseFile("data/contacts.db-journal")).toBe("sidecar");
+    expect(classifyDatabaseFile("notes/log.sqlite3-wal")).toBe("sidecar");
     expect(isDatabaseSidecar("finance/wallet.sqlite-wal")).toBe(true);
     expect(isDatabaseSidecar("finance/wallet.sqlite")).toBe(false);
+  });
+
+  it("exposes the single-source helpers the watcher collapse uses", () => {
+    // .sqlite3 once diverged between this module and the watcher's local copy
+    // of the regex — these helpers ARE the watcher's rules now.
+    expect(isDatabaseFile("notes/log.sqlite3")).toBe(true);
+    expect(isDatabaseFile("notes/log.sqlite3-wal")).toBe(false);
+    expect(sidecarBasePath("notes/log.sqlite3-wal")).toBe("notes/log.sqlite3");
+    expect(sidecarBasePath("finance/wallet.sqlite-journal")).toBe("finance/wallet.sqlite");
+    expect(sidecarBasePath("notes/today.md")).toBeNull();
   });
 
   it("is not fooled by db-like substrings in non-db names", () => {
@@ -88,6 +101,12 @@ describe("database operation log", () => {
     // Deterministic per database path.
     expect(databaseOpLogPath("finance/wallet.sqlite")).toBe(p);
     expect(databaseOpLogPath("data/contacts.db")).not.toBe(p);
+  });
+
+  it("never maps two database paths to the same op log (slug ambiguity)", () => {
+    // Both slug to a_b.sqlite — the path tag must keep their logs separate, or
+    // unrelated operations and versions would interleave in one log.
+    expect(databaseOpLogPath("a/b.sqlite")).not.toBe(databaseOpLogPath("a_b.sqlite"));
   });
 });
 

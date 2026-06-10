@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
 // the part realpath can resolve, so we can check containment BEFORE mkdir.
-async function existingAncestor(path: string): Promise<string> {
+export async function existingAncestor(path: string): Promise<string> {
   let current = path;
   for (;;) {
     try {

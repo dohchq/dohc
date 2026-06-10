@@ -1,7 +1,7 @@
-// Phase 5: turn the raw stream of file-watcher events into reviewable units.
-// Two pieces: a settle-window batcher that waits for the workspace to go quiet
-// before grouping events, and a mapper from a settled batch to a ChangeSet.
-// An agent run touching 18 files becomes ONE batch and ONE change set, not 18.
+// Phase 5: map a settled batch of file-watcher events to a reviewable
+// ChangeSet. An agent run touching 18 files becomes ONE change set, not 18.
+// (The settle-window debounce itself lives in workspace-fs watchEvents — the
+// shipping implementation; a duplicate batcher here was deleted as dead code.)
 
 import {
   addFileChanges,
@@ -14,63 +14,6 @@ import {
   type WatcherEvent,
   type WatcherEventBatch,
 } from "@dohc/workspace-core";
-
-export interface SettleBatcherOptions {
-  // Quiet period (ms) the workspace must stay event-free before a batch emits.
-  windowMs: number;
-  // Injected clock so behavior is deterministic in tests and host-driven in
-  // production. Stamps each event's arrival time.
-  now: () => number;
-  onBatch: (batch: WatcherEventBatch) => void;
-}
-
-export interface SettleBatcher {
-  push(event: WatcherEvent): void;
-  // Probe called by the host (e.g. from a real interval) with the current time.
-  // Emits the pending batch when the workspace has been quiet for windowMs.
-  tick(currentMs: number): void;
-  // Emit any pending batch right now, ignoring the window (e.g. on shutdown).
-  flush(): void;
-}
-
-export function createSettleBatcher(
-  opts: SettleBatcherOptions,
-): SettleBatcher {
-  // Pending events keyed by path so rapid edits to the same file collapse into
-  // a single event carrying the latest sha256. Map preserves insertion order,
-  // so the emitted batch keeps first-seen ordering of paths.
-  const pending = new Map<string, WatcherEvent>();
-  let lastEventMs = 0;
-
-  function emit(settledAtMs: number): void {
-    if (pending.size === 0) return;
-    const batch: WatcherEventBatch = {
-      settledAtMs,
-      windowMs: opts.windowMs,
-      events: Array.from(pending.values()),
-    };
-    pending.clear();
-    opts.onBatch(batch);
-  }
-
-  return {
-    push(event: WatcherEvent): void {
-      // A later event for the same path supersedes the earlier one: keep the
-      // newest operation and sha256 (e.g. create then update -> latest update).
-      pending.set(event.path, event);
-      lastEventMs = opts.now();
-    },
-    tick(currentMs: number): void {
-      if (pending.size === 0) return;
-      if (currentMs - lastEventMs >= opts.windowMs) {
-        emit(currentMs);
-      }
-    },
-    flush(): void {
-      emit(opts.now());
-    },
-  };
-}
 
 // Watcher operations map onto the coarser change vocabulary: a create or an
 // update both land as a "write" (the file now has new content); delete and

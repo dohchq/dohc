@@ -96,8 +96,18 @@ test("first run creates a real workspace folder and lands in a native shell", as
     /today\.md/i,
     { timeout: 15_000 },
   );
-  // The watcher must NEVER record its own .dohc writes (feedback loop): the
-  // timeline shows user files only.
+  // The watcher must NEVER record its own .dohc writes (feedback loop).
+  // Recording today.md is itself a .dohc/history write — a regression would
+  // surface only in the NEXT settle batch, so make a second change, wait for
+  // ITS record (proving a further settle cycle completed), then assert.
+  await page.keyboard.press("ControlOrMeta+n");
+  const secondName = page.getByRole("textbox", { name: /file name/i });
+  await secondName.fill("notes/second.md");
+  await secondName.press("Enter");
+  await expect(page.getByTestId("history-timeline")).toContainText(
+    /2 files|second\.md/i,
+    { timeout: 15_000 },
+  );
   await expect(page.getByTestId("history-timeline")).not.toContainText(".dohc");
 
   // --- Keyboard: command palette opens, filters, closes ---

@@ -141,11 +141,20 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       const records: HistoryRecord[] = [];
       for (const entry of ordered) {
         // Read the full record from its own file — the index only holds a
-        // summary, the per-record file is the source of full detail.
-        const record = await readJson<HistoryRecord>(
-          join(historyDir, recordFileName(entry)),
-        );
-        if (record) records.push(record);
+        // summary, the per-record file is the source of full detail. One
+        // corrupt/truncated record (crash mid-write, hand edit) must cost that
+        // one entry, never brick the entire timeline.
+        try {
+          const record = await readJson<HistoryRecord>(
+            join(historyDir, recordFileName(entry)),
+          );
+          if (record) records.push(record);
+        } catch (error) {
+          console.error(
+            `[workspace-history] skipping unreadable record ${entry.id}:`,
+            error,
+          );
+        }
       }
       return records;
     },

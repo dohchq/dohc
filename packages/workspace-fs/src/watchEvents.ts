@@ -13,18 +13,18 @@
 
 import { watch } from "chokidar";
 import { isAbsolute, relative } from "node:path";
-import type { WatcherEvent } from "@dohc/workspace-core";
+import {
+  hasIgnoredSegment,
+  isDatabaseFile,
+  sidecarBasePath,
+  type WatcherEvent,
+} from "@dohc/workspace-core";
 
 // Normalize separators so a single set of rules covers POSIX and the
 // backslash paths a Windows watcher hands back.
 function toPosix(relativePath: string): string {
   return relativePath.replaceAll("\\", "/");
 }
-
-// SQLite sidecars: the WAL/SHM/journal files SQLite writes alongside a
-// database. Anchored to the end so "data/walmart.csv" (contains "wal") and
-// "notes/journal.md" never match.
-const SQLITE_SIDECAR = /^(.*\.(?:db|sqlite))-(?:wal|shm|journal)$/i;
 
 // Editor scratch/swap/autosave artifacts that churn while a user types but are
 // never the file we sync.
@@ -39,21 +39,18 @@ const EDITOR_NOISE = [
 ];
 
 // TRUE when the watcher should drop this relative path before it ever becomes
-// a user file op. Covers the reserved .dohc/ tree (including its cache) and
-// editor scratch files. NOTE: SQLite sidecars (.db-wal/-journal/-shm) are NOT
-// ignored here — a SQLite write often touches only the WAL while the base .db
-// is untouched until checkpoint, so ignoring sidecars would make the change
-// INVISIBLE. Instead the pipeline lets sidecar events through and folds them
-// into one base-db update via collapseSqliteSidecars, so the sidecar path
-// never surfaces but the database change is never missed.
+// a user file op. Shares hasIgnoredSegment with the file-tree walker so the
+// watcher never records history for paths the tree hides (.dohc at any depth,
+// .git, node_modules), plus editor scratch files. NOTE: SQLite sidecars
+// (.db-wal/-journal/-shm) are NOT ignored here — a SQLite write often touches
+// only the WAL while the base .db is untouched until checkpoint, so ignoring
+// sidecars would make the change INVISIBLE. Instead the pipeline lets sidecar
+// events through and folds them into one base-db update via
+// collapseSqliteSidecars, so the sidecar path never surfaces but the database
+// change is never missed.
 export function shouldIgnoreWatchPath(relativePath: string): boolean {
   const path = toPosix(relativePath);
-  const lower = path.toLowerCase();
-
-  // .dohc/ is dohc's own reserved/derived state (registry, cache, ...). Match
-  // the directory exactly or as a prefix — but NOT ".dohcrc", which is a
-  // sibling file, not the reserved directory.
-  if (lower === ".dohc" || lower.startsWith(".dohc/")) return true;
+  if (hasIgnoredSegment(path)) return true;
 
   const basename = path.slice(path.lastIndexOf("/") + 1);
   if (EDITOR_NOISE.some((pattern) => pattern.test(basename))) return true;
@@ -62,10 +59,11 @@ export function shouldIgnoreWatchPath(relativePath: string): boolean {
 }
 
 // Strip a SQLite sidecar suffix back to its base database path, or return
-// undefined for a path that is not a sidecar.
+// undefined for a path that is not a sidecar. The extension set lives in
+// workspace-core (databases.ts) — single-sourced so it cannot drift from the
+// sync rules (.sqlite3 sidecars were once missed by a local copy).
 function baseDbPath(path: string): string | undefined {
-  const match = SQLITE_SIDECAR.exec(toPosix(path));
-  return match ? match[1] : undefined;
+  return sidecarBasePath(toPosix(path)) ?? undefined;
 }
 
 // Collapse SQLite's multi-file write protocol back to one logical change.
@@ -109,7 +107,7 @@ export function collapseSqliteSidecars(events: WatcherEvent[]): WatcherEvent[] {
       continue;
     }
     const normalized = toPosix(event.path);
-    if (/\.(?:db|sqlite)$/i.test(normalized)) {
+    if (isDatabaseFile(normalized)) {
       // The base db itself — carry its real operation (delete must survive).
       foldBaseDb(normalized, event.operation);
       continue;
@@ -125,18 +123,32 @@ export type WatchWorkspaceEventsOptions = {
   // Quiet-window before a burst of raw events is reported as one batch. An
   // agent run or a save-all touching many files settles into a single batch.
   settleMs?: number;
+  // Hard ceiling on how long a continuous burst can postpone a flush. Without
+  // it, a busy database WAL (or a long agent run) writing faster than settleMs
+  // would starve the settle window forever and nothing would ever record.
+  maxWindowMs?: number;
   signal?: AbortSignal;
+};
+
+export type WorkspaceEventsWatcher = {
+  // Idempotent; flushes pending changes so a save right before quit records.
+  stop: () => void;
+  // Resolves when chokidar's initial scan completes — writes made after this
+  // point are guaranteed to be observed. (Writes landing DURING the initial
+  // scan can be folded into it and dropped; callers that trigger writes, like
+  // the desktop's openWorkspace, await this first. Changes made while the app
+  // was closed are reconciled by sync's manifest diff, not the watcher.)
+  ready: Promise<void>;
 };
 
 // Thin chokidar wrapper: watches rootDir, ignores noise via
 // shouldIgnoreWatchPath, debounces raw events into a quiet-window settle, and
 // calls onBatch with the unique changed relative paths once things go quiet.
-// Returns an idempotent stop function.
 export function watchWorkspaceEvents(
-  { rootDir, settleMs = 500, signal }: WatchWorkspaceEventsOptions,
+  { rootDir, settleMs = 500, maxWindowMs = settleMs * 8, signal }: WatchWorkspaceEventsOptions,
   onBatch: (paths: string[]) => void,
-): () => void {
-  if (signal?.aborted) return () => undefined;
+): WorkspaceEventsWatcher {
+  if (signal?.aborted) return { stop: () => undefined, ready: Promise.resolve() };
 
   // cwd makes chokidar hand back EVENT paths relative to rootDir, but the
   // `ignored` predicate is called with ABSOLUTE paths during the initial scan
@@ -159,10 +171,14 @@ export function watchWorkspaceEvents(
 
   const pending = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
   const flush = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    if (deadline !== undefined) clearTimeout(deadline);
     timer = undefined;
+    deadline = undefined;
     if (pending.size === 0) return;
     const paths = [...pending];
     pending.clear();
@@ -171,11 +187,19 @@ export function watchWorkspaceEvents(
 
   const onEvent = (relativePath: string): void => {
     // chokidar's cwd-relative path is already separator-normalized for our
-    // matcher; track it and (re)arm the quiet window.
+    // matcher; track it and (re)arm the quiet window. The deadline timer is
+    // armed once per burst and never reset — under continuous writes it
+    // guarantees a flush every maxWindowMs even though the settle timer keeps
+    // being pushed back.
     pending.add(toPosix(relativePath));
     if (timer !== undefined) clearTimeout(timer);
     timer = setTimeout(flush, settleMs);
+    if (deadline === undefined) deadline = setTimeout(flush, maxWindowMs);
   };
+
+  const ready = new Promise<void>((resolve) => {
+    watcher.on("ready", () => resolve());
+  });
 
   watcher.on("add", onEvent);
   watcher.on("change", onEvent);
@@ -189,7 +213,6 @@ export function watchWorkspaceEvents(
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
-    if (timer !== undefined) clearTimeout(timer);
     // Flush any settled-but-not-yet-emitted changes so a save right before
     // stop/quit is recorded into history rather than silently dropped.
     flush();
@@ -198,5 +221,5 @@ export function watchWorkspaceEvents(
   };
 
   signal?.addEventListener("abort", stop, { once: true });
-  return stop;
+  return { stop, ready };
 }

@@ -6,7 +6,7 @@ import type { ChangeAuthor } from "./changeSet";
 // transient WAL/journal sidecars are never synced as standalone files.
 
 const DB_EXT = /\.(?:db|sqlite|sqlite3)$/i;
-const SIDECAR = /\.(?:db|sqlite|sqlite3)-(?:wal|shm|journal)$/i;
+const SIDECAR = /^(.*\.(?:db|sqlite|sqlite3))-(?:wal|shm|journal)$/i;
 
 export type DatabaseFileKind =
   | "visible-user" // user data db (e.g. finance/wallet.sqlite) — syncs via op-log
@@ -16,6 +16,19 @@ export type DatabaseFileKind =
 
 export function isDatabaseSidecar(path: string): boolean {
   return SIDECAR.test(path);
+}
+
+// True for the database file itself (never its sidecars). The single source
+// of the extension set — the watcher's sidecar-collapse logic uses these
+// helpers so the two layers can't drift (.sqlite3 was once missed that way).
+export function isDatabaseFile(path: string): boolean {
+  return DB_EXT.test(path);
+}
+
+// Strip a sidecar suffix back to its base database path; null for non-sidecars.
+export function sidecarBasePath(path: string): string | null {
+  const match = SIDECAR.exec(path);
+  return match ? match[1] : null;
 }
 
 function inDohc(path: string): boolean {
@@ -110,9 +123,22 @@ export function serializeDatabaseOperation(op: DatabaseOperation): string {
   return `${JSON.stringify(op)}\n`;
 }
 
-// A stable, readable op-log location for a visible database. Kept under .dohc
-// (internal metadata governing a visible db) and inspectable as JSONL.
+// 32-bit FNV-1a over the exact path (pure JS — workspace-core must stay
+// renderer-safe, so no node:crypto). The readable slug alone is ambiguous
+// ("a/b.sqlite" and "a_b.sqlite" both slug to "a_b.sqlite"); the tag makes two
+// databases' logs collide only if BOTH slug and hash collide.
+function pathTag(path: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of path) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+// A stable, readable, collision-free op-log location for a visible database.
+// Kept under .dohc (internal metadata governing a visible db), inspectable JSONL.
 export function databaseOpLogPath(databasePath: string): string {
   const slug = databasePath.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `.dohc/databases/${slug}/operations.jsonl`;
+  return `.dohc/databases/${slug}-${pathTag(databasePath)}/operations.jsonl`;
 }

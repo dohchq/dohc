@@ -17,19 +17,53 @@ const READINESS_LABEL: Record<AppInfo["readiness"], string> = {
 // trusted, broadly-writing app.
 export function AppPackageView(props: { workspaceId: string; path: string }) {
   const [info, setInfo] = useState<AppInfo | null>(null);
+  // A path under .apps/ that doesn't belong to a discovered package (no
+  // app.json yet, or a stray file directly under .apps/) is a real, reachable
+  // state — it must render guidance, never an eternal "Loading…".
+  const [missing, setMissing] = useState(false);
   const [running, setRunning] = useState(false);
 
   const reload = useCallback(async () => {
-    const result = await bridge().getAppPackage({
-      workspaceId: props.workspaceId,
-      path: props.path,
-    });
-    setInfo(result);
+    try {
+      const result = await bridge().getAppPackage({
+        workspaceId: props.workspaceId,
+        path: props.path,
+      });
+      setInfo(result);
+      setMissing(result === null);
+    } catch {
+      setInfo(null);
+      setMissing(true);
+    }
   }, [props.workspaceId, props.path]);
 
   useEffect(() => {
+    setInfo(null);
+    setMissing(false);
     void reload();
   }, [reload]);
+
+  if (missing) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+        <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
+          <LayoutGrid size={13} aria-hidden />
+          <span className="font-mono text-ink">{props.path}</span>
+          <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">app</span>
+        </header>
+        <div
+          data-testid="view-app"
+          className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+        >
+          <span className="text-sm text-ink">Not an app package yet</span>
+          <span className="max-w-md text-xs text-muted">
+            An app lives in .apps/&lt;name&gt; with an app.json manifest next to its
+            source. Add app.json to make this folder a runnable app.
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   async function runTester() {
     if (!info || running) return;

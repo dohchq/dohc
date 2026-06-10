@@ -40,13 +40,13 @@ export function createWorkspaceActivity(notify: () => void) {
     });
   }
 
-  function open(workspace: CreatedWorkspace): SyncStatusResult {
+  async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {
     if (!watched.has(workspace.workspaceId)) {
       const entry: WatchedWorkspace = {
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: () => {} },
+        handle: { stop: async () => {}, ready: Promise.resolve() },
       };
       watched.set(workspace.workspaceId, entry);
       entry.handle = startWorkspaceWatch(workspace, {
@@ -56,6 +56,13 @@ export function createWorkspaceActivity(notify: () => void) {
           notify();
         },
       });
+      // Don't report the workspace open until the watcher's initial scan is
+      // done — a write made right after openWorkspace resolves is guaranteed
+      // observed. Bounded so a pathological scan can't hang the renderer.
+      await Promise.race([
+        entry.handle.ready,
+        new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+      ]);
     }
     return statusFor(workspace.workspaceId);
   }
@@ -80,9 +87,12 @@ export function createWorkspaceActivity(notify: () => void) {
     return statusFor(workspaceId);
   }
 
-  function stopAll(): void {
-    for (const w of watched.values()) w.handle.stop();
+  // Resolves once every watcher has flushed AND its in-flight records are
+  // written — the quit path awaits this so the last save is never dropped.
+  async function stopAll(): Promise<void> {
+    const stops = [...watched.values()].map((w) => w.handle.stop());
     watched.clear();
+    await Promise.all(stops);
   }
 
   return { open, listChangeSets, getStatus, stopAll };

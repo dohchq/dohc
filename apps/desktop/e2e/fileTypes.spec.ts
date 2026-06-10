@@ -33,11 +33,14 @@ async function seededWorkspace(): Promise<string> {
   );
   await writeFile(join(root, "uploads", "contract.pdf"), "%PDF-1.4\n%minimal\n");
   await writeFile(join(root, "uploads", "voice.m4a"), Buffer.from([0, 0, 0, 24]));
-  // Real SQLite magic header via Buffer so this spec stays a text file.
-  await writeFile(
-    join(root, "finance", "wallet.sqlite"),
-    Buffer.concat([Buffer.from("SQLite format 3"), Buffer.from([0])]),
-  );
+  // A REAL SQLite database so the studio's happy path is what gets asserted —
+  // a bytes-only fake would silently exercise the error state instead.
+  const { createRequire } = await import("node:module");
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const db = new DatabaseSync(join(root, "finance", "wallet.sqlite"));
+  db.exec("CREATE TABLE transactions (id TEXT PRIMARY KEY, amount INTEGER)");
+  db.prepare("INSERT INTO transactions VALUES ('txn_001', 42)").run();
+  db.close();
   await writeFile(
     join(root, "finance", ".apps", "ledger", "app.json"),
     '{ "name": "ledger" }',
@@ -99,7 +102,11 @@ test("each file type opens its own native view", async () => {
   await expect(page.getByTestId("view-audio")).toBeVisible();
 
   await open("finance/wallet.sqlite");
-  await expect(page.getByTestId("view-database")).toContainText(/database/i);
+  // Positive studio assertions: the real table and its data render — the
+  // loading/error fallback (which also carries view-database) can't satisfy
+  // these.
+  await expect(page.getByTestId("db-table-tab")).toHaveText(/transactions/);
+  await expect(page.getByTestId("db-cell-amount-txn_001")).toHaveText("42");
 
   await open("finance/.apps/ledger/app.json");
   await expect(page.getByTestId("view-app")).toContainText(/app/i);

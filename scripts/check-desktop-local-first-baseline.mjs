@@ -38,6 +38,12 @@ const commands = [
   ["pnpm", ["--filter", "@dohc/app-tester", "test"]],
   ["pnpm", ["--filter", "@dohc/sqlite-worker", "test"]],
   ["pnpm", ["--filter", "@dohc/agent-sandbox", "test"]],
+  // The pivot's own suites — the gate covers what we're building, not just
+  // what we inherited.
+  ["pnpm", ["--filter", "@dohc/workspace-core", "test"]],
+  ["pnpm", ["--filter", "@dohc/workspace-sync", "test"]],
+  ["pnpm", ["--filter", "@dohc/workspace-history", "test"]],
+  ["pnpm", ["--filter", "@dohc/desktop", "test"]],
   ["pnpm", ["check:debt"]],
 ];
 

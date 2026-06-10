@@ -7,7 +7,16 @@ import { z } from "zod";
 
 // Length caps: IPC payloads are untrusted; bound every renderer-supplied
 // string so a hostile/buggy caller cannot cause memory/latency pressure.
-const WORKSPACE_ID = z.string().min(1).max(200);
+// workspaceId doubles as the dohc-file:// URL HOSTNAME, so it must be
+// hostname-safe and lowercase (URL hostnames lowercase silently — a
+// case-variant id would break asset serving or alias another workspace).
+// Our own ids are UUIDs; a foreign manifest with any other shape is rejected
+// at attach time with a visible error.
+const WORKSPACE_ID = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
 
 // Enums derive from the workspace-core tuples (single source of truth) so a

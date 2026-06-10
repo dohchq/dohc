@@ -104,7 +104,19 @@ const activity = createWorkspaceActivity(() => {
     win.webContents.send(CHANNELS.workspaceActivity);
   }
 });
-app.on("will-quit", () => activity.stopAll());
+// Quit must wait for the final settle-window flush AND its history record to
+// be durably written — otherwise a save right before quit is silently lost.
+// Bounded so a wedged disk can't make the app unquittable.
+let quitting = false;
+app.on("will-quit", (event) => {
+  if (quitting) return;
+  quitting = true;
+  event.preventDefault();
+  void Promise.race([
+    activity.stopAll(),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+  ]).finally(() => app.exit(0));
+});
 
 // Workspace roots the main process itself produced — the default suggestion
 // and any folder the user chose through the real OS dialog. A renderer cannot
@@ -206,8 +218,12 @@ function registerIpcHandlers(): void {
       rootPath: usableRoot(input.rootPath),
       kind: input.kind,
     });
+    // Parse BEFORE register: a summary that fails the contract must never be
+    // persisted into the registry, or every later registry read would throw
+    // and the app would launch to a permanent blank window.
+    const summary = WorkspaceSummary.parse(created);
     registerWorkspace(created);
-    return WorkspaceSummary.parse(created);
+    return summary;
   });
 
   ipcMain.handle(CHANNELS.attachWorkspaceFolder, async (event, payload) => {
@@ -219,8 +235,12 @@ function registerIpcHandlers(): void {
       rootPath: usableRoot(input.rootPath),
       kind: "personal",
     });
+    // Parse-then-register (see createLocalWorkspace): a foreign manifest's
+    // workspaceId is untrusted input — an oversized or non-hostname-safe id
+    // must fail the attach with a visible error, not brick the registry.
+    const summary = WorkspaceSummary.parse(attached);
     registerWorkspace(attached);
-    return WorkspaceSummary.parse(attached);
+    return summary;
   });
 
   ipcMain.handle(CHANNELS.listWorkspaceFiles, async (event, payload) => {
@@ -341,11 +361,11 @@ function registerIpcHandlers(): void {
     await grantAppTrustState(workspace.rootPath, input.appRoot);
   });
 
-  ipcMain.handle(CHANNELS.openWorkspace, (event, payload) => {
+  ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return SyncStatusResult.parse(activity.open(workspace));
+    return SyncStatusResult.parse(await activity.open(workspace));
   });
 
   ipcMain.handle(CHANNELS.listChangeSets, async (event, payload) => {
@@ -399,12 +419,22 @@ if (!app.requestSingleInstanceLock()) {
           workspace.rootPath,
           relPath,
         );
-        return new Response(new Uint8Array(bytes), {
+        // A Uint8Array VIEW over the Buffer's memory — not a second full copy.
+        // (Node Buffers are ArrayBuffer-backed; the cast narrows the generic
+        // ArrayBufferLike that TS 5.9 infers from .buffer.)
+        const body = new Uint8Array(
+          bytes.buffer,
+          bytes.byteOffset,
+          bytes.byteLength,
+        ) as Uint8Array<ArrayBuffer>;
+        return new Response(body, {
           headers: {
             "content-type": mediaType,
             // The renderer fetch()es text files from this scheme; a custom
             // scheme is a distinct origin, so allow the cross-origin read.
             "access-control-allow-origin": "*",
+            // Never let served workspace bytes be sniffed into active content.
+            "x-content-type-options": "nosniff",
           },
         });
       } catch {

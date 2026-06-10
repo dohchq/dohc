@@ -1,11 +1,10 @@
 import {
-  Database,
   FileText,
   Image as ImageIcon,
   Music,
   Table,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { AppPackageView } from "./AppPackageView";
 import { DatabaseStudioView } from "./DatabaseStudioView";
@@ -69,19 +68,30 @@ function useTextContent(
   const [text, setText] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState(false);
+  const lastPathRef = useRef<string | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    setText(null);
-    setError(false);
+    // Blank only when switching FILES — an activity refresh of the open file
+    // swaps content in place instead of flashing the document away.
+    if (lastPathRef.current !== path) {
+      lastPathRef.current = path;
+      setText(null);
+      setError(false);
+    }
     void bridge()
       .readWorkspaceText({ workspaceId, relativePath: path })
       .then((r) => {
         if (cancelled) return;
         setText(r.text);
         setTruncated(r.truncated);
+        setError(false);
       })
-      .catch(() => !cancelled && setError(true));
+      .catch(() => {
+        if (cancelled) return;
+        setText(null);
+        setError(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -168,6 +178,7 @@ function CsvView({
 }) {
   const [raw, setRaw] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   const rows = useMemo(
     () =>
       body
@@ -182,6 +193,7 @@ function CsvView({
   async function importToSqlite() {
     if (importing) return;
     setImporting(true);
+    setImportError(null);
     try {
       const { dbPath, tableName } = deriveImportTarget(path);
       const result = await bridge().importToDatabase({
@@ -191,6 +203,11 @@ function CsvView({
         tableName,
       });
       onOpenPath?.(result.path);
+    } catch (cause) {
+      // Most common: the target database already exists (import never
+      // overwrites a canonical file). Tell the user instead of failing mute.
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setImportError(/already exists/i.test(message) ? "Database already exists" : "Import failed");
     } finally {
       setImporting(false);
     }
@@ -199,6 +216,11 @@ function CsvView({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
       <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
+        {importError ? (
+          <span data-testid="csv-import-error" className="px-1 text-[11px] text-danger">
+            {importError}
+          </span>
+        ) : null}
         {onOpenPath ? (
           <button
             type="button"

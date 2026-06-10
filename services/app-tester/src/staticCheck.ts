@@ -21,11 +21,11 @@ export type AppTestCheck = {
   message?: string
 }
 
-export function isCodeFile(file: AppTestFile): boolean {
+function isCodeFile(file: AppTestFile): boolean {
   return /\.(?:[cm]?[jt]sx?)$/i.test(file.relativePath)
 }
 
-export function stripDohcFrontmatter(body: string): string {
+function stripDohcFrontmatter(body: string): string {
   if (!body.startsWith('---\n') && !body.startsWith('---\r\n')) return body
   const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(body)
   return match ? body.slice(match[0].length) : body

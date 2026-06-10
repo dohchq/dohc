@@ -1,11 +1,11 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { open, readFile, realpath } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
 
 // Media types served to the renderer for binary assets. Kept small and
-// explicit — anything unknown is served as octet-stream (download, never
-// executed in the renderer).
+// explicit — only types a view actually renders (image/audio src, pdf);
+// anything unknown is served as octet-stream (download, never executed).
 const MEDIA_TYPES: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -18,8 +18,6 @@ const MEDIA_TYPES: Record<string, string> = {
   mp3: "audio/mpeg",
   wav: "audio/wav",
   ogg: "audio/ogg",
-  mp4: "video/mp4",
-  webm: "video/webm",
 };
 
 export function mediaTypeForExtension(path: string): string {
@@ -57,6 +55,11 @@ export async function resolveWorkspaceFile(
   return { realTarget, normalized: validated.normalized };
 }
 
+// Media views buffer the whole file into the privileged main process before
+// serving — cap it so one oversized file can't OOM/freeze the app (same
+// reasoning as MAX_TEXT_BYTES, sized for real images/audio).
+const MAX_ASSET_BYTES = 64 * 1024 * 1024;
+
 // Reads a workspace-relative file's bytes.
 export async function readWorkspaceAsset(
   rootPath: string,
@@ -66,6 +69,10 @@ export async function readWorkspaceAsset(
     rootPath,
     relativePath,
   );
+  const { size } = await stat(realTarget);
+  if (size > MAX_ASSET_BYTES) {
+    throw new Error(`Asset too large to serve (${size} bytes): ${relativePath}`);
+  }
   return {
     bytes: await readFile(realTarget),
     mediaType: mediaTypeForExtension(normalized),

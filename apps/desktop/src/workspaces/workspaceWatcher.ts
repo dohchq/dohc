@@ -28,8 +28,9 @@ async function sha256OrUndefined(absolute: string): Promise<string | undefined> 
 }
 
 // Turn the watcher's settled changed paths into WatcherEvents. Operation is
-// inferred from current existence (present => write/create, absent => delete);
-// this is the pure, testable core of the live pipeline.
+// inferred from current existence; only a confirmed-absent file (ENOENT/
+// ENOTDIR) is a delete — a transiently unreadable file (EACCES, EBUSY) is
+// still present and must not be recorded into history as "deleted".
 export async function pathsToEvents(
   rootPath: string,
   paths: string[],
@@ -37,23 +38,33 @@ export async function pathsToEvents(
   const events: WatcherEvent[] = [];
   for (const path of paths) {
     const absolute = join(rootPath, path);
-    let exists = false;
+    let kind: "file" | "absent" | "other" = "other";
     try {
-      exists = (await stat(absolute)).isFile();
-    } catch {
-      exists = false;
+      kind = (await stat(absolute)).isFile() ? "file" : "other";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      kind = code === "ENOENT" || code === "ENOTDIR" ? "absent" : "other";
     }
-    events.push(
-      exists
-        ? { path, operation: "update", sha256: await sha256OrUndefined(absolute) }
-        : { path, operation: "delete" },
-    );
+    if (kind === "absent") {
+      events.push({ path, operation: "delete" });
+    } else if (kind === "file") {
+      events.push({ path, operation: "update", sha256: await sha256OrUndefined(absolute) });
+    } else {
+      // Directories and unreadable-but-present entries: record the change
+      // without a hash rather than fabricating a delete.
+      events.push({ path, operation: "update" });
+    }
   }
   return events;
 }
 
 export interface WorkspaceWatchHandle {
-  stop: () => void;
+  // Stops watching, flushes the final settle window, and resolves once every
+  // in-flight record has been written — so quit cannot drop the last batch.
+  stop: () => Promise<void>;
+  // Resolves when the underlying watcher's initial scan completes; writes made
+  // after this are guaranteed observed.
+  ready: Promise<void>;
 }
 
 // Wires the file watcher to the history store: each settled batch of changes
@@ -70,33 +81,54 @@ export function startWorkspaceWatch(
   const store = createChangeSetStore(workspace.rootPath);
   const now = options.now ?? (() => Date.now());
 
-  const stop = watchWorkspaceEvents(
+  async function recordBatch(paths: string[]): Promise<void> {
+    // Defense in depth: never record changes to .dohc/** (our own history
+    // writes, manifest, cache) — recording them would feed back into the
+    // watcher. The watcher already ignores these; this guards a leak.
+    const userPaths = paths.filter((p) => !shouldIgnoreWatchPath(p));
+    if (userPaths.length === 0) return;
+    const rawEvents = await pathsToEvents(workspace.rootPath, userPaths);
+    // Fold SQLite WAL/journal/shm churn into a single base-db update so the
+    // history shows "wallet.sqlite changed", never the transient sidecars.
+    const events = collapseSqliteSidecars(rawEvents);
+    if (events.length === 0) return;
+    const batch: WatcherEventBatch = {
+      settledAtMs: now(),
+      windowMs: options.settleMs ?? 500,
+      events,
+    };
+    const changeSet = batchToChangeSet(batch, { author: LOCAL_USER });
+    await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
+    options.onRecorded?.();
+  }
+
+  // Batches are processed strictly in order on one chain; a failure is logged
+  // with workspace context (never an unhandled rejection that could kill the
+  // main process) and the chain stays alive for the next batch. stop() awaits
+  // this chain so the final pre-quit batch is durably recorded before exit.
+  let recording: Promise<void> = Promise.resolve();
+
+  const watcher = watchWorkspaceEvents(
     { rootDir: workspace.rootPath, settleMs: options.settleMs },
     (paths) => {
-      void (async () => {
-        // Defense in depth: never record changes to .dohc/** (our own history
-        // writes, manifest, cache) — recording them would feed back into the
-        // watcher. The watcher already ignores these; this guards a leak.
-        const userPaths = paths.filter((p) => !shouldIgnoreWatchPath(p));
-        if (userPaths.length === 0) return;
-        const rawEvents = await pathsToEvents(workspace.rootPath, userPaths);
-        // Fold SQLite WAL/journal/shm churn into a single base-db update so the
-        // history shows "wallet.sqlite changed", never the transient sidecars.
-        const events = collapseSqliteSidecars(rawEvents);
-        if (events.length === 0) return;
-        const batch: WatcherEventBatch = {
-          settledAtMs: now(),
-          windowMs: options.settleMs ?? 500,
-          events,
-        };
-        const changeSet = batchToChangeSet(batch, { author: LOCAL_USER });
-        await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
-        options.onRecorded?.();
-      })();
+      recording = recording.then(() =>
+        recordBatch(paths).catch((error) => {
+          console.error(
+            `[desktop] failed to record history for ${workspace.rootPath}:`,
+            error,
+          );
+        }),
+      );
     },
   );
 
-  return { stop };
+  return {
+    ready: watcher.ready,
+    stop: async () => {
+      watcher.stop();
+      await recording;
+    },
+  };
 }
 
 export { createChangeSetStore, humanSummary };

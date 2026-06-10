@@ -5,6 +5,7 @@ import {
   isReservedPath,
   validateAttachedFolder,
   validateUserWritePath,
+  hasIgnoredSegment,
 } from "./paths";
 
 describe("workspace roots", () => {
@@ -187,5 +188,43 @@ describe("path classification", () => {
 
   it("classifies everything else as a plain file", () => {
     expect(classifyPath("notes/today.md")).toEqual({ kind: "file" });
+  });
+});
+
+describe("Windows trailing dot/space aliasing", () => {
+  it("rejects .dohc disguised with trailing dots or spaces", () => {
+    expect(validateUserWritePath(".dohc./x.md")).toEqual({ ok: false, reason: "reserved" });
+    expect(validateUserWritePath(".dohc /x.md")).toEqual({ ok: false, reason: "reserved" });
+    expect(validateUserWritePath(".DOHC./x.md")).toEqual({ ok: false, reason: "reserved" });
+  });
+
+  it("rejects traversal disguised with trailing dots or spaces", () => {
+    expect(validateUserWritePath(".. /secret.md")).toEqual({ ok: false, reason: "traversal" });
+    expect(validateUserWritePath("a/.. ./b.md").ok).toBe(false);
+  });
+
+  it("rejects segments that are only dots/spaces", () => {
+    expect(validateUserWritePath("a/   /b.md")).toEqual({ ok: false, reason: "invalid" });
+    expect(validateUserWritePath("a/..../b.md").ok).toBe(false);
+  });
+
+  it("still accepts ordinary names with inner dots", () => {
+    expect(validateUserWritePath("notes/v1.2.draft.md").ok).toBe(true);
+  });
+});
+
+describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
+  it("ignores .dohc, .git, and node_modules at any depth", () => {
+    expect(hasIgnoredSegment(".dohc/history/index.json")).toBe(true);
+    expect(hasIgnoredSegment("sub/.dohc/manifest.json")).toBe(true);
+    expect(hasIgnoredSegment(".git/objects/ab")).toBe(true);
+    expect(hasIgnoredSegment("pkg/node_modules/x/index.js")).toBe(true);
+    expect(hasIgnoredSegment("NODE_MODULES/x")).toBe(true);
+  });
+
+  it("does not ignore lookalike names", () => {
+    expect(hasIgnoredSegment(".dohcrc")).toBe(false);
+    expect(hasIgnoredSegment("notes/git/readme.md")).toBe(false);
+    expect(hasIgnoredSegment("my-node_modules-notes.md")).toBe(false);
   });
 });

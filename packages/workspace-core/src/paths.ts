@@ -20,11 +20,31 @@ export function validateAttachedFolder(path: string): FolderValidation {
   return { ok: true };
 }
 
+// Windows silently strips trailing dots/spaces from path segments, so
+// ".dohc." and ".dohc " alias the reserved directory there. Strip them before
+// any segment comparison.
+function stripWindowsAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/, "");
+}
+
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata.
 export function isReservedPath(relativePath: string): boolean {
-  const lower = relativePath.toLowerCase();
-  return lower === ".dohc" || lower.startsWith(".dohc/");
+  const first = relativePath.split("/")[0] ?? "";
+  return stripWindowsAliasSuffix(first.toLowerCase()) === ".dohc";
+}
+
+// Path segments that are dohc/system internals at ANY depth — hidden from the
+// file tree and never recorded into history. One predicate shared by the
+// tree walker and the watcher so the two views of "what exists" cannot drift.
+const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
+
+export function hasIgnoredSegment(relativePath: string): boolean {
+  return relativePath
+    .replaceAll("\\", "/")
+    .toLowerCase()
+    .split("/")
+    .some((segment) => IGNORED_SEGMENTS.has(stripWindowsAliasSuffix(segment)));
 }
 
 export type WritePathValidation =
@@ -50,7 +70,19 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
   // drive letters survive decoding as-is).
   if (isAbsolutePathLike(decoded)) return { ok: false, reason: "absolute" };
   const segments = decoded.replaceAll("\\", "/").split("/");
-  if (segments.includes("..")) return { ok: false, reason: "traversal" };
+  // Windows strips trailing dots/spaces from segments, so ".. ", "..." and
+  // friends can alias ".." or "." there — any segment made ONLY of dots and
+  // spaces (beyond the exact "" / "." pass-throughs) is rejected outright,
+  // as traversal when it smells like one.
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") return { ok: false, reason: "traversal" };
+    if (/^[. ]+$/.test(segment)) {
+      return segment.includes("..")
+        ? { ok: false, reason: "traversal" }
+        : { ok: false, reason: "invalid" };
+    }
+  }
   const normalized = segments
     .filter((segment) => segment !== "" && segment !== ".")
     .join("/");

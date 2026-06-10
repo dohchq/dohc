@@ -23,7 +23,9 @@ const FATAL_PATTERNS = [
   /ERR_FILE_NOT_FOUND/,
 ];
 
-const args = [mainEntry];
+// --enable-logging routes renderer console/load errors to stderr so the
+// renderer-side fatal patterns can actually fire.
+const args = [mainEntry, "--enable-logging"];
 if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
 
 const child = spawn(
@@ -39,20 +41,35 @@ let stderr = "";
 child.stderr.on("data", (chunk) => {
   stderr += String(chunk);
 });
-child.stdout.on("data", () => {});
+child.stdout.on("data", (chunk) => {
+  // Electron routes some output to stdout depending on platform; scan both.
+  stderr += String(chunk);
+});
 
 const SMOKE_DURATION_MS = 8000;
+let sentTerm = false;
 
 setTimeout(() => {
+  sentTerm = true;
   child.kill("SIGTERM");
 }, SMOKE_DURATION_MS);
 
-child.on("exit", () => {
+child.on("exit", (code, signal) => {
   const fatal = FATAL_PATTERNS.filter((pattern) => pattern.test(stderr));
-  if (fatal.length > 0) {
-    console.error("Desktop smoke FAILED. Fatal stderr patterns:");
-    for (const pattern of fatal) console.error(`  ${pattern}`);
-    console.error("--- stderr ---");
+  // Surviving until OUR SIGTERM is part of the contract: an app that quits or
+  // crashes early (single-instance lock, segfault, clean process.exit) must
+  // fail the smoke even with quiet stderr.
+  const earlyExit = !sentTerm;
+  const badExit = (code !== null && code !== 0) || (signal !== null && signal !== "SIGTERM");
+  if (fatal.length > 0 || earlyExit || badExit) {
+    console.error("Desktop smoke FAILED.");
+    if (earlyExit) {
+      console.error(`  app exited early (code=${code}, signal=${signal}) before the ${SMOKE_DURATION_MS}ms window elapsed`);
+    } else if (badExit) {
+      console.error(`  abnormal exit (code=${code}, signal=${signal})`);
+    }
+    for (const pattern of fatal) console.error(`  fatal pattern: ${pattern}`);
+    console.error("--- output ---");
     console.error(stderr.slice(0, 4000));
     process.exit(1);
   }

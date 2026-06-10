@@ -204,18 +204,21 @@ describe("watchWorkspaceEvents", () => {
     try {
       const controller = new AbortController();
       controller.abort();
-      const stopAborted = watchWorkspaceEvents(
+      const aborted = watchWorkspaceEvents(
         { rootDir: root, signal: controller.signal },
         () => undefined,
       );
-      expect(typeof stopAborted).toBe("function");
-      stopAborted();
+      expect(typeof aborted.stop).toBe("function");
+      await aborted.ready;
+      aborted.stop();
 
-      const stop = watchWorkspaceEvents({ rootDir: root, settleMs: 10 }, () => undefined);
-      expect(typeof stop).toBe("function");
-      stop();
+      const watcher = watchWorkspaceEvents({ rootDir: root, settleMs: 10 }, () => undefined);
+      expect(typeof watcher.stop).toBe("function");
+      // ready resolves once the initial scan completes.
+      await watcher.ready;
+      watcher.stop();
       // Calling stop twice must not throw.
-      stop();
+      watcher.stop();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -228,16 +231,16 @@ describe("watchWorkspaceEvents", () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-watch-"));
     try {
       const batches: string[][] = [];
-      const stop = watchWorkspaceEvents({ rootDir: root, settleMs: 80 }, (paths) =>
+      const watcher = watchWorkspaceEvents({ rootDir: root, settleMs: 80 }, (paths) =>
         batches.push(paths),
       );
-      // Give chokidar a moment to attach before writing.
-      await new Promise((r) => setTimeout(r, 200));
+      // Writes after ready are guaranteed observed — no fixed attach sleep.
+      await watcher.ready;
       await mkdir(join(root, ".dohc", "history"), { recursive: true });
       await writeFile(join(root, ".dohc", "history", "1.json"), "{}");
       await writeFile(join(root, "notes.md"), "hi");
       await new Promise((r) => setTimeout(r, 600));
-      stop();
+      watcher.stop();
       const seen = batches.flat();
       // The user file is reported; nothing under .dohc/ ever is (no feedback loop).
       expect(seen).toContain("notes.md");
@@ -246,4 +249,61 @@ describe("watchWorkspaceEvents", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+describe("rule unification with workspace-core", () => {
+  it("collapses .sqlite3 sidecars onto their base database", () => {
+    // .sqlite3 was once missed by a local regex copy — sidecars surfaced as
+    // standalone user files in history.
+    const events = collapseSqliteSidecars([
+      { path: "notes/log.sqlite3-wal", operation: "update" },
+      { path: "notes/log.sqlite3-shm", operation: "update" },
+    ]);
+    expect(events).toEqual([{ path: "notes/log.sqlite3", operation: "update" }]);
+  });
+
+  it("folds a .sqlite3 base db's own events like .sqlite/.db", () => {
+    const events = collapseSqliteSidecars([
+      { path: "notes/log.sqlite3", operation: "delete" },
+      { path: "notes/log.sqlite3-journal", operation: "update" },
+    ]);
+    expect(events).toEqual([{ path: "notes/log.sqlite3", operation: "delete" }]);
+  });
+
+  it("ignores nested .dohc, .git, and node_modules like the file tree does", () => {
+    expect(shouldIgnoreWatchPath("sub/.dohc/manifest.json")).toBe(true);
+    expect(shouldIgnoreWatchPath(".git/objects/ab/cdef")).toBe(true);
+    expect(shouldIgnoreWatchPath("pkg/node_modules/x/index.js")).toBe(true);
+    expect(shouldIgnoreWatchPath(".dohcrc")).toBe(false);
+    expect(shouldIgnoreWatchPath("notes/git-notes.md")).toBe(false);
+  });
+});
+
+describe("settle max-window cap", () => {
+  it("flushes a batch under continuous writes instead of starving forever", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "dohc-watch-"));
+    try {
+      const batches: string[][] = [];
+      const watcher = watchWorkspaceEvents(
+        { rootDir: root, settleMs: 200, maxWindowMs: 600 },
+        (paths) => batches.push(paths),
+      );
+      await watcher.ready;
+      // Write faster than settleMs for well past maxWindowMs: the trailing
+      // debounce alone would never flush, the deadline must.
+      const start = Date.now();
+      while (Date.now() - start < 1400) {
+        await writeFile(join(root, "busy.md"), `tick ${Date.now()}`);
+        await new Promise((r) => setTimeout(r, 90));
+      }
+      expect(batches.length).toBeGreaterThan(0);
+      expect(batches[0]).toContain("busy.md");
+      watcher.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
