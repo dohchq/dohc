@@ -102,6 +102,15 @@
 
 - File-type views: apps/app/src/components/FileTypeView.tsx; Database Studio: DatabaseStudio.tsx, DatabaseTableGrid.tsx; tree: FileTree.tsx; upload: UploadFileButton.tsx; agent activity: AgentActivityTimeline.tsx, AgentRunRail.tsx (+ AgentChatSidebar.tsx).
 
+### Phase 10 collab-stack digest (recon 2026-06-11; source: services/hocuspocus + apps/app editor)
+
+- HocuspocusAcl interface (hooks.ts:93-104): getWorkspaceAuthzVersion/canReadAtom/canWriteAtom required; loadAtomBootstrap/setAtomBodyCache/createAtom optional. onAuthenticate verifies a 5-min HS256 JWT (jose, HOCUSPOCUS_JWT_SECRET) with claims {sub:userId, ws:workspaceId, actorKind, authzVersion}; canWrite sets connection.readOnly; beforeSync re-checks ACL per update; onChange schedules debounced markdown projection -> setAtomBodyCache. Y.Doc state persists in hocuspocus_ydoc_* tables (own DATABASE_URL; co-locatable with workspace-postgres, distinct prefixes).
+- Doc name wire format: workspace/<enc(workspaceId)>/atom/<enc(atomId)> — atomId = STABLE atoms.id UUID (path is mutable; resolve path->id when minting). loadAtomBootstrap = SELECT body,path FROM atoms WHERE id AND workspace_id AND deleted_at IS NULL.
+- postgres-acl port queries: membership (workspace_members deleted_at IS NULL), owner (workspaces.owner_user_id), shares (target_kind='atom' capability view/edit), locks (target_kind='atom' blocks write). authzVersion: HARDCODE 1 (no counter exists; stale-check compares equality — bump later via member-change counter). setAtomBodyCache = UPDATE atoms body/revision + INSERT atom_revisions; createAtom mirrors repositories/atoms.ts insertAtom.
+- AUTH DECISION (Option A): workspace-api gains POST /collab/token — validates Better Auth Bearer session, checks membership, resolves atomPath->atoms.id, mints the 5-min collab JWT with the SHARED HOCUSPOCUS_JWT_SECRET. Hocuspocus unchanged re: token verification; never sees Better Auth tokens. Desktop refreshes via provider.sendToken() ~4min (token param accepts async factory).
+- Web editor: Tiptap 3.23.6 (AtomEditor.tsx 3044 lines, heavily Convex-coupled BUT portable core = TiptapAtomEditor + editor-v2/hocuspocusProvider.ts (createDohcHocuspocusProvider — Convex-free) + dohc-markdown-extensions.ts + import-export.ts (Yjs<->markdown). Presence: y-protocols Awareness + CollaborationCaret; server sanitizes in beforeHandleAwareness. Offline: y-indexeddb keyed by docName + hasIndexeddbYDocState seeding check + server /capabilities atomBootstrap probe.
+- Desktop deps to add (match app versions): yjs ^13.6.30, @hocuspocus/provider ^4.1.0, y-indexeddb ^9.0.12, y-protocols ^1.0.7, @tiptap/{core,react,pm,extension-collaboration,extension-collaboration-caret,markdown,starter-kit} ^3.23.6. Desktop currently has NO editor (react-markdown read-only) — the editing surface itself is new Phase 10 work.
+
 ## Gotchas (append-only)
 
 - Node 25 breaks 17 @dohc/web tests; pin 22.13.0 via PATH (see Environment).
