@@ -1,10 +1,13 @@
 import ts from 'typescript'
 
-// The Playwright-free half of AppTester. It compiles an app's source and
-// confirms it targets the @dohc/app SDK — enough to catch legacy imports and
-// broken builds without launching a browser. The desktop imports ONLY this
-// module (via @dohc/app-tester/static) so its bundle never pulls in the
-// browser runtime that dynamically imports @playwright/test.
+// The Playwright-free half of AppTester. It transpiles an app's source and
+// confirms it targets the @dohc/app SDK — catching legacy SDK imports and
+// syntactically broken source without launching a browser. Note: ts.transpileModule
+// is syntax-only — it does NOT resolve imports or type-check, so full
+// build/module-resolution validation is the Phase 7b runtime's job, not this
+// gate. The desktop imports ONLY this module (via @dohc/app-tester/static) so
+// its bundle never pulls in the browser runtime that dynamically imports
+// @playwright/test.
 
 export type AppTestFile = {
   relativePath: string

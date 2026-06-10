@@ -19,7 +19,8 @@ export default defineConfig({
         ],
         // typescript is a CommonJS compiler that relies on __filename — bundling
         // it into the ESM main crashes at load. Keep it external and load it
-        // from node_modules at runtime (AppTester's static check uses it).
+        // from node_modules at runtime (AppTester's static check uses it). It is
+        // a production dependency of this package so packaged installs ship it.
         include: ["typescript"],
       }),
     ],

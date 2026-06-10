@@ -1,0 +1,49 @@
+import { describe, expect, it } from 'vitest'
+import { runStaticAppCheck } from './staticCheck'
+import { runAppTest } from './runAppTest'
+
+const file = (body: string) => [{ relativePath: 'src/App.tsx', body }]
+
+describe('runStaticAppCheck', () => {
+  it('passes a clean @dohc/app app with only a compile check', () => {
+    const r = runStaticAppCheck(
+      file("import { dohc } from '@dohc/app'\nexport default function App(){ return null }"),
+    )
+    expect(r.ok).toBe(true)
+    expect(r.failures).toEqual([])
+    expect(r.checks.map((c) => c.name)).toEqual(['compile'])
+    expect(r.checks[0]?.status).toBe('ok')
+  })
+
+  it('rejects a legacy @dohc/view app', () => {
+    const r = runStaticAppCheck(
+      file("import { dohc } from '@dohc/view'\nexport default function App(){ return null }"),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.failures[0]?.code).toBe('legacy-view-import')
+  })
+
+  it('rejects an app that does not import the @dohc/app SDK', () => {
+    const r = runStaticAppCheck(file('export default function App(){ return null }'))
+    expect(r.ok).toBe(false)
+    expect(r.failures[0]?.code).toBe('missing-app-sdk')
+  })
+
+  it('rejects syntactically broken source that still imports @dohc/app', () => {
+    const r = runStaticAppCheck(file("import { dohc } from '@dohc/app'\nconst x = ;"))
+    expect(r.ok).toBe(false)
+    expect(r.failures[0]?.code).toBe('compile-error')
+  })
+})
+
+describe('runAppTest static-mode contract', () => {
+  it('returns ONLY the compile check — no render/source-data/persistence checks', async () => {
+    const r = await runAppTest({
+      packageRoot: 'finance/.apps/ledger',
+      mode: 'static',
+      files: file("import { dohc } from '@dohc/app'\nexport default function App(){ return null }"),
+    })
+    expect(r.ok).toBe(true)
+    expect(r.checks.map((c) => c.name)).toEqual(['compile'])
+  })
+})

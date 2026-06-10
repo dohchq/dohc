@@ -243,6 +243,9 @@ importers:
       react-markdown:
         specifier: ^9.1.0
         version: 9.1.0(@types/react@19.2.15)(react@19.2.6)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -289,9 +292,6 @@ importers:
       tailwindcss:
         specifier: ^4.3.0
         version: 4.3.0
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
       vite:
         specifier: ^8.0.14
         version: 8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3)

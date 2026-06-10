@@ -2,14 +2,14 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 7 FULLY COMPLETE (apps as local source folders; AppTester static gate + trust model). Committing phase7 now. Phase 8 next.
-- Expected test state (verified this session under Node 22.13): workspace-core 66, desktop 62, app-tester 25; desktop E2E 6 (desktopLaunch, fileTypes, appPackage, firstRunWorkspace×3); smoke green. workspace-fs 27 / workspace-sync 15 / workspace-history 10 unchanged since Phase 5 (not re-run this session).
-- Dirty files and intent: this log + plan (Phase 7b deferral note) — being committed with phase7.
-- Exact next action: Phase 8 (visible SQLite + data import) — see plan Phase 8. Lead writes failing E2E for importing CSV/JSON into a workspace folder + viewing a real SQLite db in the studio; DatabaseStudio/DatabaseTableGrid port lands here (D-21 deferred SQLite studio from Phase 6). Watch provenance=import (deferred from Phase 5 finding #2).
-- Active background tasks: none
+- Phase/Step + TDD position: Phase 7 FULLY COMPLETE + reviewed (phase7=0458779; phase7(fix) pending commit, all checkpoint findings closed). Phase 8 next.
+- Expected test state (verified this session under Node 22.13, post-fix): workspace-core 68, desktop 66, app-tester 30; desktop E2E 6 (desktopLaunch, fileTypes, appPackage, firstRunWorkspace×3); smoke green. workspace-fs 27 / workspace-sync 15 / workspace-history 10 unchanged since Phase 5 (not re-run this session).
+- Dirty files and intent: phase7(fix) — appPackage.ts (readiness gate + content fingerprint), apps.ts (.dohc/traversal exclusion), staticCheck.ts/test, appPackage.test.ts, appPackage.spec.ts, apps.test.ts, desktop package.json (typescript→prod dep), electron.vite.config.ts comment, reviews/codex/phase-07.md, this log.
+- Exact next action: Phase 8 (visible SQLite + data import). DE-RISKED: node:sqlite works in Electron 42 (bundles Node 24.16) — no native dep / electron-rebuild. Reuse @dohc/sqlite-worker importData (RFC CSV parser + materialize) for CSV→.sqlite; read/edit the on-disk .sqlite directly via node:sqlite (local file canonical; structured edits = op-log, raw bytes never CRDT-synced). Port DatabaseStudio/DatabaseTableGrid (pure/props-driven; token remap bg-paper→bg-bg etc; drop ops/version) + add editable cell. New IPC readWorkspaceDatabase/applyDatabaseEdit/importCsvToDatabase. New packages/workspace-core/src/databases.ts (classify visible-user vs hidden-internal .dohc/databases; sidecar-not-standalone; raw-bytes-not-crdt; op-log type; materialization-point rule) + tests. Inject provenance="import" (record directly from the import handler, not the live watcher). E2E sqliteImport.spec.ts: drop CSV→materialize→studio→query→edit category→reload→persists.
+- Active background tasks: none (codex bco2dj1nd + verifier wx2uguxr7 both complete).
 - Open worktrees: none
-- Pending reviews: codex phase7 (to run against the phase7 commit SHA after commit) + verifier fan-out.
-- Git state: HEAD at phase6 (313658d); phase7 commit pending (this change).
+- Pending reviews: none open (phase7 + phase7(fix) reviewed). Phase 8 checkpoint review per plan ("after Phase 7: local workspace/sync review") runs after the phase8 commit.
+- Git state: HEAD at phase7 (0458779); phase7(fix) commit pending (this change).
 - GOTCHA: codex review transcripts are large (~5-20k lines, full exec trace) — DISTILL to findings before committing from Phase 6 onward.
 - TOOLCHAIN (CORRECTED 2026-06-10): the mise/`.tools/pnpm` paths in the Environment freeze are stale this session. Working invocation: `export PATH="$HOME/.local/share/nvm/v22.13.0/bin:$PATH" COREPACK_INTEGRITY_KEYS=0; corepack pnpm ...` (corepack signature verification fails without the integrity bypass; resolves pnpm 10.24.0 from packageManager pin). E2E needs `DOHC_E2E_NO_CHROMIUM_SANDBOX=1` on WSL.
 
@@ -165,9 +165,9 @@ Consult high-value batches (await verifier confirmation before fixing; transcrib
 - Electron E2E/manual smoke: 6/6 E2E + smoke green; built main launches clean (zero stderr error markers).
 - UI/UX screenshot/design review: phase-07 screenshots (app-ready, app-failed) captured by the E2E.
 - Security: app trust model — broad writes require explicit trust (requiresTrust + grantAppTrust), own-folder writes always allowed; AppTester static gate blocks legacy SDK + broken builds before an app can be trusted; trust/test state persisted as inspectable .dohc/apps-state.json.
-- Reviewer/subagent findings: pending (codex phase7 + verifier fan-out post-commit).
-- Codex third-party review findings: pending post-commit.
-- Dependencies added: none.
+- Reviewer/subagent findings: verifier fan-out wx2uguxr7 (security-trust / test-quality / claimed-vs-actual, adversarially confirmed) → 6 confirmed (2 MED, 4 LOW), 2 rejected. Codex `exec review --commit 0458779` (gpt-5.5 xhigh) → 4 (2 P1, 2 P2). De-duped + all fixed in phase7(fix); distilled to docs/superpowers/reviews/codex/phase-07.md. Net new defects caught beyond the pre-commit verifiers: (P1) grantAppTrust didn't enforce readiness at the IPC boundary — a forged renderer call could trust an untested/failed app; (P1) trust survived content edits (no fingerprint) — widening write globs inherited an old approval; (P2) typescript externalized but only a devDep → packaged desktop would fail to resolve it; appWriteAllowed didn't exclude .dohc (the trust store governing the check). FIXES: grantAppTrust backend readiness gate + package validation; SHA-256 content fingerprint with self-healing reset on change/fail; appWriteAllowed refuses `..` + `.dohc`; typescript → desktop prod dep; static-mode tests in app-tester; readiness-gate + invalidation unit/E2E tests; corrected "broken builds" over-claim (static = syntax + SDK only).
+- Codex third-party review findings: see docs/superpowers/reviews/codex/phase-07.md (folded above). codex ledger: 2026-06-10 | phase 7 review --commit 0458779 | gpt-5.5 xhigh | ~5min | success — 2 P1 + 2 P2, all real, all fixed.
+- Dependencies added: none (typescript moved devDeps→deps in apps/desktop for packaged runtime resolution of the externalized compiler).
 - Remaining risk / Phase 7b (deferred): full in-iframe app RUNTIME (file-backed RPC + persistence + live render) is NOT in Phase 7 — apps are inspectable/testable/trustable source folders, not yet executable in-app. The browser-render half of AppTester (source-backed-data, mutation-persistence, manifest-tests) is unused by the desktop until the runtime lands. Recorded as Phase 7b follow-up in the plan.
 - Next phase: 8
 

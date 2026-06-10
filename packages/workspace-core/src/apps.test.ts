@@ -115,6 +115,24 @@ describe("app trust gates broad workspace writes", () => {
       appWriteAllowed(manifest, { trusted: true }, appRoot, "other/secret.md"),
     ).toBe(false);
   });
+
+  it("never lets even a wildcard root-scope app write the .dohc control dir", () => {
+    // A root-scoped app (".apps/<name>") with write:["**"] matches every path —
+    // but .dohc holds the trust store that governs this very check, so it must
+    // never be in any app's writable ceiling.
+    const root = parseAppManifest(JSON.stringify({ title: "Wide", write: ["**"] }));
+    const rootApp = ".apps/wide";
+    expect(appWriteAllowed(root, { trusted: true }, rootApp, "notes/today.md")).toBe(true);
+    expect(appWriteAllowed(root, { trusted: true }, rootApp, ".dohc/apps-state.json")).toBe(false);
+    expect(appWriteAllowed(root, { trusted: true }, rootApp, ".dohc")).toBe(false);
+    expect(appWriteAllowed(root, { trusted: true }, rootApp, ".dohc/cache/apps/wide")).toBe(false);
+  });
+
+  it("refuses any path containing a traversal segment, even inside its own folder", () => {
+    expect(
+      appWriteAllowed(manifest, { trusted: true }, appRoot, "finance/.apps/ledger/../../../secret.md"),
+    ).toBe(false);
+  });
 });
 
 describe("app readiness gate (AppTester must pass before ready)", () => {

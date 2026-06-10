@@ -25,7 +25,6 @@
     "electron-vite": "^5.0.0",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.0",
-    "typescript": "^5.9.3",
     "vite": "^8.0.14",
     "vitest": "^2.1.9"
   },
@@ -41,6 +40,7 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^9.1.0",
+    "typescript": "^5.9.3",
     "zod": "^3.25.76"
   }
 }

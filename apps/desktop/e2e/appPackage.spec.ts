@@ -89,6 +89,8 @@ test("an app passes AppTester and can be trusted; a legacy app is rejected", asy
   await expect(page.getByTestId("trust-app")).toBeVisible();
   await page.getByTestId("trust-app").click();
   await expect(page.getByTestId("trust-app")).toHaveCount(0);
+  // Positively confirm the app is now Trusted (not merely that the button left).
+  await expect(page.getByTestId("view-app")).toContainText("Trusted");
 
   // Legacy @dohc/view app: AppTester catches the wrong SDK and marks it failed.
   await open("notes/.apps/old/app.json");
@@ -96,6 +98,8 @@ test("an app passes AppTester and can be trusted; a legacy app is rejected", asy
   await expect(page.getByTestId("app-readiness")).toHaveAttribute("data-readiness", "failed", {
     timeout: 30_000,
   });
+  // A failed app must never be trustable — the trust affordance is absent.
+  await expect(page.getByTestId("trust-app")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT_DIR}/app-failed--1280x800--light.png` });
 
   await app.close();
