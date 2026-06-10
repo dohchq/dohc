@@ -216,7 +216,7 @@ export function humanSummary(record: HistoryRecord): string {
   return `You ${verb} ${count} ${noun}`;
 }
 
-function verbForKind(kind: ChangeSetKind): string {
+export function verbForKind(kind: ChangeSetKind): string {
   switch (kind) {
     case "import":
       return "imported";
