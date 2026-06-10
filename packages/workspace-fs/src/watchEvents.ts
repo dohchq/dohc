@@ -39,9 +39,13 @@ const EDITOR_NOISE = [
 ];
 
 // TRUE when the watcher should drop this relative path before it ever becomes
-// a user file op. Covers the reserved .dohc/ tree (including its cache),
-// editor scratch files, and SQLite sidecars — see the regexes above for why
-// each is anchored to avoid false positives on real user files.
+// a user file op. Covers the reserved .dohc/ tree (including its cache) and
+// editor scratch files. NOTE: SQLite sidecars (.db-wal/-journal/-shm) are NOT
+// ignored here — a SQLite write often touches only the WAL while the base .db
+// is untouched until checkpoint, so ignoring sidecars would make the change
+// INVISIBLE. Instead the pipeline lets sidecar events through and folds them
+// into one base-db update via collapseSqliteSidecars, so the sidecar path
+// never surfaces but the database change is never missed.
 export function shouldIgnoreWatchPath(relativePath: string): boolean {
   const path = toPosix(relativePath);
   const lower = path.toLowerCase();
@@ -53,8 +57,6 @@ export function shouldIgnoreWatchPath(relativePath: string): boolean {
 
   const basename = path.slice(path.lastIndexOf("/") + 1);
   if (EDITOR_NOISE.some((pattern) => pattern.test(basename))) return true;
-
-  if (SQLITE_SIDECAR.test(path)) return true;
 
   return false;
 }
@@ -142,6 +144,9 @@ export function watchWorkspaceEvents(
     // We diff the filesystem ourselves on change; an initial flood of "add"
     // events for every existing file would be pure noise.
     ignoreInitial: true,
+    // Never follow symlinks out of the workspace — a symlinked dir would let
+    // the watcher observe (and record) files outside the workspace root.
+    followSymlinks: false,
     ignored: (path: string) => {
       const rel = isAbsolute(path) ? relative(rootDir, path) : path;
       if (rel === "" || rel === ".") return false;
@@ -182,6 +187,9 @@ export function watchWorkspaceEvents(
     if (stopped) return;
     stopped = true;
     if (timer !== undefined) clearTimeout(timer);
+    // Flush any settled-but-not-yet-emitted changes so a save right before
+    // stop/quit is recorded into history rather than silently dropped.
+    flush();
     signal?.removeEventListener("abort", stop);
     void watcher.close();
   };

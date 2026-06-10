@@ -37,13 +37,25 @@ describe("shouldIgnoreWatchPath", () => {
     expect(shouldIgnoreWatchPath("notes/.DS_Store")).toBe(true);
   });
 
-  it("ignores SQLite sidecar journals and shared-memory files", () => {
-    expect(shouldIgnoreWatchPath("finance/wallet.db-wal")).toBe(true);
-    expect(shouldIgnoreWatchPath("finance/wallet.db-journal")).toBe(true);
-    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-wal")).toBe(true);
-    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-journal")).toBe(true);
-    expect(shouldIgnoreWatchPath("finance/wallet.db-shm")).toBe(true);
-    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-shm")).toBe(true);
+  it("does NOT ignore SQLite sidecars — they signal a db change and are collapsed", () => {
+    // A SQLite write often touches only the WAL; ignoring sidecars would make
+    // the change invisible. They pass through here and collapseSqliteSidecars
+    // folds them into one base-db update (so the sidecar path never surfaces).
+    expect(shouldIgnoreWatchPath("finance/wallet.db-wal")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/wallet.db-journal")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-wal")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-journal")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/wallet.db-shm")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/wallet.sqlite-shm")).toBe(false);
+  });
+
+  it("collapses a WAL-only change into a base-db update (db never missed)", () => {
+    // The base .db file is untouched until checkpoint; only the WAL changed.
+    expect(
+      collapseSqliteSidecars([
+        { path: "finance/wallet.sqlite-wal", operation: "update" },
+      ]),
+    ).toEqual([{ path: "finance/wallet.sqlite", operation: "update" }]);
   });
 
   it("keeps normal user files watchable", () => {

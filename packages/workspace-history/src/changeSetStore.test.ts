@@ -189,4 +189,18 @@ describe("humanSummary", () => {
     expect(humanSummary(userRec)).not.toMatch(/<{7}|>{7}|={7}/);
     expect(humanSummary(agentRec)).not.toMatch(/<{7}|>{7}|={7}/);
   });
+
+  it("does not drop entries when records are fired concurrently", async () => {
+    // The live watcher fires record() fire-and-forget; without serialization
+    // two close-together records race on index.json and the second clobbers
+    // the first's entry, silently dropping it from the timeline.
+    const store = createChangeSetStore(root);
+    const writes = Array.from({ length: 25 }, (_, i) =>
+      store.record(userEdit(), { id: `c${i}`, recordedAtMs: 1000 + i }),
+    );
+    await Promise.all(writes);
+    const listed = await store.list();
+    expect(listed).toHaveLength(25);
+    expect(new Set(listed.map((r) => r.id)).size).toBe(25);
+  });
 });

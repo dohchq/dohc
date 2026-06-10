@@ -3,7 +3,11 @@ import type {
   WatcherEvent,
   WatcherEventBatch,
 } from "@dohc/workspace-core";
-import { shouldIgnoreWatchPath, watchWorkspaceEvents } from "@dohc/workspace-fs";
+import {
+  collapseSqliteSidecars,
+  shouldIgnoreWatchPath,
+  watchWorkspaceEvents,
+} from "@dohc/workspace-fs";
 import { createChangeSetStore, humanSummary } from "@dohc/workspace-history";
 import { batchToChangeSet } from "@dohc/workspace-sync";
 import { createHash, randomUUID } from "node:crypto";
@@ -75,7 +79,10 @@ export function startWorkspaceWatch(
         // watcher. The watcher already ignores these; this guards a leak.
         const userPaths = paths.filter((p) => !shouldIgnoreWatchPath(p));
         if (userPaths.length === 0) return;
-        const events = await pathsToEvents(workspace.rootPath, userPaths);
+        const rawEvents = await pathsToEvents(workspace.rootPath, userPaths);
+        // Fold SQLite WAL/journal/shm churn into a single base-db update so the
+        // history shows "wallet.sqlite changed", never the transient sidecars.
+        const events = collapseSqliteSidecars(rawEvents);
         if (events.length === 0) return;
         const batch: WatcherEventBatch = {
           settledAtMs: now(),

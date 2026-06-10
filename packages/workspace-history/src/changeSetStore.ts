@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BoundaryCrossing,
@@ -58,6 +58,15 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
+// Atomic write: serialize to a temp file then rename over the target so a
+// concurrent reader never sees a half-written index, and a crash can't leave
+// a truncated file.
+async function writeFileAtomic(path: string, data: string): Promise<void> {
+  const tmp = `${path}.tmp-${process.pid}-${process.hrtime.bigint()}`;
+  await writeFile(tmp, data, "utf8");
+  await rename(tmp, path);
+}
+
 export function createChangeSetStore(rootDir: string): ChangeSetStore {
   // All history stays inside .dohc/history — never written outside it.
   const historyDir = join(rootDir, ".dohc", "history");
@@ -67,40 +76,58 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
     return (await readJson<IndexEntry[]>(indexPath)) ?? [];
   }
 
+  // Serialize record() within this store instance: the index is a
+  // read-modify-write, and the live watcher fires records fire-and-forget, so
+  // two close-together batches would race and the second writeFile would drop
+  // the first's index entry (silent timeline loss). This promise chain makes
+  // index updates strictly sequential.
+  let writeChain: Promise<unknown> = Promise.resolve();
+  function serialize<T>(task: () => Promise<T>): Promise<T> {
+    const run = writeChain.then(task, task);
+    // Keep the chain alive even if a task rejects, without unhandled rejection.
+    writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   return {
-    async record(set, opts) {
-      const record: HistoryRecord = {
-        id: opts.id,
-        recordedAtMs: opts.recordedAtMs,
-        kind: set.kind,
-        author: set.author,
-        summary: set.summary,
-        files: set.files,
-        boundaryCrossings: set.boundaryCrossings,
-        ...(set.provenance ? { provenance: set.provenance } : {}),
-      };
+    record(set, opts) {
+      return serialize(async () => {
+        const record: HistoryRecord = {
+          id: opts.id,
+          recordedAtMs: opts.recordedAtMs,
+          kind: set.kind,
+          author: set.author,
+          summary: set.summary,
+          files: set.files,
+          boundaryCrossings: set.boundaryCrossings,
+          ...(set.provenance ? { provenance: set.provenance } : {}),
+        };
 
-      await mkdir(historyDir, { recursive: true });
-      // Pretty JSON: history is meant to be opened and read by a person.
-      await writeFile(
-        join(historyDir, recordFileName(opts)),
-        `${JSON.stringify(record, null, 2)}\n`,
-        "utf8",
-      );
+        await mkdir(historyDir, { recursive: true });
+        // Pretty JSON: history is meant to be opened and read by a person.
+        await writeFile(
+          join(historyDir, recordFileName(opts)),
+          `${JSON.stringify(record, null, 2)}\n`,
+          "utf8",
+        );
 
-      const entry: IndexEntry = {
-        id: record.id,
-        recordedAtMs: record.recordedAtMs,
-        kind: record.kind,
-        author: record.author,
-        summary: record.summary,
-        fileCount: record.files.length,
-      };
-      const index = await readIndex();
-      index.push(entry);
-      await writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+        const entry: IndexEntry = {
+          id: record.id,
+          recordedAtMs: record.recordedAtMs,
+          kind: record.kind,
+          author: record.author,
+          summary: record.summary,
+          fileCount: record.files.length,
+        };
+        const index = await readIndex();
+        index.push(entry);
+        await writeFileAtomic(indexPath, `${JSON.stringify(index, null, 2)}\n`);
 
-      return record;
+        return record;
+      });
     },
 
     async list() {

@@ -2,15 +2,15 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 4 + CHECKPOINT 1 COMPLETE (committed b3dd383). Phase 5 starting: recon fan-out, then contracts-first, then 3 worktree lanes.
-- Expected test state: workspace-core 47/47, desktop 42/42, E2E 4/4, smoke green — all committed at b3dd383
+- Phase/Step + TDD position: Phase 5 COMPLETE (committed eb6c0c3 + review-record commit). Verifiers + codex phase-05 in flight. Phase 6 next.
+- Expected test state: workspace-core 54, workspace-fs 26, workspace-sync 15, workspace-history 9, desktop 42; 4 E2E; smoke — all green at HEAD
 - Dirty files and intent: this log only
-- Exact next action: Phase 5 recon digest returns → define watcher-event + change-set contracts in workspace-core (lead, sequential) → fan out 3 worktree lanes (A: workspace-fs watch/scan/diff + chokidar + temp/WAL ignore; B: workspace-sync batchedSync + settle windows; C: workspace-history changeSetStore + provenance/timeline) → merge → lead-owned shell wiring (sync status + history timeline in DesktopWorkspaceShell) → gate → verifiers → commit
-- Active background tasks: codex phase4(fix) review of b3dd383 (background); Phase 5 recon fan-out
+- Exact next action: triage Phase 5 verifier findings (wt3n2lhba) + codex phase-05 (buiavg06m) → fix/disposition → Phase 6 (real file UX: FileInspector dispatch table, markdown/CSV/JSON/image/PDF/audio/SQLite/.apps views — port from apps/app/src/components/FileTypeView.tsx etc per reuse map; UI phase → design review loop). Note: codex finding #4 (window.open user-gesture) is DUE in Phase 6 (deferred there).
+- Active background tasks: buiavg06m (codex phase-05 review xhigh → codex/phase-05.md); wt3n2lhba (Phase 5 verifier fan-out)
 - Open worktrees: none
-- Pending reviews: codex b3dd383 (in flight, one targeted re-review per cap; residue rolls to next checkpoint)
-- Git state: 13 commits atop e2de7a3; HEAD b3dd383
-- GOTCHA: codex review transcripts are large (full exec trace, ~5-20k lines each) — they bloat commits. For future phases, distill to findings-only before committing or gitignore raw transcripts. (Checkpoint-1 ones already committed as the audit record.)
+- Pending reviews: codex phase-05 + verifiers (in flight)
+- Git state: 17 commits atop e2de7a3; HEAD = review-record commit on eb6c0c3
+- GOTCHA: codex review transcripts are large (~5-20k lines, full exec trace) — DISTILL to findings before committing going forward (decided after phase-04-fix).
 
 ## Environment (append-only)
 
@@ -166,11 +166,15 @@ Consult high-value batches (await verifier confirmation before fixing; transcrib
 - UI/UX screenshot/design review: History timeline screenshot inspected — clean (warm panel, user/agent icon, "You edited notes/today.md", file count + kind), no .dohc noise after fix. Sync-status footer binds to live state (synced/syncing/local-changes/conflict/cloud-disconnected with state-driven dot color).
 - Performance measurements: watcher settle 500ms; no polling loop (chokidar event-driven); registry parsed-cache from checkpoint-1 avoids per-IPC reads. Virtualization of timeline/tree deferred to Phase 16.
 - Security/collaboration regressions: .dohc never recorded (feedback-loop guard, 2 layers); history is inspectable JSON under .dohc/history; no git markers in summaries (asserted)
-- Reviewer/subagent findings: 3 lanes all GREEN with recorded RED; pending pre-commit verifier fan-out
-- Codex third-party review findings: pending post-commit (high-risk phase — data/sync)
-- Relevant findings fixed: feedback-loop pre-commit
-- Deferred findings with reason: live co-editing/conflict states (Phase 10); cloud-disconnected reachable Phase 9; timeline virtualization Phase 16
-- Remaining risk: chokidar timing under heavy load unmeasured (Phase 16); settle window fixed at 500ms (per-file-type windows from plan deferred — markdown/app/sqlite all use one window for now)
+- Reviewer/subagent findings: verifiers wf_36257875-c12 — test-quality PASS (ran 4 behavioral mutations, all caught: sha-keyed batcher, non-relativized ignore, oldest-first sort, injected git marker). claimed-vs-actual FAIL on 2 live-pipeline data-loss bugs. Codex phase-05 (xhigh) independently found the same index race + 3 watcher issues. All triaged in phase5(fix):
+  - HIGH index.json concurrent clobber (record() read-modify-write fired fire-and-forget → second write drops first's entry → silent timeline loss) — FIXED: serialize record() via promise-chain in the store instance + atomic temp+rename index write; regression test (25 concurrent records → 25 listed).
+  - P1 SQLite sidecars dropped before collapse (shouldIgnoreWatchPath ignored .db-wal so WAL-only writes were INVISIBLE, and collapse never ran) — FIXED: stop ignoring sidecars; wire collapseSqliteSidecars into the live workspaceWatcher path; tests flipped (sidecars not ignored) + WAL-only→base-db-update test.
+  - P2 chokidar followSymlinks default true (could watch outside workspace) — FIXED: followSymlinks:false.
+  - P2 stop() dropped pending settled changes — FIXED: flush() on stop.
+- Codex third-party review findings: full docs/superpowers/reviews/codex/phase-05.md; 4 findings, all fixed above (index race matched the verifier's).
+- Relevant findings fixed: feedback-loop pre-commit; 4 in phase5(fix); all 5 package suites + E2E + smoke green after.
+- Deferred findings with reason: (1) rename recorded as delete+create losing rename-identity — DEFERRED to Phase 9: detecting rename needs the prior-content index the sync engine maintains (the deleted file's hash is gone when the watcher sees it; diff.ts does it against the manifest the live watcher lacks); content-lossless today (both files on disk, timeline truthful). (2) live watcher hardcodes author=local-user + no provenance, so agent/import/sync kinds unreachable via the fs pipeline — EXPECTED: agent attribution arrives with MCP (Phase 11), import provenance with the import flow (Phase 8); contract+store already support all kinds. (3) conflict/local-changes/cloud-disconnected states wired but unreachable until Phases 9/10. (4) timeline/tree virtualization → Phase 16.
+- Remaining risk: chokidar timing under heavy load unmeasured (Phase 16); single 500ms settle window (per-file-type windows deferred)
 - Next phase: 6
 
 ### Phase 0: Baseline, Tooling, And Old-Plan Inventory
