@@ -2,13 +2,13 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 1 COMPLETE (committed 67d692f, codex review in flight); Phase 2 read-only prep underway
-- Expected test state: workspace-core 31/31 green; baseline green (11 PASS + 1 KNOWN-FAIL web)
-- Dirty files and intent: this log only (snapshot updates)
-- Exact next action: when codex phase-01 review lands → triage → then Phase 2 Step 1 (pnpm-workspace.yaml onlyBuiltDependencies, install Electron tooling, verify electron --version) — mutation waits for review triage
-- Active background tasks: codex review phase-01 (bbslcyw98 → docs/superpowers/reviews/codex/phase-01.md); t3code renderer recon agent (digest → Reference Digests on completion)
+- Phase/Step + TDD position: Phase 2 Step 1 — Electron install running (background); tests already written (electronSecurity.test.ts, desktopLaunch.spec.ts, playwright.config.ts, scaffold package.json/tsconfig)
+- Expected test state: post-install: `pnpm --filter @dohc/desktop test` expected RED (missing ./electronSecurity module); E2E RED (no build output)
+- Dirty files and intent: pnpm-workspace.yaml (onlyBuiltDependencies — Phase 2 commit), apps/desktop/* (Phase 2), pnpm-lock.yaml (install), this log
+- Exact next action: install completes → verify electron --version → record unit RED → implement main/preload/security/launchMarks/electron.vite.config/renderer → build → GREEN → E2E + screenshot + marks
+- Active background tasks: b0pv29olr (pnpm add electron tooling + binary verify)
 - Open worktrees: none
-- Pending reviews: codex phase-01 (in flight)
+- Pending reviews: none (phase-01 triaged: 3 findings fixed @ f405074)
 
 ## Environment (append-only)
 
@@ -134,3 +134,28 @@
 - Deferred findings with reason: none
 - Remaining risk: API shapes may evolve when Phase 4 (registry) and Phase 5 (history) consume them — acceptable, contract-first by design
 - Next phase: 2
+
+### Phase 2: Electron Desktop Scaffold And Test Harness
+
+- Status: in progress (all gates green; verifiers running; commit pending)
+- Execution map: tests-first (security unit + launch E2E + dedicated playwright config, written during phase-01 review window) → pnpm-workspace onlyBuiltDependencies → install (electron 42.4.0 binary verified) → unit RED recorded (missing module) → implement (main/preload/window/security/channels/bridgeContract/launchMarks/renderer/electron.vite.config/vitest.config/smoke) → unit GREEN 7/7 + typecheck + build → E2E pass (first try, WSLg, no xvfb needed) → smoke pass → screenshot inspected → verifiers → commit → codex review (xhigh tier)
+- Resume notes: verifiers wf_7528cd05-564 in flight; commit phase2 on pass.
+- Files changed: apps/desktop/* (16 files), pnpm-workspace.yaml (onlyBuiltDependencies), root package.json (5 desktop scripts), pnpm-lock.yaml
+- Code deleted or consolidated: none (greenfield scaffold)
+- Net LOC delta (`git diff --shortstat`): recorded at commit (~600 lines apps/desktop incl. tests)
+- Old paths retained and why: root playwright.config.ts untouched (web E2E keeps working — per plan/team audit)
+- Dependencies added (name, size, justification): electron 42.4.0 (runtime), electron-vite 5 + vite 8 (build, repo is vite-native), electron-builder + @electron/fuses (Phase 14 packaging, installed now per plan), electron-updater (Phase 14), zod (IPC validation), vitest/typescript/@types/node pinned to repo standards (TS6→5.9, types25→22 corrected post-install)
+- Decisions made (D-NN ids): D-10 | Phase 2 renderer is dependency-free TS+HTML placeholder; React arrives in Phase 3 via component reuse map | smallest first paint, Phase 3 owns the real shell | phase 2. D-11 | preload built CJS (sandboxed preload requirement); main ESM (import.meta.dirname) | electron-vite 5 + sandbox constraint | phase 2
+- Tests added: 7 security unit tests (webPreferences trio, absolute preload, navigation policy, window.open deny + external routing + scheme restrictions); 1 Playwright Electron E2E (heading visible, screenshot at convention path, launch marks positive, perf JSON written); smoke script (8s fatal-stderr scan)
+- Commands run: install+electron --version (42.4.0); test RED→GREEN 7/7; typecheck PASS; build PASS (main ESM/preload CJS/renderer); test:desktop:e2e PASS 534ms; smoke:desktop PASS — all pinned Node 22.13
+- Failing tests fixed: RED→GREEN by implementation; vitest/e2e separation fixed via vitest.config include
+- Electron E2E/manual smoke: E2E pass (no sandbox workarounds needed on WSLg — DOHC_E2E_NO_CHROMIUM_SANDBOX path exists but unused); smoke pass
+- UI/UX screenshot/design review: screenshot inspected by lead — warm paper bg, centered graphite wordmark, muted subtitle, nonblank, no white flash (backgroundColor set pre-paint). Full Design Review Loop applies from Phase 3.
+- Performance measurements: cold launch appReady 194ms / firstWindow 232ms / firstPaint 315ms (budget: shell <2000ms — 6x headroom); recorded to test-results/performance/desktop-performance.json
+- Security/collaboration regressions: IPC sender-origin validation on all invoke handlers; zod-parsed results; test bridge gated on DOHC_DESKTOP_TEST; CSP in renderer; window.open denied universally
+- Reviewer/subagent findings: verifiers wf_7528cd05-564 BOTH PASS. test-quality: deletion mutation fails suite; sandbox:false mutation caught at exact assertion; E2E flake-free (no sleeps). claimed-vs-actual: probed RUNTIME bridge surface without test env (Node unreachable, exact bridge shape, test bridge double-gated); re-ran full gate chain green. Findings fixed pre-commit: (1) origin prefix-match bypass (file:// allowed any local file; dev origin matched localhost:5173.evil.com) — FIXED with NavigationPolicy (exact http origins + bundle-scoped file prefix, deny-by-default incl. unparseable), assertTrustedSender now uses the same policy; (2) http:// scheme untested in window.open — test added; (3) single-instance lock didn't gate bootstrap — restructured; (4) bridgeContract comment overstated payload validation — corrected. 11/11 after fixes; full gate chain re-run green.
+- Codex third-party review findings: pending post-commit (xhigh tier — security phase)
+- Relevant findings fixed: 4 verifier findings fixed pre-commit
+- Deferred findings with reason: desktopSmoke.test.ts from plan file list realized as scripts/smoke-test.mjs (executable smoke, not a vitest stub) — justification: a unit test asserting the smoke script exists adds no information; the script itself runs in every phase gate
+- Remaining risk: fuses configuration deferred to Phase 14 packaging (per plan); titlebar is default chrome until Phase 3
+- Next phase: 3

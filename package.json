@@ -9,6 +9,11 @@
   "scripts": {
     "dev": "node scripts/dev-sync.mjs && pnpm --filter @dohc/web --if-present run dev",
     "dev:app": "pnpm --filter @dohc/web --if-present run dev",
+    "dev:desktop": "pnpm --filter @dohc/desktop dev",
+    "build:desktop": "pnpm --filter @dohc/desktop build",
+    "test:desktop": "pnpm --filter @dohc/desktop test",
+    "test:desktop:e2e": "playwright test --config apps/desktop/playwright.config.ts",
+    "smoke:desktop": "node apps/desktop/scripts/smoke-test.mjs",
     "dev:sync": "node scripts/dev-sync.mjs",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
