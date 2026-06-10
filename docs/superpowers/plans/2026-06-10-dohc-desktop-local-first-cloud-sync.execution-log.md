@@ -2,13 +2,13 @@
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/Step + TDD position: Phase 0 COMPLETE pending commit + codex review; Phase 1 next
-- Expected test state: baseline recorded — all package suites green; @dohc/web 1618/1623 (4 pre-existing main failures, see Gotchas); check:debt green
-- Dirty files and intent: Phase 0 commit staging everything (AGENTS.md, plan, package.json, baseline script, this log, inventory, team audit doc)
-- Exact next action: `git add` Phase 0 files → commit "Inventory old plan for desktop local-first pivot" → launch codex review (high tier, background) → Phase 1 read-only prep (workspace-core test design) while review runs
-- Active background tasks: none at snapshot time
+- Phase/Step + TDD position: Phase 1 COMPLETE (committed 67d692f, codex review in flight); Phase 2 read-only prep underway
+- Expected test state: workspace-core 31/31 green; baseline green (11 PASS + 1 KNOWN-FAIL web)
+- Dirty files and intent: this log only (snapshot updates)
+- Exact next action: when codex phase-01 review lands → triage → then Phase 2 Step 1 (pnpm-workspace.yaml onlyBuiltDependencies, install Electron tooling, verify electron --version) — mutation waits for review triage
+- Active background tasks: codex review phase-01 (bbslcyw98 → docs/superpowers/reviews/codex/phase-01.md); t3code renderer recon agent (digest → Reference Digests on completion)
 - Open worktrees: none
-- Pending reviews: Phase 0 codex review launches post-commit
+- Pending reviews: codex phase-01 (in flight)
 
 ## Environment (append-only)
 
@@ -57,6 +57,15 @@
 - convex-acl.ts exports createConvexAcl(): getWorkspaceAuthzVersion/canReadAtom/canWriteAtom/loadAtomBootstrap/setAtomBodyCache/createAtom — Postgres port must replicate these against workspace-postgres grants + Better Auth sessions.
 - Env to delete in P13: CONVEX_DEPLOYMENT, VITE_CONVEX_URL, VITE_CONVEX_SITE_URL, WORKOS_*, HOCUSPOCUS_CONVEX_*; scripts: dev-sync.mjs convex parts, reset:dev.
 - Convex guidelines key porting rules: server-derived identity only (never trust client identity args); index-based queries (no .filter); storage = Blob + signed URLs; crons via crons.interval/cron; validators on every function.
+
+### t3code desktop renderer digest (source: /home/ice/dev/oss-repos/t3code/apps/desktop; digested 2026-06-10)
+
+- Security posture matches ours exactly: contextIsolation+sandbox+no nodeIntegration (src/window/DesktopWindow.ts:190); `setWindowOpenHandler` denies ALL window.open, externals via shell.openExternal (DesktopWindow.ts:246-251); `will-navigate` blocks off-origin (252-266); single-instance lock early (src/electron/ElectronApp.ts:103). ADOPT all.
+- Bridge: contextBridge.exposeInMainWorld("desktopBridge", ...), `desktop:`-prefixed channels (src/ipc/channels.ts), schema-validated codecs per method (src/ipc/DesktopIpc.ts:132-221 — they use Effect Schema; dohc uses zod per plan). Event listeners return unsubscribe fns. ADOPT shape, zod instead.
+- Titlebar: platform-aware custom chrome — macOS hiddenInset + trafficLightPosition {16,18}; Win/Linux hidden + titleBarOverlay {height:40, theme-synced symbolColor} (DesktopWindow.ts:106-139). Window starts `show:false`, reveals on first load. min 840x620. ADOPT for Phase 3.
+- Updates: electron-updater state machine idle→checking→available→downloading→downloaded→installing with reducer fns (src/updates/DesktopUpdates.ts) — ADOPT reducer-style state machine for Phase 14 tests.
+- Smoke: scripts/smoke-test.mjs spawns Electron 8s, greps stderr for fatal patterns. ADOPT for Phase 2 smoke.
+- REJECT: Effect-based layer architecture (overkill; plain TS + promises), sync IPC for hot data (async everything except immutable bootstrap), custom launcher plist patching (electron-builder instead), their no-Playwright gap (we add real Playwright Electron E2E).
 
 ### Port-source file paths (verified present 2026-06-10)
 
@@ -120,8 +129,8 @@
 - Performance measurements: n/a (no measurable surface; tests run in 305ms)
 - Security/collaboration regressions: path traversal coverage incl. %2e and backslash variants; boundary-crossing review gate asserted per crossing
 - Reviewer/subagent findings: verifier workflow wf_2b9debfd-c61 — test-quality PASS (worktree revert: 0 tests pass without implementation; reason-specific assertions confirmed); claimed-vs-actual PASS (all plan files present, all claims re-verified independently, cheat scan clean). Finding 1: double-encoded traversal (%252e) passed single-pass decoding — FIXED pre-commit (decode-until-stable + 3 new traversal cases, 31/31). Finding 2 (note): repo .nvmrc pins 24.14.0 (not installed); our freeze is the documented 22.13.0 PATH prefix — consistent with engines, recorded.
-- Codex third-party review findings: pending post-commit
-- Relevant findings fixed: verifier finding 1 fixed pre-commit
+- Codex third-party review findings (full: docs/superpowers/reviews/codex/phase-01.md): (1) P1 case-insensitive .DOHC bypasses reserved guard on mac/Windows filesystems — FIXED (case-insensitive isReservedPath + tests); (2) P1 Windows drive-qualified paths (C:\...) pass absolute check, escape workspace after backslash normalization — FIXED (isAbsolutePathLike: POSIX + drive + UNC, checked raw and post-decode + tests); (3) P2 Windows absolute attached folders wrongly rejected — FIXED (same helper + tests). 35/35 green after fixes.
+- Relevant findings fixed: verifier finding 1 + all 3 codex findings fixed in phase1(fix) commit
 - Deferred findings with reason: none
 - Remaining risk: API shapes may evolve when Phase 4 (registry) and Phase 5 (history) consume them — acceptable, contract-first by design
 - Next phase: 2

@@ -4,17 +4,27 @@ export function defaultWorkspaceRoot(homeDir: string): string {
 
 export type FolderValidation = { ok: true } | { ok: false; reason: string };
 
+// POSIX absolute, Windows drive-qualified (C:\ or C:/), or UNC (\\server).
+function isAbsolutePathLike(path: string): boolean {
+  return (
+    path.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    path.startsWith("\\\\")
+  );
+}
+
 export function validateAttachedFolder(path: string): FolderValidation {
-  if (!path.startsWith("/")) {
+  if (!isAbsolutePathLike(path)) {
     return { ok: false, reason: "attached folders must be absolute paths" };
   }
   return { ok: true };
 }
 
-const RESERVED_PREFIX = ".dohc/";
-
+// Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
+// so a case-sensitive guard would let writes overwrite dohc metadata.
 export function isReservedPath(relativePath: string): boolean {
-  return relativePath === ".dohc" || relativePath.startsWith(RESERVED_PREFIX);
+  const lower = relativePath.toLowerCase();
+  return lower === ".dohc" || lower.startsWith(".dohc/");
 }
 
 export type WritePathValidation =
@@ -23,7 +33,7 @@ export type WritePathValidation =
 
 export function validateUserWritePath(relativePath: string): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
-  if (relativePath.startsWith("/")) return { ok: false, reason: "absolute" };
+  if (isAbsolutePathLike(relativePath)) return { ok: false, reason: "absolute" };
   // Percent-encoded dots/separators are traversal in disguise; decode until
   // stable so double-encoding (%252e -> %2e -> .) cannot slip through.
   let decoded = relativePath;
@@ -36,6 +46,9 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
     if (next === decoded) break;
     decoded = next;
   }
+  // Decoding may reveal an absolute path (%2fetc, C%3A is out of scope but
+  // drive letters survive decoding as-is).
+  if (isAbsolutePathLike(decoded)) return { ok: false, reason: "absolute" };
   const segments = decoded.replaceAll("\\", "/").split("/");
   if (segments.includes("..")) return { ok: false, reason: "traversal" };
   const normalized = segments

@@ -17,6 +17,12 @@ describe("workspace roots", () => {
     expect(validateAttachedFolder("/mnt/data/research").ok).toBe(true);
   });
 
+  it("allows Windows absolute folders (drive and UNC)", () => {
+    expect(validateAttachedFolder("C:\\Users\\ice\\dohc").ok).toBe(true);
+    expect(validateAttachedFolder("C:/Users/ice/dohc").ok).toBe(true);
+    expect(validateAttachedFolder("\\\\server\\share\\dohc").ok).toBe(true);
+  });
+
   it("rejects relative paths as attached folders", () => {
     expect(validateAttachedFolder("projects/notes").ok).toBe(false);
   });
@@ -27,6 +33,13 @@ describe("reserved paths", () => {
     expect(isReservedPath(".dohc/manifest.json")).toBe(true);
     expect(isReservedPath(".dohc/history/0001.json")).toBe(true);
     expect(isReservedPath("notes/today.md")).toBe(false);
+  });
+
+  it("reserves case-insensitive .dohc variants (case-insensitive filesystems)", () => {
+    expect(isReservedPath(".DOHC/manifest.json")).toBe(true);
+    const result = validateUserWritePath(".DoHc/manifest.json");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("reserved");
   });
 
   it("rejects user writes into reserved space", () => {
@@ -58,6 +71,24 @@ describe("path traversal", () => {
 
   it("rejects absolute paths inside a workspace", () => {
     const result = validateUserWritePath("/etc/passwd");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("absolute");
+  });
+
+  it("rejects Windows drive-qualified and UNC write paths", () => {
+    for (const candidate of [
+      "C:\\Users\\ice\\secret.md",
+      "C:/Users/ice/secret.md",
+      "\\\\server\\share\\secret.md",
+    ]) {
+      const result = validateUserWritePath(candidate);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("absolute");
+    }
+  });
+
+  it("rejects encoded-slash absolute paths", () => {
+    const result = validateUserWritePath("%2fetc/passwd");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("absolute");
   });
