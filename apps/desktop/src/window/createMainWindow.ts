@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen } from "electron";
+import { app, BrowserWindow, nativeTheme, screen } from "electron";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,16 +13,28 @@ import { stateDir } from "../workspaces/WorkspaceRegistry";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
+  initialChromeTheme,
   MIN_WINDOW_SIZE,
   parseWindowState,
   planWindowPlacement,
   serializeWindowState,
   WINDOW_STATE_FILE,
+  type ChromeTheme,
 } from "./windowState";
 
-// Light bg token — set before first paint so launch never flashes a wrong
-// color (index.html's first-paint block then takes over per theme).
-const BACKGROUND_COLOR = palette.light.bg;
+// The theme the native chrome was last told about: persisted-on-disk theme at
+// launch, then whatever the renderer's theme.ts reports on every flip. A
+// single window owns the chrome, so module state + one persist hook suffice.
+let chromeTheme: ChromeTheme = "light";
+let persistCurrentWindow: (() => void) | null = null;
+
+// Called by the desktop:set-titlebar-theme IPC handler so the NEXT launch
+// paints the correct chrome before any renderer JS runs.
+export function rememberChromeTheme(theme: ChromeTheme): void {
+  if (chromeTheme === theme) return;
+  chromeTheme = theme;
+  persistCurrentWindow?.();
+}
 
 // The OS-drawn window controls (Windows/Linux overlay) re-tint with the app
 // theme via the desktop:set-titlebar-theme IPC.
@@ -68,8 +80,12 @@ function loadPlacement() {
   } catch {
     // First launch / unreadable state: centered default.
   }
+  const state = parseWindowState(raw);
   const displays = screen.getAllDisplays().map((display) => display.bounds);
-  return planWindowPlacement(parseWindowState(raw), displays);
+  return {
+    ...planWindowPlacement(state, displays),
+    theme: initialChromeTheme(state, nativeTheme.shouldUseDarkColors),
+  };
 }
 
 function trackWindowState(window: BrowserWindow): void {
@@ -78,6 +94,7 @@ function trackWindowState(window: BrowserWindow): void {
     const state = {
       bounds: window.getNormalBounds(),
       isMaximized: window.isMaximized(),
+      theme: chromeTheme,
     };
     try {
       writeFileSync(windowStateFile(), serializeWindowState(state));
@@ -85,6 +102,7 @@ function trackWindowState(window: BrowserWindow): void {
       // Window state is a convenience; a read-only disk must not break the app.
     }
   };
+  persistCurrentWindow = persist;
   const saver = createDebouncedSaver(persist, 400);
   window.on("resize", saver.schedule);
   window.on("move", saver.schedule);
@@ -100,6 +118,9 @@ function trackWindowState(window: BrowserWindow): void {
 export function createMainWindow(): BrowserWindow {
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
   const placement = loadPlacement();
+  // Native chrome paints the LAUNCH theme (persisted user choice, else the OS
+  // preference) before any renderer JS — no light flash on dark launches.
+  chromeTheme = placement.theme;
   // Dev/Linux window icon; packaged builds get theirs from electron-builder.
   const iconPath = join(import.meta.dirname, "../../build/icon.png");
 
@@ -108,7 +129,7 @@ export function createMainWindow(): BrowserWindow {
     ...(placement.bounds ?? DEFAULT_WINDOW_SIZE),
     minWidth: MIN_WINDOW_SIZE.width,
     minHeight: MIN_WINDOW_SIZE.height,
-    backgroundColor: BACKGROUND_COLOR,
+    backgroundColor: palette[placement.theme].bg,
     ...(existsSync(iconPath) ? { icon: iconPath } : {}),
     // Native chrome: the renderer draws the titlebar (Titlebar.tsx drag
     // strip); the OS draws only its window controls.
@@ -119,7 +140,7 @@ export function createMainWindow(): BrowserWindow {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: titleBarOverlayOptions("light"),
+          titleBarOverlay: titleBarOverlayOptions(placement.theme),
         }),
     webPreferences: createMainWindowWebPreferences(preloadPath),
   });

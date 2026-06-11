@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createDebouncedSaver,
+  initialChromeTheme,
   parseWindowState,
   planWindowPlacement,
   serializeWindowState,
@@ -39,6 +40,27 @@ describe("parseWindowState", () => {
       parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}'),
     ).toBeNull();
   });
+
+  it("round-trips the chrome theme and drops foreign theme values", () => {
+    const themed: WindowState = { ...saved, theme: "dark" };
+    expect(parseWindowState(serializeWindowState(themed))).toEqual(themed);
+    const foreign = parseWindowState(
+      '{"bounds":{"x":0,"y":0,"width":1280,"height":800},"theme":"hotdog"}',
+    );
+    expect(foreign?.theme).toBeUndefined();
+  });
+});
+
+describe("initialChromeTheme", () => {
+  it("prefers the persisted user theme over the OS preference", () => {
+    expect(initialChromeTheme({ ...saved, theme: "dark" }, false)).toBe("dark");
+    expect(initialChromeTheme({ ...saved, theme: "light" }, true)).toBe("light");
+  });
+
+  it("follows the OS when nothing was persisted", () => {
+    expect(initialChromeTheme(saved, true)).toBe("dark");
+    expect(initialChromeTheme(null, false)).toBe("light");
+  });
 });
 
 describe("planWindowPlacement", () => {
@@ -71,6 +93,40 @@ describe("planWindowPlacement", () => {
   it("resets when only a sliver would remain visible", () => {
     const sliver = { ...saved, bounds: { ...saved.bounds, x: 1900, y: 1070 } };
     expect(planWindowPlacement(sliver, [PRIMARY]).bounds).toBeNull();
+  });
+
+  it("resets when the TITLEBAR is above every display, even if the body is visible", () => {
+    // codex e0-e1 review: bottom 64px visible used to pass, but the titlebar
+    // at y=-736 is unreachable — the user can never drag the window back.
+    const titlebarOffTop = {
+      ...saved,
+      bounds: { x: 100, y: -736, width: 1280, height: 800 },
+    };
+    expect(planWindowPlacement(titlebarOffTop, [PRIMARY]).bounds).toBeNull();
+  });
+
+  it("keeps a window hanging off the left edge while its titlebar stays grabbable", () => {
+    const offLeft = { ...saved, bounds: { x: -1100, y: 80, width: 1280, height: 800 } };
+    expect(planWindowPlacement(offLeft, [PRIMARY]).bounds).toEqual(offLeft.bounds);
+  });
+
+  it("resets on negative-coordinate layouts when the titlebar misses every display", () => {
+    const above = { x: 0, y: -1080, width: 1920, height: 1080 };
+    const belowBoth = {
+      ...saved,
+      bounds: { x: 100, y: 1080 - 30, width: 1280, height: 800 },
+    };
+    // Only 30px of body on PRIMARY's bottom; titlebar band y∈[1050,1090) has
+    // 30px on PRIMARY — exactly grabbable; with the band fully BELOW both
+    // displays it resets.
+    const fullyBelow = {
+      ...saved,
+      bounds: { x: 100, y: 1100, width: 1280, height: 800 },
+    };
+    expect(planWindowPlacement(belowBoth, [above, PRIMARY]).bounds).toEqual(
+      belowBoth.bounds,
+    );
+    expect(planWindowPlacement(fullyBelow, [above, PRIMARY]).bounds).toBeNull();
   });
 
   it("preserves isMaximized even when position resets", () => {

@@ -69,7 +69,11 @@ import { launchMarks } from "./performance/launchMarks";
 import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
-import { navigationPolicy, titleBarOverlayOptions } from "./window/createMainWindow";
+import {
+  navigationPolicy,
+  rememberChromeTheme,
+  titleBarOverlayOptions,
+} from "./window/createMainWindow";
 import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
 import {
   effectiveHome,
@@ -723,6 +727,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.setTitlebarTheme, (event, payload) => {
     assertTrustedSender(event);
     const input = SetTitlebarThemePayload.parse(payload);
+    // Persist so the NEXT launch paints the native chrome in this theme
+    // before any renderer JS runs (no light flash on dark launches).
+    rememberChromeTheme(input.theme);
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || typeof window.setTitleBarOverlay !== "function") return;
     try {

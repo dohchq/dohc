@@ -4,7 +4,7 @@ import type {
   DohcDesktopBridge,
   MenuCommand,
 } from "./ipc/bridgeContract";
-import { CHANNELS, MENU_COMMANDS } from "./ipc/channels";
+import { CHANNELS, isMenuCommand } from "./ipc/channels";
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
@@ -68,16 +68,13 @@ const bridge: DohcDesktopBridge = {
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
   },
   // Event payloads from main are still validated at this boundary: only a
-  // command from the closed MENU_COMMANDS set ever reaches renderer code.
-  // (Plain tuple membership, not zod — the sandboxed preload stays
-  // dependency-free; bridgeContract's MenuCommand enum derives from the
-  // same tuple so the two can never drift.)
+  // command from the closed MENU_COMMANDS set ever reaches renderer code
+  // (isMenuCommand — unit-tested against String objects/toString tricks; the
+  // sandboxed preload stays dependency-free, bridgeContract's MenuCommand
+  // enum derives from the same tuple so the two can never drift).
   onMenuCommand: (listener) => {
     const handler = (_event: unknown, command: unknown) => {
-      if (
-        typeof command === "string" &&
-        (MENU_COMMANDS as readonly string[]).includes(command)
-      ) {
+      if (isMenuCommand(command)) {
         listener(command as MenuCommand);
       }
     };

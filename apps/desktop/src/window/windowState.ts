@@ -1,6 +1,8 @@
-// Pure window-state model: parse/clamp/serialize for {bounds, isMaximized},
-// persisted to stateDir()/dohc-window-state.json by createMainWindow. Pure so
-// the display-clamping rules are unit-tested without Electron.
+// Pure window-state model: parse/clamp/serialize for {bounds, isMaximized,
+// theme}, persisted to stateDir()/dohc-window-state.json by createMainWindow.
+// Pure so the display-clamping rules are unit-tested without Electron.
+
+import { TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
 
 export interface WindowBounds {
   x: number;
@@ -9,9 +11,15 @@ export interface WindowBounds {
   height: number;
 }
 
+export type ChromeTheme = "light" | "dark";
+
 export interface WindowState {
   bounds: WindowBounds;
   isMaximized: boolean;
+  // The last theme the renderer told main about — lets the NEXT launch paint
+  // the native chrome (background, overlay controls) correctly before any
+  // renderer JS runs. Absent on first launch: follow the OS.
+  theme?: ChromeTheme;
 }
 
 export const WINDOW_STATE_FILE = "dohc-window-state.json";
@@ -47,27 +55,49 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
     ) {
       return null;
     }
+    const theme = (data as { theme?: unknown }).theme;
     return {
       bounds: { x: b.x, y: b.y, width: b.width, height: b.height },
       isMaximized: data.isMaximized === true,
+      ...(theme === "light" || theme === "dark" ? { theme } : {}),
     };
   } catch {
     return null;
   }
 }
 
+// What the native chrome (backgroundColor + overlay controls) should paint at
+// window creation, BEFORE any renderer JS: the user's last explicit theme if
+// one was persisted, else the OS preference. Prevents a light flash of the
+// window controls on dark-theme launches.
+export function initialChromeTheme(
+  state: WindowState | null,
+  nativePrefersDark: boolean,
+): ChromeTheme {
+  return state?.theme ?? (nativePrefersDark ? "dark" : "light");
+}
+
 export function serializeWindowState(state: WindowState): string {
   return JSON.stringify(state, null, 2);
 }
 
+// How much of the titlebar band must be vertically visible to count as
+// grabbable (half the strip is plenty to click and drag).
+const MIN_GRAB_HEIGHT_PX = 20;
+
+// The window is restorable only if its TITLEBAR BAND is grabbable on some
+// display — a window whose bottom half is visible but whose titlebar sits
+// above every screen (saved at negative y, monitor layout changed) can never
+// be dragged back by the user.
 function visibleOn(bounds: WindowBounds, display: WindowBounds): boolean {
+  const band = { ...bounds, height: TITLEBAR_HEIGHT_PX };
   const w =
-    Math.min(bounds.x + bounds.width, display.x + display.width) -
-    Math.max(bounds.x, display.x);
+    Math.min(band.x + band.width, display.x + display.width) -
+    Math.max(band.x, display.x);
   const h =
-    Math.min(bounds.y + bounds.height, display.y + display.height) -
-    Math.max(bounds.y, display.y);
-  return w >= MIN_VISIBLE_PX && h >= MIN_VISIBLE_PX;
+    Math.min(band.y + band.height, display.y + display.height) -
+    Math.max(band.y, display.y);
+  return w >= MIN_VISIBLE_PX && h >= MIN_GRAB_HEIGHT_PX;
 }
 
 // bounds: null means "no trustworthy position — center a default window".

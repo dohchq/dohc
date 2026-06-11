@@ -14,6 +14,19 @@ export const MENU_COMMANDS = [
   "settings",
 ] as const;
 
+export type MenuCommandId = (typeof MENU_COMMANDS)[number];
+
+// THE preload boundary check for menu events: only an exact PRIMITIVE string
+// from the closed tuple passes — String objects, toString tricks, case
+// variants, and unknown ids are all dropped. Exported so the boundary itself
+// is unit-tested (not just the renderer-side registry lookup behind it).
+export function isMenuCommand(value: unknown): value is MenuCommandId {
+  return (
+    typeof value === "string" &&
+    (MENU_COMMANDS as readonly string[]).includes(value)
+  );
+}
+
 export const CHANNELS = {
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",

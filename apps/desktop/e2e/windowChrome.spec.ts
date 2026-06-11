@@ -213,3 +213,46 @@ test("a saved position off every display resets to the centered default", async 
   expect(bounds?.y).toBeLessThan(10000);
   await app.close();
 });
+
+test("the single-instance lock quits a second launch on the same profile", async () => {
+  // launch.ts gives every harness launch a fresh user-data dir for isolation,
+  // which stopped exercising the production lock — this test pins it
+  // deliberately: same profile, second instance must exit; first stays alive.
+  const { spawn } = await import("node:child_process");
+  const { createRequire } = await import("node:module");
+  const electronBinary = createRequire(import.meta.url)("electron") as string;
+
+  const testHome = await mkdtemp(join(tmpdir(), "dohc-lock-home-"));
+  const profile = await mkdtemp(join(tmpdir(), "dohc-lock-profile-"));
+  const app = await launchApp({
+    DOHC_TEST_HOME: testHome,
+    DOHC_TEST_USER_DATA: profile,
+  });
+  await app.firstWindow();
+
+  const args = ["apps/desktop/dist/main/main.js", `--user-data-dir=${profile}`];
+  if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
+  const second = spawn(electronBinary, args, {
+    cwd: process.cwd(),
+    env: { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: testHome },
+    stdio: "ignore",
+  });
+  const exitCode = await new Promise<number | null>((resolve) => {
+    const timeout = setTimeout(() => {
+      second.kill("SIGTERM");
+      resolve(null);
+    }, 15_000);
+    second.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
+  // The lock refused the second instance (clean exit, no second window)…
+  expect(exitCode).not.toBeNull();
+  // …and the FIRST instance is still alive and serving its window.
+  const windowCount = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows().length,
+  );
+  expect(windowCount).toBe(1);
+  await app.close();
+});
