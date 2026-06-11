@@ -427,6 +427,37 @@ function scanDuplicates() {
   }
 }
 
+// The desktop editor renders the SAME documents the live hocuspocus server
+// materializes over collab, so the custom-node ProseMirror schema must be
+// identical on both sides — a mismatch silently drops or mangles a construct.
+// editor/extensions.ts is a verbatim copy of the server's
+// dohc-markdown-extensions.ts; enforce byte-identity HERE (a cross-package
+// source invariant the renderer test cannot check — the renderer is sandboxed
+// and cannot read files). Re-sync on drift, or dedupe both into a shared pkg.
+function scanEditorSchemaParity() {
+  const desktopPath = join(root, "apps/desktop/src/renderer/editor/extensions.ts");
+  let desktop;
+  try {
+    desktop = readText(desktopPath);
+  } catch {
+    return; // editor not ported yet — nothing to enforce
+  }
+  let server;
+  try {
+    server = readText(join(root, "services/hocuspocus/src/dohc-markdown-extensions.ts"));
+  } catch {
+    failures.push(
+      "services/hocuspocus/src/dohc-markdown-extensions.ts missing — desktop editor schema parity cannot be verified",
+    );
+    return;
+  }
+  if (desktop !== server) {
+    failures.push(
+      "apps/desktop/src/renderer/editor/extensions.ts has DRIFTED from services/hocuspocus/src/dohc-markdown-extensions.ts — the desktop editor and collab server must share one custom-node schema; re-sync the copy (or dedupe both into a shared package)",
+    );
+  }
+}
+
 // --- run ----------------------------------------------------------------------
 
 for (const entry of [...FORBIDDEN_ALLOWLIST, ...MEDIA_TABLE_ALLOWLIST]) {
@@ -438,6 +469,7 @@ for (const entry of [...FORBIDDEN_ALLOWLIST, ...MEDIA_TABLE_ALLOWLIST]) {
 scanForbidden();
 scanBoundaries();
 scanDuplicates();
+scanEditorSchemaParity();
 
 if (failures.length > 0) {
   console.error(`Architecture debt check FAILED (${failures.length} finding${failures.length === 1 ? "" : "s"}):`);

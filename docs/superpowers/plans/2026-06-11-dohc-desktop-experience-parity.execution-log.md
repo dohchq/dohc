@@ -8,11 +8,37 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/position: E5.0 SEARCH committed 24282cb; e3(fix) committed (THIS
-  commit). NEXT = E4 EDITOR lane (contract READY:
-  docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md — Tiptap WYSIWYG
-  + rich collab, D-E1 plainText->rich migration w/ data-loss test, source
-  toggle). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
+- Phase/position: E5.0 SEARCH committed 24282cb; e3(fix) committed a94ac27;
+  watcher de-flake e532d82. E4 IN PROGRESS, sub-laned: **E4a FOUNDATION =
+  THIS commit** (round-trip core, desktop-only, NON-breaking — textarea editor
+  still wired). E4a shipped apps/desktop/src/renderer/editor/{extensions.ts
+  (VERBATIM copy of server dohc-markdown-extensions.ts), import-export.ts
+  (VERBATIM copy of server import-export.ts, one import-path fixup),
+  schema-contracts.ts (from editor-v2 ref)} + tests (import-export 7 incl
+  idempotency/frontmatter-order/custom-node preservation, schema-contracts 5,
+  schema-parity 1) = 13 green; deps @tiptap/core,/markdown,/starter-kit,
+  /extension-table,/pm + y-prosemirror@^1.3.7 (match server ^3.23.6). PARITY
+  GATE: byte-identity desktop extensions.ts === server file enforced in
+  scripts/check-architecture-debt.mjs (scanEditorSchemaParity — renderer is
+  sandboxed, can't node:fs; verified it fails on drift). Editor files kept in
+  SERVER single-quote style (a mirror-of-source island; no desktop format
+  gate) for easy parity diffing. CHECKLISTS DESCOPED from E4a (taskList is a
+  schema change requiring a server touch -> deferred to E4c). FUTURE DEBT:
+  dedupe the copied core into a shared @dohc/editor-core pkg (consumed by both
+  hocuspocus + desktop as raw TS src, the monorepo convention) — deferred to
+  avoid destabilizing live collab mid-E4. NEXT = **E4b EDITOR COMPONENT**:
+  port plugins (wikilinkPlugin verbatim, inlineAtomPlugin + the inlineAtom
+  parser EXTRACTED from deleted convex/inlineAtom.ts — only the text
+  parseInlineAtoms path, DROP the mdast-util-from-markdown parseInlineAtomsFrom-
+  Markdown family, +@tiptap/pm already added, floatingMenuPosition verbatim),
+  MarkdownEditor.tsx (3043->~1300 strip per recon §1 STRIP list), WikilinkPicker,
+  FileInspector WYSIWYG-default + source-toggle, BubbleMenu (NEW). THEN E4c
+  COLLAB+SERVER: useCollabDoc body-fragment rework, plainText->rich server flip
+  + migration arm + data-loss test, add taskList both sides, liveCoEditing
+  update. THEN E4d GATES (editorWysiwyg.spec, perf tiptap-mount + 32KB-typing,
+  design + codex review). Recon: docs/superpowers/recon/2026-06-11-e4-editor-
+  port-digest.md; D-E1 rich collab, D-E3 retire formula/query VALUES (keep
+  inert styling + schema nodes for round-trip). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
   FIRST then engine-level !.dohc/!.git/!node_modules LAST = last-match-wins,
   + hasIgnoredSegment parse-time backstop; 2MB/2000-match caps; PID-tracked
   cancellation + search-id stale-drop), streamed batches w/ preload shape
@@ -45,7 +71,8 @@ design review + codex review + fix commit, every phase).
   offline-rename+concurrent-remote-edit-of-old-path -> spurious <old>.conflict
   + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
-  3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), e3(fix)=this.
+  3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
+  e4a foundation=this.
 - Branch: `claude/desktop-local-first-cloud-sync` (continuing the mega-branch;
   HEAD at start = 5df57e7 fix(dev) barrel leak). Commit convention `eN: …` +
   `eN(fix): …`.
