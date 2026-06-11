@@ -25,6 +25,10 @@ export interface WorkbenchState {
   // The right-hand history rail (default ON — specs assert the timeline with
   // zero clicks). Independent of the left panel's History view.
   historyVisible: boolean;
+  // Explorer state (Phase E3), persisted with the rest: which folders are
+  // expanded and which paths are pinned to the favorites section.
+  expandedFolders: string[];
+  pinned: string[];
 }
 
 export const SIDEBAR_MIN_WIDTH = 200;
@@ -32,6 +36,9 @@ export const SIDEBAR_MAX_WIDTH = 480;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
 // Bounds the persisted payload (and the tab strip) — not a UX target.
 export const MAX_OPEN_TABS = 100;
+// Bounds the persisted explorer state the same way (oldest entries give way).
+export const MAX_EXPANDED_FOLDERS = 500;
+export const MAX_PINNED_PATHS = 100;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -41,6 +48,8 @@ export function defaultWorkbenchState(): WorkbenchState {
     tabs: [],
     activeTab: null,
     historyVisible: true,
+    expandedFolders: [],
+    pinned: [],
   };
 }
 
@@ -122,6 +131,82 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
+// Capped append: at the bound the OLDEST entry gives way (openTab precedent)
+// — never a refusal the user would have to understand.
+function appendCapped(list: string[], path: string, cap: number): string[] {
+  const next = [...list, path];
+  return next.length > cap ? next.slice(next.length - cap) : next;
+}
+
+export function setFolderExpanded(
+  state: WorkbenchState,
+  path: string,
+  expanded: boolean,
+): WorkbenchState {
+  const has = state.expandedFolders.includes(path);
+  if (expanded === has) return state;
+  return {
+    ...state,
+    expandedFolders: expanded
+      ? appendCapped(state.expandedFolders, path, MAX_EXPANDED_FOLDERS)
+      : state.expandedFolders.filter((folder) => folder !== path),
+  };
+}
+
+export function toggleFolderExpanded(
+  state: WorkbenchState,
+  path: string,
+): WorkbenchState {
+  return setFolderExpanded(state, path, !state.expandedFolders.includes(path));
+}
+
+export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
+  return {
+    ...state,
+    pinned: state.pinned.includes(path)
+      ? state.pinned.filter((pin) => pin !== path)
+      : appendCapped(state.pinned, path, MAX_PINNED_PATHS),
+  };
+}
+
+// Rename/move/delete remap: every path-keyed slice (tabs, activeTab, pins,
+// expansion) re-projects through ONE projection so a successful move never
+// leaves dead tabs pointing at the old path or orphan pins. `project`
+// returns the new path, the same path (untouched), or null (deleted).
+export function remapWorkbenchPaths(
+  state: WorkbenchState,
+  project: (path: string) => string | null,
+): WorkbenchState {
+  const seen = new Set<string>();
+  const tabs: Array<{ path: string }> = [];
+  for (const tab of state.tabs) {
+    const next = project(tab.path);
+    if (next === null || seen.has(next)) continue;
+    seen.add(next);
+    tabs.push(next === tab.path ? tab : { path: next });
+  }
+  const projectedActive = state.activeTab === null ? null : project(state.activeTab);
+  const activeTab =
+    projectedActive !== null && seen.has(projectedActive)
+      ? projectedActive
+      : (tabs[tabs.length - 1]?.path ?? null);
+  const remapList = (list: string[]): string[] => {
+    const out: string[] = [];
+    for (const path of list) {
+      const next = project(path);
+      if (next !== null && !out.includes(next)) out.push(next);
+    }
+    return out;
+  };
+  return {
+    ...state,
+    tabs,
+    activeTab,
+    expandedFolders: remapList(state.expandedFolders),
+    pinned: remapList(state.pinned),
+  };
+}
+
 // Persistence (.dohc/ui-state.json via the narrow get/set IPC pair).
 // serialize produces the zod-validated wire shape; parse is TOLERANT — a
 // missing, corrupt, or foreign-shaped value yields defaults, field by field,
@@ -135,6 +220,8 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     tabs: state.tabs.map((tab) => tab.path),
     activeTab: state.activeTab,
     historyVisible: state.historyVisible,
+    expandedFolders: state.expandedFolders,
+    pinned: state.pinned,
   };
 }
 
@@ -151,20 +238,24 @@ export function parseUiState(raw: unknown): WorkbenchState {
   // is reached — never materialize/filter a huge foreign array first.
   const own = (key: string): unknown =>
     Object.hasOwn(value, key) ? value[key] : undefined;
-  const rawTabs = own("tabs");
-  const paths: string[] = [];
-  if (Array.isArray(rawTabs)) {
+  // Bounded path-list collector (tabs, expandedFolders, pinned): stops once
+  // the cap is reached — never materialize/filter a huge foreign array first.
+  const collectPaths = (raw: unknown, cap: number): string[] => {
+    const out: string[] = [];
+    if (!Array.isArray(raw)) return out;
     const seen = new Set<string>();
-    for (const entry of rawTabs) {
-      if (paths.length >= MAX_OPEN_TABS) break;
+    for (const entry of raw) {
+      if (out.length >= cap) break;
       if (typeof entry !== "string" || entry.length === 0 || entry.length > 4096) {
         continue;
       }
       if (seen.has(entry)) continue;
       seen.add(entry);
-      paths.push(entry);
+      out.push(entry);
     }
-  }
+    return out;
+  };
+  const paths = collectPaths(own("tabs"), MAX_OPEN_TABS);
   const rawActiveTab = own("activeTab");
   const activeTab =
     typeof rawActiveTab === "string" && paths.includes(rawActiveTab)
@@ -190,5 +281,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
       typeof rawHistoryVisible === "boolean"
         ? rawHistoryVisible
         : defaults.historyVisible,
+    expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
+    pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
   };
 }

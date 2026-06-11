@@ -1,10 +1,15 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   MenuCommand,
 } from "./ipc/bridgeContract";
-import { CHANNELS, isMenuCommand, parseUpdateStateEvent } from "./ipc/channels";
+import {
+  CHANNELS,
+  isExplorerMenuCommand,
+  isMenuCommand,
+  parseUpdateStateEvent,
+} from "./ipc/channels";
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
@@ -24,6 +29,42 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   createWorkspaceFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
+  createWorkspaceFolder: (payload) =>
+    ipcRenderer.invoke(CHANNELS.createWorkspaceFolder, payload),
+  moveWorkspacePath: (payload) =>
+    ipcRenderer.invoke(CHANNELS.moveWorkspacePath, payload),
+  deleteWorkspacePath: (payload) =>
+    ipcRenderer.invoke(CHANNELS.deleteWorkspacePath, payload),
+  exportWorkspaceZip: (payload) =>
+    ipcRenderer.invoke(CHANNELS.exportWorkspaceZip, payload),
+  // The invoke RESULT is validated here like main→renderer events are: only
+  // an exact member of the closed EXPLORER_MENU_COMMANDS tuple reaches
+  // renderer code — anything else reads as null ("dismissed").
+  showExplorerMenu: async (payload) => {
+    const result: unknown = await ipcRenderer.invoke(
+      CHANNELS.showExplorerMenu,
+      payload,
+    );
+    return isExplorerMenuCommand(result) ? result : null;
+  },
+  // OS drag-in: sandboxed renderers lost File.path in Electron 32+;
+  // webUtils.getPathForFile in the preload is the sanctioned resolver.
+  // TRUST DELTA flagged in the contract: these paths are renderer-supplied
+  // once they cross the bridge — main re-validates each one through the
+  // picker-grade import path (files only, never a workspace's .dohc).
+  getDroppedFilePaths: (files) => {
+    const paths: string[] = [];
+    for (const file of files) {
+      if (!(file instanceof File)) continue;
+      try {
+        const path = webUtils.getPathForFile(file);
+        if (typeof path === "string" && path.length > 0) paths.push(path);
+      } catch {
+        // A synthetic File (no backing fs entry) has no path — skip it.
+      }
+    }
+    return paths;
+  },
   importWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
   readWorkspaceText: (payload) =>

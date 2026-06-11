@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // The full Phase 9 story over real wires: login (device flow), enable sync
 // (claims the workspace on the server), local edits PUSH to Postgres, and
@@ -149,9 +149,9 @@ test("local edits push to the cloud; remote changes pull on relaunch; local surv
   const second = await launchApp(env);
   const page2 = await second.firstWindow();
   await expect(page2.getByTestId("workspace-shell")).toBeVisible();
-  await expect(
-    page2.getByTestId("file-tree").getByText("notes/from-cloud.md", { exact: true }),
-  ).toBeVisible({ timeout: 30_000 });
+  // Nested tree (E3): reveal (expand notes/) without opening; the pulled
+  // file may land after the folder row appears — openInTree waits for both.
+  await openInTree(page2, "notes/from-cloud.md", { click: false, timeout: 30_000 });
   expect(readFileSync(join(root, "notes", "from-cloud.md"), "utf8")).toBe(
     "# Hello from the cloud",
   );

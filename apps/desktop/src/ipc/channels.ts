@@ -28,6 +28,38 @@ export function isMenuCommand(value: unknown): value is MenuCommandId {
   );
 }
 
+// The closed explorer context-menu command set (Phase E3). Same pattern as
+// MENU_COMMANDS: the renderer asks main to pop a native menu built from
+// MAIN-owned labels over this closed set, and the chosen id comes back over
+// the SAME invoke. Lives here (dependency-free) so the sandboxed preload can
+// validate the RESULT against it as a plain value before renderer code sees
+// it — the renderer never supplies labels or item structure.
+export const EXPLORER_MENU_COMMANDS = [
+  "new-file",
+  "new-folder",
+  "rename",
+  "delete",
+  "pin",
+  "unpin",
+  "export-zip",
+  "open-externally",
+  "import-files",
+] as const;
+
+export type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
+
+// THE preload boundary check for the explorer-menu invoke result: only an
+// exact primitive string from the closed tuple passes (String objects,
+// toString tricks, case variants, unknown ids drop to null = "dismissed").
+export function isExplorerMenuCommand(
+  value: unknown,
+): value is ExplorerMenuCommandId {
+  return (
+    typeof value === "string" &&
+    (EXPLORER_MENU_COMMANDS as readonly string[]).includes(value)
+  );
+}
+
 // Closed main→renderer update-state event shape (Phase E2 status bar). Like
 // MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
 // preload validates against it as a plain value and must stay dependency-free.
@@ -81,6 +113,11 @@ export const CHANNELS = {
   attachWorkspaceFolder: "desktop:attach-workspace-folder",
   listWorkspaceFiles: "desktop:list-workspace-files",
   createWorkspaceFile: "desktop:create-workspace-file",
+  createWorkspaceFolder: "desktop:create-workspace-folder",
+  moveWorkspacePath: "desktop:move-workspace-path",
+  deleteWorkspacePath: "desktop:delete-workspace-path",
+  exportWorkspaceZip: "desktop:export-workspace-zip",
+  showExplorerMenu: "desktop:show-explorer-menu",
   importWorkspaceFiles: "desktop:import-workspace-files",
   readWorkspaceText: "desktop:read-workspace-text",
   writeWorkspaceText: "desktop:write-workspace-text",

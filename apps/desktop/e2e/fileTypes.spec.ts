@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 const SHOT_DIR = "test-results/screenshots/phase-06";
 
@@ -57,7 +57,7 @@ test("each file type opens its own native view", async () => {
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
   async function open(path: string) {
-    await page.getByTestId("file-tree").getByText(path, { exact: true }).click();
+    await openInTree(page, path);
     await expect(page.getByTestId("file-inspector")).toBeVisible();
   }
 

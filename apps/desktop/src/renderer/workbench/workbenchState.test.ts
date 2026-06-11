@@ -16,6 +16,12 @@ import {
   toggleHistory,
   toggleSidebar,
   MAX_OPEN_TABS,
+  MAX_EXPANDED_FOLDERS,
+  MAX_PINNED_PATHS,
+  remapWorkbenchPaths,
+  setFolderExpanded,
+  toggleFolderExpanded,
+  togglePinned,
   type WorkbenchState,
 } from "./workbenchState";
 
@@ -213,5 +219,90 @@ describe("ui-state persistence round-trip", () => {
     expect(state.tabs[0].path).toBe("f0.md");
     expect(state.tabs[MAX_OPEN_TABS - 1].path).toBe(`f${MAX_OPEN_TABS - 1}.md`);
     expect(state.activeTab).toBe("f0.md");
+  });
+});
+
+describe("explorer expansion + pins (Phase E3)", () => {
+  it("toggleFolderExpanded flips membership; setFolderExpanded no-ops on no change", () => {
+    let state = defaultWorkbenchState();
+    state = toggleFolderExpanded(state, "notes");
+    expect(state.expandedFolders).toEqual(["notes"]);
+    expect(setFolderExpanded(state, "notes", true)).toBe(state);
+    state = toggleFolderExpanded(state, "notes");
+    expect(state.expandedFolders).toEqual([]);
+    expect(setFolderExpanded(state, "notes", false)).toBe(state);
+  });
+
+  it("togglePinned flips membership and caps at the bound (oldest gives way)", () => {
+    let state = defaultWorkbenchState();
+    state = togglePinned(state, "a.md");
+    state = togglePinned(state, "b.md");
+    expect(state.pinned).toEqual(["a.md", "b.md"]);
+    state = togglePinned(state, "a.md");
+    expect(state.pinned).toEqual(["b.md"]);
+    for (let i = 0; i < MAX_PINNED_PATHS + 5; i++) {
+      state = togglePinned(state, `pin-${i}.md`);
+    }
+    expect(state.pinned).toHaveLength(MAX_PINNED_PATHS);
+    expect(state.pinned[MAX_PINNED_PATHS - 1]).toBe(
+      `pin-${MAX_PINNED_PATHS + 4}.md`,
+    );
+  });
+
+  it("expansion caps at its bound the same way", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_EXPANDED_FOLDERS + 3; i++) {
+      state = setFolderExpanded(state, `dir-${i}`, true);
+    }
+    expect(state.expandedFolders).toHaveLength(MAX_EXPANDED_FOLDERS);
+  });
+
+  it("serialize → parse round-trips expansion and pins; old files parse to empty", () => {
+    let state = withTabs("a.md");
+    state = setFolderExpanded(state, "notes", true);
+    state = togglePinned(state, "a.md");
+    const restored = parseUiState(serializeUiState(state));
+    expect(restored.expandedFolders).toEqual(["notes"]);
+    expect(restored.pinned).toEqual(["a.md"]);
+    // A pre-E3 ui-state.json (no explorer fields) parses to empty lists.
+    const old = parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" });
+    expect(old.expandedFolders).toEqual([]);
+    expect(old.pinned).toEqual([]);
+  });
+});
+
+describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
+  it("remaps tabs, the active tab, pins, and expansion through one projection", () => {
+    let state = withTabs("team/anna.md", "readme.md");
+    state = setFolderExpanded(state, "team", true);
+    state = togglePinned(state, "team/anna.md");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "team" ? "org/team" : path.startsWith("team/") ? `org/${path}` : path,
+    );
+    expect(remapped.tabs.map((tab) => tab.path)).toEqual([
+      "org/team/anna.md",
+      "readme.md",
+    ]);
+    expect(remapped.activeTab).toBe("readme.md");
+    expect(remapped.expandedFolders).toEqual(["org/team"]);
+    expect(remapped.pinned).toEqual(["org/team/anna.md"]);
+  });
+
+  it("a deleted active tab falls back to the last surviving tab; deletions drop pins", () => {
+    let state = withTabs("a.md", "junk.md");
+    state = togglePinned(state, "junk.md");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "junk.md" ? null : path,
+    );
+    expect(remapped.tabs.map((tab) => tab.path)).toEqual(["a.md"]);
+    expect(remapped.activeTab).toBe("a.md");
+    expect(remapped.pinned).toEqual([]);
+  });
+
+  it("a move that collides two tabs onto one path dedupes them", () => {
+    const state = withTabs("a.md", "b.md");
+    const remapped = remapWorkbenchPaths(state, () => "same.md");
+    expect(remapped.tabs.map((tab) => tab.path)).toEqual(["same.md"]);
+    expect(remapped.activeTab).toBe("same.md");
   });
 });

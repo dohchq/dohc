@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, openInTree as openTreePath } from "./launch";
 
 const SHOT_DIR = "test-results/screenshots/phase-08";
 
@@ -32,9 +32,8 @@ test("import a CSV to SQLite, browse it in the studio, edit a cell, and it persi
   await page.getByRole("button", { name: /open an existing folder/i }).click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-  const tree = page.getByTestId("file-tree");
   async function openInTree(path: string) {
-    await tree.getByText(path, { exact: true }).click();
+    await openTreePath(page, path);
   }
 
   const { mkdir: mkdirP } = await import("node:fs/promises");
@@ -52,10 +51,9 @@ test("import a CSV to SQLite, browse it in the studio, edit a cell, and it persi
   await expect(page.getByTestId("db-cell-category-txn_002")).toHaveText("Transport");
   await page.screenshot({ path: `${SHOT_DIR}/studio--1280x800--light.png` });
 
-  // The materialized .sqlite is a real, visible workspace file.
-  await expect(tree.getByText("imports/wallet.sqlite", { exact: true })).toBeVisible({
-    timeout: 15_000,
-  });
+  // The materialized .sqlite is a real, visible workspace file (reveal in
+  // the nested tree without re-opening it — the studio is already on it).
+  await openTreePath(page, "imports/wallet.sqlite", { click: false });
 
   // 3. Edit a category cell in place.
   await page.getByTestId("db-cell-category-txn_001").click();

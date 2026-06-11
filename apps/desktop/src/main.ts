@@ -20,6 +20,15 @@ import {
   CreateLocalWorkspacePayload,
   CreateWorkspaceFilePayload,
   CreateWorkspaceFileResult,
+  CreateWorkspaceFolderPayload,
+  MoveWorkspacePathPayload,
+  DeleteWorkspacePathPayload,
+  DeleteWorkspacePathResult,
+  ExportWorkspaceZipPayload,
+  ExportWorkspaceZipResult,
+  ShowExplorerMenuPayload,
+  ShowExplorerMenuResult,
+  type ExplorerMenuCommand,
   DefaultWorkspaceRootResult,
   AppPackagePayload,
   AppPackageResult,
@@ -107,10 +116,16 @@ import {
   readDatabaseSnapshot,
 } from "./workspaces/workspaceDatabase";
 import {
+  collectZipEntries,
   copyIntoWorkspace,
   createFile,
+  createFolder,
+  deletePath,
+  importDroppedPaths,
   listFiles,
+  movePath,
 } from "./workspaces/workspaceFiles";
+import { buildStoreZip } from "./workspaces/zipWriter";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
@@ -410,9 +425,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return ListWorkspaceFilesResult.parse({
-      files: await listFiles(workspace.rootPath),
-    });
+    return ListWorkspaceFilesResult.parse(await listFiles(workspace.rootPath));
   });
 
   ipcMain.handle(CHANNELS.createWorkspaceFile, async (event, payload) => {
@@ -423,10 +436,157 @@ function registerIpcHandlers(): void {
     return CreateWorkspaceFileResult.parse({ path });
   });
 
+  ipcMain.handle(CHANNELS.createWorkspaceFolder, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateWorkspaceFolderPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const path = await createFolder(workspace.rootPath, input.relativePath);
+    return CreateWorkspaceFileResult.parse({ path });
+  });
+
+  ipcMain.handle(CHANNELS.moveWorkspacePath, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = MoveWorkspacePathPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const path = await movePath(workspace.rootPath, input.fromPath, input.toPath);
+    return CreateWorkspaceFileResult.parse({ path });
+  });
+
+  ipcMain.handle(CHANNELS.deleteWorkspacePath, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DeleteWorkspacePathPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // shell.trashItem first (recoverable on every platform); deletePath
+    // falls back to the workspace's .dohc/trash where the OS rejects
+    // (cross-filesystem mounts) — never a hard delete either way.
+    const result = await deletePath(workspace.rootPath, input.relativePath, (p) =>
+      shell.trashItem(p),
+    );
+    return DeleteWorkspacePathResult.parse(result);
+  });
+
+  ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ExportWorkspaceZipPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Gather + bound BEFORE asking where to save: an over-limit export
+    // refuses without ever showing a dialog.
+    const { entries, baseName } = await collectZipEntries(
+      workspace.rootPath,
+      input.relativePath,
+    );
+    // Test seam (DOHC_TEST_PICK_PATH precedent): native save dialogs cannot
+    // be driven by Playwright. Read per-invoke so a spec can repoint it.
+    const testSave = process.env.DOHC_TEST_SAVE_PATH;
+    let target: string | null;
+    if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && testSave) {
+      target = testSave;
+    } else {
+      const result = await dialog.showSaveDialog({
+        title: "Export as zip",
+        defaultPath: `${baseName}.zip`,
+        filters: [{ name: "Zip archive", extensions: ["zip"] }],
+      });
+      target = result.canceled ? null : (result.filePath ?? null);
+    }
+    if (target !== null) {
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(target, buildStoreZip(entries));
+    }
+    return ExportWorkspaceZipResult.parse({ path: target });
+  });
+
+  // Native explorer context menu over the CLOSED EXPLORER_MENU_COMMANDS set:
+  // main owns every label and the item structure (the renderer only names
+  // what was right-clicked), and the chosen id resolves the SAME invoke —
+  // null on dismiss. "Reveal in file manager" is performed HERE (containment
+  // first) so no broader open-path IPC needs to exist for it.
+  ipcMain.handle(CHANNELS.showExplorerMenu, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ShowExplorerMenuPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+
+    const chosen = await new Promise<ExplorerMenuCommand | null>((resolve) => {
+      // Test seam (DOHC_TEST_PICK_PATH precedent): a NATIVE menu cannot be
+      // driven by Playwright. Read per-invoke so a spec can repoint it via
+      // electronApp.evaluate between right-clicks; values outside the closed
+      // tuple resolve null exactly like a dismissed menu.
+      if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
+        const choice = process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
+        if (choice !== undefined) {
+          const parsed = ShowExplorerMenuResult.safeParse(choice);
+          resolve(parsed.success ? parsed.data : null);
+          return;
+        }
+      }
+      let picked: ExplorerMenuCommand | null = null;
+      const item = (
+        label: string,
+        id: ExplorerMenuCommand,
+      ): Electron.MenuItemConstructorOptions => ({
+        label,
+        click: () => {
+          picked = id;
+        },
+      });
+      const separator = { type: "separator" as const };
+      const template: Electron.MenuItemConstructorOptions[] =
+        input.kind === "root"
+          ? [
+              item("New File", "new-file"),
+              item("New Folder", "new-folder"),
+              item("Import Files…", "import-files"),
+              separator,
+              item("Export Workspace as Zip…", "export-zip"),
+            ]
+          : [
+              ...(input.kind === "folder"
+                ? [item("New File", "new-file"), item("New Folder", "new-folder"), separator]
+                : []),
+              item("Rename", "rename"),
+              item("Delete", "delete"),
+              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
+              separator,
+              item("Export as Zip…", "export-zip"),
+              item("Reveal in File Manager", "open-externally"),
+            ];
+      const menu = Menu.buildFromTemplate(template);
+      const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      menu.popup({
+        window,
+        // The close callback can fire before the clicked item's handler —
+        // defer one tick so `picked` is settled either way.
+        callback: () => setImmediate(() => resolve(picked)),
+      });
+    });
+
+    if (chosen === "open-externally" && input.path) {
+      // Containment before the OS sees the path (resolveWorkspaceFile:
+      // validate + realpath + inside-root), same rule as openFileExternally.
+      const { realTarget } = await resolveWorkspaceFile(
+        workspace.rootPath,
+        input.path,
+      );
+      shell.showItemInFolder(realTarget);
+    }
+    return ShowExplorerMenuResult.parse(chosen);
+  });
+
   ipcMain.handle(CHANNELS.importWorkspaceFiles, async (event, payload) => {
     assertTrustedSender(event);
     const input = ImportWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
+    // note on the payload) re-validated by importDroppedPaths — regular
+    // files only, never any registered workspace's .dohc metadata.
+    if (input.droppedPaths !== undefined) {
+      const imported = await importDroppedPaths(
+        workspace.rootPath,
+        input.droppedPaths,
+        listWorkspaces().map((ws) => ws.rootPath),
+      );
+      return ImportWorkspaceFilesResult.parse({ imported });
+    }
     const result = await dialog.showOpenDialog({
       properties: ["openFile", "multiSelections"],
       title: "Import files into workspace",

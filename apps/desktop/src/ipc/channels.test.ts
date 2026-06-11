@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { UpdateState } from "../updates/updateMachine";
 import {
+  EXPLORER_MENU_COMMANDS,
+  isExplorerMenuCommand,
   isMenuCommand,
   MENU_COMMANDS,
   parseUpdateStateEvent,
@@ -41,6 +43,30 @@ describe("isMenuCommand (preload boundary)", () => {
     expect(isMenuCommand(undefined)).toBe(false);
     expect(isMenuCommand(0)).toBe(false);
     expect(isMenuCommand(Symbol("new-file"))).toBe(false);
+  });
+});
+
+// The preload boundary for the explorer context-menu invoke RESULT — same
+// attack set as isMenuCommand: a compromised/buggy responder can only ever
+// deliver an exact member of the closed tuple to renderer code (anything
+// else reads as null = "menu dismissed").
+describe("isExplorerMenuCommand (preload boundary)", () => {
+  it("accepts every member of the closed tuple", () => {
+    for (const command of EXPLORER_MENU_COMMANDS) {
+      expect(isExplorerMenuCommand(command)).toBe(true);
+    }
+  });
+
+  it("rejects case variants, unknown ids, and non-primitive impostors", () => {
+    expect(isExplorerMenuCommand("RENAME")).toBe(false);
+    expect(isExplorerMenuCommand("rename ")).toBe(false);
+    expect(isExplorerMenuCommand("rm -rf")).toBe(false);
+    expect(isExplorerMenuCommand("")).toBe(false);
+    expect(isExplorerMenuCommand(new String("rename"))).toBe(false);
+    expect(isExplorerMenuCommand({ toString: () => "rename" })).toBe(false);
+    expect(isExplorerMenuCommand(["rename"])).toBe(false);
+    expect(isExplorerMenuCommand(null)).toBe(false);
+    expect(isExplorerMenuCommand(undefined)).toBe(false);
   });
 });
 

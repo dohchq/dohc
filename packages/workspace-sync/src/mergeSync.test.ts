@@ -67,6 +67,21 @@ function fakeServer() {
       files.delete(path);
       return { ok: true };
     }
+    if (op.op === "rename") {
+      // The real backend accepts SAME-FOLDER renames only (cross-folder is
+      // decomposed client-side — pinned below); mirror that contract.
+      const fromPath = String(op.fromPath ?? "");
+      const toPath = String(op.toPath ?? "");
+      const source = files.get(fromPath);
+      if (!source) return { ok: false, error: "Asset not found" };
+      if (files.has(toPath)) return { ok: false, error: "File path already exists" };
+      if (String(source.revision) !== String(op.expectedRevision)) {
+        return { ok: false, error: "Expected revision is stale" };
+      }
+      files.delete(fromPath);
+      files.set(toPath, { ...source, revision: source.revision + 1 });
+      return { ok: true, file: fileSummary(toPath) };
+    }
     return { ok: false, error: `unsupported op ${String(op.op)}` };
   }
 
@@ -408,5 +423,106 @@ describe("manifest server binding", () => {
     await expect(wrong.pull()).rejects.toThrow(ServerBindingMismatchError);
     // The clean local file is untouched.
     expect(await readFile(join(root, "keep.md"), "utf8")).toBe("important");
+  });
+});
+
+// Phase E3 pins: the desktop explorer's movePath is one fs.rename, so these
+// lock how renames flow through sync — the clean steady-state path AND the
+// known wart — before renames become a first-class UI affordance. Recorded
+// in the phase ledger.
+describe("rename sync semantics (E3 pins)", () => {
+  it("a same-folder rename pushes ONE rename op (never delete+create)", async () => {
+    const server = fakeServer();
+    await mkdir(join(root, "notes"), { recursive: true });
+    await writeFile(join(root, "notes", "draft.md"), "same bytes");
+    const sync = engine(server);
+    await sync.initialize();
+    await sync.push();
+
+    // One fs.rename (what desktop movePath does), then a steady-state push.
+    await rm(join(root, "notes", "draft.md"));
+    await writeFile(join(root, "notes", "final.md"), "same bytes");
+    const batchesBefore = server.seen.appliedOps.length;
+    const result = await sync.push();
+    expect(result.pushed).toBe(1);
+
+    expect(server.files.has("notes/draft.md")).toBe(false);
+    expect(server.files.get("notes/final.md")?.body).toBe("same bytes");
+    const renameOps = server.seen.appliedOps
+      .slice(batchesBefore)
+      .flat() as Array<{ op: string }>;
+    expect(renameOps).toEqual([
+      expect.objectContaining({
+        op: "rename",
+        fromPath: "notes/draft.md",
+        toPath: "notes/final.md",
+      }),
+    ]);
+  });
+
+  it("an OFFLINE rename with no remote change survives pull-before-push cleanly (no resurrect, no conflict)", async () => {
+    const server = fakeServer();
+    await writeFile(join(root, "a.md"), "v1");
+    const sync = engine(server);
+    await sync.initialize();
+    await sync.push();
+
+    // Rename while no engine runs, then the firstContact order: pull, push.
+    await rm(join(root, "a.md"));
+    await writeFile(join(root, "b.md"), "v1");
+    const pulled = await sync.pull();
+    // The remote revision still matches the baseline, so pull leaves the
+    // renamed-away old path alone — no resurrect, no spurious conflict.
+    expect(pulled.conflicts).toEqual([]);
+    expect(existsSync(join(root, "a.md.conflict"))).toBe(false);
+
+    const pushed = await sync.push();
+    expect(pushed.pushed).toBe(1);
+    expect([...server.files.keys()]).toEqual(["b.md"]);
+  });
+
+  // ⚠ KNOWN WART, pinned as the CURRENT contract (accepted for E3, recorded
+  // in the phase ledger — do NOT change engine behavior this phase). Rename
+  // a synced file while OFFLINE *and* let the remote edit the old path; on
+  // relaunch firstContact pulls BEFORE it pushes:
+  //   1. pull sees a baseline entry whose local file is gone (the rename's
+  //      old path) with a NEWER remote revision, applies the no-resurrect
+  //      rule, and lands the remote content as a spurious `<old>.conflict`;
+  //   2. push then sends the rename with the BASELINE's expectedRevision —
+  //      now stale — so the server refuses it, the baseline never advances,
+  //      and the rename op retries (and fails) identically on every push:
+  //      the new path NEVER reaches the server.
+  // FIX CONDITION: pull must sha-pair a missing baseline entry against a new
+  // local file with the same hash (recognize delete+create as a rename)
+  // before declaring a local deletion, and rebase the pending rename's
+  // expectedRevision — engine work out of E3 scope. If this pin fails
+  // because the conflict no longer appears AND b.md reaches the server,
+  // the wart was fixed: delete this test and the ledger entry.
+  it("offline-rename + remote-edit-of-old-path: spurious <old>.conflict and the rename WEDGES (current contract)", async () => {
+    const server = fakeServer();
+    await writeFile(join(root, "a.md"), "v1");
+    const sync = engine(server);
+    await sync.initialize();
+    await sync.push();
+
+    await rm(join(root, "a.md"));
+    await writeFile(join(root, "b.md"), "v1");
+    server.set("a.md", "v2-remote"); // concurrent remote edit (revision 2)
+
+    const pulled = await sync.pull();
+    // The spurious user-facing artifact this pin documents:
+    expect(pulled.conflicts).toContain("a.md");
+    expect(await readFile(join(root, "a.md.conflict"), "utf8")).toBe("v2-remote");
+
+    // And the wedge: the rename op carries the stale baseline revision, the
+    // server refuses it, and retrying changes nothing.
+    const pushed = await sync.push();
+    expect(pushed.pushed).toBe(0);
+    const again = await sync.push();
+    expect(again.pushed).toBe(0);
+    expect(server.files.has("b.md")).toBe(false);
+    expect(server.files.get("a.md")?.body).toBe("v2-remote");
+    // The conflict artifact itself never uploads.
+    expect(server.files.has("a.md.conflict")).toBe(false);
   });
 });

@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { chromium, type Browser, type ElectronApplication } from "playwright";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // Phase 18: the final product readiness matrix as ONE sequential journey over
 // the real product — desktop first-run with no account, real files on disk,
@@ -306,7 +306,7 @@ test("step 4: markdown, CSV, image, audio, PDF, SQLite, and app files become rea
   const nameInput = page.getByRole("textbox", { name: /file name/i });
   await nameInput.fill("notes/plan.md");
   await nameInput.press("Enter");
-  await page.getByTestId("file-tree").getByText("notes/plan.md", { exact: true }).click();
+  await openInTree(page, "notes/plan.md");
   await page.getByTestId("markdown-edit-toggle").click();
   await page.getByTestId("markdown-editor").fill("# Plan\n\nDrafted in dohc desktop.\n");
   await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
@@ -366,8 +366,8 @@ test("step 4: markdown, CSV, image, audio, PDF, SQLite, and app files become rea
     ].join("\n"),
   );
 
-  // The watcher reflects every direct write into the live file tree.
-  const tree = page.getByTestId("file-tree");
+  // The watcher reflects every direct write into the live file tree
+  // (revealed in the nested tree without opening each file).
   for (const path of [
     "finance/transactions.csv",
     "uploads/receipt.png",
@@ -376,7 +376,7 @@ test("step 4: markdown, CSV, image, audio, PDF, SQLite, and app files become rea
     "finance/wallet.sqlite",
     "finance/.apps/ledger/app.json",
   ]) {
-    await expect(tree.getByText(path, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await openInTree(page, path, { click: false });
   }
   await shot(page, "03-real-files");
 });
@@ -431,17 +431,13 @@ test("steps 5-6: a local agent's multi-file batch lands as ONE attributed change
 test("steps 7-8: finance tracker — CSV imports to visible SQLite, cell edits stick, AppTester gates the app", async () => {
   test.setTimeout(180_000);
   const page = await app!.firstWindow();
-  const tree = page.getByTestId("file-tree");
-
   // Import the CSV into a sibling .sqlite through the inspector's real flow.
-  await tree.getByText("finance/transactions.csv", { exact: true }).click();
+  await openInTree(page, "finance/transactions.csv");
   await expect(page.getByTestId("view-csv")).toBeVisible();
   await page.getByTestId("csv-import-sqlite").click();
   await expect(page.getByTestId("view-database")).toBeVisible();
   await expect(page.getByTestId("db-cell-category-txn_001")).toHaveText("Food");
-  await expect(tree.getByText("finance/transactions.sqlite", { exact: true })).toBeVisible({
-    timeout: 15_000,
-  });
+  await openInTree(page, "finance/transactions.sqlite", { click: false });
 
   // Edit a cell in the studio — this is the edit step 9 must survive.
   await page.getByTestId("db-cell-category-txn_001").click();
@@ -452,7 +448,7 @@ test("steps 7-8: finance tracker — CSV imports to visible SQLite, cell edits s
   await shot(page, "05-database-studio");
 
   // The app package view + the AppTester static gate, then explicit trust.
-  await tree.getByText("finance/.apps/ledger/app.json", { exact: true }).click();
+  await openInTree(page, "finance/.apps/ledger/app.json");
   await expect(page.getByTestId("view-app")).toBeVisible();
   await expect(page.getByTestId("app-readiness")).toHaveAttribute(
     "data-readiness",
@@ -479,9 +475,8 @@ test("step 9: relaunch — the workspace, files, and the database edit persist",
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
   await expect(page.getByRole("button", { name: /create workspace/i })).toHaveCount(0);
 
-  const tree = page.getByTestId("file-tree");
-  await expect(tree.getByText("notes/plan.md", { exact: true })).toBeVisible({ timeout: 15_000 });
-  await tree.getByText("finance/transactions.sqlite", { exact: true }).click();
+  await openInTree(page, "notes/plan.md", { click: false });
+  await openInTree(page, "finance/transactions.sqlite");
   await expect(page.getByTestId("view-database")).toBeVisible();
   // The on-disk SQLite file is canonical: the studio edit survived the restart.
   await expect(page.getByTestId("db-cell-category-txn_001")).toHaveText("Groceries");
@@ -631,9 +626,7 @@ test("steps 13-14: a real second user syncs a normal edit into the shared worksp
   appA = await launchApp(envFor(sharedA));
   const pageA2 = await appA.firstWindow();
   await expect(pageA2.getByTestId("workspace-shell")).toBeVisible();
-  await expect(
-    pageA2.getByTestId("file-tree").getByText("notes/standup.md", { exact: true }),
-  ).toBeVisible({ timeout: 30_000 });
+  await openInTree(pageA2, "notes/standup.md", { click: false, timeout: 30_000 });
   expect(readFileSync(join(sharedA.root, "notes", "standup.md"), "utf8")).toContain(
     "Collaborator update — synced freely.",
   );
@@ -690,9 +683,7 @@ test("step 16: an offline both-sides conflict is rescued with both versions and 
   app = await launchApp({ DOHC_TEST_HOME: testHome, DOHC_CLOUD_URL: API_URL });
   const page = await app.firstWindow();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
-  await expect(
-    page.getByTestId("file-tree").getByText("notes/journal.md.conflict", { exact: true }),
-  ).toBeVisible({ timeout: 30_000 });
+  await openInTree(page, "notes/journal.md.conflict", { click: false, timeout: 30_000 });
   await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict", {
     timeout: 30_000,
   });

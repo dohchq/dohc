@@ -24,8 +24,8 @@ const STORED_STATE: WorkspaceUiState = {
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 320,
-  tabs: ["notes/b.md"],
-  activeTab: "notes/b.md",
+  tabs: ["b.md"],
+  activeTab: "b.md",
   historyVisible: true,
 };
 
@@ -45,8 +45,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     ),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [
-        { path: "notes/a.md", kind: "file" as const },
-        { path: "notes/b.md", kind: "file" as const },
+        { path: "a.md", kind: "file" as const },
+        { path: "b.md", kind: "file" as const },
       ],
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
@@ -58,7 +58,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       lastRun: null,
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
-    writeWorkspaceText: vi.fn(async () => ({ path: "notes/a.md", recorded: true })),
+    writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     collabToken: vi.fn(async () => ({ available: false as const })),
     onWorkspaceActivity: vi.fn(() => () => {}),
     onMenuCommand: vi.fn(() => () => {}),
@@ -93,7 +93,7 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    const row = await screen.findByText("notes/a.md");
+    const row = await screen.findByText("a.md");
 
     await act(async () => {
       // Resolve the load FIRST (queues its .then as a microtask), then click
@@ -107,8 +107,8 @@ describe("ui-state merge-on-load", () => {
     });
 
     // The user's open survived; the stored tabs did NOT clobber it.
-    expect(screen.getByTestId("tab-notes/a.md")).toBeTruthy();
-    expect(screen.queryByTestId("tab-notes/b.md")).toBeNull();
+    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
     // And the pre-load action is durable: it gets written (immediate write on
     // load-settle, then the debounced writer once the commit lands).
     await waitFor(
@@ -117,7 +117,7 @@ describe("ui-state merge-on-load", () => {
           ([payload]) => payload.state,
         );
         expect(
-          states.some((state) => state.tabs.includes("notes/a.md")),
+          states.some((state) => state.tabs.includes("a.md")),
         ).toBe(true);
       },
       { timeout: 2000 },
@@ -128,15 +128,15 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    await screen.findByText("notes/a.md");
+    await screen.findByText("a.md");
 
     await act(async () => {
       stored.resolve(STORED_STATE);
       await Promise.resolve();
     });
 
-    expect(await screen.findByTestId("tab-notes/b.md")).toBeTruthy();
-    expect(screen.getByTestId("tab-notes/b.md").dataset.active).toBe("true");
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   });
 });
 
@@ -153,9 +153,9 @@ describe("file-open-start marking", () => {
     const openStartCalls = () =>
       mark.mock.calls.filter(([name]) => name === "file-open-start").length;
 
-    const row = await screen.findByText("notes/a.md");
+    const row = await screen.findByText("a.md");
     await user.click(row);
-    await screen.findByTestId("tab-notes/a.md");
+    await screen.findByTestId("tab-a.md");
     expect(openStartCalls()).toBe(1);
 
     // Re-clicking the active row is a no-op open: no remount, no mark.
@@ -163,8 +163,8 @@ describe("file-open-start marking", () => {
     expect(openStartCalls()).toBe(1);
 
     // A different file is a real open again.
-    await user.click(screen.getByText("notes/b.md"));
-    await screen.findByTestId("tab-notes/b.md");
+    await user.click(screen.getByText("b.md"));
+    await screen.findByTestId("tab-b.md");
     expect(openStartCalls()).toBe(2);
 
     mark.mockRestore();

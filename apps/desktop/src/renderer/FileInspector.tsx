@@ -171,6 +171,7 @@ function MarkdownView(props: {
   path: string;
   truncatedNotice?: React.ReactNode;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(props.body);
@@ -281,6 +282,25 @@ function MarkdownView(props: {
         .catch(() => undefined);
     };
   }, [workspaceId, path]);
+
+  // Imperative flush seam: the shell awaits this BEFORE an explorer op that
+  // moves/deletes paths. A rename of the open file remounts the keyed
+  // inspector AFTER the disk rename — by then the unmount flush above writes
+  // to the renamed-away OLD path (ENOENT, swallowed) and the draft is lost.
+  // Flushing through here lands the keystrokes while the path still exists.
+  const { registerDraftFlush } = props;
+  useEffect(() => {
+    if (!registerDraftFlush) return;
+    registerDraftFlush(async () => {
+      if (!unsavedDraft.current) return;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      await saveNow();
+    });
+    return () => registerDraftFlush(null);
+    // saveNow reads refs (latestDraft) + per-mount-stable props only, so the
+    // first render's closure stays correct for the whole mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerDraftFlush]);
 
   // Materialization of the converged CRDT back to the file lives inside
   // useCollabDoc, gated on sync and routed through the canonical-state model
@@ -652,6 +672,9 @@ export function FileInspector(props: {
   // Editor save-state seam for the tab strip's dirty indicator. Only the
   // markdown editor saves locally, so it is the only dirty source.
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
+  // Registers the active editor's draft flush with the shell (same "only
+  // dirty source" scoping): explorer ops await it before re-pathing files.
+  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -690,6 +713,7 @@ export function FileInspector(props: {
             path={props.path}
             truncatedNotice={truncatedNotice}
             onSaveStateChange={props.onSaveStateChange}
+            registerDraftFlush={props.registerDraftFlush}
           />
         </div>
       );

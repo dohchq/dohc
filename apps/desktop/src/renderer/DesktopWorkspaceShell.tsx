@@ -1,14 +1,12 @@
 import {
   Bot,
-  Database,
   FilePlus2,
-  FileText,
+  FolderPlus,
   Import,
-  LayoutGrid,
   PanelRight,
   User,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChangeSetRecord,
   SyncStatusResult,
@@ -27,6 +25,8 @@ import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
+import { Explorer } from "./workbench/Explorer";
+import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import {
@@ -35,10 +35,14 @@ import {
   moveTab,
   openTab,
   parseUiState,
+  remapWorkbenchPaths,
   serializeUiState,
+  setFolderExpanded,
   setSidebarWidth,
   setView,
+  toggleFolderExpanded,
   toggleHistory,
+  togglePinned,
   toggleSidebar,
   VIEW_IDS,
   type ViewId,
@@ -47,37 +51,11 @@ import {
 
 export type Workspace = WorkspaceSummary;
 
-function FileIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
-  if (kind === "database") return <Database size={13} aria-hidden />;
-  if (kind === "app-source") return <LayoutGrid size={13} aria-hidden />;
-  return <FileText size={13} aria-hidden />;
+// Every folder above a path — expanded when a create/open must REVEAL it.
+function ancestorDirs(path: string): string[] {
+  const segments = path.split("/");
+  return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
 }
-
-// Memoized so selecting a file only re-renders the two rows whose selected
-// state changed, not the entire tree (onSelect takes the path, not a closure).
-// 28px rows (h-7), VS Code density: hover is a gray tint, active a darker one.
-const FileRow = memo(function FileRow(props: {
-  file: WorkspaceFileEntry;
-  selected: boolean;
-  onSelect: (path: string) => void;
-}) {
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={() => props.onSelect(props.file.path)}
-        className={`flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] ${
-          props.selected
-            ? "bg-line text-ink"
-            : "text-muted hover:bg-line/50 hover:text-ink"
-        }`}
-      >
-        <FileIcon kind={props.file.kind} />
-        <span className="truncate">{props.file.path}</span>
-      </button>
-    </li>
-  );
-});
 
 // The timeline body, shared by the right history rail and the side panel's
 // History view (both render the same root-owned changeSets — never a second
@@ -161,6 +139,7 @@ export function DesktopWorkspaceShell(props: {
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
+  const [folders, setFolders] = useState<string[]>([]);
   const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
@@ -169,6 +148,11 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Inline-create requests routed INTO the explorer (palette/menu/header).
+  const [createRequest, setCreateRequest] = useState<{
+    kind: "file" | "folder";
+    id: number;
+  } | null>(null);
   const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
 
   // Runtime-only dirty flag for the ACTIVE tab (the one mounted inspector
@@ -181,6 +165,22 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setActiveTabDirty(false);
   }, [wb.activeTab]);
+
+  // Imperative flush for the active editor's unsaved draft (registered by
+  // the mounted MarkdownView). Explorer ops await it BEFORE their disk ops:
+  // a rename of the open file otherwise remounts the keyed inspector after
+  // the path moved, and its unmount flush writes to the renamed-away OLD
+  // path — ENOENT, swallowed, keystrokes inside the autosave window lost.
+  const draftFlushRef = useRef<(() => Promise<void>) | null>(null);
+  const registerDraftFlush = useCallback(
+    (flush: (() => Promise<void>) | null) => {
+      draftFlushRef.current = flush;
+    },
+    [],
+  );
+  const flushActiveDraft = useCallback(async () => {
+    await draftFlushRef.current?.();
+  }, []);
 
   const workspaceId = props.workspace.workspaceId;
 
@@ -273,6 +273,7 @@ export function DesktopWorkspaceShell(props: {
   const refreshFiles = useCallback(async () => {
     const result = await bridge().listWorkspaceFiles({ workspaceId });
     setFiles(result.files);
+    setFolders(result.folders ?? []);
   }, [workspaceId]);
 
   const refreshHistory = useCallback(async () => {
@@ -286,10 +287,19 @@ export function DesktopWorkspaceShell(props: {
     setAgentActive(agent.activeRun !== null);
   }, [workspaceId]);
 
-  const importFiles = useCallback(async () => {
-    await bridge().importWorkspaceFiles({ workspaceId });
-    await refreshFiles();
-  }, [workspaceId, refreshFiles]);
+  // One import seam for the dialog flow AND the OS drag-in flow (the latter
+  // passes the preload-resolved absolute paths; see the trust-delta note on
+  // ImportWorkspaceFilesPayload).
+  const importFiles = useCallback(
+    async (droppedPaths?: string[]) => {
+      await bridge().importWorkspaceFiles({
+        workspaceId,
+        ...(droppedPaths ? { droppedPaths } : {}),
+      });
+      await refreshFiles();
+    },
+    [workspaceId, refreshFiles],
+  );
 
   // THE one way a file opens (tree click, quick-open, tab activation): marks
   // file-open-start — file views measure open latency from here — then opens
@@ -348,6 +358,52 @@ export function DesktopWorkspaceShell(props: {
         ),
       );
     },
+    [mutateWb],
+  );
+
+  // Successful explorer moves/deletes re-project every path-keyed slice
+  // (tabs, activeTab, pins, expansion) BEFORE the watcher refresh lands, so
+  // a rename never leaves a dead tab pointing at the old path. If the remap
+  // changes which inspector is mounted, that is an open — re-mark
+  // file-open-start (closeFileTab idiom) so the next measure stays honest.
+  const onExplorerPathsChanged = useCallback(
+    (changes: PendingTreeChange[]) => {
+      const current = wbRef.current;
+      const next = remapWorkbenchPaths(current, (path) =>
+        projectTreePath(path, changes),
+      );
+      if (next.activeTab !== current.activeTab && next.activeTab !== null) {
+        rendererMarks.mark("file-open-start");
+      }
+      mutateWb((state) =>
+        remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
+      );
+    },
+    [mutateWb],
+  );
+
+  // Reveal-then-create: the inline editbox lives in the explorer view, so
+  // make that view visible first (never setView — re-selecting the active
+  // view TOGGLES the panel).
+  const requestExplorerCreate = useCallback(
+    (kind: "file" | "folder") => {
+      mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
+      setCreateRequest((current) => ({ kind, id: (current?.id ?? 0) + 1 }));
+    },
+    [mutateWb],
+  );
+
+  const setExplorerFolderExpanded = useCallback(
+    (path: string, expanded: boolean) =>
+      mutateWb((state) => setFolderExpanded(state, path, expanded)),
+    [mutateWb],
+  );
+  const toggleExplorerFolder = useCallback(
+    (path: string) => mutateWb((state) => toggleFolderExpanded(state, path)),
+    [mutateWb],
+  );
+  const toggleExplorerPin = useCallback(
+    (path: string) => mutateWb((state) => togglePinned(state, path)),
     [mutateWb],
   );
 
@@ -429,6 +485,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => setNewFileOpen(true),
       },
       {
+        id: "new-folder",
+        label: "New folder",
+        run: () => requestExplorerCreate("folder"),
+      },
+      {
         id: "quick-open",
         label: "Go to file",
         run: () => setQuickOpenOpen(true),
@@ -479,48 +540,36 @@ export function DesktopWorkspaceShell(props: {
         run: toggleTheme,
       },
     ],
-    [importFiles, openWorkspaceFolder, closeActiveTab, mutateWb],
+    [importFiles, openWorkspaceFolder, closeActiveTab, mutateWb, requestExplorerCreate],
   );
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
       if (command === "command-palette") setPaletteOpen(true);
-      // Until E3's real folder creation lands, New Folder opens the new-file
-      // dialog (a nested path like notes/today.md creates its folders).
-      else if (command === "new-folder") setNewFileOpen(true);
       else commands.find((entry) => entry.id === command)?.run();
     });
   }, [commands]);
 
   const explorerView = (
     <>
-      <nav
-        data-testid="file-tree"
-        aria-label="Files"
-        className="min-h-0 flex-1 overflow-y-auto py-1"
-      >
-        {files.length === 0 ? (
-          <button
-            type="button"
-            onClick={() => setNewFileOpen(true)}
-            className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-          >
-            <FilePlus2 size={13} aria-hidden />
-            Create your first file
-          </button>
-        ) : (
-          <ul className="m-0 list-none p-0">
-            {files.map((file) => (
-              <FileRow
-                key={file.path}
-                file={file}
-                selected={wb.activeTab === file.path}
-                onSelect={openFile}
-              />
-            ))}
-          </ul>
-        )}
-      </nav>
+      <Explorer
+        workspaceId={workspaceId}
+        files={files}
+        folders={folders}
+        activeTab={wb.activeTab}
+        expandedFolders={wb.expandedFolders}
+        pinned={wb.pinned}
+        createRequest={createRequest}
+        onOpenFile={openFile}
+        onSetFolderExpanded={setExplorerFolderExpanded}
+        onToggleFolder={toggleExplorerFolder}
+        onTogglePin={toggleExplorerPin}
+        onBeforeChanges={flushActiveDraft}
+        onPathsChanged={onExplorerPathsChanged}
+        onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
+        onRefresh={() => void refreshFiles()}
+        onNewFileDialog={() => setNewFileOpen(true)}
+      />
 
       <footer className="flex flex-col border-t border-line px-1 py-1">
         <button
@@ -586,6 +635,29 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <PanelRight size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "explorer" ? (
+                <>
+                  <button
+                    type="button"
+                    data-testid="explorer-new-file"
+                    aria-label="New file"
+                    title="New file"
+                    onClick={() => requestExplorerCreate("file")}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  >
+                    <FilePlus2 size={13} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="explorer-new-folder"
+                    aria-label="New folder"
+                    title="New folder"
+                    onClick={() => requestExplorerCreate("folder")}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  >
+                    <FolderPlus size={13} aria-hidden />
+                  </button>
+                </>
               ) : undefined
             }
           >
@@ -617,6 +689,7 @@ export function DesktopWorkspaceShell(props: {
               refreshKey={changeSets.length}
               onOpenPath={openFile}
               onSaveStateChange={onSaveStateChange}
+              registerDraftFlush={registerDraftFlush}
             />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
@@ -705,8 +778,18 @@ export function DesktopWorkspaceShell(props: {
         <NewFileDialog
           workspaceId={props.workspace.workspaceId}
           onClose={() => setNewFileOpen(false)}
-          onCreated={() => {
+          onCreated={(path) => {
             setNewFileOpen(false);
+            // Reveal the new file in the nested tree (expand its ancestors)
+            // and open it — a file created into a collapsed folder must
+            // never be invisible.
+            mutateWb((state) =>
+              ancestorDirs(path).reduce(
+                (acc, dir) => setFolderExpanded(acc, dir, true),
+                state,
+              ),
+            );
+            openFile(path);
             void refreshFiles();
           }}
         />

@@ -1,7 +1,12 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _electron as electron, type ElectronApplication } from "playwright";
+import {
+  _electron as electron,
+  type ElectronApplication,
+  type Locator,
+  type Page,
+} from "playwright";
 
 // Single source for launching the built desktop app in E2E. Keeps the
 // dist path, the WSL --no-sandbox flag, and the test env in one place.
@@ -23,4 +28,44 @@ export async function launchApp(
     cwd: process.cwd(),
     env: { ...process.env, DOHC_DESKTOP_TEST: "1", ...env },
   });
+}
+
+// THE navigation helper for the nested explorer tree (Phase E3): expands
+// each folder segment of `path` (skipping ones already expanded), waits for
+// the leaf row, and clicks it — the spec-side twin of the old flat-list
+// `getByText("<full/path>").click()`. Pass { click: false } to only REVEAL
+// the row (visibility assertions, e.g. files arriving via cloud sync — the
+// timeout covers late-arriving rows under an already-expanded folder).
+export async function openInTree(
+  page: Page,
+  path: string,
+  options: { click?: boolean; timeout?: number } = {},
+): Promise<Locator> {
+  const { click = true, timeout = 15_000 } = options;
+  const tree = page.getByTestId("file-tree");
+  const segments = path.split("/");
+  for (let i = 0; i < segments.length - 1; i++) {
+    const folderPath = segments.slice(0, i + 1).join("/");
+    // tree-row scoped: a PINNED row carries the same data-path.
+    const folder = tree.locator(
+      `[data-testid="tree-row"][data-path="${folderPath}"][data-kind="folder"]`,
+    );
+    await folder.waitFor({ state: "visible", timeout });
+    // Converge instead of single-shot: clicking TOGGLES expansion, and the
+    // read-then-click can race an app-side expansion update (e.g. the
+    // post-rename remap landing between the read and the click would turn
+    // this click into a COLLAPSE). Re-read and re-toggle until expanded.
+    const deadline = Date.now() + timeout;
+    while ((await folder.getAttribute("aria-expanded")) !== "true") {
+      if (Date.now() > deadline) {
+        throw new Error(`openInTree: could not expand folder "${folderPath}"`);
+      }
+      await folder.click();
+      await page.waitForTimeout(100);
+    }
+  }
+  const leaf = tree.locator(`[data-testid="tree-row"][data-path="${path}"]`);
+  await leaf.waitFor({ state: "visible", timeout });
+  if (click) await leaf.click();
+  return leaf;
 }

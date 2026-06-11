@@ -129,7 +129,7 @@ export async function getAppPackage(
   rootPath: string,
   anyPath: string,
 ): Promise<AppPackageInfo | null> {
-  const files = (await listFiles(rootPath)).map((f) => f.path);
+  const files = (await listFiles(rootPath)).files.map((f) => f.path);
   const pkg = discoverApps(files).find(
     (p) => anyPath === p.root || anyPath.startsWith(`${p.root}/`),
   );
@@ -165,7 +165,7 @@ export async function runAppTesterStatic(
   rootPath: string,
   appRoot: string,
 ): Promise<{ ok: boolean; checks: Array<{ name: string; status: string; message?: string }> }> {
-  const allFiles = (await listFiles(rootPath)).map((f) => f.path);
+  const allFiles = (await listFiles(rootPath)).files.map((f) => f.path);
   const pkg = discoverApps(allFiles).find((p) => p.root === appRoot);
   if (!pkg) throw new Error(`Not an app package: ${appRoot}`);
 
@@ -212,7 +212,7 @@ export async function runAppTesterStatic(
 // "ready"-only button is UX, not the security gate. A direct/forged IPC call
 // for an untested, failed, or non-existent app must be refused here.
 export async function grantAppTrust(rootPath: string, appRoot: string): Promise<void> {
-  const allFiles = (await listFiles(rootPath)).map((f) => f.path);
+  const allFiles = (await listFiles(rootPath)).files.map((f) => f.path);
   const pkg = discoverApps(allFiles).find((p) => p.root === appRoot);
   if (!pkg) throw new Error(`Not an app package: ${appRoot}`);
 

@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { cpus, platform, release, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // Phase 16: measures the plan's ten desktop scenarios against the hard
 // budgets in @dohc/performance and writes the results JSON the
@@ -228,9 +228,10 @@ test("file tree: open 1000-file workspace to interactive tree (+ memory working 
     await expect(open).toBeVisible();
     const t0 = performance.now();
     await open.click();
-    await expect(
-      page.getByTestId("file-tree").getByText("notes-00/note-0.md", { exact: true }),
-    ).toBeVisible();
+    // Nested tree (E3): expand notes-00 INSIDE the measured window and wait
+    // for its leaf row — the budget now covers expand latency too (the
+    // collapsed-by-default tree renders ~20 root rows for this fixture).
+    await openInTree(page, "notes-00/note-0.md", { click: false });
     const ms = performance.now() - t0;
 
     // Resource ratchet: total working set with the 1,000-file workspace open.
@@ -428,10 +429,7 @@ test("apps: AppTester on a small app; warm app open is a deferred seam", async (
     );
   });
   const { app, page } = await openSeededWorkspace(home, root);
-  await page
-    .getByTestId("file-tree")
-    .getByText("finance/.apps/ledger/app.json", { exact: true })
-    .click();
+  await openInTree(page, "finance/.apps/ledger/app.json");
   await expect(page.getByTestId("view-app")).toBeVisible();
 
   async function runTester(): Promise<number> {
@@ -491,7 +489,7 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
 
   async function openSqlite(): Promise<number> {
     const clickEpoch = Date.now();
-    await tree.getByText("data/big.sqlite", { exact: true }).click();
+    await openInTree(page, "data/big.sqlite");
     // Anchor on a row unique to this database, then on the freshness mark
     // (see the markdown scenario).
     await expect(page.getByTestId("db-table")).toContainText("item-0");
@@ -501,7 +499,7 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
   let firstPageMs = await openSqlite();
   if (firstPageMs > sqliteBudget * 0.75 && firstPageMs < sqliteBudget * 1.25) {
     // Swap away and re-open for a real second measurement.
-    await tree.getByText("data/rows.csv", { exact: true }).click();
+    await openInTree(page, "data/rows.csv");
     await expect(page.getByTestId("view-csv")).toBeVisible({ timeout: 60_000 });
     firstPageMs = Math.min(firstPageMs, await openSqlite());
   }
@@ -512,7 +510,7 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
   // opens the new database on its first page. dispatchEvent instead of a
   // mouse click: the import blocks the MAIN process (deferred finding), which
   // stalls CDP input dispatch — a hardware-style click can never complete.
-  await tree.getByText("data/rows.csv", { exact: true }).click();
+  await openInTree(page, "data/rows.csv");
   await expect(page.getByTestId("view-csv")).toBeVisible({ timeout: 60_000 });
   const t0 = performance.now();
   await page.getByTestId("csv-import-sqlite").dispatchEvent("click");

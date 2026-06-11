@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // Two Electron clients on the SAME shared markdown doc must converge live via
 // Hocuspocus. Boots the real workspace-api (Better Auth + collab-token) and a
@@ -119,7 +119,7 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   const appA = await launchApp(envFor(a));
   const pageA = await appA.firstWindow();
   await signInAndEnableSync(pageA);
-  await pageA.getByTestId("file-tree").getByText("notes/doc.md", { exact: true }).click();
+  await openInTree(pageA, "notes/doc.md");
   await expect(pageA.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
   // The bootstrapped content MUST survive — the editor opens with it, never
   // blank. (Regression guard: a wrong-field bind / pre-sync materialize would
@@ -131,7 +131,7 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   const appB = await launchApp(envFor(b));
   const pageB = await appB.firstWindow();
   await signInAndEnableSync(pageB);
-  await pageB.getByTestId("file-tree").getByText("notes/doc.md", { exact: true }).click();
+  await openInTree(pageB, "notes/doc.md");
   await expect(pageB.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
   await expect(pageB.getByTestId("collab-editor")).toHaveValue(/# Shared doc/, { timeout: 20_000 });
 
@@ -186,7 +186,7 @@ test("a personal local workspace edits fully without any collab server", async (
   const page = await app.firstWindow();
   await page.getByRole("button", { name: /open an existing folder/i }).click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
-  await page.getByTestId("file-tree").getByText("notes/doc.md", { exact: true }).click();
+  await openInTree(page, "notes/doc.md");
   await expect(page.getByTestId("view-markdown")).toBeVisible();
   // The local edit toggle exists; the collab editor never appears.
   await expect(page.getByTestId("markdown-edit-toggle")).toBeVisible();

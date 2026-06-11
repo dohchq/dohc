@@ -1,12 +1,18 @@
 import { WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import {
+  MAX_EXPANDED_FOLDERS,
   MAX_OPEN_TABS,
+  MAX_PINNED_PATHS,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
-import { MENU_COMMANDS, UPDATE_STATUSES } from "./channels";
+import {
+  EXPLORER_MENU_COMMANDS,
+  MENU_COMMANDS,
+  UPDATE_STATUSES,
+} from "./channels";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -79,6 +85,10 @@ export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
 export const ListWorkspaceFilesResult = z.object({
   files: z.array(WorkspaceFileEntry),
+  // Additive (Phase E3 explorer): directories ride along so EMPTY folders
+  // appear in the tree. Optional so older fixtures/consumers keep parsing;
+  // the main-side walk always provides it.
+  folders: z.array(PATH_STRING).optional(),
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -97,8 +107,82 @@ export type CreateWorkspaceFileResult = z.infer<
   typeof CreateWorkspaceFileResult
 >;
 
+// Phase E3 file-management surfaces. Every op mirrors createWorkspaceFile's
+// handler shape (assertTrustedSender → parse → requireWorkspace → op →
+// result parse) and the workspaceFiles containment sandwich on every path.
+
+export const CreateWorkspaceFolderPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+});
+export type CreateWorkspaceFolderPayload = z.infer<
+  typeof CreateWorkspaceFolderPayload
+>;
+
+// rename === move: ONE engine — F2, inline rename, and drag-drop all call it.
+export const MoveWorkspacePathPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  fromPath: PATH_STRING,
+  toPath: PATH_STRING,
+});
+export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
+
+export const DeleteWorkspacePathPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+});
+export type DeleteWorkspacePathPayload = z.infer<
+  typeof DeleteWorkspacePathPayload
+>;
+
+// trashed: true = OS trash; false = the .dohc/trash fallback (cross-
+// filesystem mounts where g_file_trash rejects). Both are recoverable.
+export const DeleteWorkspacePathResult = z.object({
+  trashed: z.boolean(),
+});
+export type DeleteWorkspacePathResult = z.infer<typeof DeleteWorkspacePathResult>;
+
+// relativePath absent = export the whole workspace. The output path comes
+// from a MAIN-process save dialog — the renderer never names one. null =
+// the user cancelled the dialog.
+export const ExportWorkspaceZipPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING.optional(),
+});
+export type ExportWorkspaceZipPayload = z.infer<typeof ExportWorkspaceZipPayload>;
+
+export const ExportWorkspaceZipResult = z.object({
+  path: PATH_STRING.nullable(),
+});
+export type ExportWorkspaceZipResult = z.infer<typeof ExportWorkspaceZipResult>;
+
+// Explorer context menu: the renderer names WHAT was right-clicked, main
+// builds the native Menu from main-owned labels over the closed
+// EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the SAME invoke
+// with the chosen id (null = dismissed). No event channel needed.
+export const ShowExplorerMenuPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  // Absent for the root (container background) menu.
+  path: PATH_STRING.optional(),
+  kind: z.enum(["file", "folder", "root"]),
+  pinned: z.boolean(),
+});
+export type ShowExplorerMenuPayload = z.infer<typeof ShowExplorerMenuPayload>;
+
+export const ExplorerMenuCommand = z.enum(EXPLORER_MENU_COMMANDS);
+export type ExplorerMenuCommand = z.infer<typeof ExplorerMenuCommand>;
+
+export const ShowExplorerMenuResult = ExplorerMenuCommand.nullable();
+export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
+
 export const ImportWorkspaceFilesPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  // OS drag-in (Phase E3): absolute source paths resolved by the PRELOAD
+  // (webUtils.getPathForFile) from a drop event. TRUST DELTA vs the dialog
+  // flow: these are renderer-supplied — main re-validates every one through
+  // the picker-grade import path (importDroppedPaths: regular files only,
+  // never a registered workspace's .dohc) and the count is capped here.
+  droppedPaths: z.array(PATH_STRING).max(100).optional(),
 });
 export type ImportWorkspaceFilesPayload = z.infer<
   typeof ImportWorkspaceFilesPayload
@@ -449,6 +533,10 @@ export const WorkspaceUiState = z.object({
   tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
   activeTab: PATH_STRING.nullable(),
   historyVisible: z.boolean(),
+  // Additive (Phase E3 explorer), still version 1: optional fields parse old
+  // files, and zod's non-strict parse drops unknown keys for old readers.
+  expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),
+  pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
 });
 export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
 
@@ -496,6 +584,28 @@ export interface DohcDesktopBridge {
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;
+  createWorkspaceFolder(
+    payload: CreateWorkspaceFolderPayload,
+  ): Promise<CreateWorkspaceFileResult>;
+  moveWorkspacePath(
+    payload: MoveWorkspacePathPayload,
+  ): Promise<CreateWorkspaceFileResult>;
+  deleteWorkspacePath(
+    payload: DeleteWorkspacePathPayload,
+  ): Promise<DeleteWorkspacePathResult>;
+  exportWorkspaceZip(
+    payload: ExportWorkspaceZipPayload,
+  ): Promise<ExportWorkspaceZipResult>;
+  // Native explorer context menu; resolves with the chosen closed-tuple
+  // command (validated in the preload via isExplorerMenuCommand) or null.
+  showExplorerMenu(
+    payload: ShowExplorerMenuPayload,
+  ): Promise<ShowExplorerMenuResult>;
+  // OS drag-in: maps dropped File objects to absolute paths via
+  // webUtils.getPathForFile in the PRELOAD (sandboxed renderers have no
+  // File.path since Electron 32). The paths feed importWorkspaceFiles'
+  // droppedPaths — see the trust-delta note on that payload.
+  getDroppedFilePaths(files: File[]): string[];
   importWorkspaceFiles(
     payload: ImportWorkspaceFilesPayload,
   ): Promise<ImportWorkspaceFilesResult>;

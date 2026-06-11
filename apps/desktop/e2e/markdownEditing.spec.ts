@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // The local editing loop: edit in source mode, autosave through the bounded
 // write IPC, the file on disk IS the result, and the watcher records it into
@@ -24,7 +24,7 @@ test("markdown edits autosave to disk and land in history", async () => {
   await page.getByRole("button", { name: /open an existing folder/i }).click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-  await page.getByTestId("file-tree").getByText("notes/today.md", { exact: true }).click();
+  await openInTree(page, "notes/today.md");
   await expect(page.getByTestId("view-markdown")).toBeVisible();
 
   // Enter source mode, append a line, let the autosave settle.

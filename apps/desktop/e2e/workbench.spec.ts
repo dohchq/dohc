@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
-import { launchApp } from "./launch";
+import { launchApp, openInTree } from "./launch";
 
 // Phase E2 gate: the VS Code-style workbench — activity-bar view switching
 // (incl. designed empty states), side-panel toggle/resize with ui-state
@@ -158,9 +158,8 @@ test("sidebar: Ctrl+B toggle, drag resize, ui-state persistence across relaunch 
   expect(Math.abs(draggedWidth - 360)).toBeLessThanOrEqual(1);
 
   // Open both files (tabs) so the relaunch has something to restore.
-  const tree = page.getByTestId("file-tree");
-  await tree.getByText("notes/a.md", { exact: true }).click();
-  await tree.getByText("notes/b.md", { exact: true }).click();
+  await openInTree(page, "notes/a.md");
+  await openInTree(page, "notes/b.md");
   await expect(page.getByTestId("tab-notes/a.md")).toBeVisible();
   await expect(page.getByTestId("tab-notes/b.md")).toHaveAttribute("data-active", "true");
 
@@ -392,7 +391,7 @@ test("status bar: clean status carries no conflict count; update toast appears o
   // Screenshots (1/2): the full workbench (tabs open, rail visible) at both
   // gate sizes, light and dark. The E2-specific states (dirty/inactive tabs,
   // empty views, hidden sidebar) get their own captures below.
-  await page.getByTestId("file-tree").getByText("notes/today.md", { exact: true }).click();
+  await openInTree(page, "notes/today.md");
   await expect(page.getByTestId("view-markdown")).toBeVisible();
   await page.emulateMedia({ colorScheme: "light" });
   await expect
@@ -427,9 +426,8 @@ test("screenshots (2/2): dirty + inactive tabs, agent empty view, hidden sidebar
   });
   const { app, page } = await openSeeded(home, root);
   await page.setViewportSize({ width: 1280, height: 800 });
-  const tree = page.getByTestId("file-tree");
-  await tree.getByText("notes/ideas.md", { exact: true }).click();
-  await tree.getByText("notes/today.md", { exact: true }).click();
+  await openInTree(page, "notes/ideas.md");
+  await openInTree(page, "notes/today.md");
   await expect(page.getByTestId("tab-notes/today.md")).toHaveAttribute(
     "data-active",
     "true",
