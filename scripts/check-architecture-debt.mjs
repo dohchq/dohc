@@ -206,6 +206,7 @@ const HISTORICAL_DOCS = new Set([
   term("docs/superpowers/reviews/2026-06-10-conv", "ex-deletion-review.md"),
   "docs/superpowers/reviews/2026-06-10-desktop-component-reuse-map.md",
   "docs/superpowers/reviews/2026-06-10-desktop-local-first-cloud-sync-plan-audit.md",
+  "docs/superpowers/reviews/2026-06-10-desktop-local-first-readiness-review.md",
   "docs/superpowers/reviews/2026-06-10-desktop-local-first-tech-debt-audit.md",
   "docs/superpowers/reviews/2026-06-10-old-plan-port-delete-inventory.md",
   "docs/superpowers/reviews/codex/checkpoint-phase-04.md",
