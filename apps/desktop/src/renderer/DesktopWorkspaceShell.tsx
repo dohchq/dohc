@@ -81,6 +81,7 @@ function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
       {changeSets.map((change) => (
         <li
           key={change.id}
+          data-testid="change-set"
           className="flex flex-col gap-0.5 border-b border-line px-3 py-2"
         >
           <span className="flex items-center gap-1.5 text-[12px] text-ink">
@@ -622,6 +623,13 @@ export function DesktopWorkspaceShell(props: {
   return (
     <div
       data-testid="workspace-shell"
+      // Flips to "true" only once openWorkspace has resolved — which in main
+      // awaits the file watcher's initial scan (workspaceActivity.open races
+      // handle.ready). The shell element itself mounts immediately, so a test
+      // that writes a file right after the shell appears would otherwise race
+      // chokidar's ignoreInitial scan and have the write silently swallowed.
+      // Waiting on this attribute is the deterministic "watcher is live" gate.
+      data-ready={syncStatus ? "true" : "false"}
       className="app-chrome flex h-screen flex-col bg-bg text-ink"
     >
       <Titlebar
