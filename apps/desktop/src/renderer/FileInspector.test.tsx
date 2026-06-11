@@ -2,7 +2,23 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyForView, FileInspector } from "./FileInspector";
+import { classifyForView, FileInspector, lineSpanInText } from "./FileInspector";
+
+describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
+  const text = "first\nsecond line\n\nfourth";
+
+  it("spans each 1-based line, excluding the newline", () => {
+    expect(lineSpanInText(text, 1)).toEqual({ start: 0, end: 5 });
+    expect(lineSpanInText(text, 2)).toEqual({ start: 6, end: 17 });
+    expect(lineSpanInText(text, 3)).toEqual({ start: 18, end: 18 }); // empty line
+    expect(lineSpanInText(text, 4)).toEqual({ start: 19, end: 25 });
+  });
+
+  it("clamps a line past the end to the last line", () => {
+    expect(lineSpanInText(text, 99)).toEqual({ start: 19, end: 25 });
+    expect(lineSpanInText("", 5)).toEqual({ start: 0, end: 0 });
+  });
+});
 
 describe("classifyForView dispatch", () => {
   const cases: Array<[string, string]> = [

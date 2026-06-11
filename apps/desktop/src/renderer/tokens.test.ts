@@ -36,6 +36,7 @@ const CSS_NAME: Record<keyof ThemeTokens, string> = {
   muted: "muted",
   subtle: "subtle",
   accent: "accent",
+  match: "match",
   success: "success",
   warning: "warning",
   danger: "danger",
@@ -116,6 +117,16 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "subtle", bg: "bg", min: 3.0 },
     { fg: "subtle", bg: "panel", min: 3.0 },
     { fg: "subtle", bg: "panel2", min: 3.0 },
+    // The find-match mark is an OPAQUE chip that must pop on every surface a
+    // result row renders on: the side panel, the hover row (panel-2), AND the
+    // keyboard-selected row (line) — 3:1 is the graphical-object bar.
+    { fg: "match", bg: "panel", min: 3.0 },
+    { fg: "match", bg: "panel2", min: 3.0 },
+    { fg: "match", bg: "line", min: 3.0 },
+    // Bold ink text sits ON the mark. Light clears AA (4.62); dark tops out
+    // at 4.27 — the physical ceiling while the mark itself holds 3:1 against
+    // the selected-row bg (bold weight carries the remaining gap).
+    { fg: "ink", bg: "match", min: 4.2 },
   ];
 
   for (const mode of ["light", "dark"] as const) {

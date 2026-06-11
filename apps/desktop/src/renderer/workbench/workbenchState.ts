@@ -29,6 +29,9 @@ export interface WorkbenchState {
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
   pinned: string[];
+  // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
+  // quick-open ranking. Persisted with the rest of the ui-state.
+  recentFiles: string[];
 }
 
 export const SIDEBAR_MIN_WIDTH = 200;
@@ -39,6 +42,8 @@ export const MAX_OPEN_TABS = 100;
 // Bounds the persisted explorer state the same way (oldest entries give way).
 export const MAX_EXPANDED_FOLDERS = 500;
 export const MAX_PINNED_PATHS = 100;
+// Recent-files list for quick-open ranking (Phase E5.0).
+export const MAX_RECENT_FILES = 20;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -50,6 +55,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     historyVisible: true,
     expandedFolders: [],
     pinned: [],
+    recentFiles: [],
   };
 }
 
@@ -160,6 +166,18 @@ export function toggleFolderExpanded(
   return setFolderExpanded(state, path, !state.expandedFolders.includes(path));
 }
 
+// Records a file open for quick-open recency ranking: most recent FIRST,
+// deduped, capped at MAX_RECENT_FILES (oldest gives way). Re-opening the
+// already-most-recent file is a no-op (same reference).
+export function recordRecentFile(state: WorkbenchState, path: string): WorkbenchState {
+  if (state.recentFiles[0] === path) return state;
+  const recentFiles = [
+    path,
+    ...state.recentFiles.filter((recent) => recent !== path),
+  ].slice(0, MAX_RECENT_FILES);
+  return { ...state, recentFiles };
+}
+
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -204,6 +222,7 @@ export function remapWorkbenchPaths(
     activeTab,
     expandedFolders: remapList(state.expandedFolders),
     pinned: remapList(state.pinned),
+    recentFiles: remapList(state.recentFiles),
   };
 }
 
@@ -222,6 +241,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     historyVisible: state.historyVisible,
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
+    recentFiles: state.recentFiles,
   };
 }
 
@@ -283,5 +303,6 @@ export function parseUiState(raw: unknown): WorkbenchState {
         : defaults.historyVisible,
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
+    recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
   };
 }

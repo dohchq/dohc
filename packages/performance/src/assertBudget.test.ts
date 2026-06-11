@@ -23,6 +23,10 @@ describe("performanceBudgets", () => {
       appTesterSmallAppMs: 15000,
       sqliteTenThousandRowsFirstPageMs: 1000,
       csvTenThousandRowsImportMs: 5000,
+      // Phase E5.0 additions (content search over the 10k-file fixture).
+      contentSearchFirstResultMs: 300,
+      contentSearchCompleteMs: 1500,
+      searchKeystrokeLongTaskMs: 50,
     });
   });
 });

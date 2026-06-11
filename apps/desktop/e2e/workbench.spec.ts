@@ -90,15 +90,24 @@ test("activity bar: view switching with designed empty states, panel collapse on
   );
   await expect(page.getByTestId("file-tree")).toBeVisible();
 
+  // Search graduated to its real view in E5.0 (search.spec.ts drives it).
+  await page.getByTestId("activity-search").click();
+  await expect(page.getByTestId("activity-search")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.getByTestId("search-view")).toBeVisible();
+  await expect(page.getByTestId("file-tree")).toHaveCount(0);
+
   // Each not-yet-built view renders its designed empty state in the panel.
-  for (const view of ["search", "graph", "apps", "agent"] as const) {
+  for (const view of ["graph", "apps", "agent"] as const) {
     await page.getByTestId(`activity-${view}`).click();
     await expect(page.getByTestId(`activity-${view}`)).toHaveAttribute(
       "aria-current",
       "page",
     );
     await expect(page.getByTestId("view-empty-state")).toContainText(
-      new RegExp(view === "search" ? "search" : view, "i"),
+      new RegExp(view, "i"),
     );
     await expect(page.getByTestId("file-tree")).toHaveCount(0);
   }

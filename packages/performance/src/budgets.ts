@@ -19,6 +19,13 @@ export const performanceBudgets = {
   appTesterSmallAppMs: 15000,
   sqliteTenThousandRowsFirstPageMs: 1000,
   csvTenThousandRowsImportMs: 5000,
+  // Phase E5.0 content search (ADDITIVE rows, named in the phase's codex
+  // review per the budget-edit rule): ripgrep over a generated 10,000-file /
+  // ~100MB workspace fixture. First streamed batch rendered, full scan
+  // complete, and typing in the search box never janks the renderer.
+  contentSearchFirstResultMs: 300,
+  contentSearchCompleteMs: 1500,
+  searchKeystrokeLongTaskMs: 50,
 } as const;
 
 export type BudgetName = keyof typeof performanceBudgets;

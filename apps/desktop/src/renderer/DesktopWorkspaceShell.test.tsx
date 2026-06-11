@@ -63,6 +63,10 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     onWorkspaceActivity: vi.fn(() => () => {}),
     onMenuCommand: vi.fn(() => () => {}),
     onUpdateState: vi.fn(() => () => {}),
+    // Content search (E5.0): the shell subscribes on mount.
+    onSearchResults: vi.fn(() => () => {}),
+    searchWorkspace: vi.fn(async () => undefined),
+    cancelWorkspaceSearch: vi.fn(async () => undefined),
   };
 }
 

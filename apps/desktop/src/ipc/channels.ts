@@ -105,6 +105,113 @@ export function parseUpdateStateEvent(
   return { status: status as UpdateStatusId, message };
 }
 
+// Closed main→renderer search-results event shape (Phase E5.0). Like
+// parseUpdateStateEvent this lives here, not bridgeContract, because the
+// SANDBOXED preload validates every batch against it as a plain value and
+// must stay dependency-free. The bounds mirror workspaceSearch.ts (the main-
+// side producer) and bridgeContract's zod schema derives from the same
+// limits — channels.test.ts pins them so the three can never drift.
+export const SEARCH_EVENT_MAX_ENTRIES = 50;
+export const SEARCH_EVENT_MAX_PREVIEW_CHARS = 250;
+export const SEARCH_EVENT_MAX_ID_CHARS = 64;
+const SEARCH_EVENT_MAX_PATH_CHARS = 4096;
+
+export interface SearchResultsEventEntry {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface SearchResultsEvent {
+  searchId: string;
+  entries: SearchResultsEventEntry[];
+  done: boolean;
+  limitHit: boolean;
+}
+
+function isBoundedString(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max;
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+// Dependency-free lexical path check for the preload boundary: relative,
+// forward-slashed, no null bytes, no backslashes, no empty/dot/dot-dot
+// segments. Main ALREADY ran validateUserWritePath before sending (it owns
+// containment); this re-check is the sandboxed preload's own closed gate —
+// it cannot require workspace-core, so it enforces the same lexical rules
+// inline. A path that fails drops the WHOLE batch (a tampered event is not
+// salvageable row by row).
+export function isSafeRelativePath(value: unknown): value is string {
+  if (!isBoundedString(value, SEARCH_EVENT_MAX_PATH_CHARS)) return false;
+  if (value.includes("\0") || value.includes("\\")) return false;
+  if (value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
+  for (const segment of value.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return false;
+  }
+  return true;
+}
+
+// THE preload boundary check for search-result events: only a plain object
+// whose searchId is a bounded primitive string and whose entries ALL pass the
+// closed entry shape (safe relative path, 1-based integer line/column,
+// bounded preview, ordered in-bounds match offsets) gets through — and only
+// the validated fields are REBUILT into a fresh object (extra fields never
+// cross; String objects/toString tricks fail the typeof checks). Unit-tested
+// like parseUpdateStateEvent.
+export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  if (
+    !Object.hasOwn(value, "searchId") ||
+    !Object.hasOwn(value, "entries") ||
+    !Object.hasOwn(value, "done") ||
+    !Object.hasOwn(value, "limitHit")
+  ) {
+    return null;
+  }
+  const { searchId, entries, done, limitHit } = value as {
+    searchId?: unknown;
+    entries?: unknown;
+    done?: unknown;
+    limitHit?: unknown;
+  };
+  if (!isBoundedString(searchId, SEARCH_EVENT_MAX_ID_CHARS)) return null;
+  if (typeof done !== "boolean" || typeof limitHit !== "boolean") return null;
+  if (!Array.isArray(entries) || entries.length > SEARCH_EVENT_MAX_ENTRIES) return null;
+  const safeEntries: SearchResultsEventEntry[] = [];
+  for (const raw of entries) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const entry = raw as Record<string, unknown>;
+    const { path, line, column, preview, matchStart, matchEnd } = entry;
+    if (!isSafeRelativePath(path)) return null;
+    if (!isPositiveInt(line) || !isPositiveInt(column)) return null;
+    if (
+      typeof preview !== "string" ||
+      preview.length > SEARCH_EVENT_MAX_PREVIEW_CHARS
+    ) {
+      return null;
+    }
+    if (
+      typeof matchStart !== "number" ||
+      typeof matchEnd !== "number" ||
+      !Number.isInteger(matchStart) ||
+      !Number.isInteger(matchEnd) ||
+      matchStart < 0 ||
+      matchEnd < matchStart ||
+      matchEnd > preview.length
+    ) {
+      return null;
+    }
+    safeEntries.push({ path, line, column, preview, matchStart, matchEnd });
+  }
+  return { searchId, entries: safeEntries, done, limitHit };
+}
+
 export const CHANNELS = {
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
@@ -145,6 +252,9 @@ export const CHANNELS = {
   setTitlebarTheme: "desktop:set-titlebar-theme",
   getWorkspaceUiState: "desktop:get-workspace-ui-state",
   setWorkspaceUiState: "desktop:set-workspace-ui-state",
+  searchWorkspace: "desktop:search-workspace",
+  cancelWorkspaceSearch: "desktop:cancel-workspace-search",
+  searchResults: "desktop:search-results",
   menuCommand: "desktop:menu-command",
   updateState: "desktop:update-state",
   workspaceActivity: "desktop:workspace-activity",

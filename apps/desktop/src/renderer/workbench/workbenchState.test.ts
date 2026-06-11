@@ -18,6 +18,8 @@ import {
   MAX_OPEN_TABS,
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
+  MAX_RECENT_FILES,
+  recordRecentFile,
   remapWorkbenchPaths,
   setFolderExpanded,
   toggleFolderExpanded,
@@ -268,6 +270,36 @@ describe("explorer expansion + pins (Phase E3)", () => {
     const old = parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" });
     expect(old.expandedFolders).toEqual([]);
     expect(old.pinned).toEqual([]);
+  });
+});
+
+describe("recent files (Phase E5.0 quick-open ranking)", () => {
+  it("records most-recent-first with dedupe; re-opening the head no-ops", () => {
+    let state = defaultWorkbenchState();
+    state = recordRecentFile(state, "a.md");
+    state = recordRecentFile(state, "b.md");
+    expect(state.recentFiles).toEqual(["b.md", "a.md"]);
+    state = recordRecentFile(state, "a.md");
+    expect(state.recentFiles).toEqual(["a.md", "b.md"]);
+    expect(recordRecentFile(state, "a.md")).toBe(state); // head re-open: same ref
+  });
+
+  it("caps at MAX_RECENT_FILES (oldest gives way)", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_RECENT_FILES + 5; i++) {
+      state = recordRecentFile(state, `f-${i}.md`);
+    }
+    expect(state.recentFiles).toHaveLength(MAX_RECENT_FILES);
+    expect(state.recentFiles[0]).toBe(`f-${MAX_RECENT_FILES + 4}.md`);
+  });
+
+  it("round-trips through ui-state; old files parse to empty", () => {
+    let state = withTabs("a.md");
+    state = recordRecentFile(state, "a.md");
+    expect(parseUiState(serializeUiState(state)).recentFiles).toEqual(["a.md"]);
+    expect(
+      parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles,
+    ).toEqual([]);
   });
 });
 

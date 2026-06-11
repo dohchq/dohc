@@ -16,6 +16,7 @@ export interface ThemeTokens {
   muted: string;
   subtle: string;
   accent: string;
+  match: string;
   success: string;
   warning: string;
   danger: string;
@@ -35,6 +36,13 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // just bg — in both modes (see the contrast test).
     subtle: "#8b8b93",
     accent: "#18181b",
+    // Find-match highlight (search panel <mark>, pressed search toggles):
+    // the editor's selection-blue family, tuned so the OPAQUE mark clears
+    // 3:1 against panel/panel-2 AND the selected-row bg (line), with bold
+    // ink text on it at AA (4.62:1) — see the contrast test below. The
+    // graphite accent stays the only structural accent; this token means
+    // exactly one thing: "your match".
+    match: "#3a80ec",
     success: "#15803d",
     warning: "#a16207",
     danger: "#b91c1c",
@@ -49,6 +57,11 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     muted: "#a1a1aa",
     subtle: "#71717a",
     accent: "#fafafa",
+    // Dark variant: 3:1+ vs panel/panel-2/line. Ink-on-match is 4.27:1 —
+    // the physical ceiling while holding 3:1 against the selected-row bg
+    // (any brighter mark erodes the ink text further); the mark text is
+    // bold, which carries the remaining gap.
+    match: "#3270f0",
     success: "#4ade80",
     warning: "#fbbf24",
     danger: "#f87171",

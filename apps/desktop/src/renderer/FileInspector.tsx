@@ -25,6 +25,35 @@ function extensionOf(path: string): string {
   return dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
 }
 
+// A search result landing in the editor (Phase E5.0). nonce distinguishes
+// repeated jumps to the same path+line; the shell clears the target once a
+// mounted view consumed it, so later plain opens of the same file never
+// re-trigger the jump.
+export interface ScrollTarget {
+  path: string;
+  line: number;
+  nonce: number;
+}
+
+// [start, end) character span of 1-based `line` within `text` (end excludes
+// the newline). Lines past the end clamp to the last line. Pure — unit
+// tested; the editor uses it to select the landed-on line.
+export function lineSpanInText(
+  text: string,
+  line: number,
+): { start: number; end: number } {
+  let start = 0;
+  let current = 1;
+  while (current < line) {
+    const nextBreak = text.indexOf("\n", start);
+    if (nextBreak === -1) break;
+    start = nextBreak + 1;
+    current += 1;
+  }
+  const lineEnd = text.indexOf("\n", start);
+  return { start, end: lineEnd === -1 ? text.length : lineEnd };
+}
+
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
 const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
@@ -170,12 +199,42 @@ function MarkdownView(props: {
   workspaceId: string;
   path: string;
   truncatedNotice?: React.ReactNode;
+  // A pending search-result jump for this path (Phase E5.0).
+  scrollTarget?: ScrollTarget;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
+  // to anchor, so the smallest honest seam is opening SOURCE mode and
+  // selecting the matched line. Phase E4's WYSIWYG editor takes this seam
+  // over with a real in-document scroll-to-position once it owns the surface.
+  const [pendingScrollLine, setPendingScrollLine] = useState<number | null>(null);
+  const scrollTargetNonce = props.scrollTarget?.nonce;
+  useEffect(() => {
+    if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
+    setEditing(true);
+    setPendingScrollLine(props.scrollTarget.line);
+    // Applied once per jump: nonce is the identity of one click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollTargetNonce]);
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (pendingScrollLine === null || !editing) return;
+    const textarea = editorRef.current;
+    if (!textarea) return;
+    const { start, end } = lineSpanInText(textarea.value, pendingScrollLine);
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+    const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 21;
+    textarea.scrollTop = Math.max(
+      0,
+      (pendingScrollLine - 1) * lineHeight - textarea.clientHeight / 3,
+    );
+    setPendingScrollLine(null);
+  }, [pendingScrollLine, editing]);
 
   // Lift the save state to the shell (smallest seam): the active editor tab
   // shows a dirty dot while this is not "saved".
@@ -384,6 +443,7 @@ function MarkdownView(props: {
       {editing ? (
         <textarea
           data-testid="markdown-editor"
+          ref={editorRef}
           autoFocus
           value={draft}
           onChange={(e) => onDraft(e.target.value)}
@@ -591,9 +651,28 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
-function CodeView({ body, testId }: { body: string; testId: string }) {
+function CodeView({
+  body,
+  testId,
+  scrollLine,
+}: {
+  body: string;
+  testId: string;
+  // Search-result landing for read-only text views (Phase E5.0): scroll the
+  // pre so the matched line sits in the upper third.
+  scrollLine?: number;
+}) {
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (scrollLine === undefined) return;
+    const pre = preRef.current;
+    if (!pre) return;
+    const lineHeight = Number.parseFloat(getComputedStyle(pre).lineHeight) || 20;
+    pre.scrollTop = Math.max(0, (scrollLine - 1) * lineHeight - pre.clientHeight / 3);
+  }, [scrollLine]);
   return (
     <pre
+      ref={preRef}
       data-testid={testId}
       className="min-h-0 flex-1 overflow-auto p-4 font-mono text-[13px] text-ink"
     >
@@ -669,6 +748,10 @@ export function FileInspector(props: {
   path: string;
   refreshKey?: number;
   onOpenPath?: (path: string) => void;
+  // A pending search-result jump (Phase E5.0). Consumed (onScrollConsumed)
+  // once a mounted view applied it, so plain re-opens never re-jump.
+  scrollTarget?: ScrollTarget;
+  onScrollConsumed?: () => void;
   // Editor save-state seam for the tab strip's dirty indicator. Only the
   // markdown editor saves locally, so it is the only dirty source.
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
@@ -684,6 +767,16 @@ export function FileInspector(props: {
     isText,
     props.refreshKey ?? 0,
   );
+  // Consume the jump AFTER the child view's own effects applied it (child
+  // effects run before this parent effect). Text views wait for the loaded
+  // text; every other kind has nowhere to land, so consume immediately.
+  const { scrollTarget, onScrollConsumed } = props;
+  const textReady = !isText || (text !== null && loadedPath === props.path);
+  useEffect(() => {
+    if (scrollTarget && scrollTarget.path === props.path && textReady) {
+      onScrollConsumed?.();
+    }
+  }, [scrollTarget, props.path, textReady, onScrollConsumed]);
   const url = assetUrl(props.workspaceId, props.path);
   const truncatedNotice =
     isText && truncated ? (
@@ -712,6 +805,7 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             truncatedNotice={truncatedNotice}
+            scrollTarget={props.scrollTarget}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />
@@ -736,7 +830,15 @@ export function FileInspector(props: {
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label={kind === "json" ? "json" : "text"} />
           {truncatedNotice}
-          <CodeView body={text ?? ""} testId={kind === "json" ? "view-json" : "view-text"} />
+          <CodeView
+            body={text ?? ""}
+            testId={kind === "json" ? "view-json" : "view-text"}
+            scrollLine={
+              props.scrollTarget?.path === props.path
+                ? props.scrollTarget.line
+                : undefined
+            }
+          />
         </div>
       );
     case "image":

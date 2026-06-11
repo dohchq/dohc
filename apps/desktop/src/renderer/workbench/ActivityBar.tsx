@@ -44,6 +44,8 @@ function RailButton(props: {
   active?: boolean;
   // Badge dot seam (conflicts, running agent — more arrive in later phases).
   badge?: "danger" | "success";
+  // Numeric badge seam (Phase E5.0: search results count while showing).
+  count?: number;
   onClick: () => void;
   Icon: typeof Files;
 }) {
@@ -74,6 +76,18 @@ function RailButton(props: {
           }`}
         />
       ) : null}
+      {typeof props.count === "number" ? (
+        <span
+          data-testid={`${props.testId}-count`}
+          className="absolute -right-0.5 -top-0.5 min-w-3.5 rounded-full bg-ink px-1 text-center text-[9px] font-semibold leading-[14px] text-bg"
+        >
+          {/* Clamp at 99+: the right-anchored pill grows leftward, and at
+              four glyphs ("999+") it spanned ~36px of the 48px rail and
+              detached from its icon. Three glyphs keeps it a corner
+              ornament on the icon tile. */}
+          {props.count > 99 ? "99+" : props.count}
+        </span>
+      ) : null}
     </button>
   );
 }
@@ -83,6 +97,8 @@ export function ActivityBar(props: {
   sidebarVisible: boolean;
   hasConflict: boolean;
   agentActive: boolean;
+  // Content-search results count (Phase E5.0); undefined = no badge.
+  searchResultCount?: number;
   onSelectView: (view: ViewId) => void;
   onOpenCloud: () => void;
   onOpenSettings: () => void;
@@ -107,6 +123,7 @@ export function ActivityBar(props: {
                 ? "success"
                 : undefined
           }
+          count={view === "search" ? props.searchResultCount : undefined}
           onClick={() => props.onSelectView(view)}
           Icon={ICONS[view]}
         />

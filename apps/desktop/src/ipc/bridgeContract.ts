@@ -4,6 +4,7 @@ import {
   MAX_EXPANDED_FOLDERS,
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
+  MAX_RECENT_FILES,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   VIEW_IDS,
@@ -11,7 +12,11 @@ import {
 import {
   EXPLORER_MENU_COMMANDS,
   MENU_COMMANDS,
+  SEARCH_EVENT_MAX_ENTRIES,
+  SEARCH_EVENT_MAX_ID_CHARS,
+  SEARCH_EVENT_MAX_PREVIEW_CHARS,
   UPDATE_STATUSES,
+  type SearchResultsEvent,
 } from "./channels";
 
 // Typed contract for everything the preload bridge exposes. Main-process
@@ -537,6 +542,9 @@ export const WorkspaceUiState = z.object({
   // files, and zod's non-strict parse drops unknown keys for old readers.
   expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
+  // Additive (Phase E5.0 quick-open ranking), still version 1: the last ~20
+  // opened files, most recent first — recency boosts quick-open results.
+  recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
 });
 export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
 
@@ -548,6 +556,51 @@ export const SetWorkspaceUiStatePayload = z.object({
   state: WorkspaceUiState,
 });
 export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePayload>;
+
+// Workspace content search (Phase E5.0). The renderer mints a bounded
+// searchId per search; main spawns ripgrep rooted at the real workspace root
+// and STREAMS batches back over the desktop:search-results event channel
+// (closed shape, validated in the dependency-free preload via
+// parseSearchResultsEvent — these zod schemas are the main-side mirror, with
+// the same bounds, used to validate batches BEFORE they are sent).
+const SEARCH_ID = z.string().min(1).max(SEARCH_EVENT_MAX_ID_CHARS);
+
+export const WorkspaceSearchPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  searchId: SEARCH_ID,
+  // Bounded like every IPC string: a pattern is a line of text, never a blob.
+  query: z.string().min(1).max(1000),
+  caseSensitive: z.boolean().optional(),
+  wholeWord: z.boolean().optional(),
+  regex: z.boolean().optional(),
+  includeGlob: z.string().min(1).max(256).optional(),
+  excludeGlob: z.string().min(1).max(256).optional(),
+});
+export type WorkspaceSearchPayload = z.infer<typeof WorkspaceSearchPayload>;
+
+export const CancelWorkspaceSearchPayload = z.object({
+  searchId: SEARCH_ID,
+});
+export type CancelWorkspaceSearchPayload = z.infer<
+  typeof CancelWorkspaceSearchPayload
+>;
+
+const SearchResultEntrySchema = z.object({
+  path: PATH_STRING,
+  line: z.number().int().min(1),
+  column: z.number().int().min(1),
+  preview: z.string().max(SEARCH_EVENT_MAX_PREVIEW_CHARS),
+  matchStart: z.number().int().min(0),
+  matchEnd: z.number().int().min(0),
+});
+
+export const SearchResultsEventSchema = z.object({
+  searchId: SEARCH_ID,
+  entries: z.array(SearchResultEntrySchema).max(SEARCH_EVENT_MAX_ENTRIES),
+  done: z.boolean(),
+  limitHit: z.boolean(),
+});
+export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
@@ -659,4 +712,14 @@ export interface DohcDesktopBridge {
   // UPDATE_STATUSES tuple in the preload (parseUpdateStateEvent) before they
   // reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;
+  // Workspace content search (Phase E5.0). Resolves when the search has been
+  // ACCEPTED and the rg child spawned; results stream separately through
+  // onSearchResults. Issuing a new search cancels the previous one in main.
+  searchWorkspace(payload: WorkspaceSearchPayload): Promise<void>;
+  cancelWorkspaceSearch(payload: CancelWorkspaceSearchPayload): Promise<void>;
+  // Streamed result batches, validated batch-by-batch in the preload via the
+  // closed dependency-free parseSearchResultsEvent check. Returns an
+  // unsubscribe function. The searchId round-trips so the renderer drops
+  // batches that belong to a superseded search.
+  onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
 }

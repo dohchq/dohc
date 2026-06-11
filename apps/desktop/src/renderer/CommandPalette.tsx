@@ -14,6 +14,10 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
+  // Optional ranking seam (Phase E5.0): quick-open passes the pure
+  // rankQuickOpenPaths-backed ranker (prefix > word-boundary > fuzzy, recent
+  // boosted, pinned first). Default stays the simple substring filter.
+  rank?: (query: string, commands: Command[]) => Command[];
 }) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -29,9 +33,11 @@ export function CommandPalette(props: {
   const MAX_MATCHES = 50;
   const filterStart = performance.now();
   const needle = query.toLowerCase();
-  const matches = props.commands
-    .filter((command) => command.label.toLowerCase().includes(needle))
-    .slice(0, MAX_MATCHES);
+  const matches = (
+    props.rank
+      ? props.rank(query, props.commands)
+      : props.commands.filter((command) => command.label.toLowerCase().includes(needle))
+  ).slice(0, MAX_MATCHES);
   const filterMs = useRef(0);
   filterMs.current = performance.now() - filterStart;
 

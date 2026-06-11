@@ -8,6 +8,7 @@ import {
   CHANNELS,
   isExplorerMenuCommand,
   isMenuCommand,
+  parseSearchResultsEvent,
   parseUpdateStateEvent,
 } from "./ipc/channels";
 
@@ -137,6 +138,24 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.updateState, handler);
     return () => ipcRenderer.removeListener(CHANNELS.updateState, handler);
+  },
+  // Content search (Phase E5.0): results stream main→renderer as bounded
+  // batches; the searchId round-trips so stale batches drop renderer-side.
+  searchWorkspace: (payload) =>
+    ipcRenderer.invoke(CHANNELS.searchWorkspace, payload),
+  cancelWorkspaceSearch: (payload) =>
+    ipcRenderer.invoke(CHANNELS.cancelWorkspaceSearch, payload),
+  // Same boundary rule as onUpdateState: every batch is validated by the
+  // closed dependency-free parseSearchResultsEvent check (bounded searchId,
+  // entries rebuilt field by field, every path lexically safe-relative) —
+  // anything else never reaches renderer code.
+  onSearchResults: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const batch = parseSearchResultsEvent(raw);
+      if (batch) listener(batch);
+    };
+    ipcRenderer.on(CHANNELS.searchResults, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.searchResults, handler);
   },
 };
 

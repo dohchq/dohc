@@ -4,7 +4,9 @@ import {
   EXPLORER_MENU_COMMANDS,
   isExplorerMenuCommand,
   isMenuCommand,
+  isSafeRelativePath,
   MENU_COMMANDS,
+  parseSearchResultsEvent,
   parseUpdateStateEvent,
   UPDATE_STATUSES,
 } from "./channels";
@@ -126,6 +128,117 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
         Object.assign(Object.create(null), { status: "ready", message: "x" }),
       ),
     ).toEqual({ status: "ready", message: "x" });
+  });
+});
+
+// The preload boundary for main→renderer search-result events (Phase E5.0) —
+// same attack set as parseUpdateStateEvent: only a plain object with a
+// bounded primitive searchId and entries that ALL pass the closed shape gets
+// through, rebuilt field by field so nothing extra ever crosses.
+describe("parseSearchResultsEvent (preload boundary)", () => {
+  const entry = {
+    path: "notes/a.md",
+    line: 3,
+    column: 5,
+    preview: "one needle two",
+    matchStart: 4,
+    matchEnd: 10,
+  };
+  const batch = { searchId: "s1", entries: [entry], done: false, limitHit: false };
+
+  it("accepts a well-formed batch and rebuilds only the validated fields", () => {
+    const parsed = parseSearchResultsEvent({
+      ...batch,
+      entries: [{ ...entry, extra: "dropped" }],
+      injected: true,
+    });
+    expect(parsed).toEqual(batch);
+    expect(parsed!.entries[0]).not.toHaveProperty("extra");
+    expect(parsed).not.toHaveProperty("injected");
+  });
+
+  it("accepts an empty done batch (the final flush)", () => {
+    expect(
+      parseSearchResultsEvent({ searchId: "s2", entries: [], done: true, limitHit: true }),
+    ).toEqual({ searchId: "s2", entries: [], done: true, limitHit: true });
+  });
+
+  it("rejects unsafe paths: absolute, traversal, backslash, null byte, drive letter", () => {
+    for (const path of [
+      "/etc/passwd",
+      "../escape.md",
+      "a/../b.md",
+      "a\\b.md",
+      "a\0b.md",
+      "C:evil.md",
+      "",
+      "x".repeat(5000),
+    ]) {
+      expect(
+        parseSearchResultsEvent({ ...batch, entries: [{ ...entry, path }] }),
+        JSON.stringify(path),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects out-of-bounds offsets, non-integer lines, oversized previews", () => {
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, matchEnd: 999 }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, matchStart: -1 }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, matchEnd: 2, matchStart: 4 }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, line: 0 }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: [{ ...entry, line: 1.5 }] }),
+    ).toBeNull();
+    expect(
+      parseSearchResultsEvent({
+        ...batch,
+        entries: [{ ...entry, preview: "x".repeat(251), matchStart: 0, matchEnd: 1 }],
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects oversized batches, bad ids, and non-primitive impostors", () => {
+    expect(
+      parseSearchResultsEvent({ ...batch, entries: Array.from({ length: 51 }, () => entry) }),
+    ).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, searchId: "" })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, searchId: "x".repeat(65) })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, searchId: new String("s1") })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, done: "false" })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, entries: entry })).toBeNull();
+    expect(parseSearchResultsEvent(null)).toBeNull();
+    expect(parseSearchResultsEvent([batch])).toBeNull();
+    expect(parseSearchResultsEvent("batch")).toBeNull();
+  });
+
+  it("rejects INHERITED fields — only own properties count as a plain object", () => {
+    expect(parseSearchResultsEvent(Object.create(batch))).toBeNull();
+  });
+});
+
+describe("isSafeRelativePath", () => {
+  it("accepts plain relative forward-slashed paths", () => {
+    expect(isSafeRelativePath("a.md")).toBe(true);
+    expect(isSafeRelativePath("notes/deep/file.txt")).toBe(true);
+    expect(isSafeRelativePath(".hidden.md")).toBe(true);
+  });
+
+  it("rejects traversal, absolute, separators-in-disguise, and non-strings", () => {
+    expect(isSafeRelativePath("..")).toBe(false);
+    expect(isSafeRelativePath("a//b")).toBe(false);
+    expect(isSafeRelativePath("a/./b")).toBe(false);
+    expect(isSafeRelativePath("/a")).toBe(false);
+    expect(isSafeRelativePath("D:stuff")).toBe(false);
+    expect(isSafeRelativePath(42)).toBe(false);
+    expect(isSafeRelativePath(new String("a.md"))).toBe(false);
   });
 });
 

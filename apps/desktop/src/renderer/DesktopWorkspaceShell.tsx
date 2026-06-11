@@ -17,7 +17,7 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
-import { FileInspector } from "./FileInspector";
+import { FileInspector, type ScrollTarget } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
@@ -27,14 +27,18 @@ import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
+import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
+import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   closeTab,
   defaultWorkbenchState,
   moveTab,
   openTab,
   parseUiState,
+  recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
   setFolderExpanded,
@@ -99,12 +103,9 @@ function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
 }
 
 // Designed empty states for the views whose real content lands later in this
-// plan (search E5.0, graph/apps E5, agent E6) — the rail itself is the seam.
+// plan (graph/apps E5, agent E6) — the rail itself is the seam. Search
+// graduated to its real view in E5.0 (SearchView).
 const EMPTY_VIEW_COPY: Partial<Record<ViewId, { title: string; body: string }>> = {
-  search: {
-    title: "Search is on its way",
-    body: "Fast full-text search across this workspace lands later in this plan.",
-  },
   graph: {
     title: "Graph is on its way",
     body: "How your files connect, drawn as a map — later in this plan.",
@@ -183,6 +184,19 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+
+  // Content search (Phase E5.0). The model lives HERE, not in the Search
+  // view, so results — and the activity-bar count badge — survive switching
+  // views while the panel unmounts.
+  const search = useWorkspaceSearch(workspaceId);
+
+  // A clicked search result: open the file AND land at the line. The target
+  // is consumed (cleared) by the inspector once a mounted view applied it.
+  const [searchScrollTarget, setSearchScrollTarget] = useState<ScrollTarget | null>(
+    null,
+  );
+  const scrollNonce = useRef(0);
+  const consumeScrollTarget = useCallback(() => setSearchScrollTarget(null), []);
 
   // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
   // render immediately (launch budgets key off shell visibility); the stored
@@ -316,9 +330,19 @@ export function DesktopWorkspaceShell(props: {
       if (openTab(wbRef.current, path) !== wbRef.current) {
         rendererMarks.mark("file-open-start");
       }
-      mutateWb((state) => openTab(state, path));
+      // Every open also records recency (quick-open ranking, Phase E5.0).
+      mutateWb((state) => recordRecentFile(openTab(state, path), path));
     },
     [mutateWb],
+  );
+
+  // Search-result click: open + land at the line (source mode this phase).
+  const openSearchResult = useCallback(
+    (path: string, line: number) => {
+      setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
+      openFile(path);
+    },
+    [openFile],
   );
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -612,6 +636,9 @@ export function DesktopWorkspaceShell(props: {
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
           agentActive={agentActive}
+          searchResultCount={
+            search.model.totalMatches > 0 ? search.model.totalMatches : undefined
+          }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenCloud={() => setCloudOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -663,6 +690,8 @@ export function DesktopWorkspaceShell(props: {
           >
             {wb.activeView === "explorer" ? (
               explorerView
+            ) : wb.activeView === "search" ? (
+              <SearchView search={search} onOpenResult={openSearchResult} />
             ) : wb.activeView === "history" ? (
               <HistoryList changeSets={changeSets} />
             ) : (
@@ -688,6 +717,8 @@ export function DesktopWorkspaceShell(props: {
               path={wb.activeTab}
               refreshKey={changeSets.length}
               onOpenPath={openFile}
+              scrollTarget={searchScrollTarget ?? undefined}
+              onScrollConsumed={consumeScrollTarget}
               onSaveStateChange={onSaveStateChange}
               registerDraftFlush={registerDraftFlush}
             />
@@ -771,6 +802,16 @@ export function DesktopWorkspaceShell(props: {
             label: file.path,
             run: () => openFile(file.path),
           }))}
+          // Quick-open ranking (E5.0): prefix > word-boundary > substring >
+          // fuzzy; recent files boosted; pinned first. Pure function — the
+          // command ids ARE the paths.
+          rank={(query, commands) => {
+            const byPath = new Map(commands.map((command) => [command.id, command]));
+            return rankQuickOpenPaths(query, [...byPath.keys()], {
+              recent: wb.recentFiles,
+              pinned: wb.pinned,
+            }).map((path) => byPath.get(path)!);
+          }}
           onClose={() => setQuickOpenOpen(false)}
         />
       ) : null}

@@ -73,6 +73,9 @@ import {
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
+  WorkspaceSearchPayload,
+  CancelWorkspaceSearchPayload,
+  SearchResultsEventSchema,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { desktopMarks } from "./performance/desktopMarks";
@@ -127,6 +130,8 @@ import {
 } from "./workspaces/workspaceFiles";
 import { buildStoreZip } from "./workspaces/zipWriter";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
+import { createSearchRegistry } from "./workspaces/workspaceSearch";
+import { rgPath } from "@vscode/ripgrep";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -279,6 +284,13 @@ const agentIntegration = createAgentIntegration({
   home: stateDir(),
 });
 
+// Content search (Phase E5.0): at most one live ripgrep child per renderer,
+// tracked by handle. A new search, an explicit cancel, the renderer's
+// webContents going away, and app quit each kill the SPECIFIC tracked child.
+const searchRegistry = createSearchRegistry({ rgPath });
+// Senders whose 'destroyed' cleanup hook is already attached.
+const searchCleanupHooked = new WeakSet<Electron.WebContents>();
+
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
@@ -287,6 +299,7 @@ app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
+  searchRegistry.killAll();
   agentIntegration.stopAll();
   void Promise.race([
     activity.stopAll(),
@@ -922,6 +935,54 @@ function registerIpcHandlers(): void {
     const input = SetWorkspaceUiStatePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     await writeUiStateFile(workspace.rootPath, input.state);
+  });
+
+  // Content search (Phase E5.0): spawns ripgrep rooted at the REAL workspace
+  // root (the registry refuses a root that doesn't realpath to a directory)
+  // and streams bounded batches back over the searchResults event channel.
+  // Every batch is validated against the contract schema BEFORE it is sent;
+  // the dependency-free preload re-validates on arrival. Starting a new
+  // search from the same renderer kills its previous rg child by handle.
+  ipcMain.handle(CHANNELS.searchWorkspace, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceSearchPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    if (!searchCleanupHooked.has(sender)) {
+      searchCleanupHooked.add(sender);
+      // Window closed / renderer gone: kill this renderer's rg child.
+      sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
+    }
+    await searchRegistry.startSearch(
+      sender.id,
+      workspace.rootPath,
+      input.searchId,
+      {
+        query: input.query,
+        caseSensitive: input.caseSensitive,
+        wholeWord: input.wholeWord,
+        regex: input.regex,
+        includeGlob: input.includeGlob,
+        excludeGlob: input.excludeGlob,
+      },
+      (batch) => {
+        if (sender.isDestroyed()) return;
+        try {
+          sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
+        } catch {
+          // Defense in depth: a batch that fails the contract is DROPPED,
+          // never thrown through the engine's stream handler (an uncaught
+          // throw there would wedge the main process). The bounded done
+          // batch still arrives and settles the renderer.
+        }
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.cancelWorkspaceSearch, (event, payload) => {
+    assertTrustedSender(event);
+    const input = CancelWorkspaceSearchPayload.parse(payload);
+    searchRegistry.cancel(event.sender.id, input.searchId);
   });
 
   ipcMain.on(CHANNELS.firstPaint, (event) => {
