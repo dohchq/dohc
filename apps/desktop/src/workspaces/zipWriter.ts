@@ -49,6 +49,23 @@ function dosDateTime(date: Date): { time: number; date: number } {
   };
 }
 
+// Entry names MUST be relative POSIX paths. Many extractors honor an absolute
+// path, a drive letter, backslashes (Windows separators), or a ".." segment to
+// write OUTSIDE the extraction directory (zip-slip). This is the container
+// boundary, so refuse them here — no buildStoreZip caller can emit a slip name
+// even if its own name construction is ever wrong.
+function assertSafeEntryName(name: string): void {
+  if (name.length === 0) throw new Error("Zip entry name is empty");
+  if (name.startsWith("/")) throw new Error(`Zip entry name is absolute: ${name}`);
+  if (/^[a-zA-Z]:/.test(name)) throw new Error(`Zip entry name has a drive letter: ${name}`);
+  if (name.includes("\\")) throw new Error(`Zip entry name has a backslash: ${name}`);
+  for (const segment of name.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") {
+      throw new Error(`Zip entry name has an unsafe segment: ${name}`);
+    }
+  }
+}
+
 // Builds the complete archive in memory: local file headers + data, then the
 // central directory, then the end-of-central-directory record. Names are
 // UTF-8 (general-purpose flag bit 11 set so readers decode them as such).
@@ -61,6 +78,7 @@ export function buildStoreZip(entries: ReadonlyArray<ZipEntry>): Buffer {
   let offset = 0;
 
   for (const entry of entries) {
+    assertSafeEntryName(entry.path);
     if (entry.data.length > MAX_U32) {
       throw new Error(`Zip entry too large: ${entry.path}`);
     }

@@ -202,6 +202,21 @@ describe("movePath", () => {
     );
   });
 
+  it("refuses a case-fold descendant move on a case-insensitive fs (realpath guard)", async () => {
+    await mkdir(join(root, "Team", "leads"), { recursive: true });
+    await writeFile(join(root, "Team", "leads", "x.md"), "x");
+    if (await caseInsensitiveFs()) {
+      // "team/leads/sub" IS inside "Team" (same inode), but the lexical
+      // self/descendant refusal is case-SENSITIVE and misses it — the realpath
+      // descendant guard is what catches this and prevents the corruption.
+      await expect(movePath(root, "Team", "team/leads/sub")).rejects.toThrow(/into itself/);
+      expect(await readFile(join(root, "Team", "leads", "x.md"), "utf8")).toBe("x");
+    } else {
+      // Case-sensitive fs: the same-case descendant is still refused lexically.
+      await expect(movePath(root, "Team", "Team/leads/sub")).rejects.toThrow(/into itself/);
+    }
+  });
+
   it("refuses a symlink source and a symlinked-ancestor escape", async () => {
     const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "real.md"), "outside");
@@ -295,19 +310,57 @@ describe("deletePath", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
-  it("rejects traversal, reserved paths, the root, and symlink escapes", async () => {
+  it("rejects traversal, reserved paths, the root, and symlinked-ancestor escapes", async () => {
     await expect(deletePath(root, "../x", rejectingTrash)).rejects.toThrow(/traversal/);
     await expect(deletePath(root, ".dohc/trash", rejectingTrash)).rejects.toThrow(
       /reserved/,
     );
     await expect(deletePath(root, ".", rejectingTrash)).rejects.toThrow(/invalid/);
+    // A regular file reached THROUGH a symlinked ancestor still escapes: lstat
+    // follows the ancestor link, realpath of the leaf resolves outside the
+    // root, and containment refuses it.
     const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "victim.md"), "keep");
-    await symlink(join(outside, "victim.md"), join(root, "link.md"), "file");
-    await expect(deletePath(root, "link.md", rejectingTrash)).rejects.toThrow(
+    await symlink(outside, join(root, "linkdir"), "dir");
+    await expect(deletePath(root, "linkdir/victim.md", rejectingTrash)).rejects.toThrow(
       /escapes workspace/,
     );
     expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
+  });
+
+  it("trashes a symlink as the LINK, never following it to harm the target", async () => {
+    // The finding: realpath-ing a symlink target meant deleting a link trashed
+    // whatever it pointed at. lstat-first trashes the LINK itself; the external
+    // target is untouched. (The tree never lists symlinks, so this only fires
+    // via a direct/forged IPC — but it must never delete an outside file.)
+    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    await writeFile(join(outside, "victim.md"), "keep");
+    await symlink(join(outside, "victim.md"), join(root, "link.md"), "file");
+    const result = await deletePath(root, "link.md", rejectingTrash);
+    expect(result).toEqual({ trashed: false });
+    // The LINK left the tree, the target is untouched, and the trash holds the
+    // link (never the target's bytes).
+    expect(existsSync(join(root, "link.md"))).toBe(false);
+    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("keep");
+    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    expect(trashNames).toHaveLength(1);
+    expect(trashNames[0]).toMatch(/link\.md$/);
+  });
+
+  it("fits the trash name within NAME_MAX for a very long basename", async () => {
+    // prefix (timestamp + uuid, ~50 bytes) + a ~250-char basename would exceed
+    // the 255-byte NAME_MAX and ENAMETOOLONG. The decorative basename truncates
+    // to fit; the uuid keeps the entry unique and the bytes recoverable.
+    const longBase = `${"x".repeat(246)}.md`; // 249 chars — legal to create
+    await writeFile(join(root, longBase), "recover me");
+    const result = await deletePath(root, longBase, rejectingTrash);
+    expect(result).toEqual({ trashed: false });
+    const trashNames = await readdir(join(root, ".dohc", "trash"));
+    expect(trashNames).toHaveLength(1);
+    expect(Buffer.byteLength(trashNames[0]!, "utf8")).toBeLessThanOrEqual(255);
+    expect(
+      await readFile(join(root, ".dohc", "trash", trashNames[0]!), "utf8"),
+    ).toBe("recover me");
   });
 });
 
@@ -324,6 +377,13 @@ describe("collectZipEntries", () => {
 
     const { entries } = await collectZipEntries(root);
     expect(entries.map((entry) => entry.path).sort()).toEqual(["b.md", "notes/a.md"]);
+    // The fd-based bounded read returns the FULL bytes (not a truncated/empty
+    // buffer) — guards the open→fstat→read loop against an off-by-one.
+    const byPath = new Map(
+      entries.map((entry) => [entry.path, Buffer.from(entry.data).toString("utf8")]),
+    );
+    expect(byPath.get("b.md")).toBe("beta");
+    expect(byPath.get("notes/a.md")).toBe("alpha");
   });
 
   it("exports a single folder under its own top-level name", async () => {
@@ -389,14 +449,46 @@ describe("importDroppedPaths", () => {
     await symlink(join(outside, "target.md"), join(outside, "alias.md"), "file");
     const imported = await importDroppedPaths(
       root,
-      [join(outside, "doc.md"), join(outside, "folder"), "relative.md"],
+      [
+        join(outside, "doc.md"),
+        join(outside, "folder"),
+        join(outside, "alias.md"),
+        "relative.md",
+      ],
       [root],
     );
+    // Only the real regular file imports. The directory, the symlink (refused
+    // BEFORE it follows to target.md), and the relative path are all skipped.
     expect(imported).toEqual(["doc.md"]);
-    // A symlink source resolves to its real file — still a regular file, so
-    // the copy is of real bytes, never a dangling link.
-    const linked = await importDroppedPaths(root, [join(outside, "alias.md")], [root]);
-    expect(linked).toEqual(["target.md"]);
+    expect(existsSync(join(root, "target.md"))).toBe(false);
+  });
+
+  it("refuses a symlink pointing at a secret OUTSIDE the workspace (exfil vector)", async () => {
+    // A compromised renderer forging droppedPaths could plant a symlink to a
+    // secret and rely on realpath-then-isFile to copy the SECRET's bytes into
+    // the (possibly cloud-synced) workspace. lstat-ing the ORIGINAL source
+    // refuses the link before it ever resolves to the target.
+    const secrets = await mkdtemp(join(tmpdir(), "dohc-secrets-"));
+    await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
+    const stage = await mkdtemp(join(tmpdir(), "dohc-stage-"));
+    await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
+    const imported = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
+    expect(imported).toEqual([]);
+    expect(existsSync(join(root, "innocent.txt"))).toBe(false);
+    // Nothing landed in the workspace — the secret never left its directory.
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("caps the dropped-path count at the handler, not just the schema", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "dohc-many-"));
+    const paths = await Promise.all(
+      Array.from({ length: 101 }, async (_, i) => {
+        const p = join(outside, `f-${i}.md`);
+        await writeFile(p, "x");
+        return p;
+      }),
+    );
+    await expect(importDroppedPaths(root, paths, [root])).rejects.toThrow(/Too many/);
   });
 
   it("refuses sources inside any registered workspace's .dohc", async () => {
@@ -406,6 +498,25 @@ describe("importDroppedPaths", () => {
     const imported = await importDroppedPaths(
       root,
       [join(otherRoot, ".dohc", "credentials.json")],
+      [root, otherRoot],
+    );
+    expect(imported).toEqual([]);
+    expect(existsSync(join(root, "credentials.json"))).toBe(false);
+  });
+
+  it("still refuses a .dohc source reached through a symlinked ANCESTOR (canonical containment)", async () => {
+    // The accepted ancestor-symlink residual (a real leaf under a symlinked dir
+    // imports) must NOT defeat the one location gate we DO enforce: the .dohc
+    // refusal runs on realpath(source), so an ancestor alias to another
+    // workspace's metadata is still canonicalized and refused.
+    const otherRoot = await mkdtemp(join(tmpdir(), "dohc-other-"));
+    await mkdir(join(otherRoot, ".dohc"), { recursive: true });
+    await writeFile(join(otherRoot, ".dohc", "credentials.json"), "secret");
+    const stage = await mkdtemp(join(tmpdir(), "dohc-stage-"));
+    await symlink(join(otherRoot, ".dohc"), join(stage, "alias"), "dir");
+    const imported = await importDroppedPaths(
+      root,
+      [join(stage, "alias", "credentials.json")],
       [root, otherRoot],
     );
     expect(imported).toEqual([]);

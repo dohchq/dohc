@@ -8,28 +8,44 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/position: E2 gate 7 DONE: codex on 7a85b1f found 8 (1 P1 + 5 P2 +
-  2 P3) -> /tmp/codex-e2.log. [P1] dirty-tab close/cap-evict drops the
-  draft (unmount clears autosave timer without flush) — SILENT LOSS, the
-  cardinal sin. [P2s] symlinked-.dohc metadata write escape (ui-state AND
-  the pre-existing agent-runs writer), unbounded on-disk ui-state read
-  before zod, merge-on-load wbRef race (passive-effect lag), spurious +
-  updater-side-effectful file-open-start marks, sidebar resize stuck
-  pointer capture. [P3s] own-property hardening both parsers. Codex
-  EXPLICITLY validated: ui-state IPC auth/containment-by-registry, real
-  relaunch E2E, palette 16 honest, Ctrl+W template move. ACTIVE LANE:
-  workflow w213qrqdu = e2-fix (resumable wf_0b6e39c2-58f): fix all 8 (incl
-  centralized workspaceMetadata .dohc resolution helper used by BOTH
-  writers) -> adversarial trap-replay verify -> full gates. WHEN IT LANDS:
-  lead verify, commit e2(fix) — gate 8 closes -> launch E3 EXPLORER lane
-  (contract READY: docs/superpowers/recon/2026-06-11-e3-explorer-digest.md
-  — tree libs port as-is from 7277c39^, ONE movePath engine rename+move w/
-  dest-exists + case-only carve-out, shell.trashItem cross-fs fallback to
-  .dohc/trash, listFiles needs folders field, webUtils.getPathForFile for
-  OS drag-in, store-only zip writer, offline-rename/no-resurrect sync wart
-  MUST be pinned, ~10 spec files migrate atomically via openInTree helper,
-  no virtualization needed). COMMITS: a5343a3/cab8525/6703984 (e5 server),
-  0c40626/c56c17f (e0-e1), 7a85b1f (e2).
+- Phase/position: E5.0 SEARCH committed 24282cb; e3(fix) committed (THIS
+  commit). NEXT = E4 EDITOR lane (contract READY:
+  docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md — Tiptap WYSIWYG
+  + rich collab, D-E1 plainText->rich migration w/ data-loss test, source
+  toggle). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
+  FIRST then engine-level !.dohc/!.git/!node_modules LAST = last-match-wins,
+  + hasIgnoredSegment parse-time backstop; 2MB/2000-match caps; PID-tracked
+  cancellation + search-id stale-drop), streamed batches w/ preload shape
+  validator, SearchView + quick-open ranking, 3 additive budget rows. e3(fix)
+  = codex review (docs/superpowers/reviews/codex/e3-findings.md) all closed:
+  P1 import exfil (lstat ORIGINAL source -> final-component symlink refused,
+  handler count cap, .dohc containment on canonical realpath); movePath
+  case-fold descendant (realpath isInside guard); deletePath lstat-first
+  (trash the LINK not target) + NAME_MAX-safe trash names; export add() =
+  open(O_NOFOLLOW)+fstat+bounded read (symlink-swap TOCTOU + grow-after-cap
+  closed); zipWriter assertSafeEntryName (abs/drive/backslash/dotdot/empty-seg
+  rejected). Move/trash TOCTOUs = documented accepted residuals (no renameat2
+  in Node). ADVERSARIAL VERIFY (workflow e3fix-adversarial-verify, 57 agents,
+  17 claims -> 16 refuted): ONE confirmed P2 = importDroppedPaths ANCESTOR-
+  symlink (a real leaf under a symlinked dir still imports). DISPOSITION =
+  accepted-residual + documented, NOT a guard: (a) grants compromised renderer
+  nothing beyond the already-accepted residual (it can name ~/.ssh/id_rsa
+  directly; ancestor symlink is just an alias to the same canonical path);
+  (b) the recommended hasNoSymlinkedAncestor walk would FALSE-REJECT legit OS
+  drags through SYSTEM symlinks (macOS /tmp->/private/tmp, /var->/private/var,
+  incl. our own temp-dir tests on macOS) = silent import loss for zero gain;
+  (c) the .dohc gate runs on canonical realpath so ancestor symlinks can't
+  smuggle metadata past it (locked by a new test). Real future fix = visible
+  import-confirm quarantine (deferred, product sign-off). WATCHER FLAKE FIXED
+  e532d82 (root cause: shell DOM mounts before openWorkspace resolves the
+  watcher-ready race; detected.md written into chokidar's ignoreInitial scan
+  was swallowed -> added data-ready shell attr the perf-open helper gates on;
+  rewrote 100-file assertion to poll cumulative count + assert 1-5 batch rows
+  via change-set testid). FULL E2E 55/55, perf green. SYNC-WART (pinned, E5):
+  offline-rename+concurrent-remote-edit-of-old-path -> spurious <old>.conflict
+  + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
+  cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
+  3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), e3(fix)=this.
 - Branch: `claude/desktop-local-first-cloud-sync` (continuing the mega-branch;
   HEAD at start = 5df57e7 fix(dev) barrel leak). Commit convention `eN: …` +
   `eN(fix): …`.
@@ -89,6 +105,23 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e3 codex review — DONE (findings recorded), e3(fix) PENDING E5.0
+The xhigh/high full-diff codex passes OVERRAN the reasoning budget before
+flushing findings (3 dead attempts at ~317K input tokens — not OOM; lesson:
+for large diffs, SPLIT the review by file at effort=medium with "findings
+ONLY, write list first"). The split worked: findings in docs/superpowers/
+reviews/codex/e3-findings.md — 1 P1 (renderer-forged droppedPaths exfiltrates
+/etc/passwd etc. into the synced workspace) + a P2 cluster (symlink-TOCTOU in
+delete/move/export, zip-slip, case-only descendant bypass, dest-rename TOCTOU).
+SEQUENCING: e3(fix) waits for E5.0 to land+commit (both append main.ts/
+channels/preload — concurrent mutation would race the tree); the P1 is
+defense-in-depth (needs a compromised renderer, which dohc's CSP+no-raw-HTML
+makes hard), so the short wait is safe. WHEN E5.0 COMMITS: run e3(fix) lane
+(lstat/no-follow hardening + handler-level path cap + zip-name validation +
+case-fold descendant check; adversarial replay of the forged-path P1 and the
+symlink swaps), commit e3(fix) -> THEN E4 editor lane.
+
 
 ### e5(server) — COMMITTED a5343a3 (2026-06-11)
 

@@ -71,4 +71,25 @@ describe("buildStoreZip", () => {
     const entries = Array.from({ length: 65_536 }, () => tiny);
     expect(() => buildStoreZip(entries)).toThrow(/cannot hold/);
   });
+
+  it("refuses zip-slip entry names at the container boundary", () => {
+    const data = Buffer.from("x");
+    // Each of these can write OUTSIDE the extraction dir in some extractor.
+    for (const path of [
+      "../evil.md", // parent traversal
+      "a/../../evil.md", // traversal mid-path
+      "/etc/passwd", // absolute (POSIX)
+      "C:\\Windows\\evil", // drive letter
+      "a\\b.md", // backslash separator (Windows)
+      "a//b.md", // empty segment
+      "a/./b.md", // dot segment
+      "", // empty name
+    ]) {
+      expect(() => buildStoreZip([{ path, data }])).toThrow(
+        /absolute|drive letter|backslash|unsafe segment|empty/,
+      );
+    }
+    // A clean relative POSIX name (including dots WITHIN a segment) is fine.
+    expect(() => buildStoreZip([{ path: "notes/my.notes.md", data }])).not.toThrow();
+  });
 });
