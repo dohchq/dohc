@@ -1,4 +1,4 @@
-import { deriveSyncStatus, type SyncStatus } from "@dohc/workspace-core";
+import { deriveSyncStatus } from "@dohc/workspace-core";
 import type {
   ChangeSetRecord,
   SyncStatusResult,
@@ -43,17 +43,18 @@ export function createWorkspaceActivity(
 ) {
   const watched = new Map<string, WatchedWorkspace>();
 
-  function statusFor(workspaceId: string): SyncStatus {
+  function statusFor(workspaceId: string): SyncStatusResult {
     const w = watched.get(workspaceId);
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
       connected: false,
     };
     const snap = w?.engine?.snapshot();
-    return deriveSyncStatus({
+    const conflictCount = snap?.conflictCount ?? 0;
+    const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
-      hasConflict: (snap?.conflictCount ?? 0) > 0,
+      hasConflict: conflictCount > 0,
       cloudEnabled: cloud.enabled,
       // A confirmed-401 engine reads as disconnected (the existing
       // "cloud-disconnected" surface) so the UI stops saying "connected" and
@@ -61,6 +62,8 @@ export function createWorkspaceActivity(
       cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
+    // Additive surface: the status bar shows HOW MANY files conflict.
+    return { ...status, conflictCount };
   }
 
   async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {

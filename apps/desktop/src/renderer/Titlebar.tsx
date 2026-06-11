@@ -3,7 +3,8 @@ import { useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
 
-function workspaceName(workspace: WorkspaceSummary): string {
+// Exported: the status bar shows the same name (one derivation, two surfaces).
+export function workspaceName(workspace: WorkspaceSummary): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.split(/[\\/]/).pop() ?? "workspace";
 }

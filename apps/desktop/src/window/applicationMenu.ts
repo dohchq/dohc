@@ -47,7 +47,11 @@ export function buildMenuTemplate(options: {
         command("Open Workspace…", "open-workspace"),
         command("Import Files…", "import-files"),
         { type: "separator" },
-        { role: "close", label: "Close Window" },
+        command("Close Tab", "close-tab", "CommandOrControl+W"),
+        // VS Code convention: Ctrl+W closes the TAB (renderer-owned above),
+        // so the close role must not keep its DEFAULT Ctrl+W accelerator —
+        // it would close the whole window on every tab close.
+        { role: "close", label: "Close Window", accelerator: "CommandOrControl+Shift+W" },
       ],
     },
     {

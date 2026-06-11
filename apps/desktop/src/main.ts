@@ -59,6 +59,8 @@ import {
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   SetTitlebarThemePayload,
+  SetWorkspaceUiStatePayload,
+  GetWorkspaceUiStateResult,
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
@@ -109,6 +111,7 @@ import {
   createFile,
   listFiles,
 } from "./workspaces/workspaceFiles";
+import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -739,6 +742,28 @@ function registerIpcHandlers(): void {
     }
   });
 
+  // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
+  // cannot write .dohc through writeWorkspaceText (reserved path) — this
+  // narrow pair is the only writer, same pattern as agent-runs.json. Both
+  // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
+  // ("no saved state"), never an error.
+  ipcMain.handle(CHANNELS.getWorkspaceUiState, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceFilesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const parsed = GetWorkspaceUiStateResult.safeParse(
+      await readUiStateFile(workspace.rootPath),
+    );
+    return parsed.success ? parsed.data : null;
+  });
+
+  ipcMain.handle(CHANNELS.setWorkspaceUiState, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetWorkspaceUiStatePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await writeUiStateFile(workspace.rootPath, input.state);
+  });
+
   ipcMain.on(CHANNELS.firstPaint, (event) => {
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();
@@ -833,9 +858,21 @@ if (!app.requestSingleInstanceLock()) {
 
     // Auto-updates: only a packaged app with DOHC_UPDATE_URL set ever checks
     // (local/dev builds never self-mutate). Failures are absorbed — updates
-    // must never take the app down. No UI surface yet; downloaded updates
-    // install on quit (electron-updater autoInstallOnAppQuit).
-    void startAutoUpdates({ isPackaged: app.isPackaged }).catch(() => undefined);
+    // must never take the app down. Each machine state is pushed to every
+    // window as a closed {status, message} event; the preload re-validates it
+    // (parseUpdateStateEvent) and the status bar surfaces "ready" as a toast.
+    // Downloaded updates still install on quit (autoInstallOnAppQuit).
+    void startAutoUpdates({
+      isPackaged: app.isPackaged,
+      onState: (state) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send(CHANNELS.updateState, {
+            status: state.status,
+            message: state.message,
+          });
+        }
+      },
+    }).catch(() => undefined);
   });
 
   app.on("window-all-closed", () => {

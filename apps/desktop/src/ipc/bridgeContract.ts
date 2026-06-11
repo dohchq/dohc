@@ -1,6 +1,12 @@
 import { WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
-import { MENU_COMMANDS } from "./channels";
+import {
+  MAX_OPEN_TABS,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  VIEW_IDS,
+} from "../renderer/workbench/workbenchState";
+import { MENU_COMMANDS, UPDATE_STATUSES } from "./channels";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -209,6 +215,10 @@ export const SyncStatusResult = z.object({
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
   lastSyncedAtMs: z.number().nullable(),
+  // Additive (Phase E2 status bar): HOW MANY files conflict, not just that
+  // one does. Fed from the sync-engine snapshot in workspaceActivity —
+  // optional so older producers/fixtures keep parsing.
+  conflictCount: z.number().int().nonnegative().optional(),
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
@@ -417,6 +427,40 @@ export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 export const MenuCommand = z.enum(MENU_COMMANDS);
 export type MenuCommand = z.infer<typeof MenuCommand>;
 
+// Main→renderer auto-update event (Phase E2 status bar toast). channels.ts
+// owns the closed status tuple and the dependency-free preload check
+// (parseUpdateStateEvent) — this schema derives from the same tuple so the
+// two can never drift. Only {status, message} ever crosses the boundary.
+export const UpdateStateEvent = z.object({
+  status: z.enum(UPDATE_STATUSES),
+  message: z.string().min(1).max(500),
+});
+export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
+
+// Per-workspace UI state persisted to .dohc/ui-state.json by MAIN (the
+// renderer cannot write .dohc through writeWorkspaceText by design —
+// validateUserWritePath refuses reserved paths). The clamp/cap constants are
+// the pure workbench model's, so contract and model can never disagree.
+export const WorkspaceUiState = z.object({
+  version: z.literal(1),
+  activeView: z.enum(VIEW_IDS),
+  sidebarVisible: z.boolean(),
+  sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
+  tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
+  activeTab: PATH_STRING.nullable(),
+  historyVisible: z.boolean(),
+});
+export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
+
+export const GetWorkspaceUiStateResult = WorkspaceUiState.nullable();
+export type GetWorkspaceUiStateResult = z.infer<typeof GetWorkspaceUiStateResult>;
+
+export const SetWorkspaceUiStatePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  state: WorkspaceUiState,
+});
+export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePayload>;
+
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
@@ -489,6 +533,11 @@ export interface DohcDesktopBridge {
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
+  getWorkspaceUiState(
+    payload: ListWorkspaceFilesPayload,
+  ): Promise<GetWorkspaceUiStateResult>;
+  setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Returns an
   // unsubscribe function.
@@ -496,4 +545,8 @@ export interface DohcDesktopBridge {
   // Application-menu clicks, validated against MenuCommand in the preload
   // before they reach renderer code. Returns an unsubscribe function.
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
+  // Auto-update state pushes from main, validated against the closed
+  // UPDATE_STATUSES tuple in the preload (parseUpdateStateEvent) before they
+  // reach renderer code. Returns an unsubscribe function.
+  onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;
 }

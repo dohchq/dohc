@@ -38,6 +38,7 @@ describe("application menu template", () => {
     const { template } = build();
     for (const [menu, label, accelerator] of [
       ["File", "New File", "CommandOrControl+N"],
+      ["File", "Close Tab", "CommandOrControl+W"],
       ["View", "Command Palette", "CommandOrControl+Shift+P"],
       ["View", "Quick Open", "CommandOrControl+P"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
@@ -59,6 +60,14 @@ describe("application menu template", () => {
       "paste",
       "selectAll",
     ]);
+  });
+
+  it("Ctrl+W belongs to Close Tab; Close Window moved to Ctrl+Shift+W", () => {
+    // The close ROLE's default accelerator is Ctrl+W — left in place it would
+    // close the window on every tab close.
+    const { template } = build();
+    const closeWindow = items(template, "File").find((i) => i.role === "close");
+    expect(closeWindow?.accelerator).toBe("CommandOrControl+Shift+W");
   });
 
   it("devtools is present in dev and absent in packaged builds", () => {

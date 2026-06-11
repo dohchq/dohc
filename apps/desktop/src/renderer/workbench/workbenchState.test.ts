@@ -1,0 +1,171 @@
+import { describe, expect, it } from "vitest";
+import {
+  activateTab,
+  clampSidebarWidth,
+  closeTab,
+  defaultWorkbenchState,
+  moveTab,
+  openTab,
+  parseUiState,
+  serializeUiState,
+  setSidebarWidth,
+  setView,
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  toggleHistory,
+  toggleSidebar,
+  MAX_OPEN_TABS,
+  type WorkbenchState,
+} from "./workbenchState";
+
+function withTabs(...paths: string[]): WorkbenchState {
+  return paths.reduce(openTab, defaultWorkbenchState());
+}
+
+describe("tabs", () => {
+  it("openTab appends and activates; re-opening never duplicates", () => {
+    const state = withTabs("a.md", "b.md", "a.md");
+    expect(state.tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
+    expect(state.activeTab).toBe("a.md");
+  });
+
+  it("openTab of the already-active tab is a no-op (same reference)", () => {
+    const state = withTabs("a.md");
+    expect(openTab(state, "a.md")).toBe(state);
+  });
+
+  it("openTab at the cap drops the oldest tab instead of refusing", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_OPEN_TABS; i++) state = openTab(state, `f${i}.md`);
+    state = openTab(state, "new.md");
+    expect(state.tabs).toHaveLength(MAX_OPEN_TABS);
+    expect(state.tabs[0].path).toBe("f1.md");
+    expect(state.activeTab).toBe("new.md");
+  });
+
+  it("activateTab only activates an OPEN tab", () => {
+    const state = withTabs("a.md", "b.md");
+    expect(activateTab(state, "a.md").activeTab).toBe("a.md");
+    expect(activateTab(state, "ghost.md")).toBe(state);
+  });
+
+  it("closing the active tab activates the neighbor that slid into its slot", () => {
+    const state = activateTab(withTabs("a.md", "b.md", "c.md"), "b.md");
+    const next = closeTab(state, "b.md");
+    expect(next.tabs.map((tab) => tab.path)).toEqual(["a.md", "c.md"]);
+    expect(next.activeTab).toBe("c.md");
+  });
+
+  it("closing the LAST active tab falls back to the new last tab, then null", () => {
+    const last = withTabs("a.md", "b.md"); // active: b.md
+    const afterLast = closeTab(last, "b.md");
+    expect(afterLast.activeTab).toBe("a.md");
+    expect(closeTab(afterLast, "a.md").activeTab).toBeNull();
+  });
+
+  it("closing an inactive tab keeps the active one", () => {
+    const state = withTabs("a.md", "b.md", "c.md"); // active: c.md
+    const next = closeTab(state, "a.md");
+    expect(next.activeTab).toBe("c.md");
+    expect(next.tabs.map((tab) => tab.path)).toEqual(["b.md", "c.md"]);
+  });
+
+  it("closing an unknown tab is a no-op (same reference)", () => {
+    const state = withTabs("a.md");
+    expect(closeTab(state, "ghost.md")).toBe(state);
+  });
+
+  it("moveTab reorders forward and backward without touching activation", () => {
+    const state = withTabs("a.md", "b.md", "c.md"); // active: c.md
+    const forward = moveTab(state, 0, 2);
+    expect(forward.tabs.map((tab) => tab.path)).toEqual(["b.md", "c.md", "a.md"]);
+    expect(forward.activeTab).toBe("c.md");
+    const back = moveTab(forward, 2, 0);
+    expect(back.tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md", "c.md"]);
+  });
+
+  it("moveTab clamps the target and no-ops invalid or same-slot moves (same reference)", () => {
+    const state = withTabs("a.md", "b.md");
+    expect(moveTab(state, 0, 99).tabs.map((tab) => tab.path)).toEqual(["b.md", "a.md"]);
+    expect(moveTab(state, 0, -5)).toBe(state); // clamps to 0 === from
+    expect(moveTab(state, -1, 1)).toBe(state); // unknown from (findIndex miss)
+    expect(moveTab(state, 5, 0)).toBe(state);
+    expect(moveTab(state, 1, 1)).toBe(state);
+    expect(moveTab(state, 0.5, 1)).toBe(state);
+  });
+});
+
+describe("views and panels", () => {
+  it("setView switches the view and reveals a hidden panel", () => {
+    const hidden = toggleSidebar(defaultWorkbenchState());
+    const next = setView(hidden, "search");
+    expect(next.activeView).toBe("search");
+    expect(next.sidebarVisible).toBe(true);
+  });
+
+  it("re-selecting the active view toggles the panel (old collapse button)", () => {
+    const state = defaultWorkbenchState();
+    const collapsed = setView(state, "explorer");
+    expect(collapsed.sidebarVisible).toBe(false);
+    expect(setView(collapsed, "explorer").sidebarVisible).toBe(true);
+  });
+
+  it("toggleSidebar and toggleHistory flip independently", () => {
+    const state = toggleSidebar(defaultWorkbenchState());
+    expect(state.sidebarVisible).toBe(false);
+    expect(state.historyVisible).toBe(true);
+    expect(toggleHistory(state).historyVisible).toBe(false);
+  });
+});
+
+describe("sidebar width", () => {
+  it("clamps into [MIN, MAX] and rounds; non-finite resets to the default", () => {
+    expect(clampSidebarWidth(10)).toBe(SIDEBAR_MIN_WIDTH);
+    expect(clampSidebarWidth(9999)).toBe(SIDEBAR_MAX_WIDTH);
+    expect(clampSidebarWidth(300.6)).toBe(301);
+    expect(clampSidebarWidth(Number.NaN)).toBe(SIDEBAR_DEFAULT_WIDTH);
+    expect(clampSidebarWidth(Number.POSITIVE_INFINITY)).toBe(SIDEBAR_DEFAULT_WIDTH);
+  });
+
+  it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
+    const state = defaultWorkbenchState();
+    expect(setSidebarWidth(state, 320).sidebarWidth).toBe(320);
+    expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
+  });
+});
+
+describe("ui-state persistence round-trip", () => {
+  it("serialize → parse restores the workbench state", () => {
+    let state = withTabs("notes/a.md", "notes/b.md");
+    state = setView(state, "history");
+    state = setSidebarWidth(state, 333);
+    state = toggleHistory(state);
+    expect(parseUiState(serializeUiState(state))).toEqual(state);
+  });
+
+  it("parse is tolerant: null/garbage/foreign shapes yield defaults", () => {
+    expect(parseUiState(null)).toEqual(defaultWorkbenchState());
+    expect(parseUiState("nonsense")).toEqual(defaultWorkbenchState());
+    expect(parseUiState({ activeView: "evil", sidebarWidth: "wide" })).toEqual(
+      defaultWorkbenchState(),
+    );
+  });
+
+  it("parse clamps width, dedupes tabs, drops junk entries, bounds the count", () => {
+    const state = parseUiState({
+      sidebarWidth: 5,
+      tabs: ["a.md", "a.md", 42, "", "b.md"],
+      activeTab: "missing.md",
+    });
+    expect(state.sidebarWidth).toBe(SIDEBAR_MIN_WIDTH);
+    expect(state.tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
+    // An activeTab that no surviving tab carries falls back to the first tab.
+    expect(state.activeTab).toBe("a.md");
+
+    const oversized = parseUiState({
+      tabs: Array.from({ length: MAX_OPEN_TABS + 50 }, (_, i) => `f${i}.md`),
+    });
+    expect(oversized.tabs).toHaveLength(MAX_OPEN_TABS);
+  });
+});

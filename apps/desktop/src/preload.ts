@@ -4,7 +4,7 @@ import type {
   DohcDesktopBridge,
   MenuCommand,
 } from "./ipc/bridgeContract";
-import { CHANNELS, isMenuCommand } from "./ipc/channels";
+import { CHANNELS, isMenuCommand, parseUpdateStateEvent } from "./ipc/channels";
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
@@ -62,6 +62,10 @@ const bridge: DohcDesktopBridge = {
   getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
+  getWorkspaceUiState: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
+  setWorkspaceUiState: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
   onWorkspaceActivity: (listener: () => void) => {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
@@ -80,6 +84,18 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.menuCommand, handler);
     return () => ipcRenderer.removeListener(CHANNELS.menuCommand, handler);
+  },
+  // Same boundary rule as onMenuCommand: only a value that passes the closed
+  // dependency-free check (parseUpdateStateEvent — exact tuple member status,
+  // bounded primitive string message) reaches renderer code, and only the two
+  // validated fields cross, never the raw event payload.
+  onUpdateState: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const state = parseUpdateStateEvent(raw);
+      if (state) listener(state);
+    };
+    ipcRenderer.on(CHANNELS.updateState, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.updateState, handler);
   },
 };
 

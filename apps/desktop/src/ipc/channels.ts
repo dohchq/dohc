@@ -12,6 +12,7 @@ export const MENU_COMMANDS = [
   "toggle-sidebar",
   "toggle-theme",
   "settings",
+  "close-tab",
 ] as const;
 
 export type MenuCommandId = (typeof MENU_COMMANDS)[number];
@@ -25,6 +26,46 @@ export function isMenuCommand(value: unknown): value is MenuCommandId {
     typeof value === "string" &&
     (MENU_COMMANDS as readonly string[]).includes(value)
   );
+}
+
+// Closed main→renderer update-state event shape (Phase E2 status bar). Like
+// MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
+// preload validates against it as a plain value and must stay dependency-free.
+// The tuple mirrors updateMachine's UpdateState["status"] — channels.test.ts
+// holds the compile-time both-ways check so the two can never drift.
+export const UPDATE_STATUSES = [
+  "idle",
+  "checking",
+  "up-to-date",
+  "available",
+  "downloading",
+  "ready",
+  "offline",
+  "error",
+] as const;
+
+export type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
+
+// THE preload boundary check for update events: only a plain object whose
+// status is an exact primitive member of the closed tuple and whose message
+// is a bounded primitive string passes — and ONLY those two fields cross the
+// boundary (extra fields are dropped, String objects/toString tricks fail the
+// typeof checks). Unit-tested like isMenuCommand.
+export function parseUpdateStateEvent(
+  value: unknown,
+): { status: UpdateStatusId; message: string } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { status, message } = value as { status?: unknown; message?: unknown };
+  if (
+    typeof status !== "string" ||
+    !(UPDATE_STATUSES as readonly string[]).includes(status)
+  ) {
+    return null;
+  }
+  if (typeof message !== "string" || message.length === 0 || message.length > 500) {
+    return null;
+  }
+  return { status: status as UpdateStatusId, message };
 }
 
 export const CHANNELS = {
@@ -60,7 +101,10 @@ export const CHANNELS = {
   getAgentRunStatus: "desktop:get-agent-run-status",
   getMcpConfig: "desktop:get-mcp-config",
   setTitlebarTheme: "desktop:set-titlebar-theme",
+  getWorkspaceUiState: "desktop:get-workspace-ui-state",
+  setWorkspaceUiState: "desktop:set-workspace-ui-state",
   menuCommand: "desktop:menu-command",
+  updateState: "desktop:update-state",
   workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",

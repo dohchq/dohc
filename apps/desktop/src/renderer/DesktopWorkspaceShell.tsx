@@ -1,32 +1,14 @@
 import {
   Bot,
-  Cloud,
   Database,
   FilePlus2,
   FileText,
-  History,
   Import,
   LayoutGrid,
-  Settings,
+  PanelRight,
   User,
 } from "lucide-react";
-
-const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
-  synced: "Local · saved",
-  syncing: "Saving…",
-  "local-changes": "Local changes",
-  conflict: "Conflict",
-  "cloud-disconnected": "Cloud disconnected",
-};
-
-const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
-  synced: "bg-success",
-  syncing: "bg-warning",
-  "local-changes": "bg-warning",
-  conflict: "bg-danger",
-  "cloud-disconnected": "bg-subtle",
-};
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChangeSetRecord,
   SyncStatusResult,
@@ -41,8 +23,27 @@ import { FileInspector } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
-import { Titlebar } from "./Titlebar";
+import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
+import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
+import { EditorTabs } from "./workbench/EditorTabs";
+import { SidePanel } from "./workbench/SidePanel";
+import { StatusBar } from "./workbench/StatusBar";
+import {
+  closeTab,
+  defaultWorkbenchState,
+  moveTab,
+  openTab,
+  parseUiState,
+  serializeUiState,
+  setSidebarWidth,
+  setView,
+  toggleHistory,
+  toggleSidebar,
+  VIEW_IDS,
+  type ViewId,
+  type WorkbenchState,
+} from "./workbench/workbenchState";
 
 export type Workspace = WorkspaceSummary;
 
@@ -78,6 +79,82 @@ const FileRow = memo(function FileRow(props: {
   );
 });
 
+// The timeline body, shared by the right history rail and the side panel's
+// History view (both render the same root-owned changeSets — never a second
+// subscription). The pinned history-timeline testid stays on the RAIL only.
+function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
+  if (changeSets.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
+        <span className="text-xs text-muted">No changes yet</span>
+        <span className="text-[11px] text-subtle">
+          Edits — yours or your agent's — show up here as a timeline you can
+          review.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
+      {changeSets.map((change) => (
+        <li
+          key={change.id}
+          className="flex flex-col gap-0.5 border-b border-line px-3 py-2"
+        >
+          <span className="flex items-center gap-1.5 text-[12px] text-ink">
+            {change.author.kind === "agent" ? (
+              <Bot size={12} aria-hidden className="shrink-0 text-subtle" />
+            ) : (
+              <User size={12} aria-hidden className="shrink-0 text-subtle" />
+            )}
+            <span className="truncate">{change.humanSummary}</span>
+          </span>
+          <span className="text-[10px] text-subtle">
+            {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
+            {" · "}
+            {change.kind}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Designed empty states for the views whose real content lands later in this
+// plan (search E5.0, graph/apps E5, agent E6) — the rail itself is the seam.
+const EMPTY_VIEW_COPY: Partial<Record<ViewId, { title: string; body: string }>> = {
+  search: {
+    title: "Search is on its way",
+    body: "Fast full-text search across this workspace lands later in this plan.",
+  },
+  graph: {
+    title: "Graph is on its way",
+    body: "How your files connect, drawn as a map — later in this plan.",
+  },
+  apps: {
+    title: "Apps panel is on its way",
+    body: "Your workspace apps get a dedicated home later in this plan.",
+  },
+  agent: {
+    title: "Agent panel is on its way",
+    body: "Start and review agent sessions from here later in this plan.",
+  },
+};
+
+function EmptyView({ view }: { view: ViewId }) {
+  const copy = EMPTY_VIEW_COPY[view];
+  if (!copy) return null;
+  return (
+    <div
+      data-testid="view-empty-state"
+      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
+    >
+      <span className="text-xs text-muted">{copy.title}</span>
+      <span className="text-[11px] text-subtle">{copy.body}</span>
+    </div>
+  );
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -86,15 +163,92 @@ export function DesktopWorkspaceShell(props: {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [agentActive, setAgentActive] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
-  const [sidebarVisible, setSidebarVisible] = useState(true);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [wb, setWb] = useState<WorkbenchState>(defaultWorkbenchState);
+
+  // Runtime-only dirty flag for the ACTIVE tab (the one mounted inspector
+  // reports its markdown save state) — never persisted.
+  const [activeTabDirty, setActiveTabDirty] = useState(false);
+  const onSaveStateChange = useCallback(
+    (state: "saved" | "saving" | "error") => setActiveTabDirty(state !== "saved"),
+    [],
+  );
+  useEffect(() => {
+    setActiveTabDirty(false);
+  }, [wb.activeTab]);
 
   const workspaceId = props.workspace.workspaceId;
+
+  // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
+  // render immediately (launch budgets key off shell visibility); the stored
+  // state MERGES when the IPC resolves: it applies only if nothing diverged
+  // from the defaults in the meantime — a pre-load user action wins (and gets
+  // an immediate write, since wb may never change again to arm the debounced
+  // one). Writes stay off until the load settles so a default-state write can
+  // never clobber the stored one.
+  const uiStateLoaded = useRef(false);
+  const wbRef = useRef(wb);
+  useEffect(() => {
+    let cancelled = false;
+    void bridge()
+      .getWorkspaceUiState({ workspaceId })
+      .then((stored) => {
+        if (cancelled) return;
+        const current = wbRef.current;
+        const untouched =
+          JSON.stringify(serializeUiState(current)) ===
+          JSON.stringify(serializeUiState(defaultWorkbenchState()));
+        if (stored && untouched) setWb(parseUiState(stored));
+        uiStateLoaded.current = true;
+        if (!untouched) {
+          void bridge()
+            .setWorkspaceUiState({ workspaceId, state: serializeUiState(current) })
+            .catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        uiStateLoaded.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
+  useEffect(() => {
+    wbRef.current = wb;
+    if (!uiStateLoaded.current) return;
+    const timer = setTimeout(() => {
+      void bridge()
+        .setWorkspaceUiState({ workspaceId, state: serializeUiState(wb) })
+        .catch(() => undefined);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [wb, workspaceId]);
+
+  // Durability at the edges: the debounce above silently drops changes made
+  // within 500ms of quitting or switching workspaces — flush the latest state
+  // fire-and-forget on beforeunload and on unmount (workspace switch remounts
+  // the shell via key={workspaceId}). Gated on the load having resolved so a
+  // default snapshot can never clobber stored state.
+  useEffect(() => {
+    const flush = () => {
+      if (!uiStateLoaded.current) return;
+      void bridge()
+        .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
+        .catch(() => undefined);
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, [workspaceId]);
 
   const refreshFiles = useCallback(async () => {
     const result = await bridge().listWorkspaceFiles({ workspaceId });
@@ -102,12 +256,14 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId]);
 
   const refreshHistory = useCallback(async () => {
-    const [history, status] = await Promise.all([
+    const [history, status, agent] = await Promise.all([
       bridge().listChangeSets({ workspaceId }),
       bridge().getSyncStatus({ workspaceId }),
+      bridge().getAgentRunStatus({ workspaceId }),
     ]);
     setChangeSets(history.changeSets);
     setSyncStatus(status);
+    setAgentActive(agent.activeRun !== null);
   }, [workspaceId]);
 
   const importFiles = useCallback(async () => {
@@ -115,14 +271,55 @@ export function DesktopWorkspaceShell(props: {
     await refreshFiles();
   }, [workspaceId, refreshFiles]);
 
-  const selectFile = useCallback((path: string) => {
-    // Performance mark: file views measure open latency from this click.
+  // THE one way a file opens (tree click, quick-open, tab activation): marks
+  // file-open-start — file views measure open latency from here — then opens
+  // or re-activates the tab. The inspector mounts keyed by the active tab, so
+  // every activation is a fresh read + measure.
+  const openFile = useCallback((path: string) => {
     rendererMarks.mark("file-open-start");
-    setSelected(path);
+    setWb((state) => openTab(state, path));
+  }, []);
+
+  // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
+  // re-render the whole strip on every shell render, incl. each 800ms dirty
+  // flip while typing). Closing the ACTIVE tab activates its neighbor, which
+  // remounts the keyed inspector — that is an OPEN, so re-mark
+  // file-open-start or the view's mount measure would bracket the stale mark
+  // the last explicit open left (garbage open-latency telemetry). Marking
+  // inside the updater is safe: marks are last-write-wins, so a StrictMode
+  // double-invoke re-marks the same instant.
+  const closeFileTab = useCallback((path: string) => {
+    setWb((state) => {
+      const next = closeTab(state, path);
+      if (next.activeTab !== state.activeTab && next.activeTab !== null) {
+        rendererMarks.mark("file-open-start");
+      }
+      return next;
+    });
+  }, []);
+
+  const closeActiveTab = useCallback(() => {
+    setWb((state) => {
+      if (!state.activeTab) return state;
+      const next = closeTab(state, state.activeTab);
+      if (next.activeTab !== null) rendererMarks.mark("file-open-start");
+      return next;
+    });
+  }, []);
+
+  const moveFileTab = useCallback((path: string, toIndex: number) => {
+    setWb((state) =>
+      moveTab(
+        state,
+        state.tabs.findIndex((tab) => tab.path === path),
+        toIndex,
+      ),
+    );
   }, []);
 
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
+  // These live in the workbench ROOT — a view may unmount, this must not.
   useEffect(() => {
     if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
   }, [files]);
@@ -169,12 +366,17 @@ export function DesktopWorkspaceShell(props: {
         setQuickOpenOpen((open) => !open);
       } else if (event.key === "b") {
         event.preventDefault();
-        setSidebarVisible((visible) => !visible);
+        setWb(toggleSidebar);
+      } else if (event.key === "w") {
+        // Ctrl+W closes the TAB (the menu's Close Window moved to
+        // Ctrl+Shift+W so the close role can't swallow this keystroke).
+        event.preventDefault();
+        closeActiveTab();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [closeActiveTab]);
 
   const openWorkspaceFolder = useCallback(async () => {
     const picked = await bridge().pickWorkspaceRoot();
@@ -210,8 +412,23 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "toggle-sidebar",
         label: "Toggle sidebar",
-        run: () => setSidebarVisible((visible) => !visible),
+        run: () => setWb(toggleSidebar),
       },
+      {
+        id: "close-tab",
+        label: "Close tab",
+        run: closeActiveTab,
+      },
+      {
+        id: "toggle-history",
+        label: "Toggle history rail",
+        run: () => setWb(toggleHistory),
+      },
+      ...VIEW_IDS.map((view) => ({
+        id: `show-${view}`,
+        label: `View: ${activityViewLabel(view)}`,
+        run: () => setWb((state) => setView(state, view)),
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -228,7 +445,7 @@ export function DesktopWorkspaceShell(props: {
         run: toggleTheme,
       },
     ],
-    [importFiles, openWorkspaceFolder],
+    [importFiles, openWorkspaceFolder, closeActiveTab],
   );
 
   useEffect(() => {
@@ -240,6 +457,60 @@ export function DesktopWorkspaceShell(props: {
       else commands.find((entry) => entry.id === command)?.run();
     });
   }, [commands]);
+
+  const explorerView = (
+    <>
+      <nav
+        data-testid="file-tree"
+        aria-label="Files"
+        className="min-h-0 flex-1 overflow-y-auto py-1"
+      >
+        {files.length === 0 ? (
+          <button
+            type="button"
+            onClick={() => setNewFileOpen(true)}
+            className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
+          >
+            <FilePlus2 size={13} aria-hidden />
+            Create your first file
+          </button>
+        ) : (
+          <ul className="m-0 list-none p-0">
+            {files.map((file) => (
+              <FileRow
+                key={file.path}
+                file={file}
+                selected={wb.activeTab === file.path}
+                onSelect={openFile}
+              />
+            ))}
+          </ul>
+        )}
+      </nav>
+
+      <footer className="flex flex-col border-t border-line px-1 py-1">
+        <button
+          type="button"
+          onClick={() => setNewFileOpen(true)}
+          className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
+        >
+          <FilePlus2 size={13} aria-hidden />
+          New file
+          <kbd className="ml-auto font-mono text-[10px] text-subtle">
+            Ctrl N
+          </kbd>
+        </button>
+        <button
+          type="button"
+          onClick={() => void importFiles()}
+          className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
+        >
+          <Import size={13} aria-hidden />
+          Import files
+        </button>
+      </footer>
+    </>
+  );
 
   return (
     <div
@@ -253,69 +524,65 @@ export function DesktopWorkspaceShell(props: {
         onQuickOpen={() => setQuickOpenOpen(true)}
       />
       <div className="flex min-h-0 flex-1">
-        {/* Sidebar (Ctrl+B toggles; the switcher lives in the titlebar) */}
-        {sidebarVisible ? (
-        <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-panel-2">
-          <nav
-            data-testid="file-tree"
-            aria-label="Files"
-            className="min-h-0 flex-1 overflow-y-auto py-1"
-          >
-            {files.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => setNewFileOpen(true)}
-                className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-              >
-                <FilePlus2 size={13} aria-hidden />
-                Create your first file
-              </button>
-            ) : (
-              <ul className="m-0 list-none p-0">
-                {files.map((file) => (
-                  <FileRow
-                    key={file.path}
-                    file={file}
-                    selected={selected === file.path}
-                    onSelect={selectFile}
-                  />
-                ))}
-              </ul>
-            )}
-          </nav>
+        <ActivityBar
+          activeView={wb.activeView}
+          sidebarVisible={wb.sidebarVisible}
+          hasConflict={syncStatus?.state === "conflict"}
+          agentActive={agentActive}
+          onSelectView={(view) => setWb((state) => setView(state, view))}
+          onOpenCloud={() => setCloudOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
 
-          <footer className="flex flex-col border-t border-line px-1 py-1">
-            <button
-              type="button"
-              onClick={() => setNewFileOpen(true)}
-              className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
-            >
-              <FilePlus2 size={13} aria-hidden />
-              New file
-              <kbd className="ml-auto font-mono text-[10px] text-subtle">
-                Ctrl N
-              </kbd>
-            </button>
-            <button
-              type="button"
-              onClick={() => void importFiles()}
-              className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
-            >
-              <Import size={13} aria-hidden />
-              Import files
-            </button>
-          </footer>
-        </aside>
+        {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
+        {wb.sidebarVisible ? (
+          <SidePanel
+            title={activityViewLabel(wb.activeView)}
+            width={wb.sidebarWidth}
+            onWidthChange={(width) => setWb((state) => setSidebarWidth(state, width))}
+            actions={
+              wb.activeView === "history" ? (
+                <button
+                  type="button"
+                  data-testid="history-rail-toggle"
+                  aria-label="Toggle history rail"
+                  title="Toggle history rail"
+                  onClick={() => setWb(toggleHistory)}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <PanelRight size={13} aria-hidden />
+                </button>
+              ) : undefined
+            }
+          >
+            {wb.activeView === "explorer" ? (
+              explorerView
+            ) : wb.activeView === "history" ? (
+              <HistoryList changeSets={changeSets} />
+            ) : (
+              <EmptyView view={wb.activeView} />
+            )}
+          </SidePanel>
         ) : null}
 
-        {/* Main area */}
+        {/* Editor area: tab strip + the active tab's inspector */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          {selected ? (
+          <EditorTabs
+            tabs={wb.tabs}
+            activeTab={wb.activeTab}
+            activeTabDirty={activeTabDirty}
+            onActivate={openFile}
+            onClose={closeFileTab}
+            onMove={moveFileTab}
+          />
+          {wb.activeTab ? (
             <FileInspector
+              key={wb.activeTab}
               workspaceId={workspaceId}
-              path={selected}
+              path={wb.activeTab}
               refreshKey={changeSets.length}
-              onOpenPath={selectFile}
+              onOpenPath={openFile}
+              onSaveStateChange={onSaveStateChange}
             />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
@@ -350,85 +617,36 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* History timeline — the "git log for everyday people". Every
-            settled change (yours or your agent's) lands here, newest first. */}
-        <aside
-          data-testid="history-timeline"
-          aria-label="History"
-          className="flex w-64 shrink-0 flex-col border-l border-line bg-panel-2"
-        >
-          <header className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[13px] font-semibold">
-            <History size={14} aria-hidden />
-            History
-          </header>
-          {changeSets.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-              <span className="text-xs text-muted">No changes yet</span>
-              <span className="text-[11px] text-subtle">
-                Edits — yours or your agent's — show up here as a timeline you
-                can review.
+            settled change (yours or your agent's) lands here, newest first.
+            Default-visible right rail (specs assert it with zero clicks);
+            toggleable via the toggle-history command. */}
+        {wb.historyVisible ? (
+          <aside
+            data-testid="history-timeline"
+            aria-label="History"
+            className="flex w-64 shrink-0 flex-col border-l border-line bg-panel-2"
+          >
+            {/* Same header grammar + h-9 band as the side panel: the two
+                peer chrome surfaces speak one language and their hairlines
+                meet the tab strip's on the same pixel row. */}
+            <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+                History
               </span>
-            </div>
-          ) : (
-            <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
-              {changeSets.map((change) => (
-                <li
-                  key={change.id}
-                  className="flex flex-col gap-0.5 border-b border-line px-3 py-2"
-                >
-                  <span className="flex items-center gap-1.5 text-[12px] text-ink">
-                    {change.author.kind === "agent" ? (
-                      <Bot size={12} aria-hidden className="shrink-0 text-subtle" />
-                    ) : (
-                      <User size={12} aria-hidden className="shrink-0 text-subtle" />
-                    )}
-                    <span className="truncate">{change.humanSummary}</span>
-                  </span>
-                  <span className="text-[10px] text-subtle">
-                    {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-                    {" · "}
-                    {change.kind}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
+            </header>
+            <HistoryList changeSets={changeSets} />
+          </aside>
+        ) : null}
       </div>
 
-      {/* Status bar */}
-      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3">
-        <span
-          data-testid="sync-status"
-          data-state={syncStatus?.state ?? "synced"}
-          className="flex items-center gap-1.5 text-[11px] text-muted"
-        >
-          <span
-            aria-hidden
-            className={`inline-block h-1.5 w-1.5 rounded-full ${SYNC_DOT[syncStatus?.state ?? "synced"]}`}
-          />
-          {SYNC_LABEL[syncStatus?.state ?? "synced"]}
-        </span>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setCloudOpen(true)}
-            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
-          >
-            <Cloud size={12} aria-hidden />
-            Connect dohc Cloud
-          </button>
-          <button
-            type="button"
-            data-testid="open-settings"
-            aria-label="Settings"
-            onClick={() => setSettingsOpen(true)}
-            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
-          >
-            <Settings size={12} aria-hidden />
-            Settings
-          </button>
-        </div>
-      </footer>
+      <StatusBar
+        workspaceName={workspaceName(props.workspace)}
+        syncStatus={syncStatus}
+        agentActive={agentActive}
+        onConnectCloud={() => setCloudOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleTheme={toggleTheme}
+      />
 
       {paletteOpen ? (
         <CommandPalette
@@ -444,7 +662,7 @@ export function DesktopWorkspaceShell(props: {
           commands={files.map((file) => ({
             id: file.path,
             label: file.path,
-            run: () => setSelected(file.path),
+            run: () => openFile(file.path),
           }))}
           onClose={() => setQuickOpenOpen(false)}
         />

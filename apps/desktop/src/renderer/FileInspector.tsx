@@ -170,10 +170,18 @@ function MarkdownView(props: {
   workspaceId: string;
   path: string;
   truncatedNotice?: React.ReactNode;
+  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+
+  // Lift the save state to the shell (smallest seam): the active editor tab
+  // shows a dirty dot while this is not "saved".
+  const { onSaveStateChange } = props;
+  useEffect(() => {
+    onSaveStateChange?.(saveState);
+  }, [saveState, onSaveStateChange]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestDraft = useRef(props.body);
 
@@ -615,6 +623,9 @@ export function FileInspector(props: {
   path: string;
   refreshKey?: number;
   onOpenPath?: (path: string) => void;
+  // Editor save-state seam for the tab strip's dirty indicator. Only the
+  // markdown editor saves locally, so it is the only dirty source.
+  onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -652,6 +663,7 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             truncatedNotice={truncatedNotice}
+            onSaveStateChange={props.onSaveStateChange}
           />
         </div>
       );
