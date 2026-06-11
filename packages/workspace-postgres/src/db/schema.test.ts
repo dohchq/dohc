@@ -16,6 +16,7 @@ describe("Postgres workspace schema scaffold", () => {
       "database_operations",
       "permissions",
       "shares",
+      "workspace_invitations",
       "locks",
       "app_packages",
       "app_trust_grants",

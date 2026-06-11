@@ -9,7 +9,15 @@ import {
   type WriteTextFileRequest,
 } from "./routes/files";
 import { mintCollabToken, type CollabTokenDeps, type CollabTokenRequest } from "./routes/collab";
+import { createInvite, listInvites, revokeInvite } from "./routes/invites";
 import { resolveSharedAtom, type SharedAtomDeps } from "./routes/shared";
+import {
+  createShare,
+  listMyShares,
+  listWorkspaceShares,
+  revokeShare,
+  type CreateShareRequest,
+} from "./routes/shares";
 import { applyWorkspaceSync, type ApplySyncRequest } from "./routes/sync";
 import {
   createWorkspace as createWorkspaceRoute,
@@ -37,7 +45,9 @@ type WorkspaceRoute =
   | { route: "assets"; workspaceId: string }
   | { route: "sync"; workspaceId: string; action: "apply" }
   | { route: "collab"; workspaceId: string; action: "token" }
-  | { route: "events"; workspaceId: string };
+  | { route: "events"; workspaceId: string }
+  | { route: "shares"; workspaceId: string }
+  | { route: "invites"; workspaceId: string };
 
 export function createWorkspaceApiHandler({
   backend,
@@ -62,16 +72,30 @@ export function createWorkspaceApiHandler({
       // Workspace-less routes: the session alone identifies the user; the
       // workspace (if any) comes from the data, so the resolver gets "" and
       // only actor.userId is consumed.
-      if (shared && request.method === "GET") {
-        const pathname = new URL(request.url).pathname;
-        if (pathname === "/workspaces") {
+      if (shared) {
+        const parts = new URL(request.url).pathname
+          .split("/")
+          .filter(Boolean)
+          .map(decodeURIComponent);
+        if (request.method === "GET" && parts.length === 1 && parts[0] === "workspaces") {
           const actor = await resolveActor(request, "");
           return jsonResponse(await listWorkspaces(shared.pool, actor));
         }
-        const sharedAtomId = parseSharedAtomRoute(pathname);
-        if (sharedAtomId) {
+        if (request.method === "GET" && parts.length === 3 && parts[0] === "shared" && parts[1] === "atoms" && parts[2]) {
           const actor = await resolveActor(request, "");
-          return jsonResponse(await resolveSharedAtom(shared, actor.userId, sharedAtomId));
+          return jsonResponse(await resolveSharedAtom(shared, actor.userId, parts[2]));
+        }
+        if (request.method === "GET" && parts.length === 2 && parts[0] === "me" && parts[1] === "shares") {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await listMyShares(shared, actor.userId));
+        }
+        if (request.method === "DELETE" && parts.length === 2 && parts[0] === "shares" && parts[1]) {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await revokeShare(shared, actor.userId, parts[1]));
+        }
+        if (request.method === "DELETE" && parts.length === 2 && parts[0] === "invites" && parts[1]) {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await revokeInvite(shared, actor.userId, parts[1]));
         }
       }
 
@@ -108,6 +132,18 @@ export function createWorkspaceApiHandler({
       if (route.route === "events" && request.method === "GET") {
         return jsonResponse(await listWorkspaceEvents(actor, events));
       }
+      if (route.route === "shares" && request.method === "POST") {
+        return jsonResponse(await createShare(shared, actor, await readJson<CreateShareRequest>(request)));
+      }
+      if (route.route === "shares" && request.method === "GET") {
+        return jsonResponse(await listWorkspaceShares(shared, actor));
+      }
+      if (route.route === "invites" && request.method === "POST") {
+        return jsonResponse(await createInvite(shared, actor, await readJson<{ email?: string }>(request)));
+      }
+      if (route.route === "invites" && request.method === "GET") {
+        return jsonResponse(await listInvites(shared, actor));
+      }
 
       return jsonResponse({ ok: false, error: "route not found" }, 404);
     } catch (error) {
@@ -123,16 +159,6 @@ async function actorForRequest(
 ): Promise<Actor> {
   const actor = await resolveActor(request, workspaceId);
   return { ...actor, workspaceId };
-}
-
-// GET /shared/atoms/:atomId — returns the atom id or null when the path is
-// some other route.
-function parseSharedAtomRoute(pathname: string): string | null {
-  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 3 && parts[0] === "shared" && parts[1] === "atoms" && parts[2]) {
-    return parts[2];
-  }
-  return null;
 }
 
 function parseWorkspaceRoute(request: Request): WorkspaceRoute {
@@ -159,6 +185,12 @@ function parseWorkspaceRoute(request: Request): WorkspaceRoute {
   }
   if (section === "events" && parts.length === 3) {
     return { route: "events", workspaceId };
+  }
+  if (section === "shares" && parts.length === 3) {
+    return { route: "shares", workspaceId };
+  }
+  if (section === "invites" && parts.length === 3) {
+    return { route: "invites", workspaceId };
   }
   throw notFound("workspace route not found");
 }

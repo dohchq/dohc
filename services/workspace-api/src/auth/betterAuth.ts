@@ -2,6 +2,7 @@ import type { Actor } from "@dohc/workspace-contracts";
 import { betterAuth } from "better-auth";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { Pool } from "pg";
+import { claimWorkspaceInvitations } from "../routes/invites";
 
 // dohc Cloud auth: Better Auth mounted inside workspace-api on the SAME
 // Postgres the workspace backend uses (self-host = one database, no auth
@@ -27,13 +28,52 @@ export interface WorkspaceAuthOptions {
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
+  const sendEmail =
+    options.sendEmail ??
+    (async (to: string, subject: string, body: string) => {
+      console.log(`[workspace-api] email to ${to}: ${subject}\n${body}`);
+    });
+  // A failed claim logs but never fails the auth flow itself.
+  const claimInvitations = async (user: { id: string; email: string }) => {
+    try {
+      await claimWorkspaceInvitations(options.pool, user);
+    } catch (error) {
+      console.error("[workspace-api] invitation claim failed:", error);
+    }
+  };
   return betterAuth({
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
     database: options.pool,
     emailAndPassword: { enabled: true },
+    // Claim-on-VERIFICATION (security review P2): pending workspace
+    // invitations become workspace_members rows only once the signer has
+    // proven control of the invited address — claiming in user.create.after
+    // let anyone who signed up with an invited-but-unregistered email hijack
+    // the membership without ever receiving mail at that address.
+    emailVerification: {
+      sendOnSignUp: true,
+      sendVerificationEmail: async ({ user, url }) => {
+        await sendEmail(user.email, "Verify your dohc email", url);
+      },
+      afterEmailVerification: async (user) => {
+        await claimInvitations(user);
+      },
+    },
     ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
+    databaseHooks: {
+      user: {
+        create: {
+          // Only accounts BORN verified (e.g. a future social provider)
+          // claim at creation; email/password signups claim in
+          // afterEmailVerification above.
+          after: async (user) => {
+            if (user.emailVerified) await claimInvitations(user);
+          },
+        },
+      },
+    },
     plugins: [
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).

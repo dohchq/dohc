@@ -31,6 +31,7 @@ export const workspaceTables = [
   "database_operations",
   "permissions",
   "shares",
+  "workspace_invitations",
   "locks",
   "app_packages",
   "app_trust_grants",
@@ -234,7 +235,22 @@ export const shares = pgTable("shares", {
   recipientUserId: text("recipient_user_id"),
   recipientEmail: text("recipient_email"),
   capability: text("capability").notNull(),
+  // Migration 0004: who created the share (revocation = sharer or owner).
+  createdBy: text("created_by"),
   ...scopedTimestamps,
+});
+
+// Migration 0004: pending member invitations, claimed on signup by the
+// Better Auth user-create hook (or immediately when the invitee exists).
+export const workspaceInvitations = pgTable("workspace_invitations", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  email: text("email").notNull(),
+  invitedBy: text("invited_by").notNull(),
+  role: text("role").notNull().default("member"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
 
 export const locks = pgTable(
