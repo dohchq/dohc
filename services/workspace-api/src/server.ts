@@ -133,13 +133,16 @@ export function createWorkspaceApiHandler({
         return jsonResponse(await listWorkspaceEvents(actor, events));
       }
       if (route.route === "shares" && request.method === "POST") {
-        return jsonResponse(await createShare(shared, actor, await readJson<CreateShareRequest>(request)));
+        // Body parsing is DEFERRED into the route so workspace authz runs
+        // first: non-members get the uniform 403 whatever they POST
+        // (security review P3 schema oracle). Same for invites below.
+        return jsonResponse(await createShare(shared, actor, () => readJson<CreateShareRequest>(request)));
       }
       if (route.route === "shares" && request.method === "GET") {
         return jsonResponse(await listWorkspaceShares(shared, actor));
       }
       if (route.route === "invites" && request.method === "POST") {
-        return jsonResponse(await createInvite(shared, actor, await readJson<{ email?: string }>(request)));
+        return jsonResponse(await createInvite(shared, actor, () => readJson<{ email?: string }>(request)));
       }
       if (route.route === "invites" && request.method === "GET") {
         return jsonResponse(await listInvites(shared, actor));

@@ -4,13 +4,15 @@ import { defaultPostgresUrl } from "@dohc/workspace-postgres";
 import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceAuth } from "../auth/betterAuth";
+import { claimWorkspaceInvitations } from "./invites";
 import { createWorkspaceApiHandler } from "../server";
 
 // Live-pg member invitations (plan Phase E5 server lane; closes the tracked
-// convex-deletion gap): inviting an existing user grants membership now;
-// unknown emails leave a pending row that a REAL Better Auth email
-// VERIFICATION (driven through the node handler) claims — bare signup never
-// does; revoked invitations never claim.
+// convex-deletion gap): inviting an existing VERIFIED user grants membership
+// now; unknown AND unverified emails leave a pending row that a REAL Better
+// Auth email VERIFICATION (driven through the node handler) claims — bare
+// signup never does; revoked invitations never claim, including under a
+// concurrent revoke/claim race (deterministic two-client interleavings).
 const migrationUrls = ["0001_initial.sql", "0002_better_auth.sql", "0004_invitations.sql"].map(
   (name) =>
     new URL(`../../../../packages/workspace-postgres/src/db/migrations/${name}`, import.meta.url),
@@ -22,6 +24,8 @@ const memberId = "e5_invites_member";
 const strangerId = "e5_invites_stranger";
 const existingUserId = "e5_invites_existing";
 const existingEmail = "e5-invites-existing@dohc.test";
+const raceClaimerId = "e5_invites_race_claimer";
+const raceVerifierId = "e5_invites_race_verifier";
 // Signup emails must be unique across runs (the Better Auth user table
 // outlives the workspace fixtures).
 const unique = () => `e5-invites-${Date.now()}-${Math.floor(Math.random() * 1e6)}@dohc.test`;
@@ -54,6 +58,38 @@ const membershipFor = (userId: string) =>
     [workspaceId, userId],
   );
 
+// Real Better Auth signup/verification driven through the node handler:
+// sendOnSignUp delivers the verification URL through the sendEmail seam, the
+// test captures it per-address and replays it.
+function authHarness() {
+  const verifyUrls = new Map<string, string>();
+  const auth = createWorkspaceAuth({
+    pool,
+    baseURL: "http://localhost:1786",
+    secret: "test-secret-0123456789abcdef0123456789abcdef",
+    sendEmail: async (to, _subject, body) => {
+      verifyUrls.set(to, body);
+    },
+  });
+  const signUp = async (email: string) => {
+    const response = await auth.handler(
+      new Request("http://localhost:1786/api/auth/sign-up/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "a-real-password-123", name: "Invited User" }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const { user } = (await response.json()) as { user: { id: string } };
+    return user;
+  };
+  const verify = async (email: string) => {
+    const response = await auth.handler(new Request(verifyUrls.get(email)!));
+    expect([200, 302]).toContain(response.status);
+  };
+  return { signUp, verify };
+}
+
 beforeEach(async () => {
   pool = new pg.Pool({ connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl });
   for (const url of migrationUrls) await pool.query(await readFile(url, "utf8"));
@@ -69,8 +105,10 @@ beforeEach(async () => {
             ('e5-invites-m-member', $1, $3, 'member')`,
     [workspaceId, ownerId, memberId],
   );
+  // VERIFIED: invites resolve existing users among verified accounts only
+  // (security review P1); the unverified case has its own test below.
   await pool.query(
-    `insert into "user" (id, name, email, "emailVerified") values ($1, 'Existing', $2, false)`,
+    `insert into "user" (id, name, email, "emailVerified") values ($1, 'Existing', $2, true)`,
     [existingUserId, existingEmail],
   );
 });
@@ -128,6 +166,17 @@ describe("workspace invitation routes (live pg)", () => {
 
   it("403s non-members on create/list; strangers on revoke get the missing-row 404; rejects bad emails", async () => {
     expect((await postInvite(strangerId, unique())).status).toBe(403);
+    // Uniform shape (security review P3): authz precedes body validation, so
+    // a non-member gets the SAME 403 for malformed payloads — even non-JSON.
+    expect((await postInvite(strangerId, "not-an-email")).status).toBe(403);
+    expect(
+      (
+        await call(strangerId, `/workspaces/${workspaceId}/invites`, {
+          method: "POST",
+          body: "not json",
+        })
+      ).status,
+    ).toBe(403);
     expect((await call(strangerId, `/workspaces/${workspaceId}/invites`)).status).toBe(403);
     expect((await postInvite(ownerId, "not-an-email")).status).toBe(400);
 
@@ -167,37 +216,16 @@ describe("workspace invitation routes (live pg)", () => {
   });
 
   it("claims pending invitations only on REAL Better Auth email VERIFICATION — never on bare signup, never for revoked rows", async () => {
-    // sendOnSignUp delivers the verification URL through the sendEmail seam;
-    // the test captures it per-address and drives the verify-email route.
-    const verifyUrls = new Map<string, string>();
-    const auth = createWorkspaceAuth({
-      pool,
-      baseURL: "http://localhost:1786",
-      secret: "test-secret-0123456789abcdef0123456789abcdef",
-      sendEmail: async (to, _subject, body) => {
-        verifyUrls.set(to, body);
-      },
-    });
-    const signUp = (email: string) =>
-      auth.handler(
-        new Request("http://localhost:1786/api/auth/sign-up/email", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ email, password: "a-real-password-123", name: "Invited User" }),
-        }),
-      );
-    const verify = (email: string) => auth.handler(new Request(verifyUrls.get(email)!));
+    const { signUp, verify } = authHarness();
 
     // Invited then signed up: NO membership yet (the address is unproven)…
     const invitedEmail = unique();
     const { invite } = await (await postInvite(memberId, invitedEmail)).json();
-    const response = await signUp(invitedEmail);
-    expect(response.status).toBe(200);
-    const { user } = (await response.json()) as { user: { id: string } };
+    const user = await signUp(invitedEmail);
     expect((await membershipFor(user.id)).rowCount).toBe(0);
 
     // …then email verification lands membership and claims the invitation.
-    expect([200, 302]).toContain((await verify(invitedEmail)).status);
+    await verify(invitedEmail);
     expect((await membershipFor(user.id)).rows).toEqual([{ role: "member" }]);
     const claimed = await pool.query(
       "select claimed_at from workspace_invitations where id = $1",
@@ -209,10 +237,119 @@ describe("workspace invitation routes (live pg)", () => {
     const revokedEmail = unique();
     const { invite: revokedInvite } = await (await postInvite(memberId, revokedEmail)).json();
     await call(memberId, `/invites/${revokedInvite.inviteId}`, { method: "DELETE" });
-    const revokedResponse = await signUp(revokedEmail);
-    expect(revokedResponse.status).toBe(200);
-    const { user: revokedUser } = (await revokedResponse.json()) as { user: { id: string } };
-    expect([200, 302]).toContain((await verify(revokedEmail)).status);
+    const revokedUser = await signUp(revokedEmail);
+    await verify(revokedEmail);
     expect((await membershipFor(revokedUser.id)).rowCount).toBe(0);
   }, 30_000);
+
+  it("treats an UNVERIFIED existing account as unproven: the invite stays pending until THEIR verification claims it", async () => {
+    const { signUp, verify } = authHarness();
+
+    // The account exists FIRST, unverified (a squatter — or just a slow
+    // verifier — security review P1)…
+    const email = unique();
+    const user = await signUp(email);
+
+    // …inviting that address must NOT hand the unverified account membership;
+    // it records the same pending row an unknown email gets.
+    const invited = await (await postInvite(memberId, email)).json();
+    expect(invited).toMatchObject({
+      ok: true,
+      invite: { workspaceId, email, status: "pending" },
+    });
+    expect((await membershipFor(user.id)).rowCount).toBe(0);
+
+    // afterEmailVerification fires for EXISTING-account verification too, and
+    // claims the invitation created AFTER the account: proof of mailbox
+    // control is what converts the pending row, never account age.
+    await verify(email);
+    expect((await membershipFor(user.id)).rows).toEqual([{ role: "member" }]);
+    const claimed = await pool.query(
+      "select claimed_at from workspace_invitations where id = $1",
+      [invited.invite.inviteId],
+    );
+    expect(claimed.rows[0]?.claimed_at).not.toBeNull();
+  }, 30_000);
+
+  it("revoke 404s when a verification claim is in flight: membership stands, never a false success", async () => {
+    const email = unique();
+    const { invite } = await (await postInvite(memberId, email)).json();
+
+    const claimer = await pool.connect();
+    try {
+      // The exact conditional claim claimWorkspaceInvitations runs, held open
+      // in an explicit transaction: this client now owns the row lock.
+      await claimer.query("begin");
+      const claimed = await claimer.query(
+        `update workspace_invitations set claimed_at = now()
+         where lower(email) = lower($1) and claimed_at is null and deleted_at is null
+         returning workspace_id, role`,
+        [email],
+      );
+      expect(claimed.rowCount).toBe(1);
+
+      // Dispatch the REAL revoke route now: its conditional UPDATE blocks on
+      // the locked row, so the interleaving is deterministic — revoke only
+      // proceeds after the claim commits, re-evaluates its WHERE, and finds
+      // claimed_at set → zero rows → 404.
+      const revoke = call(ownerId, `/invites/${invite.inviteId}`, { method: "DELETE" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await claimer.query(
+        `insert into workspace_members (id, workspace_id, user_id, role)
+         values ('e5-invites-m-race-a', $1, $2, 'member')`,
+        [workspaceId, raceClaimerId],
+      );
+      await claimer.query("commit");
+      expect((await revoke).status).toBe(404);
+    } finally {
+      claimer.release();
+    }
+
+    // The membership stands and the invitation is claimed, NOT revoked — the
+    // owner saw a 404, never `revoked: true` over a live membership.
+    expect((await membershipFor(raceClaimerId)).rows).toEqual([{ role: "member" }]);
+    const row = await pool.query(
+      "select claimed_at, deleted_at from workspace_invitations where id = $1",
+      [invite.inviteId],
+    );
+    expect(row.rows[0].claimed_at).not.toBeNull();
+    expect(row.rows[0].deleted_at).toBeNull();
+  });
+
+  it("a claim arriving while revoke holds the row never lands membership", async () => {
+    const email = unique();
+    const { invite } = await (await postInvite(memberId, email)).json();
+
+    const revoker = await pool.connect();
+    try {
+      // The exact conditional revoke the route runs, held open: this client
+      // owns the row lock with deleted_at set but uncommitted.
+      await revoker.query("begin");
+      const revoked = await revoker.query(
+        `update workspace_invitations set deleted_at = now()
+         where id = $1 and claimed_at is null and deleted_at is null
+         returning id`,
+        [invite.inviteId],
+      );
+      expect(revoked.rowCount).toBe(1);
+
+      // Dispatch the REAL claim path now: its conditional UPDATE blocks on
+      // the locked row, re-evaluates after commit, sees deleted_at set, and
+      // skips the row — deterministically, no membership.
+      const claim = claimWorkspaceInvitations(pool, { id: raceVerifierId, email });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await revoker.query("commit");
+      await claim;
+    } finally {
+      revoker.release();
+    }
+
+    expect((await membershipFor(raceVerifierId)).rowCount).toBe(0);
+    const row = await pool.query(
+      "select claimed_at, deleted_at from workspace_invitations where id = $1",
+      [invite.inviteId],
+    );
+    expect(row.rows[0].claimed_at).toBeNull();
+    expect(row.rows[0].deleted_at).not.toBeNull();
+  });
 });

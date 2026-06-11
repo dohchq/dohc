@@ -62,18 +62,15 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       },
     },
     ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
-    databaseHooks: {
-      user: {
-        create: {
-          // Only accounts BORN verified (e.g. a future social provider)
-          // claim at creation; email/password signups claim in
-          // afterEmailVerification above.
-          after: async (user) => {
-            if (user.emailVerified) await claimInvitations(user);
-          },
-        },
-      },
-    },
+    // Deliberately NO user.create.after auto-claim hook (security review P3):
+    // none of the enabled providers (email/password, bearer, device,
+    // organization) creates born-verified users, so a create-time claim is
+    // dead code today and a hazard tomorrow — a future provider that mints
+    // emailVerified=true users (social login, magic link, email OTP, admin
+    // import) would silently claim every pending invitation for that address.
+    // Re-add ONLY behind an explicit allowlist of providers whose
+    // verified-email semantics have been reviewed, with provider-specific
+    // tests; until then afterEmailVerification above is the single claim path.
     plugins: [
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).

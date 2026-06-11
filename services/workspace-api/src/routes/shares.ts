@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { Actor } from "@dohc/workspace-contracts";
 import type pg from "pg";
+import { normalizeEmail } from "./email";
 import type { SharedAtomDeps } from "./shared";
 
 // Share lifecycle for the repositioned product (plan Phase E5 server lane):
-// members/owners share ONE atom with an EXISTING user by email; re-sharing
-// the same atom+recipient updates capability in place (the old Convex
-// audience-upsert semantics); revocation is a soft delete that the
-// GET /shared/atoms/:atomId resolver honors immediately. Unknown emails are
-// the invitation flow (invites.ts), never a share row.
+// members/owners share ONE atom with an existing VERIFIED user by email;
+// re-sharing the same atom+recipient updates capability in place (the old
+// Convex audience-upsert semantics) and is restricted to the original sharer
+// or the workspace owner; revocation is a soft delete that the
+// GET /shared/atoms/:atomId resolver honors immediately. Unknown AND
+// unverified emails are the invitation flow (invites.ts), never a share row.
 
 export type ShareCapability = "view" | "edit";
 
@@ -32,20 +34,25 @@ export type ShareRow = {
 export async function createShare(
   deps: SharedAtomDeps | undefined,
   actor: Actor,
-  body: CreateShareRequest,
+  readBody: () => Promise<CreateShareRequest>,
 ): Promise<{ ok: true; share: ShareRow }> {
   const pool = requirePool(deps);
-  const { atomId, atomPath, recipientEmail, capability } = body;
+  // Authz BEFORE the body is even parsed (security review P3 schema oracle):
+  // a non-member gets the uniform 403 whatever they POST, instead of a 400
+  // revealing how far their payload got through validation.
+  await assertWorkspaceAccess(pool, actor);
+
+  const { atomId, atomPath, recipientEmail, capability } = await readBody();
   if (capability !== "view" && capability !== "edit") {
     throw new Error('capability must be "view" or "edit"');
   }
-  if (typeof recipientEmail !== "string" || !recipientEmail.includes("@")) {
+  const email = normalizeEmail(recipientEmail);
+  if (!email) {
     throw new Error("recipientEmail must be an email address");
   }
   if ((atomId === undefined) === (atomPath === undefined)) {
     throw new Error("exactly one of atomId or atomPath is required");
   }
-  await assertWorkspaceAccess(pool, actor);
 
   // The atom must be a LIVE row in the route's workspace whichever way the
   // caller names it (share links are keyed by atoms.id, see shared.ts).
@@ -58,50 +65,67 @@ export async function createShare(
   );
   if (!atom.rows[0]) throw coded("not-found", "atom not found in this workspace");
 
-  // Recipients are resolved server-side from the Better Auth user table;
-  // pending-email sharing is the invitation flow, NOT a share row. The
-  // distinct 404 here is an ACCEPTED member-gated account-existence oracle
-  // (security review P3): only authenticated workspace members reach it, and
-  // silently falling through to an invitation would escalate an atom-scoped
-  // share request into full workspace membership.
+  // Recipients are resolved server-side from the Better Auth user table, and
+  // ONLY among VERIFIED accounts (security review P1): an attacker who signed
+  // up with someone else's address but never proved control of the mailbox
+  // must not receive shares meant for its true owner. Unverified and unknown
+  // emails share ONE answer — the invitation flow — so the response is also
+  // no verification oracle. The remaining 404 is an ACCEPTED member-gated
+  // account-existence oracle (security review P3): only authenticated
+  // workspace members reach it, and silently falling through to an invitation
+  // would escalate an atom-scoped share request into full workspace
+  // membership.
   const recipient = await pool.query<{ id: string; email: string }>(
-    `select id, email from "user" where lower(email) = lower($1) limit 1`,
-    [recipientEmail],
+    `select id, email from "user"
+     where lower(email) = $1 and "emailVerified" = true limit 1`,
+    [email],
   );
   if (!recipient.rows[0]) {
     throw coded("not-found", "no user with that email — invite them to the workspace instead");
   }
 
-  // Audience upsert: one live share per (atom, recipient); re-sharing only
-  // moves capability. Two statements keep us off ON CONFLICT (the shares
-  // table predates a uniqueness index for this triple).
-  const updated = await pool.query<DbShareRow>(
-    `update shares set capability = $1, updated_at = now()
-     where workspace_id = $2 and target_kind = 'atom' and target_id = $3
-       and recipient_user_id = $4 and deleted_at is null
-     returning ${SHARE_RETURNING}`,
-    [capability, actor.workspaceId, atom.rows[0].id, recipient.rows[0].id],
+  // Capability-update authz BEFORE the upsert (ON CONFLICT cannot authz):
+  // re-sharing an existing audience row is restricted to the workspace owner
+  // or the original sharer, or any member could silently escalate another
+  // sharer's view grant to edit (security review P2). The 403 deliberately
+  // does not name the current capability.
+  const existing = await pool.query<{ created_by: string | null; is_owner: boolean }>(
+    `select s.created_by,
+       exists(select 1 from workspaces w
+         where w.workspace_id = s.workspace_id and w.owner_user_id = $4
+           and w.deleted_at is null) as is_owner
+     from shares s
+     where s.workspace_id = $1 and s.target_kind = 'atom' and s.target_id = $2
+       and s.recipient_user_id = $3 and s.deleted_at is null`,
+    [actor.workspaceId, atom.rows[0].id, recipient.rows[0].id, actor.userId],
   );
-  const row =
-    updated.rows[0] ??
-    (
-      await pool.query<DbShareRow>(
-        `insert into shares (id, workspace_id, target_kind, target_id,
-           recipient_user_id, recipient_email, capability, created_by)
-         values ($1, $2, 'atom', $3, $4, $5, $6, $7)
-         returning ${SHARE_RETURNING}`,
-        [
-          randomUUID(),
-          actor.workspaceId,
-          atom.rows[0].id,
-          recipient.rows[0].id,
-          recipient.rows[0].email,
-          capability,
-          actor.userId,
-        ],
-      )
-    ).rows[0];
-  return { ok: true, share: { ...toShare(row), atomPath: atom.rows[0].path } };
+  if (existing.rows[0] && existing.rows[0].created_by !== actor.userId && !existing.rows[0].is_owner) {
+    throw coded("forbidden", "only the original sharer or the workspace owner may change this share");
+  }
+
+  // Audience upsert as ONE statement against the migration 0005 partial
+  // unique index: concurrent create-share requests can no longer both insert
+  // (security review P2 duplicate-row race) — the loser lands in DO UPDATE,
+  // which moves capability on the SAME row and keeps the original created_by.
+  const { rows } = await pool.query<DbShareRow>(
+    `insert into shares (id, workspace_id, target_kind, target_id,
+       recipient_user_id, recipient_email, capability, created_by)
+     values ($1, $2, 'atom', $3, $4, $5, $6, $7)
+     on conflict (workspace_id, target_kind, target_id, recipient_user_id)
+       where deleted_at is null
+     do update set capability = excluded.capability, updated_at = now()
+     returning ${SHARE_RETURNING}`,
+    [
+      randomUUID(),
+      actor.workspaceId,
+      atom.rows[0].id,
+      recipient.rows[0].id,
+      recipient.rows[0].email,
+      capability,
+      actor.userId,
+    ],
+  );
+  return { ok: true, share: { ...toShare(rows[0]), atomPath: atom.rows[0].path } };
 }
 
 // DELETE /shares/:shareId — soft delete by the sharer or the workspace owner.

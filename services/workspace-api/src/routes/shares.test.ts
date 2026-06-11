@@ -9,7 +9,12 @@ import { createWorkspaceApiHandler } from "../server";
 // shares by recipient email, re-sharing upserts capability, revocation soft-
 // deletes and the shared-link route 403s immediately, and /me/shares powers
 // "shared with me". Mirrors the shared.test.ts fixture idioms.
-const migrationUrls = ["0001_initial.sql", "0002_better_auth.sql", "0004_invitations.sql"].map(
+const migrationUrls = [
+  "0001_initial.sql",
+  "0002_better_auth.sql",
+  "0004_invitations.sql",
+  "0005_share_audience_unique.sql",
+].map(
   (name) =>
     new URL(`../../../../packages/workspace-postgres/src/db/migrations/${name}`, import.meta.url),
 );
@@ -21,6 +26,8 @@ const otherMemberId = "e5_shares_other_member";
 const strangerId = "e5_shares_stranger";
 const recipientId = "e5_shares_recipient";
 const recipientEmail = "e5-shares-recipient@dohc.test";
+const unverifiedId = "e5_shares_unverified";
+const unverifiedEmail = "e5-shares-unverified@dohc.test";
 const atomId = "e5-shares-atom";
 const otherAtomId = "e5-shares-atom-2";
 
@@ -67,10 +74,13 @@ beforeEach(async () => {
             ($3, $1, 'notes/second.md', 'markdown', '# Second note', 1)`,
     [workspaceId, atomId, otherAtomId],
   );
-  // The recipient is a Better Auth account (recipients resolve by email).
+  // The recipient is a VERIFIED Better Auth account (recipients resolve by
+  // email among verified users only — security review P1); the unverified
+  // account exists to prove it can never receive shares.
   await pool.query(
-    `insert into "user" (id, name, email, "emailVerified") values ($1, 'Recipient', $2, false)`,
-    [recipientId, recipientEmail],
+    `insert into "user" (id, name, email, "emailVerified")
+     values ($1, 'Recipient', $2, true), ($3, 'Squatter', $4, false)`,
+    [recipientId, recipientEmail, unverifiedId, unverifiedEmail],
   );
 });
 
@@ -127,6 +137,35 @@ describe("share lifecycle routes (live pg)", () => {
     await expect(link.json()).resolves.toMatchObject({ ok: true, capability: "edit" });
   });
 
+  it("403s a member who re-shares ANOTHER member's share (capability escalation); the owner may", async () => {
+    // Member A shares as view…
+    const { share } = await (
+      await postShare(memberId, { atomId, recipientEmail, capability: "view" })
+    ).json();
+
+    // …member B may not escalate it to edit (security review P2), and the
+    // refusal must not name the current capability.
+    const escalation = await postShare(otherMemberId, { atomId, recipientEmail, capability: "edit" });
+    expect(escalation.status).toBe(403);
+    const body = await escalation.json();
+    expect(body).toMatchObject({ ok: false, code: "forbidden" });
+    expect(body.error).not.toMatch(/view|edit/);
+    const after = await pool.query("select capability from shares where id = $1", [share.shareId]);
+    expect(after.rows).toEqual([{ capability: "view" }]);
+    // The recipient's link capability is unchanged.
+    await expect((await call(recipientId, `/shared/atoms/${atomId}`)).json()).resolves.toMatchObject(
+      { ok: true, capability: "view" },
+    );
+
+    // The workspace owner MAY change a share they did not create — same row.
+    const ownerUpdate = await postShare(ownerId, { atomId, recipientEmail, capability: "edit" });
+    expect(ownerUpdate.status).toBe(200);
+    await expect(ownerUpdate.json()).resolves.toMatchObject({
+      ok: true,
+      share: { shareId: share.shareId, capability: "edit" },
+    });
+  });
+
   it("rejects unknown recipient emails (invitation flow, not a share row) and bad bodies", async () => {
     const unknown = await postShare(ownerId, {
       atomId,
@@ -134,6 +173,18 @@ describe("share lifecycle routes (live pg)", () => {
       capability: "view",
     });
     expect(unknown.status).toBe(404);
+
+    // An UNVERIFIED account is not a proven email owner (security review P1):
+    // it gets the EXACT unknown-email answer — same status, same message — so
+    // the route neither shares with a mailbox squatter nor reveals whether an
+    // unverified signup exists for the address.
+    const unverified = await postShare(ownerId, {
+      atomId,
+      recipientEmail: unverifiedEmail,
+      capability: "view",
+    });
+    expect(unverified.status).toBe(404);
+    await expect(unverified.json()).resolves.toEqual(await unknown.json());
     expect((await pool.query("select 1 from shares where workspace_id = $1", [workspaceId])).rowCount).toBe(0);
 
     for (const body of [
@@ -152,6 +203,17 @@ describe("share lifecycle routes (live pg)", () => {
   it("403s non-members on create and list; members and owners list live shares", async () => {
     expect(
       (await postShare(strangerId, { atomId, recipientEmail, capability: "view" })).status,
+    ).toBe(403);
+    // Uniform shape (security review P3): authz precedes body validation, so
+    // a non-member gets the SAME 403 for malformed payloads — even non-JSON.
+    expect((await postShare(strangerId, { capability: "admin" })).status).toBe(403);
+    expect(
+      (
+        await call(strangerId, `/workspaces/${workspaceId}/shares`, {
+          method: "POST",
+          body: "not json",
+        })
+      ).status,
     ).toBe(403);
     expect((await call(strangerId, `/workspaces/${workspaceId}/shares`)).status).toBe(403);
 
@@ -226,5 +288,40 @@ describe("share lifecycle routes (live pg)", () => {
       await postShare(memberId, { atomId: otherAtomId, recipientEmail, capability: "view" })
     ).json();
     expect((await call(ownerId, `/shares/${second.shareId}`, { method: "DELETE" })).status).toBe(200);
+  });
+
+  it("migration 0005 dedupes pre-existing duplicate audience rows, keeping the newest", async () => {
+    // Recreate the pre-0005 world: no audience index, two live rows for the
+    // same (workspace, atom, recipient) — the duplicate the racy two-statement
+    // upsert could produce.
+    await pool.query("drop index if exists shares_audience_unique");
+    await pool.query(
+      `insert into shares (id, workspace_id, target_kind, target_id,
+         recipient_user_id, capability, created_by, created_at)
+       values ('e5-shares-dup-old', $1, 'atom', $2, $3, 'edit', $4, now() - interval '1 hour'),
+              ('e5-shares-dup-new', $1, 'atom', $2, $3, 'view', $4, now())`,
+      [workspaceId, atomId, recipientId, memberId],
+    );
+
+    // Re-applying the migration soft-deletes the older duplicate (the newest
+    // capability decision wins) and restores the unique index.
+    const migration = migrationUrls.find((url) =>
+      url.pathname.endsWith("0005_share_audience_unique.sql"),
+    )!;
+    await pool.query(await readFile(migration, "utf8"));
+    const live = await pool.query(
+      "select id from shares where workspace_id = $1 and deleted_at is null",
+      [workspaceId],
+    );
+    expect(live.rows).toEqual([{ id: "e5-shares-dup-new" }]);
+
+    // The index is back: the single-statement upsert updates that row in
+    // place instead of inserting a second live one.
+    const reshared = await postShare(memberId, { atomId, recipientEmail, capability: "edit" });
+    expect(reshared.status).toBe(200);
+    await expect(reshared.json()).resolves.toMatchObject({
+      ok: true,
+      share: { shareId: "e5-shares-dup-new", capability: "edit" },
+    });
   });
 });

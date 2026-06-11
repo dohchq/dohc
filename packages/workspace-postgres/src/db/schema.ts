@@ -227,21 +227,33 @@ export const permissions = pgTable("permissions", {
   ...scopedTimestamps,
 });
 
-export const shares = pgTable("shares", {
-  id: text("id").primaryKey(),
-  workspaceId: text("workspace_id").notNull(),
-  targetKind: text("target_kind").notNull(),
-  targetId: text("target_id").notNull(),
-  recipientUserId: text("recipient_user_id"),
-  recipientEmail: text("recipient_email"),
-  capability: text("capability").notNull(),
-  // Migration 0004: who created the share (revocation = sharer or owner).
-  createdBy: text("created_by"),
-  ...scopedTimestamps,
-});
+export const shares = pgTable(
+  "shares",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetId: text("target_id").notNull(),
+    recipientUserId: text("recipient_user_id"),
+    recipientEmail: text("recipient_email"),
+    capability: text("capability").notNull(),
+    // Migration 0004: who created the share (revocation = sharer or owner).
+    createdBy: text("created_by"),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    // Migration 0005: ONE live share per audience — createShare's
+    // INSERT ... ON CONFLICT upsert targets this partial index, closing the
+    // concurrent-create duplicate-row race. Tombstones never block a reshare.
+    uniqueIndex("shares_audience_unique")
+      .on(table.workspaceId, table.targetKind, table.targetId, table.recipientUserId)
+      .where(isNull(table.deletedAt)),
+  ],
+);
 
-// Migration 0004: pending member invitations, claimed on signup by the
-// Better Auth user-create hook (or immediately when the invitee exists).
+// Migration 0004: pending member invitations, claimed ONLY by the Better Auth
+// afterEmailVerification hook (or immediately when the invitee is an existing
+// VERIFIED user) — never at bare signup.
 export const workspaceInvitations = pgTable("workspace_invitations", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull(),
