@@ -8,7 +8,7 @@ import { claimWorkspaceInvitations } from "./invites";
 import { createWorkspaceApiHandler } from "../server";
 
 // Live-pg member invitations (plan Phase E5 server lane; closes the tracked
-// convex-deletion gap): inviting an existing VERIFIED user grants membership
+// backend-deletion-review gap): inviting an existing VERIFIED user grants membership
 // now; unknown AND unverified emails leave a pending row that a REAL Better
 // Auth email VERIFICATION (driven through the node handler) claims — bare
 // signup never does; revoked invitations never claim, including under a

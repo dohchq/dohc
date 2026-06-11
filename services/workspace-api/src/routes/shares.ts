@@ -6,8 +6,8 @@ import type { SharedAtomDeps } from "./shared";
 
 // Share lifecycle for the repositioned product (plan Phase E5 server lane):
 // members/owners share ONE atom with an existing VERIFIED user by email;
-// re-sharing the same atom+recipient updates capability in place (the old
-// Convex audience-upsert semantics) and is restricted to the original sharer
+// re-sharing the same atom+recipient updates capability in place (the
+// pre-pivot backend's audience-upsert semantics) and is restricted to the original sharer
 // or the workspace owner; revocation is a soft delete that the
 // GET /shared/atoms/:atomId resolver honors immediately. Unknown AND
 // unverified emails are the invitation flow (invites.ts), never a share row.

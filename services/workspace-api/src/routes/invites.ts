@@ -5,8 +5,8 @@ import { normalizeEmail } from "./email";
 import type { SharedAtomDeps } from "./shared";
 import { assertWorkspaceAccess } from "./shares";
 
-// Member invitations (plan Phase E5 server lane; closes the convex-deletion
-// review gap): inviting an existing VERIFIED user writes the
+// Member invitations (plan Phase E5 server lane; closes the 2026-06-10
+// backend-deletion review gap): inviting an existing VERIFIED user writes the
 // workspace_members row immediately and records the invitation claimed; an
 // unknown OR UNVERIFIED email leaves a pending workspace_invitations row that
 // claimWorkspaceInvitations (the Better Auth afterEmailVerification hook)

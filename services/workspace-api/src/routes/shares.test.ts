@@ -118,7 +118,7 @@ describe("share lifecycle routes (live pg)", () => {
     });
 
     // Re-share the same atom+recipient (this time by atomId): SAME row, new
-    // capability — the Convex audience-upsert semantics.
+    // capability — the pre-pivot audience-upsert semantics.
     const reshared = await postShare(memberId, { atomId, recipientEmail, capability: "edit" });
     expect(reshared.status).toBe(200);
     await expect(reshared.json()).resolves.toMatchObject({

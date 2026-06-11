@@ -1,5 +1,5 @@
 -- Phase E5 server lane: workspace member invitations (closes the tracked
--- member-invite gap from the convex-deletion review). Inviting an EXISTING
+-- member-invite gap from the 2026-06-10 backend-deletion review). Inviting an EXISTING
 -- user writes the workspace_members row immediately and records the
 -- invitation as claimed; inviting an unknown email leaves a pending row that
 -- the Better Auth after-email-verification hook claims once the signer

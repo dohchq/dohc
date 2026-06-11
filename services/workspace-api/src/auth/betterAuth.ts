@@ -65,7 +65,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
     // Deliberately NO user.create.after auto-claim hook (security review P3):
     // none of the enabled providers (email/password, bearer, device,
     // organization) creates born-verified users, so a create-time claim is
-    // dead code today and a hazard tomorrow — a future provider that mints
+    // unreachable today and a hazard tomorrow — a future provider that mints
     // emailVerified=true users (social login, magic link, email OTP, admin
     // import) would silently claim every pending invitation for that address.
     // Re-add ONLY behind an explicit allowlist of providers whose
