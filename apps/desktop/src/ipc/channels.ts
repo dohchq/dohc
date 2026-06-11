@@ -1,3 +1,19 @@
+// The closed application-menu command set. Lives here (not bridgeContract)
+// because the SANDBOXED preload validates against it as a value, and this
+// module must stay dependency-free — bridgeContract pulls zod/workspace-core,
+// which a sandboxed preload cannot require at runtime.
+export const MENU_COMMANDS = [
+  "new-file",
+  "new-folder",
+  "open-workspace",
+  "import-files",
+  "command-palette",
+  "quick-open",
+  "toggle-sidebar",
+  "toggle-theme",
+  "settings",
+] as const;
+
 export const CHANNELS = {
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
@@ -30,6 +46,8 @@ export const CHANNELS = {
   endAgentRun: "desktop:end-agent-run",
   getAgentRunStatus: "desktop:get-agent-run-status",
   getMcpConfig: "desktop:get-mcp-config",
+  setTitlebarTheme: "desktop:set-titlebar-theme",
+  menuCommand: "desktop:menu-command",
   workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",

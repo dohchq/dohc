@@ -1,10 +1,47 @@
-@import "@dohc/brand/tokens.css";
 @import "tailwindcss";
 
 @custom-variant dark ([data-theme='dark'] &);
 
-/* Semantic layer over the shared brand tokens. The desktop renderer never
- * redefines brand colors — packages/brand/src/tokens.css is the source. */
+/* Graphite-minimal palette (decision D-E5). SINGLE SOURCE OF TRUTH RULE:
+ * these values are mirrored in tokens.ts for surfaces CSS cannot reach
+ * (window backgroundColor, titleBarOverlay); tokens.test.ts parses this file
+ * and asserts both stay byte-identical. This static block exists so first
+ * paint never waits on JS — edit values in BOTH files or the sync test fails. */
+:root {
+  --font-sans: "InterVariable", system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --dohc-bg: #ffffff;
+  --dohc-panel: #fafafa;
+  --dohc-panel-2: #f4f4f5;
+  --dohc-line: #e4e4e7;
+  --dohc-ink: #18181b;
+  --dohc-muted: #52525b;
+  --dohc-subtle: #8b8b93;
+  --dohc-accent: #18181b;
+  --dohc-success: #15803d;
+  --dohc-warning: #a16207;
+  --dohc-danger: #b91c1c;
+  --dohc-selection: rgba(59, 130, 246, 0.22);
+}
+
+[data-theme='dark'] {
+  --dohc-bg: #18181b;
+  --dohc-panel: #1e1e20;
+  --dohc-panel-2: #1c1c1e;
+  --dohc-line: #2e2e33;
+  --dohc-ink: #fafafa;
+  --dohc-muted: #a1a1aa;
+  --dohc-subtle: #71717a;
+  --dohc-accent: #fafafa;
+  --dohc-success: #4ade80;
+  --dohc-warning: #fbbf24;
+  --dohc-danger: #f87171;
+  --dohc-selection: rgba(96, 165, 250, 0.32);
+}
+
+/* Semantic layer the components consume; token NAMES are stable, only the
+ * values above change between themes. */
 @theme inline {
   --color-bg: var(--dohc-bg);
   --color-panel: var(--dohc-panel);
@@ -29,12 +66,50 @@ body,
   background: var(--dohc-bg);
   color: var(--dohc-ink);
   font-family: var(--font-sans);
-  font-size: 14px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* 13px UI baseline (editor surfaces opt up to 15–16px) — on body, NEVER on
+ * html: rem-based Tailwind utilities resolve against the root, so a 13px
+ * root would silently shrink every h-7 row, the h-10 titlebar, and text-xs
+ * by 18.75% (and desync the strip from the 40px OS titleBarOverlay). */
+body {
+  font-size: 13px;
+}
+
+/* Color only for semantics: text selection is a neutral-blue tint for
+ * legibility, never brand decoration. */
+::selection {
+  background: var(--dohc-selection);
+}
+
+/* a11y: keyboard focus is a 2px ink ring with offset, both modes. Layered so
+ * Tailwind utilities (outline-none on inputs that carry their own focus
+ * treatment) can override it — unlayered, this rule would beat every
+ * utility and clip into stray bars inside overflow-hidden popovers. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--dohc-accent);
+    outline-offset: 1px;
+  }
+}
+
+/* Tables read as data: tabular numerals wherever rows of numbers render. */
+table {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Desktop app, not a web page: no text cursor or selection on chrome. */
 .app-chrome {
   user-select: none;
   cursor: default;
+}
+
+/* Native window chrome: the titlebar strip drags the window; every
+ * interactive child must opt out or it becomes un-clickable. */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
 }

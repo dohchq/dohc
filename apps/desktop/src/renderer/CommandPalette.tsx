@@ -16,7 +16,9 @@ export function CommandPalette(props: {
   ariaLabel?: string;
 }) {
   const [query, setQuery] = useState("");
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -42,6 +44,21 @@ export function CommandPalette(props: {
     rendererMarks.measureSince("file-tree-search-visible", "file-tree-search-input");
   }, [query]);
 
+  // The match list can shrink under the selection as the query narrows.
+  const selected = Math.min(selectedIndex, Math.max(matches.length - 1, 0));
+
+  function moveSelection(delta: number) {
+    if (matches.length === 0) return;
+    setSelectedIndex((selected + delta + matches.length) % matches.length);
+  }
+
+  // Keep the keyboard-selected row visible inside the scrolling list.
+  useEffect(() => {
+    listRef.current
+      ?.querySelector('[aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
+
   function runCommand(command: Command | undefined) {
     if (!command) return;
     props.onClose();
@@ -63,24 +80,43 @@ export function CommandPalette(props: {
           onChange={(event) => {
             rendererMarks.mark("file-tree-search-input");
             setQuery(event.target.value);
+            setSelectedIndex(0);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") props.onClose();
-            if (event.key === "Enter") runCommand(matches[0]);
+            else if (event.key === "ArrowDown") {
+              event.preventDefault();
+              moveSelection(1);
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              moveSelection(-1);
+            } else if (event.key === "Enter") runCommand(matches[selected]);
           }}
-          className="w-full border-b border-line bg-transparent px-4 py-3 text-sm text-ink outline-none placeholder:text-subtle"
+          // Intentional focus treatment (the input autofocuses on open): the
+          // bottom hairline shifts to ink instead of the global focus ring,
+          // whose top/sides the rounded popover would clip into a stray bar.
+          className="w-full border-b border-line bg-transparent px-4 py-3 text-sm text-ink outline-none placeholder:text-subtle focus:border-ink"
         />
-        <ul role="listbox" aria-label="Commands" className="m-0 max-h-72 list-none overflow-y-auto p-1">
+        <ul
+          ref={listRef}
+          role="listbox"
+          aria-label="Commands"
+          className="m-0 max-h-72 list-none overflow-y-auto p-1"
+        >
           {matches.length === 0 ? (
             <li className="px-3 py-2 text-xs text-subtle">No matching commands</li>
           ) : (
             matches.map((command, index) => (
-              <li key={command.id} role="option" aria-selected={index === 0}>
+              <li key={command.id} role="option" aria-selected={index === selected}>
                 <button
                   type="button"
                   onClick={() => runCommand(command)}
-                  className={`w-full rounded px-3 py-1.5 text-left text-[13px] ${
-                    index === 0 ? "bg-panel-2 text-ink" : "text-muted hover:text-ink"
+                  className={`flex h-7 w-full items-center rounded px-3 text-left text-[13px] ${
+                    // Active row gets the stronger line-family tint (D-E5);
+                    // panel-2 is reserved for hover only.
+                    index === selected
+                      ? "bg-line text-ink"
+                      : "text-muted hover:bg-panel-2 hover:text-ink"
                   }`}
                 >
                   {command.label}

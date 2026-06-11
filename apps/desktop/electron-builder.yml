@@ -17,6 +17,9 @@ appId: app.dohc.desktop
 productName: dohc
 directories:
   output: release
+  # App icon: build/icon.png (512px, rendered from icon.svg by
+  # scripts/render-icon.mjs); electron-builder derives ico/icns from it.
+  buildResources: build
 files:
   - dist/**
 asar: true

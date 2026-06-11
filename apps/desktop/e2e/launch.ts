@@ -1,3 +1,6 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { _electron as electron, type ElectronApplication } from "playwright";
 
 // Single source for launching the built desktop app in E2E. Keeps the
@@ -7,11 +10,14 @@ export async function launchApp(
 ): Promise<ElectronApplication> {
   const args = ["apps/desktop/dist/main/main.js"];
   if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
-  // A distinct userData dir per launch lets two clients run CONCURRENTLY
-  // (live co-editing): the single-instance lock keys on userData, so without
-  // this the second instance would quit on launch. Test-only state
-  // (registry, credentials) already lives under DOHC_TEST_HOME.
-  if (env.DOHC_TEST_USER_DATA) args.push(`--user-data-dir=${env.DOHC_TEST_USER_DATA}`);
+  // EVERY launch gets a distinct userData dir: the single-instance lock keys
+  // on it (so two clients can run CONCURRENTLY for live co-editing), and
+  // renderer-origin state (localStorage, e.g. the stored theme) must never
+  // leak between tests or runs. Test-only app state (registry, credentials,
+  // window state) already lives under DOHC_TEST_HOME.
+  const userData =
+    env.DOHC_TEST_USER_DATA ?? (await mkdtemp(join(tmpdir(), "dohc-e2e-ud-")));
+  args.push(`--user-data-dir=${userData}`);
   return electron.launch({
     args,
     cwd: process.cwd(),

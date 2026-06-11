@@ -200,6 +200,13 @@ const HISTORICAL_DOCS = new Set([
   term("docs/superpowers/plans/2026-06-09-dohc-dual-back", "end-filesystem-agent-runtime.md"),
   "docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.execution-log.md",
   "docs/superpowers/plans/2026-06-10-dohc-desktop-local-first-cloud-sync.md",
+  // The experience-parity plan recovers pre-pivot UI from git history and must
+  // name the old world to do so (recovery commands, porting rules).
+  "docs/superpowers/plans/2026-06-11-dohc-desktop-experience-parity.md",
+  "docs/superpowers/plans/2026-06-11-dohc-desktop-experience-parity.execution-log.md",
+  // Recon digest for the same plan's E4 editor port: inventories the pre-pivot
+  // editor to name what gets ported vs stripped.
+  "docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md",
   "docs/superpowers/reviews/2026-06-06-apps-sdk-sqlite-agent-testing-review.md",
   term("docs/superpowers/reviews/2026-06-09-dual-back", "end-readiness-review.md"),
   term("docs/superpowers/reviews/2026-06-09-dual-back", "end-tech-debt-audit.md"),

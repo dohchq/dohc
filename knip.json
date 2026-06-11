@@ -21,7 +21,7 @@
         "scripts/*.mjs"
       ],
       "project": ["src/**/*.{ts,tsx}", "e2e/**/*.ts", "scripts/**/*.mjs"],
-      "ignoreDependencies": ["tailwindcss", "@dohc/brand", "@dohc/mcp"]
+      "ignoreDependencies": ["tailwindcss", "@dohc/mcp"]
     },
     "packages/*": {
       "project": "src/**/*.{ts,tsx}"

@@ -1,9 +1,17 @@
 const STORAGE_KEY = "dohc-theme";
 
+// The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
+// every theme flip to main. Best-effort: a platform without an overlay (or a
+// test without the bridge) just ignores it.
+function applyTheme(theme: "light" | "dark"): void {
+  document.documentElement.dataset.theme = theme;
+  void window.dohcDesktop?.setTitlebarTheme({ theme }).catch(() => undefined);
+}
+
 function apply(media: MediaQueryList): void {
   const stored = localStorage.getItem(STORAGE_KEY);
   const dark = stored ? stored === "dark" : media.matches;
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  applyTheme(dark ? "dark" : "light");
 }
 
 // Follows the system theme unless the user explicitly toggled; never
@@ -18,5 +26,5 @@ export function toggleTheme(): void {
   const next =
     document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   localStorage.setItem(STORAGE_KEY, next);
-  document.documentElement.dataset.theme = next;
+  applyTheme(next);
 }

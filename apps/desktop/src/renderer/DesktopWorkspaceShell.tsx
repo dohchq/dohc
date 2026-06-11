@@ -1,7 +1,5 @@
 import {
   Bot,
-  Check,
-  ChevronsUpDown,
   Cloud,
   Database,
   FilePlus2,
@@ -43,13 +41,10 @@ import { FileInspector } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
+import { Titlebar } from "./Titlebar";
 import { toggleTheme } from "./theme";
 
 export type Workspace = WorkspaceSummary;
-
-function workspaceName(workspace: Workspace): string {
-  return workspace.rootPath.split("/").pop() ?? "workspace";
-}
 
 function FileIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   if (kind === "database") return <Database size={13} aria-hidden />;
@@ -59,6 +54,7 @@ function FileIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 
 // Memoized so selecting a file only re-renders the two rows whose selected
 // state changed, not the entire tree (onSelect takes the path, not a closure).
+// 28px rows (h-7), VS Code density: hover is a gray tint, active a darker one.
 const FileRow = memo(function FileRow(props: {
   file: WorkspaceFileEntry;
   selected: boolean;
@@ -69,8 +65,10 @@ const FileRow = memo(function FileRow(props: {
       <button
         type="button"
         onClick={() => props.onSelect(props.file.path)}
-        className={`flex w-full items-center gap-1.5 px-3 py-1 text-left text-[13px] ${
-          props.selected ? "bg-panel text-ink" : "text-muted hover:text-ink"
+        className={`flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] ${
+          props.selected
+            ? "bg-line text-ink"
+            : "text-muted hover:bg-line/50 hover:text-ink"
         }`}
       >
         <FileIcon kind={props.file.kind} />
@@ -92,7 +90,7 @@ export function DesktopWorkspaceShell(props: {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -157,21 +155,36 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
+      // The application menu DISPLAYS these accelerators but does not
+      // register them (registerAccelerator: false) — this handler is the one
+      // owner of the keystrokes. Shift+P is "P" (uppercase) in event.key.
       if (event.key === "n") {
         event.preventDefault();
         setNewFileOpen(true);
-      } else if (event.key === "k") {
+      } else if (event.key === "k" || (event.shiftKey && event.key === "P")) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
       } else if (event.key === "p") {
         event.preventDefault();
         setQuickOpenOpen((open) => !open);
+      } else if (event.key === "b") {
+        event.preventDefault();
+        setSidebarVisible((visible) => !visible);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  const openWorkspaceFolder = useCallback(async () => {
+    const picked = await bridge().pickWorkspaceRoot();
+    if (!picked) return;
+    const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
+    props.onSwitchWorkspace(attached);
+  }, [props.onSwitchWorkspace]);
+
+  // THE command registry: the palette renders it and the application menu
+  // routes through it (onMenuCommand below) — one definition per action.
   const commands = useMemo<Command[]>(
     () => [
       {
@@ -185,9 +198,19 @@ export function DesktopWorkspaceShell(props: {
         run: () => setQuickOpenOpen(true),
       },
       {
+        id: "open-workspace",
+        label: "Open workspace folder…",
+        run: () => void openWorkspaceFolder(),
+      },
+      {
         id: "import-files",
         label: "Import files into workspace",
         run: () => void importFiles(),
+      },
+      {
+        id: "toggle-sidebar",
+        label: "Toggle sidebar",
+        run: () => setSidebarVisible((visible) => !visible),
       },
       {
         id: "connect-cloud",
@@ -205,63 +228,34 @@ export function DesktopWorkspaceShell(props: {
         run: toggleTheme,
       },
     ],
-    [importFiles],
+    [importFiles, openWorkspaceFolder],
   );
+
+  useEffect(() => {
+    return bridge().onMenuCommand((command) => {
+      if (command === "command-palette") setPaletteOpen(true);
+      // Until E3's real folder creation lands, New Folder opens the new-file
+      // dialog (a nested path like notes/today.md creates its folders).
+      else if (command === "new-folder") setNewFileOpen(true);
+      else commands.find((entry) => entry.id === command)?.run();
+    });
+  }, [commands]);
 
   return (
     <div
       data-testid="workspace-shell"
       className="app-chrome flex h-screen flex-col bg-bg text-ink"
     >
+      <Titlebar
+        workspace={props.workspace}
+        workspaces={props.workspaces}
+        onSwitchWorkspace={props.onSwitchWorkspace}
+        onQuickOpen={() => setQuickOpenOpen(true)}
+      />
       <div className="flex min-h-0 flex-1">
-        {/* Sidebar */}
+        {/* Sidebar (Ctrl+B toggles; the switcher lives in the titlebar) */}
+        {sidebarVisible ? (
         <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-panel-2">
-          <header className="relative border-b border-line">
-            <button
-              type="button"
-              data-testid="workspace-switcher"
-              aria-haspopup="listbox"
-              aria-expanded={switcherOpen}
-              onClick={() => setSwitcherOpen((open) => !open)}
-              className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-panel"
-            >
-              <span className="truncate text-[13px] font-semibold">
-                {workspaceName(props.workspace)}
-              </span>
-              <ChevronsUpDown size={13} aria-hidden className="text-subtle" />
-            </button>
-            {switcherOpen ? (
-              <ul
-                role="listbox"
-                aria-label="Workspaces"
-                className="absolute left-2 right-2 top-full z-20 mt-1 m-0 list-none rounded border border-line bg-panel p-1 shadow-md"
-              >
-                {props.workspaces.map((candidate) => (
-                  <li key={candidate.workspaceId} role="option" aria-selected={candidate.workspaceId === props.workspace.workspaceId}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSwitcherOpen(false);
-                        props.onSwitchWorkspace(candidate);
-                      }}
-                      className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[13px] text-muted hover:text-ink"
-                    >
-                      {candidate.workspaceId === props.workspace.workspaceId ? (
-                        <Check size={12} aria-hidden />
-                      ) : (
-                        <span className="w-3" aria-hidden />
-                      )}
-                      <span className="truncate">{workspaceName(candidate)}</span>
-                      <span className="ml-auto text-[10px] uppercase text-subtle">
-                        {candidate.kind}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </header>
-
           <nav
             data-testid="file-tree"
             aria-label="Files"
@@ -290,11 +284,11 @@ export function DesktopWorkspaceShell(props: {
             )}
           </nav>
 
-          <footer className="flex flex-col gap-1 border-t border-line px-3 py-1.5">
+          <footer className="flex flex-col border-t border-line px-1 py-1">
             <button
               type="button"
               onClick={() => setNewFileOpen(true)}
-              className="flex w-full items-center gap-1.5 text-xs text-muted hover:text-ink"
+              className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
             >
               <FilePlus2 size={13} aria-hidden />
               New file
@@ -305,13 +299,14 @@ export function DesktopWorkspaceShell(props: {
             <button
               type="button"
               onClick={() => void importFiles()}
-              className="flex w-full items-center gap-1.5 text-xs text-muted hover:text-ink"
+              className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
             >
               <Import size={13} aria-hidden />
               Import files
             </button>
           </footer>
         </aside>
+        ) : null}
 
         {/* Main area */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
@@ -417,7 +412,7 @@ export function DesktopWorkspaceShell(props: {
           <button
             type="button"
             onClick={() => setCloudOpen(true)}
-            className="flex items-center gap-1.5 text-[11px] text-subtle hover:text-ink"
+            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
           >
             <Cloud size={12} aria-hidden />
             Connect dohc Cloud
@@ -427,7 +422,7 @@ export function DesktopWorkspaceShell(props: {
             data-testid="open-settings"
             aria-label="Settings"
             onClick={() => setSettingsOpen(true)}
-            className="flex items-center gap-1.5 text-[11px] text-subtle hover:text-ink"
+            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
           >
             <Settings size={12} aria-hidden />
             Settings

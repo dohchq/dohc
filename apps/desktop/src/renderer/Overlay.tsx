@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 export function Overlay(props: { onClose: () => void; children: ReactNode }) {
   return (
     <div
-      className="absolute inset-0 z-10 flex items-start justify-center bg-black/20 pt-24"
+      className="absolute inset-0 z-30 flex items-start justify-center bg-black/20 pt-24"
       onClick={props.onClose}
     >
       <div onClick={(event) => event.stopPropagation()}>{props.children}</div>

@@ -109,14 +109,22 @@ function useTextContent(
   return { text, loadedPath, truncated, error };
 }
 
-function ViewHeader(props: { icon: React.ReactNode; path: string; label: string }) {
+// `actions` puts a view's controls (edit toggle, save state, presence) in the
+// ONE document header — views never stack a second near-empty toolbar.
+function ViewHeader(props: {
+  icon: React.ReactNode;
+  path: string;
+  label: string;
+  actions?: React.ReactNode;
+}) {
   return (
-    <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
+    <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
       {props.icon}
       <span className="font-mono text-ink">{props.path}</span>
       <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">
         {props.label}
       </span>
+      {props.actions}
     </header>
   );
 }
@@ -157,7 +165,12 @@ const MARKDOWN_COMPONENTS = {
 // change into history like any other file change — the editor is just another
 // writer, never a privileged one. Live co-editing (Yjs) layers onto this
 // surface for shared workspaces in the collab step.
-function MarkdownView(props: { body: string; workspaceId: string; path: string }) {
+function MarkdownView(props: {
+  body: string;
+  workspaceId: string;
+  path: string;
+  truncatedNotice?: React.ReactNode;
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
@@ -247,27 +260,33 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
   if (collab.enabled) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1">
-          <span
-            data-testid="collab-presence"
-            data-peer-count={collab.peerCount}
-            className="flex items-center gap-1 text-[11px] text-accent"
-          >
+        <ViewHeader
+          icon={<FileText size={13} aria-hidden />}
+          path={props.path}
+          label="document"
+          actions={
             <span
-              aria-hidden
-              className="inline-block h-1.5 w-1.5 rounded-full bg-success"
-            />
-            {collab.peerCount === 0
-              ? "Live · just you"
-              : `${collab.peerCount + 1} editing`}
-          </span>
-        </div>
+              data-testid="collab-presence"
+              data-peer-count={collab.peerCount}
+              className="flex items-center gap-1 text-[11px] text-accent"
+            >
+              <span
+                aria-hidden
+                className="inline-block h-1.5 w-1.5 rounded-full bg-success"
+              />
+              {collab.peerCount === 0
+                ? "Live · just you"
+                : `${collab.peerCount + 1} editing`}
+            </span>
+          }
+        />
+        {props.truncatedNotice}
         <textarea
           data-testid="collab-editor"
           value={collab.text}
           onChange={(e) => collab.setText(e.target.value)}
           spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[13px] leading-relaxed text-ink outline-none"
+          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
         />
       </div>
     );
@@ -275,31 +294,39 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1">
-        {editing ? (
-          <span
-            data-testid="markdown-save-state"
-            data-state={saveState}
-            className={`text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
-          >
-            {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          data-testid="markdown-edit-toggle"
-          onClick={() => {
-            if (editing && saveTimer.current) {
-              clearTimeout(saveTimer.current);
-              void saveNow();
-            }
-            setEditing((e) => !e);
-          }}
-          className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink"
-        >
-          {editing ? "Done" : "Edit"}
-        </button>
-      </div>
+      <ViewHeader
+        icon={<FileText size={13} aria-hidden />}
+        path={props.path}
+        label="document"
+        actions={
+          <>
+            {editing ? (
+              <span
+                data-testid="markdown-save-state"
+                data-state={saveState}
+                className={`text-[11px] ${saveState === "error" ? "text-danger" : "text-subtle"}`}
+              >
+                {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              data-testid="markdown-edit-toggle"
+              onClick={() => {
+                if (editing && saveTimer.current) {
+                  clearTimeout(saveTimer.current);
+                  void saveNow();
+                }
+                setEditing((e) => !e);
+              }}
+              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink"
+            >
+              {editing ? "Done" : "Edit"}
+            </button>
+          </>
+        }
+      />
+      {props.truncatedNotice}
       {editing ? (
         <textarea
           data-testid="markdown-editor"
@@ -314,12 +341,12 @@ function MarkdownView(props: { body: string; workspaceId: string; path: string }
             }
           }}
           spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[13px] leading-relaxed text-ink outline-none"
+          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
         />
       ) : (
         <div
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto p-6 text-[14px]"
+          className="min-h-0 flex-1 overflow-auto p-6 text-[15px]"
         >
           {renderedDocument}
         </div>
@@ -616,11 +643,16 @@ export function FileInspector(props: {
 
   switch (kind) {
     case "markdown":
+      // MarkdownView renders the ViewHeader itself: the edit toggle and save
+      // state live IN the document header (one bar, not two).
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="document" />
-          {truncatedNotice}
-          <MarkdownView body={text ?? ""} workspaceId={props.workspaceId} path={props.path} />
+          <MarkdownView
+            body={text ?? ""}
+            workspaceId={props.workspaceId}
+            path={props.path}
+            truncatedNotice={truncatedNotice}
+          />
         </div>
       );
     case "csv":

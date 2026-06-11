@@ -2,6 +2,7 @@ import { Cloud, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { Titlebar } from "./Titlebar";
 
 // First launch is a working tool, not a marketing page: pick where your
 // files live, create the folder, start working. No account exists here.
@@ -51,7 +52,11 @@ export function DesktopFirstRun(props: {
   }
 
   return (
-    <div className="app-chrome flex h-screen flex-col items-center justify-center gap-6 bg-bg text-ink">
+    <div className="app-chrome flex h-screen flex-col bg-bg text-ink">
+      {/* The first-run window is frameless too — without the drag strip it
+          could not be moved at all. */}
+      <Titlebar />
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6">
       <div className="flex flex-col items-center gap-1">
         <h1 className="m-0 text-2xl font-semibold tracking-tight">dohc</h1>
         <p className="m-0 text-sm text-muted">Your workspace is a folder.</p>
@@ -118,6 +123,7 @@ export function DesktopFirstRun(props: {
             connect it later without moving anything.
           </p>
         ) : null}
+      </div>
       </div>
     </div>
   );

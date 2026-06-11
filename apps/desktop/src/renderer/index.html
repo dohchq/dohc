@@ -9,7 +9,8 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: dohc-file:; media-src 'self' dohc-file:; connect-src 'self' dohc-file: wss: ws://localhost:* ws://127.0.0.1:*" />
     <title>dohc</title>
     <style>
-      /* Warm paper + graphite, set inline so first paint is never unstyled. */
+      /* Graphite minimal (bg/ink only), set inline so first paint is never
+         unstyled. Values mirror tokens.ts/styles.css (sync-tested there). */
       :root {
         color-scheme: light dark;
       }
@@ -17,8 +18,8 @@
       body {
         margin: 0;
         height: 100%;
-        background: #faf7f2;
-        color: #2b2926;
+        background: #ffffff;
+        color: #18181b;
         font-family:
           system-ui,
           -apple-system,
@@ -28,8 +29,8 @@
       @media (prefers-color-scheme: dark) {
         html,
         body {
-          background: #1c1a18;
-          color: #e8e4de;
+          background: #18181b;
+          color: #fafafa;
         }
       }
     </style>

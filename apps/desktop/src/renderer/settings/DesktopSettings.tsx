@@ -114,7 +114,7 @@ export function DesktopSettings(props: {
           disabled={busy}
           onClick={() => void toggle()}
           className={`rounded px-3 py-1 text-xs ${
-            enabled ? "bg-panel-2 text-ink" : "bg-accent text-white"
+            enabled ? "bg-panel-2 text-ink" : "bg-accent text-bg"
           } disabled:opacity-50`}
         >
           {enabled ? "Disable" : "Enable"}

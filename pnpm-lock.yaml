@@ -26,9 +26,6 @@ importers:
       '@dohc/app-tester':
         specifier: workspace:*
         version: link:../../services/app-tester
-      '@dohc/brand':
-        specifier: workspace:*
-        version: link:../../packages/brand
       '@dohc/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
@@ -47,6 +44,9 @@ importers:
       '@dohc/workspace-sync':
         specifier: workspace:*
         version: link:../../packages/workspace-sync
+      '@fontsource-variable/inter':
+        specifier: ^5.2.8
+        version: 5.2.8
       '@hocuspocus/provider':
         specifier: ^4.1.0
         version: 4.1.0(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
@@ -1281,6 +1281,9 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@fontsource-variable/inter@5.2.8':
+    resolution: {integrity: sha512-kOfP2D+ykbcX/P3IFnokOhVRNoTozo5/JxhAIVYLpea/UBmCQ/YWPBfWIDuBImXX/15KH+eKh4xpEUyS2sQQGQ==}
 
   '@fontsource/ibm-plex-mono@5.2.7':
     resolution: {integrity: sha512-MKAb8qV+CaiMQn2B0dIi1OV3565NYzp3WN5b4oT6LTkk+F0jR6j0ZN+5BKJiIhffDC3rtBULsYZE65+0018z9w==}
@@ -5744,6 +5747,8 @@ snapshots:
   '@exodus/bytes@1.15.1(@noble/hashes@2.2.0)':
     optionalDependencies:
       '@noble/hashes': 2.2.0
+
+  '@fontsource-variable/inter@5.2.8': {}
 
   '@fontsource/ibm-plex-mono@5.2.7': {}
 

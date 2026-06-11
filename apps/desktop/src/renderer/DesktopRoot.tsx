@@ -68,7 +68,16 @@ export function DesktopRoot() {
       key={workspace.workspaceId}
       workspace={workspace}
       workspaces={workspaces}
-      onSwitchWorkspace={setWorkspace}
+      onSwitchWorkspace={(next) => {
+        // File ▸ Open Workspace… can hand us a workspace the registry list
+        // didn't know yet — keep the switcher list complete.
+        setWorkspaces((known) =>
+          known.some((entry) => entry.workspaceId === next.workspaceId)
+            ? known
+            : [...known, next],
+        );
+        setWorkspace(next);
+      }}
     />
   );
 }

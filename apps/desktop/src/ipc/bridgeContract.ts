@@ -1,5 +1,6 @@
 import { WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
+import { MENU_COMMANDS } from "./channels";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -401,6 +402,21 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
+// Native window chrome (Phase E1). The renderer mirrors its theme flip to
+// main so the OS titleBarOverlay (Windows/Linux) re-tints with the app; main
+// feature-detects overlay support and no-ops where it doesn't exist.
+export const SetTitlebarThemePayload = z.object({
+  theme: z.enum(["light", "dark"]),
+});
+export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
+
+// Application-menu commands. One closed set (channels.ts owns the tuple; the
+// sandboxed preload validates against it as a plain value): the menu sends
+// these names and the shell routes them through the SAME command registry the
+// palette uses — menu items never grow their own action definitions.
+export const MenuCommand = z.enum(MENU_COMMANDS);
+export type MenuCommand = z.infer<typeof MenuCommand>;
+
 // Test-only snapshot of the main-process mark/measure recorder (Phase 16):
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
@@ -418,6 +434,9 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge {
+  // Constant, not a call: the titlebar lays out around macOS traffic lights
+  // on darwin vs the window-controls overlay everywhere else.
+  platform: NodeJS.Platform;
   pickWorkspaceRoot(): Promise<PickWorkspaceRootResult>;
   getWorkspaceRegistry(): Promise<WorkspaceRegistryResult>;
   getDefaultWorkspaceRoot(): Promise<string>;
@@ -469,8 +488,12 @@ export interface DohcDesktopBridge {
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
+  setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Returns an
   // unsubscribe function.
   onWorkspaceActivity(listener: () => void): () => void;
+  // Application-menu clicks, validated against MenuCommand in the preload
+  // before they reach renderer code. Returns an unsubscribe function.
+  onMenuCommand(listener: (command: MenuCommand) => void): () => void;
 }

@@ -2,14 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
+  MenuCommand,
 } from "./ipc/bridgeContract";
-import { CHANNELS } from "./ipc/channels";
+import { CHANNELS, MENU_COMMANDS } from "./ipc/channels";
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
 // mistyped method fails the desktop typecheck).
 const bridge: DohcDesktopBridge = {
+  platform: process.platform,
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>
@@ -58,10 +60,29 @@ const bridge: DohcDesktopBridge = {
   getAgentRunStatus: (payload) =>
     ipcRenderer.invoke(CHANNELS.getAgentRunStatus, payload),
   getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
+  setTitlebarTheme: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWorkspaceActivity: (listener: () => void) => {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
+  },
+  // Event payloads from main are still validated at this boundary: only a
+  // command from the closed MENU_COMMANDS set ever reaches renderer code.
+  // (Plain tuple membership, not zod — the sandboxed preload stays
+  // dependency-free; bridgeContract's MenuCommand enum derives from the
+  // same tuple so the two can never drift.)
+  onMenuCommand: (listener) => {
+    const handler = (_event: unknown, command: unknown) => {
+      if (
+        typeof command === "string" &&
+        (MENU_COMMANDS as readonly string[]).includes(command)
+      ) {
+        listener(command as MenuCommand);
+      }
+    };
+    ipcRenderer.on(CHANNELS.menuCommand, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.menuCommand, handler);
   },
 };
 

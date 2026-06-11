@@ -114,9 +114,12 @@ test("first run creates a real workspace folder and lands in a native shell", as
   await page.keyboard.press("ControlOrMeta+k");
   const palette = page.getByTestId("command-palette");
   await expect(palette).toBeVisible();
-  await expect(palette.getByRole("option")).toHaveCount(6);
+  // The full registry: new-file, quick-open, open-workspace, import-files,
+  // toggle-sidebar, connect-cloud, settings, toggle-theme.
+  await expect(palette.getByRole("option")).toHaveCount(8);
   await expect(palette).toContainText(/import files/i);
   await expect(palette).toContainText(/connect dohc cloud/i);
+  await expect(palette).toContainText(/toggle sidebar/i);
   await page.keyboard.type("new");
   await expect(palette.getByRole("option").first()).toContainText(/new/i);
   await shot(page, "command-palette");

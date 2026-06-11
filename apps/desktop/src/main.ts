@@ -8,6 +8,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   protocol,
   safeStorage,
   shell,
@@ -57,6 +58,7 @@ import {
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
+  SetTitlebarThemePayload,
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
@@ -66,7 +68,8 @@ import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
 import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
-import { navigationPolicy } from "./window/createMainWindow";
+import { buildMenuTemplate } from "./window/applicationMenu";
+import { navigationPolicy, titleBarOverlayOptions } from "./window/createMainWindow";
 import { createWorkspaceFolder } from "./workspaces/createWorkspaceFolder";
 import {
   effectiveHome,
@@ -714,6 +717,21 @@ function registerIpcHandlers(): void {
     return McpConfigResult.parse(mcpConfigFor(workspace.rootPath));
   });
 
+  // Theme flip → re-tint the OS window-control overlay. setTitleBarOverlay
+  // only exists where the overlay does (Windows, newer Linux); macOS and
+  // older Linux feature-detect to a no-op — never a crash.
+  ipcMain.handle(CHANNELS.setTitlebarTheme, (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetTitlebarThemePayload.parse(payload);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || typeof window.setTitleBarOverlay !== "function") return;
+    try {
+      window.setTitleBarOverlay(titleBarOverlayOptions(input.theme));
+    } catch {
+      // Platform without a title bar overlay: nothing to re-tint.
+    }
+  });
+
   ipcMain.on(CHANNELS.firstPaint, (event) => {
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();
@@ -780,6 +798,26 @@ if (!app.requestSingleInstanceLock()) {
         return new Response("Not found", { status: 404 });
       }
     });
+
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate(
+        buildMenuTemplate({
+          isDev: !app.isPackaged,
+          platform: process.platform,
+          sendCommand: (window, command) => {
+            const target = window ?? BrowserWindow.getAllWindows()[0];
+            target?.webContents.send(CHANNELS.menuCommand, command);
+          },
+          showAbout: () => {
+            void dialog.showMessageBox({
+              title: "About dohc",
+              message: "dohc",
+              detail: `Version ${app.getVersion()}\nYour workspace is a folder.`,
+            });
+          },
+        }),
+      ),
+    );
 
     const { createMainWindow } = await import("./window/createMainWindow");
     createMainWindow();
