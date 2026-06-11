@@ -1,9 +1,13 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { readUiStateFile, writeUiStateFile } from "./workspaceUiState";
+import {
+  MAX_UI_STATE_FILE_BYTES,
+  readUiStateFile,
+  writeUiStateFile,
+} from "./workspaceUiState";
 import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
 
 const roots: string[] = [];
@@ -43,6 +47,34 @@ describe("ui-state file store", () => {
     await writeUiStateFile(root, STATE);
     await writeFile(join(root, ".dohc", "ui-state.json"), "{not json");
     expect(await readUiStateFile(root)).toBeNull();
+  });
+
+  it("an oversized on-disk file reads as null — stat-capped BEFORE read+parse", async () => {
+    const root = await tempRoot();
+    await writeUiStateFile(root, STATE);
+    // Valid JSON, hostile size: a workspace can carry any bytes it likes —
+    // the cap must refuse it before JSON.parse ever sees the payload.
+    const huge = JSON.stringify({
+      ...STATE,
+      padding: "x".repeat(MAX_UI_STATE_FILE_BYTES),
+    });
+    await writeFile(join(root, ".dohc", "ui-state.json"), huge);
+    expect(await readUiStateFile(root)).toBeNull();
+  });
+
+  // A malicious attached workspace can ship `.dohc` as a SYMLINK to a
+  // user-writable directory outside the workspace. Following it would land
+  // main-process metadata writes outside the boundary — both the write and
+  // the read must refuse, and nothing may appear in the symlink's target.
+  it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await symlink(outside, join(root, ".dohc"), "dir");
+
+    await expect(writeUiStateFile(root, STATE)).rejects.toThrow(/\.dohc/);
+    expect(await readUiStateFile(root)).toBeNull();
+    // The escape target stayed untouched: no ui-state.json, no temp files.
+    expect(await readdir(outside)).toEqual([]);
   });
 });
 

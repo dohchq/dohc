@@ -296,6 +296,44 @@ test("editor tabs: open/switch, drag reorder, overflow menu, dirty dot, Ctrl+W, 
   await app.close();
 });
 
+test("dirty tab: a draft typed within the autosave window SURVIVES Ctrl+W (unmount flush)", async () => {
+  const { home, root } = await seedWorkspace("e2-dirty-close", {
+    "a.md": "# Alpha\n",
+    "b.md": "# Beta\n",
+  });
+  const { app, page } = await openSeeded(home, root);
+  const tree = page.getByTestId("file-tree");
+
+  // Two tabs so closing a.md activates a neighbor (the close path that used
+  // to drop the draft), with a.md active.
+  await tree.getByText("b.md", { exact: true }).click();
+  await tree.getByText("a.md", { exact: true }).click();
+  await expect(page.getByTestId("tab-a.md")).toHaveAttribute("data-active", "true");
+
+  // Type and close INSIDE the 800ms autosave window: the pending draft has
+  // not been written when Ctrl+W unmounts the editor. Silent loss is never
+  // acceptable — the unmount flush must land it.
+  await page.getByTestId("markdown-edit-toggle").click();
+  await page.getByTestId("markdown-editor").click();
+  await page.keyboard.type("Draft typed right before close.");
+  await page.keyboard.press("ControlOrMeta+w");
+  await expect(page.getByTestId("tab-a.md")).toHaveCount(0);
+  await expect(page.getByTestId("tab-b.md")).toHaveAttribute("data-active", "true");
+
+  // The draft landed on disk.
+  await expect
+    .poll(() => readFileSync(join(root, "a.md"), "utf8"), { timeout: 5000 })
+    .toContain("Draft typed right before close.");
+
+  // And reopening shows the saved draft as the document.
+  await tree.getByText("a.md", { exact: true }).click();
+  await expect(page.getByTestId("view-markdown")).toContainText(
+    "Draft typed right before close.",
+  );
+
+  await app.close();
+});
+
 test("history rail: visible by default with zero clicks, toggleable via the palette", async () => {
   const { home, root } = await seedWorkspace("e2-rail", { "a.md": "# A\n" });
   const { app, page } = await openSeeded(home, root);

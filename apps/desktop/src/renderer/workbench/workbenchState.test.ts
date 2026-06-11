@@ -44,6 +44,20 @@ describe("tabs", () => {
     expect(state.activeTab).toBe("new.md");
   });
 
+  it("openTab at the cap NEVER evicts the active tab (the only one that can hold a dirty draft)", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_OPEN_TABS; i++) state = openTab(state, `f${i}.md`);
+    // Make the OLDEST tab the active one — the naive evict-index-0 would
+    // drop the exact tab whose mounted editor may hold an unsaved draft.
+    state = activateTab(state, "f0.md");
+    state = openTab(state, "new.md");
+    expect(state.tabs).toHaveLength(MAX_OPEN_TABS);
+    expect(state.tabs.some((tab) => tab.path === "f0.md")).toBe(true);
+    // The oldest NON-active tab gave way instead.
+    expect(state.tabs.some((tab) => tab.path === "f1.md")).toBe(false);
+    expect(state.activeTab).toBe("new.md");
+  });
+
   it("activateTab only activates an OPEN tab", () => {
     const state = withTabs("a.md", "b.md");
     expect(activateTab(state, "a.md").activeTab).toBe("a.md");
@@ -167,5 +181,37 @@ describe("ui-state persistence round-trip", () => {
       tabs: Array.from({ length: MAX_OPEN_TABS + 50 }, (_, i) => `f${i}.md`),
     });
     expect(oversized.tabs).toHaveLength(MAX_OPEN_TABS);
+  });
+
+  it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {
+    // A crafted object inheriting every field from its prototype must parse
+    // as if the fields were absent: pure defaults, no tabs.
+    const inherited = parseUiState(
+      Object.create({
+        version: 1,
+        activeView: "history",
+        sidebarVisible: false,
+        sidebarWidth: 480,
+        tabs: ["evil.md"],
+        activeTab: "evil.md",
+        historyVisible: false,
+      }),
+    );
+    expect(inherited).toEqual(defaultWorkbenchState());
+  });
+
+  it("parse stops collecting at the cap on huge adversarial arrays and keeps the FIRST valid entries", () => {
+    // 100k entries, junk interleaved: the collector must stop once it has
+    // MAX_OPEN_TABS valid unique paths (never filter/dedupe the whole array)
+    // and keep the first valid entries in order.
+    const huge: unknown[] = [];
+    for (let i = 0; i < 100_000; i++) {
+      huge.push(42, "", `f${i}.md`, `f${i}.md`);
+    }
+    const state = parseUiState({ tabs: huge, activeTab: "f0.md" });
+    expect(state.tabs).toHaveLength(MAX_OPEN_TABS);
+    expect(state.tabs[0].path).toBe("f0.md");
+    expect(state.tabs[MAX_OPEN_TABS - 1].path).toBe(`f${MAX_OPEN_TABS - 1}.md`);
+    expect(state.activeTab).toBe("f0.md");
   });
 });

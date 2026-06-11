@@ -8,22 +8,28 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Phase/position: E0+E1 IN FLIGHT. ACTIVE LANES (2026-06-11): (1) workflow
-  wop1415aj = E0+E1 foundation (graphite tokens + tokens.ts sync-test + Inter
-  + density + titleBarOverlay chrome + Titlebar.tsx + app menu + windowState
-  + visualLanguage.spec + windowChrome.spec; build→design-critique(multimodal
-  screenshots)→adversarial review→fix; resumable wf_5bb5c4af-b35); (2)
-  workflow wv9hdbq26 = E5 SERVER lane (share CRUD POST/DELETE/GET +
-  /me/shares + workspace_invitations migration 0004 + claim-on-signup hook +
-  live-pg authz tests; owns ONLY services/workspace-api +
-  packages/workspace-postgres; resumable wf_207ac8dd-a8e); (3) background
-  recon agents writing docs/superpowers/recon/2026-06-11-e6-agent-driver-spec.md
-  (t3code mapping) and …e4-editor-port-digest.md (Tiptap port blueprint).
-  WHEN E0+E1 LANDS: lead re-verifies gates (unit+both specs+FULL E2E+perf+
-  lean), commits e0-e1, launches codex review (POLL /tmp log, not pgrep),
-  triages → e0-e1(fix) commit → THEN launch E2 workbench lane. E5-server
-  commits separately (path-scoped) + own codex review. Definition of done =
-  plan Standing rules 8 gates, EVERY phase.
+- Phase/position: E2 gate 7 DONE: codex on 7a85b1f found 8 (1 P1 + 5 P2 +
+  2 P3) -> /tmp/codex-e2.log. [P1] dirty-tab close/cap-evict drops the
+  draft (unmount clears autosave timer without flush) — SILENT LOSS, the
+  cardinal sin. [P2s] symlinked-.dohc metadata write escape (ui-state AND
+  the pre-existing agent-runs writer), unbounded on-disk ui-state read
+  before zod, merge-on-load wbRef race (passive-effect lag), spurious +
+  updater-side-effectful file-open-start marks, sidebar resize stuck
+  pointer capture. [P3s] own-property hardening both parsers. Codex
+  EXPLICITLY validated: ui-state IPC auth/containment-by-registry, real
+  relaunch E2E, palette 16 honest, Ctrl+W template move. ACTIVE LANE:
+  workflow w213qrqdu = e2-fix (resumable wf_0b6e39c2-58f): fix all 8 (incl
+  centralized workspaceMetadata .dohc resolution helper used by BOTH
+  writers) -> adversarial trap-replay verify -> full gates. WHEN IT LANDS:
+  lead verify, commit e2(fix) — gate 8 closes -> launch E3 EXPLORER lane
+  (contract READY: docs/superpowers/recon/2026-06-11-e3-explorer-digest.md
+  — tree libs port as-is from 7277c39^, ONE movePath engine rename+move w/
+  dest-exists + case-only carve-out, shell.trashItem cross-fs fallback to
+  .dohc/trash, listFiles needs folders field, webUtils.getPathForFile for
+  OS drag-in, store-only zip writer, offline-rename/no-resurrect sync wart
+  MUST be pinned, ~10 spec files migrate atomically via openInTree helper,
+  no virtualization needed). COMMITS: a5343a3/cab8525/6703984 (e5 server),
+  0c40626/c56c17f (e0-e1), 7a85b1f (e2).
 - Branch: `claude/desktop-local-first-cloud-sync` (continuing the mega-branch;
   HEAD at start = 5df57e7 fix(dev) barrel leak). Commit convention `eN: …` +
   `eN(fix): …`.
@@ -58,7 +64,10 @@ design review + codex review + fix commit, every phase).
 - Codex: `/home/ice/.local/share/nvm/v25.2.1/bin/codex` exec, `-m gpt-5.5 -c
   model_reasoning_effort="xhigh"`, read-only sandbox. POLL the log file
   (detached nohup); do NOT watch via `pgrep -x codex` (VS Code app-servers
-  match it forever — burned us once).
+  match it forever — burned us once). Completion marker must be EOF-ANCHORED:
+  `tail -c 150 <log> | grep -qE "tokens used[[:space:]]+[0-9,]+[[:space:]]*$"`
+  — a bare grep for "tokens used" false-fires when codex READS our own logs
+  containing that phrase (burned us 2026-06-11).
 
 ## Decision Ledger (append-only)
 

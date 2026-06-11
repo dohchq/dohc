@@ -207,6 +207,9 @@ const HISTORICAL_DOCS = new Set([
   // Recon digest for the same plan's E4 editor port: inventories the pre-pivot
   // editor to name what gets ported vs stripped.
   "docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md",
+  "docs/superpowers/recon/2026-06-11-e2-workbench-digest.md",
+  "docs/superpowers/recon/2026-06-11-e3-explorer-digest.md",
+  "docs/superpowers/recon/2026-06-11-e6-agent-driver-spec.md",
   "docs/superpowers/reviews/2026-06-06-apps-sdk-sqlite-agent-testing-review.md",
   term("docs/superpowers/reviews/2026-06-09-dual-back", "end-readiness-review.md"),
   term("docs/superpowers/reviews/2026-06-09-dual-back", "end-tech-debt-audit.md"),

@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
 
 // Local agent integration. Two local-only concepts live here:
@@ -54,12 +55,16 @@ export interface AgentIntegrationOptions {
   now?: () => number;
 }
 
-const RUNS_FILE = ".dohc/agent-runs.json";
+const RUNS_FILE = "agent-runs.json";
 const DEFAULT_AGENT_ID = "dohc-mcp";
 
+// Both paths resolve .dohc through resolveWorkspaceMetadataDir — a symlinked
+// .dohc (malicious attached workspace) is refused, never followed, so the run
+// log can't be planted outside the workspace boundary.
 async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
   try {
-    const parsed = JSON.parse(await readFile(join(rootPath, RUNS_FILE), "utf8"));
+    const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
+    const parsed = JSON.parse(await readFile(path, "utf8"));
     return Array.isArray(parsed) ? (parsed as AgentRunRecord[]) : [];
   } catch {
     return [];
@@ -67,8 +72,7 @@ async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
 }
 
 async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void> {
-  const path = join(rootPath, RUNS_FILE);
-  await mkdir(join(rootPath, ".dohc"), { recursive: true });
+  const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
   // Atomic temp+rename so a crash never truncates the run log. A unique suffix
   // (not just pid) means a leftover temp from a crashed run can never be
   // reused/clobbered by a later write.

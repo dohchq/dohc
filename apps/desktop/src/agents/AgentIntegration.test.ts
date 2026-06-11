@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -99,5 +99,26 @@ describe("AgentIntegration", () => {
       setAgentRun: () => {},
     });
     await expect(integration.startAgentRun("nope")).rejects.toThrow(/Unknown workspace/);
+  });
+
+  // Same boundary as workspaceUiState: a malicious attached workspace can ship
+  // `.dohc` as a SYMLINK to a directory outside the workspace. The run-log
+  // writer must refuse instead of planting agent-runs.json at the target.
+  it("refuses to write agent-runs through a symlinked .dohc and never lands files outside", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const outside = await mkdtemp(join(tmpdir(), "dohc-agent-escape-"));
+      try {
+        await symlink(outside, join(root, ".dohc"), "dir");
+        const integration = createAgentIntegration({
+          rootFor: () => root,
+          setAgentRun: (_id, run) => setSlot(run),
+        });
+        await expect(integration.startAgentRun("ws")).rejects.toThrow(/\.dohc/);
+        // The escape target stayed untouched: no run log, no temp files.
+        expect(await readdir(outside)).toEqual([]);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
   });
 });

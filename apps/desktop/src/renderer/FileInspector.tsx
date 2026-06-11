@@ -184,6 +184,10 @@ function MarkdownView(props: {
   }, [saveState, onSaveStateChange]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestDraft = useRef(props.body);
+  // True from the keystroke until a write for that draft has been ISSUED.
+  // The unmount flush keys off this — never off the timer handle, which stays
+  // set (already fired) after a completed autosave and would double-write.
+  const unsavedDraft = useRef(false);
 
   // Parse-once + visible-first (Phase 16): the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -229,6 +233,7 @@ function MarkdownView(props: {
   }, [props.body, editing]);
 
   async function saveNow(): Promise<void> {
+    unsavedDraft.current = false;
     setSaveState("saving");
     try {
       await bridge().writeWorkspaceText({
@@ -238,6 +243,9 @@ function MarkdownView(props: {
       });
       setSaveState("saved");
     } catch {
+      // The write failed: the draft is still unsaved, so the unmount flush
+      // gets another shot at landing it.
+      unsavedDraft.current = true;
       setSaveState("error");
     }
   }
@@ -245,16 +253,34 @@ function MarkdownView(props: {
   function onDraft(next: string) {
     setDraft(next);
     latestDraft.current = next;
+    unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => void saveNow(), 800);
   }
 
+  // Unmount flush — silent loss is never acceptable. Closing/switching the
+  // tab (the inspector is keyed by the active tab) unmounts mid-autosave;
+  // clearing the timer alone would drop the draft. Fire the pending draft
+  // write-through here: the component is gone, but the write (same bounded
+  // IPC as saveNow) still lands and the watcher records it like any save.
+  // props are stable for a mount (keyed remount per path), so the captured
+  // workspaceId/path always belong to the draft being flushed.
+  const { workspaceId, path } = props;
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (!unsavedDraft.current) return;
+      unsavedDraft.current = false;
+      void bridge()
+        .writeWorkspaceText({
+          workspaceId,
+          relativePath: path,
+          text: latestDraft.current,
+        })
+        .catch(() => undefined);
     };
-  }, []);
+  }, [workspaceId, path]);
 
   // Materialization of the converged CRDT back to the file lives inside
   // useCollabDoc, gated on sync and routed through the canonical-state model

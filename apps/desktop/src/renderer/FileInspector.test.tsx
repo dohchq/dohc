@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
-import { classifyForView } from "./FileInspector";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { classifyForView, FileInspector } from "./FileInspector";
 
 describe("classifyForView dispatch", () => {
   const cases: Array<[string, string]> = [
@@ -29,5 +31,60 @@ describe("classifyForView dispatch", () => {
   it("treats an app-source file as app even if it has a data extension", () => {
     // .apps/<name>/app.json is app source, not a standalone JSON document.
     expect(classifyForView("x/.apps/ledger/app.json")).toBe("app-source");
+  });
+});
+
+// THE P1 trap (codex review): typing arms an 800ms autosave, and unmounting
+// (tab close, tab switch — the inspector is keyed by the active tab) used to
+// clear the timer WITHOUT flushing, silently dropping the draft. The unmount
+// cleanup must fire the pending draft through writeWorkspaceText.
+describe("markdown editor unmount flush", () => {
+  const bridgeMock = {
+    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
+    writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    collabToken: vi.fn(async () => ({ available: false as const })),
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  async function typeDraft() {
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(screen.getByTestId("markdown-editor"), "Draft!");
+    return { user, view };
+  }
+
+  it("flushes the pending draft on unmount — the write carries the FINAL text", async () => {
+    const { view } = await typeDraft();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    // Unmount INSIDE the 800ms autosave window (real timers; typing is fast).
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: "# Hello\nDraft!",
+    });
+  });
+
+  it("does not double-write when the draft already saved before unmount", async () => {
+    const { user, view } = await typeDraft();
+    // "Done" flushes immediately (the Ctrl+S path) — draft saved.
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    view.unmount();
+    // The unmount flush keys off the unsaved-draft flag, not the timer
+    // handle: a clean save must not be replayed as a second write.
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
   });
 });

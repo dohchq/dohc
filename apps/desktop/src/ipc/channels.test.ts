@@ -85,6 +85,22 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
     expect(parseUpdateStateEvent("ready")).toBeNull();
     expect(parseUpdateStateEvent([{ status: "ready", message: "m" }])).toBeNull();
   });
+
+  it("rejects INHERITED status/message — only own properties count as a plain object", () => {
+    expect(
+      parseUpdateStateEvent(Object.create({ status: "ready", message: "x" })),
+    ).toBeNull();
+    // One own + one inherited still fails: BOTH fields must be own.
+    const halfOwn = Object.create({ message: "x" }) as { status?: string };
+    halfOwn.status = "ready";
+    expect(parseUpdateStateEvent(halfOwn)).toBeNull();
+    // Null-prototype objects with own fields remain fine.
+    expect(
+      parseUpdateStateEvent(
+        Object.assign(Object.create(null), { status: "ready", message: "x" }),
+      ),
+    ).toEqual({ status: "ready", message: "x" });
+  });
 });
 
 // Compile-time both-ways drift guard: UPDATE_STATUSES must cover exactly the

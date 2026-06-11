@@ -40,17 +40,29 @@ export function SidePanel(props: {
         aria-orientation="vertical"
         aria-label="Resize sidebar"
         onPointerDown={(event) => {
+          // Left button only — a right/middle press must never start a resize.
+          if (event.button !== 0) return;
           dragLeft.current = asideRef.current?.getBoundingClientRect().left ?? 0;
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
           if (dragLeft.current === null) return;
+          // Mirror the tab-drag guard: if the release was missed (capture
+          // lost outside the window), a buttons-up move must end the drag —
+          // or plain hovering would keep resizing and persist bogus widths.
+          if ((event.buttons & 1) === 0) {
+            dragLeft.current = null;
+            return;
+          }
           props.onWidthChange(clampSidebarWidth(event.clientX - dragLeft.current));
         }}
         onPointerUp={() => {
           dragLeft.current = null;
         }}
         onPointerCancel={() => {
+          dragLeft.current = null;
+        }}
+        onLostPointerCapture={() => {
           dragLeft.current = null;
         }}
         className="absolute -right-0.5 top-0 z-10 h-full w-1 cursor-col-resize hover:bg-line"

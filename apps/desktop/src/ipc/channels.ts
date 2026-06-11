@@ -55,6 +55,11 @@ export function parseUpdateStateEvent(
   value: unknown,
 ): { status: UpdateStatusId; message: string } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  // OWN properties only: an object inheriting status/message from a crafted
+  // prototype must not pass a check that promises "plain object".
+  if (!Object.hasOwn(value, "status") || !Object.hasOwn(value, "message")) {
+    return null;
+  }
   const { status, message } = value as { status?: unknown; message?: unknown };
   if (
     typeof status !== "string" ||

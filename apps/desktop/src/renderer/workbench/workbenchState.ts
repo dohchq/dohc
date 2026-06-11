@@ -50,17 +50,21 @@ export function clampSidebarWidth(width: number): number {
 }
 
 // Open (or re-activate) a file's tab. No duplicates; opening always
-// activates. At the cap the oldest tab gives way rather than refusing.
+// activates. At the cap the oldest tab gives way rather than refusing — but
+// NEVER the active tab: it is the only tab that can hold an unsaved editor
+// draft (the mounted inspector), so evicting it could race the unmount flush.
+// The oldest non-active tab is always safe to drop.
 export function openTab(state: WorkbenchState, path: string): WorkbenchState {
   const exists = state.tabs.some((tab) => tab.path === path);
   if (exists) {
     return state.activeTab === path ? state : { ...state, activeTab: path };
   }
-  const tabs =
-    state.tabs.length >= MAX_OPEN_TABS
-      ? [...state.tabs.slice(1), { path }]
-      : [...state.tabs, { path }];
-  return { ...state, tabs, activeTab: path };
+  if (state.tabs.length >= MAX_OPEN_TABS) {
+    const evict = state.tabs.findIndex((tab) => tab.path !== state.activeTab);
+    const tabs = state.tabs.filter((_, index) => index !== (evict === -1 ? 0 : evict));
+    return { ...state, tabs: [...tabs, { path }], activeTab: path };
+  }
+  return { ...state, tabs: [...state.tabs, { path }], activeTab: path };
 }
 
 export function activateTab(state: WorkbenchState, path: string): WorkbenchState {
@@ -142,35 +146,49 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const defaults = defaultWorkbenchState();
   if (typeof raw !== "object" || raw === null) return defaults;
   const value = raw as Record<string, unknown>;
-  const paths = Array.isArray(value.tabs)
-    ? [
-        ...new Set(
-          value.tabs.filter(
-            (path): path is string =>
-              typeof path === "string" && path.length > 0 && path.length <= 4096,
-          ),
-        ),
-      ].slice(0, MAX_OPEN_TABS)
-    : [];
+  // Adversarial boundary: read only OWN fields (a polluted prototype must not
+  // inject state) and collect tab paths with a loop that STOPS once the cap
+  // is reached — never materialize/filter a huge foreign array first.
+  const own = (key: string): unknown =>
+    Object.hasOwn(value, key) ? value[key] : undefined;
+  const rawTabs = own("tabs");
+  const paths: string[] = [];
+  if (Array.isArray(rawTabs)) {
+    const seen = new Set<string>();
+    for (const entry of rawTabs) {
+      if (paths.length >= MAX_OPEN_TABS) break;
+      if (typeof entry !== "string" || entry.length === 0 || entry.length > 4096) {
+        continue;
+      }
+      if (seen.has(entry)) continue;
+      seen.add(entry);
+      paths.push(entry);
+    }
+  }
+  const rawActiveTab = own("activeTab");
   const activeTab =
-    typeof value.activeTab === "string" && paths.includes(value.activeTab)
-      ? value.activeTab
+    typeof rawActiveTab === "string" && paths.includes(rawActiveTab)
+      ? rawActiveTab
       : (paths[0] ?? null);
+  const rawView = own("activeView");
+  const rawSidebarVisible = own("sidebarVisible");
+  const rawSidebarWidth = own("sidebarWidth");
+  const rawHistoryVisible = own("historyVisible");
   return {
-    activeView: isViewId(value.activeView) ? value.activeView : defaults.activeView,
+    activeView: isViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
-      typeof value.sidebarVisible === "boolean"
-        ? value.sidebarVisible
+      typeof rawSidebarVisible === "boolean"
+        ? rawSidebarVisible
         : defaults.sidebarVisible,
     sidebarWidth:
-      typeof value.sidebarWidth === "number"
-        ? clampSidebarWidth(value.sidebarWidth)
+      typeof rawSidebarWidth === "number"
+        ? clampSidebarWidth(rawSidebarWidth)
         : defaults.sidebarWidth,
     tabs: paths.map((path) => ({ path })),
     activeTab,
     historyVisible:
-      typeof value.historyVisible === "boolean"
-        ? value.historyVisible
+      typeof rawHistoryVisible === "boolean"
+        ? rawHistoryVisible
         : defaults.historyVisible,
   };
 }
