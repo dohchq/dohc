@@ -26,13 +26,23 @@ design review + codex review + fix commit, every phase).
   schema change requiring a server touch -> deferred to E4c). FUTURE DEBT:
   dedupe the copied core into a shared @dohc/editor-core pkg (consumed by both
   hocuspocus + desktop as raw TS src, the monorepo convention) — deferred to
-  avoid destabilizing live collab mid-E4. NEXT = **E4b EDITOR COMPONENT**:
-  port plugins (wikilinkPlugin verbatim, inlineAtomPlugin + the inlineAtom
-  parser EXTRACTED from deleted convex/inlineAtom.ts — only the text
-  parseInlineAtoms path, DROP the mdast-util-from-markdown parseInlineAtomsFrom-
-  Markdown family, +@tiptap/pm already added, floatingMenuPosition verbatim),
-  MarkdownEditor.tsx (3043->~1300 strip per recon §1 STRIP list), WikilinkPicker,
-  FileInspector WYSIWYG-default + source-toggle, BubbleMenu (NEW). THEN E4c
+  avoid destabilizing live collab mid-E4. **E4b-1 PLUGINS committed = THIS
+  commit** (non-breaking, not wired yet): editor/inlineAtom.ts (text
+  parseInlineAtoms EXTRACTED from deleted convex/inlineAtom.ts by an opus
+  agent — call-graph traced, mdast-util-from-markdown family + convex path
+  helpers DROPPED, zero imports), inlineAtomPlugin.ts (import fixed to
+  ./inlineAtom, featureFlags re-export dropped), wikilinkPlugin.ts (verbatim,
+  convex comment reworded for the arch-debt gate) + tests (60 editor tests;
+  factory smoke tests reference makeX/keys so knip stays clean; isEscaped
+  un-exported + dead parseFormulaFromSrc dropped). floatingMenuPosition
+  DEFERRED to E4b-2 (no standalone test, pure editor-support — would trip
+  knip unused-file/export until the editor imports it). NEXT = **E4b-2 EDITOR
+  COMPONENT**: floatingMenuPosition + MarkdownEditor.tsx (3043->~1300 strip
+  per recon §1 STRIP list, props {value,onChange,workspaceId,path,knownFiles,
+  onOpenWikilink,collab?} — build NON-collab first, collab? added in E4c),
+  WikilinkPicker, BubbleMenu (NEW), FileInspector WYSIWYG-default +
+  source-toggle. Workflow-driven (build->design critique->codex review).
+  THEN E4c
   COLLAB+SERVER: useCollabDoc body-fragment rework, plainText->rich server flip
   + migration arm + data-loss test, add taskList both sides, liveCoEditing
   update. THEN E4d GATES (editorWysiwyg.spec, perf tiptap-mount + 32KB-typing,
@@ -72,7 +82,7 @@ design review + codex review + fix commit, every phase).
   + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
-  e4a foundation=this.
+  6151bd6 (e4a foundation), e4b-1 plugins=this.
 - Branch: `claude/desktop-local-first-cloud-sync` (continuing the mega-branch;
   HEAD at start = 5df57e7 fix(dev) barrel leak). Commit convention `eN: …` +
   `eN(fix): …`.
