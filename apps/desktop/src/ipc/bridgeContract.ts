@@ -433,10 +433,10 @@ export const CloudEnableSyncPayload = z.object({
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 
 // Live co-editing token: the renderer asks for a short-lived collab JWT for a
-// specific atom (markdown/text file) in a SHARED cloud workspace. Main mints it
+// specific markdown atom in a SHARED cloud workspace. Main mints it
 // by calling the workspace-api POST /workspaces/:id/collab/token endpoint with
 // the cloud session Bearer — the session token never crosses IPC; only the
-// 5-min collab token, the doc name, and the websocket URL come back. Returns
+// 5-min collab token, the doc name, server body base, and websocket URL come back. Returns
 // { available: false } whenever the workspace isn't a signed-in shared cloud
 // workspace (personal/local-only behaves exactly as before).
 export const CollabTokenPayload = z.object({
@@ -450,6 +450,7 @@ export const CollabTokenResult = z.union([
     available: z.literal(true),
     token: z.string().min(1),
     documentName: z.string().min(1),
+    baseMarkdown: z.string(),
     wsUrl: z.string().min(1),
   }),
   z.object({ available: z.literal(false) }),

@@ -87,14 +87,18 @@ export function createPostgresAcl({ pool }: { pool: pg.Pool }): HocuspocusAcl {
     },
 
     async loadAtomBootstrap(input) {
-      const { rows } = await pool.query<{ body: string; path: string }>(
-        `select body, path from atoms
+      const { rows } = await pool.query<{ body: string; kind: string; path: string }>(
+        `select body, kind, path from atoms
          where id = $1 and workspace_id = $2 and deleted_at is null limit 1`,
         [input.atomId, input.workspaceId],
       )
       // Markdown atoms are rich ProseMirror Y.XmlFragment docs. Source/app
-      // files stay plain-text-canonical so code survives projection unchanged.
-      const plainText = isPlainTextAtomPath(rows[0]?.path ?? '')
+      // files and every non-markdown atom stay plain-text-canonical so code,
+      // CSV, JSON, HTML, and text survive projection unchanged.
+      const plainText =
+        rows[0] === undefined ||
+        rows[0].kind !== 'markdown' ||
+        isPlainTextAtomPath(rows[0].path)
       return rows[0]
         ? { markdown: rows[0].body, path: rows[0].path, plainText }
         : null

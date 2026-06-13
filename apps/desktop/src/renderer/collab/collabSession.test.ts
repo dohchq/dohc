@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   createCollabSessionState,
+  firstSyncMaterializationBase,
   isSelfMaterializedWrite,
   recordMaterialization,
   reconcileExternalEdit,
@@ -90,6 +91,30 @@ describe("CASE 2: a base-hash record per materialization", () => {
         trigger: "settle-debounce",
       }),
     ).toBe(false);
+  });
+});
+
+describe("first rich sync base selection", () => {
+  it("uses the server body cache as the base when the local file still matches it", () => {
+    expect(
+      firstSyncMaterializationBase({
+        serverBaseText: "# Doc\n\nBefore projection\n",
+        docText: "# Doc\n\nBefore projection\n\nLive remote edit\n",
+        onDiskText: "# Doc\n\nBefore projection\n",
+        lastMaterializedText: null,
+      }),
+    ).toBe("# Doc\n\nBefore projection\n");
+  });
+
+  it("does not invent a base when the local file has a divergent offline edit", () => {
+    expect(
+      firstSyncMaterializationBase({
+        serverBaseText: "# Doc\n\nBefore projection\n",
+        docText: "# Doc\n\nBefore projection\n\nLive remote edit\n",
+        onDiskText: "# Doc\n\nBefore projection\n\nLocal offline edit\n",
+        lastMaterializedText: null,
+      }),
+    ).toBeNull();
   });
 });
 

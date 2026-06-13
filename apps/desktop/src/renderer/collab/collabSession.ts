@@ -85,6 +85,17 @@ export function recordMaterialization(
   return { ...state, lastMaterialized: { sha: sha256Hex(text), atMs } };
 }
 
+export function firstSyncMaterializationBase(input: {
+  serverBaseText: string;
+  docText: string;
+  onDiskText: string;
+  lastMaterializedText: string | null;
+}): string | null {
+  if (input.lastMaterializedText !== null) return input.lastMaterializedText;
+  if (input.docText.trim().length === 0) return null;
+  return input.serverBaseText === input.onDiskText ? input.serverBaseText : null;
+}
+
 // CASE 3 (watcher suppression of self-materialized writes): when the watcher
 // observes a file change with sha `observedSha`, and that equals the sha we
 // just materialized, the change is our own projection bouncing back — the sync

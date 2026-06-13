@@ -19,6 +19,7 @@ const editorId = 'phase10-pgacl-editor'
 const strangerId = 'phase10-pgacl-stranger'
 const atomId = 'phase10-pgacl-atom'
 const sourceAtomId = 'phase10-pgacl-source-atom'
+const csvAtomId = 'phase10-pgacl-csv-atom'
 const deletedAtomId = 'phase10-pgacl-atom-deleted'
 const lockedAtomId = 'phase10-pgacl-atom-locked'
 
@@ -57,9 +58,10 @@ beforeEach(async () => {
      values
        ($2, $1, 'notes/hello.md', 'markdown', '# Hello', 1, null),
        ($3, $1, '.apps/workspace/src/App.tsx', 'text', 'export default 1', 1, null),
-       ($4, $1, 'notes/gone.md', 'markdown', '# Gone', 1, now()),
-       ($5, $1, 'notes/locked.md', 'markdown', '# Locked', 1, null)`,
-    [ws, atomId, sourceAtomId, deletedAtomId, lockedAtomId],
+       ($4, $1, 'data/live.csv', 'csv', 'id,name\n1,Ice', 1, null),
+       ($5, $1, 'notes/gone.md', 'markdown', '# Gone', 1, now()),
+       ($6, $1, 'notes/locked.md', 'markdown', '# Locked', 1, null)`,
+    [ws, atomId, sourceAtomId, csvAtomId, deletedAtomId, lockedAtomId],
   )
   await pool.query(
     `insert into shares (id, workspace_id, target_kind, target_id, recipient_user_id, capability)
@@ -132,6 +134,11 @@ describe('Postgres ACL', () => {
     await expect(acl().loadAtomBootstrap?.(input(memberId, sourceAtomId))).resolves.toEqual({
       markdown: 'export default 1',
       path: '.apps/workspace/src/App.tsx',
+      plainText: true,
+    })
+    await expect(acl().loadAtomBootstrap?.(input(memberId, csvAtomId))).resolves.toEqual({
+      markdown: 'id,name\n1,Ice',
+      path: 'data/live.csv',
       plainText: true,
     })
     await expect(

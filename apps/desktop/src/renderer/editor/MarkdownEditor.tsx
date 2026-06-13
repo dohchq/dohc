@@ -16,7 +16,6 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { Collaboration } from "@tiptap/extension-collaboration";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
@@ -66,6 +65,23 @@ export type MarkdownEditorProps = {
   onOpenWikilink?: (path: string) => void;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
+};
+
+type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
+
+let collaborationExtensionPromise: Promise<CollaborationExtension> | null = null;
+
+async function loadCollaborationExtension(): Promise<CollaborationExtension> {
+  if (!collaborationExtensionPromise) {
+    collaborationExtensionPromise = import("@tiptap/extension-collaboration").then(
+      (mod) => mod.Collaboration,
+    );
+  }
+  return collaborationExtensionPromise;
+}
+
+type MarkdownEditorInnerProps = MarkdownEditorProps & {
+  collaborationExtension: CollaborationExtension | null;
 };
 
 type SlashCommandId =
@@ -847,8 +863,8 @@ function BubbleButton(props: {
   );
 }
 
-export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
-  function MarkdownEditor(
+const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
+  function MarkdownEditorInner(
     {
       value,
       onDirty,
@@ -856,6 +872,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       onOpenWikilink,
       autoFocus,
       collab,
+      collaborationExtension,
       workspaceId: _workspaceId,
       path: _path,
     },
@@ -943,7 +960,8 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
 
     const extensions = useMemo(
       () => {
-        const isCollab = Boolean(collab?.ydoc);
+        const collabYDoc = collab?.ydoc ?? null;
+        const isCollab = Boolean(collabYDoc && collaborationExtension);
         return [
           StarterKit.configure({
             trailingNode: false,
@@ -966,7 +984,12 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
             },
           }),
           ...(isCollab
-            ? [Collaboration.configure({ document: collab?.ydoc ?? null, field: "body" })]
+            ? [
+                collaborationExtension!.configure({
+                  document: collabYDoc,
+                  field: "body",
+                }),
+              ]
             : [
                 TrailingNode.configure({
                   node: "paragraph",
@@ -976,10 +999,10 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
           dohcPlugins,
         ];
       },
-      [collab?.ydoc, dohcPlugins],
+      [collab?.ydoc, collaborationExtension, dohcPlugins],
     );
 
-    const collabActive = Boolean(collab?.ydoc);
+    const collabActive = Boolean(collab?.ydoc && collaborationExtension);
 
     const editor = useEditor(
       {
@@ -1236,5 +1259,51 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         />
       </div>
     );
+  },
+);
+
+const MarkdownEditorCollabLoader = forwardRef<
+  MarkdownEditorHandle,
+  MarkdownEditorProps
+>(function MarkdownEditorCollabLoader(props, ref) {
+  const [collaborationExtension, setCollaborationExtension] =
+    useState<CollaborationExtension | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadCollaborationExtension().then((extension) => {
+      if (!cancelled) setCollaborationExtension(extension);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!collaborationExtension) {
+    return (
+      <div
+        className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
+        data-collab-state={props.collab?.status ?? "connecting"}
+      >
+        Loading editor...
+      </div>
+    );
+  }
+
+  return (
+    <MarkdownEditorInner
+      {...props}
+      ref={ref}
+      collaborationExtension={collaborationExtension}
+    />
+  );
+});
+
+export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
+  function MarkdownEditor(props, ref) {
+    if (props.collab?.ydoc) {
+      return <MarkdownEditorCollabLoader {...props} ref={ref} />;
+    }
+    return <MarkdownEditorInner {...props} ref={ref} collaborationExtension={null} />;
   },
 );

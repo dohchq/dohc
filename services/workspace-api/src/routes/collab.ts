@@ -37,14 +37,17 @@ export async function mintCollabToken(
     throw coded("forbidden", "not a member of this workspace");
   }
   // Paths are mutable; the doc name is keyed by the STABLE atoms.id.
-  const atom = await deps.pool.query<{ id: string }>(
-    `select id from atoms
+  const atom = await deps.pool.query<{ id: string; kind: string; body: string }>(
+    `select id, kind, body from atoms
      where workspace_id = $1 and path = $2 and deleted_at is null
      limit 1`,
     [actor.workspaceId, body.atomPath],
   );
-  const atomId = atom.rows[0]?.id;
-  if (!atomId) throw coded("not-found", "atom not found");
+  const row = atom.rows[0];
+  if (!row) throw coded("not-found", "atom not found");
+  if (row.kind !== "markdown") {
+    throw coded("unsupported-kind", "live rich collaboration is markdown-only");
+  }
 
   return {
     ok: true,
@@ -52,7 +55,8 @@ export async function mintCollabToken(
       { sub: actor.userId, ws: actor.workspaceId, actorKind: "user", authzVersion: 1 },
       deps.jwtSecret,
     ),
-    documentName: encodeDocName({ workspaceId: actor.workspaceId, atomId }),
+    documentName: encodeDocName({ workspaceId: actor.workspaceId, atomId: row.id }),
+    baseMarkdown: row.body,
   };
 }
 

@@ -327,7 +327,7 @@ function MarkdownView(props: {
 
   // Live co-editing only ever activates for SHARED cloud workspaces with a
   // signed-in session (the collabToken IPC returns available:false otherwise).
-  // When it does, the textarea is driven by the shared Y.Text instead of the
+  // When it does, Tiptap is driven by the shared rich Y.Doc instead of the
   // local autosave path — personal/local-only stays byte-identical to today.
   const collab = useCollabDoc({
     workspaceId: props.workspaceId,

@@ -61,6 +61,7 @@ describe("POST /workspaces/:id/collab/token (live pg)", () => {
 
     expect(result.ok).toBe(true);
     expect(decodeDocName(result.documentName)).toEqual({ workspaceId, atomId });
+    expect(result.baseMarkdown).toBe("# Live");
     await expect(verifyCollabToken(result.token, jwtSecret)).resolves.toMatchObject({
       sub: member.userId,
       ws: workspaceId,
@@ -78,5 +79,17 @@ describe("POST /workspaces/:id/collab/token (live pg)", () => {
     await expect(
       mintCollabToken({ pool, jwtSecret }, member, { atomPath: "notes/live.md" }),
     ).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("only mints rich collaboration tokens for markdown atoms", async () => {
+    await pool.query(
+      `insert into atoms (id, workspace_id, path, kind, body, revision)
+       values ('phase10-collab-csv', $1, 'data/live.csv', 'csv', 'id,name\\n1,Ice', 1)`,
+      [workspaceId],
+    );
+
+    await expect(
+      mintCollabToken({ pool, jwtSecret }, member, { atomPath: "data/live.csv" }),
+    ).rejects.toMatchObject({ code: "unsupported-kind" });
   });
 });

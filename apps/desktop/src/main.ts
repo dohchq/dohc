@@ -765,15 +765,21 @@ function registerIpcHandlers(): void {
     // the editor stays usable in local mode.
     if (!response.ok) return CollabTokenResult.parse({ available: false });
     const body = (await response.json().catch(() => null)) as
-      | { ok?: boolean; token?: string; documentName?: string }
+      | { ok?: boolean; token?: string; documentName?: string; baseMarkdown?: string }
       | null;
-    if (!body?.ok || !body.token || !body.documentName) {
+    if (
+      !body?.ok ||
+      !body.token ||
+      !body.documentName ||
+      typeof body.baseMarkdown !== "string"
+    ) {
       return CollabTokenResult.parse({ available: false });
     }
     return CollabTokenResult.parse({
       available: true,
       token: body.token,
       documentName: body.documentName,
+      baseMarkdown: body.baseMarkdown,
       wsUrl: deriveHocuspocusUrl(remote.serverUrl),
     });
   });

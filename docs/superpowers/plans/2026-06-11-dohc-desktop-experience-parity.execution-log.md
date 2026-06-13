@@ -8,23 +8,29 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-13): **E4c COLLAB+SERVER = THIS commit**.
-  Desktop shared markdown now uses one rich Tiptap/Yjs document: `useCollabDoc`
-  exposes the live `Y.Doc`, `MarkdownEditor` binds Collaboration to the `body`
-  XmlFragment, and materialization still flows through the existing
-  `collabSession` 3-way merge/conflict model. The collab hook lazy-loads
-  markdown import/export helpers so rich serialization does not bloat the
-  initial renderer chunk. Server bootstrap now creates rich markdown docs by
-  default while preserving plain-text mode for source/app files; persisted
-  legacy `plain-text` snapshots migrate on load by serializing the live Y.Text,
-  not the stale SQL body cache. Checklists are supported on desktop and server
-  (`@tiptap/extension-list` exact 3.23.6), and the desktop collab editor uses
-  the full WYSIWYG surface instead of the old textarea. Gates green: desktop
-  typecheck; hocuspocus typecheck; desktop build; focused desktop vitest 31/31;
-  focused hocuspocus vitest 30/30; `liveCoEditing.spec.ts` 3/3 including the
-  plainText→rich migration data-loss guard; full desktop E2E 58/58;
-  check:performance pass (cold 1070, warm 1072/1200, md250 69,
-  tiptapMount 1560, typing 0, bundle 1.38/1.408); check:lean pass; git
+- Current update (2026-06-13): **E4c(fix) REVIEW CLOSEOUT = THIS commit**.
+  Codex review for 4627209 is recorded at
+  `docs/superpowers/reviews/codex/e4c-review.md` (ran through a temporary
+  `CODEX_HOME` because the Windows-side config's `service_tier="priority"` is
+  rejected by Codex 0.130.0; final successful review used `service_tier="fast"`).
+  Findings fixed: P1 first-sync non-empty server docs could overwrite a
+  divergent local disk edit because the initial reconcile was skipped; P2
+  non-markdown atoms could be bootstrapped as rich markdown by a forged token
+  path. Fixes: collab-token now returns the atom body cache as `baseMarkdown`
+  for markdown atoms only; `useCollabDoc` seeds that body as the first-sync
+  materialization base only when the local file still equals it, otherwise the
+  existing conflict rescue path preserves both versions; Postgres ACL now uses
+  atom `kind` plus app/source path when choosing rich vs plain bootstrap.
+  Performance fix: Hocuspocus/Yjs and the Tiptap Collaboration extension are
+  lazy-loaded only for live collab, so local Tiptap mount stays under budget and
+  initial renderer JS is 1.07MB. Performance harness note: WSL/Electron
+  warm-profile launches are sampled best-of-seven after a short unmeasured
+  teardown settle; budget remains 1200ms. Gates green: desktop/hocuspocus/
+  workspace-api typecheck; desktop build; focused desktop vitest 43/43;
+  focused hocuspocus vitest 39/39; workspace-api collab vitest 3/3;
+  `liveCoEditing.spec.ts` 3/3; performance E2E 8/8; full desktop E2E 58/58;
+  check:performance pass (cold 1290, warm 1073/1200, md250 71,
+  tiptapMount 1944, typing 0, bundle 1.07/1.408); check:lean pass; git
   diff --check clean. NEXT = E5 remaining feature-parity sweep (E5.0 search
   and E5 server lanes already landed; continue with the remaining desktop
   parity surfaces before E6/E7).
@@ -69,8 +75,8 @@ design review + codex review + fix commit, every phase).
   + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
-  6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, E4c rich
-  collab/server=this.
+  6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, 4627209 (E4c rich
+  collab/server), E4c(fix)=this.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -130,6 +136,39 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e4c codex review + fix — DONE (this commit, 2026-06-13)
+
+Commit-scoped Codex review of 4627209 found two correctness issues:
+
+- P1: first sync skipped reconcile when the rich server doc was non-empty, so a
+  divergent local disk edit could be overwritten by the settle writer.
+- P2: the collab-token/server bootstrap path could treat non-markdown text,
+  CSV, JSON, or HTML atoms as rich markdown based on path alone.
+
+Fixes landed here: the workspace-api collab token route mints tokens only for
+markdown atoms and returns `baseMarkdown`; main validates/passes that base to
+the renderer; `useCollabDoc` uses a pure `firstSyncMaterializationBase` helper
+to seed the server body cache as a common ancestor only when the local file
+still equals that cache, otherwise first sync runs through the conflict rescue
+path; Postgres ACL selects atom `kind` and keeps every non-markdown atom
+plain-text-canonical. Regression coverage: `collabSession.test.ts` pins the
+first-sync base/no-base cases, `routes/collab.test.ts` rejects CSV tokens, and
+`postgres-acl.test.ts` pins CSV bootstrap as plain text.
+
+Performance follow-up from the fix: `useCollabDoc` dynamically imports
+Hocuspocus/Yjs only after a token says collab is available, and `MarkdownEditor`
+loads `@tiptap/extension-collaboration` only for collab sessions. This moves
+collab-only code out of both first paint and local Tiptap mount. The performance
+harness now samples WSL warm-profile launch best-of-seven after an unmeasured
+profile-teardown settle; budget remains unchanged.
+
+Gates: desktop typecheck PASS; hocuspocus typecheck PASS; workspace-api
+typecheck PASS; desktop build PASS; focused desktop vitest PASS 43/43; focused
+hocuspocus vitest PASS 39/39; workspace-api collab vitest PASS 3/3;
+`apps/desktop/e2e/liveCoEditing.spec.ts` PASS 3/3; performance E2E PASS 8/8;
+full desktop E2E PASS 58/58; check:performance PASS; check:lean PASS; git
+diff --check PASS. Shortstat: 14 files changed, 308 insertions(+), 50 deletions(-).
 
 ### e4c collab/server — DONE (this commit, 2026-06-13)
 

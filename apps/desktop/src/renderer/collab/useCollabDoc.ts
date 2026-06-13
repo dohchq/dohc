@@ -1,9 +1,10 @@
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { useEffect, useRef, useState } from "react";
-import * as Y from "yjs";
+import type * as Y from "yjs";
 import { bridge } from "../bridge";
 import {
   createCollabSessionState,
+  firstSyncMaterializationBase,
   recordMaterialization,
   reconcileExternalEdit,
   shouldMaterialize,
@@ -169,7 +170,7 @@ export function useCollabDoc(input: {
 
     void bridge()
       .collabToken({ workspaceId, relativePath: path })
-      .then((result) => {
+      .then(async (result) => {
         if (cancelled) return;
         if (!result.available) {
           // Not a shared cloud workspace (or signed out) — stay local.
@@ -177,7 +178,13 @@ export function useCollabDoc(input: {
           return;
         }
 
-        doc = new Y.Doc();
+        const [{ HocuspocusProvider }, Yjs] = await Promise.all([
+          import("@hocuspocus/provider"),
+          import("yjs"),
+        ]);
+        if (cancelled) return;
+
+        doc = new Yjs.Doc();
         ydocRef.current = doc;
         setYdoc(doc);
 
@@ -212,9 +219,27 @@ export function useCollabDoc(input: {
             void (async () => {
               if (!doc) return;
               const docText = await yDocToMarkdown(doc);
-              if (docText.trim().length === 0) {
-                await reconcile(workspaceId, path, onDiskTextRef.current);
+              const onDiskText = onDiskTextRef.current;
+              const firstSyncBase = firstSyncMaterializationBase({
+                serverBaseText: result.baseMarkdown,
+                docText,
+                onDiskText,
+                lastMaterializedText: lastMaterializedTextRef.current,
+              });
+              if (firstSyncBase !== null) {
+                // The local file still equals the server atom body cache used
+                // as this session's bootstrap base. Treat that cache as the
+                // common ancestor so richer live Yjs state can materialize
+                // without a false conflict, while real offline disk edits
+                // (disk != baseMarkdown) still go through the conflict path.
+                lastMaterializedTextRef.current = firstSyncBase;
+                sessionRef.current = recordMaterialization(
+                  sessionRef.current,
+                  firstSyncBase,
+                  Date.now(),
+                );
               }
+              await reconcile(workspaceId, path, onDiskText);
             })();
           },
         });
