@@ -104,8 +104,22 @@ async function expectChangeSet(
   newest: RegExp | string,
 ): Promise<void> {
   const entries = page.getByTestId("history-timeline").locator("li");
-  await expect(entries).toHaveCount(n, { timeout: 15_000 });
-  await expect(entries.first()).toContainText(newest);
+  await expect
+    .poll(
+      async () => ({
+        count: await entries.count(),
+        newest: (await entries.first().textContent().catch(() => "")) ?? "",
+      }),
+      { timeout: 15_000 },
+    )
+    .toEqual({
+      count: n,
+      newest: expect.stringMatching(
+        typeof newest === "string"
+          ? new RegExp(newest.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+          : newest,
+      ),
+    });
 }
 
 // Recovery-location assertion: deletes are NEVER hard deletes. Where the

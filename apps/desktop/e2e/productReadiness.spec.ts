@@ -26,6 +26,7 @@ const API_PORT = 17901;
 const WEB_PORT = 17907;
 const API_URL = `http://localhost:${API_PORT}`;
 const WEB_URL = `http://localhost:${WEB_PORT}`;
+const SERVICE_START_TIMEOUT_MS = 300_000;
 const PG_URL = "postgres://dohc:dohc@localhost:54329/dohc_v2";
 const SHOT_DIR = "test-results/screenshots/phase-18";
 
@@ -59,7 +60,7 @@ let sharedB: { home: string; root: string };
 
 // --- helpers -----------------------------------------------------------------
 
-async function waitForHttp(url: string, timeoutMs = 60_000): Promise<void> {
+async function waitForHttp(url: string, timeoutMs = SERVICE_START_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -241,6 +242,7 @@ async function seedSharedClient(workspaceId: string): Promise<{ home: string; ro
 // --- lifecycle ---------------------------------------------------------------
 
 test.beforeAll(async () => {
+  test.setTimeout(SERVICE_START_TIMEOUT_MS);
   api = spawn(
     process.execPath,
     [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],

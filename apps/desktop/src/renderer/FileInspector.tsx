@@ -4,13 +4,28 @@ import {
   Music,
   Table,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ForwardRefExoticComponent,
+  type LazyExoticComponent,
+  type RefAttributes,
+} from "react";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { AppPackageView } from "./AppPackageView";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
 import { useCollabDoc } from "./collab/useCollabDoc";
+import type {
+  MarkdownEditorHandle,
+  MarkdownEditorProps,
+} from "./editor/MarkdownEditor";
+import type { WikilinkFile } from "./editor/wikilinkPlugin";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
@@ -58,6 +73,15 @@ const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
 const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
 const TEXT_EXT = new Set(["md", "markdown", "txt", "csv", "json", "html", "tsx", "ts", "css", "js"]);
+const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
+const LazyMarkdownEditor = lazy(async () => {
+  const mod = await import("./editor/MarkdownEditor");
+  return { default: mod.MarkdownEditor };
+}) as unknown as LazyExoticComponent<
+  ForwardRefExoticComponent<
+    MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
+  >
+>;
 
 export type FileViewKind =
   | "markdown"
@@ -201,11 +225,16 @@ function MarkdownView(props: {
   truncatedNotice?: React.ReactNode;
   // A pending search-result jump for this path (Phase E5.0).
   scrollTarget?: ScrollTarget;
+  onOpenPath?: (path: string) => void;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
+    props.body.length <= WYSIWYG_MARKDOWN_THRESHOLD_BYTES ? "wysiwyg" : "read",
+  );
   const [draft, setDraft] = useState(props.body);
+  const [savedBody, setSavedBody] = useState(props.body);
+  const [knownFiles, setKnownFiles] = useState<WikilinkFile[]>([]);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
   // to anchor, so the smallest honest seam is opening SOURCE mode and
@@ -215,14 +244,23 @@ function MarkdownView(props: {
   const scrollTargetNonce = props.scrollTarget?.nonce;
   useEffect(() => {
     if (!props.scrollTarget || props.scrollTarget.path !== props.path) return;
-    setEditing(true);
+    setMode("source");
     setPendingScrollLine(props.scrollTarget.line);
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
+  const serializeDraftRef = useRef<() => string>(() => props.body);
+  const editing = mode !== "read";
+
+  serializeDraftRef.current = () => {
+    if (mode === "wysiwyg") return wysiwygRef.current?.getMarkdown() ?? draft;
+    return draft;
+  };
+
   useEffect(() => {
-    if (pendingScrollLine === null || !editing) return;
+    if (pendingScrollLine === null || mode !== "source") return;
     const textarea = editorRef.current;
     if (!textarea) return;
     const { start, end } = lineSpanInText(textarea.value, pendingScrollLine);
@@ -234,7 +272,35 @@ function MarkdownView(props: {
       (pendingScrollLine - 1) * lineHeight - textarea.clientHeight / 3,
     );
     setPendingScrollLine(null);
-  }, [pendingScrollLine, editing]);
+  }, [pendingScrollLine, mode]);
+
+  useEffect(() => {
+    if (mode !== "wysiwyg") return;
+    let cancelled = false;
+    void bridge()
+      .listWorkspaceFiles({ workspaceId: props.workspaceId })
+      .then((result) => {
+        if (cancelled) return;
+        setKnownFiles(
+          result.files
+            .filter((file) => /\.(md|markdown)$/i.test(file.path))
+            .map((file) => {
+              const pathNoExt = file.path.replace(/\.md$/i, "");
+              return {
+                path: file.path,
+                title: pathNoExt.split("/").pop() ?? file.path,
+                fileId: null,
+              };
+            }),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setKnownFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, props.workspaceId]);
 
   // Lift the save state to the shell (smallest seam): the active editor tab
   // shows a dirty dot while this is not "saved".
@@ -255,9 +321,9 @@ function MarkdownView(props: {
   // backfilling the rest — a 250KB doc opens in tens of ms, not ~575ms.
   const renderedDocument = useMemo(
     () => (
-      <IncrementalMarkdownDocument body={props.body} components={MARKDOWN_COMPONENTS} />
+      <IncrementalMarkdownDocument body={savedBody} components={MARKDOWN_COMPONENTS} />
     ),
-    [props.body],
+    [savedBody],
   );
 
   // Live co-editing only ever activates for SHARED cloud workspaces with a
@@ -288,19 +354,24 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!editing) {
       setDraft(props.body);
+      setSavedBody(props.body);
       latestDraft.current = props.body;
     }
   }, [props.body, editing]);
 
   async function saveNow(): Promise<void> {
+    const text = serializeDraftRef.current();
+    latestDraft.current = text;
     unsavedDraft.current = false;
     setSaveState("saving");
     try {
       await bridge().writeWorkspaceText({
         workspaceId: props.workspaceId,
         relativePath: props.path,
-        text: latestDraft.current,
+        text,
       });
+      setDraft(text);
+      setSavedBody(text);
       setSaveState("saved");
     } catch {
       // The write failed: the draft is still unsaved, so the unmount flush
@@ -313,10 +384,54 @@ function MarkdownView(props: {
   function onDraft(next: string) {
     setDraft(next);
     latestDraft.current = next;
+    scheduleSave();
+  }
+
+  function scheduleSave() {
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => void saveNow(), 800);
+  }
+
+  function switchMode(next: "read" | "wysiwyg" | "source") {
+    const current =
+      mode === "wysiwyg" && !unsavedDraft.current
+        ? latestDraft.current
+        : serializeDraftRef.current();
+    latestDraft.current = current;
+    setDraft(current);
+    setMode(next);
+  }
+
+  function toggleEditorMode() {
+    if (mode === "read") {
+      switchMode("wysiwyg");
+      return;
+    }
+    if (mode === "wysiwyg") {
+      switchMode("source");
+      return;
+    }
+    switchMode("wysiwyg");
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
+      event.preventDefault();
+      toggleEditorMode();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  function openWikilink(target: string) {
+    const normalized = target.replace(/\.md$/i, "");
+    const match =
+      knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
+      knownFiles.find((file) => file.path === target);
+    props.onOpenPath?.(match?.path ?? `${normalized}.md`);
   }
 
   // Unmount flush — silent loss is never acceptable. Closing/switching the
@@ -332,11 +447,12 @@ function MarkdownView(props: {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       if (!unsavedDraft.current) return;
       unsavedDraft.current = false;
+      const text = serializeDraftRef.current();
       void bridge()
         .writeWorkspaceText({
           workspaceId,
           relativePath: path,
-          text: latestDraft.current,
+          text,
         })
         .catch(() => undefined);
     };
@@ -426,21 +542,21 @@ function MarkdownView(props: {
               type="button"
               data-testid="markdown-edit-toggle"
               onClick={() => {
-                if (editing && saveTimer.current) {
+                if (mode === "source" && saveTimer.current) {
                   clearTimeout(saveTimer.current);
                   void saveNow();
                 }
-                setEditing((e) => !e);
+                toggleEditorMode();
               }}
               className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink"
             >
-              {editing ? "Done" : "Edit"}
+              {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
           </>
         }
       />
       {props.truncatedNotice}
-      {editing ? (
+      {mode === "source" ? (
         <textarea
           data-testid="markdown-editor"
           ref={editorRef}
@@ -457,6 +573,30 @@ function MarkdownView(props: {
           spellCheck={false}
           className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
         />
+      ) : mode === "wysiwyg" ? (
+        <div
+          data-testid="view-markdown"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
+        >
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-xs text-subtle">
+                Loading editor...
+              </div>
+            }
+          >
+            <LazyMarkdownEditor
+              ref={wysiwygRef}
+              value={draft}
+              onDirty={scheduleSave}
+              workspaceId={props.workspaceId}
+              path={props.path}
+              knownFiles={knownFiles}
+              onOpenWikilink={openWikilink}
+              collab={null}
+            />
+          </Suspense>
+        </div>
       ) : (
         <div
           data-testid="view-markdown"
@@ -806,6 +946,7 @@ export function FileInspector(props: {
             path={props.path}
             truncatedNotice={truncatedNotice}
             scrollTarget={props.scrollTarget}
+            onOpenPath={props.onOpenPath}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />

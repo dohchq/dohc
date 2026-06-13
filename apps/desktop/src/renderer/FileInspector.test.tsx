@@ -58,6 +58,7 @@ describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     collabToken: vi.fn(async () => ({ available: false as const })),
   };
 

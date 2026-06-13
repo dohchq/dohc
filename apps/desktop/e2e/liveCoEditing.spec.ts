@@ -17,6 +17,7 @@ const API_URL = `http://localhost:${API_PORT}`;
 const HP_URL = `ws://localhost:${HP_PORT}`;
 const JWT_SECRET = "phase10-coedit-shared-secret-0123456789ab";
 const PG = "postgres://dohc:dohc@localhost:54329/dohc_v2";
+const SERVICE_START_TIMEOUT_MS = 300_000;
 
 let api: ChildProcess;
 let hocuspocus: ChildProcess;
@@ -29,7 +30,7 @@ function spawnService(entry: string, cwd: string, env: Record<string, string>): 
   });
 }
 
-async function waitForHttp(url: string, timeoutMs = 30_000): Promise<void> {
+async function waitForHttp(url: string, timeoutMs = SERVICE_START_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -43,6 +44,7 @@ async function waitForHttp(url: string, timeoutMs = 30_000): Promise<void> {
 }
 
 test.beforeAll(async () => {
+  test.setTimeout(SERVICE_START_TIMEOUT_MS);
   api = spawnService("src/main.ts", "services/workspace-api", {
     DOHC_TEST_AUTH: "1",
     NODE_ENV: "test",

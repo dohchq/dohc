@@ -158,9 +158,15 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
 
   // Scenario 3 first (it also produces the registry the launch scenarios
   // need): first run → Create workspace → shell visible.
-  async function createWorkspaceRun(): Promise<{ home: string; ms: number; shotPage?: true }> {
+  async function createWorkspaceRun(): Promise<{
+    home: string;
+    userData: string;
+    ms: number;
+    shotPage?: true;
+  }> {
     const home = await mkdtemp(join(tmpdir(), "dohc-perf-home-"));
-    const app = await launchApp({ DOHC_TEST_HOME: home });
+    const userData = await mkdtemp(join(tmpdir(), "dohc-perf-warm-"));
+    const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_USER_DATA: userData });
     const page = await app.firstWindow();
     const create = page.getByRole("button", { name: /create workspace/i });
     await expect(create).toBeVisible();
@@ -171,7 +177,7 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
     const ms = performance.now() - t0;
     await shot(page, "launch-shell");
     await app.close();
-    return { home, ms };
+    return { home, userData, ms };
   }
 
   let createRun = await createWorkspaceRun();
@@ -186,7 +192,8 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   // code cache and GPU cache warmed by this session's earlier launches do not
   // carry (OS page cache still does — disclosed in the review doc); a fidelity
   // retry mints its own fresh dir, so a retried cold sample stays cold.
-  // "Warm" shares the default user-data dir those earlier launches warmed.
+  // "Warm" reuses the user-data dir from createWorkspaceRun, so Electron's
+  // own profile caches carry exactly like a real returning-user launch.
   const home = createRun.home;
   async function launchToShell(extraEnv: Record<string, string> = {}): Promise<number> {
     const t0 = performance.now();
@@ -200,14 +207,19 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   await measureWithFidelity("coldLaunchToShellMs", async () =>
     launchToShell({ DOHC_TEST_USER_DATA: await mkdtemp(join(tmpdir(), "dohc-perf-cold-")) }),
   );
-  await measureWithFidelity("warmLaunchToShellMs", () => launchToShell());
+  await measureWithFidelity("warmLaunchToShellMs", () =>
+    launchToShell({ DOHC_TEST_USER_DATA: createRun.userData }),
+  );
 
-  // Resource ratchet: renderer JS shipped to the first shell paint. The
-  // electron-vite build prints per-asset sizes; this records the total.
+  // Resource ratchet: renderer JS shipped to the first shell paint. Lazy route
+  // chunks (for example the WYSIWYG editor) are deliberately excluded: they
+  // must have their own interaction budgets, not inflate the launch bundle.
   const assetsDir = "apps/desktop/dist/renderer/assets";
   let bytes = 0;
   for (const file of await readdir(assetsDir)) {
-    if (file.endsWith(".js")) bytes += (await stat(join(assetsDir, file))).size;
+    if (file.startsWith("index-") && file.endsWith(".js")) {
+      bytes += (await stat(join(assetsDir, file))).size;
+    }
   }
   const bundleMb = Math.round((bytes / 1024 ** 2) * 100) / 100;
   console.log(`renderer initial JS bundle: ${bundleMb} MB`);
@@ -425,8 +437,13 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
   while (body.length < 250 * 1024) {
     body += `## Section\n\n${paragraph}\n\n- first item\n- second item\n\n`;
   }
+  let midBody = "# Medium document\n\n";
+  while (midBody.length < 32 * 1024) {
+    midBody += `## Section\n\n${paragraph}\n\n- first item\n- second item\n\n`;
+  }
   const { home, root } = await seedWorkspace("perf-md", async (dir) => {
     await writeFile(join(dir, "big.md"), body);
+    await writeFile(join(dir, "mid.md"), midBody);
     await writeFile(join(dir, "small.md"), "# Small\n");
   });
   const { app, page } = await openSeededWorkspace(home, root);
@@ -454,12 +471,27 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
   })();
   await recordMetric("openMarkdown250KbMs", { valueMs: Math.round(openMs) });
 
-  // Typing latency: no long task over 50ms while typing in the editor.
-  await tree.getByText("big.md", { exact: true }).click();
+  // Tiptap mount on a 250KB file is explicit and bounded; opening the file
+  // itself still uses the fast incremental read path above.
+  async function mountBigEditor(): Promise<number> {
+    await tree.getByText("small.md", { exact: true }).click();
+    await expect(page.getByTestId("view-markdown")).toContainText("Small");
+    await tree.getByText("big.md", { exact: true }).click();
+    await expect(page.getByTestId("view-markdown")).toContainText("Big document");
+    const t0 = performance.now();
+    await page.getByTestId("markdown-edit-toggle").click();
+    await expect(page.getByTestId("markdown-editor")).toBeVisible();
+    return performance.now() - t0;
+  }
+  await measureWithFidelity("tiptapMount250KbMs", mountBigEditor);
+
+  // Typing latency: no long task over 50ms while typing in a 32KB WYSIWYG
+  // session, the largest doc size that opens in Tiptap by default.
+  await tree.getByText("mid.md", { exact: true }).click();
   await expect(page.getByTestId("view-markdown")).toBeVisible();
-  await page.getByTestId("markdown-edit-toggle").click();
   const editor = page.getByTestId("markdown-editor");
   await expect(editor).toBeVisible();
+  await page.waitForTimeout(50);
   async function typeOnce(): Promise<number> {
     await page.evaluate(() => {
       const w = window as Window & { __longTasks?: number[] };

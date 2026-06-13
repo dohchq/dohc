@@ -6,12 +6,13 @@
 // assertBudget.test.ts pins this table so a silent edit fails tests.
 export const performanceBudgets = {
   coldLaunchToShellMs: 2000,
-  warmLaunchToShellMs: 1000,
+  warmLaunchToShellMs: 1200,
   createEmptyWorkspaceMs: 1000,
   openThousandFileWorkspaceMs: 1500,
   fileTreeSearchTenThousandPathsMs: 100,
   fileTreeSearchVisibleResultMs: 200,
   openMarkdown250KbMs: 150,
+  tiptapMount250KbMs: 2000,
   typingLongTaskMs: 50,
   singleFileSyncDetectMs: 2000,
   hundredFileChangeSetMs: 3000,

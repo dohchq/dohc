@@ -116,3 +116,388 @@ table {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+
+/* Tiptap document editor (E4): graphite-minimal, dense enough for daily work. */
+.dohc-tiptap-editor {
+  position: relative;
+  min-height: 100%;
+  background: var(--dohc-bg);
+}
+
+.dohc-notion-editor {
+  min-height: calc(100vh - 96px);
+  padding: 28px 48px 80px;
+  color: var(--dohc-ink);
+  font-size: 15px;
+  line-height: 1.65;
+  outline: none;
+}
+
+.dohc-notion-editor > * {
+  max-width: 820px;
+}
+
+.dohc-notion-editor h1 {
+  margin: 0 0 18px;
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.dohc-notion-editor h2 {
+  margin: 28px 0 10px;
+  font-size: 22px;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.dohc-notion-editor h3 {
+  margin: 22px 0 8px;
+  font-size: 17px;
+  font-weight: 620;
+}
+
+.dohc-notion-editor p,
+.dohc-notion-editor ul,
+.dohc-notion-editor ol,
+.dohc-notion-editor blockquote,
+.dohc-notion-editor pre,
+.dohc-notion-editor table {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.dohc-notion-editor ul,
+.dohc-notion-editor ol {
+  padding-left: 24px;
+}
+
+.dohc-notion-editor blockquote {
+  border-left: 2px solid var(--dohc-line);
+  color: var(--dohc-muted);
+  padding-left: 14px;
+}
+
+.dohc-notion-editor code {
+  border: 1px solid var(--dohc-line);
+  border-radius: 5px;
+  background: var(--dohc-panel-2);
+  padding: 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.dohc-notion-editor pre {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 7px;
+  background: var(--dohc-panel);
+  padding: 42px 14px 14px;
+}
+
+.dohc-notion-editor pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.dohc-notion-editor table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.dohc-notion-editor th,
+.dohc-notion-editor td {
+  border: 1px solid var(--dohc-line);
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.dohc-notion-editor th {
+  background: var(--dohc-panel-2);
+  font-weight: 600;
+}
+
+.dohc-notion-editor .is-empty::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--dohc-subtle);
+  pointer-events: none;
+}
+
+.dohc-block-node {
+  position: relative;
+}
+
+.dohc-block-affordance {
+  position: absolute;
+  left: 18px;
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transform: translateX(-100%);
+  transition: opacity 120ms ease;
+}
+
+.dohc-block-node:hover .dohc-block-affordance,
+.dohc-block-affordance:focus-within {
+  opacity: 1;
+}
+
+.dohc-block-gutter-btn {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--dohc-subtle);
+  font-size: 13px;
+}
+
+.dohc-block-plus::before {
+  content: "+";
+}
+
+.dohc-block-handle::before {
+  content: "⋮";
+}
+
+.dohc-block-gutter-btn:hover {
+  border-color: var(--dohc-line);
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-code-block-toolbar {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  width: min(760px, calc(100% - 96px));
+  max-width: 820px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--dohc-line);
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--dohc-subtle);
+}
+
+.dohc-code-block-toolbar-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dohc-code-block-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dohc-subtle);
+}
+
+.dohc-code-language-select,
+.dohc-code-copy-btn,
+.dohc-code-block-continue-btn {
+  border: 1px solid var(--dohc-line);
+  border-radius: 4px;
+  background: var(--dohc-bg);
+  color: var(--dohc-muted);
+  font: inherit;
+}
+
+.dohc-code-copy-btn {
+  padding: 2px 6px;
+}
+
+.dohc-code-block-continuation {
+  max-width: 820px;
+}
+
+.dohc-code-block-continue-btn {
+  margin: 2px 0 10px;
+  width: 22px;
+  height: 20px;
+}
+
+.dohc-slash-menu,
+.dohc-wikilink-picker,
+.dohc-bubble-menu {
+  overflow: auto;
+  border: 1px solid var(--dohc-line);
+  border-radius: 7px;
+  background: var(--dohc-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
+}
+
+.dohc-slash-menu {
+  position: fixed;
+  z-index: 70;
+  width: 320px;
+  padding: 4px;
+}
+
+.dohc-slash-menu__item,
+.dohc-wikilink-picker__item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-ink);
+  text-align: left;
+}
+
+.dohc-slash-menu__item {
+  padding: 6px;
+}
+
+.dohc-slash-menu__item.is-selected,
+.dohc-wikilink-picker__item.is-active {
+  background: var(--dohc-panel-2);
+}
+
+.dohc-slash-menu__glyph {
+  display: inline-grid;
+  width: 30px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--dohc-line);
+  border-radius: 4px;
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dohc-slash-menu__copy,
+.dohc-wikilink-picker__item-title {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.dohc-slash-menu__label,
+.dohc-wikilink-picker__item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.dohc-slash-menu__hint,
+.dohc-wikilink-picker__item-path,
+.dohc-slash-menu__empty,
+.dohc-wikilink-picker__empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dohc-subtle);
+  font-size: 11px;
+}
+
+.dohc-wikilink-picker {
+  width: 360px;
+  padding: 4px;
+}
+
+.dohc-wikilink-picker__item {
+  padding: 6px 7px;
+}
+
+.dohc-wikilink-hidden {
+  font-size: 0;
+}
+
+.dohc-wikilink-source {
+  border-radius: 4px;
+  background: var(--dohc-panel-2);
+  color: var(--dohc-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.dohc-wikilink-pill {
+  display: inline-flex;
+  max-width: 260px;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  border: 1px solid var(--dohc-line);
+  border-radius: 999px;
+  background: var(--dohc-panel-2);
+  padding: 0 7px;
+  color: var(--dohc-ink);
+  font-size: 12px;
+  vertical-align: baseline;
+}
+
+.dohc-wikilink-pill--broken {
+  border-style: dashed;
+  color: var(--dohc-subtle);
+}
+
+.dohc-wikilink-pill__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dohc-atom {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dohc-match) 10%, transparent);
+  color: var(--dohc-match);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.dohc-bubble-menu {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+}
+
+.dohc-bubble-menu__button {
+  display: inline-grid;
+  width: 26px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-muted);
+}
+
+.dohc-bubble-menu__button:hover,
+.dohc-bubble-menu__button.is-active {
+  background: var(--dohc-panel-2);
+  color: var(--dohc-ink);
+}
+
+.dohc-editor-presence {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 999px;
+  background: var(--dohc-panel);
+  padding: 3px 8px;
+  color: var(--dohc-muted);
+  font-size: 11px;
+}
+
+.dohc-editor-presence-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dohc-success);
+}

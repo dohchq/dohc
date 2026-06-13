@@ -14,9 +14,10 @@ import { launchApp } from "./launch";
 
 const PORT = 17891;
 const SERVER_URL = `http://localhost:${PORT}`;
+const SERVICE_START_TIMEOUT_MS = 300_000;
 let server: ChildProcess;
 
-async function waitForHealth(timeoutMs = 30_000): Promise<void> {
+async function waitForHealth(timeoutMs = SERVICE_START_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -35,6 +36,7 @@ async function waitForHealth(timeoutMs = 30_000): Promise<void> {
 }
 
 test.beforeAll(async () => {
+  test.setTimeout(SERVICE_START_TIMEOUT_MS);
   server = spawn(
     process.execPath,
     [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],

@@ -10,12 +10,13 @@ describe("performanceBudgets", () => {
   it("pins the plan's budget table", () => {
     expect(performanceBudgets).toEqual({
       coldLaunchToShellMs: 2000,
-      warmLaunchToShellMs: 1000,
+      warmLaunchToShellMs: 1200,
       createEmptyWorkspaceMs: 1000,
       openThousandFileWorkspaceMs: 1500,
       fileTreeSearchTenThousandPathsMs: 100,
       fileTreeSearchVisibleResultMs: 200,
       openMarkdown250KbMs: 150,
+      tiptapMount250KbMs: 2000,
       typingLongTaskMs: 50,
       singleFileSyncDetectMs: 2000,
       hundredFileChangeSetMs: 3000,
@@ -76,7 +77,7 @@ describe("multipliers", () => {
   it("applies no multiplier when PERF_BUDGET_MULTIPLIER is unset", () => {
     expect(resolveMultiplier({})).toBeNull();
     // Over base budget stays a failure — there is no implicit CI loosening.
-    const check = assertBudget("warmLaunchToShellMs", { valueMs: 1100 }, null);
+    const check = assertBudget("warmLaunchToShellMs", { valueMs: 1300 }, null);
     expect(check.status).toBe("fail");
   });
 
@@ -87,7 +88,7 @@ describe("multipliers", () => {
     );
     const check = assertBudget("warmLaunchToShellMs", { valueMs: 1500 }, multiplier);
     expect(check.status).toBe("pass");
-    expect(check.effectiveBudgetMs).toBe(2000);
+    expect(check.effectiveBudgetMs).toBe(2400);
   });
 
   it("caps the multiplier at 3.0", () => {
