@@ -229,6 +229,7 @@ export const CHANNELS = {
   readWorkspaceText: "desktop:read-workspace-text",
   writeWorkspaceText: "desktop:write-workspace-text",
   openFileExternally: "desktop:open-file-externally",
+  readWorkspaceGraph: "desktop:read-workspace-graph",
   readWorkspaceDatabase: "desktop:read-workspace-database",
   applyDatabaseEdit: "desktop:apply-database-edit",
   importToDatabase: "desktop:import-to-database",

@@ -235,6 +235,34 @@ export const ReadWorkspaceTextResult = z.object({
 });
 export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
 
+const WorkspaceGraphNode = z.object({
+  path: PATH_STRING,
+  title: z.string().max(120),
+  outgoing: z.number().int().nonnegative(),
+  incoming: z.number().int().nonnegative(),
+});
+
+const WorkspaceGraphEdge = z.object({
+  source: PATH_STRING,
+  target: PATH_STRING,
+  kind: z.enum(["wikilink", "markdown"]),
+});
+
+export const ReadWorkspaceGraphPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
+
+export const WorkspaceGraphResult = z.object({
+  nodes: z.array(WorkspaceGraphNode).max(2000),
+  edges: z.array(WorkspaceGraphEdge).max(10000),
+  unresolvedLinks: z.number().int().nonnegative(),
+  scannedFileCount: z.number().int().nonnegative(),
+  omittedFileCount: z.number().int().nonnegative(),
+  truncatedFileCount: z.number().int().nonnegative(),
+});
+export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
+
 // Visible SQLite: the studio reads a snapshot (tables/columns/bounded rows),
 // edits rows in place, and imports a source file into a new database. The
 // on-disk .sqlite is canonical; raw bytes never CRDT-sync (edits flow as an
@@ -668,6 +696,9 @@ export interface DohcDesktopBridge {
   ): Promise<ReadWorkspaceTextResult>;
   writeWorkspaceText(payload: WriteWorkspaceTextPayload): Promise<void>;
   openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
+  readWorkspaceGraph(
+    payload: ReadWorkspaceGraphPayload,
+  ): Promise<WorkspaceGraphResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;

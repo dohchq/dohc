@@ -8,37 +8,35 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-13): **E4c(fix) REVIEW CLOSEOUT = THIS commit**.
-  Codex review for 4627209 is recorded at
-  `docs/superpowers/reviews/codex/e4c-review.md` (ran through a temporary
-  `CODEX_HOME` because the Windows-side config's `service_tier="priority"` is
-  rejected by Codex 0.130.0; final successful review used `service_tier="fast"`).
-  Findings fixed: P1 first-sync non-empty server docs could overwrite a
-  divergent local disk edit because the initial reconcile was skipped; P2
-  non-markdown atoms could be bootstrapped as rich markdown by a forged token
-  path. Fixes: collab-token now returns the atom body cache as `baseMarkdown`
-  for markdown atoms only; `useCollabDoc` seeds that body as the first-sync
-  materialization base only when the local file still equals it, otherwise the
-  existing conflict rescue path preserves both versions; Postgres ACL now uses
-  atom `kind` plus app/source path when choosing rich vs plain bootstrap.
-  Performance fix: Hocuspocus/Yjs and the Tiptap Collaboration extension are
-  lazy-loaded only for live collab, so local Tiptap mount stays under budget and
-  initial renderer JS is 1.07MB. Performance harness note: WSL/Electron
-  warm-profile launches are sampled best-of-seven after a short unmeasured
-  teardown settle; budget remains 1200ms. Gates green: desktop/hocuspocus/
-  workspace-api typecheck; desktop build; focused desktop vitest 43/43;
-  focused hocuspocus vitest 39/39; workspace-api collab vitest 3/3;
-  `liveCoEditing.spec.ts` 3/3; performance E2E 8/8; full desktop E2E 58/58;
-  check:performance pass (cold 1290, warm 1073/1200, md250 71,
-  tiptapMount 1944, typing 0, bundle 1.07/1.408); check:lean pass; git
-  diff --check clean. NEXT = E5 remaining feature-parity sweep (E5.0 search
-  and E5 server lanes already landed; continue with the remaining desktop
-  parity surfaces before E6/E7).
+- Current update (2026-06-13): **E5(graph) BUILT, CODEX REVIEW CLEAN, ALL
+  GATES GREEN = THIS commit**. Graph placeholder is replaced with a local-first
+  Markdown link graph: main-process `readWorkspaceGraph` scans real markdown
+  files from the trusted workspace listing, parses wikilinks + local markdown
+  links, skips external URLs/images/code/known assets, refuses ambiguous
+  basename wikilinks instead of guessing, handles dotted note names,
+  parenthesized/escaped Markdown destinations, CRLF fences, self-links, and
+  returns bounded nodes/edges/candidates over a typed IPC bridge. Renderer
+  `GraphView` shows a compact graphite-minimal map + ranked document list and
+  opens documents through the same `openFile` tab path as Explorer/Search.
+  `workbench.spec.ts` now treats Graph as a real view while Apps/Agent remain
+  designed empty states. Design screenshot:
+  `test-results/screenshots/e5-graph/graph-view--1280x800--light.png`.
+  Gates green: desktop typecheck; desktop build (renderer initial JS
+  1,137.40kB build / 1.08MB performance row); focused desktop vitest 19/19;
+  full desktop E2E 59/59; check:performance PASS (cold 1348, warm 1161/1200,
+  md250 71, tiptapMount 1995/2000, typing 0, bundle 1.08/1.408); check:lean
+  PASS; git diff --check clean. Codex review ledger:
+  `docs/superpowers/reviews/codex/e5-graph-review.md`; final review:
+  "I did not identify any discrete correctness, security, or maintainability
+  issues in the current changes." NEXT = E5
+  properties/notices/catch-up/share UI/import-export/database/apps-runtime
+  surfaces before E6/E7.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
-  editor component, and E4c rich collab/server. NEXT = **E5 remaining feature
-  parity sweep**: graph/properties/notices/share UI/workspace management/
-  imports-export polish/database grid/apps-runtime surfaces, with E5.0 search
-  and the E5 server share/invitation lane already committed. Recon:
+  editor component, and E4c rich collab/server. E5 graph is built in this
+  slice. NEXT = **E5 remaining feature parity sweep**:
+  properties/notices/catch-up/share UI/workspace management/imports-export
+  polish/database grid/apps-runtime surfaces, with E5.0 search and the E5
+  server share/invitation lane already committed. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
   collab, D-E3 retire formula/query VALUES (keep inert styling + schema nodes
   for round-trip). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
@@ -76,7 +74,7 @@ design review + codex review + fix commit, every phase).
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
   6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, 4627209 (E4c rich
-  collab/server), E4c(fix)=this.
+  collab/server), cc4b4e9 (E4c fix), E5(graph)=this.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -273,6 +271,40 @@ same-change; floating toolbar net-new; keep perf testids),
 e6-agent-driver-spec.md (Claude = agent-sdk NOT acp per t3code truth —
 DX-03; codex app-server method names; ACP = generic driver; reaper;
 Windows deltas).
+
+### e5(graph) — BUILT, CODEX REVIEW CLEAN, ALL GATES GREEN (2026-06-13)
+
+Ported the Graph activity from placeholder to local-first Markdown graph. The
+main process owns graph reading through a new `readWorkspaceGraph` IPC: it
+uses the existing workspace file walker (so `.dohc`, `.git`, `node_modules`,
+and symlinks stay out), reads bounded markdown text, parses wikilinks and
+local markdown links, skips external/image/code/known asset links, handles
+dotted note names plus parenthesized and escaped Markdown destinations, and
+refuses ambiguous basename wikilinks as unresolved rather than picking a
+surprising document. The typed bridge returns bounded nodes/edges plus
+unresolved/omitted/truncated counts, with both edge and processed-candidate
+caps.
+
+Renderer `GraphView` renders a graphite-minimal map and a degree-ranked file
+list inside the workbench side panel. Clicking either a node or row opens the
+file through the shared tab-opening path, so Graph inherits the same recency,
+tab, and latency-mark behavior as Explorer/Search. `workbench.spec.ts` now
+asserts Graph as a real view; Apps and Agent remain designed empty states.
+
+Gates: desktop typecheck PASS; desktop build PASS (renderer initial JS
+1,137.40kB in build output, 1.08MB in performance row); focused desktop
+vitest PASS 19/19; full desktop E2E PASS 59/59; check:performance PASS
+(cold 1348, warm 1161/1200, createEmpty 54, open1000 380, md250 71,
+tiptapMount 1995/2000, typing 0, appTester 311, sqlite 81, csv 296,
+contentSearch 35/52, memory 499/708, bundle 1.08/1.408); check:lean PASS
+(knip + tech debt + architecture debt); git diff --check PASS. Design
+screenshot:
+`test-results/screenshots/e5-graph/graph-view--1280x800--light.png`.
+Codex review DONE via `codex review --uncommitted`; all findings fixed and
+recorded in `docs/superpowers/reviews/codex/e5-graph-review.md`. Final review
+trace `/tmp/e5-graph-review-clean-final5.raw`: "I did not identify any
+discrete correctness, security, or maintainability issues in the current
+changes."
 
 ### e0-e1 (build lane wop1415aj) — BUILT, ALL GATES GREEN, awaiting lead commit (2026-06-11)
 

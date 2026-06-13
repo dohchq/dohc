@@ -63,6 +63,7 @@ import {
   AgentRunStatusResult,
   McpConfigResult,
   PickWorkspaceRootResult,
+  ReadWorkspaceGraphPayload,
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
@@ -73,6 +74,7 @@ import {
   SyncStatusResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
+  WorkspaceGraphResult,
   WorkspaceSearchPayload,
   CancelWorkspaceSearchPayload,
   SearchResultsEventSchema,
@@ -118,6 +120,7 @@ import {
   importToDatabase,
   readDatabaseSnapshot,
 } from "./workspaces/workspaceDatabase";
+import { readWorkspaceGraph } from "./workspaces/workspaceGraph";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -639,6 +642,13 @@ function registerIpcHandlers(): void {
     );
     const error = await shell.openPath(realTarget);
     if (error) throw new Error(error);
+  });
+
+  ipcMain.handle(CHANNELS.readWorkspaceGraph, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadWorkspaceGraphPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return WorkspaceGraphResult.parse(await readWorkspaceGraph(workspace.rootPath));
   });
 
   // The ONLY path from renderer to the OS browser (window.open is a pure

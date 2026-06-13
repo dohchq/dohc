@@ -26,6 +26,7 @@ import { toggleTheme } from "./theme";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
+import { GraphView } from "./workbench/GraphView";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { SearchView } from "./workbench/SearchView";
@@ -104,13 +105,9 @@ function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
 }
 
 // Designed empty states for the views whose real content lands later in this
-// plan (graph/apps E5, agent E6) — the rail itself is the seam. Search
-// graduated to its real view in E5.0 (SearchView).
+// plan (apps E5, agent E6) — the rail itself is the seam. Search graduated to
+// its real view in E5.0; graph graduated in E5 graph (GraphView).
 const EMPTY_VIEW_COPY: Partial<Record<ViewId, { title: string; body: string }>> = {
-  graph: {
-    title: "Graph is on its way",
-    body: "How your files connect, drawn as a map — later in this plan.",
-  },
   apps: {
     title: "Apps panel is on its way",
     body: "Your workspace apps get a dedicated home later in this plan.",
@@ -190,6 +187,16 @@ export function DesktopWorkspaceShell(props: {
   // view, so results — and the activity-bar count badge — survive switching
   // views while the panel unmounts.
   const search = useWorkspaceSearch(workspaceId);
+  const graphRefreshKey = useMemo(
+    () =>
+      [
+        changeSets[0]?.id ?? "none",
+        String(changeSets.length),
+        String(files.length),
+        files.map((file) => file.path).join("\0"),
+      ].join("\0"),
+    [changeSets, files],
+  );
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -700,6 +707,13 @@ export function DesktopWorkspaceShell(props: {
               explorerView
             ) : wb.activeView === "search" ? (
               <SearchView search={search} onOpenResult={openSearchResult} />
+            ) : wb.activeView === "graph" ? (
+              <GraphView
+                workspaceId={workspaceId}
+                activePath={wb.activeTab}
+                refreshKey={graphRefreshKey}
+                onOpenPath={openFile}
+              />
             ) : wb.activeView === "history" ? (
               <HistoryList changeSets={changeSets} />
             ) : (

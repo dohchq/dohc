@@ -74,6 +74,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeWorkspaceText, payload),
   openFileExternally: (payload) =>
     ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
+  readWorkspaceGraph: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
   applyDatabaseEdit: (payload) =>

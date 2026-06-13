@@ -99,8 +99,18 @@ test("activity bar: view switching with designed empty states, panel collapse on
   await expect(page.getByTestId("search-view")).toBeVisible();
   await expect(page.getByTestId("file-tree")).toHaveCount(0);
 
+  // Graph graduated to its real local Markdown link map in E5.
+  await page.getByTestId("activity-graph").click();
+  await expect(page.getByTestId("activity-graph")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.getByTestId("graph-view")).toHaveAttribute("data-state", "ready");
+  await expect(page.getByTestId("graph-doc-count")).toHaveText("1 doc");
+  await expect(page.getByTestId("file-tree")).toHaveCount(0);
+
   // Each not-yet-built view renders its designed empty state in the panel.
-  for (const view of ["graph", "apps", "agent"] as const) {
+  for (const view of ["apps", "agent"] as const) {
     await page.getByTestId(`activity-${view}`).click();
     await expect(page.getByTestId(`activity-${view}`)).toHaveAttribute(
       "aria-current",
