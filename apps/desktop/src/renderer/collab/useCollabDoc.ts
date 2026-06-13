@@ -13,14 +13,11 @@ import {
 // Live co-editing hook for the desktop markdown editor. Given a workspace +
 // path, it asks main for a collab token (only minted for SHARED cloud
 // workspaces with a signed-in session — see the collabToken IPC), connects a
-// HocuspocusProvider, and binds the canonical "plainText" Y.Text that the
-// server bootstraps and projects markdown from (NOT a desktop-only field — the
-// server stores markdown atoms as a plain-text Y.Text on this path, and its
-// onChange projection reads that same field back to atoms.body). The textarea
-// reads/writes it. When the workspace is personal/local-only or signed out,
-// main returns available:false and this hook is a clean no-op: enabled=false,
-// the editor stays on the existing local autosave path, byte-identical to
-// today.
+// HocuspocusProvider, and exposes the canonical rich Y.Doc that Tiptap binds
+// to via its "body" XmlFragment. When the workspace is personal/local-only or
+// signed out, main returns available:false and this hook is a clean no-op:
+// enabled=false, the editor stays on the existing local autosave path,
+// byte-identical to today.
 //
 // Data-loss safety (plan Phase 10, decision D-07; "silent loss is never
 // acceptable"): the editor only enters collab mode once the provider is
@@ -32,15 +29,11 @@ import {
 // rather than clobbering it, and an overlapping external edit is rescued to a
 // visible <path>.conflict instead of being lost.
 //
-// Anti-bloat (lead's choice): Y.Text + textarea + awareness. No Tiptap, no
-// y-indexeddb — the desktop's offline copy is the FILE on disk, not IndexedDB,
-// so Yjs offline convergence on reconnect is enough.
+// Anti-bloat (lead's choice): Hocuspocus + Tiptap Collaboration + awareness.
+// No y-indexeddb — the desktop's offline copy is the FILE on disk, not
+// IndexedDB, so Yjs offline convergence on reconnect is enough.
 
 export type CollabStatus = "disabled" | "connecting" | "connected" | "disconnected";
-
-// The shared Y.Text field. MUST match the server's plain-text bootstrap +
-// projection field (services/hocuspocus/src/import-export.ts PLAIN_TEXT_FIELD).
-const PLAIN_TEXT_FIELD = "plainText";
 
 // Re-fetch the collab token a little before the 5-min server TTL so a
 // long-lived editing session never has its sync/awareness messages rejected.
@@ -49,26 +42,38 @@ const TOKEN_REFRESH_MS = 4 * 60 * 1000;
 // autosave cadence).
 const MATERIALIZE_DEBOUNCE_MS = 800;
 
+type MarkdownImportExport = typeof import("../editor/import-export");
+let markdownImportExportPromise: Promise<MarkdownImportExport> | null = null;
+
+function loadMarkdownImportExport(): Promise<MarkdownImportExport> {
+  markdownImportExportPromise ??= import("../editor/import-export");
+  return markdownImportExportPromise;
+}
+
+async function yDocToMarkdown(doc: Y.Doc): Promise<string> {
+  const mod = await loadMarkdownImportExport();
+  return mod.yDocToMarkdown(doc);
+}
+
+async function replaceYDocWithMarkdown(
+  doc: Y.Doc,
+  markdown: string,
+): Promise<void> {
+  const mod = await loadMarkdownImportExport();
+  mod.replaceYDocWithMarkdown(doc, markdown);
+}
+
 export type UseCollabDoc = {
   // True only once a live shared session is connected AND synced; the editor
   // switches to collab mode on this flag. false => use the local autosave
   // editor showing the real on-disk content (never an empty pre-sync doc).
   enabled: boolean;
   status: CollabStatus;
-  // The live document text and the writer the textarea calls onChange with.
-  text: string;
-  setText: (next: string) => void;
+  synced: boolean;
+  ydoc: Y.Doc | null;
   // How many OTHER editors are present (this client is excluded).
   peerCount: number;
 };
-
-function replaceText(yText: Y.Text, next: string): void {
-  if (yText.toString() === next) return;
-  yText.doc?.transact(() => {
-    yText.delete(0, yText.length);
-    yText.insert(0, next);
-  });
-}
 
 export function useCollabDoc(input: {
   workspaceId: string;
@@ -83,10 +88,11 @@ export function useCollabDoc(input: {
 }): UseCollabDoc {
   const [status, setStatus] = useState<CollabStatus>("disabled");
   const [synced, setSynced] = useState(false);
-  const [text, setTextState] = useState("");
+  const [ydoc, setYdoc] = useState<Y.Doc | null>(null);
+  const [docRevision, setDocRevision] = useState(0);
   const [peerCount, setPeerCount] = useState(0);
-  // The live Y.Text for the connected session; null when not in collab mode.
-  const yTextRef = useRef<Y.Text | null>(null);
+  // The live rich Y.Doc for the connected session; null when not in collab mode.
+  const ydocRef = useRef<Y.Doc | null>(null);
   // Canonical-state model state + the text we last projected to disk (the 3-way
   // merge base). Held in refs so the debounced settle reads the latest.
   const sessionRef = useRef<CollabSessionState>(createCollabSessionState());
@@ -94,15 +100,19 @@ export function useCollabDoc(input: {
   const onDiskTextRef = useRef(input.onDiskText);
   onDiskTextRef.current = input.onDiskText;
 
-  // Write the CRDT text to disk and record it as the new materialization base,
+  // Write the CRDT markdown to disk and record it as the new materialization base,
   // so the resulting watcher event is recognised as our own (no loop) and a
   // later external change 3-way merges against it.
   async function writeAndRecord(workspaceId: string, path: string, text: string): Promise<void> {
+    const previousText = lastMaterializedTextRef.current;
+    const previousState = sessionRef.current;
+    lastMaterializedTextRef.current = text;
+    sessionRef.current = recordMaterialization(sessionRef.current, text, Date.now());
     try {
       await bridge().writeWorkspaceText({ workspaceId, relativePath: path, text });
-      lastMaterializedTextRef.current = text;
-      sessionRef.current = recordMaterialization(sessionRef.current, text, Date.now());
     } catch {
+      lastMaterializedTextRef.current = previousText;
+      sessionRef.current = previousState;
       // Leave it for the next settle — never lose the in-memory doc.
     }
   }
@@ -111,15 +121,16 @@ export function useCollabDoc(input: {
   // side. Runs on initial sync (base=null adopts on-disk if the doc is empty)
   // and on every later on-disk change.
   async function reconcile(workspaceId: string, path: string, onDiskText: string): Promise<void> {
-    const yText = yTextRef.current;
-    if (!yText) return;
+    const doc = ydocRef.current;
+    if (!doc) return;
+    const docText = await yDocToMarkdown(doc);
     const res = reconcileExternalEdit({
       onDiskText,
       lastMaterializedText: lastMaterializedTextRef.current,
-      docText: yText.toString(),
+      docText,
     });
     if (res.kind === "merge-into-doc") {
-      replaceText(yText, res.mergedText);
+      await replaceYDocWithMarkdown(doc, res.mergedText);
       await writeAndRecord(workspaceId, path, res.mergedText);
     } else if (res.kind === "conflict") {
       // Overlapping edits: rescue the external version to a visible sibling so
@@ -136,18 +147,22 @@ export function useCollabDoc(input: {
   useEffect(() => {
     if (!input.enabled) {
       setStatus("disabled");
+      setSynced(false);
+      ydocRef.current = null;
+      setYdoc(null);
       return;
     }
     const { workspaceId, path } = input;
     let cancelled = false;
     let provider: HocuspocusProvider | null = null;
     let doc: Y.Doc | null = null;
-    let yText: Y.Text | null = null;
     let detachObservers: (() => void) | null = null;
     let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
     setStatus("connecting");
     setSynced(false);
+    ydocRef.current = null;
+    setYdoc(null);
     setPeerCount(0);
     sessionRef.current = createCollabSessionState();
     lastMaterializedTextRef.current = null;
@@ -163,15 +178,13 @@ export function useCollabDoc(input: {
         }
 
         doc = new Y.Doc();
-        yText = doc.getText(PLAIN_TEXT_FIELD);
-        yTextRef.current = yText;
+        ydocRef.current = doc;
+        setYdoc(doc);
 
-        // Reflect remote/local Y.Text changes into React state so the textarea
-        // shows the converged document.
-        const syncText = () => {
-          if (!cancelled && yText) setTextState(yText.toString());
+        const bumpRevision = () => {
+          if (!cancelled) setDocRevision((revision) => revision + 1);
         };
-        yText.observe(syncText);
+        doc.on("update", bumpRevision);
 
         provider = new HocuspocusProvider({
           url: result.wsUrl,
@@ -195,8 +208,14 @@ export function useCollabDoc(input: {
             if (cancelled) return;
             sessionRef.current = { ...sessionRef.current, active: true };
             setSynced(true);
-            syncText();
-            void reconcile(workspaceId, path, onDiskTextRef.current);
+            bumpRevision();
+            void (async () => {
+              if (!doc) return;
+              const docText = await yDocToMarkdown(doc);
+              if (docText.trim().length === 0) {
+                await reconcile(workspaceId, path, onDiskTextRef.current);
+              }
+            })();
           },
         });
 
@@ -225,10 +244,9 @@ export function useCollabDoc(input: {
           color: "#6b7280",
         });
         updatePeers();
-        syncText();
 
         detachObservers = () => {
-          yText?.unobserve(syncText);
+          doc?.off("update", bumpRevision);
           awareness?.off("change", updatePeers);
         };
       })
@@ -240,9 +258,10 @@ export function useCollabDoc(input: {
       cancelled = true;
       if (refreshTimer) clearInterval(refreshTimer);
       detachObservers?.();
-      yTextRef.current = null;
+      ydocRef.current = null;
       sessionRef.current = { ...sessionRef.current, active: false };
       setSynced(false);
+      setYdoc(null);
       // Destroy the provider first (closes the socket + cleans awareness),
       // then the doc — clean teardown on unmount or path/workspace change so a
       // navigated-away document never keeps syncing.
@@ -258,7 +277,7 @@ export function useCollabDoc(input: {
   // External on-disk changes (agent edit, sync pull) while a session is live:
   // fold them into the doc once synced, never clobber.
   useEffect(() => {
-    if (!synced || !yTextRef.current) return;
+    if (!synced || !ydocRef.current) return;
     void reconcile(input.workspaceId, input.path, input.onDiskText);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.onDiskText, synced]);
@@ -268,45 +287,34 @@ export function useCollabDoc(input: {
   useEffect(() => {
     if (!synced) return;
     const timer = setTimeout(() => {
-      const yText = yTextRef.current;
-      if (!yText) return;
-      const docText = yText.toString();
-      if (
-        !shouldMaterialize({
-          state: sessionRef.current,
-          docText,
-          onDiskText: onDiskTextRef.current,
-          trigger: "settle-debounce",
-        })
-      ) {
-        return;
-      }
-      void writeAndRecord(input.workspaceId, input.path, docText);
+      void (async () => {
+        const doc = ydocRef.current;
+        if (!doc) return;
+        const docText = await yDocToMarkdown(doc);
+        if (
+          !shouldMaterialize({
+            state: sessionRef.current,
+            docText,
+            onDiskText: onDiskTextRef.current,
+            trigger: "settle-debounce",
+          })
+        ) {
+          return;
+        }
+        await writeAndRecord(input.workspaceId, input.path, docText);
+      })();
     }, MATERIALIZE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text, synced]);
-
-  // Writes from the textarea: replace the whole Y.Text content in one
-  // transaction. (A character-diff binding is an optimization; full-replace is
-  // correct and keeps this lean — Yjs still merges concurrent remote edits at
-  // the CRDT layer, and the local observer immediately reflects the result.)
-  function setText(next: string): void {
-    const yText = yTextRef.current;
-    if (!yText) {
-      setTextState(next);
-      return;
-    }
-    replaceText(yText, next);
-  }
+  }, [docRevision, synced]);
 
   return {
     // Collab mode only once SYNCED — the local editor (real on-disk content)
     // owns the surface until then, so an empty pre-sync doc can never blank it.
-    enabled: synced,
+    enabled: synced && ydoc !== null,
     status,
-    text,
-    setText,
+    synced,
+    ydoc,
     peerCount,
   };
 }

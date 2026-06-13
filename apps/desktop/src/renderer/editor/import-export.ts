@@ -3,6 +3,7 @@ import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
+import { TaskItem, TaskList } from '@tiptap/extension-list'
 import yaml from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
@@ -23,6 +24,8 @@ const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit,
+  TaskList,
+  TaskItem,
   TableKit,
 ]
 const markdownManager = new MarkdownManager({
@@ -37,8 +40,8 @@ export function markdownToYDoc(markdown: string): Y.Doc {
   const { meta, body } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
 
-  writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_V2_SCHEMA_VERSION })
+  replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
+  replaceMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_V2_SCHEMA_VERSION })
 
   const bodyFragment = doc.getXmlFragment(BODY_FIELD)
   const tiptapJson = markdownManager.parse(body)
@@ -51,8 +54,8 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
   const { meta, body } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
 
-  writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), {
+  replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
+  replaceMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_V2_SCHEMA_VERSION,
     contentKind: PLAIN_TEXT_CONTENT_KIND,
   })
@@ -73,6 +76,19 @@ export function yDocToMarkdown(doc: Y.Doc): string {
   })
 
   return `---\n${yamlFrontmatter}---\n\n${body}`
+}
+
+export function replaceYDocWithMarkdown(doc: Y.Doc, markdown: string): void {
+  const { meta, body } = parseFrontmatter(markdown)
+  doc.transact(() => {
+    replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
+    replaceMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_V2_SCHEMA_VERSION })
+
+    const bodyFragment = doc.getXmlFragment(BODY_FIELD)
+    if (bodyFragment.length > 0) bodyFragment.delete(0, bodyFragment.length)
+    const tiptapJson = markdownManager.parse(body)
+    prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
+  })
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
@@ -141,7 +157,10 @@ function parseFrontmatter(src: string): {
   return { meta, body: rest ?? '' }
 }
 
-function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
+function replaceMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
+  for (const key of Array.from(map.keys())) {
+    map.delete(key)
+  }
   for (const [key, value] of Object.entries(values)) {
     map.set(key, value)
   }

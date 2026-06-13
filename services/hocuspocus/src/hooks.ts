@@ -19,6 +19,7 @@ import type { PostgresYDocStore } from './persistence.js'
 import {
   getDohcYDocBodyFragment,
   getDohcYDocFrontmatter,
+  getDohcYDocMeta,
   getDohcYDocPlainText,
   markdownToYDoc,
   plainTextToYDoc,
@@ -90,13 +91,13 @@ export type WorkspaceAuthzVersionInput = {
   authzVersion: number
 }
 
+type AtomBootstrap = { markdown: string; path?: string; plainText?: boolean }
+
 export type HocuspocusAcl = {
   getWorkspaceAuthzVersion(input: WorkspaceAuthzVersionInput): Promise<number>
   canReadAtom(input: AtomAccessInput): Promise<boolean>
   canWriteAtom(input: AtomAccessInput): Promise<boolean>
-  loadAtomBootstrap?(
-    input: AtomAccessInput,
-  ): Promise<{ markdown: string; path?: string; plainText?: boolean } | null>
+  loadAtomBootstrap?(input: AtomAccessInput): Promise<AtomBootstrap | null>
   setAtomBodyCache?(
     input: AtomBodyCacheProjectionInput,
   ): Promise<AtomBodyCacheProjectionResult>
@@ -192,22 +193,31 @@ function hasPersistedBodyContent(doc: Y.Doc): boolean {
   }
 }
 
-function bootstrapMarkdownToYDoc(bootstrap: {
-  markdown: string
-  path?: string
+function bootstrapMarkdownToYDoc(bootstrap: AtomBootstrap): Y.Doc {
   // True when the atom is plain-text-canonical (one Y.Text in `plainText`)
-  // rather than a rich ProseMirror `body` XmlFragment. The Postgres/desktop
-  // path sets this for ALL its atoms: the desktop editor is a plain textarea,
-  // so the shared field MUST be the plainText Y.Text it can read/write and the
-  // server projects from. App source files are plain-text by path too.
-  plainText?: boolean
-}): Y.Doc {
-  const plainText =
-    bootstrap.plainText ||
-    (bootstrap.path ? isPlainTextAtomPath(bootstrap.path) : false)
-  return plainText
+  // rather than a rich ProseMirror `body` XmlFragment. Markdown atoms are rich;
+  // app/source files remain plain text by path so code is not parsed as prose.
+  return isPlainTextBootstrap(bootstrap)
     ? plainTextToYDoc(bootstrap.markdown)
     : markdownToYDoc(bootstrap.markdown)
+}
+
+function isPlainTextBootstrap(bootstrap: AtomBootstrap): boolean {
+  return Boolean(
+    bootstrap.plainText ||
+      (bootstrap.path ? isPlainTextAtomPath(bootstrap.path) : false),
+  )
+}
+
+function shouldMigratePlainTextDocumentToRich(
+  document: Y.Doc,
+  bootstrap: AtomBootstrap | null | undefined,
+): boolean {
+  return (
+    getDohcYDocMeta(document).contentKind === 'plain-text' &&
+    bootstrap?.markdown !== undefined &&
+    !isPlainTextBootstrap(bootstrap)
+  )
 }
 
 const YJS_SYNC_STEP2 = 1
@@ -515,6 +525,22 @@ export function createHocuspocusHooks({
 
       const document = await store.loadDocument(data.documentName)
       const loadedSequence = await store.latestSequence(data.documentName)
+      if (getDohcYDocMeta(document).contentKind === 'plain-text') {
+        const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
+        if (shouldMigratePlainTextDocumentToRich(document, bootstrap)) {
+          const migratedDocument = markdownToYDoc(yDocToMarkdown(document))
+          await store.storeSnapshot(data.documentName, migratedDocument, {
+            lastSeq: loadedSequence,
+          })
+          sequences.setLoadedSequence(data.documentName, loadedSequence)
+          logger.warn('migrated plain-text hocuspocus document to rich body', {
+            documentName: data.documentName,
+            workspaceId: context.workspaceId,
+            atomId: context.atomId,
+          })
+          return migratedDocument
+        }
+      }
       if (isUninitializedCanonicalDoc(document, context.atomId)) {
         const bootstrap = await acl.loadAtomBootstrap?.(accessInput(context))
         if (bootstrap?.markdown !== undefined) {

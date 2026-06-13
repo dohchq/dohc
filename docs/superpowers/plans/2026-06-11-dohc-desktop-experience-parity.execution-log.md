@@ -8,35 +8,31 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-13): **E4b-2 EDITOR COMPONENT = THIS commit**.
-  Desktop markdown now defaults small `.md` files to a lazy-loaded, local
-  Tiptap WYSIWYG editor with source toggle, slash commands (wikilink,
-  headings, lists, quote, code block, divider, table), wikilink picker/open,
-  selection bubble formatting, block gutter controls, code-block chrome, and
-  byte-stable untouched-file behavior. Large markdown stays read-first.
-  WYSIWYG is deliberately passive on file open (no autofocus) so explorer
-  rename/edit flows keep focus. Tiptap deps are exact where newly added
-  (`@tiptap/react`, `@tiptap/extensions` 3.23.6), with editor code split into
-  a lazy renderer chunk; the initial bundle ratchet counts only `index-*.js`,
-  while `tiptapMount250KbMs` covers the editor chunk. Test harness fixes in
-  this commit: desktop Playwright forces POSIX `/tmp` on Linux/WSL when
-  `TMPDIR` is unset because DrvFs `/mnt/c/.../Temp` drops chokidar events;
-  cloud/collab E2E service startup budget is 300s because cold importing
-  Better Auth from this WSL worktree takes minutes; warm launch budget is
-  rebased from 1000→1200ms for the current WSL2/Electron startup floor
-  (cold remains 2000ms). Gates green: desktop typecheck; desktop build;
-  focused editor/FileInspector vitest 25/25; performance assertBudget 18/18;
-  full desktop E2E 57/57; performance E2E 8/8 via full suite;
+- Current update (2026-06-13): **E4c COLLAB+SERVER = THIS commit**.
+  Desktop shared markdown now uses one rich Tiptap/Yjs document: `useCollabDoc`
+  exposes the live `Y.Doc`, `MarkdownEditor` binds Collaboration to the `body`
+  XmlFragment, and materialization still flows through the existing
+  `collabSession` 3-way merge/conflict model. The collab hook lazy-loads
+  markdown import/export helpers so rich serialization does not bloat the
+  initial renderer chunk. Server bootstrap now creates rich markdown docs by
+  default while preserving plain-text mode for source/app files; persisted
+  legacy `plain-text` snapshots migrate on load by serializing the live Y.Text,
+  not the stale SQL body cache. Checklists are supported on desktop and server
+  (`@tiptap/extension-list` exact 3.23.6), and the desktop collab editor uses
+  the full WYSIWYG surface instead of the old textarea. Gates green: desktop
+  typecheck; hocuspocus typecheck; desktop build; focused desktop vitest 31/31;
+  focused hocuspocus vitest 30/30; `liveCoEditing.spec.ts` 3/3 including the
+  plainText→rich migration data-loss guard; full desktop E2E 58/58;
   check:performance pass (cold 1070, warm 1072/1200, md250 69,
   tiptapMount 1560, typing 0, bundle 1.38/1.408); check:lean pass; git
-  diff --check clean. NEXT = E4c COLLAB+SERVER (useCollabDoc body-fragment
-  rework, server plainText→rich flip/migration, taskList both sides,
-  liveCoEditing update).
-- Phase/position: E4 is still in progress. E4a foundation committed 6151bd6;
-  E4b-1 plugins committed before this lane; E4b-2 editor component is the
-  current commit. NEXT = **E4c COLLAB+SERVER**: rework `useCollabDoc` around a
-  body-fragment rich document, flip/migrate server `plainText` to rich state,
-  add taskList on both desktop/server, and update `liveCoEditing`. Recon:
+  diff --check clean. NEXT = E5 remaining feature-parity sweep (E5.0 search
+  and E5 server lanes already landed; continue with the remaining desktop
+  parity surfaces before E6/E7).
+- Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
+  editor component, and E4c rich collab/server. NEXT = **E5 remaining feature
+  parity sweep**: graph/properties/notices/share UI/workspace management/
+  imports-export polish/database grid/apps-runtime surfaces, with E5.0 search
+  and the E5 server share/invitation lane already committed. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
   collab, D-E3 retire formula/query VALUES (keep inert styling + schema nodes
   for round-trip). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
@@ -73,7 +69,8 @@ design review + codex review + fix commit, every phase).
   + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
-  6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor=this.
+  6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, E4c rich
+  collab/server=this.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -133,6 +130,37 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e4c collab/server — DONE (this commit, 2026-06-13)
+
+Moved desktop live co-editing from the temporary textarea/Y.Text path onto the
+same rich Tiptap/Yjs document shape as the local WYSIWYG editor. `useCollabDoc`
+now returns the session `Y.Doc`, tracks rich updates for debounced markdown
+materialization, records materialization before the filesystem write to avoid
+watcher self-write races, and only folds local disk text into the server doc on
+first sync when the rich server doc is empty. `FileInspector` renders the lazy
+MarkdownEditor in collab mode with presence metadata, keeping local-only
+workspaces on the existing autosave path.
+
+Server-side bootstrap now treats markdown atoms as rich docs and keeps
+plain-text mode for source/app paths. A legacy persisted `plain-text` document
+migrates on load by serializing the live Y.Text into markdown, importing that
+markdown into a rich `body` XmlFragment, and storing the migrated snapshot at
+the loaded sequence. This explicitly protects unprojected live collab text from
+being overwritten by a stale atom body cache. Desktop and server import/export
+schemas now share `taskList`/`taskItem`, with checklist round-trip coverage.
+
+Added exact dependencies `@tiptap/extension-collaboration` and
+`@tiptap/extension-list` 3.23.6 where they are used. Bundle strategy: the
+collab hook dynamically imports markdown import/export serialization so the
+initial renderer bundle stays under the ratchet and rich editor code remains
+lazy.
+
+Gates: desktop typecheck PASS; hocuspocus typecheck PASS; desktop build PASS;
+focused desktop vitest PASS 31/31; focused hocuspocus vitest PASS 30/30;
+`apps/desktop/e2e/liveCoEditing.spec.ts` PASS 3/3; full desktop E2E PASS
+58/58; check:performance PASS; check:lean PASS; git diff --check PASS.
+Shortstat: 19 files changed, 635 insertions(+), 216 deletions(-).
 
 ### e4b-2 editor component — DONE (this commit, 2026-06-13)
 

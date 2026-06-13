@@ -275,7 +275,6 @@ function MarkdownView(props: {
   }, [pendingScrollLine, mode]);
 
   useEffect(() => {
-    if (mode !== "wysiwyg") return;
     let cancelled = false;
     void bridge()
       .listWorkspaceFiles({ workspaceId: props.workspaceId })
@@ -300,7 +299,7 @@ function MarkdownView(props: {
     return () => {
       cancelled = true;
     };
-  }, [mode, props.workspaceId]);
+  }, [props.workspaceId]);
 
   // Lift the save state to the shell (smallest seam): the active editor tab
   // shows a dirty dot while this is not "saved".
@@ -482,11 +481,11 @@ function MarkdownView(props: {
   // (collabSession.ts) so a stale/empty doc folds the on-disk text in rather
   // than clobbering it — never a blind write of the live text over the file.
 
-  // Collab mode: the shared Y.Text drives the editor. There is no local save
+  // Collab mode: the shared rich Y.Doc drives Tiptap. There is no local save
   // state (the CRDT is canonical; main materializes to disk at settle points),
-  // so the toolbar shows live presence instead. The textarea is always
-  // editable — co-editing has no separate "Edit" gate.
-  if (collab.enabled) {
+  // so the toolbar shows live presence instead. Co-editing has no separate
+  // "Edit" gate once the provider has synced.
+  if (collab.enabled && collab.ydoc) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
@@ -510,13 +509,34 @@ function MarkdownView(props: {
           }
         />
         {props.truncatedNotice}
-        <textarea
-          data-testid="collab-editor"
-          value={collab.text}
-          onChange={(e) => collab.setText(e.target.value)}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
-        />
+        <div
+          data-testid="view-markdown"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[15px]"
+        >
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-xs text-subtle">
+                Loading editor...
+              </div>
+            }
+          >
+            <LazyMarkdownEditor
+              ref={wysiwygRef}
+              value={props.body}
+              onDirty={() => undefined}
+              workspaceId={props.workspaceId}
+              path={props.path}
+              knownFiles={knownFiles}
+              onOpenWikilink={openWikilink}
+              collab={{
+                ydoc: collab.ydoc,
+                status: collab.status,
+                peerCount: collab.peerCount,
+                synced: collab.synced,
+              }}
+            />
+          </Suspense>
+        </div>
       </div>
     );
   }

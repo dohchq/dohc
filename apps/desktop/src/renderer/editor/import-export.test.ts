@@ -129,6 +129,14 @@ describe('desktop editor markdown round-trip', () => {
     expect(output).toContain('{= a + b}')
   })
 
+  it('preserves task lists instead of degrading them to plain bullets', () => {
+    const input = ['- [ ] write migration test', '- [x] keep checked item'].join('\n')
+    const output = yDocToMarkdown(markdownToYDoc(input))
+    expect(output).toContain('- [ ] write migration test')
+    expect(output).toContain('- [x] keep checked item')
+    expect(yDocToMarkdown(markdownToYDoc(output))).toBe(output)
+  })
+
   it('exposes the body fragment (rich) and the plain-text field (plain) — the collab edit handles', () => {
     // The E4 collab rework binds Tiptap to the body XmlFragment and the server
     // migration reads the plainText Y.Text; these accessors are how each side

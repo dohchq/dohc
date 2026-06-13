@@ -18,6 +18,7 @@ const viewerId = 'phase10-pgacl-viewer'
 const editorId = 'phase10-pgacl-editor'
 const strangerId = 'phase10-pgacl-stranger'
 const atomId = 'phase10-pgacl-atom'
+const sourceAtomId = 'phase10-pgacl-source-atom'
 const deletedAtomId = 'phase10-pgacl-atom-deleted'
 const lockedAtomId = 'phase10-pgacl-atom-locked'
 
@@ -55,9 +56,10 @@ beforeEach(async () => {
     `insert into atoms (id, workspace_id, path, kind, body, revision, deleted_at)
      values
        ($2, $1, 'notes/hello.md', 'markdown', '# Hello', 1, null),
-       ($3, $1, 'notes/gone.md', 'markdown', '# Gone', 1, now()),
-       ($4, $1, 'notes/locked.md', 'markdown', '# Locked', 1, null)`,
-    [ws, atomId, deletedAtomId, lockedAtomId],
+       ($3, $1, '.apps/workspace/src/App.tsx', 'text', 'export default 1', 1, null),
+       ($4, $1, 'notes/gone.md', 'markdown', '# Gone', 1, now()),
+       ($5, $1, 'notes/locked.md', 'markdown', '# Locked', 1, null)`,
+    [ws, atomId, sourceAtomId, deletedAtomId, lockedAtomId],
   )
   await pool.query(
     `insert into shares (id, workspace_id, target_kind, target_id, recipient_user_id, capability)
@@ -121,13 +123,15 @@ describe('Postgres ACL', () => {
     await expect(acl().canWriteAtom(input(memberId, lockedAtomId))).resolves.toBe(false)
   })
 
-  it('bootstraps body+path (plain-text-canonical) for live atoms and null for deleted ones', async () => {
-    // plainText:true — the desktop's plain-text editor is the only live editor
-    // on this path, so the shared Y.Doc body is a `plainText` Y.Text (not a
-    // rich `body` XmlFragment) and the markdown projection reads it back.
+  it('bootstraps markdown as rich and source files as plain-text canonical', async () => {
     await expect(acl().loadAtomBootstrap?.(input(memberId))).resolves.toEqual({
       markdown: '# Hello',
       path: 'notes/hello.md',
+      plainText: false,
+    })
+    await expect(acl().loadAtomBootstrap?.(input(memberId, sourceAtomId))).resolves.toEqual({
+      markdown: 'export default 1',
+      path: '.apps/workspace/src/App.tsx',
       plainText: true,
     })
     await expect(

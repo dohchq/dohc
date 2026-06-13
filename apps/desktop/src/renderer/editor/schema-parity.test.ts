@@ -11,9 +11,16 @@ import { getDohcProseMirrorSchema } from './import-export'
 // (which is allowed to read across packages — the renderer must stay
 // sandboxed and cannot use node:fs).
 describe('desktop editor schema parity with hocuspocus', () => {
-  it('the assembled schema carries the four dohc custom nodes', () => {
+  it('the assembled schema carries the dohc custom nodes and checklist nodes', () => {
     const schema = getDohcProseMirrorSchema()
-    for (const node of ['wikilink', 'inlineAtom', 'formula', 'queryBlock']) {
+    for (const node of [
+      'wikilink',
+      'inlineAtom',
+      'formula',
+      'queryBlock',
+      'taskList',
+      'taskItem',
+    ]) {
       expect(schema.nodes[node]).toBeDefined()
     }
   })

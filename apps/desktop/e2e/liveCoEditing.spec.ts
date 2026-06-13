@@ -1,9 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as Y from "yjs";
+import { encodeDocName } from "../../../services/hocuspocus/src/doc-name";
 import { launchApp, openInTree } from "./launch";
 
 // Two Electron clients on the SAME shared markdown doc must converge live via
@@ -102,10 +104,121 @@ async function signInAndEnableSync(page: Page): Promise<void> {
   await expect(page.getByTestId("cloud-sync-panel")).toHaveCount(0);
 }
 
+async function pgQuery(
+  sql: string,
+  params: unknown[] = [],
+): Promise<Array<Record<string, unknown>>> {
+  const script =
+    "const{Pool}=require('pg');const p=new Pool({connectionString:process.env.PG_URL});" +
+    "p.query(process.env.PG_SQL,JSON.parse(process.env.PG_PARAMS))" +
+    ".then(r=>{console.log(JSON.stringify(r.rows));return p.end()})" +
+    ".catch(e=>{console.error(e.message);process.exit(1)});";
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ["-e", script],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, PG_URL: PG, PG_SQL: sql, PG_PARAMS: JSON.stringify(params) },
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr || error.message));
+          return;
+        }
+        resolve(JSON.parse(stdout || "[]") as Array<Record<string, unknown>>);
+      },
+    );
+  });
+}
+
+function encodePlainTextSnapshot(markdown: string): {
+  snapshot: string;
+  stateVector: string;
+} {
+  const doc = new Y.Doc();
+  doc.getMap("meta").set("schemaVersion", 1);
+  doc.getMap("meta").set("contentKind", "plain-text");
+  doc.getText("plainText").insert(0, markdown);
+  const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+  const stateVector = Buffer.from(Y.encodeStateVector(doc)).toString("base64");
+  doc.destroy();
+  return { snapshot, stateVector };
+}
+
+async function seedPlainTextSnapshot(input: {
+  workspaceId: string;
+  path: string;
+  markdown: string;
+}): Promise<void> {
+  const atoms = await pgQuery(
+    "select id from atoms where workspace_id = $1 and path = $2 and deleted_at is null",
+    [input.workspaceId, input.path],
+  );
+  if (atoms.length !== 1 || typeof atoms[0].id !== "string") {
+    throw new Error(`Expected synced atom for ${input.path}`);
+  }
+  const documentName = encodeDocName({
+    workspaceId: input.workspaceId,
+    atomId: atoms[0].id,
+  });
+  const encoded = encodePlainTextSnapshot(input.markdown);
+  await pgQuery("delete from hocuspocus_projection_jobs where doc_name = $1", [
+    documentName,
+  ]);
+  await pgQuery("delete from hocuspocus_ydoc_updates where doc_name = $1", [
+    documentName,
+  ]);
+  await pgQuery("delete from hocuspocus_ydoc_snapshots where doc_name = $1", [
+    documentName,
+  ]);
+  await pgQuery("delete from hocuspocus_ydoc_counters where doc_name = $1", [
+    documentName,
+  ]);
+  await pgQuery(
+    `insert into hocuspocus_ydoc_snapshots
+       (doc_name, snapshot_bytes, state_vector, last_seq)
+     values ($1, decode($2, 'base64'), decode($3, 'base64'), 0)`,
+    [documentName, encoded.snapshot, encoded.stateVector],
+  );
+}
+
+async function appendParagraphAfter(
+  page: Page,
+  editor: ReturnType<Page["getByTestId"]>,
+  anchorText: string,
+  nextText: string,
+): Promise<void> {
+  await expect(editor).toContainText(anchorText, { timeout: 20_000 });
+  await editor.evaluate((root, text) => {
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node: Node | null = walker.nextNode();
+    while (node) {
+      const value = node.textContent ?? "";
+      const index = value.indexOf(text);
+      if (index !== -1) {
+        const range = doc.createRange();
+        range.setStart(node, index + text.length);
+        range.collapse(true);
+        const selection = doc.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        (root as HTMLElement).focus();
+        return;
+      }
+      node = walker.nextNode();
+    }
+    throw new Error(`Could not place caret after: ${text}`);
+  }, anchorText);
+  await page.keyboard.press("Enter");
+  await page.keyboard.type(nextText);
+}
+
 test("two clients co-edit a shared markdown doc and converge live", async () => {
   const wsId = `coedit-e2e-${Date.now()}`;
-  const a = await seedShared(wsId, "# Shared doc\n");
-  const b = await seedShared(wsId, "# Shared doc\n");
+  const a = await seedShared(wsId, "# Shared doc\n\nStart here\n");
+  const b = await seedShared(wsId, "# Shared doc\n\nStart here\n");
   const envFor = (s: { home: string; root: string }) => ({
     DOHC_TEST_HOME: s.home,
     DOHC_TEST_PICK_PATH: s.root,
@@ -122,11 +235,12 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   const pageA = await appA.firstWindow();
   await signInAndEnableSync(pageA);
   await openInTree(pageA, "notes/doc.md");
-  await expect(pageA.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
+  const editorA = pageA.getByTestId("markdown-editor");
+  await expect(editorA).toBeVisible({ timeout: 30_000 });
   // The bootstrapped content MUST survive — the editor opens with it, never
   // blank. (Regression guard: a wrong-field bind / pre-sync materialize would
   // silently blank "# Shared doc".)
-  await expect(pageA.getByTestId("collab-editor")).toHaveValue(/# Shared doc/, { timeout: 20_000 });
+  await expect(editorA).toContainText(/Shared doc/, { timeout: 20_000 });
 
   // Client B: same remote workspace id; enable-sync pulls (self-heals — same
   // bytes), opens the doc, joins the same shared Y.Doc.
@@ -134,25 +248,22 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
   const pageB = await appB.firstWindow();
   await signInAndEnableSync(pageB);
   await openInTree(pageB, "notes/doc.md");
-  await expect(pageB.getByTestId("collab-editor")).toBeVisible({ timeout: 30_000 });
-  await expect(pageB.getByTestId("collab-editor")).toHaveValue(/# Shared doc/, { timeout: 20_000 });
+  const editorB = pageB.getByTestId("markdown-editor");
+  await expect(editorB).toBeVisible({ timeout: 30_000 });
+  await expect(editorB).toContainText(/Shared doc/, { timeout: 20_000 });
 
   // Presence: each side sees the other editing.
   await expect(pageA.getByTestId("collab-presence")).toContainText(/editing/i, { timeout: 20_000 });
 
   // A types; B converges to the same content (no Git markers, ever).
-  await pageA.getByTestId("collab-editor").focus();
-  await pageA.keyboard.press("End");
-  await pageA.keyboard.type("\nEdited by A.");
-  await expect(pageB.getByTestId("collab-editor")).toHaveValue(/Edited by A\./, { timeout: 20_000 });
+  await appendParagraphAfter(pageA, editorA, "Start here", "Edited by A.");
+  await expect(editorB).toContainText(/Edited by A\./, { timeout: 20_000 });
 
   // B types; A converges too (bidirectional).
-  await pageB.getByTestId("collab-editor").focus();
-  await pageB.keyboard.press("End");
-  await pageB.keyboard.type("\nEdited by B.");
-  await expect(pageA.getByTestId("collab-editor")).toHaveValue(/Edited by B\./, { timeout: 20_000 });
-  await expect(pageA.getByTestId("collab-editor")).toHaveValue(/Edited by A\./);
-  expect(await pageA.getByTestId("collab-editor").inputValue()).not.toMatch(/<<<<<<<|>>>>>>>/);
+  await appendParagraphAfter(pageB, editorB, "Edited by A.", "Edited by B.");
+  await expect(editorA).toContainText(/Edited by B\./, { timeout: 20_000 });
+  await expect(editorA).toContainText(/Edited by A\./);
+  expect(await editorA.textContent()).not.toMatch(/<<<<<<<|>>>>>>>/);
 
   // The CRDT materializes back to the file on settle: A's disk must converge to
   // the full document — the original header AND both edits — so nothing is lost
@@ -168,6 +279,52 @@ test("two clients co-edit a shared markdown doc and converge live", async () => 
 
   await appA.close();
   await appB.close();
+});
+
+test("plainText hocuspocus markdown docs migrate to rich without losing live text", async () => {
+  const wsId = `coedit-migrate-${Date.now()}`;
+  const seeded = await seedShared(wsId, "# Migration\n\nBefore projection\n");
+  const env = {
+    DOHC_TEST_HOME: seeded.home,
+    DOHC_TEST_PICK_PATH: seeded.root,
+    DOHC_CLOUD_URL: API_URL,
+    DOHC_HOCUSPOCUS_URL: HP_URL,
+    DOHC_TEST_USER_DATA: seeded.home,
+  };
+
+  const app = await launchApp(env);
+  const page = await app.firstWindow();
+  await signInAndEnableSync(page);
+  await expect
+    .poll(
+      async () =>
+        (
+          await pgQuery(
+            "select id from atoms where workspace_id = $1 and path = 'notes/doc.md' and deleted_at is null",
+            [wsId],
+          )
+        ).length,
+      { timeout: 30_000 },
+    )
+    .toBe(1);
+  await seedPlainTextSnapshot({
+    workspaceId: wsId,
+    path: "notes/doc.md",
+    markdown: "# Migration\n\nBefore projection\n\nUnprojected live edit",
+  });
+
+  await openInTree(page, "notes/doc.md");
+  const editor = page.getByTestId("markdown-editor");
+  await expect(editor).toBeVisible({ timeout: 30_000 });
+  await expect(editor).toContainText(/Migration/, { timeout: 20_000 });
+  await expect(editor).toContainText(/Unprojected live edit/, { timeout: 20_000 });
+
+  const docPath = join(seeded.root, "notes", "doc.md");
+  await expect
+    .poll(async () => readFile(docPath, "utf8").catch(() => ""), { timeout: 30_000 })
+    .toContain("Unprojected live edit");
+  expect(existsSync(`${docPath}.conflict`)).toBe(false);
+  await app.close();
 });
 
 test("a personal local workspace edits fully without any collab server", async () => {

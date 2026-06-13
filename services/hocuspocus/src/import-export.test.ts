@@ -64,4 +64,12 @@ describe('hocuspocus markdown import/export', () => {
     expect(getDohcYDocMeta(doc)).toMatchObject({ contentKind: 'plain-text' })
     expect(output).toBe(input)
   })
+
+  it('preserves task lists instead of degrading them to plain bullets', () => {
+    const input = ['- [ ] migrate rich collab', '- [x] keep checked state'].join('\n')
+    const output = yDocToMarkdown(markdownToYDoc(input))
+    expect(output).toContain('- [ ] migrate rich collab')
+    expect(output).toContain('- [x] keep checked state')
+    expect(yDocToMarkdown(markdownToYDoc(output))).toBe(output)
+  })
 })

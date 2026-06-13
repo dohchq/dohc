@@ -19,6 +19,7 @@
     "@hocuspocus/provider": "^4.1.0",
     "@hocuspocus/server": "^4.1.0",
     "@tiptap/core": "^3.23.6",
+    "@tiptap/extension-list": "3.23.6",
     "@tiptap/extension-table": "^3.23.6",
     "@tiptap/markdown": "^3.23.6",
     "@tiptap/pm": "^3.23.6",

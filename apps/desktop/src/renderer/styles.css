@@ -172,6 +172,31 @@ table {
   padding-left: 24px;
 }
 
+.dohc-notion-editor ul[data-type="taskList"] {
+  padding-left: 0;
+  list-style: none;
+}
+
+.dohc-notion-editor li[data-type="taskItem"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.dohc-notion-editor li[data-type="taskItem"] > label {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.dohc-notion-editor li[data-type="taskItem"] > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.dohc-notion-editor li[data-type="taskItem"] input[type="checkbox"] {
+  accent-color: var(--dohc-ink);
+}
+
 .dohc-notion-editor blockquote {
   border-left: 2px solid var(--dohc-line);
   color: var(--dohc-muted);

@@ -3,6 +3,7 @@ import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
+import { TaskItem, TaskList } from '@tiptap/extension-list'
 import yaml from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
@@ -23,6 +24,8 @@ const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit,
+  TaskList,
+  TaskItem,
   TableKit,
 ]
 const markdownManager = new MarkdownManager({

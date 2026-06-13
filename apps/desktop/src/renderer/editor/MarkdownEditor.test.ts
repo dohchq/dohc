@@ -22,5 +22,8 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("grid").map((item) => item.id)).toEqual([
       "table",
     ]);
+    expect(filterSlashCommands("todo").map((item) => item.id)).toEqual([
+      "task-list",
+    ]);
   });
 });

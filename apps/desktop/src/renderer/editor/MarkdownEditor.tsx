@@ -16,6 +16,8 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+import { Collaboration } from "@tiptap/extension-collaboration";
+import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { TrailingNode } from "@tiptap/extensions/trailing-node";
@@ -28,6 +30,7 @@ import {
 } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { Bold, Code, Italic } from "lucide-react";
+import type * as Y from "yjs";
 import { dohcMarkdownExtensions } from "./extensions";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import {
@@ -48,9 +51,7 @@ export type MarkdownEditorHandle = {
 };
 
 export type MarkdownEditorCollab = {
-  // E4c binds Tiptap Collaboration to this Y.Doc. E4b-2 keeps the prop so the
-  // FileInspector surface does not churn again when rich collab lands.
-  ydoc: unknown;
+  ydoc: Y.Doc;
   status: "disabled" | "connecting" | "connected" | "disconnected";
   peerCount: number;
   synced: boolean;
@@ -74,6 +75,7 @@ type SlashCommandId =
   | "heading-3"
   | "bulleted-list"
   | "numbered-list"
+  | "task-list"
   | "quote"
   | "code-block"
   | "divider"
@@ -145,6 +147,13 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     hint: "Start an ordered list",
     glyph: "1.",
     aliases: ["number", "numbered", "ordered", "ol"],
+  },
+  {
+    id: "task-list",
+    label: "Todo list",
+    hint: "Track checkable work",
+    glyph: "[]",
+    aliases: ["todo", "task", "checklist", "checkbox"],
   },
   {
     id: "quote",
@@ -245,6 +254,7 @@ type SlashCommandChain = {
   toggleBulletList: () => SlashCommandChain;
   toggleHeading: (attrs: { level: 1 | 2 | 3 }) => SlashCommandChain;
   toggleOrderedList: () => SlashCommandChain;
+  toggleTaskList: () => SlashCommandChain;
 };
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
@@ -932,38 +942,50 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     );
 
     const extensions = useMemo(
-      () => [
-        StarterKit.configure({
-          trailingNode: false,
-        }),
-        ...dohcMarkdownExtensions,
-        TableKit,
-        Markdown.configure({ indentation: { style: "space", size: 2 } }),
-        Placeholder.configure({
-          includeChildren: true,
-          showOnlyCurrent: false,
-          placeholder: ({ node }) => {
-            if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
-              return "";
-            }
-            if (node.type.name === "heading") return "Heading";
-            return "Type '/' for commands";
-          },
-        }),
-        TrailingNode.configure({
-          node: "paragraph",
-          notAfter: ["paragraph"],
-        }),
-        dohcPlugins,
-      ],
-      [dohcPlugins],
+      () => {
+        const isCollab = Boolean(collab?.ydoc);
+        return [
+          StarterKit.configure({
+            trailingNode: false,
+            undoRedo: isCollab ? false : undefined,
+          }),
+          ...dohcMarkdownExtensions,
+          TaskList,
+          TaskItem,
+          TableKit,
+          Markdown.configure({ indentation: { style: "space", size: 2 } }),
+          Placeholder.configure({
+            includeChildren: true,
+            showOnlyCurrent: false,
+            placeholder: ({ node }) => {
+              if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
+                return "";
+              }
+              if (node.type.name === "heading") return "Heading";
+              return "Type '/' for commands";
+            },
+          }),
+          ...(isCollab
+            ? [Collaboration.configure({ document: collab?.ydoc ?? null, field: "body" })]
+            : [
+                TrailingNode.configure({
+                  node: "paragraph",
+                  notAfter: ["paragraph"],
+                }),
+              ]),
+          dohcPlugins,
+        ];
+      },
+      [collab?.ydoc, dohcPlugins],
     );
+
+    const collabActive = Boolean(collab?.ydoc);
 
     const editor = useEditor(
       {
         extensions,
-        content: value,
-        contentType: "markdown",
+        content: collabActive ? undefined : value,
+        contentType: collabActive ? undefined : "markdown",
         editorProps: {
           attributes: {
             class: "dohc-notion-editor",
@@ -972,11 +994,12 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
         },
         immediatelyRender: false,
         onUpdate() {
+          if (collabActive) return;
           if (!dirtyTrackingReadyRef.current) return;
           onDirty();
         },
       },
-      [extensions],
+      [extensions, collabActive],
     );
 
     useEffect(() => {
@@ -1100,6 +1123,9 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
             return;
           case "numbered-list":
             chain.toggleOrderedList().run();
+            return;
+          case "task-list":
+            chain.toggleTaskList().run();
             return;
           case "quote":
             chain.toggleBlockquote().run();
