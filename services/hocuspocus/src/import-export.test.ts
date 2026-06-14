@@ -26,6 +26,22 @@ describe('hocuspocus markdown import/export', () => {
     expect(output).toContain('# Body')
   })
 
+  it('keeps scalar and array frontmatter-looking blocks visible', () => {
+    for (const [input, content] of [
+      [['---', 'just a divider', '---', '# Body'].join('\n'), 'just a divider'],
+      [['---', 'null', '---', '# Body'].join('\n'), 'null'],
+      [['---', '- one', '---', '# Body'].join('\n'), '- one'],
+    ] as const) {
+      const doc = markdownToYDoc(input)
+      const output = yDocToMarkdown(doc)
+
+      expect(getDohcYDocFrontmatter(doc)).toEqual({})
+      expect(output).toContain(content)
+      expect(output).toContain('---')
+      expect(output).toContain('# Body')
+    }
+  })
+
   it('imports query and dohc-query fences with info strings as query blocks', () => {
     const output = yDocToMarkdown(
       markdownToYDoc(
@@ -63,6 +79,11 @@ describe('hocuspocus markdown import/export', () => {
 
     expect(getDohcYDocMeta(doc)).toMatchObject({ contentKind: 'plain-text' })
     expect(output).toBe(input)
+  })
+
+  it('keeps an existing blank separator between frontmatter and rich markdown body', () => {
+    const input = ['---', 'id: note-1', '---', '', '', '# Plan'].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
   it('preserves task lists instead of degrading them to plain bullets', () => {

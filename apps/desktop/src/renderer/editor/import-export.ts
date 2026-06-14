@@ -4,21 +4,23 @@ import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import { TableKit } from '@tiptap/extension-table'
 import { TaskItem, TaskList } from '@tiptap/extension-list'
-import yaml from 'js-yaml'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
+import {
+  orderFrontmatter,
+  parseFrontmatter,
+  stringifyFrontmatter,
+} from '../markdown/frontmatter'
 import { dohcMarkdownExtensions } from './extensions'
 
 const BODY_FIELD = 'body'
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
-const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_V2_SCHEMA_VERSION = 1
-const FM_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
 const extensions: AnyExtension[] = [
@@ -70,12 +72,9 @@ export function yDocToMarkdown(doc: Y.Doc): string {
 
   if (Object.keys(frontmatter).length === 0) return body
 
-  const yamlFrontmatter = yaml.dump(frontmatter, {
-    lineWidth: -1,
-    sortKeys: false,
-  })
-
-  return `---\n${yamlFrontmatter}---\n\n${body}`
+  return `---\n${stringifyFrontmatter(frontmatter)}---${
+    body.startsWith('\n') ? '\n' : '\n\n'
+  }${body}`
 }
 
 export function replaceYDocWithMarkdown(doc: Y.Doc, markdown: string): void {
@@ -137,26 +136,6 @@ function yDocBodyToJSON(doc: Y.Doc): JSONContent {
   ).toJSON() as JSONContent
 }
 
-function parseFrontmatter(src: string): {
-  meta: Record<string, unknown>
-  body: string
-} {
-  const match = FM_RE.exec(src)
-  if (!match) return { meta: {}, body: src }
-
-  const [, raw, rest] = match
-  let meta: Record<string, unknown> = {}
-  try {
-    const parsed = yaml.load(raw ?? '')
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      meta = parsed as Record<string, unknown>
-    }
-  } catch {
-    return { meta: {}, body: src }
-  }
-  return { meta, body: rest ?? '' }
-}
-
 function replaceMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
   for (const key of Array.from(map.keys())) {
     map.delete(key)
@@ -168,20 +147,4 @@ function replaceMap(map: Y.Map<unknown>, values: Record<string, unknown>): void 
 
 function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
   return Object.fromEntries(map.entries())
-}
-
-function orderFrontmatter(
-  frontmatter: Record<string, unknown>,
-): Record<string, unknown> {
-  const ordered: Record<string, unknown> = {}
-
-  for (const key of FRONTMATTER_PRIORITY_KEYS) {
-    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]
-  }
-
-  for (const key of Object.keys(frontmatter).sort()) {
-    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key]
-  }
-
-  return ordered
 }

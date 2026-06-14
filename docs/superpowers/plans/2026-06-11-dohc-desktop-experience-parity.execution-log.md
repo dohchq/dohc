@@ -8,35 +8,54 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-14): **E5(catch-up) BUILT, CODEX REVIEW CLEAN, ALL
-  GATES GREEN = THIS commit**. History now has a "while you were away" catch-up
-  surface backed by typed `readCatchUpSummary` IPC, a trusted main/preload
-  bridge, and `workspaceActivity.readCatchUpSummary`. The history store exposes
-  display-ordered records with a durable append index so same-timestamp and
-  clock-skewed records cannot be skipped by timestamp-only cursors. The
-  renderer History view shows catch-up lines plus local `.conflict` summaries,
-  persists timestamp/id/index cursor state in `.dohc/ui-state.json`, and
-  reloads summaries when any visible change-set id/timestamp changes. Editor
-  follow-up: markdown tabs preload the lazy editor, large documents skip costly
-  placeholder decoration, and the warm-launch performance harness uses a
-  consistent teardown settle. Gates green: desktop typecheck; desktop build
-  (renderer initial JS 1,146.06kB build / 1.09MB performance row); focused
-  desktop vitest PASS (history store 12/12, activity 1/1, workbench state +
-  shell 36/36, editor/FileInspector/shell 26/26); full desktop E2E PASS 61/61
-  under canonical Xvfb; check:performance PASS (cold 1176, warm 1070/1200,
-  createEmpty 59, open1000 319, md250 68, tiptapMount 1806/2000, typing 0,
-  singleFileSync 791, hundredFileChangeSet 866, appTester 234, sqlite 27, csv
-  270, contentSearch 36/54, memory 555/708, bundle 1.09/1.408);
-  check:lean PASS; git diff --check clean. Codex review ledger:
-  `docs/superpowers/reviews/codex/e5-catch-up-review.md`; final trace
-  `/tmp/e5-catch-up-review-final9.raw`: "I did not identify any discrete
-  regressions in the staged, unstaged, or untracked changes." NEXT = remaining
-  E5 surfaces: properties/notices/share UI/workspace management/import-export/
-  database/apps-runtime plus the pinned SYNC-WART before E6/E7.
+- Current update (2026-06-15): **E5(properties) BUILT, REVIEW CLEAN, ALL
+  REQUIRED GATES GREEN = next commit**. Actual branch/head:
+  `codex/desktop-experience-parity` at `837f6bd`. Dirty files are the current
+  E5(properties) lane only:
+  `apps/desktop/src/renderer/FileInspector.{tsx,test.tsx}`,
+  `apps/desktop/src/renderer/PropertiesPanel.{tsx,test.tsx}`,
+  `apps/desktop/src/renderer/markdown/frontmatter.{ts,test.ts}`,
+  `apps/desktop/src/renderer/editor/import-export.{ts,test.ts}`,
+  `services/hocuspocus/src/import-export.{ts,test.ts}`,
+  `apps/desktop/e2e/properties.spec.ts`,
+  `docs/superpowers/reviews/codex/e5-properties-review.md`, and this log.
+  Active background task: full desktop E2E launched before the interrupt with
+  `xvfb-run` parent PID `1083078` / Playwright PID `1083091`; last captured
+  output had 33/62 tests passing through the performance specs. Open worktrees:
+  `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
+  and this worktree on `codex/desktop-experience-parity`. No mutating
+  subagent/workflow lanes are active. Markdown files now have a desktop properties
+  panel for frontmatter, with `id`/`title` kept system-owned and hidden.
+  Local edits route through the existing bounded markdown autosave/unmount
+  flush; shared edits patch the `frontmatter` Y.Map without clearing unrelated
+  keys. WYSIWYG mode strips only parser-recognized raw frontmatter and
+  reattaches the original bytes on save, while malformed/scalar/array/explicit
+  `null` frontmatter-looking blocks stay visible as body text. Truncated
+  markdown reads disable properties and collab to avoid prefix-only rewrites.
+  Hocuspocus import/export now matches the desktop parser/serializer for
+  non-map frontmatter and conditional blank separators. Review ledger:
+  `docs/superpowers/reviews/codex/e5-properties-review.md`; final direct
+  CodeRabbit trace `/tmp/e5-properties-coderabbit-after-parser-owned-seam.raw`
+  completed with `findings:0`. Final gates after resume/patches: git
+  diff --check PASS; desktop typecheck PASS; hocuspocus typecheck PASS;
+  focused desktop Vitest PASS 53/53; hocuspocus Vitest PASS 85/85; desktop
+  build PASS; named properties E2E PASS 1/1 after adding required
+  1280x800/1536x960 light+dark screenshots; full desktop E2E PASS 62/62
+  (22.5m); `pnpm check:performance` PASS (cold 1225, warm 1185/1200,
+  createEmpty 55, open1000 357, md250 69, tiptapMount 1932/2000, typing 0,
+  singleFileSync 787, hundredFileChangeSet 864, appTester 262, sqlite 75,
+  csv 292, contentSearch 42/61, memory 555/708, bundle 1.18/1.408);
+  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+  architecture debt 12 allowlist entries, 66 historical docs). Design review:
+  screenshots in `test-results/screenshots/e5-properties/` show no overlap,
+  readable contrast, compact property rows, and consistent light/dark treatment
+  at both required sizes. NEXT = stage exact E5(properties) files, commit, and
+  continue the remaining E5 surfaces: notices/share UI/workspace management/
+  import-export/database/apps-runtime plus the pinned SYNC-WART before E6/E7.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
-  editor component, and E4c rich collab/server. E5 graph and catch-up/history
-  are built. NEXT = **E5 remaining feature parity sweep**:
-  properties/notices/share UI/workspace management/imports-export
+  editor component, and E4c rich collab/server. E5 graph, catch-up/history, and
+  properties/frontmatter are built. NEXT = **E5 remaining feature parity
+  sweep**: notices/share UI/workspace management/import-export
   polish/database grid/apps-runtime surfaces, with E5.0 search and the E5
   server share/invitation lane already committed. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
@@ -76,7 +95,8 @@ design review + codex review + fix commit, every phase).
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
   6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, 4627209 (E4c rich
-  collab/server), cc4b4e9 (E4c fix), b2f6407 (E5 graph), E5(catch-up)=this.
+  collab/server), cc4b4e9 (E4c fix), b2f6407 (E5 graph), 837f6bd
+  (E5 catch-up), E5(properties)=this.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -136,6 +156,40 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(properties) — DONE (this commit, 2026-06-14)
+
+Added a markdown properties panel to the desktop inspector. The panel exposes
+user frontmatter keys while hiding/reserving system-owned `id` and `title`,
+preserves structured YAML values unless directly edited, and routes local
+changes through the same debounced markdown autosave/unmount flush already used
+by source and WYSIWYG editing. In shared collab mode it edits the canonical
+`frontmatter` Y.Map and patches only changed editable keys, so unrelated
+frontmatter updates are not cleared.
+
+The WYSIWYG/frontmatter boundary now uses the shared desktop parser as the
+source of truth: real map or empty/comment-only frontmatter is stripped from the
+editor body and reattached byte-for-byte on save, while malformed, scalar,
+array, explicit `null`, and other non-map frontmatter-looking fences remain
+visible content. Truncated markdown reads hide properties and disable collab so
+large files cannot be rewritten from a prefix. Desktop and hocuspocus
+import/export now agree on non-map frontmatter handling and conditional blank
+separators around serialized frontmatter.
+
+Review: `docs/superpowers/reviews/codex/e5-properties-review.md`; final direct
+CodeRabbit trace `/tmp/e5-properties-coderabbit-after-parser-owned-seam.raw`
+returned `findings:0`. Known review-wrapper note: the outer
+`codex review --uncommitted` was stopped after it began retrying WSL-bad
+subpackage Vitest/tsx command forms; deterministic gates were run directly.
+
+Gates: git diff --check PASS; desktop typecheck PASS; hocuspocus typecheck
+PASS; focused desktop Vitest PASS 53/53 (`FileInspector`, `PropertiesPanel`,
+markdown frontmatter helper, editor import/export); hocuspocus Vitest PASS
+85/85; desktop build PASS; named properties E2E PASS 1/1 with
+1280x800/1536x960 light+dark screenshots; full desktop E2E PASS 62/62;
+check:performance PASS; check:lean PASS. Design review PASS on the generated
+screenshots: no overlap, readable contrast, compact row density, and no
+palette drift.
 
 ### e5(catch-up) — DONE (this commit, 2026-06-14)
 

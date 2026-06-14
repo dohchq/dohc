@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyForView, FileInspector, lineSpanInText } from "./FileInspector";
+import {
+  classifyForView,
+  FileInspector,
+  lineSpanInText,
+  markdownEditorBody,
+  mergeMarkdownEditorBody,
+} from "./FileInspector";
 
 describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   const text = "first\nsecond line\n\nfourth";
@@ -47,6 +53,55 @@ describe("classifyForView dispatch", () => {
   it("treats an app-source file as app even if it has a data extension", () => {
     // .apps/<name>/app.json is app source, not a standalone JSON document.
     expect(classifyForView("x/.apps/ledger/app.json")).toBe("app-source");
+  });
+});
+
+describe("markdown WYSIWYG frontmatter seam", () => {
+  it("edits only the body and reattaches raw frontmatter on save", () => {
+    const markdown = "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n";
+
+    expect(markdownEditorBody(markdown)).toBe("\n# Plan\n");
+    expect(mergeMarkdownEditorBody(markdown, "# Plan\n\nMore")).toBe(
+      "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nMore",
+    );
+  });
+
+  it("leaves markdown without frontmatter untouched", () => {
+    expect(markdownEditorBody("# Plan\n")).toBe("# Plan\n");
+    expect(mergeMarkdownEditorBody("# Plan\n", "# Edited\n")).toBe("# Edited\n");
+  });
+
+  it("recognizes real map frontmatter with common YAML keys", () => {
+    const markdown =
+      "---\ndue date: today\na:b: c\n'a: b': quoted\nx/y: slash\n'@x': at\nanchor: &base value\nnote: Plan # owner: ice\ntags: # list: owned\n- a\n- b\n---\n# Plan\n";
+
+    expect(markdownEditorBody(markdown)).toBe("# Plan\n");
+    expect(mergeMarkdownEditorBody(markdown, "# Edited\n")).toBe(
+      "---\ndue date: today\na:b: c\n'a: b': quoted\nx/y: slash\n'@x': at\nanchor: &base value\nnote: Plan # owner: ice\ntags: # list: owned\n- a\n- b\n---\n# Edited\n",
+    );
+  });
+
+  it("reattaches empty and comment-only frontmatter instead of rendering it", () => {
+    const markdown = "---\n# dohc metadata\n---\n# Plan\n";
+
+    expect(markdownEditorBody(markdown)).toBe("# Plan\n");
+    expect(mergeMarkdownEditorBody(markdown, "# Edited\n")).toBe(
+      "---\n# dohc metadata\n---\n# Edited\n",
+    );
+  });
+
+  it("leaves malformed and non-map frontmatter-looking blocks editable", () => {
+    for (const markdown of [
+      "---\nid: note-1\nbad: [unclosed\n---\n# Body\n",
+      "---\nkey: a: b\n---\n# Body\n",
+      "---\nkey: *missing\n---\n# Body\n",
+      "---\njust a divider\n---\n# Body\n",
+      "---\nnull\n---\n# Body\n",
+      "---\n- one\n---\n# Body\n",
+    ]) {
+      expect(markdownEditorBody(markdown)).toBe(markdown);
+      expect(mergeMarkdownEditorBody(markdown, "# Edited\n")).toBe("# Edited\n");
+    }
   });
 });
 
@@ -103,5 +158,94 @@ describe("markdown editor unmount flush", () => {
     // The unmount flush keys off the unsaved-draft flag, not the timer
     // handle: a clean save must not be replayed as a second write.
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+  });
+
+  it("edits markdown frontmatter properties through the same save seam", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await user.clear(screen.getByDisplayValue("draft"));
+    await user.type(screen.getByLabelText("Property status value"), "ready");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "a.md",
+      text: "---\nid: note-1\ntitle: Plan\nstatus: ready\n---\n\n# Plan\n",
+    });
+  });
+
+  it("does not expose properties editing for truncated markdown reads", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
+      truncated: true,
+    });
+    render(<FileInspector workspaceId="ws-1" path="large.md" />);
+
+    await screen.findByTestId("view-markdown");
+
+    expect(screen.getByTestId("truncated-notice")).toBeTruthy();
+    expect(screen.queryByTestId("markdown-properties-toggle")).toBeNull();
+    expect(bridgeMock.collabToken).not.toHaveBeenCalled();
+  });
+
+  it("closes local properties before returning to WYSIWYG", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("properties-panel")).toBeNull();
+    });
+  });
+
+  it("keeps read-mode properties edits dirty across a refresh before save", async () => {
+    const largeBody = `---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n${"body\n".repeat(14_000)}`;
+    const externalBody = `${largeBody}\nexternal update\n`;
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: largeBody,
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        text: externalBody,
+        truncated: false,
+      });
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="large.md" refreshKey={0} />,
+    );
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-properties-toggle"));
+    await screen.findByTestId("properties-panel", {}, { timeout: 5_000 });
+    await user.clear(screen.getByDisplayValue("draft"));
+    await user.type(screen.getByLabelText("Property status value"), "ready");
+    view.rerender(
+      <FileInspector workspaceId="ws-1" path="large.md" refreshKey={1} />,
+    );
+    await waitFor(() => expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2));
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "large.md",
+      text: largeBody.replace("status: draft", "status: ready"),
+    });
   });
 });

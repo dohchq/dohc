@@ -2,6 +2,7 @@ import {
   FileText,
   Image as ImageIcon,
   Music,
+  SlidersHorizontal,
   Table,
 } from "lucide-react";
 import {
@@ -21,10 +22,12 @@ import { AppPackageView } from "./AppPackageView";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
 import { useCollabDoc } from "./collab/useCollabDoc";
+import { parseFrontmatter } from "./markdown/frontmatter";
 import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import type { PropertiesPanelProps } from "./PropertiesPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
@@ -74,6 +77,8 @@ const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
 const TEXT_EXT = new Set(["md", "markdown", "txt", "csv", "json", "html", "tsx", "ts", "css", "js"]);
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
+const RAW_FRONTMATTER_RE =
+  /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
 type MarkdownEditorComponent = ForwardRefExoticComponent<
   MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
 >;
@@ -90,6 +95,35 @@ export function preloadMarkdownEditor(): void {
 const LazyMarkdownEditor = lazy(loadMarkdownEditor) as unknown as LazyExoticComponent<
   MarkdownEditorComponent
 >;
+const LazyPropertiesPanel = lazy(() =>
+  import("./PropertiesPanel").then((mod) => ({
+    default: mod.PropertiesPanel,
+  })),
+) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement>;
+
+function splitRawFrontmatter(markdown: string): {
+  frontmatter: string | null;
+  body: string;
+} {
+  const match = RAW_FRONTMATTER_RE.exec(markdown);
+  if (!match) return { frontmatter: null, body: markdown };
+  const parsed = parseFrontmatter(markdown);
+  if (parsed.body === markdown) {
+    return { frontmatter: null, body: markdown };
+  }
+  return { frontmatter: match[1] ?? "", body: parsed.body };
+}
+
+export function markdownEditorBody(markdown: string): string {
+  return splitRawFrontmatter(markdown).body;
+}
+
+export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
+  const split = splitRawFrontmatter(sourceMarkdown);
+  if (!split.frontmatter) return body;
+  const separator = split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
+  return `${split.frontmatter}${separator}${body}`;
+}
 
 export type FileViewKind =
   | "markdown"
@@ -190,6 +224,14 @@ function ViewHeader(props: {
   );
 }
 
+function PropertiesFallback() {
+  return (
+    <div className="border-b border-line bg-panel px-4 py-2 text-[11px] text-subtle">
+      Loading properties...
+    </div>
+  );
+}
+
 // Rendered markdown document — headings, lists, code, emphasis read as a
 // document, not raw source. react-markdown renders to React nodes (no raw
 // HTML execution); links render as inert styled text since the renderer's
@@ -230,6 +272,7 @@ function MarkdownView(props: {
   body: string;
   workspaceId: string;
   path: string;
+  truncated?: boolean;
   truncatedNotice?: React.ReactNode;
   // A pending search-result jump for this path (Phase E5.0).
   scrollTarget?: ScrollTarget;
@@ -244,6 +287,7 @@ function MarkdownView(props: {
   const [savedBody, setSavedBody] = useState(props.body);
   const [knownFiles, setKnownFiles] = useState<WikilinkFile[]>([]);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
   // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
   // to anchor, so the smallest honest seam is opening SOURCE mode and
   // selecting the matched line. Phase E4's WYSIWYG editor takes this seam
@@ -259,12 +303,16 @@ function MarkdownView(props: {
   }, [scrollTargetNonce]);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
+  const latestDraft = useRef(props.body);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = mode !== "read";
 
   serializeDraftRef.current = () => {
-    if (mode === "wysiwyg") return wysiwygRef.current?.getMarkdown() ?? draft;
-    return draft;
+    if (mode === "wysiwyg" && !propertiesOpen) {
+      const body = wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(draft);
+      return mergeMarkdownEditorBody(latestDraft.current, body);
+    }
+    return latestDraft.current;
   };
 
   useEffect(() => {
@@ -320,7 +368,6 @@ function MarkdownView(props: {
     onSaveStateChange?.(saveState);
   }, [saveState, onSaveStateChange]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestDraft = useRef(props.body);
   // True from the keystroke until a write for that draft has been ISSUED.
   // The unmount flush keys off this — never off the timer handle, which stays
   // set (already fired) after a completed autosave and would double-write.
@@ -347,8 +394,12 @@ function MarkdownView(props: {
     // The on-disk text so the collab session can reconcile external changes
     // (agent edits, sync pulls) into the live doc instead of clobbering them.
     onDiskText: props.body,
-    enabled: true,
+    enabled: !props.truncated,
   });
+
+  useEffect(() => {
+    if (props.truncated && !collab.enabled) setPropertiesOpen(false);
+  }, [props.truncated, collab.enabled]);
 
   // Performance measure: MarkdownView only mounts once the document body is
   // loaded, so this post-commit effect brackets click → IPC read → markdown
@@ -398,6 +449,13 @@ function MarkdownView(props: {
     scheduleSave();
   }
 
+  function onPropertiesDraft(next: string) {
+    setDraft(next);
+    latestDraft.current = next;
+    if (mode === "read") setSavedBody(next);
+    scheduleSave();
+  }
+
   function scheduleSave() {
     unsavedDraft.current = true;
     setSaveState("saving");
@@ -412,6 +470,9 @@ function MarkdownView(props: {
         : serializeDraftRef.current();
     latestDraft.current = current;
     setDraft(current);
+    if (next !== "source" && propertiesOpen && !collab.enabled) {
+      setPropertiesOpen(false);
+    }
     setMode(next);
   }
 
@@ -425,6 +486,15 @@ function MarkdownView(props: {
       return;
     }
     switchMode("wysiwyg");
+  }
+
+  function togglePropertiesPanel() {
+    const opening = !propertiesOpen;
+    if (opening && props.truncated && !collab.enabled) return;
+    if (opening && mode !== "source" && !collab.enabled) {
+      switchMode("source");
+    }
+    setPropertiesOpen(opening);
   }
 
   useEffect(() => {
@@ -505,21 +575,42 @@ function MarkdownView(props: {
           path={props.path}
           label="document"
           actions={
-            <span
-              data-testid="collab-presence"
-              data-peer-count={collab.peerCount}
-              className="flex items-center gap-1 text-[11px] text-accent"
-            >
+            <>
+              <button
+                type="button"
+                data-testid="markdown-properties-toggle"
+                aria-label="Toggle properties"
+                title="Toggle properties"
+                onClick={togglePropertiesPanel}
+                className={`grid size-6 place-items-center rounded ${
+                  propertiesOpen
+                    ? "bg-line/60 text-ink"
+                    : "text-subtle hover:bg-line/50 hover:text-ink"
+                }`}
+              >
+                <SlidersHorizontal size={13} aria-hidden />
+              </button>
               <span
-                aria-hidden
-                className="inline-block h-1.5 w-1.5 rounded-full bg-success"
-              />
-              {collab.peerCount === 0
-                ? "Live · just you"
-                : `${collab.peerCount + 1} editing`}
-            </span>
+                data-testid="collab-presence"
+                data-peer-count={collab.peerCount}
+                className="flex items-center gap-1 text-[11px] text-accent"
+              >
+                <span
+                  aria-hidden
+                  className="inline-block h-1.5 w-1.5 rounded-full bg-success"
+                />
+                {collab.peerCount === 0
+                  ? "Live · just you"
+                  : `${collab.peerCount + 1} editing`}
+              </span>
+            </>
           }
         />
+        {propertiesOpen ? (
+          <Suspense fallback={<PropertiesFallback />}>
+            <LazyPropertiesPanel ydoc={collab.ydoc} />
+          </Suspense>
+        ) : null}
         {props.truncatedNotice}
         <div
           data-testid="view-markdown"
@@ -570,6 +661,22 @@ function MarkdownView(props: {
                 {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : "Couldn't save"}
               </span>
             ) : null}
+            {!props.truncated ? (
+              <button
+                type="button"
+                data-testid="markdown-properties-toggle"
+                aria-label="Toggle properties"
+                title="Toggle properties"
+                onClick={togglePropertiesPanel}
+                className={`grid size-6 place-items-center rounded ${
+                  propertiesOpen
+                    ? "bg-line/60 text-ink"
+                    : "text-subtle hover:bg-line/50 hover:text-ink"
+                }`}
+              >
+                <SlidersHorizontal size={13} aria-hidden />
+              </button>
+            ) : null}
             <button
               type="button"
               data-testid="markdown-edit-toggle"
@@ -587,6 +694,14 @@ function MarkdownView(props: {
           </>
         }
       />
+      {propertiesOpen && !props.truncated ? (
+        <Suspense fallback={<PropertiesFallback />}>
+          <LazyPropertiesPanel
+            body={latestDraft.current}
+            onChange={onPropertiesDraft}
+          />
+        </Suspense>
+      ) : null}
       {props.truncatedNotice}
       {mode === "source" ? (
         <textarea
@@ -619,7 +734,7 @@ function MarkdownView(props: {
           >
             <LazyMarkdownEditor
               ref={wysiwygRef}
-              value={draft}
+              value={markdownEditorBody(draft)}
               onDirty={scheduleSave}
               workspaceId={props.workspaceId}
               path={props.path}
@@ -976,6 +1091,7 @@ export function FileInspector(props: {
             body={text ?? ""}
             workspaceId={props.workspaceId}
             path={props.path}
+            truncated={truncated}
             truncatedNotice={truncatedNotice}
             scrollTarget={props.scrollTarget}
             onOpenPath={props.onOpenPath}

@@ -18,7 +18,7 @@ const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_V2_SCHEMA_VERSION = 1
-const FM_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
+const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
 const extensions: AnyExtension[] = [
@@ -75,7 +75,7 @@ export function yDocToMarkdown(doc: Y.Doc): string {
     sortKeys: false,
   })
 
-  return `---\n${yamlFrontmatter}---\n\n${body}`
+  return `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
@@ -135,13 +135,32 @@ function parseFrontmatter(src: string): {
   let meta: Record<string, unknown> = {}
   try {
     const parsed = yaml.load(raw ?? '')
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      meta = parsed as Record<string, unknown>
+    if (parsed == null) {
+      return isEmptyFrontmatter(raw ?? '')
+        ? { meta, body: rest ?? '' }
+        : { meta: {}, body: src }
     }
+    if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
+    meta = parsed
   } catch {
     return { meta: {}, body: src }
   }
   return { meta, body: rest ?? '' }
+}
+
+function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function isEmptyFrontmatter(raw: string): boolean {
+  return raw.split(/\r?\n/).every((line) => {
+    const trimmed = line.trim()
+    return !trimmed || trimmed.startsWith('#')
+  })
 }
 
 function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {

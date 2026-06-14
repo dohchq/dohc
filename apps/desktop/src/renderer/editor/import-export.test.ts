@@ -66,6 +66,11 @@ describe('desktop editor markdown round-trip', () => {
     expect(output).toBe(input)
   })
 
+  it('keeps a blank separator between frontmatter and rich markdown body', () => {
+    const input = ['---', 'id: note-1', '---', '', '# Plan'].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
   it('is IDEMPOTENT: a second round-trip is a no-op (the byte-stable-on-disk gate)', () => {
     // The round-trip normalizes on the FIRST pass (list markers, escaping,
     // frontmatter key order) but must be stable thereafter — the desktop only
