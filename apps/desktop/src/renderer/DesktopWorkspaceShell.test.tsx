@@ -1,8 +1,15 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceUiState } from "../ipc/bridgeContract";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChangeSetRecord, WorkspaceUiState } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
@@ -37,8 +44,29 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
+function changeSet(id: string, recordedAtMs: number, humanSummary: string): ChangeSetRecord {
   return {
+    id,
+    recordedAtMs,
+    kind: "user-edit",
+    author: { kind: "user", userId: "ice" },
+    summary: humanSummary,
+    humanSummary,
+    fileCount: 1,
+  };
+}
+
+function makeBridge(
+  uiStatePromise: Promise<WorkspaceUiState | null>,
+  initialChangeSets: ChangeSetRecord[] = [],
+) {
+  let changeSets = initialChangeSets;
+  let activityCallback: (() => void) | null = null;
+  return {
+    setChangeSets: (next: ChangeSetRecord[]) => {
+      changeSets = next;
+    },
+    emitWorkspaceActivity: () => activityCallback?.(),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
@@ -51,7 +79,16 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
-    listChangeSets: vi.fn(async () => ({ changeSets: [] })),
+    listChangeSets: vi.fn(async () => ({ changeSets })),
+    readCatchUpSummary: vi.fn(async () => {
+      const latest = changeSets[changeSets.length - 1] ?? null;
+      return {
+        lines: changeSets.map((change) => change.humanSummary),
+        latestRecordedAtMs: latest?.recordedAtMs ?? null,
+        latestChangeSetId: latest?.id ?? null,
+        latestHistoryIndex: changeSets.length > 0 ? changeSets.length - 1 : null,
+      };
+    }),
     getAgentRunStatus: vi.fn(async () => ({
       mcpEnabled: false,
       activeRun: null,
@@ -60,7 +97,12 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     collabToken: vi.fn(async () => ({ available: false as const })),
-    onWorkspaceActivity: vi.fn(() => () => {}),
+    onWorkspaceActivity: vi.fn((callback: () => void) => {
+      activityCallback = callback;
+      return () => {
+        activityCallback = null;
+      };
+    }),
     onMenuCommand: vi.fn(() => () => {}),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -172,5 +214,41 @@ describe("file-open-start marking", () => {
     expect(openStartCalls()).toBe(2);
 
     mark.mockRestore();
+  });
+});
+
+describe("catch-up refresh", () => {
+  it("reloads when a non-top history record arrives", async () => {
+    const newest = changeSet("newest", 2000, "ice edited notes/newest.md");
+    const bridge = makeBridge(Promise.resolve(null), [newest]);
+    renderShell(bridge);
+
+    await waitFor(() => {
+      expect(bridge.listChangeSets).toHaveBeenCalled();
+      expect(bridge.readCatchUpSummary.mock.calls.length).toBeGreaterThanOrEqual(1);
+    });
+    const initialReadCount = bridge.readCatchUpSummary.mock.calls.length;
+
+    bridge.setChangeSets([
+      newest,
+      changeSet("same-time-behind", 2000, "ice edited notes/behind.md"),
+    ]);
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+
+    await waitFor(() => {
+      expect(bridge.readCatchUpSummary.mock.calls.length).toBeGreaterThan(
+        initialReadCount,
+      );
+    });
+    const historyRail = within(screen.getByTestId("history-timeline"));
+    await waitFor(() => {
+      expect(
+        historyRail
+          .getAllByTestId("catch-up-line")
+          .map((line) => line.textContent),
+      ).toContain("ice edited notes/behind.md");
+    });
   });
 });

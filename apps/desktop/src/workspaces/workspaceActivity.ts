@@ -1,5 +1,8 @@
 import { deriveSyncStatus } from "@dohc/workspace-core";
+import { catchUpSummary } from "@dohc/workspace-history";
 import type {
+  ReadCatchUpSummaryPayload,
+  ReadCatchUpSummaryResult,
   ChangeSetRecord,
   SyncStatusResult,
 } from "../ipc/bridgeContract";
@@ -23,6 +26,9 @@ interface WatchedWorkspace {
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
 }
+
+const MAX_CATCH_UP_LINES = 50;
+const MAX_CATCH_UP_LINE_CHARS = 500;
 
 export interface WorkspaceActivityOptions {
   // Live facts main owns: whether this workspace has cloud sync enabled
@@ -176,6 +182,54 @@ export function createWorkspaceActivity(
     }));
   }
 
+  async function readCatchUpSummary(
+    workspace: CreatedWorkspace,
+    cursor: ReadCatchUpSummaryPayload,
+  ): Promise<ReadCatchUpSummaryResult> {
+    const store = createChangeSetStore(workspace.rootPath);
+    const indexed = await store.listIndexed();
+    const latestIndexed = indexed.reduce<(typeof indexed)[number] | null>(
+      (latest, entry) => (latest && latest.index > entry.index ? latest : entry),
+      null,
+    );
+    const seenIndexed = cursor.sinceChangeSetId
+      ? indexed.find((entry) => entry.record.id === cursor.sinceChangeSetId)
+      : undefined;
+    const sinceHistoryIndex = cursor.sinceHistoryIndex;
+    const unseen =
+      typeof sinceHistoryIndex === "number"
+        ? indexed.filter((entry) => entry.index > sinceHistoryIndex)
+        : cursor.sinceChangeSetId
+          ? indexed.filter((entry) =>
+              seenIndexed
+                ? entry.index > seenIndexed.index
+                : entry.record.recordedAtMs > cursor.sinceMs,
+            )
+          : indexed.filter((entry) => entry.record.recordedAtMs > cursor.sinceMs);
+    const summaryLines = catchUpSummary(
+      unseen.map((entry) => entry.record),
+      Number.NEGATIVE_INFINITY,
+    );
+    const omittedCount =
+      summaryLines.length > MAX_CATCH_UP_LINES
+        ? summaryLines.length - (MAX_CATCH_UP_LINES - 1)
+        : 0;
+    const visibleLines = summaryLines
+      .slice(0, omittedCount > 0 ? MAX_CATCH_UP_LINES - 1 : MAX_CATCH_UP_LINES)
+      .map((line) => line.slice(0, MAX_CATCH_UP_LINE_CHARS));
+    if (omittedCount > 0) {
+      visibleLines.push(
+        `${omittedCount} older change${omittedCount === 1 ? "" : "s"} not shown.`,
+      );
+    }
+    return {
+      lines: visibleLines,
+      latestRecordedAtMs: latestIndexed?.record.recordedAtMs ?? null,
+      latestChangeSetId: latestIndexed?.record.id ?? null,
+      latestHistoryIndex: latestIndexed?.index ?? null,
+    };
+  }
+
   function getStatus(workspaceId: string): SyncStatusResult {
     return statusFor(workspaceId);
   }
@@ -201,5 +255,15 @@ export function createWorkspaceActivity(
     await Promise.all(stops);
   }
 
-  return { open, enableCloud, reconcileCloud, stopEngines, listChangeSets, getStatus, setAgentRun, stopAll };
+  return {
+    open,
+    enableCloud,
+    reconcileCloud,
+    stopEngines,
+    listChangeSets,
+    readCatchUpSummary,
+    getStatus,
+    setAgentRun,
+    stopAll,
+  };
 }

@@ -84,6 +84,8 @@ type MarkdownEditorInnerProps = MarkdownEditorProps & {
   collaborationExtension: CollaborationExtension | null;
 };
 
+const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
+
 type SlashCommandId =
   | "wikilink"
   | "heading-1"
@@ -888,6 +890,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockSelectRef = useRef<(pos: number) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const dirtyTrackingReadyRef = useRef(false);
+    const includePlaceholdersRef = useRef(
+      value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS,
+    );
     const onOpenWikilinkRef = useRef<((target: string) => void) | null>(
       onOpenWikilink ?? null,
     );
@@ -972,17 +977,24 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           TaskItem,
           TableKit,
           Markdown.configure({ indentation: { style: "space", size: 2 } }),
-          Placeholder.configure({
-            includeChildren: true,
-            showOnlyCurrent: false,
-            placeholder: ({ node }) => {
-              if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
-                return "";
-              }
-              if (node.type.name === "heading") return "Heading";
-              return "Type '/' for commands";
-            },
-          }),
+          ...(includePlaceholdersRef.current
+            ? [
+                Placeholder.configure({
+                  includeChildren: true,
+                  showOnlyCurrent: false,
+                  placeholder: ({ node }) => {
+                    if (
+                      node.type.name === "tableCell" ||
+                      node.type.name === "tableHeader"
+                    ) {
+                      return "";
+                    }
+                    if (node.type.name === "heading") return "Heading";
+                    return "Type '/' for commands";
+                  },
+                }),
+              ]
+            : []),
           ...(isCollab
             ? [
                 collaborationExtension!.configure({

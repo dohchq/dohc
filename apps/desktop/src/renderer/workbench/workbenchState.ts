@@ -32,6 +32,12 @@ export interface WorkbenchState {
   // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
+  // Newest history cursor the user explicitly marked caught-up (Phase E5).
+  // The id/index make the cursor stable across same-ms records and clock skew;
+  // the timestamp remains for compatibility with older ui-state files.
+  lastCatchUpSeenAtMs: number;
+  lastCatchUpSeenChangeSetId: string | null;
+  lastCatchUpSeenHistoryIndex: number | null;
 }
 
 export const SIDEBAR_MIN_WIDTH = 200;
@@ -56,6 +62,9 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
+    lastCatchUpSeenAtMs: 0,
+    lastCatchUpSeenChangeSetId: null,
+    lastCatchUpSeenHistoryIndex: null,
   };
 }
 
@@ -178,6 +187,34 @@ export function recordRecentFile(state: WorkbenchState, path: string): Workbench
   return { ...state, recentFiles };
 }
 
+export function setCatchUpSeenAt(
+  state: WorkbenchState,
+  seenAtMs: number,
+  changeSetId: string | null = null,
+  historyIndex: number | null = null,
+): WorkbenchState {
+  if (!Number.isFinite(seenAtMs) || seenAtMs < 0) return state;
+  const next = Math.floor(seenAtMs);
+  const nextChangeSetId =
+    typeof changeSetId === "string" && changeSetId.length > 0 ? changeSetId : null;
+  const nextHistoryIndex =
+    typeof historyIndex === "number" &&
+    Number.isFinite(historyIndex) &&
+    historyIndex >= 0
+      ? Math.floor(historyIndex)
+      : null;
+  return next === state.lastCatchUpSeenAtMs &&
+    nextChangeSetId === state.lastCatchUpSeenChangeSetId &&
+    nextHistoryIndex === state.lastCatchUpSeenHistoryIndex
+    ? state
+    : {
+        ...state,
+        lastCatchUpSeenAtMs: next,
+        lastCatchUpSeenChangeSetId: nextChangeSetId,
+        lastCatchUpSeenHistoryIndex: nextHistoryIndex,
+      };
+}
+
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -242,6 +279,13 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
+    lastCatchUpSeenAtMs: state.lastCatchUpSeenAtMs,
+    ...(state.lastCatchUpSeenChangeSetId
+      ? { lastCatchUpSeenChangeSetId: state.lastCatchUpSeenChangeSetId }
+      : {}),
+    ...(state.lastCatchUpSeenHistoryIndex !== null
+      ? { lastCatchUpSeenHistoryIndex: state.lastCatchUpSeenHistoryIndex }
+      : {}),
   };
 }
 
@@ -285,6 +329,9 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
   const rawHistoryVisible = own("historyVisible");
+  const rawLastCatchUpSeenAtMs = own("lastCatchUpSeenAtMs");
+  const rawLastCatchUpSeenChangeSetId = own("lastCatchUpSeenChangeSetId");
+  const rawLastCatchUpSeenHistoryIndex = own("lastCatchUpSeenHistoryIndex");
   return {
     activeView: isViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
@@ -304,5 +351,23 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
+    lastCatchUpSeenAtMs:
+      typeof rawLastCatchUpSeenAtMs === "number" &&
+      Number.isFinite(rawLastCatchUpSeenAtMs) &&
+      rawLastCatchUpSeenAtMs >= 0
+        ? Math.floor(rawLastCatchUpSeenAtMs)
+        : defaults.lastCatchUpSeenAtMs,
+    lastCatchUpSeenChangeSetId:
+      typeof rawLastCatchUpSeenChangeSetId === "string" &&
+      rawLastCatchUpSeenChangeSetId.length > 0 &&
+      rawLastCatchUpSeenChangeSetId.length <= 500
+        ? rawLastCatchUpSeenChangeSetId
+        : defaults.lastCatchUpSeenChangeSetId,
+    lastCatchUpSeenHistoryIndex:
+      typeof rawLastCatchUpSeenHistoryIndex === "number" &&
+      Number.isFinite(rawLastCatchUpSeenHistoryIndex) &&
+      rawLastCatchUpSeenHistoryIndex >= 0
+        ? Math.floor(rawLastCatchUpSeenHistoryIndex)
+        : defaults.lastCatchUpSeenHistoryIndex,
   };
 }

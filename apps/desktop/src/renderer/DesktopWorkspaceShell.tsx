@@ -1,5 +1,6 @@
 import {
   Bot,
+  CheckCheck,
   FilePlus2,
   FolderPlus,
   Import,
@@ -17,7 +18,11 @@ import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import { CommandPalette, type Command } from "./CommandPalette";
-import { FileInspector, type ScrollTarget } from "./FileInspector";
+import {
+  FileInspector,
+  preloadMarkdownEditor,
+  type ScrollTarget,
+} from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
@@ -42,6 +47,7 @@ import {
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
+  setCatchUpSeenAt,
   setFolderExpanded,
   setSidebarWidth,
   setView,
@@ -55,6 +61,21 @@ import {
 } from "./workbench/workbenchState";
 
 export type Workspace = WorkspaceSummary;
+
+type CatchUpState = {
+  status: "loading" | "ready" | "error";
+  lines: string[];
+  latestRecordedAtMs: number | null;
+  latestChangeSetId: string | null;
+  latestHistoryIndex: number | null;
+};
+
+function describeConflictForCatchUp(path: string, conflictPath: string): string {
+  return (
+    `Both sides changed ${path}: your local version was kept, ` +
+    `while ${conflictPath} stores the other version. Both versions are kept until you choose.`
+  );
+}
 
 // Every folder above a path — expanded when a create/open must REVEAL it.
 function ancestorDirs(path: string): string[] {
@@ -104,6 +125,99 @@ function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
   );
 }
 
+function CatchUpSummaryCard(props: {
+  catchUp: CatchUpState;
+  conflictSummaries: string[];
+  onMarkCaughtUp: () => void;
+}) {
+  const hasLines = props.catchUp.lines.length > 0;
+  const hasConflicts = props.conflictSummaries.length > 0;
+  return (
+    <section
+      data-testid="catch-up-summary"
+      data-state={props.catchUp.status}
+      className="shrink-0 border-b border-line bg-panel px-3 py-2"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+          Catch-up
+        </span>
+        <button
+          type="button"
+          data-testid="catch-up-mark-seen"
+          disabled={!hasLines}
+          onClick={props.onMarkCaughtUp}
+          className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40"
+          aria-label="Mark caught up"
+          title="Mark caught up"
+        >
+          <CheckCheck size={13} aria-hidden />
+        </button>
+      </div>
+      {props.catchUp.status === "loading" ? (
+        <p className="mb-0 mt-1 text-[11px] text-subtle">Checking history…</p>
+      ) : props.catchUp.status === "error" ? (
+        <p className="mb-0 mt-1 text-[11px] text-danger">Catch-up unavailable.</p>
+      ) : hasLines || hasConflicts ? (
+        <div className="mt-1 space-y-2">
+          {hasLines ? (
+            <ul className="m-0 list-none space-y-1 p-0">
+              {props.catchUp.lines.map((line, index) => (
+                <li
+                  key={`${index}:${line}`}
+                  data-testid="catch-up-line"
+                  className="text-[11px] leading-snug text-ink"
+                >
+                  {line}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {hasConflicts ? (
+            <ul className="m-0 list-none space-y-1 border-t border-line px-0 pb-0 pt-2">
+              {props.conflictSummaries.map((line, index) => (
+                <li
+                  key={`${index}:${line}`}
+                  data-testid="catch-up-conflict"
+                  className="text-[11px] leading-snug text-danger"
+                >
+                  {line}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : (
+        <p className="mb-0 mt-1 text-[11px] text-subtle">You're caught up.</p>
+      )}
+    </section>
+  );
+}
+
+function HistoryView(props: {
+  changeSets: ChangeSetRecord[];
+  catchUp: CatchUpState;
+  conflictSummaries: string[];
+  onMarkCaughtUp: () => void;
+}) {
+  const showCatchUp =
+    props.changeSets.length > 0 ||
+    props.catchUp.status !== "ready" ||
+    props.conflictSummaries.length > 0;
+  return (
+    <>
+      {showCatchUp ? (
+        <CatchUpSummaryCard
+          catchUp={props.catchUp}
+          conflictSummaries={props.conflictSummaries}
+          onMarkCaughtUp={props.onMarkCaughtUp}
+        />
+      ) : null}
+      <HistoryList changeSets={props.changeSets} />
+    </>
+  );
+}
+
 // Designed empty states for the views whose real content lands later in this
 // plan (apps E5, agent E6) — the rail itself is the seam. Search graduated to
 // its real view in E5.0; graph graduated in E5 graph (GraphView).
@@ -140,6 +254,14 @@ export function DesktopWorkspaceShell(props: {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
   const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [catchUp, setCatchUp] = useState<CatchUpState>({
+    status: "ready",
+    lines: [],
+    latestRecordedAtMs: null,
+    latestChangeSetId: null,
+    latestHistoryIndex: null,
+  });
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -182,6 +304,16 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  const conflictSummaries = useMemo(
+    () =>
+      files
+        .filter((file) => file.kind === "file" && file.path.endsWith(".conflict"))
+        .slice(0, 5)
+        .map((file) =>
+          describeConflictForCatchUp(file.path.replace(/\.conflict$/, ""), file.path),
+        ),
+    [files],
+  );
 
   // Content search (Phase E5.0). The model lives HERE, not in the Search
   // view, so results — and the activity-bar count badge — survive switching
@@ -307,7 +439,90 @@ export function DesktopWorkspaceShell(props: {
     setChangeSets(history.changeSets);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
+    setHistoryLoaded(true);
   }, [workspaceId]);
+
+  const catchUpRefreshKey = useMemo(
+    () =>
+      changeSets
+        .map((change) => `${change.id}:${change.recordedAtMs}`)
+        .join("\0"),
+    [changeSets],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    if (!historyLoaded) return;
+    if (changeSets.length === 0) {
+      setCatchUp({
+        status: "ready",
+        lines: [],
+        latestRecordedAtMs: null,
+        latestChangeSetId: null,
+        latestHistoryIndex: null,
+      });
+      return;
+    }
+    setCatchUp((current) => ({ ...current, status: "loading" }));
+    void bridge()
+      .readCatchUpSummary({
+        workspaceId,
+        sinceMs: wb.lastCatchUpSeenAtMs,
+        ...(wb.lastCatchUpSeenChangeSetId
+          ? { sinceChangeSetId: wb.lastCatchUpSeenChangeSetId }
+          : {}),
+        ...(wb.lastCatchUpSeenHistoryIndex !== null
+          ? { sinceHistoryIndex: wb.lastCatchUpSeenHistoryIndex }
+          : {}),
+      })
+      .then((summary) => {
+        if (cancelled) return;
+        setCatchUp({
+          status: "ready",
+          lines: summary.lines,
+          latestRecordedAtMs: summary.latestRecordedAtMs,
+          latestChangeSetId: summary.latestChangeSetId,
+          latestHistoryIndex: summary.latestHistoryIndex,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCatchUp((current) => ({ ...current, status: "error" }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    workspaceId,
+    wb.lastCatchUpSeenAtMs,
+    historyLoaded,
+    changeSets.length,
+    catchUpRefreshKey,
+  ]);
+
+  const markCaughtUp = useCallback(() => {
+    const seenAt = catchUp.latestRecordedAtMs ?? Date.now();
+    setCatchUp({
+      status: "ready",
+      lines: [],
+      latestRecordedAtMs: seenAt,
+      latestChangeSetId: catchUp.latestChangeSetId,
+      latestHistoryIndex: catchUp.latestHistoryIndex,
+    });
+    mutateWb((state) =>
+      setCatchUpSeenAt(
+        state,
+        seenAt,
+        catchUp.latestChangeSetId,
+        catchUp.latestHistoryIndex,
+      ),
+    );
+  }, [
+    catchUp.latestRecordedAtMs,
+    catchUp.latestChangeSetId,
+    catchUp.latestHistoryIndex,
+    mutateWb,
+  ]);
 
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
@@ -335,6 +550,7 @@ export function DesktopWorkspaceShell(props: {
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
     (path: string) => {
+      if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
       if (openTab(wbRef.current, path) !== wbRef.current) {
         rendererMarks.mark("file-open-start");
       }
@@ -715,7 +931,12 @@ export function DesktopWorkspaceShell(props: {
                 onOpenPath={openFile}
               />
             ) : wb.activeView === "history" ? (
-              <HistoryList changeSets={changeSets} />
+              <HistoryView
+                changeSets={changeSets}
+                catchUp={catchUp}
+                conflictSummaries={conflictSummaries}
+                onMarkCaughtUp={markCaughtUp}
+              />
             ) : (
               <EmptyView view={wb.activeView} />
             )}
@@ -794,7 +1015,12 @@ export function DesktopWorkspaceShell(props: {
                 History
               </span>
             </header>
-            <HistoryList changeSets={changeSets} />
+            <HistoryView
+              changeSets={changeSets}
+              catchUp={catchUp}
+              conflictSummaries={conflictSummaries}
+              onMarkCaughtUp={markCaughtUp}
+            />
           </aside>
         ) : null}
       </div>

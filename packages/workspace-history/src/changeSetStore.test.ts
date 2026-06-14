@@ -102,6 +102,23 @@ describe("changeSetStore persistence", () => {
     expect(timeline[1].kind).toBe("import");
   });
 
+  it("lists display-ordered records with their durable append index", async () => {
+    const store = createChangeSetStore(root);
+    await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });
+    await store.record(agentImport(), { id: "same-b", recordedAtMs: 2000 });
+    await store.record(userEdit(), { id: "same-a", recordedAtMs: 2000 });
+    await store.record(userEdit(), { id: "clock-skewed", recordedAtMs: 1500 });
+
+    const indexed = await store.listIndexed();
+    expect(indexed.map((entry) => entry.record.id)).toEqual([
+      "same-b",
+      "same-a",
+      "clock-skewed",
+      "first",
+    ]);
+    expect(indexed.map((entry) => entry.index)).toEqual([1, 2, 3, 0]);
+  });
+
   it("appends to an ordered index.json carrying lightweight summaries", async () => {
     const store = createChangeSetStore(root);
     await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });

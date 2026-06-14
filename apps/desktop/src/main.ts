@@ -52,6 +52,8 @@ import {
   LaunchMarksResult,
   RunAppTesterPayload,
   RunAppTesterResult,
+  ReadCatchUpSummaryPayload,
+  ReadCatchUpSummaryResult,
   ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -871,6 +873,15 @@ function registerIpcHandlers(): void {
     return ListChangeSetsResult.parse({
       changeSets: await activity.listChangeSets(workspace),
     });
+  });
+
+  ipcMain.handle(CHANNELS.readCatchUpSummary, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadCatchUpSummaryPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return ReadCatchUpSummaryResult.parse(
+      await activity.readCatchUpSummary(workspace, input),
+    );
   });
 
   ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {

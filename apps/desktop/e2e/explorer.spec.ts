@@ -103,7 +103,7 @@ async function expectChangeSet(
   n: number,
   newest: RegExp | string,
 ): Promise<void> {
-  const entries = page.getByTestId("history-timeline").locator("li");
+  const entries = page.getByTestId("history-timeline").getByTestId("change-set");
   await expect
     .poll(
       async () => ({

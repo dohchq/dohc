@@ -74,13 +74,21 @@ const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
 const TEXT_EXT = new Set(["md", "markdown", "txt", "csv", "json", "html", "tsx", "ts", "css", "js"]);
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
-const LazyMarkdownEditor = lazy(async () => {
-  const mod = await import("./editor/MarkdownEditor");
-  return { default: mod.MarkdownEditor };
-}) as unknown as LazyExoticComponent<
-  ForwardRefExoticComponent<
-    MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
-  >
+type MarkdownEditorComponent = ForwardRefExoticComponent<
+  MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
+>;
+let markdownEditorPromise: Promise<{ default: MarkdownEditorComponent }> | null = null;
+function loadMarkdownEditor(): Promise<{ default: MarkdownEditorComponent }> {
+  markdownEditorPromise ??= import("./editor/MarkdownEditor").then((mod) => ({
+    default: mod.MarkdownEditor as MarkdownEditorComponent,
+  }));
+  return markdownEditorPromise;
+}
+export function preloadMarkdownEditor(): void {
+  void loadMarkdownEditor();
+}
+const LazyMarkdownEditor = lazy(loadMarkdownEditor) as unknown as LazyExoticComponent<
+  MarkdownEditorComponent
 >;
 
 export type FileViewKind =
@@ -258,6 +266,10 @@ function MarkdownView(props: {
     if (mode === "wysiwyg") return wysiwygRef.current?.getMarkdown() ?? draft;
     return draft;
   };
+
+  useEffect(() => {
+    if (mode === "read") void loadMarkdownEditor();
+  }, [mode, props.path]);
 
   useEffect(() => {
     if (pendingScrollLine === null || mode !== "source") return;

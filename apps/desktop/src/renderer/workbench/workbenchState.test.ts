@@ -8,6 +8,7 @@ import {
   openTab,
   parseUiState,
   serializeUiState,
+  setCatchUpSeenAt,
   setSidebarWidth,
   setView,
   SIDEBAR_DEFAULT_WIDTH,
@@ -189,6 +190,34 @@ describe("ui-state persistence round-trip", () => {
       tabs: Array.from({ length: MAX_OPEN_TABS + 50 }, (_, i) => `f${i}.md`),
     });
     expect(oversized.tabs).toHaveLength(MAX_OPEN_TABS);
+  });
+
+  it("persists the catch-up cursor and ignores invalid values", () => {
+    const state = setCatchUpSeenAt(defaultWorkbenchState(), 1234.9, "change-1", 4.9);
+    expect(state.lastCatchUpSeenAtMs).toBe(1234);
+    expect(state.lastCatchUpSeenChangeSetId).toBe("change-1");
+    expect(state.lastCatchUpSeenHistoryIndex).toBe(4);
+    const restored = parseUiState(serializeUiState(state));
+    expect(restored.lastCatchUpSeenAtMs).toBe(1234);
+    expect(restored.lastCatchUpSeenChangeSetId).toBe("change-1");
+    expect(restored.lastCatchUpSeenHistoryIndex).toBe(4);
+    expect(
+      parseUiState({ version: 1, lastCatchUpSeenAtMs: 123 }).lastCatchUpSeenAtMs,
+    ).toBe(123);
+    expect(
+      parseUiState({ version: 1, lastCatchUpSeenAtMs: -1 }).lastCatchUpSeenAtMs,
+    ).toBe(0);
+    expect(
+      parseUiState({
+        version: 1,
+        lastCatchUpSeenChangeSetId: "",
+        lastCatchUpSeenHistoryIndex: -1,
+      }),
+    ).toMatchObject({
+      lastCatchUpSeenChangeSetId: null,
+      lastCatchUpSeenHistoryIndex: null,
+    });
+    expect(setCatchUpSeenAt(state, Number.NaN)).toBe(state);
   });
 
   it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {

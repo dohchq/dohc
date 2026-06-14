@@ -224,8 +224,12 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   // even when the next launch uses a different user-data dir. Do not count
   // that previous-process cleanup against the warm-profile startup budget.
   await new Promise((r) => setTimeout(r, 500));
-  await measureBestOf("warmLaunchToShellMs", () =>
-    launchToShell({ DOHC_TEST_USER_DATA: createRun.userData }),
+  await measureBestOf(
+    "warmLaunchToShellMs",
+    async () => {
+      await new Promise((r) => setTimeout(r, 500));
+      return launchToShell({ DOHC_TEST_USER_DATA: createRun.userData });
+    },
     7,
   );
 

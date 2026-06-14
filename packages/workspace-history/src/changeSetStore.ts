@@ -33,12 +33,18 @@ interface IndexEntry {
   fileCount: number;
 }
 
+export interface IndexedHistoryRecord {
+  index: number;
+  record: HistoryRecord;
+}
+
 export interface ChangeSetStore {
   record(
     set: ChangeSet,
     opts: { id: string; recordedAtMs: number },
   ): Promise<HistoryRecord>;
   list(): Promise<HistoryRecord[]>;
+  listIndexed(): Promise<IndexedHistoryRecord[]>;
   // Records strictly newer than afterMs, oldest first — the cloud sync cursor
   // ("everything not yet uploaded") without loading the whole timeline.
   listSince(afterMs: number): Promise<HistoryRecord[]>;
@@ -133,33 +139,40 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       });
     },
 
-    async list() {
+    async listIndexed() {
       const index = await readIndex();
       // The index is the ordering source; sort newest first by timestamp,
       // breaking ties on id so ordering is stable within the same ms.
-      const ordered = [...index].sort(
-        (a, b) =>
-          b.recordedAtMs - a.recordedAtMs || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
-      );
-      const records: HistoryRecord[] = [];
-      for (const entry of ordered) {
+      const ordered = index
+        .map((entry, index) => ({ entry, index }))
+        .sort(
+          (a, b) =>
+            b.entry.recordedAtMs - a.entry.recordedAtMs ||
+            (a.entry.id < b.entry.id ? 1 : a.entry.id > b.entry.id ? -1 : 0),
+        );
+      const records: IndexedHistoryRecord[] = [];
+      for (const item of ordered) {
         // Read the full record from its own file — the index only holds a
         // summary, the per-record file is the source of full detail. One
         // corrupt/truncated record (crash mid-write, hand edit) must cost that
         // one entry, never brick the entire timeline.
         try {
           const record = await readJson<HistoryRecord>(
-            join(historyDir, recordFileName(entry)),
+            join(historyDir, recordFileName(item.entry)),
           );
-          if (record) records.push(record);
+          if (record) records.push({ index: item.index, record });
         } catch (error) {
           console.error(
-            `[workspace-history] skipping unreadable record ${entry.id}:`,
+            `[workspace-history] skipping unreadable record ${item.entry.id}:`,
             error,
           );
         }
       }
       return records;
+    },
+
+    async list() {
+      return (await this.listIndexed()).map((entry) => entry.record);
     },
 
     async listSince(afterMs) {
