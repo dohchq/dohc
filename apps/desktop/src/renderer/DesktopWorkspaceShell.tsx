@@ -654,6 +654,12 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => togglePinned(state, path)),
     [mutateWb],
   );
+  const openHistoryView = useCallback(() => {
+    mutateWb((state) => ({ ...setView(state, "history"), sidebarVisible: true }));
+  }, [mutateWb]);
+  const openAgentView = useCallback(() => {
+    mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
+  }, [mutateWb]);
 
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
@@ -1029,7 +1035,10 @@ export function DesktopWorkspaceShell(props: {
         workspaceName={workspaceName(props.workspace)}
         syncStatus={syncStatus}
         agentActive={agentActive}
+        conflictSummaries={conflictSummaries}
         onConnectCloud={() => setCloudOpen(true)}
+        onOpenAgent={openAgentView}
+        onOpenHistory={openHistoryView}
         onOpenSettings={() => setSettingsOpen(true)}
         onToggleTheme={toggleTheme}
       />

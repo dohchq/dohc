@@ -1,7 +1,6 @@
-import { Bot, Cloud, Settings, SunMoon, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Bot, Cloud, Settings, SunMoon } from "lucide-react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
-import { bridge } from "../bridge";
+import { NoticeCenter } from "./NoticeCenter";
 
 // Extracted shell footer (Phase E2). The sync-status testid + data-state,
 // the "Connect dohc Cloud" button name, and the open-settings testid are
@@ -29,105 +28,83 @@ export function StatusBar(props: {
   workspaceName: string;
   syncStatus: SyncStatusResult | null;
   agentActive: boolean;
+  conflictSummaries: string[];
   onConnectCloud: () => void;
+  onOpenAgent: () => void;
+  onOpenHistory: () => void;
   onOpenSettings: () => void;
   onToggleTheme: () => void;
 }) {
   const state = props.syncStatus?.state ?? "synced";
   const conflictCount = props.syncStatus?.conflictCount ?? 0;
 
-  // Update toast: main pushes every updater state; only "ready" earns a
-  // surface (the machine's message already says restart-or-quit-to-apply).
-  // Dismissible — the update still installs on quit either way.
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
-  useEffect(
-    () =>
-      bridge().onUpdateState((update) => {
-        if (update.status === "ready") setUpdateMessage(update.message);
-      }),
-    [],
-  );
-
   return (
-    <>
-      {updateMessage ? (
-        <div
-          data-testid="update-toast"
-          role="status"
-          className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"
+    <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3">
+      <div className="flex items-center gap-3">
+        <span
+          data-testid="status-workspace"
+          className="max-w-44 truncate text-[11px] text-muted"
         >
-          <span>{updateMessage}</span>
-          <button
-            type="button"
-            aria-label="Dismiss update notice"
-            onClick={() => setUpdateMessage(null)}
-            className="grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink"
-          >
-            <X size={12} aria-hidden />
-          </button>
-        </div>
-      ) : null}
-
-      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3">
-        <div className="flex items-center gap-3">
+          {props.workspaceName}
+        </span>
+        <span
+          data-testid="sync-status"
+          data-state={state}
+          className="flex items-center gap-1.5 text-[11px] text-muted"
+        >
           <span
-            data-testid="status-workspace"
-            className="max-w-44 truncate text-[11px] text-muted"
-          >
-            {props.workspaceName}
-          </span>
+            aria-hidden
+            className={`inline-block h-1.5 w-1.5 rounded-full ${SYNC_DOT[state]}`}
+          />
+          {SYNC_LABEL[state]}
+          {state === "conflict" && conflictCount > 0 ? ` (${conflictCount})` : ""}
+        </span>
+        {props.agentActive ? (
           <span
-            data-testid="sync-status"
-            data-state={state}
+            data-testid="agent-run-indicator"
             className="flex items-center gap-1.5 text-[11px] text-muted"
           >
-            <span
-              aria-hidden
-              className={`inline-block h-1.5 w-1.5 rounded-full ${SYNC_DOT[state]}`}
-            />
-            {SYNC_LABEL[state]}
-            {state === "conflict" && conflictCount > 0 ? ` (${conflictCount})` : ""}
+            <Bot size={12} aria-hidden />
+            Agent running
           </span>
-          {props.agentActive ? (
-            <span
-              data-testid="agent-run-indicator"
-              className="flex items-center gap-1.5 text-[11px] text-muted"
-            >
-              <Bot size={12} aria-hidden />
-              Agent running
-            </span>
-          ) : null}
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={props.onConnectCloud}
-            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
-          >
-            <Cloud size={12} aria-hidden />
-            Connect dohc Cloud
-          </button>
-          <button
-            type="button"
-            data-testid="toggle-theme"
-            aria-label="Toggle theme"
-            onClick={props.onToggleTheme}
-            className="flex items-center text-muted hover:text-ink"
-          >
-            <SunMoon size={13} aria-hidden />
-          </button>
-          <button
-            type="button"
-            data-testid="open-settings"
-            aria-label="Settings"
-            onClick={props.onOpenSettings}
-            className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
-          >
-            <Settings size={12} aria-hidden />
-            Settings
-          </button>
-        </div>
-      </footer>
-    </>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-3">
+        <NoticeCenter
+          syncStatus={props.syncStatus}
+          agentActive={props.agentActive}
+          conflictSummaries={props.conflictSummaries}
+          onOpenAgent={props.onOpenAgent}
+          onOpenHistory={props.onOpenHistory}
+        />
+        <button
+          type="button"
+          onClick={props.onConnectCloud}
+          className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
+        >
+          <Cloud size={12} aria-hidden />
+          Connect dohc Cloud
+        </button>
+        <button
+          type="button"
+          data-testid="toggle-theme"
+          aria-label="Toggle theme"
+          onClick={props.onToggleTheme}
+          className="flex items-center text-muted hover:text-ink"
+        >
+          <SunMoon size={13} aria-hidden />
+        </button>
+        <button
+          type="button"
+          data-testid="open-settings"
+          aria-label="Settings"
+          onClick={props.onOpenSettings}
+          className="flex items-center gap-1.5 text-[11px] text-muted hover:text-ink"
+        >
+          <Settings size={12} aria-hidden />
+          Settings
+        </button>
+      </div>
+    </footer>
   );
 }

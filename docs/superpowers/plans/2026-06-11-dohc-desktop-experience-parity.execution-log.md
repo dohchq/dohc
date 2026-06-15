@@ -8,38 +8,48 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(SYNC-WART) BUILT, REVIEW CLEAN, ALL
-  REQUIRED GATES GREEN AND COMMITTED**. Actual branch/head:
-  `codex/desktop-experience-parity` at the current E5 sync commit. Dirty
-  files: none expected after this snapshot amend.
-  Current phase/lane: E5 pinned offline-rename/concurrent-remote-edit sync
-  correctness is complete. Exact next action: run post-commit review, then
-  continue with E5 notices/share UI/workspace-management if it stays clean.
-  Active background tasks: none; full desktop E2E session `93077` completed
-  green 62/62 in 19.7m. Open
-  workflows: completed read-only E5 recon explorers
-  `019ec885-de06-7f00-a196-c90d553bc4b7` (sharing/workspace) and
-  `019ec886-f868-7c50-b173-48510d2812fa` (remaining surfaces); focused sync
-  re-review explorer `019ec8b8-1460-7fd3-a3c6-4abcc9ffd6dc` completed with
-  no findings. Open worktrees:
+- Current update (2026-06-15): **E5(notices) COMMITTED GREEN**. Actual
+  branch/head: `codex/desktop-experience-parity` at the current E5 notices
+  commit. Dirty files: this snapshot amend only; none expected after amend.
+  Current phase/lane: E5 local notices center is complete. Exact next action:
+  start E5 sharing UI/workspace-management from the completed recon, with
+  Bearer tokens kept main-process-only. Active background tasks: none;
+  full desktop E2E session `83038` completed green 63/63 in 19.7m. Open
+  workflows: completed
+  read-only E5 recon explorers `019ec885-de06-7f00-a196-c90d553bc4b7`
+  (sharing/workspace) and `019ec886-f868-7c50-b173-48510d2812fa` (remaining
+  surfaces); focused NoticeCenter diff review `019ec91c-3387-7f70-aa45-
+  1ffc2409b50d` completed with no findings. Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
   and this worktree on `codex/desktop-experience-parity`. No mutating
-  subagent/workflow lanes are active. Review status: initial sync verifier
-  found two accepted high-confidence risks (mid-pull target edit and remote
-  target collision), both fixed with tests; CodeRabbit uncommitted review after
-  fixes returned `findings:0` in
-  `/tmp/e5-sync-wart-coderabbit-after-fixes.raw`; focused re-review returned no
-  findings. Gates: workspace-sync tests PASS 43/43; workspace-sync typecheck
-  PASS; git diff --check PASS; full desktop E2E PASS 62/62 (19.7m);
-  `pnpm check:performance` PASS (cold 1107, warm 1098/1200, createEmpty 58,
-  open1000 339, md250 66, tiptapMount 1837/2000, typing 0, singleFileSync
-  788, hundredFileChangeSet 864, appTester 240, sqlite 71, csv 271,
-  contentSearch 36/58, memory 554/708, bundle 1.18/1.408; warm app open
-  documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist
-  entries; architecture debt 12 allowlist entries, 66 historical docs).
-  E5(properties) remains committed green: markdown files
-  have a desktop properties panel for frontmatter, with `id`/`title` kept
-  system-owned and hidden.
+  subagent/workflow lanes are active. Notices lane: new renderer-only
+  NoticeCenter derives conflict, cloud-disconnected, active-agent, and
+  update-ready notices from already-validated renderer state; no new IPC or
+  token exposure. Status bar keeps pinned `sync-status` and `update-toast`
+  surfaces. Review status: CodeRabbit uncommitted review
+  `/tmp/e5-notices-coderabbit.raw` found two minor E2E harness issues (silent
+  optional window send, missing guaranteed app cleanup); both fixed. Final
+  CodeRabbit review after fixes returned `findings:0` in
+  `/tmp/e5-notices-coderabbit-final.raw`; post-commit CodeRabbit review
+  returned `findings:0` in `/tmp/e5-notices-postcommit-coderabbit.raw`.
+  Gates: focused renderer Vitest PASS 12/12; desktop typecheck PASS; desktop
+  build PASS; named notices E2E PASS 1/1 with 1280x800/1536x960 light+dark
+  screenshots in `test-results/screenshots/e5-notices/`; git diff --check
+  PASS; full desktop E2E PASS 63/63 (19.7m); `pnpm check:performance` PASS
+  (cold 1067, warm 1047/1200, createEmpty 56, open1000 319, md250 66,
+  tiptapMount 1805/2000, typing 0, singleFileSync 790, hundredFileChangeSet
+  863, appTester 241, sqlite 27, csv 260, contentSearch 38/46, memory
+  554/708, bundle 1.18/1.408; warm app open documented skip);
+  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+  architecture debt 12 allowlist entries, 66 historical docs). Design review:
+  screenshots show no overlap, readable contrast, and notice popover lifted
+  above the update toast in both themes.
+  Previous E5 sync lane is committed green as `03ac1cf`: workspace-sync tests
+  PASS 43/43; workspace-sync typecheck PASS; full desktop E2E PASS 62/62
+  (19.7m); performance and lean PASS.
+  E5(properties) remains committed green: markdown files have a desktop
+  properties panel for frontmatter, with `id`/`title` kept system-owned and
+  hidden.
   Local edits route through the existing bounded markdown autosave/unmount
   flush; shared edits patch the `frontmatter` Y.Map without clearing unrelated
   keys. WYSIWYG mode strips only parser-recognized raw frontmatter and
@@ -64,8 +74,8 @@ design review + codex review + fix commit, every phase).
   screenshots in `test-results/screenshots/e5-properties/` show no overlap,
   readable contrast, compact property rows, and consistent light/dark treatment
   at both required sizes. NEXT = continue the remaining E5 surfaces:
-  notices/share UI/workspace management/import-export/database/apps-runtime
-  before E6/E7.
+  share UI/workspace management/import-export/database/apps-runtime before
+  E6/E7.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history, and
   properties/frontmatter are built. NEXT = **E5 remaining feature parity
@@ -111,7 +121,8 @@ design review + codex review + fix commit, every phase).
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
   6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, 4627209 (E4c rich
   collab/server), cc4b4e9 (E4c fix), b2f6407 (E5 graph), 837f6bd
-  (E5 catch-up), 68c365b (E5 properties), current E5 sync commit.
+  (E5 catch-up), 68c365b (E5 properties), 03ac1cf (E5 sync), current E5
+  notices commit.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -171,6 +182,38 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(notices) — DONE (this commit, 2026-06-15)
+
+Added the desktop NoticeCenter as a renderer-only status-bar surface. It
+collects the existing validated signals for sync conflicts,
+cloud-disconnected status, active agent runs, and update-ready events into a
+compact graphite-minimal popover. The update-ready toast keeps the pinned
+`update-toast` test id and remains dismissible; the notice popover lifts above
+the toast when both are visible. Conflict and agent notices route into the
+existing History and Agent workbench views, with no new IPC, token exposure, or
+main-process trust surface.
+
+Tests: `StatusBar.test.tsx` now covers NoticeCenter aggregation, all-clear
+state, update-ready retention, and action callbacks. `notices.spec.ts` drives
+the real Electron update event boundary, asserts oversized/junk events do not
+surface, captures 1280x800/1536x960 light+dark screenshots, and guarantees app
+cleanup in `afterEach`. Review: focused NoticeCenter diff review returned no
+findings; CodeRabbit found two minor E2E harness issues (silent optional
+window send, missing guaranteed app cleanup), both fixed before gates.
+
+Gates: focused renderer Vitest PASS 12/12 (`StatusBar`,
+`DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS; named
+notices E2E PASS 1/1; full desktop E2E PASS 63/63 (19.7m);
+`pnpm check:performance` PASS (cold 1067, warm 1047/1200, createEmpty 56,
+open1000 319, md250 66, tiptapMount 1805/2000, typing 0, singleFileSync 790,
+hundredFileChangeSet 863, appTester 241, sqlite 27, csv 260, contentSearch
+38/46, memory 554/708, bundle 1.18/1.408; warm app open documented skip);
+`pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+architecture debt 12 allowlist entries, 66 historical docs). Design review
+PASS on `test-results/screenshots/e5-notices/`: no overlap, readable
+contrast, text fits, and toast/popover stacking is clean in both themes and
+gate sizes.
 
 ### e5(sync-wart) — DONE (this commit, 2026-06-15)
 
