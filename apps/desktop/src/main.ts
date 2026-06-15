@@ -41,6 +41,10 @@ import {
   CloudStatusResult,
   CollabTokenPayload,
   CollabTokenResult,
+  CreateWorkspaceInvitePayload,
+  CreateWorkspaceInviteResult,
+  CreateWorkspaceSharePayload,
+  CreateWorkspaceShareResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   GrantAppTrustPayload,
@@ -52,6 +56,8 @@ import {
   LaunchMarksResult,
   RunAppTesterPayload,
   RunAppTesterResult,
+  ListWorkspaceSharesPayload,
+  ListWorkspaceSharesResult,
   ReadCatchUpSummaryPayload,
   ReadCatchUpSummaryResult,
   ListChangeSetsResult,
@@ -69,6 +75,7 @@ import {
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
+  RevokeWorkspaceSharePayload,
   WriteWorkspaceTextPayload,
   SetTitlebarThemePayload,
   SetWorkspaceUiStatePayload,
@@ -207,6 +214,39 @@ function credentialMatchesRemote(remoteServerUrl: string): boolean {
     cachedCredentials !== null &&
     normalizeServerUrl(cachedCredentials.serverUrl) === normalizeServerUrl(remoteServerUrl)
   );
+}
+
+function remoteForWorkspace(workspaceId: string) {
+  const workspace = requireWorkspace(workspaceId);
+  const remote = workspace.remote;
+  if (!remote) throw new Error("Sync this workspace before sharing.");
+  if (!cachedCredentials) throw new Error("Sign in to dohc Cloud first.");
+  if (!credentialMatchesRemote(remote.serverUrl)) {
+    throw new Error("Sign in to the cloud server this workspace uses.");
+  }
+  return { workspace, remote, credentials: cachedCredentials };
+}
+
+async function cloudJson<T>(
+  workspaceId: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const { remote, credentials } = remoteForWorkspace(workspaceId);
+  const headers = new Headers(init?.headers);
+  if (init?.body) headers.set("content-type", "application/json");
+  headers.set("authorization", `Bearer ${credentials.token}`);
+  const response = await fetch(`${remote.serverUrl}${path}`, {
+    ...init,
+    headers,
+  });
+  const data = (await response.json().catch(() => null)) as
+    | { ok?: boolean; error?: string }
+    | null;
+  if (!response.ok || data?.ok === false) {
+    throw new Error(data?.error ?? `Cloud request failed (${response.status})`);
+  }
+  return data as T;
 }
 
 // Where the Hocuspocus websocket lives. Decision: an explicit
@@ -739,6 +779,62 @@ function registerIpcHandlers(): void {
     });
     await activity.enableCloud(workspace);
     return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
+  });
+
+  ipcMain.handle(CHANNELS.listWorkspaceShares, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceSharesPayload.parse(payload);
+    const { remote } = remoteForWorkspace(input.workspaceId);
+    return ListWorkspaceSharesResult.parse(
+      await cloudJson(
+        input.workspaceId,
+        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.createWorkspaceShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateWorkspaceSharePayload.parse(payload);
+    const { remote } = remoteForWorkspace(input.workspaceId);
+    return CreateWorkspaceShareResult.parse(
+      await cloudJson(
+        input.workspaceId,
+        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            atomPath: input.atomPath,
+            recipientEmail: input.recipientEmail,
+            capability: input.capability,
+          }),
+        },
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.revokeWorkspaceShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeWorkspaceSharePayload.parse(payload);
+    await cloudJson(input.workspaceId, `/shares/${encodeURIComponent(input.shareId)}`, {
+      method: "DELETE",
+    });
+  });
+
+  ipcMain.handle(CHANNELS.createWorkspaceInvite, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateWorkspaceInvitePayload.parse(payload);
+    const { remote } = remoteForWorkspace(input.workspaceId);
+    return CreateWorkspaceInviteResult.parse(
+      await cloudJson(
+        input.workspaceId,
+        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/invites`,
+        {
+          method: "POST",
+          body: JSON.stringify({ email: input.email }),
+        },
+      ),
+    );
   });
 
   // Mints a short-lived live-co-editing token for one atom. Only available for

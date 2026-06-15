@@ -7,7 +7,15 @@ import {
   PanelRight,
   User,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   ChangeSetRecord,
   SyncStatusResult,
@@ -31,10 +39,8 @@ import { toggleTheme } from "./theme";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { Explorer } from "./workbench/Explorer";
-import { GraphView } from "./workbench/GraphView";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
-import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -61,6 +67,16 @@ import {
 } from "./workbench/workbenchState";
 
 export type Workspace = WorkspaceSummary;
+
+const LazyShareDialog = lazy(() =>
+  import("./ShareDialog").then((mod) => ({ default: mod.ShareDialog })),
+);
+const LazySearchView = lazy(() =>
+  import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
+);
+const LazyGraphView = lazy(() =>
+  import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
+);
 
 type CatchUpState = {
   status: "loading" | "ready" | "error";
@@ -246,6 +262,14 @@ function EmptyView({ view }: { view: ViewId }) {
   );
 }
 
+function PanelLoading({ label }: { label: string }) {
+  return (
+    <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+      Loading {label}...
+    </div>
+  );
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -269,6 +293,7 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sharePath, setSharePath] = useState<string | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -928,14 +953,18 @@ export function DesktopWorkspaceShell(props: {
             {wb.activeView === "explorer" ? (
               explorerView
             ) : wb.activeView === "search" ? (
-              <SearchView search={search} onOpenResult={openSearchResult} />
+              <Suspense fallback={<PanelLoading label="search" />}>
+                <LazySearchView search={search} onOpenResult={openSearchResult} />
+              </Suspense>
             ) : wb.activeView === "graph" ? (
-              <GraphView
-                workspaceId={workspaceId}
-                activePath={wb.activeTab}
-                refreshKey={graphRefreshKey}
-                onOpenPath={openFile}
-              />
+              <Suspense fallback={<PanelLoading label="graph" />}>
+                <LazyGraphView
+                  workspaceId={workspaceId}
+                  activePath={wb.activeTab}
+                  refreshKey={graphRefreshKey}
+                  onOpenPath={openFile}
+                />
+              </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
                 changeSets={changeSets}
@@ -970,6 +999,7 @@ export function DesktopWorkspaceShell(props: {
               onScrollConsumed={consumeScrollTarget}
               onSaveStateChange={onSaveStateChange}
               registerDraftFlush={registerDraftFlush}
+              onSharePath={setSharePath}
             />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
@@ -1104,6 +1134,23 @@ export function DesktopWorkspaceShell(props: {
             workspacePath={props.workspace.rootPath}
             onClose={() => setSettingsOpen(false)}
           />
+        </Overlay>
+      ) : null}
+      {sharePath ? (
+        <Overlay onClose={() => setSharePath(null)}>
+          <Suspense
+            fallback={
+              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
+                Loading share dialog...
+              </div>
+            }
+          >
+            <LazyShareDialog
+              workspaceId={workspaceId}
+              path={sharePath}
+              onClose={() => setSharePath(null)}
+            />
+          </Suspense>
         </Overlay>
       ) : null}
     </div>

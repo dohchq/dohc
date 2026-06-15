@@ -2,6 +2,7 @@ import {
   FileText,
   Image as ImageIcon,
   Music,
+  Share2,
   SlidersHorizontal,
   Table,
 } from "lucide-react";
@@ -18,8 +19,6 @@ import {
 } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
-import { AppPackageView } from "./AppPackageView";
-import { DatabaseStudioView } from "./DatabaseStudioView";
 import { bridge } from "./bridge";
 import { useCollabDoc } from "./collab/useCollabDoc";
 import { parseFrontmatter } from "./markdown/frontmatter";
@@ -100,6 +99,16 @@ const LazyPropertiesPanel = lazy(() =>
     default: mod.PropertiesPanel,
   })),
 ) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement>;
+const LazyDatabaseStudioView = lazy(() =>
+  import("./DatabaseStudioView").then((mod) => ({
+    default: mod.DatabaseStudioView,
+  })),
+);
+const LazyAppPackageView = lazy(() =>
+  import("./AppPackageView").then((mod) => ({
+    default: mod.AppPackageView,
+  })),
+);
 
 function splitRawFrontmatter(markdown: string): {
   frontmatter: string | null;
@@ -210,6 +219,7 @@ function ViewHeader(props: {
   icon: React.ReactNode;
   path: string;
   label: string;
+  onShare?: () => void;
   actions?: React.ReactNode;
 }) {
   return (
@@ -219,6 +229,18 @@ function ViewHeader(props: {
       <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">
         {props.label}
       </span>
+      {props.onShare ? (
+        <button
+          type="button"
+          data-testid="file-share"
+          aria-label="Share file"
+          title="Share file"
+          onClick={props.onShare}
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <Share2 size={13} aria-hidden />
+        </button>
+      ) : null}
       {props.actions}
     </header>
   );
@@ -277,6 +299,7 @@ function MarkdownView(props: {
   // A pending search-result jump for this path (Phase E5.0).
   scrollTarget?: ScrollTarget;
   onOpenPath?: (path: string) => void;
+  onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
@@ -383,6 +406,9 @@ function MarkdownView(props: {
     ),
     [savedBody],
   );
+  const onShareCurrentPath = props.onSharePath
+    ? () => props.onSharePath?.(props.path)
+    : undefined;
 
   // Live co-editing only ever activates for SHARED cloud workspaces with a
   // signed-in session (the collabToken IPC returns available:false otherwise).
@@ -574,6 +600,7 @@ function MarkdownView(props: {
           icon={<FileText size={13} aria-hidden />}
           path={props.path}
           label="document"
+          onShare={onShareCurrentPath}
           actions={
             <>
               <button
@@ -650,6 +677,7 @@ function MarkdownView(props: {
         icon={<FileText size={13} aria-hidden />}
         path={props.path}
         label="document"
+        onShare={onShareCurrentPath}
         actions={
           <>
             {editing ? (
@@ -1045,6 +1073,7 @@ export function FileInspector(props: {
   // Registers the active editor's draft flush with the shell (same "only
   // dirty source" scoping): explorer ops await it before re-pathing files.
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  onSharePath?: (path: string) => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -1069,13 +1098,21 @@ export function FileInspector(props: {
     isText && truncated ? (
       <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
     ) : null;
+  const onShareCurrentPath = props.onSharePath
+    ? () => props.onSharePath?.(props.path)
+    : undefined;
 
   if (isText && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="file" />
+        <ViewHeader
+          icon={<FileText size={13} aria-hidden />}
+          path={props.path}
+          label="file"
+          onShare={onShareCurrentPath}
+        />
         <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
       </div>
     );
@@ -1095,6 +1132,7 @@ export function FileInspector(props: {
             truncatedNotice={truncatedNotice}
             scrollTarget={props.scrollTarget}
             onOpenPath={props.onOpenPath}
+            onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
           />
@@ -1103,7 +1141,12 @@ export function FileInspector(props: {
     case "csv":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<Table size={13} aria-hidden />} path={props.path} label="data" />
+          <ViewHeader
+            icon={<Table size={13} aria-hidden />}
+            path={props.path}
+            label="data"
+            onShare={onShareCurrentPath}
+          />
           {truncatedNotice}
           <CsvView
             body={text ?? ""}
@@ -1117,7 +1160,12 @@ export function FileInspector(props: {
     case "text":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label={kind === "json" ? "json" : "text"} />
+          <ViewHeader
+            icon={<FileText size={13} aria-hidden />}
+            path={props.path}
+            label={kind === "json" ? "json" : "text"}
+            onShare={onShareCurrentPath}
+          />
           {truncatedNotice}
           <CodeView
             body={text ?? ""}
@@ -1133,14 +1181,24 @@ export function FileInspector(props: {
     case "image":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<ImageIcon size={13} aria-hidden />} path={props.path} label="image" />
+          <ViewHeader
+            icon={<ImageIcon size={13} aria-hidden />}
+            path={props.path}
+            label="image"
+            onShare={onShareCurrentPath}
+          />
           <ImageView url={url} path={props.path} />
         </div>
       );
     case "audio":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<Music size={13} aria-hidden />} path={props.path} label="audio" />
+          <ViewHeader
+            icon={<Music size={13} aria-hidden />}
+            path={props.path}
+            label="audio"
+            onShare={onShareCurrentPath}
+          />
           <div className="flex flex-1 items-center justify-center p-4">
             <audio data-testid="view-audio" controls src={url} />
           </div>
@@ -1149,7 +1207,12 @@ export function FileInspector(props: {
     case "pdf":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="pdf" />
+          <ViewHeader
+            icon={<FileText size={13} aria-hidden />}
+            path={props.path}
+            label="pdf"
+            onShare={onShareCurrentPath}
+          />
           <AffordanceCard
             testId="view-pdf"
             title="PDF document"
@@ -1160,18 +1223,58 @@ export function FileInspector(props: {
       );
     case "database":
       return (
-        <DatabaseStudioView
-          workspaceId={props.workspaceId}
-          path={props.path}
-          refreshKey={props.refreshKey}
-        />
+        <Suspense
+          fallback={
+            <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+              <ViewHeader
+                icon={<FileText size={13} aria-hidden />}
+                path={props.path}
+                label="database"
+                onShare={onShareCurrentPath}
+              />
+              <Empty>Loading database…</Empty>
+            </div>
+          }
+        >
+          <LazyDatabaseStudioView
+            workspaceId={props.workspaceId}
+            path={props.path}
+            refreshKey={props.refreshKey}
+            onSharePath={props.onSharePath}
+          />
+        </Suspense>
       );
     case "app-source":
-      return <AppPackageView workspaceId={props.workspaceId} path={props.path} />;
+      return (
+        <Suspense
+          fallback={
+            <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+              <ViewHeader
+                icon={<FileText size={13} aria-hidden />}
+                path={props.path}
+                label="app"
+                onShare={onShareCurrentPath}
+              />
+              <Empty>Loading app…</Empty>
+            </div>
+          }
+        >
+          <LazyAppPackageView
+            workspaceId={props.workspaceId}
+            path={props.path}
+            onSharePath={props.onSharePath}
+          />
+        </Suspense>
+      );
     default:
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader icon={<FileText size={13} aria-hidden />} path={props.path} label="file" />
+          <ViewHeader
+            icon={<FileText size={13} aria-hidden />}
+            path={props.path}
+            label="file"
+            onShare={onShareCurrentPath}
+          />
           <AffordanceCard
             testId="view-binary"
             title="File"

@@ -476,6 +476,84 @@ export const CloudEnableSyncPayload = z.object({
 });
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 
+const EMAIL_STRING = z.string().email().max(320);
+const SHARE_ID = z.string().min(1).max(200);
+const SHARE_CAPABILITY = z.enum(["view", "edit"]);
+
+export const WorkspaceShareRow = z.object({
+  shareId: SHARE_ID,
+  workspaceId: WORKSPACE_ID,
+  atomId: z.string().min(1).max(200),
+  atomPath: PATH_STRING.nullable(),
+  recipientUserId: z.string().min(1).max(200),
+  recipientEmail: EMAIL_STRING,
+  capability: SHARE_CAPABILITY,
+});
+export type WorkspaceShareRow = z.infer<typeof WorkspaceShareRow>;
+
+export const ListWorkspaceSharesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListWorkspaceSharesPayload = z.infer<
+  typeof ListWorkspaceSharesPayload
+>;
+
+export const ListWorkspaceSharesResult = z.object({
+  shares: z.array(WorkspaceShareRow).max(500),
+});
+export type ListWorkspaceSharesResult = z.infer<
+  typeof ListWorkspaceSharesResult
+>;
+
+export const CreateWorkspaceSharePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  atomPath: PATH_STRING,
+  recipientEmail: EMAIL_STRING,
+  capability: SHARE_CAPABILITY,
+});
+export type CreateWorkspaceSharePayload = z.infer<
+  typeof CreateWorkspaceSharePayload
+>;
+
+export const CreateWorkspaceShareResult = z.object({
+  share: WorkspaceShareRow,
+});
+export type CreateWorkspaceShareResult = z.infer<
+  typeof CreateWorkspaceShareResult
+>;
+
+export const RevokeWorkspaceSharePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  shareId: SHARE_ID,
+});
+export type RevokeWorkspaceSharePayload = z.infer<
+  typeof RevokeWorkspaceSharePayload
+>;
+
+const WorkspaceInviteRow = z.object({
+  inviteId: z.string().min(1).max(200),
+  workspaceId: WORKSPACE_ID,
+  email: EMAIL_STRING,
+  role: z.string().min(1).max(50),
+  invitedBy: z.string().min(1).max(200),
+  status: z.enum(["pending", "claimed"]),
+});
+
+export const CreateWorkspaceInvitePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  email: EMAIL_STRING,
+});
+export type CreateWorkspaceInvitePayload = z.infer<
+  typeof CreateWorkspaceInvitePayload
+>;
+
+export const CreateWorkspaceInviteResult = z.object({
+  invite: WorkspaceInviteRow,
+});
+export type CreateWorkspaceInviteResult = z.infer<
+  typeof CreateWorkspaceInviteResult
+>;
+
 // Live co-editing token: the renderer asks for a short-lived collab JWT for a
 // specific markdown atom in a SHARED cloud workspace. Main mints it
 // by calling the workspace-api POST /workspaces/:id/collab/token endpoint with
@@ -739,6 +817,16 @@ export interface DohcDesktopBridge {
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
+  listWorkspaceShares(
+    payload: ListWorkspaceSharesPayload,
+  ): Promise<ListWorkspaceSharesResult>;
+  createWorkspaceShare(
+    payload: CreateWorkspaceSharePayload,
+  ): Promise<CreateWorkspaceShareResult>;
+  revokeWorkspaceShare(payload: RevokeWorkspaceSharePayload): Promise<void>;
+  createWorkspaceInvite(
+    payload: CreateWorkspaceInvitePayload,
+  ): Promise<CreateWorkspaceInviteResult>;
   collabToken(payload: CollabTokenPayload): Promise<CollabTokenResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(

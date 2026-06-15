@@ -8,21 +8,47 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(notices) COMMITTED GREEN**. Actual
-  branch/head: `codex/desktop-experience-parity` at the current E5 notices
-  commit. Dirty files: this snapshot amend only; none expected after amend.
-  Current phase/lane: E5 local notices center is complete. Exact next action:
-  start E5 sharing UI/workspace-management from the completed recon, with
-  Bearer tokens kept main-process-only. Active background tasks: none;
-  full desktop E2E session `83038` completed green 63/63 in 19.7m. Open
+- Current update (2026-06-15): **E5(sharing UI) BUILT GREEN; ready to
+  commit**. Actual branch/head: `codex/desktop-experience-parity` at E5
+  notices commit plus uncommitted sharing-lane edits. Dirty files: desktop IPC
+  contract/channels/preload/main, renderer FileInspector/Shell/editor
+  performance optimizations, new ShareDialog, focused renderer tests, named
+  sharing E2E, and this log. Current phase/lane: E5 current-file share UI.
+  Exact next action: commit `e5(sharing): add desktop file share dialog`.
+  Active background tasks: none. Open
   workflows: completed
   read-only E5 recon explorers `019ec885-de06-7f00-a196-c90d553bc4b7`
   (sharing/workspace) and `019ec886-f868-7c50-b173-48510d2812fa` (remaining
   surfaces); focused NoticeCenter diff review `019ec91c-3387-7f70-aa45-
-  1ffc2409b50d` completed with no findings. Open worktrees:
+  1ffc2409b50d` completed with no findings. Sharing lane status: renderer
+  share button opens a current-file ShareDialog; main-process IPC calls
+  workspace-api share/invite routes with Bearer token kept out of preload/
+  renderer; local-only/signed-out/server-mismatch states fail closed with
+  user-facing messages. Performance fix inside the lane: ShareDialog,
+  DatabaseStudioView, AppPackageView, SearchView, and GraphView now lazy-load
+  out of the first renderer chunk, and static Tiptap extension configs are
+  hoisted out of editor mounts. Review fix: CodeRabbit found a major
+  lazy-boundary gap where database/app-source files lost the share affordance
+  after load; fixed by threading `onSharePath` through their lazy fallbacks
+  and headers, with regression coverage. Final gates: focused renderer/editor
+  Vitest PASS 42/42 (`MarkdownEditor`, `ShareDialog`, `FileInspector`,
+  `DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS; named
+  sharing E2E PASS 1/1 with 1280x800/1536x960 light+dark screenshots in
+  `test-results/screenshots/e5-sharing/`; full desktop E2E PASS 64/64
+  (20.7m); `pnpm check:performance` PASS (cold 1118, warm 1090/1200,
+  createEmpty 61, open1000 352, md250 69, tiptapMount 1917/2000, typing 0,
+  singleFileSync 791, hundredFileChangeSet 864, appTester 237, sqlite 330,
+  csv 269, contentSearch 45/52, memory 554/708, bundle 1.14/1.408; warm app
+  open documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4
+  allowlist entries; architecture debt 12 allowlist entries, 66 historical
+  docs); git diff --check PASS. Design review PASS on the named screenshots:
+  no overlap, readable contrast, clean dialog copy, and text fits at both gate
+  sizes. Final CodeRabbit review returned `findings:0` in
+  `/tmp/e5-sharing-coderabbit-final2.raw`.
+  Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
   and this worktree on `codex/desktop-experience-parity`. No mutating
-  subagent/workflow lanes are active. Notices lane: new renderer-only
+  subagent/workflow lanes are active. Prior notices lane: new renderer-only
   NoticeCenter derives conflict, cloud-disconnected, active-agent, and
   update-ready notices from already-validated renderer state; no new IPC or
   token exposure. Status bar keeps pinned `sync-status` and `update-toast`
@@ -182,6 +208,52 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(sharing-ui) — BUILT GREEN (uncommitted, 2026-06-15)
+
+Added the first desktop sharing surface for the active file. The FileInspector
+header now exposes a share icon for normal file previews; DesktopWorkspaceShell
+opens a renderer-only ShareDialog in the existing Overlay. The dialog lists
+shares for the current atom path, creates `view`/`edit` shares for verified
+users, revokes shares by id, and offers the existing workspace-invite route
+when the server returns the verified-user-missing share error. Local-only,
+signed-out, and cloud-server-mismatch cases fail closed from main-process
+checks and render user-facing messages.
+
+Security/trust shape: preload only exposes bounded invoke wrappers; the
+renderer never receives the dohc Cloud Bearer token. Main validates every IPC
+payload with zod, verifies the sender, resolves the registry remote for the
+workspace, checks the cached credential belongs to that server, then calls the
+workspace-api share/invite endpoints. Server-side membership/owner auth,
+verified-email recipient resolution, share revoke ownership, and invite claim
+semantics remain unchanged.
+
+Initial focused gates: focused renderer Vitest PASS 38/38
+(`ShareDialog.test.tsx`, `FileInspector.test.tsx`,
+`DesktopWorkspaceShell.test.tsx`); desktop typecheck PASS; desktop build PASS;
+named sharing E2E PASS 1/1
+(`apps/desktop/e2e/sharing.spec.ts`) with light/dark screenshots at
+1280x800 and 1536x960 in `test-results/screenshots/e5-sharing/`; git
+diff --check PASS. Manual screenshot review PASS: dialog is centered, text
+fits, no overlap, readable contrast in both themes, and IPC error prefixes are
+stripped before display.
+
+Final optimization/gates: ShareDialog, DatabaseStudioView, AppPackageView,
+SearchView, and GraphView were split out of the first renderer chunk; static
+Tiptap extension configs were hoisted so large-document editor mounts avoid
+per-mount extension construction. CodeRabbit found a major lazy-boundary gap
+where database/app-source files lost the share affordance after load; fixed by
+threading `onSharePath` through their lazy fallbacks and headers, with
+regression coverage. Focused renderer/editor Vitest PASS 42/42;
+desktop typecheck PASS; desktop build PASS; named sharing E2E PASS 1/1; full
+desktop E2E PASS 64/64 (20.7m); `pnpm check:performance` PASS (cold 1118,
+warm 1090/1200, createEmpty 61, open1000 352, md250 69, tiptapMount
+1917/2000, typing 0, singleFileSync 791, hundredFileChangeSet 864, appTester
+237, sqlite 330, csv 269, contentSearch 45/52, memory 554/708, bundle
+1.14/1.408; warm app open documented skip); `pnpm check:lean` PASS (knip
+clean; tech debt 4 allowlist entries; architecture debt 12 allowlist entries,
+66 historical docs); git diff --check PASS. CodeRabbit final review returned
+`findings:0` in `/tmp/e5-sharing-coderabbit-final2.raw`.
 
 ### e5(notices) — DONE (this commit, 2026-06-15)
 

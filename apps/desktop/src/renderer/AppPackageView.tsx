@@ -1,5 +1,5 @@
-import { CheckCircle2, LayoutGrid, ShieldCheck, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { CheckCircle2, LayoutGrid, Share2, ShieldCheck, XCircle } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { AppPackageResult } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
@@ -16,7 +16,11 @@ const READINESS_LABEL: Record<AppInfo["readiness"], string> = {
 // this pane shows what the app declares (manifest), its trust requirement, and
 // its AppTester readiness — an app must pass AppTester before it can be a
 // trusted, broadly-writing app.
-export function AppPackageView(props: { workspaceId: string; path: string }) {
+export function AppPackageView(props: {
+  workspaceId: string;
+  path: string;
+  onSharePath?: (path: string) => void;
+}) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   // A path under .apps/ that doesn't belong to a discovered package (no
   // app.json yet, or a stray file directly under .apps/) is a real, reachable
@@ -54,14 +58,14 @@ export function AppPackageView(props: { workspaceId: string; path: string }) {
     }
   }, [info]);
 
+  const onShare = props.onSharePath
+    ? () => props.onSharePath?.(props.path)
+    : undefined;
+
   if (missing) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
-          <LayoutGrid size={13} aria-hidden />
-          <span className="font-mono text-ink">{props.path}</span>
-          <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">app</span>
-        </header>
+        <AppHeader icon={<LayoutGrid size={13} aria-hidden />} path={props.path} onShare={onShare} />
         <div
           data-testid="view-app"
           className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
@@ -96,6 +100,7 @@ export function AppPackageView(props: { workspaceId: string; path: string }) {
   if (!info) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+        <AppHeader icon={<LayoutGrid size={13} aria-hidden />} path={props.path} onShare={onShare} />
         <div className="flex flex-1 items-center justify-center text-sm text-subtle">
           Loading app…
         </div>
@@ -105,11 +110,7 @@ export function AppPackageView(props: { workspaceId: string; path: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-      <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
-        <LayoutGrid size={13} aria-hidden />
-        <span className="font-mono text-ink">{info.root}</span>
-        <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">app</span>
-      </header>
+      <AppHeader icon={<LayoutGrid size={13} aria-hidden />} path={info.root} onShare={onShare} />
 
       <div
         data-testid="view-app"
@@ -213,5 +214,31 @@ export function AppPackageView(props: { workspaceId: string; path: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function AppHeader(props: {
+  icon: ReactNode;
+  path: string;
+  onShare?: () => void;
+}) {
+  return (
+    <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
+      {props.icon}
+      <span className="font-mono text-ink">{props.path}</span>
+      <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">app</span>
+      {props.onShare ? (
+        <button
+          type="button"
+          data-testid="file-share"
+          aria-label="Share file"
+          title="Share file"
+          onClick={props.onShare}
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <Share2 size={13} aria-hidden />
+        </button>
+      ) : null}
+    </header>
   );
 }

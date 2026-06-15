@@ -1,4 +1,4 @@
-import { Database } from "lucide-react";
+import { Database, Share2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -45,6 +45,7 @@ export function DatabaseStudioView(props: {
   workspaceId: string;
   path: string;
   refreshKey?: number;
+  onSharePath?: (path: string) => void;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -54,6 +55,7 @@ export function DatabaseStudioView(props: {
 
   const { workspaceId, path, refreshKey } = props;
   const currentPathRef = useRef(path);
+  const onShare = props.onSharePath ? () => props.onSharePath?.(path) : undefined;
 
   // One effect handles both path switches and activity refreshes. Switching
   // paths blanks the view immediately — stale rows from the previous database
@@ -125,7 +127,7 @@ export function DatabaseStudioView(props: {
   if (!snapshot) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <Header path={path} />
+        <Header path={path} onShare={onShare} />
         <div
           data-testid="view-database"
           className="flex flex-1 items-center justify-center text-sm text-subtle"
@@ -138,7 +140,7 @@ export function DatabaseStudioView(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-      <Header path={path} />
+      <Header path={path} onShare={onShare} />
       <div className="grid min-h-0 flex-1 grid-cols-[180px_1fr]" data-testid="view-database">
         <aside className="overflow-y-auto border-r border-line bg-panel-2 p-2" data-testid="db-table-list">
           {snapshot.tables.length === 0 ? (
@@ -203,12 +205,24 @@ export function DatabaseStudioView(props: {
   );
 }
 
-function Header({ path }: { path: string }) {
+function Header({ path, onShare }: { path: string; onShare?: () => void }) {
   return (
     <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
       <Database size={13} aria-hidden />
       <span className="font-mono text-ink">{path}</span>
       <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">database</span>
+      {onShare ? (
+        <button
+          type="button"
+          data-testid="file-share"
+          aria-label="Share file"
+          title="Share file"
+          onClick={onShare}
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <Share2 size={13} aria-hidden />
+        </button>
+      ) : null}
     </header>
   );
 }

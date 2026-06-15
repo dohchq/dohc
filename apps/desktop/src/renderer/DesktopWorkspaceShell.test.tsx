@@ -96,6 +96,7 @@ function makeBridge(
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
     collabToken: vi.fn(async () => ({ available: false as const })),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
       activityCallback = callback;
@@ -214,6 +215,25 @@ describe("file-open-start marking", () => {
     expect(openStartCalls()).toBe(2);
 
     mark.mockRestore();
+  });
+});
+
+describe("active file sharing", () => {
+  it("opens the share dialog for the active inspector path", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("file-share"));
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+    expect(await within(dialog).findByText("Only you have access.")).toBeTruthy();
+    expect(bridge.listWorkspaceShares).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+    });
   });
 });
 

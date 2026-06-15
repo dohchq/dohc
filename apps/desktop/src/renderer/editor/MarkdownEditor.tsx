@@ -86,6 +86,42 @@ type MarkdownEditorInnerProps = MarkdownEditorProps & {
 
 const LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS = 64 * 1024;
 
+const LOCAL_STARTER_KIT = StarterKit.configure({
+  trailingNode: false,
+});
+const COLLAB_STARTER_KIT = StarterKit.configure({
+  trailingNode: false,
+  undoRedo: false,
+});
+const MARKDOWN_EXTENSION = Markdown.configure({
+  indentation: { style: "space", size: 2 },
+});
+const TRAILING_NODE_EXTENSION = TrailingNode.configure({
+  node: "paragraph",
+  notAfter: ["paragraph"],
+});
+const PLACEHOLDER_EXTENSION = Placeholder.configure({
+  includeChildren: true,
+  showOnlyCurrent: false,
+  placeholder: ({ node }) => {
+    if (
+      node.type.name === "tableCell" ||
+      node.type.name === "tableHeader"
+    ) {
+      return "";
+    }
+    if (node.type.name === "heading") return "Heading";
+    return "Type '/' for commands";
+  },
+});
+const STATIC_EDITOR_EXTENSIONS = [
+  ...dohcMarkdownExtensions,
+  TaskList,
+  TaskItem,
+  TableKit,
+  MARKDOWN_EXTENSION,
+];
+
 type SlashCommandId =
   | "wikilink"
   | "heading-1"
@@ -968,33 +1004,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         const collabYDoc = collab?.ydoc ?? null;
         const isCollab = Boolean(collabYDoc && collaborationExtension);
         return [
-          StarterKit.configure({
-            trailingNode: false,
-            undoRedo: isCollab ? false : undefined,
-          }),
-          ...dohcMarkdownExtensions,
-          TaskList,
-          TaskItem,
-          TableKit,
-          Markdown.configure({ indentation: { style: "space", size: 2 } }),
-          ...(includePlaceholdersRef.current
-            ? [
-                Placeholder.configure({
-                  includeChildren: true,
-                  showOnlyCurrent: false,
-                  placeholder: ({ node }) => {
-                    if (
-                      node.type.name === "tableCell" ||
-                      node.type.name === "tableHeader"
-                    ) {
-                      return "";
-                    }
-                    if (node.type.name === "heading") return "Heading";
-                    return "Type '/' for commands";
-                  },
-                }),
-              ]
-            : []),
+          isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
+          ...STATIC_EDITOR_EXTENSIONS,
+          ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
           ...(isCollab
             ? [
                 collaborationExtension!.configure({
@@ -1002,12 +1014,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   field: "body",
                 }),
               ]
-            : [
-                TrailingNode.configure({
-                  node: "paragraph",
-                  notAfter: ["paragraph"],
-                }),
-              ]),
+            : [TRAILING_NODE_EXTENSION]),
           dohcPlugins,
         ];
       },

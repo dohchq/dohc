@@ -114,6 +114,8 @@ describe("markdown editor unmount flush", () => {
     readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
+    readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+    getAppPackage: vi.fn(async () => null),
     collabToken: vi.fn(async () => ({ available: false as const })),
   };
 
@@ -194,6 +196,50 @@ describe("markdown editor unmount flush", () => {
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
     expect(screen.queryByTestId("markdown-properties-toggle")).toBeNull();
     expect(bridgeMock.collabToken).not.toHaveBeenCalled();
+  });
+
+  it("routes the document header share action to the active path", async () => {
+    const user = userEvent.setup();
+    const onSharePath = vi.fn();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        onSharePath={onSharePath}
+      />,
+    );
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("file-share"));
+
+    expect(onSharePath).toHaveBeenCalledWith("a.md");
+  });
+
+  it("routes database and app-source share actions to their active file paths", async () => {
+    const user = userEvent.setup();
+    const onSharePath = vi.fn();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="data.sqlite"
+        onSharePath={onSharePath}
+      />,
+    );
+
+    await screen.findByTestId("view-database");
+    await user.click(screen.getByTestId("file-share"));
+    expect(onSharePath).toHaveBeenCalledWith("data.sqlite");
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path=".apps/demo/app.json"
+        onSharePath={onSharePath}
+      />,
+    );
+    await screen.findByTestId("view-app");
+    await user.click(screen.getByTestId("file-share"));
+    expect(onSharePath).toHaveBeenCalledWith(".apps/demo/app.json");
   });
 
   it("closes local properties before returning to WYSIWYG", async () => {
