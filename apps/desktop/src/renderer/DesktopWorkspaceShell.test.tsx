@@ -96,6 +96,9 @@ function makeBridge(
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
+    exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
+    getDroppedFilePaths: vi.fn(() => []),
     listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
     collabToken: vi.fn(async () => ({ available: false as const })),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
@@ -233,6 +236,25 @@ describe("active file sharing", () => {
     expect(await within(dialog).findByText("Only you have access.")).toBeTruthy();
     expect(bridge.listWorkspaceShares).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
+    });
+  });
+});
+
+describe("imports and exports", () => {
+  it("opens the import/export panel from the explorer footer", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("import-export-open"));
+
+    const dialog = await screen.findByTestId("import-export-dialog");
+    expect(within(dialog).getByText("Import / export")).toBeTruthy();
+    await user.click(within(dialog).getByTestId("export-workspace-action"));
+    await waitFor(() => {
+      expect(bridge.exportWorkspaceZip).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+      });
     });
   });
 });

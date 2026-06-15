@@ -1,9 +1,9 @@
 import {
+  Archive,
   Bot,
   CheckCheck,
   FilePlus2,
   FolderPlus,
-  Import,
   PanelRight,
   User,
 } from "lucide-react";
@@ -70,6 +70,11 @@ export type Workspace = WorkspaceSummary;
 
 const LazyShareDialog = lazy(() =>
   import("./ShareDialog").then((mod) => ({ default: mod.ShareDialog })),
+);
+const LazyImportExportDialog = lazy(() =>
+  import("./ImportExportDialog").then((mod) => ({
+    default: mod.ImportExportDialog,
+  })),
 );
 const LazySearchView = lazy(() =>
   import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
@@ -294,6 +299,7 @@ export function DesktopWorkspaceShell(props: {
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sharePath, setSharePath] = useState<string | null>(null);
+  const [importExportOpen, setImportExportOpen] = useState(false);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -780,8 +786,13 @@ export function DesktopWorkspaceShell(props: {
       },
       {
         id: "import-files",
-        label: "Import files into workspace",
-        run: () => void importFiles(),
+        label: "Import / export workspace",
+        run: () => setImportExportOpen(true),
+      },
+      {
+        id: "export-workspace",
+        label: "Export workspace as zip",
+        run: () => setImportExportOpen(true),
       },
       {
         id: "toggle-sidebar",
@@ -819,7 +830,7 @@ export function DesktopWorkspaceShell(props: {
         run: toggleTheme,
       },
     ],
-    [importFiles, openWorkspaceFolder, closeActiveTab, mutateWb, requestExplorerCreate],
+    [openWorkspaceFolder, closeActiveTab, mutateWb, requestExplorerCreate],
   );
 
   useEffect(() => {
@@ -864,11 +875,12 @@ export function DesktopWorkspaceShell(props: {
         </button>
         <button
           type="button"
-          onClick={() => void importFiles()}
+          data-testid="import-export-open"
+          onClick={() => setImportExportOpen(true)}
           className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
         >
-          <Import size={13} aria-hidden />
-          Import files
+          <Archive size={13} aria-hidden />
+          Import / export
         </button>
       </footer>
     </>
@@ -1023,6 +1035,14 @@ export function DesktopWorkspaceShell(props: {
                 </button>
                 <button
                   type="button"
+                  data-testid="empty-import-export"
+                  onClick={() => setImportExportOpen(true)}
+                  className="font-mono text-xs text-subtle hover:text-ink"
+                >
+                  import / export
+                </button>
+                <button
+                  type="button"
                   onClick={() => setQuickOpenOpen(true)}
                   className="font-mono text-xs text-subtle hover:text-ink"
                 >
@@ -1149,6 +1169,24 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               path={sharePath}
               onClose={() => setSharePath(null)}
+            />
+          </Suspense>
+        </Overlay>
+      ) : null}
+      {importExportOpen ? (
+        <Overlay onClose={() => setImportExportOpen(false)}>
+          <Suspense
+            fallback={
+              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
+                Loading import/export panel...
+              </div>
+            }
+          >
+            <LazyImportExportDialog
+              workspaceId={workspaceId}
+              activePath={wb.activeTab}
+              onImported={() => void refreshFiles()}
+              onClose={() => setImportExportOpen(false)}
             />
           </Suspense>
         </Overlay>

@@ -8,42 +8,41 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(sharing UI) BUILT GREEN; ready to
-  commit**. Actual branch/head: `codex/desktop-experience-parity` at E5
-  notices commit plus uncommitted sharing-lane edits. Dirty files: desktop IPC
-  contract/channels/preload/main, renderer FileInspector/Shell/editor
-  performance optimizations, new ShareDialog, focused renderer tests, named
-  sharing E2E, and this log. Current phase/lane: E5 current-file share UI.
-  Exact next action: commit `e5(sharing): add desktop file share dialog`.
-  Active background tasks: none. Open
-  workflows: completed
-  read-only E5 recon explorers `019ec885-de06-7f00-a196-c90d553bc4b7`
-  (sharing/workspace) and `019ec886-f868-7c50-b173-48510d2812fa` (remaining
-  surfaces); focused NoticeCenter diff review `019ec91c-3387-7f70-aa45-
-  1ffc2409b50d` completed with no findings. Sharing lane status: renderer
-  share button opens a current-file ShareDialog; main-process IPC calls
-  workspace-api share/invite routes with Bearer token kept out of preload/
-  renderer; local-only/signed-out/server-mismatch states fail closed with
-  user-facing messages. Performance fix inside the lane: ShareDialog,
-  DatabaseStudioView, AppPackageView, SearchView, and GraphView now lazy-load
-  out of the first renderer chunk, and static Tiptap extension configs are
-  hoisted out of editor mounts. Review fix: CodeRabbit found a major
-  lazy-boundary gap where database/app-source files lost the share affordance
-  after load; fixed by threading `onSharePath` through their lazy fallbacks
-  and headers, with regression coverage. Final gates: focused renderer/editor
-  Vitest PASS 42/42 (`MarkdownEditor`, `ShareDialog`, `FileInspector`,
-  `DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS; named
-  sharing E2E PASS 1/1 with 1280x800/1536x960 light+dark screenshots in
-  `test-results/screenshots/e5-sharing/`; full desktop E2E PASS 64/64
-  (20.7m); `pnpm check:performance` PASS (cold 1118, warm 1090/1200,
-  createEmpty 61, open1000 352, md250 69, tiptapMount 1917/2000, typing 0,
-  singleFileSync 791, hundredFileChangeSet 864, appTester 237, sqlite 330,
-  csv 269, contentSearch 45/52, memory 554/708, bundle 1.14/1.408; warm app
-  open documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4
-  allowlist entries; architecture debt 12 allowlist entries, 66 historical
-  docs); git diff --check PASS. Design review PASS on the named screenshots:
-  no overlap, readable contrast, clean dialog copy, and text fits at both gate
-  sizes. Final CodeRabbit review returned `findings:0` in
+- Current update (2026-06-15): **E5(import/export) DONE**. Actual branch/head:
+  `codex/desktop-experience-parity` at the import/export commit. Dirty files:
+  none after the amend. Current phase/lane: E5 ImportsExportsPanel parity.
+  Exact next action: continue the remaining E5 surfaces (workspace management,
+  database grid polish, apps runtime) before E6/E7. Active background tasks:
+  none. Open workflows: completed read-only E5 recon
+  explorers `019ec885-de06-7f00-a196-c90d553bc4b7` (sharing/workspace) and
+  `019ec886-f868-7c50-b173-48510d2812fa` (remaining surfaces); focused
+  NoticeCenter diff review `019ec91c-3387-7f70-aa45-1ffc2409b50d` completed
+  with no findings. Import/export lane status: a lazy renderer-only
+  ImportExportDialog is reachable from the explorer footer and command
+  registry, imports through the existing picker/dropped-path IPC, exports the
+  active file or whole workspace through the bounded zip IPC, refreshes the
+  tree after import, and shows local status/errors with Electron IPC prefixes
+  stripped. Main adds only a test-mode import picker seam gated by
+  `DOHC_DESKTOP_TEST && !app.isPackaged`; production import paths remain the
+  native file dialog or the existing dropped-path flow. Final gates:
+  focused renderer Vitest PASS 11/11 (`ImportExportDialog`,
+  `DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS (new
+  lazy `ImportExportDialog` chunk 8.80kB; renderer initial bundle 1.14MB);
+  named importExport E2E PASS 1/1 with 1280x800/1536x960 light+dark
+  screenshots in `test-results/screenshots/e5-import-export/`; first-run E2E
+  PASS 3/3 after updating the pinned command registry count; full desktop E2E
+  PASS 65/65 (21.3m); `pnpm check:performance` PASS (cold 1243, warm
+  1149/1200, createEmpty 52, open1000 365, md250 51, tiptapMount 1996/2000,
+  typing 0, singleFileSync 790, hundredFileChangeSet 865, appTester 243,
+  sqlite 331, csv 292, contentSearch 38/58, memory 555/708, bundle
+  1.14/1.408; warm app open documented skip); `pnpm check:lean` PASS (knip
+  clean; tech debt 4 allowlist entries; architecture debt 12 allowlist
+  entries, 66 historical docs). Design review PASS on the named screenshots:
+  no overlap, readable contrast, compact action rows, and long export paths
+  truncate inside the status row in both themes and gate sizes. CodeRabbit
+  final review returned `findings:0` in
+  `/tmp/e5-import-export-coderabbit.raw`. Prior sharing lane is committed
+  green as `b4aea96`; final CodeRabbit review returned `findings:0` in
   `/tmp/e5-sharing-coderabbit-final2.raw`.
   Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
@@ -209,7 +208,41 @@ design review + codex review + fix commit, every phase).
 
 ## Phase log (append-only)
 
-### e5(sharing-ui) — BUILT GREEN (uncommitted, 2026-06-15)
+### e5(import-export) — DONE (this commit, 2026-06-15)
+
+Added the desktop ImportsExportsPanel parity surface as a lazy renderer-only
+ImportExportDialog. The panel opens from the explorer footer and command
+registry, imports files through the existing workspace import IPC, supports the
+existing dropped-path import seam for real OS drops, exports either the active
+file or the whole workspace through the bounded zip IPC, refreshes the tree
+after import, and reports local status/errors without leaking Electron IPC
+prefixes into the UI.
+
+Trust shape: production import remains the native main-process file dialog or
+the already-validated dropped-path flow; export remains main-process save
+dialog plus bounded `collectZipEntries`/`buildStoreZip`. The only new main
+surface is a Playwright-only import picker seam gated by
+`DOHC_DESKTOP_TEST && !app.isPackaged`, with JSON array parsing, absolute-path
+validation, length caps, and the same trusted-dialog copy helper.
+
+Gates: focused renderer Vitest PASS 11/11 (`ImportExportDialog`,
+`DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS (new lazy
+`ImportExportDialog` chunk 8.80kB; renderer initial bundle 1.14MB); named
+importExport E2E PASS 1/1 with light/dark screenshots at 1280x800 and
+1536x960 in `test-results/screenshots/e5-import-export/`; first-run E2E PASS
+3/3 after updating the command-palette registry count for the new export
+command; full desktop E2E PASS 65/65 (21.3m); `pnpm check:performance` PASS
+(cold 1243, warm 1149/1200, createEmpty 52, open1000 365, md250 51,
+tiptapMount 1996/2000, typing 0, singleFileSync 790, hundredFileChangeSet
+865, appTester 243, sqlite 331, csv 292, contentSearch 38/58, memory 555/708,
+bundle 1.14/1.408; warm app open documented skip); `pnpm check:lean` PASS
+(knip clean; tech debt 4 allowlist entries; architecture debt 12 allowlist
+entries, 66 historical docs). Design review PASS: screenshots show no overlap,
+readable contrast, compact action rows, and the long export path truncating
+inside the status row in both themes and gate sizes. CodeRabbit final review
+returned `findings:0` in `/tmp/e5-import-export-coderabbit.raw`.
+
+### e5(sharing-ui) — DONE (`b4aea96`, 2026-06-15)
 
 Added the first desktop sharing surface for the active file. The FileInspector
 header now exposes a share icon for normal file previews; DesktopWorkspaceShell

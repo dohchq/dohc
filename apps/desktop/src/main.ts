@@ -164,6 +164,34 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
+function testImportPaths(): string[] | null {
+  if (process.env.DOHC_DESKTOP_TEST !== "1" || app.isPackaged) return null;
+  const raw = process.env.DOHC_TEST_IMPORT_PATHS;
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("DOHC_TEST_IMPORT_PATHS must be a JSON array of absolute paths");
+  }
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    throw new Error("DOHC_TEST_IMPORT_PATHS must be an array with at most 100 paths");
+  }
+  const paths: string[] = [];
+  for (const entry of parsed) {
+    if (
+      typeof entry !== "string" ||
+      entry.length === 0 ||
+      entry.length > 4096 ||
+      !isAbsolute(entry)
+    ) {
+      throw new Error("DOHC_TEST_IMPORT_PATHS entries must be absolute paths");
+    }
+    paths.push(entry);
+  }
+  return paths;
+}
+
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
 // handlers register inside whenReady. The session token lives encrypted in
 // the credential store and never crosses IPC.
@@ -645,10 +673,14 @@ function registerIpcHandlers(): void {
       );
       return ImportWorkspaceFilesResult.parse({ imported });
     }
-    const result = await dialog.showOpenDialog({
-      properties: ["openFile", "multiSelections"],
-      title: "Import files into workspace",
-    });
+    const picked = testImportPaths();
+    const result =
+      picked === null
+        ? await dialog.showOpenDialog({
+            properties: ["openFile", "multiSelections"],
+            title: "Import files into workspace",
+          })
+        : { canceled: false, filePaths: picked };
     const imported = result.canceled
       ? []
       : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
