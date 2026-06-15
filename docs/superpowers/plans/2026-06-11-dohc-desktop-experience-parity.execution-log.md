@@ -8,24 +8,38 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(properties) BUILT, REVIEW CLEAN, ALL
-  REQUIRED GATES GREEN = next commit**. Actual branch/head:
-  `codex/desktop-experience-parity` at `837f6bd`. Dirty files are the current
-  E5(properties) lane only:
-  `apps/desktop/src/renderer/FileInspector.{tsx,test.tsx}`,
-  `apps/desktop/src/renderer/PropertiesPanel.{tsx,test.tsx}`,
-  `apps/desktop/src/renderer/markdown/frontmatter.{ts,test.ts}`,
-  `apps/desktop/src/renderer/editor/import-export.{ts,test.ts}`,
-  `services/hocuspocus/src/import-export.{ts,test.ts}`,
-  `apps/desktop/e2e/properties.spec.ts`,
-  `docs/superpowers/reviews/codex/e5-properties-review.md`, and this log.
-  Active background task: full desktop E2E launched before the interrupt with
-  `xvfb-run` parent PID `1083078` / Playwright PID `1083091`; last captured
-  output had 33/62 tests passing through the performance specs. Open worktrees:
+- Current update (2026-06-15): **E5(SYNC-WART) BUILT, REVIEW CLEAN, ALL
+  REQUIRED GATES GREEN AND COMMITTED**. Actual branch/head:
+  `codex/desktop-experience-parity` at the current E5 sync commit. Dirty
+  files: none expected after this snapshot amend.
+  Current phase/lane: E5 pinned offline-rename/concurrent-remote-edit sync
+  correctness is complete. Exact next action: run post-commit review, then
+  continue with E5 notices/share UI/workspace-management if it stays clean.
+  Active background tasks: none; full desktop E2E session `93077` completed
+  green 62/62 in 19.7m. Open
+  workflows: completed read-only E5 recon explorers
+  `019ec885-de06-7f00-a196-c90d553bc4b7` (sharing/workspace) and
+  `019ec886-f868-7c50-b173-48510d2812fa` (remaining surfaces); focused sync
+  re-review explorer `019ec8b8-1460-7fd3-a3c6-4abcc9ffd6dc` completed with
+  no findings. Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
   and this worktree on `codex/desktop-experience-parity`. No mutating
-  subagent/workflow lanes are active. Markdown files now have a desktop properties
-  panel for frontmatter, with `id`/`title` kept system-owned and hidden.
+  subagent/workflow lanes are active. Review status: initial sync verifier
+  found two accepted high-confidence risks (mid-pull target edit and remote
+  target collision), both fixed with tests; CodeRabbit uncommitted review after
+  fixes returned `findings:0` in
+  `/tmp/e5-sync-wart-coderabbit-after-fixes.raw`; focused re-review returned no
+  findings. Gates: workspace-sync tests PASS 43/43; workspace-sync typecheck
+  PASS; git diff --check PASS; full desktop E2E PASS 62/62 (19.7m);
+  `pnpm check:performance` PASS (cold 1107, warm 1098/1200, createEmpty 58,
+  open1000 339, md250 66, tiptapMount 1837/2000, typing 0, singleFileSync
+  788, hundredFileChangeSet 864, appTester 240, sqlite 71, csv 271,
+  contentSearch 36/58, memory 554/708, bundle 1.18/1.408; warm app open
+  documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist
+  entries; architecture debt 12 allowlist entries, 66 historical docs).
+  E5(properties) remains committed green: markdown files
+  have a desktop properties panel for frontmatter, with `id`/`title` kept
+  system-owned and hidden.
   Local edits route through the existing bounded markdown autosave/unmount
   flush; shared edits patch the `frontmatter` Y.Map without clearing unrelated
   keys. WYSIWYG mode strips only parser-recognized raw frontmatter and
@@ -49,9 +63,9 @@ design review + codex review + fix commit, every phase).
   architecture debt 12 allowlist entries, 66 historical docs). Design review:
   screenshots in `test-results/screenshots/e5-properties/` show no overlap,
   readable contrast, compact property rows, and consistent light/dark treatment
-  at both required sizes. NEXT = stage exact E5(properties) files, commit, and
-  continue the remaining E5 surfaces: notices/share UI/workspace management/
-  import-export/database/apps-runtime plus the pinned SYNC-WART before E6/E7.
+  at both required sizes. NEXT = continue the remaining E5 surfaces:
+  notices/share UI/workspace management/import-export/database/apps-runtime
+  before E6/E7.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history, and
   properties/frontmatter are built. NEXT = **E5 remaining feature parity
@@ -89,14 +103,15 @@ design review + codex review + fix commit, every phase).
   watcher-ready race; detected.md written into chokidar's ignoreInitial scan
   was swallowed -> added data-ready shell attr the perf-open helper gates on;
   rewrote 100-file assertion to poll cumulative count + assert 1-5 batch rows
-  via change-set testid). FULL E2E 55/55, perf green. SYNC-WART (pinned, E5):
-  offline-rename+concurrent-remote-edit-of-old-path -> spurious <old>.conflict
-  + stale-revision push refusal; fix in E5 sharing phase. COMMITS: a5343a3/
+  via change-set testid). FULL E2E 55/55, perf green. SYNC-WART (fixed in
+  E5): offline-rename+concurrent-remote-edit-of-old-path now rebases the clean
+  rename without a spurious <old>.conflict or stale-revision push wedge; target
+  mid-pull edits and remote target collisions fall back to conflicts. COMMITS: a5343a3/
   cab8525/6703984 (e5 server), 0c40626/c56c17f (e0-e1), 7a85b1f/ba808e4 (e2),
   3b9d327 (e3), 24282cb (e5.0), e532d82 (watcher de-flake), a94ac27 (e3 fix),
   6151bd6 (e4a foundation), e4b-1 plugins, e4b-2 editor, 4627209 (E4c rich
   collab/server), cc4b4e9 (E4c fix), b2f6407 (E5 graph), 837f6bd
-  (E5 catch-up), E5(properties)=this.
+  (E5 catch-up), 68c365b (E5 properties), current E5 sync commit.
 - Branch: `codex/desktop-experience-parity` (created from detached `5f2c09b`
   because `claude/desktop-local-first-cloud-sync` was already checked out in
   another worktree). Commit convention `eN: …` + `eN(fix): …`.
@@ -156,6 +171,37 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(sync-wart) — DONE (this commit, 2026-06-15)
+
+Fixed the pinned E5 sync wart: if a synced file is renamed offline and the
+remote concurrently edits the old path before the next first-contact pull,
+merge sync now recognizes the clean local rename, writes the remote edit into
+the renamed target, rebases the old-path baseline revision, and lets the next
+push send the rename without a stale-revision wedge. The rebase is deliberately
+conservative: it only applies for a one-to-one missing-baseline/new-disk hash
+pair, re-hashes the target immediately before writing, and refuses to rebase if
+the remote already owns the target path. Mid-pull local target edits and remote
+target collisions fall back to `.conflict` files instead of overwriting local
+work.
+
+Tests: `mergeSync.test.ts` rewrote the old current-contract pin to the fixed
+contract, added a clean-rename baseline cleanup assertion, and added regression
+coverage for mid-pull target edits plus remote target-path collisions. Review:
+initial focused sync verifier found both risks before commit; both were fixed
+with tests. CodeRabbit uncommitted review after fixes returned `findings:0` in
+`/tmp/e5-sync-wart-coderabbit-after-fixes.raw`; focused re-review returned no
+findings.
+
+Gates: workspace-sync test PASS 43/43; workspace-sync typecheck PASS; git
+diff --check PASS; full desktop E2E PASS 62/62 (19.7m);
+`pnpm check:performance` PASS (cold 1107, warm 1098/1200, createEmpty 58,
+open1000 339, md250 66, tiptapMount 1837/2000, typing 0, singleFileSync 788,
+hundredFileChangeSet 864, appTester 240, sqlite 71, csv 271, contentSearch
+36/58, memory 554/708, bundle 1.18/1.408; warm app open documented skip);
+`pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+architecture debt 12 allowlist entries, 66 historical docs). No UI changed, so
+no new screenshot/design gate was required for this non-UI sync lane.
 
 ### e5(properties) — DONE (this commit, 2026-06-14)
 

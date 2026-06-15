@@ -458,6 +458,7 @@ describe("rename sync semantics (E3 pins)", () => {
         toPath: "notes/final.md",
       }),
     ]);
+    expect((await sync.push()).pushed).toBe(0);
   });
 
   it("an OFFLINE rename with no remote change survives pull-before-push cleanly (no resurrect, no conflict)", async () => {
@@ -481,24 +482,7 @@ describe("rename sync semantics (E3 pins)", () => {
     expect([...server.files.keys()]).toEqual(["b.md"]);
   });
 
-  // ⚠ KNOWN WART, pinned as the CURRENT contract (accepted for E3, recorded
-  // in the phase ledger — do NOT change engine behavior this phase). Rename
-  // a synced file while OFFLINE *and* let the remote edit the old path; on
-  // relaunch firstContact pulls BEFORE it pushes:
-  //   1. pull sees a baseline entry whose local file is gone (the rename's
-  //      old path) with a NEWER remote revision, applies the no-resurrect
-  //      rule, and lands the remote content as a spurious `<old>.conflict`;
-  //   2. push then sends the rename with the BASELINE's expectedRevision —
-  //      now stale — so the server refuses it, the baseline never advances,
-  //      and the rename op retries (and fails) identically on every push:
-  //      the new path NEVER reaches the server.
-  // FIX CONDITION: pull must sha-pair a missing baseline entry against a new
-  // local file with the same hash (recognize delete+create as a rename)
-  // before declaring a local deletion, and rebase the pending rename's
-  // expectedRevision — engine work out of E3 scope. If this pin fails
-  // because the conflict no longer appears AND b.md reaches the server,
-  // the wart was fixed: delete this test and the ledger entry.
-  it("offline-rename + remote-edit-of-old-path: spurious <old>.conflict and the rename WEDGES (current contract)", async () => {
+  it("offline-rename + remote-edit-of-old-path rebases the rename and never creates a spurious conflict", async () => {
     const server = fakeServer();
     await writeFile(join(root, "a.md"), "v1");
     const sync = engine(server);
@@ -510,19 +494,67 @@ describe("rename sync semantics (E3 pins)", () => {
     server.set("a.md", "v2-remote"); // concurrent remote edit (revision 2)
 
     const pulled = await sync.pull();
-    // The spurious user-facing artifact this pin documents:
-    expect(pulled.conflicts).toContain("a.md");
-    expect(await readFile(join(root, "a.md.conflict"), "utf8")).toBe("v2-remote");
+    expect(pulled.conflicts).toEqual([]);
+    expect(existsSync(join(root, "a.md.conflict"))).toBe(false);
+    expect(existsSync(join(root, "a.md"))).toBe(false);
+    expect(await readFile(join(root, "b.md"), "utf8")).toBe("v2-remote");
 
-    // And the wedge: the rename op carries the stale baseline revision, the
-    // server refuses it, and retrying changes nothing.
     const pushed = await sync.push();
-    expect(pushed.pushed).toBe(0);
-    const again = await sync.push();
-    expect(again.pushed).toBe(0);
-    expect(server.files.has("b.md")).toBe(false);
-    expect(server.files.get("a.md")?.body).toBe("v2-remote");
-    // The conflict artifact itself never uploads.
+    expect(pushed.pushed).toBe(1);
+    expect(server.files.has("a.md")).toBe(false);
+    expect(server.files.get("b.md")?.body).toBe("v2-remote");
     expect(server.files.has("a.md.conflict")).toBe(false);
+    expect((await sync.push()).pushed).toBe(0);
+  });
+
+  it("does not overwrite a renamed target edited during the pull", async () => {
+    const server = fakeServer();
+    await writeFile(join(root, "a.md"), "v1");
+    const sync = engine(server);
+    await sync.initialize();
+    await sync.push();
+
+    await rm(join(root, "a.md"));
+    await writeFile(join(root, "b.md"), "v1");
+    server.set("a.md", "v2-remote");
+
+    const racingFetch: FetchLike = async (input, init) => {
+      const res = await server.fetchImpl(input, init);
+      if (/\/files$/.test(String(input))) {
+        await writeFile(join(root, "b.md"), "MID-PULL local edit");
+      }
+      return res;
+    };
+    const racing = createMergeSync({
+      rootDir: root,
+      remoteWorkspaceId: "ws-1",
+      serverUrl: "http://cloud.test",
+      token: "tok",
+      fetch: racingFetch,
+    });
+
+    const pulled = await racing.pull();
+    expect(pulled.conflicts).toEqual(["a.md"]);
+    expect(await readFile(join(root, "b.md"), "utf8")).toBe("MID-PULL local edit");
+    expect(await readFile(join(root, "a.md.conflict"), "utf8")).toBe("v2-remote");
+  });
+
+  it("does not rebase a clean rename when the remote independently owns the target path", async () => {
+    const server = fakeServer();
+    await writeFile(join(root, "a.md"), "v1");
+    const sync = engine(server);
+    await sync.initialize();
+    await sync.push();
+
+    await rm(join(root, "a.md"));
+    await writeFile(join(root, "b.md"), "v1");
+    server.set("a.md", "v2-remote");
+    server.set("b.md", "remote target");
+
+    const pulled = await sync.pull();
+    expect(pulled.conflicts).toEqual(["a.md", "b.md"]);
+    expect(await readFile(join(root, "b.md"), "utf8")).toBe("v1");
+    expect(await readFile(join(root, "a.md.conflict"), "utf8")).toBe("v2-remote");
+    expect(await readFile(join(root, "b.md.conflict"), "utf8")).toBe("remote target");
   });
 });

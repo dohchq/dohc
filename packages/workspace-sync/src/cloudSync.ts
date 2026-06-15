@@ -74,6 +74,7 @@ import {
   readManifest,
   resolveWorkspacePath,
   sha256,
+  scanWorkspaceFiles,
   scanWorkspaceDiff,
   type FsDiffOperation,
   type ScannedWorkspaceFile,
@@ -279,6 +280,9 @@ export function createMergeSync({
       for (const operation of candidate) {
         const path = operation.op === "rename" ? operation.toPath : operation.path;
         const result = okByPath.get(path);
+        if (operation.op === "rename") {
+          if (result) delete files[operation.fromPath];
+        }
         if (operation.op === "delete") {
           if (result) delete files[operation.path];
           continue;
@@ -301,6 +305,8 @@ export function createMergeSync({
 
     async pull() {
       const manifest = await readBoundManifest();
+      const diskFiles = await scanWorkspaceFiles(rootDir);
+      const cleanLocalRenames = detectCleanLocalRenames(manifest, diskFiles);
       const remote = await listRemote();
       const remotePaths = new Set(remote.map((file) => file.path));
       const files = { ...manifest.files };
@@ -337,6 +343,16 @@ export function createMergeSync({
         // resurrect: land the remote content beside it as .conflict and leave
         // the baseline so the deletion still pushes.
         if (entry && liveSha === null) {
+          const cleanRename = cleanLocalRenames.get(path);
+          const targetStillClean = cleanRename
+            ? (await diskSha(rootDir, cleanRename.path)) === cleanRename.sha256
+            : false;
+          if (cleanRename && targetStillClean && !remotePaths.has(cleanRename.path)) {
+            await writeWorkspaceFile(rootDir, cleanRename.path, bytes);
+            pulled += 1;
+            files[path] = baselineEntry(file, read.file.revision, remoteSha);
+            continue;
+          }
           await writeWorkspaceFile(rootDir, `${path}.conflict`, bytes);
           conflicts.push(path);
           continue;
@@ -403,6 +419,37 @@ export function createMergeSync({
   }
 }
 
+function detectCleanLocalRenames(
+  manifest: WorkspaceManifest,
+  diskFiles: ScannedWorkspaceFile[],
+): Map<string, ScannedWorkspaceFile> {
+  const diskByPath = new Map(diskFiles.map((file) => [file.path, file]));
+  const missingBySha = new Map<string, string[]>();
+  const createdBySha = new Map<string, ScannedWorkspaceFile[]>();
+
+  for (const [path, entry] of Object.entries(manifest.files)) {
+    if (!entry.sha256 || path.endsWith(".conflict") || diskByPath.has(path)) continue;
+    const paths = missingBySha.get(entry.sha256) ?? [];
+    paths.push(path);
+    missingBySha.set(entry.sha256, paths);
+  }
+
+  for (const file of diskFiles) {
+    if (file.path.endsWith(".conflict") || manifest.files[file.path]) continue;
+    const files = createdBySha.get(file.sha256) ?? [];
+    files.push(file);
+    createdBySha.set(file.sha256, files);
+  }
+
+  const renames = new Map<string, ScannedWorkspaceFile>();
+  for (const [sha, missingPaths] of missingBySha) {
+    const createdFiles = createdBySha.get(sha) ?? [];
+    if (missingPaths.length !== 1 || createdFiles.length !== 1) continue;
+    renames.set(missingPaths[0]!, createdFiles[0]!);
+  }
+  return renames;
+}
+
 function baselineEntry(file: RemoteFile, revision: string, sha: string): WorkspaceManifestEntry {
   return {
     id: file.id,
@@ -438,4 +485,3 @@ async function diskSha(rootDir: string, path: string): Promise<string | null> {
   }
   return sha256(await readFile(target));
 }
-
