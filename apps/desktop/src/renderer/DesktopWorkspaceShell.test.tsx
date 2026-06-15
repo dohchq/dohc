@@ -36,6 +36,8 @@ const STORED_STATE: WorkspaceUiState = {
   historyVisible: true,
 };
 
+Element.prototype.scrollIntoView = vi.fn();
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
@@ -100,6 +102,21 @@ function makeBridge(
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     getDroppedFilePaths: vi.fn(() => []),
     listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
+    listWorkspaceMembers: vi.fn(async () => ({
+      members: [{ userId: "owner-1", email: "owner@dohc.test", role: "owner" }],
+    })),
+    listWorkspaceInvites: vi.fn(async () => ({ invites: [] })),
+    createWorkspaceInvite: vi.fn(async () => ({
+      invite: {
+        inviteId: "invite-1",
+        workspaceId: "ws-shell-test",
+        email: "new@dohc.test",
+        role: "member",
+        invitedBy: "owner-1",
+        status: "pending" as const,
+      },
+    })),
+    revokeWorkspaceInvite: vi.fn(async () => undefined),
     collabToken: vi.fn(async () => ({ available: false as const })),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
       activityCallback = callback;
@@ -255,6 +272,27 @@ describe("imports and exports", () => {
       expect(bridge.exportWorkspaceZip).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
       });
+    });
+  });
+});
+
+describe("workspace management", () => {
+  it("opens the workspace management dialog from the command palette", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(await screen.findByRole("textbox", { name: "Command" }), "manage");
+    await user.keyboard("{Enter}");
+
+    const dialog = await screen.findByTestId("workspace-management-dialog");
+    expect(within(dialog).getByText("owner@dohc.test")).toBeTruthy();
+    expect(bridge.listWorkspaceMembers).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+    });
+    expect(bridge.listWorkspaceInvites).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
     });
   });
 });

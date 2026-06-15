@@ -9,7 +9,13 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { chromium, type Browser, type ElectronApplication } from "playwright";
-import { launchApp, openInTree } from "./launch";
+import {
+  childProcessEnv,
+  launchApp,
+  openInTree,
+  stopChildProcess,
+  tsxChildEnv,
+} from "./launch";
 
 // Phase 18: the final product readiness matrix as ONE sequential journey over
 // the real product — desktop first-run with no account, real files on disk,
@@ -199,6 +205,7 @@ async function mcpConnect(root: string, home: string): Promise<Client> {
       "--home",
       home,
     ],
+    env: childProcessEnv(),
   });
   const client = new Client({ name: "dohc-e2e-readiness", version: "1.0.0" });
   await client.connect(transport);
@@ -250,6 +257,7 @@ test.beforeAll(async () => {
       cwd: join(process.cwd(), "services/workspace-api"),
       env: {
         ...process.env,
+        ...tsxChildEnv(),
         DOHC_TEST_AUTH: "1",
         NODE_ENV: "test",
         WORKSPACE_API_PORT: String(API_PORT),
@@ -268,8 +276,8 @@ test.afterAll(async () => {
     await handle?.close().catch(() => undefined);
   }
   await browser?.close().catch(() => undefined);
-  webServer?.kill("SIGTERM");
-  api?.kill("SIGTERM");
+  await stopChildProcess(webServer);
+  await stopChildProcess(api);
 });
 
 // --- the journey -------------------------------------------------------------

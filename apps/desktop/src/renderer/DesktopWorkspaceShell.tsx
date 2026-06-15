@@ -76,6 +76,11 @@ const LazyImportExportDialog = lazy(() =>
     default: mod.ImportExportDialog,
   })),
 );
+const LazyWorkspaceManagementDialog = lazy(() =>
+  import("./WorkspaceManagementDialog").then((mod) => ({
+    default: mod.WorkspaceManagementDialog,
+  })),
+);
 const LazySearchView = lazy(() =>
   import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
 );
@@ -300,6 +305,7 @@ export function DesktopWorkspaceShell(props: {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sharePath, setSharePath] = useState<string | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
+  const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -820,6 +826,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => setCloudOpen(true),
       },
       {
+        id: "manage-workspace",
+        label: "Manage workspace members",
+        run: () => setWorkspaceManagementOpen(true),
+      },
+      {
         id: "settings",
         label: "Settings: Agents & MCP",
         run: () => setSettingsOpen(true),
@@ -1144,7 +1155,13 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {cloudOpen ? (
         <Overlay onClose={() => setCloudOpen(false)}>
-          <CloudLogin workspaceId={workspaceId} />
+          <CloudLogin
+            workspaceId={workspaceId}
+            onManageWorkspace={() => {
+              setCloudOpen(false);
+              setWorkspaceManagementOpen(true);
+            }}
+          />
         </Overlay>
       ) : null}
       {settingsOpen ? (
@@ -1187,6 +1204,22 @@ export function DesktopWorkspaceShell(props: {
               activePath={wb.activeTab}
               onImported={() => void refreshFiles()}
               onClose={() => setImportExportOpen(false)}
+            />
+          </Suspense>
+        </Overlay>
+      ) : null}
+      {workspaceManagementOpen ? (
+        <Overlay onClose={() => setWorkspaceManagementOpen(false)}>
+          <Suspense
+            fallback={
+              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
+                Loading workspace members...
+              </div>
+            }
+          >
+            <LazyWorkspaceManagementDialog
+              workspaceId={workspaceId}
+              onClose={() => setWorkspaceManagementOpen(false)}
             />
           </Suspense>
         </Overlay>

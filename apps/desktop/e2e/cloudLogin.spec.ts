@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { launchApp, stopChildProcess, tsxChildEnv } from "./launch";
 
 // Drives the REAL device-authorization flow end to end: the desktop asks the
 // live workspace-api (Better Auth on Postgres — `pnpm dev:postgres` must have
@@ -44,6 +44,7 @@ test.beforeAll(async () => {
       cwd: join(process.cwd(), "services/workspace-api"),
       env: {
         ...process.env,
+        ...tsxChildEnv(),
         DOHC_TEST_AUTH: "1",
         // The seam now fails closed unless NODE_ENV is dev/test (so a stray
         // DOHC_TEST_AUTH in a real deployment crashes instead of opening).
@@ -56,9 +57,9 @@ test.beforeAll(async () => {
   await waitForHealth();
 });
 
-test.afterAll(() => {
+test.afterAll(async () => {
   // Our own child from this run — terminate by handle, never by pattern.
-  server?.kill("SIGTERM");
+  await stopChildProcess(server);
 });
 
 async function seededWorkspace(): Promise<{ home: string; root: string }> {

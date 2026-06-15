@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp, openInTree } from "./launch";
+import { launchApp, openInTree, stopChildProcess, tsxChildEnv } from "./launch";
 
 // The full Phase 9 story over real wires: login (device flow), enable sync
 // (claims the workspace on the server), local edits PUSH to Postgres, and
@@ -39,15 +39,21 @@ test.beforeAll(async () => {
     [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],
     {
       cwd: join(process.cwd(), "services/workspace-api"),
-      env: { ...process.env, DOHC_TEST_AUTH: "1", NODE_ENV: "test", WORKSPACE_API_PORT: String(PORT) },
+      env: {
+        ...process.env,
+        ...tsxChildEnv(),
+        DOHC_TEST_AUTH: "1",
+        NODE_ENV: "test",
+        WORKSPACE_API_PORT: String(PORT),
+      },
       stdio: "ignore",
     },
   );
   await waitForHealth();
 });
 
-test.afterAll(() => {
-  server?.kill("SIGTERM");
+test.afterAll(async () => {
+  await stopChildProcess(server);
 });
 
 // A session token for server-side assertions, minted through the same device

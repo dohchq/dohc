@@ -117,11 +117,12 @@ test("first run creates a real workspace folder and lands in a native shell", as
   // The full registry: new-file, new-folder, quick-open, open-workspace,
   // import/export, export-workspace, toggle-sidebar, close-tab, toggle-history, the six
   // workbench view commands (show-explorer … show-history), connect-cloud,
-  // settings, toggle-theme.
-  await expect(palette.getByRole("option")).toHaveCount(18);
+  // manage-workspace, settings, toggle-theme.
+  await expect(palette.getByRole("option")).toHaveCount(19);
   await expect(palette).toContainText(/import \/ export workspace/i);
   await expect(palette).toContainText(/export workspace as zip/i);
   await expect(palette).toContainText(/connect dohc cloud/i);
+  await expect(palette).toContainText(/manage workspace members/i);
   await expect(palette).toContainText(/toggle sidebar/i);
   await page.keyboard.type("new");
   await expect(palette.getByRole("option").first()).toContainText(/new/i);

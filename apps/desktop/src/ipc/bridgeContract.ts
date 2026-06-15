@@ -530,7 +530,21 @@ export type RevokeWorkspaceSharePayload = z.infer<
   typeof RevokeWorkspaceSharePayload
 >;
 
-const WorkspaceInviteRow = z.object({
+export const WorkspaceMemberRow = z.object({
+  userId: z.string().min(1).max(200),
+  email: EMAIL_STRING.nullable(),
+  role: z.string().min(1).max(50),
+});
+export type WorkspaceMemberRow = z.infer<typeof WorkspaceMemberRow>;
+
+export const ListWorkspaceMembersResult = z.object({
+  members: z.array(WorkspaceMemberRow).max(500),
+});
+export type ListWorkspaceMembersResult = z.infer<
+  typeof ListWorkspaceMembersResult
+>;
+
+export const WorkspaceInviteRow = z.object({
   inviteId: z.string().min(1).max(200),
   workspaceId: WORKSPACE_ID,
   email: EMAIL_STRING,
@@ -538,6 +552,14 @@ const WorkspaceInviteRow = z.object({
   invitedBy: z.string().min(1).max(200),
   status: z.enum(["pending", "claimed"]),
 });
+export type WorkspaceInviteRow = z.infer<typeof WorkspaceInviteRow>;
+
+export const ListWorkspaceInvitesResult = z.object({
+  invites: z.array(WorkspaceInviteRow).max(500),
+});
+export type ListWorkspaceInvitesResult = z.infer<
+  typeof ListWorkspaceInvitesResult
+>;
 
 export const CreateWorkspaceInvitePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -552,6 +574,14 @@ export const CreateWorkspaceInviteResult = z.object({
 });
 export type CreateWorkspaceInviteResult = z.infer<
   typeof CreateWorkspaceInviteResult
+>;
+
+export const RevokeWorkspaceInvitePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  inviteId: z.string().min(1).max(200),
+});
+export type RevokeWorkspaceInvitePayload = z.infer<
+  typeof RevokeWorkspaceInvitePayload
 >;
 
 // Live co-editing token: the renderer asks for a short-lived collab JWT for a
@@ -824,9 +854,16 @@ export interface DohcDesktopBridge {
     payload: CreateWorkspaceSharePayload,
   ): Promise<CreateWorkspaceShareResult>;
   revokeWorkspaceShare(payload: RevokeWorkspaceSharePayload): Promise<void>;
+  listWorkspaceMembers(
+    payload: ListWorkspaceSharesPayload,
+  ): Promise<ListWorkspaceMembersResult>;
+  listWorkspaceInvites(
+    payload: ListWorkspaceSharesPayload,
+  ): Promise<ListWorkspaceInvitesResult>;
   createWorkspaceInvite(
     payload: CreateWorkspaceInvitePayload,
   ): Promise<CreateWorkspaceInviteResult>;
+  revokeWorkspaceInvite(payload: RevokeWorkspaceInvitePayload): Promise<void>;
   collabToken(payload: CollabTokenPayload): Promise<CollabTokenResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   listChangeSets(

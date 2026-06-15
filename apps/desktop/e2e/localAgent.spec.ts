@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { launchApp } from "./launch";
+import { childProcessEnv, launchApp } from "./launch";
 
 // Phase 11: local agent + MCP. Two surfaces are proven end to end:
 //  1. The DESKTOP settings panel honestly exposes the MCP integration — the
@@ -94,6 +94,7 @@ test("the dohc MCP server serves workspace tools over stdio and refuses traversa
       "--home",
       home,
     ],
+    env: childProcessEnv(),
   });
   const client = new Client({ name: "dohc-e2e-agent", version: "1.0.0" });
   await client.connect(transport);

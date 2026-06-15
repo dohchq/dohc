@@ -13,7 +13,10 @@ type Phase =
 // the user to the browser to approve it, poll until the session lands. The
 // token never reaches this process — main stores it encrypted; we only ever
 // render status + email. Local-only use never opens this panel.
-export function CloudLogin(props: { workspaceId?: string }) {
+export function CloudLogin(props: {
+  workspaceId?: string;
+  onManageWorkspace?: () => void;
+}) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [workspaceSynced, setWorkspaceSynced] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
@@ -169,9 +172,21 @@ export function CloudLogin(props: { workspaceId?: string }) {
           </p>
           {props.workspaceId ? (
             workspaceSynced ? (
-              <p data-testid="cloud-workspace-synced" className="mb-0 mt-2 text-xs text-success">
-                This workspace syncs to the cloud — edits flow automatically.
-              </p>
+              <>
+                <p data-testid="cloud-workspace-synced" className="mb-0 mt-2 text-xs text-success">
+                  This workspace syncs to the cloud — edits flow automatically.
+                </p>
+                {props.onManageWorkspace ? (
+                  <button
+                    type="button"
+                    data-testid="cloud-manage-workspace"
+                    onClick={props.onManageWorkspace}
+                    className="mt-3 rounded border border-line bg-panel-2 px-3 py-1.5 text-xs text-muted hover:text-ink"
+                  >
+                    Manage workspace
+                  </button>
+                ) : null}
+              </>
             ) : (
               <>
                 <button

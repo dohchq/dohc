@@ -10,6 +10,7 @@ import {
 } from "./routes/files";
 import { mintCollabToken, type CollabTokenDeps, type CollabTokenRequest } from "./routes/collab";
 import { createInvite, listInvites, revokeInvite } from "./routes/invites";
+import { listWorkspaceMembers } from "./routes/members";
 import { resolveSharedAtom, type SharedAtomDeps } from "./routes/shared";
 import {
   createShare,
@@ -47,6 +48,7 @@ type WorkspaceRoute =
   | { route: "collab"; workspaceId: string; action: "token" }
   | { route: "events"; workspaceId: string }
   | { route: "shares"; workspaceId: string }
+  | { route: "members"; workspaceId: string }
   | { route: "invites"; workspaceId: string };
 
 export function createWorkspaceApiHandler({
@@ -141,6 +143,9 @@ export function createWorkspaceApiHandler({
       if (route.route === "shares" && request.method === "GET") {
         return jsonResponse(await listWorkspaceShares(shared, actor));
       }
+      if (route.route === "members" && request.method === "GET") {
+        return jsonResponse(await listWorkspaceMembers(shared, actor));
+      }
       if (route.route === "invites" && request.method === "POST") {
         return jsonResponse(await createInvite(shared, actor, () => readJson<{ email?: string }>(request)));
       }
@@ -191,6 +196,9 @@ function parseWorkspaceRoute(request: Request): WorkspaceRoute {
   }
   if (section === "shares" && parts.length === 3) {
     return { route: "shares", workspaceId };
+  }
+  if (section === "members" && parts.length === 3) {
+    return { route: "members", workspaceId };
   }
   if (section === "invites" && parts.length === 3) {
     return { route: "invites", workspaceId };

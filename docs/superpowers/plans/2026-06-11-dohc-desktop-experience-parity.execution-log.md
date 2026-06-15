@@ -8,99 +8,48 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(import/export) DONE**. Actual branch/head:
-  `codex/desktop-experience-parity` at the import/export commit. Dirty files:
-  none after the amend. Current phase/lane: E5 ImportsExportsPanel parity.
-  Exact next action: continue the remaining E5 surfaces (workspace management,
-  database grid polish, apps runtime) before E6/E7. Active background tasks:
-  none. Open workflows: completed read-only E5 recon
-  explorers `019ec885-de06-7f00-a196-c90d553bc4b7` (sharing/workspace) and
-  `019ec886-f868-7c50-b173-48510d2812fa` (remaining surfaces); focused
-  NoticeCenter diff review `019ec91c-3387-7f70-aa45-1ffc2409b50d` completed
-  with no findings. Import/export lane status: a lazy renderer-only
-  ImportExportDialog is reachable from the explorer footer and command
-  registry, imports through the existing picker/dropped-path IPC, exports the
-  active file or whole workspace through the bounded zip IPC, refreshes the
-  tree after import, and shows local status/errors with Electron IPC prefixes
-  stripped. Main adds only a test-mode import picker seam gated by
-  `DOHC_DESKTOP_TEST && !app.isPackaged`; production import paths remain the
-  native file dialog or the existing dropped-path flow. Final gates:
-  focused renderer Vitest PASS 11/11 (`ImportExportDialog`,
-  `DesktopWorkspaceShell`); desktop typecheck PASS; desktop build PASS (new
-  lazy `ImportExportDialog` chunk 8.80kB; renderer initial bundle 1.14MB);
-  named importExport E2E PASS 1/1 with 1280x800/1536x960 light+dark
-  screenshots in `test-results/screenshots/e5-import-export/`; first-run E2E
-  PASS 3/3 after updating the pinned command registry count; full desktop E2E
-  PASS 65/65 (21.3m); `pnpm check:performance` PASS (cold 1243, warm
-  1149/1200, createEmpty 52, open1000 365, md250 51, tiptapMount 1996/2000,
-  typing 0, singleFileSync 790, hundredFileChangeSet 865, appTester 243,
-  sqlite 331, csv 292, contentSearch 38/58, memory 555/708, bundle
-  1.14/1.408; warm app open documented skip); `pnpm check:lean` PASS (knip
-  clean; tech debt 4 allowlist entries; architecture debt 12 allowlist
-  entries, 66 historical docs). Design review PASS on the named screenshots:
-  no overlap, readable contrast, compact action rows, and long export paths
-  truncate inside the status row in both themes and gate sizes. CodeRabbit
-  final review returned `findings:0` in
-  `/tmp/e5-import-export-coderabbit.raw`. Prior sharing lane is committed
-  green as `b4aea96`; final CodeRabbit review returned `findings:0` in
-  `/tmp/e5-sharing-coderabbit-final2.raw`.
-  Open worktrees:
-  `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at `5f2c09b`
-  and this worktree on `codex/desktop-experience-parity`. No mutating
-  subagent/workflow lanes are active. Prior notices lane: new renderer-only
-  NoticeCenter derives conflict, cloud-disconnected, active-agent, and
-  update-ready notices from already-validated renderer state; no new IPC or
-  token exposure. Status bar keeps pinned `sync-status` and `update-toast`
-  surfaces. Review status: CodeRabbit uncommitted review
-  `/tmp/e5-notices-coderabbit.raw` found two minor E2E harness issues (silent
-  optional window send, missing guaranteed app cleanup); both fixed. Final
-  CodeRabbit review after fixes returned `findings:0` in
-  `/tmp/e5-notices-coderabbit-final.raw`; post-commit CodeRabbit review
-  returned `findings:0` in `/tmp/e5-notices-postcommit-coderabbit.raw`.
-  Gates: focused renderer Vitest PASS 12/12; desktop typecheck PASS; desktop
-  build PASS; named notices E2E PASS 1/1 with 1280x800/1536x960 light+dark
-  screenshots in `test-results/screenshots/e5-notices/`; git diff --check
-  PASS; full desktop E2E PASS 63/63 (19.7m); `pnpm check:performance` PASS
-  (cold 1067, warm 1047/1200, createEmpty 56, open1000 319, md250 66,
-  tiptapMount 1805/2000, typing 0, singleFileSync 790, hundredFileChangeSet
-  863, appTester 241, sqlite 27, csv 260, contentSearch 38/46, memory
-  554/708, bundle 1.18/1.408; warm app open documented skip);
-  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
-  architecture debt 12 allowlist entries, 66 historical docs). Design review:
-  screenshots show no overlap, readable contrast, and notice popover lifted
-  above the update toast in both themes.
-  Previous E5 sync lane is committed green as `03ac1cf`: workspace-sync tests
-  PASS 43/43; workspace-sync typecheck PASS; full desktop E2E PASS 62/62
-  (19.7m); performance and lean PASS.
-  E5(properties) remains committed green: markdown files have a desktop
-  properties panel for frontmatter, with `id`/`title` kept system-owned and
-  hidden.
-  Local edits route through the existing bounded markdown autosave/unmount
-  flush; shared edits patch the `frontmatter` Y.Map without clearing unrelated
-  keys. WYSIWYG mode strips only parser-recognized raw frontmatter and
-  reattaches the original bytes on save, while malformed/scalar/array/explicit
-  `null` frontmatter-looking blocks stay visible as body text. Truncated
-  markdown reads disable properties and collab to avoid prefix-only rewrites.
-  Hocuspocus import/export now matches the desktop parser/serializer for
-  non-map frontmatter and conditional blank separators. Review ledger:
-  `docs/superpowers/reviews/codex/e5-properties-review.md`; final direct
-  CodeRabbit trace `/tmp/e5-properties-coderabbit-after-parser-owned-seam.raw`
-  completed with `findings:0`. Final gates after resume/patches: git
-  diff --check PASS; desktop typecheck PASS; hocuspocus typecheck PASS;
-  focused desktop Vitest PASS 53/53; hocuspocus Vitest PASS 85/85; desktop
-  build PASS; named properties E2E PASS 1/1 after adding required
-  1280x800/1536x960 light+dark screenshots; full desktop E2E PASS 62/62
-  (22.5m); `pnpm check:performance` PASS (cold 1225, warm 1185/1200,
-  createEmpty 55, open1000 357, md250 69, tiptapMount 1932/2000, typing 0,
-  singleFileSync 787, hundredFileChangeSet 864, appTester 262, sqlite 75,
-  csv 292, contentSearch 42/61, memory 555/708, bundle 1.18/1.408);
-  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
-  architecture debt 12 allowlist entries, 66 historical docs). Design review:
-  screenshots in `test-results/screenshots/e5-properties/` show no overlap,
-  readable contrast, compact property rows, and consistent light/dark treatment
-  at both required sizes. NEXT = continue the remaining E5 surfaces:
-  share UI/workspace management/import-export/database/apps-runtime before
-  E6/E7.
+- Current update (2026-06-15): **E5(workspace management) DONE**. Actual
+  branch/head: `codex/desktop-experience-parity` at this
+  `e5(workspace): add desktop member management` commit. Dirty files: none
+  after commit. Current phase/lane: E5 WorkspaceManagementDialog parity.
+  Intent delivered: workspace-api now exposes member listing behind
+  server-side workspace access; desktop main owns cloud-token calls for member
+  list, pending invite list, invite create, and invite revoke; the renderer gets
+  only typed bridge methods and a lazy WorkspaceManagementDialog reachable from
+  the Cloud panel and command palette. E2E harness hardening included in this
+  lane: WSL-safe `tsx` temp env for child services, awaited child teardown by
+  handle, and sequential liveCoEditing service startup with a real Hocuspocus
+  TCP readiness check, closing the full-suite service-start timeout exposed by
+  this lane's new service spec. Gates: workspace-api focused Vitest PASS 3/3;
+  desktop focused Vitest PASS 12/12; workspace-api typecheck PASS; desktop
+  typecheck PASS; desktop build PASS (new lazy `WorkspaceManagementDialog`
+  chunk 11.40kB; renderer initial bundle 1.198MB in build, 1.14MB budget row);
+  named `workspaceManagement` E2E PASS 1/1 with light/dark screenshots at
+  1280x800 and 1536x960 in
+  `test-results/screenshots/e5-workspace-management/`; first-run E2E PASS 3/3
+  after command registry count update; full desktop E2E PASS 66/66 (24.1m) on
+  the final tree; service-heavy cleanup rerun PASS 6/6 after the CodeRabbit
+  cleanup-race fix; `pnpm check:performance` PASS (cold 1082, warm 1059/1200,
+  createEmpty 55, open1000 320, md250 66, tiptapMount 1790/2000, typing 0,
+  singleFileSync 787, hundredFileChangeSet 865, appTester 232, sqlite 367,
+  csv 249, contentSearch 35/55, memory 555/708, bundle 1.14/1.408; warm app
+  open documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4
+  allowlist entries; architecture debt 12 allowlist entries, 66 historical
+  docs); `git diff --check` PASS. Design review PASS: screenshots show no
+  overlap, readable contrast, stable modal sizing, and long member/invite
+  emails truncate inside rows in both themes and sizes. Review status:
+  CodeRabbit uncommitted review first found two valid cleanup races in
+  `stopChildProcess`; fixed and reran service-heavy E2E. Final CodeRabbit
+  review returned `findings:0` in
+  `/tmp/e5-workspace-management-coderabbit-final.raw`. Exact next action:
+  stage and commit this green increment, then continue remaining E5 surfaces
+  (database grid polish, apps runtime) before E6/E7. Active background tasks:
+  none. Open worktrees: `/home/ice/dev/dohc` on
+  `claude/desktop-local-first-cloud-sync` at `5f2c09b` and this worktree on
+  `codex/desktop-experience-parity`. Open workflows: completed read-only E5
+  recon explorers `019ec885-de06-7f00-a196-c90d553bc4b7` and
+  `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
+  are active. Pending reviews/findings: none.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history, and
   properties/frontmatter are built. NEXT = **E5 remaining feature parity
@@ -207,6 +156,49 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(workspace-management) — DONE (this commit, 2026-06-15)
+
+Added the desktop workspace-management parity surface for cloud-synced
+workspaces. The workspace-api now serves `GET /workspaces/:id/members` behind
+the same server-side member/owner predicate as share and invitation routes,
+including an owner fallback when no live member row exists and email resolution
+from Better Auth users or legacy users. Desktop main owns all cloud-token calls
+for members and invitations; preload exposes only typed IPC methods, and the
+renderer opens a lazy WorkspaceManagementDialog from the Cloud panel or command
+palette. The dialog lists members and pending invitations, creates pending
+invites, handles immediately claimed invites by refreshing members, revokes
+pending invites, and strips Electron IPC prefixes from local-only errors.
+
+Trust shape: the renderer never receives the dohc Cloud Bearer token. Every new
+IPC handler validates payloads, asserts a trusted sender, resolves the
+registered remote workspace from the local workspace id, and calls cloud APIs
+through `cloudJson`. Server membership auth happens before route results are
+returned, so non-members cannot enumerate member or invitation data. Invite
+revocation stays on the existing member-gated `DELETE /invites/:id` route.
+
+E2E harness hardening: the new service-heavy workspace-management spec exposed
+two existing WSL/full-suite issues in the test harness. `tsx` child services now
+receive `/tmp` temp variables when inherited WSL `TEMP`/`TMP` point at `/mnt`,
+service children are terminated by awaited process handles instead of
+fire-and-forget `kill`, and liveCoEditing starts workspace-api before
+Hocuspocus with a TCP readiness check and captured output tails. This removed
+the prior full-suite `beforeAll` service timeout without broad process kills.
+
+Gates: workspace-api focused Vitest PASS 3/3; desktop focused Vitest PASS 12/12;
+workspace-api typecheck PASS; desktop typecheck PASS; desktop build PASS; named
+workspaceManagement E2E PASS 1/1 with 1280x800/1536x960 light+dark screenshots
+in `test-results/screenshots/e5-workspace-management/`; first-run E2E PASS 3/3;
+full desktop E2E PASS 66/66 (24.1m); post-review service-heavy E2E rerun PASS
+6/6 (`cloudLogin`, `cloudSync`, `liveCoEditing`, `workspaceManagement`);
+`pnpm check:performance` PASS (cold 1082, warm 1059/1200, createEmpty 55,
+open1000 320, md250 66, tiptapMount 1790/2000, typing 0, singleFileSync 787,
+hundredFileChangeSet 865, appTester 232, sqlite 367, csv 249, contentSearch
+35/55, memory 555/708, bundle 1.14/1.408; warm app open documented skip);
+`pnpm check:lean` PASS; `git diff --check` PASS. Design review PASS: no overlap,
+readable contrast, compact modal layout, visible revoke control, and bounded
+email truncation in both themes and sizes. CodeRabbit final uncommitted review
+returned `findings:0` in `/tmp/e5-workspace-management-coderabbit-final.raw`.
 
 ### e5(import-export) — DONE (this commit, 2026-06-15)
 

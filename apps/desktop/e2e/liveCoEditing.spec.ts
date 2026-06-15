@@ -2,11 +2,12 @@ import { expect, test, type Page } from "@playwright/test";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Y from "yjs";
 import { encodeDocName } from "../../../services/hocuspocus/src/doc-name";
-import { launchApp, openInTree } from "./launch";
+import { launchApp, openInTree, stopChildProcess, tsxChildEnv } from "./launch";
 
 // Two Electron clients on the SAME shared markdown doc must converge live via
 // Hocuspocus. Boots the real workspace-api (Better Auth + collab-token) and a
@@ -23,25 +24,94 @@ const SERVICE_START_TIMEOUT_MS = 300_000;
 
 let api: ChildProcess;
 let hocuspocus: ChildProcess;
+const serviceOutput = new WeakMap<ChildProcess, string[]>();
 
 function spawnService(entry: string, cwd: string, env: Record<string, string>): ChildProcess {
-  return spawn(process.execPath, [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), entry], {
+  const child = spawn(process.execPath, [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), entry], {
     cwd: join(process.cwd(), cwd),
-    env: { ...process.env, ...env },
-    stdio: "ignore",
+    env: { ...process.env, ...tsxChildEnv(), ...env },
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  serviceOutput.set(child, []);
+  child.stdout?.on("data", (chunk) => captureServiceOutput(child, "stdout", chunk));
+  child.stderr?.on("data", (chunk) => captureServiceOutput(child, "stderr", chunk));
+  return child;
 }
 
-async function waitForHttp(url: string, timeoutMs = SERVICE_START_TIMEOUT_MS): Promise<void> {
+function captureServiceOutput(child: ChildProcess, stream: string, chunk: Buffer) {
+  const lines = serviceOutput.get(child) ?? [];
+  lines.push(
+    ...chunk
+      .toString("utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => `${stream}: ${line}`),
+  );
+  serviceOutput.set(child, lines.slice(-30));
+}
+
+function childExitMessage(child: ChildProcess, label: string): string {
+  return [
+    `${label} exited before ready (code ${child.exitCode}, signal ${child.signalCode})`,
+    ...((serviceOutput.get(child) ?? []).slice(-10)),
+  ].join("\n");
+}
+
+async function waitForHttp(
+  url: string,
+  child?: ChildProcess,
+  timeoutMs = SERVICE_START_TIMEOUT_MS,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    if (child && child.exitCode !== null) {
+      throw new Error(childExitMessage(child, url));
+    }
     try {
       if ((await fetch(url)).ok) return;
     } catch {
       /* not up */
     }
+    if (child && child.exitCode !== null) {
+      throw new Error(childExitMessage(child, url));
+    }
     if (Date.now() > deadline) throw new Error(`not healthy: ${url} (run pnpm dev:postgres?)`);
     await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+async function waitForTcp(
+  port: number,
+  child?: ChildProcess,
+  timeoutMs = SERVICE_START_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (child && child.exitCode !== null) {
+      throw new Error(childExitMessage(child, `localhost:${port}`));
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const socket = createConnection({ host: "127.0.0.1", port });
+        socket.setTimeout(500);
+        socket.once("connect", () => {
+          socket.end();
+          resolve();
+        });
+        socket.once("error", reject);
+        socket.once("timeout", () => {
+          socket.destroy();
+          reject(new Error("tcp wait timed out"));
+        });
+      });
+      return;
+    } catch {
+      if (child && child.exitCode !== null) {
+        throw new Error(childExitMessage(child, `localhost:${port}`));
+      }
+      if (Date.now() > deadline) throw new Error(`not listening: localhost:${port}`);
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 }
 
@@ -53,6 +123,7 @@ test.beforeAll(async () => {
     WORKSPACE_API_PORT: String(API_PORT),
     HOCUSPOCUS_JWT_SECRET: JWT_SECRET,
   });
+  await waitForHttp(`${API_URL}/health`, api);
   hocuspocus = spawnService("src/server.ts", "services/hocuspocus", {
     HOCUSPOCUS_PORT: String(HP_PORT),
     HOCUSPOCUS_DATABASE_URL: PG,
@@ -61,15 +132,14 @@ test.beforeAll(async () => {
     HOCUSPOCUS_ADMIN_TOKEN: "coedit-admin",
     HOCUSPOCUS_QUIET: "true",
   });
-  await waitForHttp(`${API_URL}/health`);
-  // Hocuspocus has no /health; the upgrade endpoint answering (even 4xx) is
-  // enough to know it bound the port.
-  await new Promise((r) => setTimeout(r, 2500));
+  await waitForTcp(HP_PORT, hocuspocus);
 });
 
-test.afterAll(() => {
-  api?.kill("SIGTERM");
-  hocuspocus?.kill("SIGTERM");
+test.afterAll(async () => {
+  await Promise.all([
+    stopChildProcess(api),
+    stopChildProcess(hocuspocus),
+  ]);
 });
 
 async function seedShared(workspaceId: string, body: string): Promise<{ home: string; root: string }> {

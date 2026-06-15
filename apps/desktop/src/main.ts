@@ -58,6 +58,8 @@ import {
   RunAppTesterResult,
   ListWorkspaceSharesPayload,
   ListWorkspaceSharesResult,
+  ListWorkspaceMembersResult,
+  ListWorkspaceInvitesResult,
   ReadCatchUpSummaryPayload,
   ReadCatchUpSummaryResult,
   ListChangeSetsResult,
@@ -76,6 +78,7 @@ import {
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
   RevokeWorkspaceSharePayload,
+  RevokeWorkspaceInvitePayload,
   WriteWorkspaceTextPayload,
   SetTitlebarThemePayload,
   SetWorkspaceUiStatePayload,
@@ -853,6 +856,30 @@ function registerIpcHandlers(): void {
     });
   });
 
+  ipcMain.handle(CHANNELS.listWorkspaceMembers, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceSharesPayload.parse(payload);
+    const { remote } = remoteForWorkspace(input.workspaceId);
+    return ListWorkspaceMembersResult.parse(
+      await cloudJson(
+        input.workspaceId,
+        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/members`,
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.listWorkspaceInvites, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListWorkspaceSharesPayload.parse(payload);
+    const { remote } = remoteForWorkspace(input.workspaceId);
+    return ListWorkspaceInvitesResult.parse(
+      await cloudJson(
+        input.workspaceId,
+        `/workspaces/${encodeURIComponent(remote.remoteWorkspaceId)}/invites`,
+      ),
+    );
+  });
+
   ipcMain.handle(CHANNELS.createWorkspaceInvite, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateWorkspaceInvitePayload.parse(payload);
@@ -867,6 +894,14 @@ function registerIpcHandlers(): void {
         },
       ),
     );
+  });
+
+  ipcMain.handle(CHANNELS.revokeWorkspaceInvite, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeWorkspaceInvitePayload.parse(payload);
+    await cloudJson(input.workspaceId, `/invites/${encodeURIComponent(input.inviteId)}`, {
+      method: "DELETE",
+    });
   });
 
   // Mints a short-lived live-co-editing token for one atom. Only available for

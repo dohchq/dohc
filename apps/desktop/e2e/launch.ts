@@ -1,4 +1,5 @@
 import { mkdtemp } from "node:fs/promises";
+import type { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +8,62 @@ import {
   type Locator,
   type Page,
 } from "playwright";
+
+// tsx creates an IPC socket under os.tmpdir(). In WSL, inherited Windows
+// TEMP/TMP values point at /mnt/c, where Unix sockets are not supported.
+// Keep native environments untouched; only redirect WSL-ish temp dirs.
+export function tsxChildEnv(): Record<string, string> {
+  if (
+    process.platform === "linux" &&
+    (process.env.TMP?.startsWith("/mnt/") ||
+      process.env.TEMP?.startsWith("/mnt/"))
+  ) {
+    return { TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp" };
+  }
+  return {};
+}
+
+export function childProcessEnv(
+  overrides: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    ),
+    ...tsxChildEnv(),
+    ...overrides,
+  };
+}
+
+export async function stopChildProcess(
+  child: ChildProcess | null | undefined,
+  timeoutMs = 10_000,
+): Promise<void> {
+  if (!child) return;
+  let resolveExit!: () => void;
+  const onExit = () => resolveExit();
+  const exited = new Promise<void>((resolve) => {
+    resolveExit = resolve;
+    child.once("exit", onExit);
+  });
+  if (child.exitCode !== null || child.signalCode !== null) {
+    child.off("exit", onExit);
+    return;
+  }
+  try {
+    if (!child.kill("SIGTERM")) {
+      child.off("exit", onExit);
+      return;
+    }
+  } catch {
+    child.off("exit", onExit);
+    return;
+  }
+  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
+  child.off("exit", onExit);
+}
 
 // Single source for launching the built desktop app in E2E. Keeps the
 // dist path, the WSL --no-sandbox flag, and the test env in one place.
