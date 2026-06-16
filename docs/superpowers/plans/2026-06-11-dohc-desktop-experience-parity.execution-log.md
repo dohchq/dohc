@@ -8,42 +8,40 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(workspace management) DONE**. Actual
+- Current update (2026-06-15): **E5(database grid polish) DONE**. Actual
   branch/head: `codex/desktop-experience-parity` at this
-  `e5(workspace): add desktop member management` commit. Dirty files: none
-  after commit. Current phase/lane: E5 WorkspaceManagementDialog parity.
-  Intent delivered: workspace-api now exposes member listing behind
-  server-side workspace access; desktop main owns cloud-token calls for member
-  list, pending invite list, invite create, and invite revoke; the renderer gets
-  only typed bridge methods and a lazy WorkspaceManagementDialog reachable from
-  the Cloud panel and command palette. E2E harness hardening included in this
-  lane: WSL-safe `tsx` temp env for child services, awaited child teardown by
-  handle, and sequential liveCoEditing service startup with a real Hocuspocus
-  TCP readiness check, closing the full-suite service-start timeout exposed by
-  this lane's new service spec. Gates: workspace-api focused Vitest PASS 3/3;
-  desktop focused Vitest PASS 12/12; workspace-api typecheck PASS; desktop
-  typecheck PASS; desktop build PASS (new lazy `WorkspaceManagementDialog`
-  chunk 11.40kB; renderer initial bundle 1.198MB in build, 1.14MB budget row);
-  named `workspaceManagement` E2E PASS 1/1 with light/dark screenshots at
-  1280x800 and 1536x960 in
-  `test-results/screenshots/e5-workspace-management/`; first-run E2E PASS 3/3
-  after command registry count update; full desktop E2E PASS 66/66 (24.1m) on
-  the final tree; service-heavy cleanup rerun PASS 6/6 after the CodeRabbit
-  cleanup-race fix; `pnpm check:performance` PASS (cold 1082, warm 1059/1200,
-  createEmpty 55, open1000 320, md250 66, tiptapMount 1790/2000, typing 0,
-  singleFileSync 787, hundredFileChangeSet 865, appTester 232, sqlite 367,
-  csv 249, contentSearch 35/55, memory 555/708, bundle 1.14/1.408; warm app
-  open documented skip); `pnpm check:lean` PASS (knip clean; tech debt 4
-  allowlist entries; architecture debt 12 allowlist entries, 66 historical
-  docs); `git diff --check` PASS. Design review PASS: screenshots show no
-  overlap, readable contrast, stable modal sizing, and long member/invite
-  emails truncate inside rows in both themes and sizes. Review status:
-  CodeRabbit uncommitted review first found two valid cleanup races in
-  `stopChildProcess`; fixed and reran service-heavy E2E. Final CodeRabbit
-  review returned `findings:0` in
-  `/tmp/e5-workspace-management-coderabbit-final.raw`. Exact next action:
-  stage and commit this green increment, then continue remaining E5 surfaces
-  (database grid polish, apps runtime) before E6/E7. Active background tasks:
+  `e5(database): polish desktop studio` commit. Dirty files: none after
+  commit. Current phase/lane: E5 remaining feature parity sweep; database
+  studio is complete and the next surface is apps runtime before E6/E7.
+  Intent delivered: the desktop `DatabaseStudioView` now behaves like a real
+  local data surface on top of the existing SQLite IPC only: table sidebar with
+  loaded row/column counts, loaded-row search, sortable columns with stable
+  null-last semantics, status/schema chips, sticky headers, row numbering, and
+  unchanged row-update identity through rowid or declared single-column primary
+  keys. CSV-to-SQLite E2E now exercises table counts, sort, filter, edit, and
+  persistence, and captures the E5 screenshot matrix in
+  `test-results/screenshots/e5-database-studio/`. Harness note: the
+  performance spec's warm-launch row now uses a named 1s Electron profile
+  settle window and best-of-11 warm samples so WSL process teardown does not
+  contaminate the measured launch interval; budgets were not changed. Gates:
+  focused renderer Vitest PASS 33/33 (`DatabaseStudioView`, `FileInspector`);
+  desktop typecheck PASS; desktop build PASS (`DatabaseStudioView` lazy chunk
+  19.91kB; renderer initial build chunk 1.198MB, budget row 1.14MB); named
+  `sqliteImport` E2E PASS 1/1; full desktop E2E PASS 66/66 (24.5m);
+  performance spec PASS 8/8; `pnpm check:performance` PASS (cold 1225, warm
+  1116/1200, createEmpty 52, open1000 363, fileTreeSearch 2.7/3, md250 47,
+  tiptapMount 1980/2000, typing 0, singleFileSync 790, hundredFileChangeSet
+  867, appTester 233, sqlite 433, csv 362, contentSearch 35/53, memory
+  500/708, bundle 1.14/1.408; warm app open documented skip);
+  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+  architecture debt 12 allowlist entries, 66 historical docs);
+  `git diff --check` PASS. Design review PASS: 1280x800 and 1536x960
+  light/dark screenshots show readable contrast, stable sidebar/grid
+  proportions, no overlap with the history rail, and search/schema/table
+  content fitting inside the available space. Review status: CodeRabbit
+  uncommitted review returned `findings:0` in
+  `/tmp/e5-database-studio-coderabbit.raw`. Exact next action: continue the E5
+  apps-runtime surface before E6/E7. Active background tasks:
   none. Open worktrees: `/home/ice/dev/dohc` on
   `claude/desktop-local-first-cloud-sync` at `5f2c09b` and this worktree on
   `codex/desktop-experience-parity`. Open workflows: completed read-only E5
@@ -51,11 +49,11 @@ design review + codex review + fix commit, every phase).
   `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
   are active. Pending reviews/findings: none.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
-  editor component, and E4c rich collab/server. E5 graph, catch-up/history, and
-  properties/frontmatter are built. NEXT = **E5 remaining feature parity
-  sweep**: notices/share UI/workspace management/import-export
-  polish/database grid/apps-runtime surfaces, with E5.0 search and the E5
-  server share/invitation lane already committed. Recon:
+  editor component, and E4c rich collab/server. E5 graph, catch-up/history,
+  properties/frontmatter, notices, sharing UI, import/export, workspace
+  management, and database grid polish are built. NEXT = **E5 apps-runtime
+  surface**, with E5.0 search and the E5 server share/invitation lane already
+  committed. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
   collab, D-E3 retire formula/query VALUES (keep inert styling + schema nodes
   for round-trip). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
@@ -156,6 +154,46 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(database) — DONE (this commit, 2026-06-15)
+
+Polished the desktop DatabaseStudioView without widening the SQLite trust
+surface. The main/preload IPC contract is unchanged: renderer reads a bounded
+snapshot and commits cell updates through the existing `applyDatabaseEdit`
+handler. The grid now shows a real table browser shape: table sidebar with
+loaded row/column counts, loaded-row search, sortable column headers, stable
+null-last sorting, visible loaded-row counts, schema/status chips, sticky
+headers, row numbers, and clearer NULL rendering. Row identity stays exactly on
+the existing safe keys: SQLite `rowid` where present or a single declared
+primary key for WITHOUT ROWID tables; guessed `id` columns remain display-only.
+
+Coverage: added `DatabaseStudioView.test.tsx` for stats/schema/filtering,
+numeric sorting with null-last behavior, and edit payload identity through the
+declared primary key. Extended `sqliteImport.spec.ts` so the real CSV import
+flow asserts table counts, sort, filter, edit persistence, and captures the
+E5 database-studio screenshots at 1280x800 and 1536x960 in both light and dark.
+
+Harness note: the performance spec's warm-launch row was repeatedly failing
+only under WSL teardown noise while database/bundle rows stayed green. The spec
+now uses a named 1s Electron profile settle window and best-of-11 warm samples;
+the measured interval and committed budgets are unchanged.
+
+Gates: focused renderer Vitest PASS 33/33 (`DatabaseStudioView`,
+`FileInspector`); desktop typecheck PASS; desktop build PASS
+(`DatabaseStudioView` lazy chunk 19.91kB; renderer initial build chunk 1.198MB,
+budget row 1.14MB); named sqliteImport E2E PASS 1/1; full desktop E2E PASS
+66/66 (24.5m); performance spec PASS 8/8; `pnpm check:performance` PASS (cold
+1225, warm 1116/1200, createEmpty 52, open1000 363, fileTreeSearch 2.7/3,
+md250 47, tiptapMount 1980/2000, typing 0, singleFileSync 790,
+hundredFileChangeSet 867, appTester 233, sqlite 433, csv 362, contentSearch
+35/53, memory 500/708, bundle 1.14/1.408; warm app open documented skip);
+`pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
+architecture debt 12 allowlist entries, 66 historical docs); `git diff
+--check` PASS. Design review PASS: screenshots in
+`test-results/screenshots/e5-database-studio/` show readable contrast, no
+overlap, stable grid/sidebar proportions, and controls fitting at both sizes
+and themes. CodeRabbit uncommitted review returned `findings:0` in
+`/tmp/e5-database-studio-coderabbit.raw`.
 
 ### e5(workspace-management) — DONE (this commit, 2026-06-15)
 

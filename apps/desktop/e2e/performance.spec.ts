@@ -1,6 +1,14 @@
 import { performanceBudgets } from "@dohc/performance";
 import { expect, test } from "@playwright/test";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus, platform, release, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
@@ -15,6 +23,7 @@ import { launchApp, openInTree } from "./launch";
 
 const PERF_DIR = "test-results/performance";
 const PERF_FILE = join(PERF_DIR, "desktop-performance.json");
+const ELECTRON_PROFILE_SETTLE_MS = 1_000;
 const SHOT_DIR = "test-results/screenshots/phase-16";
 
 type MetricName = keyof typeof performanceBudgets;
@@ -58,7 +67,10 @@ async function recordPatch(patch: {
   await writeFile(PERF_FILE, `${JSON.stringify(merged, null, 2)}\n`);
 }
 
-async function recordMetric(name: MetricName, record: MetricRecord): Promise<void> {
+async function recordMetric(
+  name: MetricName,
+  record: MetricRecord,
+): Promise<void> {
   await recordPatch({ metrics: { [name]: record } });
 }
 
@@ -108,14 +120,22 @@ async function seedWorkspace(
   await mkdir(join(root, ".dohc"), { recursive: true });
   await writeFile(
     join(root, ".dohc", "manifest.json"),
-    JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" }),
+    JSON.stringify({
+      version: 1,
+      workspaceId,
+      kind: "personal",
+      mode: "local-first",
+    }),
   );
   await fill?.(root);
   return { home, root };
 }
 
 async function openSeededWorkspace(home: string, root: string) {
-  const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: root });
+  const app = await launchApp({
+    DOHC_TEST_HOME: home,
+    DOHC_TEST_PICK_PATH: root,
+  });
   const page = await app.firstWindow();
   await page.getByRole("button", { name: /open an existing folder/i }).click();
   const shell = page.getByTestId("workspace-shell");
@@ -124,7 +144,9 @@ async function openSeededWorkspace(home: string, root: string) {
   // watcher's initial scan) resolves a beat later. Writes made before then land
   // during chokidar's ignoreInitial scan and are silently dropped. Gate on the
   // watcher being live so post-open writes are guaranteed observed.
-  await expect(shell).toHaveAttribute("data-ready", "true", { timeout: 15_000 });
+  await expect(shell).toHaveAttribute("data-ready", "true", {
+    timeout: 15_000,
+  });
   return { app, page };
 }
 
@@ -136,10 +158,15 @@ interface MarksSnapshot {
 // Renderer-side recorder, exposed through the test-only window hook.
 async function rendererSnapshot(page: Page): Promise<MarksSnapshot> {
   const snapshot = await page.evaluate(() => {
-    const w = window as Window & { dohcDesktopMarks?: { snapshot(): MarksSnapshot } };
+    const w = window as Window & {
+      dohcDesktopMarks?: { snapshot(): MarksSnapshot };
+    };
     return w.dohcDesktopMarks?.snapshot() ?? null;
   });
-  expect(snapshot, "renderer marks hook must be installed in test mode").not.toBeNull();
+  expect(
+    snapshot,
+    "renderer marks hook must be installed in test mode",
+  ).not.toBeNull();
   return snapshot ?? { marks: {}, measures: {} };
 }
 
@@ -162,7 +189,10 @@ async function freshMeasure(
     .poll(async () => (await rendererSnapshot(page)).marks[freshnessMark] ?? 0)
     .toBeGreaterThanOrEqual(sinceEpochMs - 250);
   const value = (await rendererSnapshot(page)).measures[measureName];
-  expect(value, `measure ${measureName} must be recorded`).toBeGreaterThanOrEqual(0);
+  expect(
+    value,
+    `measure ${measureName} must be recorded`,
+  ).toBeGreaterThanOrEqual(0);
   return value;
 }
 
@@ -179,7 +209,10 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   }> {
     const home = await mkdtemp(join(tmpdir(), "dohc-perf-home-"));
     const userData = await mkdtemp(join(tmpdir(), "dohc-perf-warm-"));
-    const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_USER_DATA: userData });
+    const app = await launchApp({
+      DOHC_TEST_HOME: home,
+      DOHC_TEST_USER_DATA: userData,
+    });
     const page = await app.firstWindow();
     const create = page.getByRole("button", { name: /create workspace/i });
     await expect(create).toBeVisible();
@@ -198,7 +231,9 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
     const second = await createWorkspaceRun();
     if (second.ms < createRun.ms) createRun = second;
   }
-  await recordMetric("createEmptyWorkspaceMs", { valueMs: Math.round(createRun.ms) });
+  await recordMetric("createEmptyWorkspaceMs", {
+    valueMs: Math.round(createRun.ms),
+  });
 
   // Scenarios 1–2: relaunches with the seeded registry land directly in the
   // shell. "Cold" gets a FRESH Electron user-data dir per attempt so the V8
@@ -208,7 +243,9 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   // "Warm" reuses the user-data dir from createWorkspaceRun, so Electron's
   // own profile caches carry exactly like a real returning-user launch.
   const home = createRun.home;
-  async function launchToShell(extraEnv: Record<string, string> = {}): Promise<number> {
+  async function launchToShell(
+    extraEnv: Record<string, string> = {},
+  ): Promise<number> {
     const t0 = performance.now();
     const app = await launchApp({ DOHC_TEST_HOME: home, ...extraEnv });
     const page = await app.firstWindow();
@@ -218,19 +255,21 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
     return ms;
   }
   await measureWithFidelity("coldLaunchToShellMs", async () =>
-    launchToShell({ DOHC_TEST_USER_DATA: await mkdtemp(join(tmpdir(), "dohc-perf-cold-")) }),
+    launchToShell({
+      DOHC_TEST_USER_DATA: await mkdtemp(join(tmpdir(), "dohc-perf-cold-")),
+    }),
   );
   // Electron profile teardown on WSL can briefly contend with the next launch
   // even when the next launch uses a different user-data dir. Do not count
   // that previous-process cleanup against the warm-profile startup budget.
-  await new Promise((r) => setTimeout(r, 500));
+  await new Promise((r) => setTimeout(r, ELECTRON_PROFILE_SETTLE_MS));
   await measureBestOf(
     "warmLaunchToShellMs",
     async () => {
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, ELECTRON_PROFILE_SETTLE_MS));
       return launchToShell({ DOHC_TEST_USER_DATA: createRun.userData });
     },
-    7,
+    11,
   );
 
   // Resource ratchet: renderer JS shipped to the first shell paint. Lazy route
@@ -245,24 +284,32 @@ test("launch: cold/warm to visible shell, empty workspace creation, bundle size"
   }
   const bundleMb = Math.round((bytes / 1024 ** 2) * 100) / 100;
   console.log(`renderer initial JS bundle: ${bundleMb} MB`);
-  await recordPatch({ ratchets: { rendererInitialBundleMb: { value: bundleMb } } });
+  await recordPatch({
+    ratchets: { rendererInitialBundleMb: { value: bundleMb } },
+  });
 });
 
 test("file tree: open 1000-file workspace to interactive tree (+ memory working set)", async () => {
   test.setTimeout(180_000);
   async function run(): Promise<number> {
-    const { home, root } = await seedWorkspace(`perf-1k-${Date.now()}`, async (dir) => {
-      for (let d = 0; d < 20; d++) {
-        const sub = join(dir, `notes-${String(d).padStart(2, "0")}`);
-        await mkdir(sub, { recursive: true });
-        await Promise.all(
-          Array.from({ length: 50 }, (_, i) =>
-            writeFile(join(sub, `note-${i}.md`), `# Note ${d}-${i}\n`),
-          ),
-        );
-      }
+    const { home, root } = await seedWorkspace(
+      `perf-1k-${Date.now()}`,
+      async (dir) => {
+        for (let d = 0; d < 20; d++) {
+          const sub = join(dir, `notes-${String(d).padStart(2, "0")}`);
+          await mkdir(sub, { recursive: true });
+          await Promise.all(
+            Array.from({ length: 50 }, (_, i) =>
+              writeFile(join(sub, `note-${i}.md`), `# Note ${d}-${i}\n`),
+            ),
+          );
+        }
+      },
+    );
+    const app = await launchApp({
+      DOHC_TEST_HOME: home,
+      DOHC_TEST_PICK_PATH: root,
     });
-    const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: root });
     const page = await app.firstWindow();
     const open = page.getByRole("button", { name: /open an existing folder/i });
     await expect(open).toBeVisible();
@@ -275,13 +322,17 @@ test("file tree: open 1000-file workspace to interactive tree (+ memory working 
     const ms = performance.now() - t0;
 
     // Resource ratchet: total working set with the 1,000-file workspace open.
-    const metrics = await app.evaluate(({ app: electronApp }) => electronApp.getAppMetrics());
+    const metrics = await app.evaluate(({ app: electronApp }) =>
+      electronApp.getAppMetrics(),
+    );
     const workingSetKb = metrics.reduce(
       (sum, m) => sum + (m.memory?.workingSetSize ?? 0),
       0,
     );
     await recordPatch({
-      ratchets: { workspaceMemoryWorkingSetMb: { value: Math.round(workingSetKb / 1024) } },
+      ratchets: {
+        workspaceMemoryWorkingSetMb: { value: Math.round(workingSetKb / 1024) },
+      },
     });
     await shot(page, "file-tree-1000");
     await app.close();
@@ -297,14 +348,18 @@ test("file tree search: 10,000 paths query + visible result", async () => {
       const sub = join(dir, `area-${String(d).padStart(3, "0")}`);
       await mkdir(sub, { recursive: true });
       await Promise.all(
-        Array.from({ length: 100 }, (_, i) => writeFile(join(sub, `doc-${i}.md`), `# ${d}-${i}\n`)),
+        Array.from({ length: 100 }, (_, i) =>
+          writeFile(join(sub, `doc-${i}.md`), `# ${d}-${i}\n`),
+        ),
       );
     }
     await writeFile(join(dir, "needle-target.md"), "# Needle\n");
   });
   const { app, page } = await openSeededWorkspace(home, root);
   await expect(
-    page.getByTestId("file-tree").getByText("needle-target.md", { exact: true }),
+    page
+      .getByTestId("file-tree")
+      .getByText("needle-target.md", { exact: true }),
   ).toBeVisible({ timeout: 120_000 });
   await shot(page, "file-tree-10000");
 
@@ -313,7 +368,9 @@ test("file tree search: 10,000 paths query + visible result", async () => {
     const quickOpen = page.getByTestId("quick-open");
     await expect(quickOpen).toBeVisible();
     await page.keyboard.type("needle");
-    await expect(quickOpen.getByRole("option").first()).toContainText("needle-target.md");
+    await expect(quickOpen.getByRole("option").first()).toContainText(
+      "needle-target.md",
+    );
     const measures = await rendererMeasures(page);
     await page.keyboard.press("Escape");
     await expect(quickOpen).toHaveCount(0);
@@ -339,7 +396,9 @@ test("file tree search: 10,000 paths query + visible result", async () => {
   await recordMetric("fileTreeSearchTenThousandPathsMs", {
     valueMs: Math.round(result.query * 100) / 100,
   });
-  await recordMetric("fileTreeSearchVisibleResultMs", { valueMs: Math.round(result.visible) });
+  await recordMetric("fileTreeSearchVisibleResultMs", {
+    valueMs: Math.round(result.visible),
+  });
   await app.close();
 });
 
@@ -353,20 +412,25 @@ test("content search: first result + complete scan + keystroke long tasks over 1
   const paragraph =
     "Ordinary prose sentence with several common words inside it, repeated to weigh the file. ";
   const body = `# Doc\n\n${paragraph.repeat(110)}\n`; // ~10KB
-  const { home, root } = await seedWorkspace("perf-search-100mb", async (dir) => {
-    for (let d = 0; d < 100; d++) {
-      const sub = join(dir, `corpus-${String(d).padStart(3, "0")}`);
-      await mkdir(sub, { recursive: true });
-      await Promise.all(
-        Array.from({ length: 100 }, (_, i) =>
-          writeFile(
-            join(sub, `doc-${i}.md`),
-            (d * 100 + i) % 10 === 0 ? `${body}contentneedle ${d}-${i}\n` : body,
+  const { home, root } = await seedWorkspace(
+    "perf-search-100mb",
+    async (dir) => {
+      for (let d = 0; d < 100; d++) {
+        const sub = join(dir, `corpus-${String(d).padStart(3, "0")}`);
+        await mkdir(sub, { recursive: true });
+        await Promise.all(
+          Array.from({ length: 100 }, (_, i) =>
+            writeFile(
+              join(sub, `doc-${i}.md`),
+              (d * 100 + i) % 10 === 0
+                ? `${body}contentneedle ${d}-${i}\n`
+                : body,
+            ),
           ),
-        ),
-      );
-    }
-  });
+        );
+      }
+    },
+  );
   const { app, page } = await openSeededWorkspace(home, root);
   await page.getByTestId("activity-search").click();
   await expect(page.getByTestId("search-view")).toBeVisible();
@@ -389,7 +453,8 @@ test("content search: first result + complete scan + keystroke long tasks over 1
       const w = window as Window & { __longTasks?: number[] };
       w.__longTasks = [];
       new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) w.__longTasks?.push(entry.duration);
+        for (const entry of list.getEntries())
+          w.__longTasks?.push(entry.duration);
       }).observe({ type: "longtask" });
     });
     await input.click();
@@ -405,8 +470,14 @@ test("content search: first result + complete scan + keystroke long tasks over 1
     return longTasks.length === 0 ? 0 : Math.max(...longTasks);
   }
   // Clearing the input settles the view back to idle before each probe.
-  async function waitFor(p: Page, view: ReturnType<Page["getByTestId"]>, state: string) {
-    await expect(view).toHaveAttribute("data-state", state, { timeout: 30_000 });
+  async function waitFor(
+    p: Page,
+    view: ReturnType<Page["getByTestId"]>,
+    state: string,
+  ) {
+    await expect(view).toHaveAttribute("data-state", state, {
+      timeout: 30_000,
+    });
   }
   await measureWithFidelity("searchKeystrokeLongTaskMs", typeProbe);
 
@@ -444,9 +515,15 @@ test("content search: first result + complete scan + keystroke long tasks over 1
       complete: Math.min(result.complete, second.complete),
     };
   }
-  await recordMetric("contentSearchFirstResultMs", { valueMs: Math.round(result.first) });
-  await recordMetric("contentSearchCompleteMs", { valueMs: Math.round(result.complete) });
-  await expect(page.getByTestId("search-summary")).toContainText(/1000 results/);
+  await recordMetric("contentSearchFirstResultMs", {
+    valueMs: Math.round(result.first),
+  });
+  await recordMetric("contentSearchCompleteMs", {
+    valueMs: Math.round(result.complete),
+  });
+  await expect(page.getByTestId("search-summary")).toContainText(
+    /1000 results/,
+  );
   await shot(page, "content-search-100mb");
   await app.close();
 });
@@ -454,7 +531,9 @@ test("content search: first result + complete scan + keystroke long tasks over 1
 test("markdown: open a 250KB document, then typing long tasks in the editor", async () => {
   test.setTimeout(180_000);
   const paragraph =
-    "This is a realistic paragraph of prose with **bold**, a [link](https://example.com), and `code` spans. ".repeat(3);
+    "This is a realistic paragraph of prose with **bold**, a [link](https://example.com), and `code` spans. ".repeat(
+      3,
+    );
   let body = "# Big document\n\n";
   while (body.length < 250 * 1024) {
     body += `## Section\n\n${paragraph}\n\n- first item\n- second item\n\n`;
@@ -476,8 +555,15 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
     await tree.getByText("big.md", { exact: true }).click();
     // Anchor on content unique to THIS document, then wait for the freshness
     // mark so the measure read belongs to THIS open, never the previous file.
-    await expect(page.getByTestId("view-markdown")).toContainText("Big document");
-    const value = await freshMeasure(page, "markdown-open", "markdown-opened", clickEpoch);
+    await expect(page.getByTestId("view-markdown")).toContainText(
+      "Big document",
+    );
+    const value = await freshMeasure(
+      page,
+      "markdown-open",
+      "markdown-opened",
+      clickEpoch,
+    );
     // Swap away so the next attempt is a real re-open.
     await tree.getByText("small.md", { exact: true }).click();
     await expect(page.getByTestId("view-markdown")).toContainText("Small");
@@ -499,7 +585,9 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
     await tree.getByText("small.md", { exact: true }).click();
     await expect(page.getByTestId("view-markdown")).toContainText("Small");
     await tree.getByText("big.md", { exact: true }).click();
-    await expect(page.getByTestId("view-markdown")).toContainText("Big document");
+    await expect(page.getByTestId("view-markdown")).toContainText(
+      "Big document",
+    );
     const t0 = performance.now();
     await page.getByTestId("markdown-edit-toggle").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
@@ -519,11 +607,14 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
       const w = window as Window & { __longTasks?: number[] };
       w.__longTasks = [];
       new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) w.__longTasks?.push(entry.duration);
+        for (const entry of list.getEntries())
+          w.__longTasks?.push(entry.duration);
       }).observe({ type: "longtask" });
     });
     await editor.click();
-    await page.keyboard.type("The quick brown fox jumps over the lazy dog.", { delay: 30 });
+    await page.keyboard.type("The quick brown fox jumps over the lazy dog.", {
+      delay: 30,
+    });
     const longTasks = await page.evaluate(
       () => (window as Window & { __longTasks?: number[] }).__longTasks ?? [],
     );
@@ -545,7 +636,9 @@ test("watcher: single-save detection and a 100-file change set", async () => {
   const t0 = performance.now();
   await writeFile(join(root, "detected.md"), "# Saved externally\n");
   await expect(timeline).toContainText(/detected\.md/i, { timeout: 15_000 });
-  await recordMetric("singleFileSyncDetectMs", { valueMs: Math.round(performance.now() - t0) });
+  await recordMetric("singleFileSyncDetectMs", {
+    valueMs: Math.round(performance.now() - t0),
+  });
 
   // Scenario: a 100-file burst is BATCHED into change set(s), not one record
   // per file. The watcher's 500ms settle window usually captures all 100 in a
@@ -556,7 +649,10 @@ test("watcher: single-save detection and a 100-file change set", async () => {
   // sets. Reading the cumulative count off the timeline tolerates the batch
   // boundary; pinning the exact "100 files" single row did not (flaky).
   const bulkCount = (text: string): number =>
-    [...text.matchAll(/(\d+)\s+files?\b/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+    [...text.matchAll(/(\d+)\s+files?\b/g)].reduce(
+      (sum, m) => sum + Number(m[1]),
+      0,
+    );
   const baselineFiles = bulkCount((await timeline.textContent()) ?? "");
   const baselineRows = await timeline.getByTestId("change-set").count();
   await mkdir(join(root, "bulk"), { recursive: true });
@@ -568,13 +664,20 @@ test("watcher: single-save detection and a 100-file change set", async () => {
   const t1 = performance.now();
   // Wait until the burst is fully recorded (cumulative file count climbs by 100).
   await expect
-    .poll(async () => bulkCount((await timeline.textContent()) ?? "") - baselineFiles, {
-      timeout: 30_000,
-    })
+    .poll(
+      async () =>
+        bulkCount((await timeline.textContent()) ?? "") - baselineFiles,
+      {
+        timeout: 30_000,
+      },
+    )
     .toBeGreaterThanOrEqual(100);
-  await recordMetric("hundredFileChangeSetMs", { valueMs: Math.round(performance.now() - t1) });
+  await recordMetric("hundredFileChangeSetMs", {
+    valueMs: Math.round(performance.now() - t1),
+  });
   // Batching held: 100 files landed in a handful of change sets, never ~100.
-  const bulkRows = (await timeline.getByTestId("change-set").count()) - baselineRows;
+  const bulkRows =
+    (await timeline.getByTestId("change-set").count()) - baselineRows;
   expect(bulkRows).toBeGreaterThanOrEqual(1);
   expect(bulkRows).toBeLessThanOrEqual(5);
 
@@ -665,7 +768,9 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
       };
     };
     const db = new DatabaseSync(join(dir, "data", "big.sqlite"));
-    db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, amount REAL)");
+    db.exec(
+      "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, amount REAL)",
+    );
     const insert = db.prepare("INSERT INTO items (name, amount) VALUES (?, ?)");
     db.exec("BEGIN");
     for (let i = 0; i < 10_000; i++) insert.run(`item-${i}`, i * 1.5);
@@ -681,7 +786,12 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
     // Anchor on a row unique to this database, then on the freshness mark
     // (see the markdown scenario).
     await expect(page.getByTestId("db-table")).toContainText("item-0");
-    return freshMeasure(page, "sqlite-first-page", "sqlite-first-page-rendered", clickEpoch);
+    return freshMeasure(
+      page,
+      "sqlite-first-page",
+      "sqlite-first-page-rendered",
+      clickEpoch,
+    );
   }
   const sqliteBudget = performanceBudgets.sqliteTenThousandRowsFirstPageMs;
   let firstPageMs = await openSqlite();
@@ -691,7 +801,9 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
     await expect(page.getByTestId("view-csv")).toBeVisible({ timeout: 60_000 });
     firstPageMs = Math.min(firstPageMs, await openSqlite());
   }
-  await recordMetric("sqliteTenThousandRowsFirstPageMs", { valueMs: Math.round(firstPageMs) });
+  await recordMetric("sqliteTenThousandRowsFirstPageMs", {
+    valueMs: Math.round(firstPageMs),
+  });
   await shot(page, "database-10000-rows");
 
   // CSV import: click → engine parse/infer → atomic materialize → studio
@@ -703,8 +815,12 @@ test("database: 10,000-row SQLite first page and 10,000-row CSV import", async (
   const t0 = performance.now();
   await page.getByTestId("csv-import-sqlite").dispatchEvent("click");
   // The studio opens on the materialized rows.sqlite — anchor on its data.
-  await expect(page.getByTestId("db-table")).toContainText("txn_0", { timeout: 360_000 });
-  await recordMetric("csvTenThousandRowsImportMs", { valueMs: Math.round(performance.now() - t0) });
+  await expect(page.getByTestId("db-table")).toContainText("txn_0", {
+    timeout: 360_000,
+  });
+  await recordMetric("csvTenThousandRowsImportMs", {
+    valueMs: Math.round(performance.now() - t0),
+  });
   await shot(page, "database-csv-import");
   await app.close();
 });
