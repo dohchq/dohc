@@ -80,7 +80,15 @@ describe("DesktopSettings", () => {
 
   it("toggles the MCP server on, then reflects running status", async () => {
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    const onAgentActiveChange = vi.fn();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        onClose={() => {}}
+        onAgentActiveChange={onAgentActiveChange}
+      />,
+    );
     const toggle = await screen.findByTestId("mcp-enable-toggle");
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
 
@@ -89,9 +97,50 @@ describe("DesktopSettings", () => {
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
     expect(bridge.startAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(onAgentActiveChange).toHaveBeenLastCalledWith(true);
   });
 
   it("disables an enabled server, ending the active run", async () => {
+    mcpEnabled = true;
+    const user = userEvent.setup();
+    const onAgentActiveChange = vi.fn();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        onClose={() => {}}
+        onAgentActiveChange={onAgentActiveChange}
+      />,
+    );
+    const toggle = await screen.findByTestId("mcp-enable-toggle");
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
+    await user.click(toggle);
+    expect(bridge.endAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1", runId: "run-1" });
+    await waitFor(() => expect(onAgentActiveChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("refreshes stale stopped UI before toggling so it cannot disable behind an Enable label", async () => {
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    const toggle = await screen.findByTestId("mcp-enable-toggle");
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
+    mcpEnabled = true;
+    bridge.startAgentRun.mockClear();
+    bridge.endAgentRun.mockClear();
+
+    await user.click(toggle);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+    expect(bridge.endAgentRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("mcp-enable-toggle").textContent).toContain("Disable");
+  });
+
+  it("refreshes stale running UI before toggling so it cannot enable behind a Disable label", async () => {
     mcpEnabled = true;
     const user = userEvent.setup();
     render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
@@ -99,7 +148,17 @@ describe("DesktopSettings", () => {
     await waitFor(() =>
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
+    mcpEnabled = false;
+    bridge.startAgentRun.mockClear();
+    bridge.endAgentRun.mockClear();
+
     await user.click(toggle);
-    expect(bridge.endAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1", runId: "run-1" });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"),
+    );
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+    expect(bridge.endAgentRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("mcp-enable-toggle").textContent).toContain("Enable");
   });
 });

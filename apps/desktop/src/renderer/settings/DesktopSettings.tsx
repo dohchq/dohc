@@ -35,20 +35,22 @@ export function DesktopSettings(props: {
   workspaceId: string;
   workspacePath: string;
   onClose: () => void;
+  onAgentActiveChange?: (active: boolean) => void;
 }) {
-  const { workspaceId } = props;
+  const { workspaceId, onAgentActiveChange } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),
     ]);
     setStatus(nextStatus);
     setConfig(nextConfig);
+    return nextStatus;
   }, [workspaceId]);
 
   useEffect(() => {
@@ -58,18 +60,26 @@ export function DesktopSettings(props: {
   const enabled = status?.mcpEnabled ?? false;
 
   const toggle = useCallback(async () => {
+    const renderedRunId = status?.activeRun?.id ?? null;
     setBusy(true);
     try {
-      if (enabled && status?.activeRun) {
-        await bridge().endAgentRun({ workspaceId, runId: status.activeRun.id });
+      const latestStatus = await refresh();
+      const latestRun = latestStatus.activeRun;
+      if ((latestRun?.id ?? null) !== renderedRunId) {
+        onAgentActiveChange?.(latestRun !== null);
+        return;
+      }
+      if (latestRun) {
+        await bridge().endAgentRun({ workspaceId, runId: latestRun.id });
       } else {
         await bridge().startAgentRun({ workspaceId });
       }
-      await refresh();
+      const finalStatus = await refresh();
+      onAgentActiveChange?.(finalStatus.activeRun !== null);
     } finally {
       setBusy(false);
     }
-  }, [enabled, status, workspaceId, refresh]);
+  }, [workspaceId, refresh, status?.activeRun?.id, onAgentActiveChange]);
 
   const copyConfig = useCallback(async () => {
     if (!config) return;

@@ -1,6 +1,7 @@
 import { performanceBudgets } from "@dohc/performance";
 import { expect, test } from "@playwright/test";
 import {
+  cp,
   mkdir,
   mkdtemp,
   readdir,
@@ -144,6 +145,17 @@ async function openSeededWorkspace(home: string, root: string) {
   // watcher's initial scan) resolves a beat later. Writes made before then land
   // during chokidar's ignoreInitial scan and are silently dropped. Gate on the
   // watcher being live so post-open writes are guaranteed observed.
+  await expect(shell).toHaveAttribute("data-ready", "true", {
+    timeout: 15_000,
+  });
+  return { app, page };
+}
+
+async function openRegisteredWorkspace(home: string) {
+  const app = await launchApp({ DOHC_TEST_HOME: home });
+  const page = await app.firstWindow();
+  const shell = page.getByTestId("workspace-shell");
+  await expect(shell).toBeVisible();
   await expect(shell).toHaveAttribute("data-ready", "true", {
     timeout: 15_000,
   });
@@ -547,8 +559,8 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
     await writeFile(join(dir, "mid.md"), midBody);
     await writeFile(join(dir, "small.md"), "# Small\n");
   });
-  const { app, page } = await openSeededWorkspace(home, root);
-  const tree = page.getByTestId("file-tree");
+  let { app, page } = await openSeededWorkspace(home, root);
+  let tree = page.getByTestId("file-tree");
 
   async function openBig(): Promise<number> {
     const clickEpoch = Date.now();
@@ -578,22 +590,37 @@ test("markdown: open a 250KB document, then typing long tasks in the editor", as
     return value;
   })();
   await recordMetric("openMarkdown250KbMs", { valueMs: Math.round(openMs) });
+  await app.close();
 
   // Tiptap mount on a 250KB file is explicit and bounded; opening the file
   // itself still uses the fast incremental read path above.
-  async function mountBigEditor(): Promise<number> {
-    await tree.getByText("small.md", { exact: true }).click();
-    await expect(page.getByTestId("view-markdown")).toContainText("Small");
-    await tree.getByText("big.md", { exact: true }).click();
-    await expect(page.getByTestId("view-markdown")).toContainText(
-      "Big document",
-    );
-    const t0 = performance.now();
-    await page.getByTestId("markdown-edit-toggle").click();
-    await expect(page.getByTestId("markdown-editor")).toBeVisible();
-    return performance.now() - t0;
+  async function mountBigEditorCold(): Promise<number> {
+    const coldHome = await mkdtemp(join(tmpdir(), "dohc-perf-home-"));
+    const coldRoot = join(await mkdtemp(join(tmpdir(), "dohc-perf-cold-")), "workspace");
+    await cp(root, coldRoot, { recursive: true });
+    await rm(join(coldRoot, ".dohc", "ui-state.json"), { force: true });
+    const cold = await openSeededWorkspace(coldHome, coldRoot);
+    try {
+      const coldTree = cold.page.getByTestId("file-tree");
+      const t0 = performance.now();
+      await coldTree.getByText("big.md", { exact: true }).click();
+      await expect(cold.page.getByTestId("view-markdown")).toContainText(
+        "Big document",
+      );
+      await cold.page.getByTestId("markdown-edit-toggle").click();
+      await expect(cold.page.getByTestId("markdown-editor")).toBeVisible();
+      return performance.now() - t0;
+    } finally {
+      await cold.app.close();
+    }
   }
-  await measureWithFidelity("tiptapMount250KbMs", mountBigEditor);
+  // Tiptap/Chromium startup can catch a one-off scheduler spike on WSL2. Keep
+  // the hard first-edit budget: any fidelity retry launches a fresh home and
+  // starts timing before the markdown click can preload the lazy editor chunk.
+  await measureWithFidelity("tiptapMount250KbMs", mountBigEditorCold);
+
+  ({ app, page } = await openRegisteredWorkspace(home));
+  tree = page.getByTestId("file-tree");
 
   // Typing latency: no long task over 50ms while typing in a 32KB WYSIWYG
   // session, the largest doc size that opens in Tiptap by default.

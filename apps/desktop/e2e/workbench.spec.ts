@@ -109,18 +109,23 @@ test("activity bar: view switching with designed empty states, panel collapse on
   await expect(page.getByTestId("graph-doc-count")).toHaveText("1 doc");
   await expect(page.getByTestId("file-tree")).toHaveCount(0);
 
-  // Each not-yet-built view renders its designed empty state in the panel.
-  for (const view of ["apps", "agent"] as const) {
-    await page.getByTestId(`activity-${view}`).click();
-    await expect(page.getByTestId(`activity-${view}`)).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    await expect(page.getByTestId("view-empty-state")).toContainText(
-      new RegExp(view, "i"),
-    );
-    await expect(page.getByTestId("file-tree")).toHaveCount(0);
-  }
+  // Apps remains a designed empty state until its activity panel lands.
+  await page.getByTestId("activity-apps").click();
+  await expect(page.getByTestId("activity-apps")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.getByTestId("view-empty-state")).toContainText(/apps/i);
+  await expect(page.getByTestId("file-tree")).toHaveCount(0);
+
+  // Agent graduated to its real panel in E6.
+  await page.getByTestId("activity-agent").click();
+  await expect(page.getByTestId("activity-agent")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.getByTestId("agent-panel")).toBeVisible();
+  await expect(page.getByTestId("file-tree")).toHaveCount(0);
 
   // History view shows the timeline content in the panel (the RIGHT rail
   // keeps the pinned history-timeline testid and stays visible).
@@ -438,7 +443,7 @@ test("status bar: clean status carries no conflict count; update toast appears o
   await app.close();
 });
 
-test("screenshots (2/2): dirty + inactive tabs, agent empty view, hidden sidebar — light and dark", async () => {
+test("screenshots (2/2): dirty + inactive tabs, agent panel, hidden sidebar — light and dark", async () => {
   const { home, root } = await seedWorkspace("e2-shots", {
     "notes/ideas.md": "# Ideas\n",
     "notes/today.md": "# Today\n\nA second open file makes the tab contrast judgeable.\n",
@@ -473,9 +478,9 @@ test("screenshots (2/2): dirty + inactive tabs, agent empty view, hidden sidebar
     await page.getByTestId("markdown-edit-toggle").click();
     await expect(page.getByTestId("view-markdown")).toBeVisible();
 
-    // The Agent placeholder view (sidebar on a non-explorer view).
+    // The Agent panel view (sidebar on a non-explorer view).
     await page.getByTestId("activity-agent").click();
-    await expect(page.getByTestId("view-empty-state")).toBeVisible();
+    await expect(page.getByTestId("agent-panel")).toBeVisible();
     await shot(page, "workbench-agent-view");
 
     // Hidden sidebar.

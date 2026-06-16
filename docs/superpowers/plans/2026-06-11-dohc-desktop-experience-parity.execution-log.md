@@ -8,49 +8,82 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-16): **E5(apps runtime) READY TO COMMIT**. Actual
+- Current update (2026-06-16): **E6(agent panel/driver foundation) CODEX
+  REVIEW CLEAN, COMMIT READY**. Actual
   branch/head: `codex/desktop-experience-parity` at
-  `4ddc38c` (`e5(database): polish desktop studio`). Dirty files are the
-  current apps-runtime lane only: `apps/desktop/src/workspaces/appRuntime.ts`,
-  `apps/desktop/src/workspaces/appRuntimeRegistry.ts`,
-  `apps/desktop/src/workspaces/appRuntime.test.ts`,
-  `apps/desktop/src/ipc/bridgeContract.test.ts`,
-  `apps/desktop/src/ipc/channels.ts`,
-  `apps/desktop/src/ipc/bridgeContract.ts`, `apps/desktop/src/preload.ts`,
-  `apps/desktop/src/main.ts`,
-  `apps/desktop/src/renderer/AppPackageView.tsx`,
-  `apps/desktop/src/renderer/AppPackageView.test.tsx`,
-  `apps/desktop/src/renderer/index.html`,
-  `apps/desktop/src/window/createMainWindow.ts`,
-  `apps/desktop/e2e/appPackage.spec.ts`, and this execution log
-  snapshot. Current phase/lane: E5 apps-runtime surface before E6/E7. Intent
-  implemented: trusted desktop app packages now run from a per-token
-  loopback-origin sandboxed iframe, expose a tiny `dohc.collection(name)` SDK
-  through token-bound typed main-process RPC, and persist collection rows as
-  visible workspace files guarded by manifest read/write scopes plus the
-  existing app trust fingerprint. Isolation is cross-origin loopback,
-  `sandbox="allow-scripts allow-same-origin"` (same-origin with the loopback
-  runtime server, not the parent renderer), no preload bridge in the app frame,
-  strict runtime CSP, main-process frame-navigation allowlist for live runtime
-  URLs only, renderer teardown on app self-navigation, and bounded IPC/runtime
-  JSON.
-  Launch-path fix: the heavy compiler/runtime module is dynamically imported
-  only from app-runtime IPC handlers; startup navigation imports only the tiny
-  runtime registry, moving `appRuntime` into a deferred main chunk and restoring
-  performance budgets. Exact next action: commit the apps-runtime lane, then
-  continue E6/E7. Active background tasks: none. Open worktrees:
+  `aefdef1` (`e5(apps): add desktop app runtime`). Dirty files are the current
+  E6 lane only: `apps/desktop/src/agents/AgentDriver.ts`,
+  `apps/desktop/src/agents/AgentDriver.test.ts`,
+  `apps/desktop/src/renderer/AgentPanelView.tsx`,
+  `apps/desktop/src/renderer/AgentPanelView.test.tsx`,
+  `apps/desktop/src/renderer/DesktopWorkspaceShell.tsx`,
+  `apps/desktop/src/renderer/settings/DesktopSettings.tsx`,
+  `apps/desktop/src/renderer/settings/DesktopSettings.test.tsx`,
+  `apps/desktop/e2e/liveCoEditing.spec.ts`,
+  `apps/desktop/e2e/performance.spec.ts`,
+  `apps/desktop/e2e/agentPanel.spec.ts`,
+  `apps/desktop/e2e/workbench.spec.ts`, and this execution log snapshot.
+  Current phase/lane: E6 Agent panel foundation before native driver adapter
+  implementations. Intent implemented: a pure agent-driver contract/registry
+  with probe normalization and permission-option selection by ACP `kind`, plus
+  the first real Agent side-panel surface. The panel lists the planned
+  Codex/Claude/generic drivers, exposes the main-owned MCP config snippet, and
+  starts/stops the existing local `.dohc/agent-runs.json` run slot while
+  updating the shell/status-bar active-agent indicator. The Agent panel is
+  lazy-loaded as its own renderer chunk so launch does not pay for panel-only
+  controls. Focused gates so far: desktop typecheck PASS; focused Vitest PASS
+  17/17 (`AgentDriver`, `AgentIntegration`, `AgentPanelView`,
+  `DesktopSettings`); desktop build PASS (`AgentPanelView` lazy chunk 7.55kB,
+  renderer initial chunk 1,199.47kB / performance row 1.14MB);
+  named agent-panel + workbench E2E PASS 8/8 from the repo root with `pnpm
+  exec playwright test --config apps/desktop/playwright.config.ts
+  apps/desktop/e2e/agentPanel.spec.ts apps/desktop/e2e/workbench.spec.ts`.
+  One failed E2E attempt was a runner-cwd mistake (`pnpm --filter ... exec`
+  made `process.cwd()` equal `apps/desktop`, doubling the launch path), not a
+  product failure. WSL gate lesson: run desktop unit/E2E/performance with
+  `TMPDIR=/tmp TMP=/tmp TEMP=/tmp` so Node temp workspaces, Electron profiles,
+  and tsx IPC sockets stay on the Linux filesystem rather than `/mnt/c`. With
+  that normalization, full desktop unit PASS 58/58 files and 517/517 tests,
+  full desktop E2E PASS 67/67, performance spec PASS 8/8, and
+  `check:performance` PASS (cold 1114, warm 1052/1200, createEmpty 59,
+  open1000 370, fileTreeSearch 2.5/2, md250 63, tiptapMount 1953/2000,
+  typing 0, singleFileSync 789, hundredFileChangeSet 865, appTester 227,
+  sqlite 341, csv 394, contentSearch 39/56, memory 554/708, bundle
+  1.14/1.408; warm app open documented skip). Live co-editing also needed a
+  harness-only service-start timeout bump because workspace-api's collab-token
+  JWT path can cold-start for ~4+ minutes on this WSL worktree before
+  hocuspocus starts. `check:lean` PASS; `git diff --check` PASS; design
+  screenshot review PASS for light/dark Agent panel. Codex review found one P2
+  in the performance harness: best-of-3 Tiptap sampling could hide a slow first
+  editor mount. Fixed by measuring every retry in a copied fresh workspace with
+  its persisted UI state removed so the metric still pays lazy editor
+  initialization; performance spec and `check:performance` are green post-fix.
+  Clean rerun then found one panel-state P2: a mounted Agent panel could act on
+  stale visible status after Settings changed the run state, creating duplicate
+  runs or stopping a run from a stale Start button. Fixed by re-reading
+  main-owned run status before branching in both Agent panel and Settings
+  toggles, and by letting Settings signal the shell to refresh the mounted
+  Agent panel because `.dohc/agent-runs.json` is intentionally ignored by the
+  file watcher. Follow-up review hardening also added truthful clipboard
+  failure handling, ACP `kind`-based permission decisions, probe-env forwarding
+  coverage, and driver-contract comments for redaction/PII/path/argv
+  boundaries. Broad branch CodeRabbit review could not run because the branch
+  diff spans 828 files over the service limit; the narrow uncommitted
+  CodeRabbit/Codex review is clean. Exact next action: commit this foundation,
+  then continue E6 driver adapters/fake-provider
+  harness. Active background tasks: none. Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at
   `5f2c09b` and this worktree on `codex/desktop-experience-parity`. Open
   workflows: completed read-only E5 recon explorers
   `019ec885-de06-7f00-a196-c90d553bc4b7` and
   `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
-  are active. Pending reviews/findings: CodeRabbit review issues fixed and
-  Goodall boundary-review findings addressed; no open findings.
+  are active. Pending reviews/findings: none for the E6 foundation lane.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history,
   properties/frontmatter, notices, sharing UI, import/export, workspace
-  management, and database grid polish are built. NEXT = **E5 apps-runtime
-  surface**, with E5.0 search and the E5 server share/invitation lane already
+  management, database grid polish, and apps runtime are built. NEXT = **E6
+  agent panel + driver adapters**, with E5.0 search and the E5 server
+  share/invitation lane already
   committed. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
   collab, D-E3 retire formula/query VALUES (keep inert styling + schema nodes
@@ -152,6 +185,85 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e6(agent-panel-foundation) — BUILT, GATES GREEN, REVIEW CLEAN (2026-06-16)
+
+Started E6 by landing the local, testable seam before provider-specific
+drivers. Added `AgentDriver.ts`: a pure driver contract with probe/session
+types, event normalization shape, registry lookup/probe-all handling, and the
+ACP permission helper that selects permission options by semantic `kind`
+(`allow_once`, `allow_always`, `reject_once`, `reject_always`) instead of
+hardcoded provider option ids. The contract now explicitly records the
+main-owned containment/argv contract for session starts and the rule that raw
+provider events plus probe auth hints must be redacted before IPC, logs, or
+persistence. This preserves the t3code recon's important warning while giving
+Codex/Claude/generic ACP adapters one common surface to implement next.
+
+Replaced the Agent activity placeholder with a real `AgentPanelView`. The
+panel lists the planned Codex app-server, Claude, and generic ACP drivers;
+shows the main-owned MCP config snippet; copies that config; and starts/stops
+the existing local agent-run integration. Starting a run writes the visible
+`.dohc/agent-runs.json` record and flips the status-bar agent indicator through
+the shell's existing `agentActive` state. Stopping the run marks the persisted
+record complete. The old workbench screenshot spec now captures the real Agent
+panel instead of the placeholder.
+
+Coverage added: `AgentDriver.test.ts` for duplicate-id rejection, driver lookup,
+probe failure normalization, probe-env forwarding, and permission-option
+selection by kind; `AgentPanelView.test.tsx` for driver rows, MCP config
+rendering/copying, clipboard-unavailable feedback, stale visible start/stop
+guards, and start/stop shell activity callbacks; `DesktopSettings.test.tsx` for
+the matching stale toggle guards and shell refresh callback; `agentPanel.spec.ts`
+for the real desktop flow against a seeded workspace, including the MCP
+snippet's `--workspace` and `--home` args, status-bar active indicator, and
+persisted run completion.
+
+Gates: desktop typecheck PASS; focused Vitest PASS 17/17 (`AgentDriver`,
+`AgentIntegration`, `AgentPanelView`, `DesktopSettings`); full desktop unit
+PASS 58/58 files and 517/517 tests; desktop build PASS (`main.js` 218.08kB,
+`appRuntime` still deferred 18.55kB, `AgentPanelView` lazy chunk 7.55kB,
+renderer initial chunk 1,199.47kB / budget row 1.14MB); named agent-panel +
+workbench E2E PASS 8/8 from repo root; full desktop E2E PASS 67/67; performance
+spec PASS 8/8; `check:performance` PASS (cold 1114, warm 1052/1200,
+createEmpty 59, open1000 370, fileTreeSearch 2.5/2, md250 63, tiptapMount
+1953/2000, typing 0, singleFileSync 789, hundredFileChangeSet 865, appTester
+227, sqlite 341, csv 394, contentSearch 39/56, memory 554/708, bundle
+1.14/1.408; warm app open documented skip); `check:lean` PASS; `git diff
+--check` PASS. Design review PASS using
+`test-results/screenshots/e2/workbench-agent-view--1280x800--light.png` and
+`--dark.png`: controls fit, no overlap, contrast/readability OK.
+
+Codex review found one P2 in `performance.spec.ts`: best-of-3 Tiptap sampling
+could record warmed editor toggles and mask a slow first WYSIWYG open. Fixed by
+closing the seed session after the markdown-open metric, copying the seeded
+root into a fresh workspace for each Tiptap sample, deleting `.dohc/ui-state.json`,
+and measuring before clicking the markdown file so each retry pays lazy editor
+initialization. Post-fix performance spec PASS 8/8 and `check:performance`
+PASS with `tiptapMount250KbMs` 1953/2000.
+
+Clean reruns found panel-state P2s in `AgentPanelView.tsx` and
+`DesktopSettings.tsx`: a mounted control could act on stale visible status after
+another surface changed the run state, creating duplicate running records or
+stopping a run from a stale Start button. Fixed by re-reading main-owned status
+before branching and doing refresh-only on mismatch; Settings also signals the
+shell so a mounted Agent panel refreshes despite `.dohc/agent-runs.json` being
+ignored by the file watcher. Follow-up review hardening added true
+clipboard-unavailable feedback plus driver-contract docs and probe-env coverage.
+Post-fix focused Vitest PASS 27/27 for the modified tests (one
+`DesktopWorkspaceShell` member-load async assertion flaked in a combined run,
+then shell-only rerun passed 7/7), full desktop unit PASS 517/517, desktop
+typecheck PASS, desktop build PASS (`AgentPanelView` lazy chunk 7.55kB), named
+agent-panel + workbench E2E PASS 8/8, markdown performance E2E PASS 1/1, and
+final `codex review --uncommitted` returned no discrete issues.
+
+Harness notes: the first named E2E attempt failed only because it was run via
+`pnpm --filter @dohc/desktop exec`, which changed `process.cwd()` and doubled
+the app launch path. Full unit/perf/E2E should run with
+`TMPDIR=/tmp TMP=/tmp TEMP=/tmp` under WSL; without that, Node's temp dirs land
+on `/mnt/c`, producing false chmod/case-sensitivity failures and slow Electron
+profiles. `liveCoEditing.spec.ts` now gives its sequential workspace-api +
+hocuspocus startup 600s because workspace-api's collab-token JWT path can cold
+start for ~4+ minutes before hocuspocus starts on this WSL worktree.
 
 ### e5(apps-runtime) — DONE (this commit, 2026-06-16)
 

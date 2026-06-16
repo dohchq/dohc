@@ -87,6 +87,9 @@ const LazySearchView = lazy(() =>
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
 );
+const LazyAgentPanelView = lazy(() =>
+  import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
+);
 
 type CatchUpState = {
   status: "loading" | "ready" | "error";
@@ -245,16 +248,12 @@ function HistoryView(props: {
 }
 
 // Designed empty states for the views whose real content lands later in this
-// plan (apps E5, agent E6) — the rail itself is the seam. Search graduated to
-// its real view in E5.0; graph graduated in E5 graph (GraphView).
+// plan (apps E5) — the rail itself is the seam. Search graduated to its real
+// view in E5.0; graph graduated in E5 graph (GraphView); agent in E6.
 const EMPTY_VIEW_COPY: Partial<Record<ViewId, { title: string; body: string }>> = {
   apps: {
     title: "Apps panel is on its way",
     body: "Your workspace apps get a dedicated home later in this plan.",
-  },
-  agent: {
-    title: "Agent panel is on its way",
-    body: "Start and review agent sessions from here later in this plan.",
   },
 };
 
@@ -298,6 +297,7 @@ export function DesktopWorkspaceShell(props: {
   });
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
+  const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -323,6 +323,10 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setActiveTabDirty(false);
   }, [wb.activeTab]);
+  const onSettingsAgentActiveChange = useCallback((active: boolean) => {
+    setAgentActive(active);
+    setAgentPanelRefreshKey((key) => key + 1);
+  }, []);
 
   // Imperative flush for the active editor's unsaved draft (registered by
   // the mounted MarkdownView). Explorer ops await it BEFORE their disk ops:
@@ -995,6 +999,14 @@ export function DesktopWorkspaceShell(props: {
                 conflictSummaries={conflictSummaries}
                 onMarkCaughtUp={markCaughtUp}
               />
+            ) : wb.activeView === "agent" ? (
+              <Suspense fallback={<PanelLoading label="agent" />}>
+                <LazyAgentPanelView
+                  workspaceId={workspaceId}
+                  refreshKey={agentPanelRefreshKey}
+                  onAgentActiveChange={setAgentActive}
+                />
+              </Suspense>
             ) : (
               <EmptyView view={wb.activeView} />
             )}
@@ -1170,6 +1182,7 @@ export function DesktopWorkspaceShell(props: {
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             onClose={() => setSettingsOpen(false)}
+            onAgentActiveChange={onSettingsAgentActiveChange}
           />
         </Overlay>
       ) : null}

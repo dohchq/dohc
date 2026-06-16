@@ -20,7 +20,10 @@ const API_URL = `http://localhost:${API_PORT}`;
 const HP_URL = `ws://localhost:${HP_PORT}`;
 const JWT_SECRET = "phase10-coedit-shared-secret-0123456789ab";
 const PG = "postgres://dohc:dohc@localhost:54329/dohc_v2";
-const SERVICE_START_TIMEOUT_MS = 300_000;
+// The workspace-api path with collab-token JWT wiring can cold-start slowly
+// on WSL2/Windows filesystems; the hook boots workspace-api first, then
+// hocuspocus, so it needs more headroom than single-service cloud specs.
+const SERVICE_START_TIMEOUT_MS = 600_000;
 
 let api: ChildProcess;
 let hocuspocus: ChildProcess;
