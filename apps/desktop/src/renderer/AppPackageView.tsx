@@ -1,10 +1,31 @@
-import { CheckCircle2, LayoutGrid, Share2, ShieldCheck, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import type { AppPackageResult } from "../ipc/bridgeContract";
+import {
+  CheckCircle2,
+  LayoutGrid,
+  Play,
+  RefreshCcw,
+  Share2,
+  ShieldCheck,
+  XCircle,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import type {
+  AppPackageResult,
+  AppRuntimeResult,
+  AppRuntimeRpcRequest,
+} from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 
 type AppInfo = NonNullable<AppPackageResult>;
+type RuntimeMessage =
+  | ({ type: "dohc:runtime-rpc"; token: string } & Extract<
+      AppRuntimeRpcRequest,
+      { op: "collection.list" }
+    >)
+  | ({ type: "dohc:runtime-rpc"; token: string } & Extract<
+      AppRuntimeRpcRequest,
+      { op: "collection.insert" }
+    >);
 
 const READINESS_LABEL: Record<AppInfo["readiness"], string> = {
   "needs-testing": "Needs testing",
@@ -184,6 +205,13 @@ export function AppPackageView(props: {
           ) : null}
         </div>
 
+        {info.readiness === "ready" && (!info.requiresTrust || info.trusted) ? (
+          <AppRuntimeFrame
+            workspaceId={props.workspaceId}
+            appRoot={info.root}
+          />
+        ) : null}
+
         {info.lastTestChecks.length > 0 ? (
           <ul className="mt-4 m-0 list-none p-0" data-testid="app-test-checks">
             {info.lastTestChecks.map((check) => (
@@ -214,6 +242,169 @@ export function AppPackageView(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+export function isRuntimeMessage(value: unknown, token: string): value is RuntimeMessage {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Partial<RuntimeMessage>;
+  const args = data.args as Record<string, unknown> | undefined;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  if (typeof args.name !== "string") return false;
+  return (
+    data.type === "dohc:runtime-rpc" &&
+    data.token === token &&
+    typeof data.id === "string" &&
+    (data.op === "collection.list" ||
+      (data.op === "collection.insert" &&
+        Boolean(args.record) &&
+        typeof args.record === "object" &&
+        !Array.isArray(args.record)))
+  );
+}
+
+function AppRuntimeFrame({
+  workspaceId,
+  appRoot,
+}: {
+  workspaceId: string;
+  appRoot: string;
+}) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const frameLoadedRef = useRef(false);
+  const [runtime, setRuntime] = useState<AppRuntimeResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    frameLoadedRef.current = false;
+  }, [runtime?.token, reloadKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    bridge()
+      .getAppRuntime({ workspaceId, appRoot })
+      .then((result) => {
+        if (cancelled) return;
+        setRuntime(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRuntime(null);
+        setError(err instanceof Error ? err.message : "Couldn't run this app.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, appRoot, reloadKey]);
+
+  useEffect(() => {
+    if (!runtime) return;
+    const token = runtime.token;
+    const targetOrigin = new URL(runtime.src).origin;
+    function onMessage(event: MessageEvent) {
+      const frame = iframeRef.current?.contentWindow;
+      if (
+        !frame ||
+        event.source !== frame ||
+        event.origin !== targetOrigin ||
+        !isRuntimeMessage(event.data, token)
+      ) {
+        return;
+      }
+      const request = event.data;
+      const rpcRequest: AppRuntimeRpcRequest =
+        request.op === "collection.list"
+          ? { id: request.id, op: "collection.list", args: request.args }
+          : { id: request.id, op: "collection.insert", args: request.args };
+      function postRuntimeMessage(message: Record<string, unknown>) {
+        const currentFrame = iframeRef.current?.contentWindow;
+        if (!currentFrame || currentFrame !== frame) return;
+        try {
+          currentFrame.postMessage(message, targetOrigin);
+        } catch {
+          // The app frame can disappear while an async RPC is in flight.
+        }
+      }
+      bridge()
+        .runAppRuntimeRpc({ workspaceId, appRoot, request: rpcRequest })
+        .then((result) => {
+          postRuntimeMessage({
+            type: "dohc:runtime-rpc-result",
+            token,
+            id: request.id,
+            ok: true,
+            value: result.value,
+          });
+        })
+        .catch((err) => {
+          postRuntimeMessage({
+            type: "dohc:runtime-rpc-result",
+            token,
+            id: request.id,
+            ok: false,
+            error: err instanceof Error ? err.message : "App request failed.",
+          });
+        });
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [runtime, workspaceId, appRoot]);
+
+  return (
+    <section className="mt-5 border-t border-line pt-4" data-testid="app-runtime">
+      <div className="mb-2 flex items-center gap-2">
+        <Play size={13} aria-hidden className="text-success" />
+        <h3 className="m-0 text-[13px] font-medium text-ink">Runtime</h3>
+        <button
+          type="button"
+          data-testid="app-runtime-reload"
+          aria-label="Reload app runtime"
+          title="Reload app runtime"
+          onClick={() => setReloadKey((key) => key + 1)}
+          className="ml-auto grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <RefreshCcw size={13} aria-hidden />
+        </button>
+      </div>
+      {loading ? (
+        <div className="grid h-64 place-items-center rounded border border-line bg-panel-2 text-[12px] text-subtle">
+          Loading runtime…
+        </div>
+      ) : error ? (
+        <div
+          data-testid="app-runtime-error"
+          className="rounded border border-line bg-panel-2 px-3 py-2 text-[12px] text-danger"
+        >
+          {error}
+        </div>
+      ) : runtime ? (
+        <iframe
+          ref={iframeRef}
+          key={`${runtime.root}:${reloadKey}`}
+          data-testid="app-runtime-frame"
+          title={runtime.title}
+          src={runtime.src}
+          sandbox="allow-scripts allow-same-origin"
+          referrerPolicy="no-referrer"
+          onLoad={() => {
+            if (frameLoadedRef.current) {
+              setRuntime(null);
+              setError("App runtime navigation was blocked.");
+              return;
+            }
+            frameLoadedRef.current = true;
+          }}
+          className="h-[360px] w-full rounded border border-line bg-bg"
+        />
+      ) : null}
+    </section>
   );
 }
 

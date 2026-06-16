@@ -6,7 +6,7 @@
          TLS self-host, and loopback ws: for local dev. The collab URL always
          comes from the trusted main process (derived from the signed-in
          server), never renderer-chosen; no plaintext ws to arbitrary hosts. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: dohc-file:; media-src 'self' dohc-file:; connect-src 'self' dohc-file: wss: ws://localhost:* ws://127.0.0.1:*" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: dohc-file:; media-src 'self' dohc-file:; frame-src 'self' http://127.0.0.1:*; connect-src 'self' dohc-file: wss: ws://localhost:* ws://127.0.0.1:*" />
     <title>dohc</title>
     <style>
       /* Graphite minimal (bg/ink only), set inline so first paint is never

@@ -32,6 +32,10 @@ import {
   DefaultWorkspaceRootResult,
   AppPackagePayload,
   AppPackageResult,
+  AppRuntimePayload,
+  AppRuntimeResult,
+  AppRuntimeRpcPayload,
+  AppRuntimeRpcResult,
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
   CloudLoginPollResult,
@@ -1020,6 +1024,26 @@ function registerIpcHandlers(): void {
     const input = GrantAppTrustPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     await grantAppTrustState(workspace.rootPath, input.appRoot);
+  });
+
+  ipcMain.handle(CHANNELS.getAppRuntime, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AppRuntimePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const { getAppRuntime } = await import("./workspaces/appRuntime");
+    return AppRuntimeResult.parse(
+      await getAppRuntime(workspace.rootPath, input.appRoot),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.runAppRuntimeRpc, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AppRuntimeRpcPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const { runAppRuntimeRpc } = await import("./workspaces/appRuntime");
+    return AppRuntimeRpcResult.parse({
+      value: await runAppRuntimeRpc(workspace.rootPath, input.appRoot, input.request),
+    });
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {

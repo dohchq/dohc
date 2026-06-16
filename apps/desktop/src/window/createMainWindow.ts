@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { palette, TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
+import { isAppRuntimeFrameUrl } from "../workspaces/appRuntimeRegistry";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
@@ -163,6 +164,7 @@ export function createMainWindow(): BrowserWindow {
   window.webContents.on("will-navigate", denyDisallowed);
   window.webContents.on("will-redirect", denyDisallowed);
   window.webContents.on("will-frame-navigate", (event) => {
+    if (isAppRuntimeFrameUrl(event.url)) return;
     denyDisallowed(event, event.url);
   });
 

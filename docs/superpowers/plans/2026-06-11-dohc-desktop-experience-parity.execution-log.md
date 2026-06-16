@@ -8,46 +8,44 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-15): **E5(database grid polish) DONE**. Actual
-  branch/head: `codex/desktop-experience-parity` at this
-  `e5(database): polish desktop studio` commit. Dirty files: none after
-  commit. Current phase/lane: E5 remaining feature parity sweep; database
-  studio is complete and the next surface is apps runtime before E6/E7.
-  Intent delivered: the desktop `DatabaseStudioView` now behaves like a real
-  local data surface on top of the existing SQLite IPC only: table sidebar with
-  loaded row/column counts, loaded-row search, sortable columns with stable
-  null-last semantics, status/schema chips, sticky headers, row numbering, and
-  unchanged row-update identity through rowid or declared single-column primary
-  keys. CSV-to-SQLite E2E now exercises table counts, sort, filter, edit, and
-  persistence, and captures the E5 screenshot matrix in
-  `test-results/screenshots/e5-database-studio/`. Harness note: the
-  performance spec's warm-launch row now uses a named 1s Electron profile
-  settle window and best-of-11 warm samples so WSL process teardown does not
-  contaminate the measured launch interval; budgets were not changed. Gates:
-  focused renderer Vitest PASS 33/33 (`DatabaseStudioView`, `FileInspector`);
-  desktop typecheck PASS; desktop build PASS (`DatabaseStudioView` lazy chunk
-  19.91kB; renderer initial build chunk 1.198MB, budget row 1.14MB); named
-  `sqliteImport` E2E PASS 1/1; full desktop E2E PASS 66/66 (24.5m);
-  performance spec PASS 8/8; `pnpm check:performance` PASS (cold 1225, warm
-  1116/1200, createEmpty 52, open1000 363, fileTreeSearch 2.7/3, md250 47,
-  tiptapMount 1980/2000, typing 0, singleFileSync 790, hundredFileChangeSet
-  867, appTester 233, sqlite 433, csv 362, contentSearch 35/53, memory
-  500/708, bundle 1.14/1.408; warm app open documented skip);
-  `pnpm check:lean` PASS (knip clean; tech debt 4 allowlist entries;
-  architecture debt 12 allowlist entries, 66 historical docs);
-  `git diff --check` PASS. Design review PASS: 1280x800 and 1536x960
-  light/dark screenshots show readable contrast, stable sidebar/grid
-  proportions, no overlap with the history rail, and search/schema/table
-  content fitting inside the available space. Review status: CodeRabbit
-  uncommitted review returned `findings:0` in
-  `/tmp/e5-database-studio-coderabbit.raw`. Exact next action: continue the E5
-  apps-runtime surface before E6/E7. Active background tasks:
-  none. Open worktrees: `/home/ice/dev/dohc` on
-  `claude/desktop-local-first-cloud-sync` at `5f2c09b` and this worktree on
-  `codex/desktop-experience-parity`. Open workflows: completed read-only E5
-  recon explorers `019ec885-de06-7f00-a196-c90d553bc4b7` and
+- Current update (2026-06-16): **E5(apps runtime) READY TO COMMIT**. Actual
+  branch/head: `codex/desktop-experience-parity` at
+  `4ddc38c` (`e5(database): polish desktop studio`). Dirty files are the
+  current apps-runtime lane only: `apps/desktop/src/workspaces/appRuntime.ts`,
+  `apps/desktop/src/workspaces/appRuntimeRegistry.ts`,
+  `apps/desktop/src/workspaces/appRuntime.test.ts`,
+  `apps/desktop/src/ipc/bridgeContract.test.ts`,
+  `apps/desktop/src/ipc/channels.ts`,
+  `apps/desktop/src/ipc/bridgeContract.ts`, `apps/desktop/src/preload.ts`,
+  `apps/desktop/src/main.ts`,
+  `apps/desktop/src/renderer/AppPackageView.tsx`,
+  `apps/desktop/src/renderer/AppPackageView.test.tsx`,
+  `apps/desktop/src/renderer/index.html`,
+  `apps/desktop/src/window/createMainWindow.ts`,
+  `apps/desktop/e2e/appPackage.spec.ts`, and this execution log
+  snapshot. Current phase/lane: E5 apps-runtime surface before E6/E7. Intent
+  implemented: trusted desktop app packages now run from a per-token
+  loopback-origin sandboxed iframe, expose a tiny `dohc.collection(name)` SDK
+  through token-bound typed main-process RPC, and persist collection rows as
+  visible workspace files guarded by manifest read/write scopes plus the
+  existing app trust fingerprint. Isolation is cross-origin loopback,
+  `sandbox="allow-scripts allow-same-origin"` (same-origin with the loopback
+  runtime server, not the parent renderer), no preload bridge in the app frame,
+  strict runtime CSP, main-process frame-navigation allowlist for live runtime
+  URLs only, renderer teardown on app self-navigation, and bounded IPC/runtime
+  JSON.
+  Launch-path fix: the heavy compiler/runtime module is dynamically imported
+  only from app-runtime IPC handlers; startup navigation imports only the tiny
+  runtime registry, moving `appRuntime` into a deferred main chunk and restoring
+  performance budgets. Exact next action: commit the apps-runtime lane, then
+  continue E6/E7. Active background tasks: none. Open worktrees:
+  `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at
+  `5f2c09b` and this worktree on `codex/desktop-experience-parity`. Open
+  workflows: completed read-only E5 recon explorers
+  `019ec885-de06-7f00-a196-c90d553bc4b7` and
   `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
-  are active. Pending reviews/findings: none.
+  are active. Pending reviews/findings: CodeRabbit review issues fixed and
+  Goodall boundary-review findings addressed; no open findings.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history,
   properties/frontmatter, notices, sharing UI, import/export, workspace
@@ -154,6 +152,81 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e5(apps-runtime) — DONE (this commit, 2026-06-16)
+
+Added the first trusted desktop app runtime surface. A passed/trusted
+`@dohc/app` package now gets a Runtime panel in `AppPackageView`, backed by a
+main-process loopback HTTP runtime server that serves per-token `index.html`
+and `runtime.js` documents from `127.0.0.1:<ephemeral>/<token>/...`. The
+runtime compiles the package entry with TypeScript, runs it in a cross-origin
+iframe with `sandbox="allow-scripts allow-same-origin"` and no preload bridge,
+provides a tiny React/JSX shim plus
+`dohc.collection(name)`, and brokers `collection.list` / `collection.insert`
+through token-bound postMessage to typed main-process IPC. Rows are persisted
+as visible workspace JSON files under the app scope, never hidden side state.
+
+Trust and boundary shape: the iframe is cross-origin loopback and HTML
+sandboxed. It grants only scripts and same-origin with the loopback runtime
+server, not the parent renderer; forms, popups, top navigation, downloads, and
+parent same-origin access stay blocked. Isolation also relies on no preload
+injection in the child frame (covered by E2E), strict child CSP (`default-src
+'none'`, `script-src 'self'`, no network connect/frame/object/form), parent
+renderer `frame-src` limited to loopback plus a main-process
+`will-frame-navigate` allowlist for live runtime index URLs only, token-matched
+renderer RPC with origin validation, scoped target origins for RPC replies,
+runtime teardown on subsequent iframe loads, bounded IPC JSON, non-configurable
+runtime `fetch`/`WebSocket` denial, and main-process workspace read/write
+guards. App writes reject `.dohc`, require manifest trust/write scope, reject
+symlinked path segments, verify realpath containment after mkdir, use exclusive
+`O_EXCL` + `O_NOFOLLOW` where available, refuse overwrites, and encode user ids
+collision-free (`/` vs `~2F` covered).
+
+Review fixes: Goodall's read-only boundary review produced the expected hard
+spots (symlink read/write escape, overwrite/colliding ids, frame navigation,
+unbounded RPC args, persistence/boundary coverage). Those were fixed in this
+lane. CodeRabbit then raised postMessage target-origin, non-configurable
+network shims, temp-dir cleanup, runtime script assembly, IPC byte-limit/test
+coverage, frame-disappearance reply handling, and E2E frame-selection/log
+polish; the valid findings were fixed.
+
+Coverage: added `appRuntime.test.ts` for trust-gated runtime documents,
+loopback CSP/header/script serving, collection persistence/listing, untrusted
+and out-of-scope writes, overwrite refusal, collision-free ids, and symlink
+write refusal. Added `bridgeContract.test.ts` for runtime RPC shape and bounded
+payload validation. Added `AppPackageView.test.tsx` for token/op-shaped
+runtime messages and iframe navigation teardown. Extended `appPackage.spec.ts`
+so a real trusted ledger app renders in the runtime, confirms the child frame
+has no `dohcDesktop`/internal preload bridge, writes
+`finance/transactions/x.json`, reveals that visible workspace file in the tree,
+captures 1280x800 and 1536x960 light/dark screenshots, and verifies a legacy
+`@dohc/view` app still fails AppTester and cannot be trusted.
+
+Launch-path fix: an early version statically imported `appRuntime.ts` from
+startup code, which pulled TypeScript into the main process launch path and
+pushed warm launch over budget. The final version splits
+`appRuntimeRegistry.ts` (token/origin lookup only) from the heavy compiler
+runtime and dynamically imports `appRuntime.ts` only inside runtime IPC
+handlers. Build output confirms `appRuntime-*.js` is a deferred 18.55kB main
+chunk and `main.js` stays at 218.08kB.
+
+Gates: desktop typecheck PASS; focused Vitest PASS 20/20
+(`bridgeContract`, `AppPackageView`, `appRuntime`, `appPackage`); desktop build
+PASS (`AppPackageView` lazy chunk 16.97kB; renderer initial chunk unchanged at
+1.198MB / budget row 1.14MB); named app-package runtime E2E PASS 1/1; full
+desktop E2E PASS 66/66 (27.0m); performance spec PASS 8/8; `pnpm
+check:performance` PASS (cold 1314, warm 1124/1200, createEmpty 55, open1000
+385, fileTreeSearch 2.9/3, md250 70, tiptapMount 1941/2000, typing 0,
+singleFileSync 790, hundredFileChangeSet 867, appTester 258, sqlite 410, csv
+396, contentSearch 40/67, memory 554/708, bundle 1.14/1.408; warm app open
+documented skip); `pnpm check:lean` PASS; `git diff --check` PASS; debug-log
+grep PASS.
+
+Design review PASS: screenshots in
+`test-results/screenshots/e5-app-runtime/` show the trusted runtime panel, file
+tree with the runtime-written JSON file, and failed legacy app state with
+readable contrast, no overlapping text, and stable layout at both tested
+desktop sizes and both themes.
 
 ### e5(database) — DONE (this commit, 2026-06-15)
 

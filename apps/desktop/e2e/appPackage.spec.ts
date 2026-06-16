@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Page } from "playwright";
 import { launchApp, openInTree } from "./launch";
 
-const SHOT_DIR = "test-results/screenshots/phase-07";
+const SHOT_DIR = "test-results/screenshots/e5-app-runtime";
 
 // A workspace with two app packages: a valid @dohc/app app that AppTester
 // should pass, and a legacy @dohc/view app it must reject. Apps live as plain
@@ -22,7 +23,7 @@ async function seededWorkspace(): Promise<string> {
   await mkdir(ledger, { recursive: true });
   await writeFile(
     join(root, "finance", ".apps", "ledger", "app.json"),
-    JSON.stringify({ title: "Ledger", write: ["transactions/**"] }),
+    JSON.stringify({ title: "Ledger", read: ["transactions/**"], write: ["transactions/**"] }),
   );
   await writeFile(
     join(ledger, "App.tsx"),
@@ -32,7 +33,7 @@ async function seededWorkspace(): Promise<string> {
       "  return (",
       "    <main>",
       "      <h1>Ledger</h1>",
-      "      <button onClick={() => dohc.collection('transactions').insert({ id: 'x' })}>",
+      "      <button onClick={() => dohc.collection('transactions').insert({ id: 'x', amount: 42 })}>",
       "        Add transaction",
       "      </button>",
       "    </main>",
@@ -53,6 +54,26 @@ async function seededWorkspace(): Promise<string> {
   );
 
   return JSON.stringify({ home, root });
+}
+
+async function setTheme(page: Page, scheme: "light" | "dark") {
+  await page.emulateMedia({ colorScheme: scheme });
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+    .toBe(scheme);
+}
+
+async function shot(page: Page, name: string): Promise<void> {
+  await mkdir(SHOT_DIR, { recursive: true });
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Viewport size not set before screenshot.");
+  const { width, height } = viewport;
+  const scheme = await page.evaluate(() =>
+    document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+  );
+  await page.screenshot({
+    path: `${SHOT_DIR}/${name}--${width}x${height}--${scheme}.png`,
+  });
 }
 
 test("an app passes AppTester and can be trusted; a legacy app is rejected", async () => {
@@ -91,6 +112,47 @@ test("an app passes AppTester and can be trusted; a legacy app is rejected", asy
   await expect(page.getByTestId("trust-app")).toHaveCount(0);
   // Positively confirm the app is now Trusted (not merely that the button left).
   await expect(page.getByTestId("view-app")).toContainText("Trusted");
+  await expect(page.getByTestId("app-runtime")).toBeVisible();
+
+  const runtime = page.frameLocator('[data-testid="app-runtime-frame"]');
+  await expect(runtime.getByRole("heading", { name: "Ledger" })).toBeVisible();
+  await expect
+    .poll(async () => {
+      const handle = await page.locator('[data-testid="app-runtime-frame"]').elementHandle();
+      const frame = await handle?.contentFrame();
+      if (!frame) return null;
+      return await frame.evaluate(() => ({
+        desktopBridge: "dohcDesktop" in window,
+        internalBridge: "dohcDesktopInternal" in window,
+      }));
+    })
+    .toEqual({ desktopBridge: false, internalBridge: false });
+  await runtime.getByRole("button", { name: "Add transaction" }).click();
+  await expect
+    .poll(async () => {
+      try {
+        return JSON.parse(
+          await readFile(join(root, "finance", "transactions", "x.json"), "utf8"),
+        );
+      } catch {
+        return null;
+      }
+    })
+    .toEqual({ id: "x", amount: 42 });
+
+  // The runtime write is a visible workspace file, not a hidden side store.
+  await openInTree(page, "finance/transactions/x.json", { click: false });
+
+  for (const size of [
+    { width: 1280, height: 800 },
+    { width: 1536, height: 960 },
+  ]) {
+    await page.setViewportSize(size);
+    await setTheme(page, "light");
+    await shot(page, "app-runtime-trusted");
+    await setTheme(page, "dark");
+    await shot(page, "app-runtime-trusted");
+  }
 
   // Legacy @dohc/view app: AppTester catches the wrong SDK and marks it failed.
   await open("notes/.apps/old/app.json");

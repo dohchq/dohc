@@ -431,6 +431,134 @@ export const GrantAppTrustPayload = z.object({
 });
 export type GrantAppTrustPayload = z.infer<typeof GrantAppTrustPayload>;
 
+export const AppRuntimePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: PATH_STRING,
+});
+export type AppRuntimePayload = z.infer<typeof AppRuntimePayload>;
+
+export const AppRuntimeResult = z.object({
+  root: z.string(),
+  title: z.string(),
+  src: z.string().min(1).max(512).regex(/^http:\/\/127\.0\.0\.1:\d+\//),
+  token: z.string().min(1).max(100),
+});
+export type AppRuntimeResult = z.infer<typeof AppRuntimeResult>;
+
+const APP_RUNTIME_COLLECTION = z
+  .string()
+  .min(1)
+  .max(80)
+  .regex(/^[a-zA-Z0-9_-]+$/);
+const MAX_APP_RUNTIME_JSON_BYTES = 256 * 1024;
+const MAX_APP_RUNTIME_JSON_DEPTH = 8;
+const MAX_APP_RUNTIME_JSON_KEYS = 100;
+const MAX_APP_RUNTIME_JSON_ARRAY_ITEMS = 500;
+const MAX_APP_RUNTIME_JSON_STRING_BYTES = 64 * 1024;
+const RUNTIME_JSON_TEXT_ENCODER = new TextEncoder();
+
+function runtimeUtf8Bytes(value: string): number {
+  return RUNTIME_JSON_TEXT_ENCODER.encode(value).length;
+}
+
+function runtimeJsonBytes(value: unknown): number | null {
+  try {
+    return runtimeUtf8Bytes(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function validateRuntimeJson(value: unknown, ctx: z.RefinementCtx, depth = 0): void {
+  if (depth > MAX_APP_RUNTIME_JSON_DEPTH) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload is too deeply nested" });
+    return;
+  }
+  if (value === null) return;
+  if (typeof value === "string") {
+    if (runtimeUtf8Bytes(value) > MAX_APP_RUNTIME_JSON_STRING_BYTES) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload string is too large" });
+    }
+    return;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload number is invalid" });
+    }
+    return;
+  }
+  if (typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_APP_RUNTIME_JSON_ARRAY_ITEMS) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload array is too large" });
+      return;
+    }
+    for (const item of value) validateRuntimeJson(item, ctx, depth + 1);
+    return;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > MAX_APP_RUNTIME_JSON_KEYS) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload has too many keys" });
+      return;
+    }
+    for (const [key, item] of entries) {
+      if (key.length > 512) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload key is too large" });
+        return;
+      }
+      validateRuntimeJson(item, ctx, depth + 1);
+    }
+    return;
+  }
+  ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload must be JSON data" });
+}
+
+const AppRuntimeJsonRecord = z.record(z.unknown()).superRefine((value, ctx) => {
+  const bytes = runtimeJsonBytes(value);
+  if (bytes === null || bytes > MAX_APP_RUNTIME_JSON_BYTES) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload is too large" });
+    return;
+  }
+  validateRuntimeJson(value, ctx);
+});
+
+export const AppRuntimeRpcRequest = z.discriminatedUnion("op", [
+  z.object({
+    id: z.string().min(1).max(100),
+    op: z.literal("collection.list"),
+    args: z
+      .object({
+        name: APP_RUNTIME_COLLECTION,
+        query: AppRuntimeJsonRecord.optional(),
+      })
+      .strict(),
+  }),
+  z.object({
+    id: z.string().min(1).max(100),
+    op: z.literal("collection.insert"),
+    args: z
+      .object({
+        name: APP_RUNTIME_COLLECTION,
+        record: AppRuntimeJsonRecord,
+      })
+      .strict(),
+  }),
+]);
+export type AppRuntimeRpcRequest = z.infer<typeof AppRuntimeRpcRequest>;
+
+export const AppRuntimeRpcPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  appRoot: PATH_STRING,
+  request: AppRuntimeRpcRequest,
+});
+export type AppRuntimeRpcPayload = z.infer<typeof AppRuntimeRpcPayload>;
+
+export const AppRuntimeRpcResult = z.object({
+  value: z.unknown(),
+});
+export type AppRuntimeRpcResult = z.infer<typeof AppRuntimeRpcResult>;
+
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
 // session token never reaches the renderer — main stores it via safeStorage
@@ -841,6 +969,10 @@ export interface DohcDesktopBridge {
   getAppPackage(payload: AppPackagePayload): Promise<AppPackageResult>;
   runAppTester(payload: RunAppTesterPayload): Promise<RunAppTesterResult>;
   grantAppTrust(payload: GrantAppTrustPayload): Promise<void>;
+  getAppRuntime(payload: AppRuntimePayload): Promise<AppRuntimeResult>;
+  runAppRuntimeRpc(
+    payload: AppRuntimeRpcPayload,
+  ): Promise<AppRuntimeRpcResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;

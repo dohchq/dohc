@@ -236,6 +236,8 @@ export const CHANNELS = {
   getAppPackage: "desktop:get-app-package",
   runAppTester: "desktop:run-app-tester",
   grantAppTrust: "desktop:grant-app-trust",
+  getAppRuntime: "desktop:get-app-runtime",
+  runAppRuntimeRpc: "desktop:run-app-runtime-rpc",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",
