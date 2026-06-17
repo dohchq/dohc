@@ -35,6 +35,27 @@ renderer and ships a blank window). Linux only; headless runs need
 `DOHC_E2E_NO_CHROMIUM_SANDBOX=1 xvfb-run -a`. This gate is why
 `@electron/fuses` stays a devDependency.
 
+## Keyboard Map
+
+The desktop shell follows VS Code-familiar chords and keeps renderer-owned
+shortcuts out of Electron's global accelerator registration on Windows/Linux,
+so one keypress maps to one action.
+
+| Shortcut | Action | Surface |
+| --- | --- | --- |
+| `Cmd/Ctrl+Shift+P` | Command palette | shell + app menu |
+| `Cmd/Ctrl+K` | Command palette | shell |
+| `Cmd/Ctrl+P` | Quick open | shell + app menu |
+| `Cmd/Ctrl+N` | New file | shell + app menu |
+| `Cmd/Ctrl+B` | Toggle sidebar | shell + app menu |
+| `Cmd/Ctrl+W` | Close active tab | shell + app menu |
+| `Cmd/Ctrl+Shift+W` | Close window | app menu |
+| `F2` | Rename selected explorer item | explorer |
+| `Delete` | Move selected explorer item to trash | explorer |
+| `Arrow` / `Home` / `End` | Navigate the file tree | explorer |
+| `Enter` | Open the selected file or confirm active command | explorer, palette, quick open |
+| `Escape` | Dismiss overlays and transient menus | overlays |
+
 ## Packaging
 
 Config: `apps/desktop/electron-builder.yml` (appId `app.dohc.desktop`,

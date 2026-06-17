@@ -5,10 +5,13 @@ import {
   isExplorerMenuCommand,
   isMenuCommand,
   isSafeRelativePath,
+  isWorkbenchMenuCommand,
   MENU_COMMANDS,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
+  parseWorkspaceActivatedEvent,
   UPDATE_STATUSES,
+  WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 
 // The preload boundary for main→renderer menu events. These cases are the
@@ -69,6 +72,84 @@ describe("isExplorerMenuCommand (preload boundary)", () => {
     expect(isExplorerMenuCommand(["rename"])).toBe(false);
     expect(isExplorerMenuCommand(null)).toBe(false);
     expect(isExplorerMenuCommand(undefined)).toBe(false);
+  });
+});
+
+describe("isWorkbenchMenuCommand (preload boundary)", () => {
+  it("accepts every member of the closed tuple", () => {
+    for (const command of WORKBENCH_MENU_COMMANDS) {
+      expect(isWorkbenchMenuCommand(command)).toBe(true);
+    }
+  });
+
+  it("rejects case variants, unknown ids, and non-primitive impostors", () => {
+    expect(isWorkbenchMenuCommand("CLOSE-TAB")).toBe(false);
+    expect(isWorkbenchMenuCommand("close-tab ")).toBe(false);
+    expect(isWorkbenchMenuCommand("open-terminal")).toBe(false);
+    expect(isWorkbenchMenuCommand("")).toBe(false);
+    expect(isWorkbenchMenuCommand(new String("close-tab"))).toBe(false);
+    expect(isWorkbenchMenuCommand({ toString: () => "close-tab" })).toBe(false);
+    expect(isWorkbenchMenuCommand(["close-tab"])).toBe(false);
+    expect(isWorkbenchMenuCommand(null)).toBe(false);
+    expect(isWorkbenchMenuCommand(undefined)).toBe(false);
+  });
+});
+
+describe("parseWorkspaceActivatedEvent (preload boundary)", () => {
+  it("accepts a workspace summary and strips extra fields", () => {
+    expect(
+      parseWorkspaceActivatedEvent({
+        workspaceId: "ws-123",
+        rootPath: "/home/ice/dohc",
+        kind: "personal",
+        mode: "local-first",
+        extra: "ignored",
+      }),
+    ).toEqual({
+      workspaceId: "ws-123",
+      rootPath: "/home/ice/dohc",
+      kind: "personal",
+      mode: "local-first",
+    });
+  });
+
+  it("rejects malformed ids, kinds, modes, and impostors", () => {
+    expect(
+      parseWorkspaceActivatedEvent({
+        workspaceId: "WS-123",
+        rootPath: "/home/ice/dohc",
+        kind: "personal",
+        mode: "local-first",
+      }),
+    ).toBeNull();
+    expect(
+      parseWorkspaceActivatedEvent({
+        workspaceId: "ws-123",
+        rootPath: "/home/ice/dohc",
+        kind: "admin",
+        mode: "local-first",
+      }),
+    ).toBeNull();
+    expect(
+      parseWorkspaceActivatedEvent({
+        workspaceId: "ws-123",
+        rootPath: "/home/ice/dohc",
+        kind: "personal",
+        mode: "remote-code-exec",
+      }),
+    ).toBeNull();
+    expect(parseWorkspaceActivatedEvent(["ws-123"])).toBeNull();
+    expect(parseWorkspaceActivatedEvent(new String("ws-123"))).toBeNull();
+    expect(
+      parseWorkspaceActivatedEvent(
+        Object.create({
+          workspaceId: "ws-123",
+          rootPath: "/home/ice/dohc",
+          kind: "personal",
+          mode: "local-first",
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

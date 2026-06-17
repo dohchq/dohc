@@ -41,6 +41,7 @@ function renderBar(
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenSettings={() => {}}
       onToggleTheme={() => {}}
+      onContextMenu={props.onContextMenu ?? (() => {})}
     />,
   );
 }

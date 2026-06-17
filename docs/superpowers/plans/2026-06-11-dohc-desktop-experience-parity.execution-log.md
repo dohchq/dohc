@@ -8,7 +8,89 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-17): **E6(agent adapters + fake-provider harness)
+- Current update (2026-06-18): **E7(native polish / desktop shell parity)
+  COMMITTED, FULL CODE GATES GREEN; WINDOWS PACKAGE/INSTALL + NATIVE SHELL QA
+  PASS**. Actual branch/head:
+  `codex/desktop-experience-parity` at the E7 commit (`e7(desktop): add
+  native polish and QA`) with a clean worktree after commit. The committed E7
+  slice contains IPC channel/bridge/preload validators, main process native
+  menu/Open Recent/Open With plumbing, renderer workspace activation and
+  workbench context-menu routing, workbench/status/tab tests, desktop E2E
+  launch/window/workbench specs, package file associations, package smoke,
+  desktop keyboard docs, reduced-motion CSS, and this execution log.
+  Current phase/lane: E7 native shell polish and final QA. Intent implemented:
+  native context menus for editor tabs/editor surface/status bar; closed
+  validated workbench menu commands across main/preload/renderer; recent
+  workspaces in the application menu; OS recent-document and Windows task
+  surface refreshes; Open with dohc / `--open-workspace` activation with
+  nearest workspace-root resolution; preferred workspace ordering during cold
+  launches; strict registry parsing for renderer startup with native-only
+  convenience fallbacks; file associations for markdown/text/csv/json;
+  keyboard map documentation; and reduced-motion transition suppression.
+
+  Final gates on the current diff: desktop typecheck PASS; desktop build PASS
+  (`main.js` 233.23kB, `preload.cjs` 15.95kB, renderer initial build chunk
+  `index-CV7-NBxa.js` 1,202.95kB / performance row 1.15MB); full desktop unit
+  PASS 60/60 files and 538/538 tests; focused E7 desktop E2E PASS 15/15
+  (`windowChrome.spec.ts` + `workbench.spec.ts`); full desktop E2E PASS 70/70
+  in 18.5m on the current build; focused performance E2E PASS 8/8 to refresh a
+  WSL launch-jitter row; `check:performance` PASS (cold 1269, warm 1116/1200,
+  createEmpty 47, open1000 400, fileTreeSearch query 2.9, visible result 3,
+  md250 58, `tiptapMount250KbMs` 1709/2000, typing 0, singleFileSync 789,
+  hundredFileChangeSet 866, appTester 523, sqlite 427, csv 395,
+  contentSearch 42/64, memory 558/708, bundle 1.15/1.408; warm app open
+  documented skip); `smoke:package` PASS including Open with dohc associations
+  for `.md`, `.markdown`, `.txt`, `.csv`, `.json`; `check:lean` PASS; `git
+  diff --check` PASS before the log update. Visual review PASS for
+  `test-results/screenshots/e2/workbench-agent-view--1280x800--light.png`,
+  `--dark.png`, `workbench-dirty-tab--1280x800--light.png`, and
+  `workbench-sidebar-hidden--1280x800--dark.png`.
+
+  Review notes: the whole-diff CodeRabbit agent review could not run because
+  the repository context exceeded its 150-file cap. A scoped local review found
+  one real E7 issue before final verification: malformed registry entries were
+  being dropped by `safeParse`, which weakened the registry refusal invariant.
+  Fixed by making `workspaceSummaries()` strict, limiting
+  `nativeWorkspaceSummaries()` to convenience OS/menu surfaces, preserving
+  preferred-workspace ordering, and adding the malformed-registry E2E. A final
+  scoped review of IPC validation, Open With/recent-workspace behavior, and
+  workbench menu routing found no additional changes. Exact next action: hand
+  back the completed E4b-2 through E7 lane after amending the E7 evidence
+  commit. Windows evidence gathered this turn: a temp Windows
+  package directory was built from the committed `dist/` plus runtime deps
+  (`zod`, `@vscode/ripgrep`, `typescript`) to avoid mutating the repo's
+  Linux-created `node_modules`; `electron-builder --win nsis -c.electronVersion=42.4.0`
+  PASS; `release/win-unpacked/dohc.exe` launched and rendered a native Windows
+  workspace window; the NSIS installer silently installed per-user with exit 0;
+  HKCU extension keys for `.md`, `.markdown`, `.txt`, `.csv`, and `.json`
+  registered `dohc workspace document`; the class open command was
+  `C:\Users\ice\AppData\Local\Programs\@dohcdesktop\dohc.exe "%1"`; launching
+  the installed app with a real `.md` path kept the process running with that
+  file in the command line; silent uninstall exited 0 and stale dohc registry
+  defaults were cleaned, leaving prior OpenWithProgids. Native screenshot
+  evidence:
+  `C:\Users\ice\AppData\Local\Temp\dohc-win-qa-dae53e28883e4bc2b4262c74c3d25c51\packaged-maximized-screen.png`
+  and related package-window captures. Final native Windows visual evidence:
+  pywinauto/Pillow launched the packaged unpacked app with isolated
+  `DOHC_TEST_HOME`, isolated `--user-data-dir`, and a real local workspace at
+  `C:\Users\ice\AppData\Local\Temp\dohc-win-uia-1781747262324\workspace`;
+  `uia-note-open.png` shows the restored native Windows frame, titlebar,
+  app font/chrome, file tree, editor, history panel, and status bar;
+  `tab-context-screen.png` shows the native tab menu with Close Tab, Close
+  Other Tabs, Copy Path, and Show in Explorer; `status-context-screen.png`
+  shows the native status-bar menu with Open Agent Panel, Open History,
+  Connect dohc Cloud, Settings, and Toggle Theme. A second isolated shell run
+  at `C:\Users\ice\AppData\Local\Temp\dohc-win-shell-1781748818759\workspace`
+  captured `snap-hover-maximize-screen.png`, where Windows displays the snap
+  layout flyout over dohc's maximize button; UIA also reported the flyout as
+  `XamlExplorerHostIslandWindow`. The same run found the taskbar control
+  `dohc - 1 running window`, right-clicked it, and captured
+  `taskbar-jumplist-screen.png`, where Windows displays `Jump List for dohc`
+  with the dohc task action `Open workspace`, the app entry, Pin to taskbar,
+  and Close window. Active background tasks: none. Open workflows: no mutating
+  subagent/workflow lanes are active. Pending reviews/findings: none known
+  for E7 after scoped review and Windows package/install/native-shell QA.
+- Previous update before E7 (2026-06-17): **E6(agent adapters + fake-provider harness)
   REVIEW CLEAN, FULL GATES GREEN, COMMIT READY**. Actual branch/head:
   `codex/desktop-experience-parity` at `17120a9` (`e6(agent): add desktop
   agent panel foundation`). Dirty files are the current E6 adapter lane only:
@@ -74,13 +156,17 @@ design review + codex review + fix commit, every phase).
   `019ec885-de06-7f00-a196-c90d553bc4b7` and
   `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
   are active. Pending reviews/findings: none for the E6 adapter lane.
-- Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
-  editor component, and E4c rich collab/server. E5 graph, catch-up/history,
-  properties/frontmatter, notices, sharing UI, import/export, workspace
-  management, database grid polish, and apps runtime are built. NEXT = **E6
-  agent panel + driver adapters**, with E5.0 search and the E5 server
-  share/invitation lane already
-  committed. Recon:
+- Phase/position: E4b-2 through E7 is complete on
+  `codex/desktop-experience-parity`: E4b-2 editor component, E4c rich
+  collab/server + fix, E5.0 search, E5 graph/catch-up/properties/sync/
+  notices/sharing/import-export/workspace-management/database/apps runtime,
+  E6 agent panel foundation + process-backed drivers, and E7 native polish are
+  all committed with automated gates recorded. E5 server share/invitation work
+  and the earlier E0-E4a foundation remain historical prerequisites already
+  committed before this objective window. The remaining unproven plan gate is
+  the final native Windows manual verification for context menus, snap-layout
+  hover, and taskbar/jump-list display; package build/install/Open With
+  registry behavior has been verified on Windows. Recon:
   docs/superpowers/recon/2026-06-11-e4-editor-port-digest.md; D-E1 rich
   collab, D-E3 retire formula/query VALUES (keep inert styling + schema nodes
   for round-trip). E5.0 = @vscode/ripgrep argv-spawn IPC (never shell; user globs
@@ -181,6 +267,119 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e7(native-polish-full-qa) — COMMITTED, REVIEWED, FULL GATES GREEN (2026-06-18)
+
+Closed the desktop-native polish lane. Added a typed workbench context-menu
+IPC (`showWorkbenchMenu`) with a dependency-free closed command tuple in
+`channels.ts`, preload-side result validation, and main-owned Electron menus
+for tab, editor, and status contexts. Tabs now expose Close Tab / Close Other
+Tabs / Copy Path / Show in Explorer through the native menu, the editor surface
+gets platform edit roles, and the status bar routes native menu commands to
+Agent, History, Cloud login, Settings, and theme toggle. The renderer only
+receives validated command ids and reuses existing workbench actions.
+
+Added desktop activation plumbing for "Open Recent" and "Open with dohc".
+Main now tracks recent workspace summaries, refreshes native recent-document
+surfaces, provides a File → Open Recent submenu, publishes Windows user tasks
+with quoted `--open-workspace` arguments, handles `open-file` and
+`second-instance` paths, resolves documents to the nearest dohc workspace
+ancestor, registers new local workspaces when opening ordinary folders/files,
+and sends a validated `workspaceActivated` event to the renderer. Cold launches
+from `--open-workspace` preserve the requested workspace by prioritizing it in
+the initial registry response before the renderer chooses the first workspace.
+
+Preserved the registry integrity invariant during that native convenience work.
+The strict renderer-facing registry path now parses every entry with
+`WorkspaceSummary.parse`; malformed entries surface the existing "couldn't read
+its workspace registry" refusal screen instead of being silently hidden.
+Native recent/menu surfaces use a separate best-effort wrapper because they are
+convenience affordances and must not weaken startup validation. The new
+`windowChrome.spec.ts` cases cover cold Open With activation and malformed
+registry surfacing.
+
+Added packaged Open with dohc metadata in `electron-builder.yml` for
+`.md`, `.markdown`, `.txt`, `.csv`, and `.json`, plus package-smoke assertions
+for those associations. `docs/desktop.md` now records the desktop keyboard map
+for command palette, sidebar, quick open, file/folder creation, close tab,
+window close, rename/delete, tree navigation, Enter, and Escape. CSS now
+respects reduced-motion by suppressing animations, transitions, and smooth
+scrolling under `prefers-reduced-motion: reduce`.
+
+Review: the broad CodeRabbit agent run could not complete because the
+repository context exceeded the 150-file cap. Scoped review found one real
+issue: E7 initially used `safeParse` while building workspace summaries, which
+would hide malformed registry entries from the renderer. Fixed with strict
+`workspaceSummaries()`, native-only best-effort `nativeWorkspaceSummaries()`,
+and the malformed-registry E2E. A final scoped review of IPC validation, native
+workspace activation, and workbench menu routing found no additional changes.
+
+Gates: desktop typecheck PASS; desktop build PASS (`main.js` 233.23kB,
+`preload.cjs` 15.95kB, renderer initial build chunk 1,202.95kB /
+performance row 1.15MB); full desktop unit PASS 60/60 files and 538/538 tests;
+focused E7 desktop E2E PASS 15/15; full desktop E2E PASS 70/70 in 18.5m on the
+current build; focused performance E2E PASS 8/8; `check:performance` PASS
+(cold 1269, warm 1116/1200, createEmpty 47, open1000 400, fileTreeSearch 2.9
+/ 3, md250 58, tiptapMount 1709/2000, typing 0, sync/watch 789/866,
+appTester 523, sqlite 427, csv 395, contentSearch 42/64, memory 558/708,
+bundle 1.15/1.408, warm app open documented skip); `smoke:package` PASS with
+the file-association checks; `check:lean` PASS; `git diff --check` PASS before
+the log update. Visual QA PASS on the E2 workbench screenshots in light/dark
+agent panel, dirty tab, and hidden-sidebar states. Windows package/install,
+Open With, visible context menus, snap layout hover, taskbar display, and jump
+list QA PASS with evidence below.
+
+Windows package/manual progress (2026-06-18): Windows PowerShell/cmd tooling was
+available (`node` 24.16.0, `pnpm` 10.24.0). The repo install was created under
+Linux, so Windows could not execute WSL `.bin` symlinks or load Windows optional
+deps directly (`electron-vite` missed `@rolldown/binding-win32-x64-msvc`,
+`electron` missed `electron.exe`). To avoid purging shared `node_modules`, a
+temporary Windows packaging directory was created from the committed
+`apps/desktop/dist`, `build`, package metadata, and `electron-builder.yml`, then
+Windows npm installed only the externalized runtime modules (`zod`,
+`@vscode/ripgrep`, `typescript`). From that temp package,
+`electron-builder --win nsis --publish never -c.electronVersion=42.4.0` PASS;
+the unpacked `dohc.exe`, `rg.exe`, uninstaller, and installer were signed by
+the local Windows signing tool path used by electron-builder, and the NSIS
+artifact `dohc-0.1.0-win-x64.exe` plus blockmap/latest metadata were produced.
+
+Windows runtime evidence: `release/win-unpacked/dohc.exe` launched, stayed
+running, and rendered a native Windows desktop window titled `dohc`; screenshot
+captures are in
+`C:\Users\ice\AppData\Local\Temp\dohc-win-qa-dae53e28883e4bc2b4262c74c3d25c51\`
+(`packaged-shell.png`, `packaged-window-1280.png`,
+`packaged-maximized-screen.png`, and related captures). The dev NSIS installer
+then installed per-user with exit 0. Registry verification after install showed
+HKCU extension defaults for `.md`, `.markdown`, `.txt`, `.csv`, and `.json`
+registered `dohc workspace document`; the class label was `Open with dohc`; and
+the open command was
+`C:\Users\ice\AppData\Local\Programs\@dohcdesktop\dohc.exe "%1"`. Launching the
+installed app with a real `.md` path kept the process running and preserved that
+file path in the process command line, proving the installed Open With command
+matches the app's absolute-path activation parser. Cleanup: silent uninstall
+exited 0, removed the install folder, left no `dohc.exe` processes, and the
+stale dohc HKCU default values were removed while existing non-dohc
+OpenWithProgids remained. The final manual-only Windows gate for visible native
+context-menu display, snap-layout hover affordance, and taskbar/jump-list
+display was closed by a pywinauto/Pillow harness against the packaged unpacked
+app. The first isolated run used
+`C:\Users\ice\AppData\Local\Temp\dohc-win-uia-1781747262324\workspace` with
+isolated home/user-data directories. `uia-note-open.png` shows the restored
+native Windows frame, titlebar controls, dohc font/chrome, file tree, editor,
+history panel, and status bar. `tab-context-screen.png` shows the tab context
+menu with Close Tab, Close Other Tabs, Copy Path, and Show in Explorer.
+`status-context-screen.png` shows the status-bar context menu with Open Agent
+Panel, Open History, Connect dohc Cloud, Settings, and Toggle Theme. The final
+isolated shell run used
+`C:\Users\ice\AppData\Local\Temp\dohc-win-shell-1781748818759\workspace`.
+`snap-hover-maximize-screen.png` shows the Windows snap layout flyout over the
+app's maximize button, and UIA reported the flyout as
+`XamlExplorerHostIslandWindow` at `[1016, 145, 1532, 511]`. UIA found the
+taskbar control `dohc - 1 running window`; after right-clicking it, Windows
+opened `Jump List for dohc` at `[1880, 1795, 2357, 2088]`, and
+`taskbar-jumplist-screen.png` shows the dohc task action `Open workspace`, the
+app entry, Pin to taskbar, and Close window. Final cleanup left no running
+`dohc.exe` process.
 
 ### e6(agent-adapters-fake-harness) — REVIEW CLEAN, FULL GATES GREEN, COMMIT READY (2026-06-17)
 
@@ -935,5 +1134,7 @@ all PASS (cold 300ms, bundle 1.28MB), knip 0, tech-debt pass, arch-debt
 passes for THIS lane (6 open findings are e5-server files + recon doc —
 their lanes own them; the new plan/log paths were allowlisted as
 historical). Screenshots: test-results/screenshots/e0-e1/ — 5 surfaces ×
-light+dark × 1280x800+1536x960 (20 files). Windows-native checklist (snap
-layouts, overlay hover, menu accelerators) PENDING user verification.
+light+dark × 1280x800+1536x960 (20 files). Windows-native checklist was
+originally pending in this early lane; the final E7 Windows package/native
+shell QA above closes snap layouts, native menu display, taskbar, and jump-list
+verification.

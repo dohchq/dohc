@@ -77,6 +77,16 @@ async function sendUpdateState(app: ElectronApplication, state: unknown) {
   }, state);
 }
 
+async function setWorkbenchMenuChoice(
+  app: ElectronApplication,
+  choice: string | null,
+): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    if (value === null) delete process.env.DOHC_TEST_WORKBENCH_MENU_CHOICE;
+    else process.env.DOHC_TEST_WORKBENCH_MENU_CHOICE = value;
+  }, choice);
+}
+
 test("activity bar: view switching with designed empty states, panel collapse on re-click", async () => {
   const { home, root } = await seedWorkspace("e2-views", {
     "notes/a.md": "# A\n",
@@ -316,6 +326,33 @@ test("editor tabs: open/switch, drag reorder, overflow menu, dirty dot, Ctrl+W, 
   await expect(page.getByTestId("editor-tabs")).toHaveCount(0);
   await expect(page.getByText(/select a file, or create one/i)).toBeVisible();
 
+  await app.close();
+});
+
+test("native workbench context menus route tab and status bar actions", async () => {
+  const { home, root } = await seedWorkspace("e7-native-menus", {
+    "a.md": "# Alpha\n",
+    "b.md": "# Beta\n",
+    "c.md": "# Gamma\n",
+  });
+  const { app, page } = await openSeeded(home, root);
+  const tree = page.getByTestId("file-tree");
+
+  for (const name of ["a.md", "b.md", "c.md"]) {
+    await tree.getByText(name, { exact: true }).click();
+  }
+  await expect(page.getByTestId("editor-tabs").getByRole("tab")).toHaveCount(3);
+
+  await setWorkbenchMenuChoice(app, "close-other-tabs");
+  await page.getByTestId("tab-b.md").click({ button: "right" });
+  await expect(page.getByTestId("editor-tabs").getByRole("tab")).toHaveCount(1);
+  await expect(page.getByTestId("tab-b.md")).toHaveAttribute("data-active", "true");
+
+  await setWorkbenchMenuChoice(app, "open-agent");
+  await page.getByTestId("status-workspace").click({ button: "right" });
+  await expect(page.getByTestId("agent-panel")).toBeVisible();
+
+  await setWorkbenchMenuChoice(app, null);
   await app.close();
 });
 

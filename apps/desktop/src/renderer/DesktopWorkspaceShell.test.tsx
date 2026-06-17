@@ -2,6 +2,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -9,7 +10,11 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChangeSetRecord, WorkspaceUiState } from "../ipc/bridgeContract";
+import type {
+  ChangeSetRecord,
+  ShowWorkbenchMenuResult,
+  WorkspaceUiState,
+} from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
@@ -126,6 +131,7 @@ function makeBridge(
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
+    showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
     getDroppedFilePaths: vi.fn(() => []),
     listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
     listWorkspaceMembers: vi.fn(async () => ({
@@ -299,6 +305,63 @@ describe("imports and exports", () => {
         workspaceId: "ws-shell-test",
       });
     });
+  });
+});
+
+describe("native workbench context menus", () => {
+  it("routes tab context menu commands through existing tab actions", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await user.click(screen.getByText("b.md"));
+    await screen.findByTestId("tab-b.md");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+
+    await waitFor(() => {
+      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        context: "tab",
+        path: "a.md",
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+  });
+
+  it("opens the native editor context menu from the inspector area", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
+
+    await waitFor(() => {
+      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        context: "editor",
+      });
+    });
+  });
+
+  it("routes status bar context menu commands to panel actions", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("open-agent");
+    renderShell(bridge);
+
+    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
+
+    await waitFor(() => {
+      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        context: "status",
+      });
+    });
+    expect(await screen.findByTestId("agent-panel")).toBeTruthy();
   });
 });
 

@@ -60,6 +60,34 @@ export function isExplorerMenuCommand(
   );
 }
 
+// Closed native workbench context-menu command set (Phase E7). Explorer kept
+// its richer file-tree menu; this generic menu covers tabs, editor surfaces,
+// and the status bar. Labels/roles live in main. Renderer receives only the
+// selected command id, validated here before it can route to existing shell
+// actions.
+export const WORKBENCH_MENU_COMMANDS = [
+  "close-tab",
+  "close-other-tabs",
+  "copy-path",
+  "show-in-explorer",
+  "open-agent",
+  "open-history",
+  "connect-cloud",
+  "settings",
+  "toggle-theme",
+] as const;
+
+export type WorkbenchMenuCommandId = (typeof WORKBENCH_MENU_COMMANDS)[number];
+
+export function isWorkbenchMenuCommand(
+  value: unknown,
+): value is WorkbenchMenuCommandId {
+  return (
+    typeof value === "string" &&
+    (WORKBENCH_MENU_COMMANDS as readonly string[]).includes(value)
+  );
+}
+
 // Closed main→renderer update-state event shape (Phase E2 status bar). Like
 // MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
 // preload validates against it as a plain value and must stay dependency-free.
@@ -212,6 +240,59 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
   return { searchId, entries: safeEntries, done, limitHit };
 }
 
+export interface WorkspaceActivatedEvent {
+  workspaceId: string;
+  rootPath: string;
+  kind: "personal" | "shared" | "cloud-only";
+  mode: "local-first" | "cloud-first-local-copy" | "cloud-only";
+}
+
+const WORKSPACE_KINDS = ["personal", "shared", "cloud-only"] as const;
+const WORKSPACE_MODES = ["local-first", "cloud-first-local-copy", "cloud-only"] as const;
+
+function isWorkspaceKind(value: unknown): value is WorkspaceActivatedEvent["kind"] {
+  return (
+    typeof value === "string" &&
+    (WORKSPACE_KINDS as readonly string[]).includes(value)
+  );
+}
+
+function isWorkspaceMode(value: unknown): value is WorkspaceActivatedEvent["mode"] {
+  return (
+    typeof value === "string" &&
+    (WORKSPACE_MODES as readonly string[]).includes(value)
+  );
+}
+
+// Native app-menu / OS-open events carry a workspace summary from main to the
+// sandboxed renderer. Keep this dependency-free like menu/update/search
+// parsing: exact primitive fields only, extra fields stripped.
+export function parseWorkspaceActivatedEvent(
+  value: unknown,
+): WorkspaceActivatedEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  if (
+    !Object.hasOwn(value, "workspaceId") ||
+    !Object.hasOwn(value, "rootPath") ||
+    !Object.hasOwn(value, "kind") ||
+    !Object.hasOwn(value, "mode")
+  ) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const { workspaceId, rootPath, kind, mode } = raw;
+  if (
+    !isBoundedString(workspaceId, 200) ||
+    !/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)
+  ) {
+    return null;
+  }
+  if (!isBoundedString(rootPath, 4096)) return null;
+  if (!isWorkspaceKind(kind)) return null;
+  if (!isWorkspaceMode(mode)) return null;
+  return { workspaceId, rootPath, kind, mode };
+}
+
 export const CHANNELS = {
   pickWorkspaceRoot: "desktop:pick-workspace-root",
   getWorkspaceRegistry: "desktop:get-workspace-registry",
@@ -225,6 +306,7 @@ export const CHANNELS = {
   deleteWorkspacePath: "desktop:delete-workspace-path",
   exportWorkspaceZip: "desktop:export-workspace-zip",
   showExplorerMenu: "desktop:show-explorer-menu",
+  showWorkbenchMenu: "desktop:show-workbench-menu",
   importWorkspaceFiles: "desktop:import-workspace-files",
   readWorkspaceText: "desktop:read-workspace-text",
   writeWorkspaceText: "desktop:write-workspace-text",
@@ -272,6 +354,7 @@ export const CHANNELS = {
   cancelWorkspaceSearch: "desktop:cancel-workspace-search",
   searchResults: "desktop:search-results",
   menuCommand: "desktop:menu-command",
+  workspaceActivated: "desktop:workspace-activated",
   updateState: "desktop:update-state",
   workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",

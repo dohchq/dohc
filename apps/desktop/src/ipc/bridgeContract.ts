@@ -16,6 +16,7 @@ import {
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   UPDATE_STATUSES,
+  WORKBENCH_MENU_COMMANDS,
   type SearchResultsEvent,
 } from "./channels";
 
@@ -179,6 +180,19 @@ export type ExplorerMenuCommand = z.infer<typeof ExplorerMenuCommand>;
 
 export const ShowExplorerMenuResult = ExplorerMenuCommand.nullable();
 export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
+
+export const ShowWorkbenchMenuPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  context: z.enum(["tab", "editor", "status"]),
+  path: PATH_STRING.optional(),
+});
+export type ShowWorkbenchMenuPayload = z.infer<typeof ShowWorkbenchMenuPayload>;
+
+export const WorkbenchMenuCommand = z.enum(WORKBENCH_MENU_COMMANDS);
+export type WorkbenchMenuCommand = z.infer<typeof WorkbenchMenuCommand>;
+
+export const ShowWorkbenchMenuResult = WorkbenchMenuCommand.nullable();
+export type ShowWorkbenchMenuResult = z.infer<typeof ShowWorkbenchMenuResult>;
 
 export const ImportWorkspaceFilesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1053,6 +1067,9 @@ export interface DohcDesktopBridge {
   showExplorerMenu(
     payload: ShowExplorerMenuPayload,
   ): Promise<ShowExplorerMenuResult>;
+  showWorkbenchMenu(
+    payload: ShowWorkbenchMenuPayload,
+  ): Promise<ShowWorkbenchMenuResult>;
   // OS drag-in: maps dropped File objects to absolute paths via
   // webUtils.getPathForFile in the PRELOAD (sandboxed renderers have no
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
@@ -1141,6 +1158,10 @@ export interface DohcDesktopBridge {
   // Application-menu clicks, validated against MenuCommand in the preload
   // before they reach renderer code. Returns an unsubscribe function.
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
+  // Native Open Recent / OS "Open with dohc" activation. Main sends a full
+  // workspace summary; the preload strips and validates it before the root
+  // swaps workspaces.
+  onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
   // Auto-update state pushes from main, validated against the closed
   // UPDATE_STATUSES tuple in the preload (parseUpdateStateEvent) before they
   // reach renderer code. Returns an unsubscribe function.

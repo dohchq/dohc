@@ -69,6 +69,7 @@ export async function stopChildProcess(
 // dist path, the WSL --no-sandbox flag, and the test env in one place.
 export async function launchApp(
   env: Record<string, string> = {},
+  extraArgs: string[] = [],
 ): Promise<ElectronApplication> {
   const args = ["apps/desktop/dist/main/main.js"];
   if (process.env.DOHC_E2E_NO_CHROMIUM_SANDBOX === "1") args.push("--no-sandbox");
@@ -80,6 +81,7 @@ export async function launchApp(
   const userData =
     env.DOHC_TEST_USER_DATA ?? (await mkdtemp(join(tmpdir(), "dohc-e2e-ud-")));
   args.push(`--user-data-dir=${userData}`);
+  args.push(...extraArgs);
   return electron.launch({
     args,
     cwd: process.cwd(),

@@ -4,9 +4,25 @@ import { buildMenuTemplate } from "./applicationMenu";
 
 function build(isDev = false, platform: NodeJS.Platform = "linux") {
   const sendCommand = vi.fn();
+  const openRecentWorkspace = vi.fn();
   const showAbout = vi.fn();
-  const template = buildMenuTemplate({ isDev, platform, sendCommand, showAbout });
-  return { template, sendCommand, showAbout };
+  const recentWorkspaces = [
+    {
+      workspaceId: "recent-1",
+      rootPath: "/Users/ice/work/personal",
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    },
+  ];
+  const template = buildMenuTemplate({
+    isDev,
+    platform,
+    recentWorkspaces,
+    sendCommand,
+    openRecentWorkspace,
+    showAbout,
+  });
+  return { template, sendCommand, openRecentWorkspace, recentWorkspaces, showAbout };
 }
 
 function items(template: MenuItemConstructorOptions[], label: string) {
@@ -32,6 +48,39 @@ describe("application menu template", () => {
     const fakeWindow = { id: 1 };
     (newFile?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
+  });
+
+  it("Open Recent lists known workspaces and activates the picked one", () => {
+    const { template, openRecentWorkspace, recentWorkspaces } = build();
+    const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
+    const recentItems = openRecent?.submenu as MenuItemConstructorOptions[];
+    expect(recentItems?.[0]?.label).toBe("personal");
+    expect(recentItems?.[0]?.sublabel).toBe("/Users/ice/work/personal");
+
+    const fakeWindow = { id: 2 };
+    (recentItems[0]?.click as (a: unknown, b: unknown) => void)(
+      undefined,
+      fakeWindow,
+    );
+    expect(openRecentWorkspace).toHaveBeenCalledWith(
+      fakeWindow,
+      recentWorkspaces[0],
+    );
+  });
+
+  it("Open Recent has a disabled empty state when no workspaces are known", () => {
+    const sendCommand = vi.fn();
+    const showAbout = vi.fn();
+    const template = buildMenuTemplate({
+      isDev: false,
+      platform: "linux",
+      recentWorkspaces: [],
+      sendCommand,
+      showAbout,
+    });
+    const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
+    const recentItems = openRecent?.submenu as MenuItemConstructorOptions[];
+    expect(recentItems).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
   });
 
   it("renderer-owned accelerators are displayed but not registered", () => {

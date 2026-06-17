@@ -14,6 +14,7 @@ const Tab = memo(function Tab(props: {
   dirty: boolean;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
+  onContextMenu: (path: string) => void;
   onMove: (path: string, toIndex: number) => void;
 }) {
   const name = fileName(props.path);
@@ -42,6 +43,10 @@ const Tab = memo(function Tab(props: {
       // reliable middle-button event.
       onAuxClick={(event) => {
         if (event.button === 1) props.onClose(props.path);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        props.onContextMenu(props.path);
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
@@ -134,6 +139,7 @@ export function EditorTabs(props: {
   activeTabDirty: boolean;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
+  onContextMenu: (path: string) => void;
   onMove: (path: string, toIndex: number) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
@@ -153,6 +159,7 @@ export function EditorTabs(props: {
             dirty={tab.path === props.activeTab && props.activeTabDirty}
             onActivate={props.onActivate}
             onClose={props.onClose}
+            onContextMenu={props.onContextMenu}
             onMove={props.onMove}
           />
         ))}

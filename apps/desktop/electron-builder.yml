@@ -57,6 +57,12 @@ linux:
   target: [AppImage]
   category: Office
 
+fileAssociations:
+  - ext: [md, markdown, txt, csv, json]
+    name: dohc workspace document
+    description: Open with dohc
+    role: Editor
+
 # Auto-update feed STUB. The runtime feed comes from DOHC_UPDATE_URL
 # (src/updates/electronUpdater.ts setFeedURL); unset means updates are fully
 # disabled, so this RFC-reserved .invalid placeholder is never contacted.

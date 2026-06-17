@@ -14,7 +14,8 @@ import {
   shell,
   type IpcMainInvokeEvent,
 } from "electron";
-import { isAbsolute, relative, sep } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -28,7 +29,10 @@ import {
   ExportWorkspaceZipResult,
   ShowExplorerMenuPayload,
   ShowExplorerMenuResult,
+  ShowWorkbenchMenuPayload,
+  ShowWorkbenchMenuResult,
   type ExplorerMenuCommand,
+  type WorkbenchMenuCommand,
   DefaultWorkspaceRootResult,
   AppPackagePayload,
   AppPackageResult,
@@ -232,6 +236,123 @@ function notifyRenderer(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.workspaceActivity);
   }
+}
+
+function workspaceSummaries(): WorkspaceSummary[] {
+  return listWorkspaces().map((workspace) => WorkspaceSummary.parse(workspace));
+}
+
+function nativeWorkspaceSummaries(): WorkspaceSummary[] {
+  try {
+    return workspaceSummaries();
+  } catch {
+    // Native recent surfaces are convenience only. The renderer still gets the
+    // strict registry parse and shows the refusal screen for malformed state.
+    return [];
+  }
+}
+
+let preferredWorkspaceId: string | null = null;
+
+function prioritizePreferredWorkspace(
+  workspaces: WorkspaceSummary[],
+): WorkspaceSummary[] {
+  if (!preferredWorkspaceId) return workspaces;
+  const index = workspaces.findIndex(
+    (workspace) => workspace.workspaceId === preferredWorkspaceId,
+  );
+  if (index <= 0) return workspaces;
+  return [
+    workspaces[index],
+    ...workspaces.slice(0, index),
+    ...workspaces.slice(index + 1),
+  ];
+}
+
+function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
+  return window ?? BrowserWindow.getAllWindows()[0];
+}
+
+function sendWorkspaceActivated(
+  window: BrowserWindow | undefined,
+  workspace: WorkspaceSummary,
+): void {
+  preferredWorkspaceId = workspace.workspaceId;
+  targetWindow(window)?.webContents.send(CHANNELS.workspaceActivated, workspace);
+}
+
+function quoteWindowsArg(value: string): string {
+  let quoted = '"';
+  let backslashes = 0;
+  for (const char of value) {
+    if (char === "\\") {
+      backslashes += 1;
+    } else if (char === '"') {
+      quoted += "\\".repeat(backslashes * 2 + 1);
+      quoted += char;
+      backslashes = 0;
+    } else {
+      quoted += "\\".repeat(backslashes);
+      quoted += char;
+      backslashes = 0;
+    }
+  }
+  quoted += "\\".repeat(backslashes * 2);
+  quoted += '"';
+  return quoted;
+}
+
+function refreshApplicationMenu(): void {
+  if (!app.isReady()) return;
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(
+      buildMenuTemplate({
+        isDev: !app.isPackaged,
+        platform: process.platform,
+        recentWorkspaces: nativeWorkspaceSummaries(),
+        sendCommand: (window, command) => {
+          targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
+        },
+        openRecentWorkspace: (window, workspace) => {
+          sendWorkspaceActivated(window, workspace);
+          refreshNativeWorkspaceSurfaces();
+        },
+        showAbout: () => {
+          void dialog.showMessageBox({
+            title: "About dohc",
+            message: "dohc",
+            detail: `Version ${app.getVersion()}\nYour workspace is a folder.`,
+          });
+        },
+      }),
+    ),
+  );
+}
+
+function refreshNativeWorkspaceSurfaces(): void {
+  if (!app.isReady()) return;
+  const workspaces = nativeWorkspaceSummaries();
+  try {
+    app.clearRecentDocuments();
+    for (const workspace of [...workspaces].reverse()) {
+      app.addRecentDocument(workspace.rootPath);
+    }
+  } catch {
+    // Linux and some dev shells do not expose native recent-document storage.
+  }
+  if (process.platform === "win32") {
+    app.setUserTasks(
+      workspaces.slice(0, 10).map((workspace) => ({
+        program: process.execPath,
+        arguments: `--open-workspace ${quoteWindowsArg(workspace.rootPath)}`,
+        iconPath: process.execPath,
+        iconIndex: 0,
+        title: `Open ${workspace.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace"}`,
+        description: workspace.rootPath,
+      })),
+    );
+  }
+  refreshApplicationMenu();
 }
 
 // Synchronous mirror of the credential store for status derivation (the
@@ -461,6 +582,110 @@ function isApprovedRoot(normalized: string): boolean {
   return false;
 }
 
+const OPEN_WORKSPACE_ARG = "--open-workspace";
+const pendingOpenPaths: string[] = [];
+
+function collectOpenWorkspaceArgs(argv: string[]): string[] {
+  const paths: string[] = [];
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index] ?? "";
+    if (arg === OPEN_WORKSPACE_ARG) {
+      const next = argv[index + 1];
+      if (next) {
+        paths.push(next);
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith(`${OPEN_WORKSPACE_ARG}=`)) {
+      paths.push(arg.slice(OPEN_WORKSPACE_ARG.length + 1));
+      continue;
+    }
+    if (arg.startsWith("--")) continue;
+    const portable = arg.replace(/\\/g, "/");
+    if (portable.endsWith("/dist/main/main.js")) continue;
+    if (isAbsolute(arg) && arg !== process.execPath) paths.push(arg);
+  }
+  return [...new Set(paths)];
+}
+
+function nearestWorkspaceRoot(startPath: string): string | null {
+  let current = startPath;
+  while (true) {
+    if (existsSync(join(current, ".dohc", "manifest.json"))) return current;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function workspaceRootForOpenPath(path: string): string | null {
+  let normalized: string;
+  try {
+    normalized = normalizeAbsolutePath(path);
+  } catch {
+    return null;
+  }
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(normalized);
+  } catch {
+    return null;
+  }
+  if (stats.isDirectory()) return nearestWorkspaceRoot(normalized) ?? normalized;
+  if (!stats.isFile()) return null;
+  const parent = dirname(normalized);
+  return nearestWorkspaceRoot(parent) ?? parent;
+}
+
+async function ensureWorkspaceRegistered(rootPath: string): Promise<WorkspaceSummary> {
+  const normalized = normalizeAbsolutePath(rootPath);
+  const existing = workspaceSummaries().find(
+    (workspace) => normalizeAbsolutePath(workspace.rootPath) === normalized,
+  );
+  if (existing) return existing;
+  const created = await createWorkspaceFolder({
+    rootPath: normalized,
+    kind: "personal",
+  });
+  const summary = WorkspaceSummary.parse(created);
+  registerWorkspace(created);
+  refreshNativeWorkspaceSurfaces();
+  return summary;
+}
+
+async function openWorkspacePath(
+  path: string,
+  window?: BrowserWindow,
+): Promise<WorkspaceSummary | null> {
+  const rootPath = workspaceRootForOpenPath(path);
+  if (!rootPath) return null;
+  const workspace = await ensureWorkspaceRegistered(rootPath);
+  sendWorkspaceActivated(window, workspace);
+  refreshNativeWorkspaceSurfaces();
+  return workspace;
+}
+
+async function openWorkspacePaths(
+  paths: string[],
+  window?: BrowserWindow,
+): Promise<WorkspaceSummary | null> {
+  let lastOpened: WorkspaceSummary | null = null;
+  for (const path of paths) {
+    const opened = await openWorkspacePath(path, window).catch(() => null);
+    if (opened) lastOpened = opened;
+  }
+  return lastOpened;
+}
+
+async function flushPendingOpenPaths(
+  window?: BrowserWindow,
+): Promise<WorkspaceSummary | null> {
+  if (pendingOpenPaths.length === 0) return null;
+  const paths = pendingOpenPaths.splice(0);
+  return openWorkspacePaths(paths, window);
+}
+
 // The navigation policy is constant for the process lifetime (env var and
 // packaged bundle dir cannot change), so compute it once.
 let cachedPolicy: ReturnType<typeof navigationPolicy> | null = null;
@@ -501,7 +726,9 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(CHANNELS.getWorkspaceRegistry, (event) => {
     assertTrustedSender(event);
-    return WorkspaceRegistryResult.parse({ workspaces: listWorkspaces() });
+    return WorkspaceRegistryResult.parse({
+      workspaces: prioritizePreferredWorkspace(workspaceSummaries()),
+    });
   });
 
   ipcMain.handle(CHANNELS.getDefaultWorkspaceRoot, (event) => {
@@ -539,6 +766,7 @@ function registerIpcHandlers(): void {
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
     registerWorkspace(created);
+    refreshNativeWorkspaceSurfaces();
     return summary;
   });
 
@@ -556,6 +784,7 @@ function registerIpcHandlers(): void {
     // must fail the attach with a visible error, not brick the registry.
     const summary = WorkspaceSummary.parse(attached);
     registerWorkspace(attached);
+    refreshNativeWorkspaceSurfaces();
     return summary;
   });
 
@@ -708,6 +937,71 @@ function registerIpcHandlers(): void {
       shell.showItemInFolder(realTarget);
     }
     return ShowExplorerMenuResult.parse(chosen);
+  });
+
+  ipcMain.handle(CHANNELS.showWorkbenchMenu, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ShowWorkbenchMenuPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+
+    const chosen = await new Promise<WorkbenchMenuCommand | null>((resolve) => {
+      if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
+        const choice = process.env.DOHC_TEST_WORKBENCH_MENU_CHOICE;
+        if (choice !== undefined) {
+          const parsed = ShowWorkbenchMenuResult.safeParse(choice);
+          resolve(parsed.success ? parsed.data : null);
+          return;
+        }
+      }
+      let picked: WorkbenchMenuCommand | null = null;
+      const item = (
+        label: string,
+        id: WorkbenchMenuCommand,
+      ): Electron.MenuItemConstructorOptions => ({
+        label,
+        click: () => {
+          picked = id;
+        },
+      });
+      const separator = { type: "separator" as const };
+      const editRoles: Electron.MenuItemConstructorOptions[] = [
+        { role: "undo" },
+        { role: "redo" },
+        separator,
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ];
+      const template: Electron.MenuItemConstructorOptions[] =
+        input.context === "tab"
+          ? [
+              item("Close Tab", "close-tab"),
+              item("Close Other Tabs", "close-other-tabs"),
+              separator,
+              item("Copy Path", "copy-path"),
+              item("Show in Explorer", "show-in-explorer"),
+            ]
+          : input.context === "status"
+            ? [
+                item("Open Agent Panel", "open-agent"),
+                item("Open History", "open-history"),
+                separator,
+                item("Connect dohc Cloud", "connect-cloud"),
+                item("Settings", "settings"),
+                separator,
+                item("Toggle Theme", "toggle-theme"),
+              ]
+            : editRoles;
+      const menu = Menu.buildFromTemplate(template);
+      const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      menu.popup({
+        window,
+        callback: () => setImmediate(() => resolve(picked)),
+      });
+    });
+
+    return ShowWorkbenchMenuResult.parse(chosen);
   });
 
   ipcMain.handle(CHANNELS.importWorkspaceFiles, async (event, payload) => {
@@ -1094,6 +1388,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await activity.open(workspace));
   });
 
@@ -1310,6 +1605,24 @@ function registerIpcHandlers(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  app.on("open-file", (event, path) => {
+    event.preventDefault();
+    pendingOpenPaths.push(path);
+    if (app.isReady()) {
+      void flushPendingOpenPaths(targetWindow(undefined));
+    }
+  });
+
+  app.on("second-instance", (_event, argv) => {
+    const window = targetWindow(undefined);
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    }
+    void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
+  });
+
   void app.whenReady().then(async () => {
     launchMarks.appReady();
     desktopMarks.markOnce("app-ready");
@@ -1349,28 +1662,20 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    Menu.setApplicationMenu(
-      Menu.buildFromTemplate(
-        buildMenuTemplate({
-          isDev: !app.isPackaged,
-          platform: process.platform,
-          sendCommand: (window, command) => {
-            const target = window ?? BrowserWindow.getAllWindows()[0];
-            target?.webContents.send(CHANNELS.menuCommand, command);
-          },
-          showAbout: () => {
-            void dialog.showMessageBox({
-              title: "About dohc",
-              message: "dohc",
-              detail: `Version ${app.getVersion()}\nYour workspace is a folder.`,
-            });
-          },
-        }),
-      ),
+    const launchWorkspace = await openWorkspacePaths(
+      collectOpenWorkspaceArgs(process.argv),
     );
+    const pendingWorkspace = await flushPendingOpenPaths();
+    const initialActivatedWorkspace = pendingWorkspace ?? launchWorkspace;
+    refreshNativeWorkspaceSurfaces();
 
     const { createMainWindow } = await import("./window/createMainWindow");
-    createMainWindow();
+    const window = createMainWindow();
+    if (initialActivatedWorkspace) {
+      window.webContents.once("did-finish-load", () => {
+        sendWorkspaceActivated(window, initialActivatedWorkspace);
+      });
+    }
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
 

@@ -26,6 +26,17 @@ export function DesktopRoot() {
       });
   }, []);
 
+  useEffect(() => {
+    return bridge().onWorkspaceActivated((next) => {
+      setWorkspaces((known) =>
+        known.some((entry) => entry.workspaceId === next.workspaceId)
+          ? known
+          : [...known, next],
+      );
+      setWorkspace(next);
+    });
+  }, []);
+
   // Signal first paint when real content is about to mount (not while the
   // registry IPC is still pending and the root renders null).
   useEffect(() => {

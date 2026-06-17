@@ -68,6 +68,12 @@ if (config) {
   check(config.forceCodeSigning !== true, "forceCodeSigning stays a release-pipeline opt-in");
   check(config.publish?.provider === "generic" && typeof config.publish?.url === "string",
     "publish stub present (generic provider)");
+  const fileExtensions = config.fileAssociations?.flatMap((entry) =>
+    Array.isArray(entry.ext) ? entry.ext : [entry.ext],
+  ) ?? [];
+  for (const ext of ["md", "markdown", "txt", "csv", "json"]) {
+    check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
+  }
 }
 
 // --- signing labeling ------------------------------------------------------

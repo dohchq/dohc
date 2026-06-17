@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchApp } from "./launch";
@@ -93,7 +93,25 @@ test("application menu: structure installed, commands route to the registry", as
     "Help",
   ]);
   expect(menu?.[0].items).toContain("New File");
+  expect(menu?.[0].items).toContain("Open Recent");
   expect(menu?.[2].items).toContain("Command Palette");
+
+  const openRecent = await app.evaluate(({ Menu }) => {
+    const fileMenu = Menu.getApplicationMenu()?.items.find(
+      (item) => item.label === "File",
+    );
+    const item = fileMenu?.submenu?.items.find((sub) => sub.label === "Open Recent");
+    return item?.submenu?.items.map((sub) => ({
+      label: sub.label,
+      sublabel: sub.sublabel,
+      enabled: sub.enabled,
+    }));
+  });
+  expect(openRecent?.[0]).toMatchObject({
+    label: "personal",
+    sublabel: join(testHome, "dohc", "personal"),
+    enabled: true,
+  });
 
   // Drive menu commands exactly the way a click does (webContents.send on the
   // menu-command channel) and assert the renderer routes each through the
@@ -143,6 +161,77 @@ test("application menu: structure installed, commands route to the registry", as
   await send("definitely-not-a-command");
   await expect(page.getByTestId("command-palette")).toHaveCount(0);
   await expect(page.getByTestId("quick-open")).toHaveCount(0);
+
+  await app.close();
+});
+
+test("cold Open with dohc activates the requested workspace, not registry[0]", async () => {
+  const testHome = await mkdtemp(join(tmpdir(), "dohc-open-with-"));
+  const alpha = join(testHome, "alpha");
+  const beta = join(testHome, "beta");
+  const workspaces = [
+    {
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      rootPath: alpha,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    },
+    {
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      rootPath: beta,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    },
+  ];
+  for (const workspace of workspaces) {
+    await mkdir(join(workspace.rootPath, ".dohc"), { recursive: true });
+    await writeFile(
+      join(workspace.rootPath, ".dohc", "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        workspaceId: workspace.workspaceId,
+        kind: workspace.kind,
+        mode: workspace.mode,
+      }),
+    );
+  }
+  await writeFile(
+    join(testHome, "dohc-workspaces.json"),
+    JSON.stringify({ version: 1, workspaces }, null, 2),
+  );
+
+  const app = await launchApp(
+    { DOHC_TEST_HOME: testHome },
+    ["--open-workspace", beta],
+  );
+  const page = await app.firstWindow();
+  await expect(page.getByTestId("workspace-shell")).toBeVisible();
+  await expect(page.getByTestId("workspace-switcher")).toContainText("beta");
+
+  await app.close();
+});
+
+test("malformed registry entries are surfaced, not silently hidden", async () => {
+  const testHome = await mkdtemp(join(tmpdir(), "dohc-bad-registry-"));
+  await writeFile(
+    join(testHome, "dohc-workspaces.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        workspaces: [{ workspaceId: "bad-workspace-entry" }],
+      },
+      null,
+      2,
+    ),
+  );
+
+  const app = await launchApp({ DOHC_TEST_HOME: testHome });
+  const page = await app.firstWindow();
+
+  await expect(
+    page.getByText("dohc couldn't read its workspace registry"),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /create workspace/i })).toHaveCount(0);
 
   await app.close();
 });

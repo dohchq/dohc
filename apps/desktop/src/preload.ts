@@ -3,13 +3,16 @@ import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   MenuCommand,
+  WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
   isExplorerMenuCommand,
   isMenuCommand,
+  isWorkbenchMenuCommand,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
+  parseWorkspaceActivatedEvent,
 } from "./ipc/channels";
 
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
@@ -47,6 +50,13 @@ const bridge: DohcDesktopBridge = {
       payload,
     );
     return isExplorerMenuCommand(result) ? result : null;
+  },
+  showWorkbenchMenu: async (payload) => {
+    const result: unknown = await ipcRenderer.invoke(
+      CHANNELS.showWorkbenchMenu,
+      payload,
+    );
+    return isWorkbenchMenuCommand(result) ? result : null;
   },
   // OS drag-in: sandboxed renderers lost File.path in Electron 32+;
   // webUtils.getPathForFile in the preload is the sanctioned resolver.
@@ -157,6 +167,14 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.menuCommand, handler);
     return () => ipcRenderer.removeListener(CHANNELS.menuCommand, handler);
+  },
+  onWorkspaceActivated: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const workspace = parseWorkspaceActivatedEvent(raw);
+      if (workspace) listener(workspace as WorkspaceSummary);
+    };
+    ipcRenderer.on(CHANNELS.workspaceActivated, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.workspaceActivated, handler);
   },
   // Same boundary rule as onMenuCommand: only a value that passes the closed
   // dependency-free check (parseUpdateStateEvent — exact tuple member status,

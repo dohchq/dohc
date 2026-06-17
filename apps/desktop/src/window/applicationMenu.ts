@@ -1,5 +1,6 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
-import type { MenuCommand } from "../ipc/bridgeContract";
+import { basename } from "node:path";
+import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 
 // Real application menu (File/Edit/View/Go/Help). Custom items SEND a
 // MenuCommand to the focused window's renderer, where the shell routes it
@@ -17,7 +18,12 @@ import type { MenuCommand } from "../ipc/bridgeContract";
 export function buildMenuTemplate(options: {
   isDev: boolean;
   platform: NodeJS.Platform;
+  recentWorkspaces?: WorkspaceSummary[];
   sendCommand: (window: BrowserWindow | undefined, command: MenuCommand) => void;
+  openRecentWorkspace?: (
+    window: BrowserWindow | undefined,
+    workspace: WorkspaceSummary,
+  ) => void;
   showAbout: () => void;
 }): MenuItemConstructorOptions[] {
   const command = (
@@ -35,6 +41,11 @@ export function buildMenuTemplate(options: {
   // replaced by the app name); without an explicit appMenu role, "File"
   // would be swallowed into it and Quit/Hide/Services would be missing.
   const isMac = options.platform === "darwin";
+  const recentWorkspaces = (options.recentWorkspaces ?? []).slice(0, 10);
+  const recentLabel = (workspace: WorkspaceSummary): string => {
+    const leaf = basename(workspace.rootPath);
+    return leaf.length > 0 ? leaf : workspace.rootPath;
+  };
 
   return [
     ...(isMac ? [{ role: "appMenu" } as const] : []),
@@ -45,6 +56,21 @@ export function buildMenuTemplate(options: {
         command("New Folder…", "new-folder"),
         { type: "separator" },
         command("Open Workspace…", "open-workspace"),
+        {
+          label: "Open Recent",
+          submenu:
+            recentWorkspaces.length > 0
+              ? recentWorkspaces.map((workspace) => ({
+                  label: recentLabel(workspace),
+                  sublabel: workspace.rootPath,
+                  click: (_item, window) =>
+                    options.openRecentWorkspace?.(
+                      window as BrowserWindow | undefined,
+                      workspace,
+                    ),
+                }))
+              : [{ label: "No Recent Workspaces", enabled: false }],
+        },
         command("Import Files…", "import-files"),
         { type: "separator" },
         command("Close Tab", "close-tab", "CommandOrControl+W"),

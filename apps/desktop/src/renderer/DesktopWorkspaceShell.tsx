@@ -19,6 +19,7 @@ import {
 import type {
   ChangeSetRecord,
   SyncStatusResult,
+  WorkbenchMenuCommand,
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
@@ -682,6 +683,20 @@ export function DesktopWorkspaceShell(props: {
     mutateWb((state) => (state.activeTab ? closeTab(state, state.activeTab) : state));
   }, [mutateWb]);
 
+  const closeOtherTabs = useCallback(
+    (path: string) => {
+      const current = wbRef.current;
+      if (!current.tabs.some((tab) => tab.path === path)) return;
+      if (current.activeTab !== path) rendererMarks.mark("file-open-start");
+      mutateWb((state) => {
+        if (!state.tabs.some((tab) => tab.path === path)) return state;
+        if (state.tabs.length === 1 && state.activeTab === path) return state;
+        return { ...state, tabs: [{ path }], activeTab: path };
+      });
+    },
+    [mutateWb],
+  );
+
   const moveFileTab = useCallback(
     (path: string, toIndex: number) => {
       mutateWb((state) =>
@@ -689,6 +704,18 @@ export function DesktopWorkspaceShell(props: {
           state,
           state.tabs.findIndex((tab) => tab.path === path),
           toIndex,
+        ),
+      );
+    },
+    [mutateWb],
+  );
+
+  const showPathInExplorer = useCallback(
+    (path: string) => {
+      mutateWb((state) =>
+        ancestorDirs(path).reduce<WorkbenchState>(
+          (acc, dir) => setFolderExpanded(acc, dir, true),
+          { ...state, activeView: "explorer", sidebarVisible: true },
         ),
       );
     },
@@ -746,6 +773,43 @@ export function DesktopWorkspaceShell(props: {
   const openAgentView = useCallback(() => {
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
   }, [mutateWb]);
+
+  const runWorkbenchMenuCommand = useCallback(
+    (command: WorkbenchMenuCommand, path?: string) => {
+      if (command === "close-tab" && path) {
+        closeFileTab(path);
+      } else if (command === "close-other-tabs" && path) {
+        closeOtherTabs(path);
+      } else if (command === "copy-path" && path) {
+        void navigator.clipboard?.writeText(path);
+      } else if (command === "show-in-explorer" && path) {
+        showPathInExplorer(path);
+      } else if (command === "open-agent") {
+        openAgentView();
+      } else if (command === "open-history") {
+        openHistoryView();
+      } else if (command === "connect-cloud") {
+        setCloudOpen(true);
+      } else if (command === "settings") {
+        setSettingsOpen(true);
+      } else if (command === "toggle-theme") {
+        toggleTheme();
+      }
+    },
+    [closeFileTab, closeOtherTabs, openAgentView, openHistoryView, showPathInExplorer],
+  );
+
+  const showWorkbenchMenu = useCallback(
+    async (context: "tab" | "editor" | "status", path?: string) => {
+      const command = await bridge().showWorkbenchMenu({
+        workspaceId,
+        context,
+        ...(path ? { path } : {}),
+      });
+      if (command) runWorkbenchMenuCommand(command, path);
+    },
+    [runWorkbenchMenuCommand, workspaceId],
+  );
 
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
@@ -1070,24 +1134,32 @@ export function DesktopWorkspaceShell(props: {
             activeTabDirty={activeTabDirty}
             onActivate={openFile}
             onClose={closeFileTab}
+            onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
             onMove={moveFileTab}
           />
-          {wb.activeTab ? (
-            <FileInspector
-              key={wb.activeTab}
-              workspaceId={workspaceId}
-              path={wb.activeTab}
-              refreshKey={changeSets.length}
-              onOpenPath={openFile}
-              scrollTarget={searchScrollTarget ?? undefined}
-              onScrollConsumed={consumeScrollTarget}
-              onSaveStateChange={onSaveStateChange}
-              registerDraftFlush={registerDraftFlush}
-              knownMarkdownFiles={markdownWikilinkFiles}
-              onSharePath={setSharePath}
-            />
-          ) : (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+          <div
+            className="flex min-h-0 flex-1 flex-col"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              void showWorkbenchMenu("editor");
+            }}
+          >
+            {wb.activeTab ? (
+              <FileInspector
+                key={wb.activeTab}
+                workspaceId={workspaceId}
+                path={wb.activeTab}
+                refreshKey={changeSets.length}
+                onOpenPath={openFile}
+                scrollTarget={searchScrollTarget ?? undefined}
+                onScrollConsumed={consumeScrollTarget}
+                onSaveStateChange={onSaveStateChange}
+                registerDraftFlush={registerDraftFlush}
+                knownMarkdownFiles={markdownWikilinkFiles}
+                onSharePath={setSharePath}
+              />
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <span className="text-sm text-muted">
                 Select a file, or create one
               </span>
@@ -1122,8 +1194,9 @@ export function DesktopWorkspaceShell(props: {
                   Ctrl P · go to file
                 </button>
               </div>
-            </div>
-          )}
+              </div>
+            )}
+          </div>
         </main>
 
         {/* History timeline — the "git log for everyday people". Every
@@ -1164,6 +1237,7 @@ export function DesktopWorkspaceShell(props: {
         onOpenHistory={openHistoryView}
         onOpenSettings={() => setSettingsOpen(true)}
         onToggleTheme={toggleTheme}
+        onContextMenu={() => void showWorkbenchMenu("status")}
       />
 
       {paletteOpen ? (

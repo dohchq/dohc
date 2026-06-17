@@ -34,12 +34,19 @@ export function StatusBar(props: {
   onOpenHistory: () => void;
   onOpenSettings: () => void;
   onToggleTheme: () => void;
+  onContextMenu: () => void;
 }) {
   const state = props.syncStatus?.state ?? "synced";
   const conflictCount = props.syncStatus?.conflictCount ?? 0;
 
   return (
-    <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3">
+    <footer
+      className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel-2 px-3"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        props.onContextMenu();
+      }}
+    >
       <div className="flex items-center gap-3">
         <span
           data-testid="status-workspace"
