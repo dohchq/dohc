@@ -1,9 +1,6 @@
-import {
-  createLocalBlobStore,
-  createPostgresWorkspaceBackend,
-  createPostgresWorkspaceProvisioner,
-  defaultPostgresUrl,
-} from "@dohc/workspace-postgres";
+import { createLocalBlobStore } from "@dohc/workspace-postgres/blobStore";
+import { createPostgresWorkspaceBackend } from "@dohc/workspace-postgres/services/backend";
+import { createPostgresWorkspaceProvisioner } from "@dohc/workspace-postgres/services/provisioning";
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
@@ -20,6 +17,7 @@ import { createWorkspaceApiHandler } from "./server";
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
 const secret = process.env.BETTER_AUTH_SECRET ?? "";
+const defaultPostgresUrl = "postgres://dohc:dohc@localhost:54329/dohc_v2";
 
 // The /test/device/approve impersonation seam is fail-CLOSED: it requires an
 // explicit dev/test signal, never merely "not production". An operator who

@@ -31,6 +31,7 @@ import {
   preloadMarkdownEditor,
   type ScrollTarget,
 } from "./FileInspector";
+import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
@@ -81,6 +82,33 @@ const LazyWorkspaceManagementDialog = lazy(() =>
     default: mod.WorkspaceManagementDialog,
   })),
 );
+
+const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
+
+function scheduleMarkdownEditorPreload(): () => void {
+  let idleHandle: number | null = null;
+  let fired = false;
+  const timerHandle = globalThis.setTimeout(() => {
+    fired = true;
+    if (typeof globalThis.requestIdleCallback === "function") {
+      idleHandle = globalThis.requestIdleCallback(preloadMarkdownEditor, {
+        timeout: 1_000,
+      });
+      return;
+    }
+    preloadMarkdownEditor();
+  }, MARKDOWN_PRELOAD_IDLE_DELAY_MS);
+
+  return () => {
+    if (!fired) globalThis.clearTimeout(timerHandle);
+    if (
+      idleHandle !== null &&
+      typeof globalThis.cancelIdleCallback === "function"
+    ) {
+      globalThis.cancelIdleCallback(idleHandle);
+    }
+  };
+}
 const LazySearchView = lazy(() =>
   import("./workbench/SearchView").then((mod) => ({ default: mod.SearchView })),
 );
@@ -345,6 +373,23 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  useEffect(() => {
+    return scheduleMarkdownEditorPreload();
+  }, [workspaceId]);
+  const markdownWikilinkFiles = useMemo<WikilinkFile[]>(
+    () =>
+      files
+        .filter((file) => file.kind === "file" && /\.(md|markdown)$/i.test(file.path))
+        .map((file) => {
+          const pathNoExt = file.path.replace(/\.(md|markdown)$/i, "");
+          return {
+            path: file.path,
+            title: pathNoExt.split("/").pop() ?? file.path,
+            fileId: null,
+          };
+        }),
+    [files],
+  );
   const conflictSummaries = useMemo(
     () =>
       files
@@ -709,6 +754,10 @@ export function DesktopWorkspaceShell(props: {
     if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
   }, [files]);
   useEffect(() => {
+    if (!files.some((file) => /\.(md|markdown)$/i.test(file.path))) return;
+    return scheduleMarkdownEditorPreload();
+  }, [files]);
+  useEffect(() => {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
@@ -1034,6 +1083,7 @@ export function DesktopWorkspaceShell(props: {
               onScrollConsumed={consumeScrollTarget}
               onSaveStateChange={onSaveStateChange}
               registerDraftFlush={registerDraftFlush}
+              knownMarkdownFiles={markdownWikilinkFiles}
               onSharePath={setSharePath}
             />
           ) : (

@@ -123,6 +123,16 @@ const bridge: DohcDesktopBridge = {
   getAgentRunStatus: (payload) =>
     ipcRenderer.invoke(CHANNELS.getAgentRunStatus, payload),
   getMcpConfig: (payload) => ipcRenderer.invoke(CHANNELS.getMcpConfig, payload),
+  probeAgentDrivers: (payload) =>
+    ipcRenderer.invoke(CHANNELS.probeAgentDrivers, payload),
+  getAgentSessionState: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getAgentSessionState, payload),
+  startAgentSession: (payload) =>
+    ipcRenderer.invoke(CHANNELS.startAgentSession, payload),
+  stopAgentSession: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stopAgentSession, payload),
+  answerAgentPermission: (payload) =>
+    ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   getWorkspaceUiState: (payload) =>

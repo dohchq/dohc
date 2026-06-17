@@ -16,6 +16,7 @@ import {
   stopChildProcess,
   tsxChildEnv,
 } from "./launch";
+import { spawnWorkspaceApi } from "./workspaceApiServer";
 
 // Phase 18: the final product readiness matrix as ONE sequential journey over
 // the real product — desktop first-run with no account, real files on disk,
@@ -250,23 +251,13 @@ async function seedSharedClient(workspaceId: string): Promise<{ home: string; ro
 
 test.beforeAll(async () => {
   test.setTimeout(SERVICE_START_TIMEOUT_MS);
-  api = spawn(
-    process.execPath,
-    [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],
-    {
-      cwd: join(process.cwd(), "services/workspace-api"),
-      env: {
-        ...process.env,
-        ...tsxChildEnv(),
-        DOHC_TEST_AUTH: "1",
-        NODE_ENV: "test",
-        WORKSPACE_API_PORT: String(API_PORT),
-        // Enables CORS + Better Auth origin trust for the web client step.
-        DOHC_WEB_ORIGIN: WEB_URL,
-      },
-      stdio: "ignore",
-    },
-  );
+  api = spawnWorkspaceApi({
+    DOHC_TEST_AUTH: "1",
+    NODE_ENV: "test",
+    WORKSPACE_API_PORT: String(API_PORT),
+    // Enables CORS + Better Auth origin trust for the web client step.
+    DOHC_WEB_ORIGIN: WEB_URL,
+  });
   await waitForHttp(`${API_URL}/health`);
 });
 

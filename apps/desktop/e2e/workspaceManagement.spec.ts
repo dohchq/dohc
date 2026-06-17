@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
-import { launchApp, stopChildProcess, tsxChildEnv } from "./launch";
+import { launchApp, stopChildProcess } from "./launch";
+import { spawnWorkspaceApi } from "./workspaceApiServer";
 
 const PORT = 17894;
 const SERVER_URL = `http://localhost:${PORT}`;
@@ -31,21 +32,11 @@ async function waitForHealth(timeoutMs = SERVICE_START_TIMEOUT_MS): Promise<void
 
 test.beforeAll(async () => {
   test.setTimeout(SERVICE_START_TIMEOUT_MS);
-  server = spawn(
-    process.execPath,
-    [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/main.ts"],
-    {
-      cwd: join(process.cwd(), "services/workspace-api"),
-      env: {
-        ...process.env,
-        ...tsxChildEnv(),
-        DOHC_TEST_AUTH: "1",
-        NODE_ENV: "test",
-        WORKSPACE_API_PORT: String(PORT),
-      },
-      stdio: "ignore",
-    },
-  );
+  server = spawnWorkspaceApi({
+    DOHC_TEST_AUTH: "1",
+    NODE_ENV: "test",
+    WORKSPACE_API_PORT: String(PORT),
+  });
   await waitForHealth();
 });
 

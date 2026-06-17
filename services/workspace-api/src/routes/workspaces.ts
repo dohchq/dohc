@@ -1,5 +1,5 @@
 import type { Actor } from "@dohc/workspace-contracts";
-import { listUserWorkspaces } from "@dohc/workspace-postgres";
+import { listUserWorkspaces } from "@dohc/workspace-postgres/repositories/workspaces";
 import type pg from "pg";
 
 export type CreateWorkspaceInput = {

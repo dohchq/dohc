@@ -2,6 +2,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentPanelSnapshotResult } from "../ipc/bridgeContract";
 import { AgentPanelView } from "./AgentPanelView";
 
 const config = {
@@ -11,7 +12,39 @@ const config = {
   home: "/state/home",
 };
 
+const drivers: AgentPanelSnapshotResult["drivers"] = [
+  {
+    id: "codex-app-server",
+    displayName: "Codex",
+    installed: true,
+    version: "fake-codex 1.0.0",
+    auth: { status: "unknown", label: "CLI login" },
+    models: [{ id: "default", name: "Default", planIncluded: true }],
+  },
+  {
+    id: "claude-acp",
+    displayName: "Claude",
+    installed: false,
+    auth: { status: "unknown" },
+    models: [],
+  },
+  {
+    id: "generic-acp",
+    displayName: "Generic ACP",
+    installed: true,
+    version: "fake-acp 1.0.0",
+    auth: { status: "unknown", label: "CLI login" },
+    models: [],
+  },
+];
+
 let active = false;
+let session: AgentPanelSnapshotResult["session"] = null;
+
+function snapshot(): AgentPanelSnapshotResult {
+  return { drivers, session };
+}
+
 const bridge = {
   getMcpConfig: vi.fn(async () => config),
   getAgentRunStatus: vi.fn(async () => ({
@@ -27,16 +60,66 @@ const bridge = {
       : null,
     lastRun: null,
   })),
-  startAgentRun: vi.fn(async () => {
+  probeAgentDrivers: vi.fn(async () => snapshot()),
+  getAgentSessionState: vi.fn(async () => snapshot()),
+  startAgentSession: vi.fn(async () => {
     active = true;
-    return {
-      id: "run-1",
+    session = {
+      driverId: "codex-app-server",
+      driverName: "Codex",
+      status: "waiting-permission",
       startedAt: 1,
-      agentId: "dohc-mcp",
-      onBehalfOf: "local",
-      status: "running" as const,
+      runId: "run-1",
+      messages: [{ id: "assistant:1", role: "assistant", text: "Preparing workspace note.\n" }],
+      items: [
+        {
+          id: "cmd-1",
+          type: "command",
+          title: "Write notes/codex-output.md",
+          status: "in_progress",
+          locations: [],
+        },
+      ],
+      pendingPermissions: [
+        {
+          requestId: "perm-1",
+          requestType: "command",
+          title: "Write notes/codex-output.md",
+          detail: "Create the requested note.",
+          locations: ["notes/codex-output.md"],
+          options: [
+            { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+            { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+          ],
+        },
+      ],
+      authNotices: [],
     };
+    return snapshot();
   }),
+  stopAgentSession: vi.fn(async () => {
+    active = false;
+    if (session) session = { ...session, status: "stopped", pendingPermissions: [] };
+    return snapshot();
+  }),
+  answerAgentPermission: vi.fn(async () => {
+    active = false;
+    if (session) {
+      session = {
+        ...session,
+        status: "completed",
+        messages: [
+          ...session.messages,
+          { id: "assistant:2", role: "assistant", text: "Done.\n" },
+        ],
+        items: session.items.map((item) => ({ ...item, status: "completed" as const })),
+        pendingPermissions: [],
+        authNotices: ["Rate limits updated."],
+      };
+    }
+    return snapshot();
+  }),
+  startAgentRun: vi.fn(),
   endAgentRun: vi.fn(async () => {
     active = false;
   }),
@@ -53,6 +136,7 @@ function stubClipboard() {
 
 beforeEach(() => {
   active = false;
+  session = null;
   vi.stubGlobal("dohcDesktop", bridge);
 });
 
@@ -63,7 +147,7 @@ afterEach(() => {
 });
 
 describe("AgentPanelView", () => {
-  it("lists agent drivers and exposes the workspace-scoped MCP config", async () => {
+  it("lists probed drivers and exposes the workspace-scoped MCP config", async () => {
     render(<AgentPanelView workspaceId="ws-1" />);
 
     const configSnippet = await screen.findByTestId("agent-mcp-config");
@@ -75,69 +159,100 @@ describe("AgentPanelView", () => {
       "claude-acp",
       "generic-acp",
     ]);
+    expect(screen.getAllByTestId("agent-driver-state").map((row) => row.textContent)).toContain(
+      "fake-codex 1.0.0",
+    );
   });
 
-  it("starts and stops a local agent run while reporting shell activity", async () => {
+  it("starts a session, renders permission flow, and reports shell activity", async () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(<AgentPanelView workspaceId="ws-1" onAgentActiveChange={onAgentActiveChange} />);
 
-    const toggle = await screen.findByTestId("agent-run-toggle");
-    expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
-      "stopped",
-    );
+    await screen.findByTestId("agent-run-toggle");
+    await user.clear(screen.getByTestId("agent-prompt-input"));
+    await user.type(screen.getByTestId("agent-prompt-input"), "Create a note");
+    await user.click(screen.getByTestId("agent-run-toggle"));
 
-    await user.click(toggle);
     await waitFor(() =>
       expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
-        "running",
+        "waiting-permission",
       ),
     );
-    expect(screen.getByTestId("agent-active-run").textContent).toContain("dohc-mcp");
-    expect(bridge.startAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(bridge.startAgentSession).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      driverId: "codex-app-server",
+      prompt: "Create a note",
+    });
+    expect(screen.getByTestId("agent-stream").textContent).toContain("Preparing workspace note");
+    expect(screen.getByTestId("agent-permission-request").textContent).toContain(
+      "Write notes/codex-output.md",
+    );
+    expect(screen.getByTestId("agent-permission-locations").textContent).toContain(
+      "notes/codex-output.md",
+    );
     expect(onAgentActiveChange).toHaveBeenLastCalledWith(true);
 
-    await user.click(toggle);
+    await user.click(screen.getByTestId("agent-permission-allow_once"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
+        "completed",
+      ),
+    );
+    expect(bridge.answerAgentPermission).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      requestId: "perm-1",
+      decision: "allow_once",
+    });
+    expect(screen.getByTestId("agent-stream").textContent).toContain("Done.");
+    expect(screen.getByTestId("agent-auth-notice").textContent).toContain("Rate limits");
+    expect(onAgentActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("stops an active session", async () => {
+    const user = userEvent.setup();
+    render(<AgentPanelView workspaceId="ws-1" />);
+
+    await screen.findByTestId("agent-run-toggle");
+    await user.click(screen.getByTestId("agent-run-toggle"));
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
+        "waiting-permission",
+      ),
+    );
+
+    await user.click(screen.getByTestId("agent-run-toggle"));
+
     await waitFor(() =>
       expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
         "stopped",
       ),
     );
-    expect(bridge.endAgentRun).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      runId: "run-1",
-    });
-    expect(onAgentActiveChange).toHaveBeenLastCalledWith(false);
+    expect(bridge.stopAgentSession).toHaveBeenCalledWith({ workspaceId: "ws-1" });
   });
 
-  it("refreshes stale stopped UI before toggling so it cannot stop a run behind a Start label", async () => {
+  it("polls active sessions without re-probing provider binaries", async () => {
     const user = userEvent.setup();
     render(<AgentPanelView workspaceId="ws-1" />);
 
-    const toggle = await screen.findByTestId("agent-run-toggle");
-    expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
-      "stopped",
-    );
-    active = true;
-    bridge.startAgentRun.mockClear();
-    bridge.endAgentRun.mockClear();
-
-    await user.click(toggle);
-
+    await screen.findByTestId("agent-run-toggle");
+    expect(bridge.probeAgentDrivers).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("agent-run-toggle"));
     await waitFor(() =>
       expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
-        "running",
+        "waiting-permission",
       ),
     );
-    expect(bridge.startAgentRun).not.toHaveBeenCalled();
-    expect(bridge.endAgentRun).not.toHaveBeenCalled();
-    expect(screen.getByTestId("agent-run-toggle").textContent).toContain("Stop");
-    expect(screen.getByTestId("agent-panel-message").textContent).toBe(
-      "Agent status changed. Try again.",
-    );
+    const stateCalls = bridge.getAgentSessionState.mock.calls.length;
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(bridge.getAgentSessionState.mock.calls.length).toBeGreaterThan(stateCalls);
+    expect(bridge.probeAgentDrivers).toHaveBeenCalledTimes(1);
   });
 
-  it("refreshes stale running UI before toggling so it cannot start a run behind a Stop label", async () => {
+  it("treats a standalone MCP run as active instead of starting a duplicate session", async () => {
     active = true;
     const user = userEvent.setup();
     render(<AgentPanelView workspaceId="ws-1" />);
@@ -146,9 +261,7 @@ describe("AgentPanelView", () => {
     expect(screen.getByTestId("agent-panel-status").getAttribute("data-state")).toBe(
       "running",
     );
-    active = false;
-    bridge.startAgentRun.mockClear();
-    bridge.endAgentRun.mockClear();
+    expect(toggle.textContent).toContain("Stop");
 
     await user.click(toggle);
 
@@ -157,9 +270,8 @@ describe("AgentPanelView", () => {
         "stopped",
       ),
     );
-    expect(bridge.startAgentRun).not.toHaveBeenCalled();
-    expect(bridge.endAgentRun).not.toHaveBeenCalled();
-    expect(screen.getByTestId("agent-run-toggle").textContent).toContain("Start");
+    expect(bridge.startAgentSession).not.toHaveBeenCalled();
+    expect(bridge.endAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1", runId: "run-1" });
   });
 
   it("copies the MCP config", async () => {

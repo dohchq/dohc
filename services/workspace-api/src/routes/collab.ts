@@ -1,7 +1,7 @@
 import { mintCollabToken as signCollabToken } from "@dohc/hocuspocus/auth";
 import { encodeDocName } from "@dohc/hocuspocus/doc-name";
 import type { Actor } from "@dohc/workspace-contracts";
-import { hasWorkspaceMembership } from "@dohc/workspace-postgres";
+import { hasWorkspaceMembership } from "@dohc/workspace-postgres/repositories/workspaces";
 import type pg from "pg";
 
 export type CollabTokenDeps = {

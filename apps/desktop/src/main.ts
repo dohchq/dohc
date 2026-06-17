@@ -76,6 +76,9 @@ import {
   StartAgentRunResult,
   AgentRunStatusResult,
   McpConfigResult,
+  AgentPanelSnapshotResult,
+  AgentPermissionResponsePayload,
+  StartAgentSessionPayload,
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
   ReadWorkspaceDatabasePayload,
@@ -120,6 +123,7 @@ import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { createAgentIntegration } from "./agents/AgentIntegration";
+import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import {
   getAppPackage as getAppPackageInfo,
   grantAppTrust as grantAppTrustState,
@@ -233,8 +237,26 @@ function notifyRenderer(): void {
 // Synchronous mirror of the credential store for status derivation (the
 // status handler path is hot). Refreshed at ready, login, and logout.
 let cachedCredentials: Awaited<ReturnType<CloudLogin["credentials"]>> = null;
+let credentialCacheReady: Promise<void> | null = null;
+let credentialCacheGeneration = 0;
 async function refreshCredentialCache(): Promise<void> {
-  cachedCredentials = await cloudLogin().credentials();
+  const generation = credentialCacheGeneration;
+  const credentials = await cloudLogin().credentials();
+  if (generation === credentialCacheGeneration) cachedCredentials = credentials;
+}
+function warmCredentialCache(): Promise<void> {
+  credentialCacheReady ??= refreshCredentialCache().catch(() => undefined);
+  return credentialCacheReady;
+}
+function setCachedCredentials(credentials: Awaited<ReturnType<CloudLogin["credentials"]>>): void {
+  credentialCacheGeneration += 1;
+  cachedCredentials = credentials;
+  credentialCacheReady = Promise.resolve();
+}
+function clearCachedCredentials(): void {
+  credentialCacheGeneration += 1;
+  cachedCredentials = null;
+  credentialCacheReady = null;
 }
 
 // Trailing-slash-insensitive server-URL compare: the registry's recorded
@@ -251,7 +273,8 @@ function credentialMatchesRemote(remoteServerUrl: string): boolean {
   );
 }
 
-function remoteForWorkspace(workspaceId: string) {
+async function remoteForWorkspace(workspaceId: string) {
+  await warmCredentialCache();
   const workspace = requireWorkspace(workspaceId);
   const remote = workspace.remote;
   if (!remote) throw new Error("Sync this workspace before sharing.");
@@ -267,7 +290,7 @@ async function cloudJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const { remote, credentials } = remoteForWorkspace(workspaceId);
+  const { remote, credentials } = await remoteForWorkspace(workspaceId);
   const headers = new Headers(init?.headers);
   if (init?.body) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
@@ -363,6 +386,27 @@ const agentIntegration = createAgentIntegration({
   setAgentRun: (workspaceId, run) => activity.setAgentRun(workspaceId, run),
   home: stateDir(),
 });
+let cachedAgentSessions: AgentSessionManager | null = null;
+async function agentSessionManager(): Promise<AgentSessionManager> {
+  if (!cachedAgentSessions) {
+    const [{ createAgentDriverRegistry }, { createDesktopAgentDrivers }, { createAgentSessionManager }] =
+      await Promise.all([
+        import("./agents/AgentDriver"),
+        import("./agents/AgentProcessDrivers"),
+        import("./agents/AgentSessionManager"),
+      ]);
+    cachedAgentSessions = createAgentSessionManager({
+      registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
+      integration: agentIntegration,
+      rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
+      mcpFor: (rootPath) => {
+        const config = mcpConfigFor(rootPath);
+        return { command: config.command, args: config.args };
+      },
+    });
+  }
+  return cachedAgentSessions;
+}
 
 // Content search (Phase E5.0): at most one live ripgrep child per renderer,
 // tracked by handle. A new search, an explicit cancel, the renderer's
@@ -380,6 +424,7 @@ app.on("will-quit", (event) => {
   quitting = true;
   event.preventDefault();
   searchRegistry.killAll();
+  cachedAgentSessions?.stopAll();
   agentIntegration.stopAll();
   void Promise.race([
     activity.stopAll(),
@@ -776,7 +821,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
     await cloudLogin().logout();
-    cachedCredentials = null;
+    clearCachedCredentials();
     // Stop + drop active engines so edits after Disconnect never push with the
     // now-cleared session.
     await activity.stopEngines();
@@ -793,7 +838,7 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     const credentials = await cloudLogin().credentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
-    cachedCredentials = credentials;
+    setCachedCredentials(credentials);
 
     const response = await fetch(`${credentials.serverUrl}/workspaces`, {
       method: "POST",
@@ -823,7 +868,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.listWorkspaceShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = remoteForWorkspace(input.workspaceId);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     return ListWorkspaceSharesResult.parse(
       await cloudJson(
         input.workspaceId,
@@ -835,7 +880,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.createWorkspaceShare, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateWorkspaceSharePayload.parse(payload);
-    const { remote } = remoteForWorkspace(input.workspaceId);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     return CreateWorkspaceShareResult.parse(
       await cloudJson(
         input.workspaceId,
@@ -863,7 +908,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.listWorkspaceMembers, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = remoteForWorkspace(input.workspaceId);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     return ListWorkspaceMembersResult.parse(
       await cloudJson(
         input.workspaceId,
@@ -875,7 +920,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.listWorkspaceInvites, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceSharesPayload.parse(payload);
-    const { remote } = remoteForWorkspace(input.workspaceId);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     return ListWorkspaceInvitesResult.parse(
       await cloudJson(
         input.workspaceId,
@@ -887,7 +932,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.createWorkspaceInvite, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateWorkspaceInvitePayload.parse(payload);
-    const { remote } = remoteForWorkspace(input.workspaceId);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     return CreateWorkspaceInviteResult.parse(
       await cloudJson(
         input.workspaceId,
@@ -920,12 +965,11 @@ function registerIpcHandlers(): void {
     const input = CollabTokenPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const remote = workspace.remote;
-    if (
-      workspace.kind !== "shared" ||
-      !remote ||
-      !cachedCredentials ||
-      !credentialMatchesRemote(remote.serverUrl)
-    ) {
+    if (workspace.kind !== "shared" || !remote) {
+      return CollabTokenResult.parse({ available: false });
+    }
+    await warmCredentialCache();
+    if (!cachedCredentials || !credentialMatchesRemote(remote.serverUrl)) {
       return CollabTokenResult.parse({ available: false });
     }
     const response = await fetch(
@@ -1111,6 +1155,48 @@ function registerIpcHandlers(): void {
     return McpConfigResult.parse(mcpConfigFor(workspace.rootPath));
   });
 
+  ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    const sessions = await agentSessionManager();
+    await sessions.probeDrivers();
+    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
+  });
+
+  ipcMain.handle(CHANNELS.getAgentSessionState, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    const sessions = await agentSessionManager();
+    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
+  });
+
+  ipcMain.handle(CHANNELS.startAgentSession, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StartAgentSessionPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await activity.open(workspace);
+    const sessions = await agentSessionManager();
+    return AgentPanelSnapshotResult.parse(await sessions.startSession(input));
+  });
+
+  ipcMain.handle(CHANNELS.stopAgentSession, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentRunPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    const sessions = await agentSessionManager();
+    return AgentPanelSnapshotResult.parse(await sessions.stopSession(input.workspaceId));
+  });
+
+  ipcMain.handle(CHANNELS.answerAgentPermission, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AgentPermissionResponsePayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    const sessions = await agentSessionManager();
+    return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
+  });
+
   // Theme flip → re-tint the OS window-control overlay. setTitleBarOverlay
   // only exists where the overlay does (Windows, newer Linux); macOS and
   // older Linux feature-detect to a no-op — never a crash.
@@ -1227,9 +1313,6 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(async () => {
     launchMarks.appReady();
     desktopMarks.markOnce("app-ready");
-    // Load any persisted cloud session before workspaces open, so engines
-    // attach on open instead of waiting for the next login.
-    await refreshCredentialCache().catch(() => undefined);
     registerIpcHandlers();
 
     // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
@@ -1290,6 +1373,10 @@ if (!app.requestSingleInstanceLock()) {
     createMainWindow();
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
+
+    // Load persisted cloud credentials after the first window exists so local
+    // workspaces do not pay credential-store I/O on the visible-launch path.
+    void warmCredentialCache().then(() => activity.reconcileCloud(engineForWorkspace));
 
     // Auto-updates: only a packaged app with DOHC_UPDATE_URL set ever checks
     // (local/dev builds never self-mutate). Failures are absorbed — updates

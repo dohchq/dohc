@@ -920,6 +920,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [slashState, setSlashState] = useState<SlashCommandState>(
       CLOSED_SLASH_COMMAND_STATE,
     );
+    const [chromeReady, setChromeReady] = useState(false);
     const slashStateRef = useRef<SlashCommandState>(slashState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
@@ -1034,7 +1035,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             "data-testid": "markdown-editor",
           },
         },
-        immediatelyRender: false,
+        immediatelyRender: true,
         onUpdate() {
           if (collabActive) return;
           if (!dirtyTrackingReadyRef.current) return;
@@ -1050,6 +1051,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       const frame = requestAnimationFrame(() => {
         dirtyTrackingReadyRef.current = true;
       });
+      return () => cancelAnimationFrame(frame);
+    }, [editor]);
+
+    useEffect(() => {
+      setChromeReady(false);
+      if (!editor) return;
+      const frame = requestAnimationFrame(() => setChromeReady(true));
       return () => cancelAnimationFrame(frame);
     }, [editor]);
 
@@ -1232,7 +1240,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           </div>
         ) : null}
         <EditorContent editor={editor} />
-        {editor ? (
+        {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
@@ -1261,21 +1269,25 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             </BubbleButton>
           </BubbleMenu>
         ) : null}
-        <SlashCommandMenu
-          state={slashState}
-          onSelect={runSlashCommand}
-          onHover={(index) =>
-            setSlashState((current) =>
-              current.open ? { ...current, selected: index } : current,
-            )
-          }
-        />
-        <WikilinkPicker
-          state={pickerState}
-          files={knownFiles}
-          view={pickerView}
-          onDismiss={() => setAcState({ active: false })}
-        />
+        {chromeReady ? (
+          <>
+            <SlashCommandMenu
+              state={slashState}
+              onSelect={runSlashCommand}
+              onHover={(index) =>
+                setSlashState((current) =>
+                  current.open ? { ...current, selected: index } : current,
+                )
+              }
+            />
+            <WikilinkPicker
+              state={pickerState}
+              files={knownFiles}
+              view={pickerView}
+              onDismiss={() => setAcState({ active: false })}
+            />
+          </>
+        ) : null}
       </div>
     );
   },

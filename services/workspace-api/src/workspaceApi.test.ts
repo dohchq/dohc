@@ -126,7 +126,10 @@ function stubCollabPool(state: { member: boolean; atomId?: string }): pg.Pool {
       if (/workspace_members/.test(sql)) {
         return { rowCount: state.member ? 1 : 0, rows: [] };
       }
-      return { rowCount: state.atomId ? 1 : 0, rows: state.atomId ? [{ id: state.atomId }] : [] };
+      return {
+        rowCount: state.atomId ? 1 : 0,
+        rows: state.atomId ? [{ id: state.atomId, kind: "markdown", body: "# Day\n" }] : [],
+      };
     },
   } as unknown as pg.Pool;
 }

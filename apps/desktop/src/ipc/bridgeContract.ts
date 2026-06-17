@@ -782,6 +782,118 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
+const AgentDriverIdSchema = z.string().min(1).max(100);
+const AgentPermissionKindSchema = z.enum([
+  "allow_once",
+  "allow_always",
+  "reject_once",
+  "reject_always",
+]);
+const AgentPermissionDecisionSchema = z.union([
+  AgentPermissionKindSchema,
+  z.literal("cancel"),
+]);
+export type AgentPermissionDecision = z.infer<typeof AgentPermissionDecisionSchema>;
+
+const AgentModelSchema = z.object({
+  id: z.string().min(1).max(200),
+  name: z.string().min(1).max(200),
+  planIncluded: z.boolean(),
+});
+
+const AgentDriverProbeSchema = z.object({
+  id: AgentDriverIdSchema,
+  displayName: z.string().min(1).max(100),
+  installed: z.boolean(),
+  version: z.string().max(200).optional(),
+  auth: z.object({
+    status: z.enum(["authenticated", "unauthenticated", "unknown"]),
+    label: z.string().max(200).optional(),
+  }),
+  models: z.array(AgentModelSchema).max(50),
+  errorMessage: z.string().max(500).optional(),
+});
+
+const AgentPermissionOptionSchema = z.object({
+  optionId: z.string().min(1).max(200),
+  name: z.string().min(1).max(100),
+  kind: AgentPermissionKindSchema,
+});
+
+const AgentPermissionRequestSchema = z.object({
+  requestId: z.string().min(1).max(200),
+  requestType: z.enum(["command", "file-change", "file-read", "tool", "other"]),
+  title: z.string().min(1).max(200),
+  detail: z.string().max(500).optional(),
+  locations: z.array(z.string().min(1).max(1000)).max(20),
+  options: z.array(AgentPermissionOptionSchema).max(8),
+});
+
+const AgentSessionSnapshotSchema = z.object({
+  driverId: AgentDriverIdSchema,
+  driverName: z.string().min(1).max(100),
+  status: z.enum([
+    "idle",
+    "starting",
+    "ready",
+    "running",
+    "waiting-permission",
+    "completed",
+    "failed",
+    "stopped",
+  ]),
+  startedAt: z.number(),
+  endedAt: z.number().optional(),
+  runId: z.string().min(1).max(200).optional(),
+  lastError: z.string().max(500).optional(),
+  messages: z.array(
+    z.object({
+      id: z.string().min(1).max(300),
+      role: z.enum(["assistant", "reasoning"]),
+      text: z.string().max(10_000),
+    }),
+  ).max(200),
+  items: z.array(
+    z.object({
+      id: z.string().min(1).max(300),
+      type: z.enum(["tool_call", "command", "file_change", "mcp_tool_call", "web_search", "plan", "other"]),
+      title: z.string().min(1).max(200),
+      detail: z.string().max(500).optional(),
+      status: z.enum(["pending", "in_progress", "completed", "failed"]),
+      locations: z.array(z.string().min(1).max(1000)).max(20),
+    }),
+  ).max(200),
+  pendingPermissions: z.array(AgentPermissionRequestSchema).max(20),
+  usage: z.object({
+    used: z.number(),
+    max: z.number().optional(),
+    input: z.number().optional(),
+    output: z.number().optional(),
+  }).optional(),
+  authNotices: z.array(z.string().min(1).max(300)).max(5),
+});
+
+export const AgentPanelSnapshotResult = z.object({
+  drivers: z.array(AgentDriverProbeSchema).max(20),
+  session: AgentSessionSnapshotSchema.nullable(),
+});
+export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
+
+export const StartAgentSessionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  driverId: AgentDriverIdSchema,
+  prompt: z.string().min(1).max(20_000),
+  model: z.string().min(1).max(200).optional(),
+});
+export type StartAgentSessionPayload = z.infer<typeof StartAgentSessionPayload>;
+
+export const AgentPermissionResponsePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  requestId: z.string().min(1).max(200),
+  decision: AgentPermissionDecisionSchema,
+});
+export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
+
 // Native window chrome (Phase E1). The renderer mirrors its theme flip to
 // main so the OS titleBarOverlay (Windows/Linux) re-tints with the app; main
 // feature-detects overlay support and no-ops where it doesn't exist.
@@ -1009,6 +1121,13 @@ export interface DohcDesktopBridge {
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
+  probeAgentDrivers(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
+  getAgentSessionState(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
+  startAgentSession(payload: StartAgentSessionPayload): Promise<AgentPanelSnapshotResult>;
+  stopAgentSession(payload: AgentRunPayload): Promise<AgentPanelSnapshotResult>;
+  answerAgentPermission(
+    payload: AgentPermissionResponsePayload,
+  ): Promise<AgentPanelSnapshotResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(

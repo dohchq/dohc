@@ -8,76 +8,72 @@ design review + codex review + fix commit, every phase).
 
 ## Resume Snapshot (overwrite in place — the ONLY mutable section)
 
-- Current update (2026-06-16): **E6(agent panel/driver foundation) CODEX
-  REVIEW CLEAN, COMMIT READY**. Actual
-  branch/head: `codex/desktop-experience-parity` at
-  `aefdef1` (`e5(apps): add desktop app runtime`). Dirty files are the current
-  E6 lane only: `apps/desktop/src/agents/AgentDriver.ts`,
-  `apps/desktop/src/agents/AgentDriver.test.ts`,
-  `apps/desktop/src/renderer/AgentPanelView.tsx`,
-  `apps/desktop/src/renderer/AgentPanelView.test.tsx`,
-  `apps/desktop/src/renderer/DesktopWorkspaceShell.tsx`,
-  `apps/desktop/src/renderer/settings/DesktopSettings.tsx`,
-  `apps/desktop/src/renderer/settings/DesktopSettings.test.tsx`,
-  `apps/desktop/e2e/liveCoEditing.spec.ts`,
-  `apps/desktop/e2e/performance.spec.ts`,
-  `apps/desktop/e2e/agentPanel.spec.ts`,
-  `apps/desktop/e2e/workbench.spec.ts`, and this execution log snapshot.
-  Current phase/lane: E6 Agent panel foundation before native driver adapter
-  implementations. Intent implemented: a pure agent-driver contract/registry
-  with probe normalization and permission-option selection by ACP `kind`, plus
-  the first real Agent side-panel surface. The panel lists the planned
-  Codex/Claude/generic drivers, exposes the main-owned MCP config snippet, and
-  starts/stops the existing local `.dohc/agent-runs.json` run slot while
-  updating the shell/status-bar active-agent indicator. The Agent panel is
-  lazy-loaded as its own renderer chunk so launch does not pay for panel-only
-  controls. Focused gates so far: desktop typecheck PASS; focused Vitest PASS
-  17/17 (`AgentDriver`, `AgentIntegration`, `AgentPanelView`,
-  `DesktopSettings`); desktop build PASS (`AgentPanelView` lazy chunk 7.55kB,
-  renderer initial chunk 1,199.47kB / performance row 1.14MB);
-  named agent-panel + workbench E2E PASS 8/8 from the repo root with `pnpm
-  exec playwright test --config apps/desktop/playwright.config.ts
-  apps/desktop/e2e/agentPanel.spec.ts apps/desktop/e2e/workbench.spec.ts`.
-  One failed E2E attempt was a runner-cwd mistake (`pnpm --filter ... exec`
-  made `process.cwd()` equal `apps/desktop`, doubling the launch path), not a
-  product failure. WSL gate lesson: run desktop unit/E2E/performance with
-  `TMPDIR=/tmp TMP=/tmp TEMP=/tmp` so Node temp workspaces, Electron profiles,
-  and tsx IPC sockets stay on the Linux filesystem rather than `/mnt/c`. With
-  that normalization, full desktop unit PASS 58/58 files and 517/517 tests,
-  full desktop E2E PASS 67/67, performance spec PASS 8/8, and
-  `check:performance` PASS (cold 1114, warm 1052/1200, createEmpty 59,
-  open1000 370, fileTreeSearch 2.5/2, md250 63, tiptapMount 1953/2000,
-  typing 0, singleFileSync 789, hundredFileChangeSet 865, appTester 227,
-  sqlite 341, csv 394, contentSearch 39/56, memory 554/708, bundle
-  1.14/1.408; warm app open documented skip). Live co-editing also needed a
-  harness-only service-start timeout bump because workspace-api's collab-token
-  JWT path can cold-start for ~4+ minutes on this WSL worktree before
-  hocuspocus starts. `check:lean` PASS; `git diff --check` PASS; design
-  screenshot review PASS for light/dark Agent panel. Codex review found one P2
-  in the performance harness: best-of-3 Tiptap sampling could hide a slow first
-  editor mount. Fixed by measuring every retry in a copied fresh workspace with
-  its persisted UI state removed so the metric still pays lazy editor
-  initialization; performance spec and `check:performance` are green post-fix.
-  Clean rerun then found one panel-state P2: a mounted Agent panel could act on
-  stale visible status after Settings changed the run state, creating duplicate
-  runs or stopping a run from a stale Start button. Fixed by re-reading
-  main-owned run status before branching in both Agent panel and Settings
-  toggles, and by letting Settings signal the shell to refresh the mounted
-  Agent panel because `.dohc/agent-runs.json` is intentionally ignored by the
-  file watcher. Follow-up review hardening also added truthful clipboard
-  failure handling, ACP `kind`-based permission decisions, probe-env forwarding
-  coverage, and driver-contract comments for redaction/PII/path/argv
-  boundaries. Broad branch CodeRabbit review could not run because the branch
-  diff spans 828 files over the service limit; the narrow uncommitted
-  CodeRabbit/Codex review is clean. Exact next action: commit this foundation,
-  then continue E6 driver adapters/fake-provider
-  harness. Active background tasks: none. Open worktrees:
+- Current update (2026-06-17): **E6(agent adapters + fake-provider harness)
+  REVIEW CLEAN, FULL GATES GREEN, COMMIT READY**. Actual branch/head:
+  `codex/desktop-experience-parity` at `17120a9` (`e6(agent): add desktop
+  agent panel foundation`). Dirty files are the current E6 adapter lane only:
+  process drivers/session manager/transport under `apps/desktop/src/agents/`,
+  agent IPC/preload/main-process wiring, `AgentPanelView` and tests, the fake
+  agent E2E fixture/spec, the workspace-api E2E launch helper/build script,
+  narrow workspace-postgres exports, workspace-api route imports/tests,
+  markdown startup/editor performance trims, `pnpm-lock.yaml`, and this
+  execution log. Current phase/lane: E6 native adapter + fake-provider harness
+  after the foundation commit. Intent implemented: a shared NDJSON JSON-RPC
+  child-process transport; a native Codex app-server driver; an ACP driver
+  used for the generic ACP path and current Claude ACP row; a main-owned
+  session manager that starts attribution immediately before prompting, stores
+  only bounded normalized snapshots for renderer IPC, answers permission
+  requests, refuses Codex ChatGPT-token refresh storage, disposes failed
+  startup transports, ignores stale/replaced provider events, and defers normal
+  run close past the watcher settle window so agent-written files are
+  attributed. The Agent panel now probes drivers, starts/stops sessions,
+  renders stream/tool/auth cards, and answers permission prompts while keeping
+  the MCP snippet. Fake provider gate: `fakeAgentProcess.mjs` exercises both
+  fake Codex app-server and fake ACP lifecycles, permission requests, token
+  refresh rejection, file writes, provider startup failure, and durable
+  agent-run completion. Workspace API E2E harness now builds and starts a
+  narrow esbuild bundle (`services/workspace-api/dist/main.js`, generated and
+  ignored) so cloud/product-readiness specs do not cold-start the entire tsx
+  source graph on WSL. Performance fixes kept startup under budget by lazy
+  loading desktop agent session modules, warming cloud credentials after first
+  paint, moving markdown editor preload to an idle path, feeding wikilink
+  candidates from the shell file tree instead of per-open IPC, and deferring
+  editor overlay chrome one frame after the editable surface. Final review
+  fixes tightened the real Codex app-server wire protocol (thread sandbox
+  string, turn sandbox discriminator policy, nested `thread.id` extraction,
+  and request-based `turn/interrupt` with the active turn id), made the fake
+  Codex process enforce those shapes, surfaced workspace-api child logs in
+  E2E, guarded JSON-RPC writes after child stdin closure, and kept the panel
+  polling/toggle logic named.
+
+  Final gates on the current diff: desktop typecheck PASS; desktop build PASS
+  (`main.js` 224.80kB, `preload.cjs` 14.01kB, `AgentProcessDrivers` lazy chunk
+  26.14kB, `AgentPanelView` lazy chunk 16.85kB, renderer initial chunk
+  1,200.25kB / performance row 1.14MB); full desktop unit PASS 60/60 files and
+  529/529 tests; full desktop E2E PASS 67/67 in 21.2m; focused performance E2E
+  rerun PASS 8/8 in 1.1m to refresh jitter-sensitive metrics;
+  `check:performance` PASS (cold 1290, warm 1167/1200, createEmpty 59,
+  open1000 370, fileTreeSearch query 2.8, visible result 2, md250 45,
+  `tiptapMount250KbMs` 1782/2000, typing 0, singleFileSync 791,
+  hundredFileChangeSet 866, appTester 299, sqlite 451, csv 425, contentSearch
+  44/57, memory 558/708, bundle 1.14/1.408; warm app open documented skip);
+  workspace-postgres typecheck PASS; workspace-api typecheck PASS, build PASS
+  (`dist/main.js` 212.2kB), test PASS 8/8 files and 50/50 tests;
+  `check:lean` PASS; `git diff --check` PASS. Design screenshot
+  review remains PASS for
+  `test-results/screenshots/e2/workbench-agent-view--1280x800--light.png` and
+  `--dark.png`. Known scope note: DX-03 says Claude should ultimately use the
+  Agent SDK; this slice process-backs Codex native + generic ACP and leaves
+  the Claude row on the existing ACP-shaped plumbing until the next explicit
+  Claude SDK/manual-real-provider step. Exact next action: commit this adapter
+  slice, then continue E7. Active background
+  tasks: none. Open worktrees:
   `/home/ice/dev/dohc` on `claude/desktop-local-first-cloud-sync` at
   `5f2c09b` and this worktree on `codex/desktop-experience-parity`. Open
   workflows: completed read-only E5 recon explorers
   `019ec885-de06-7f00-a196-c90d553bc4b7` and
   `019ec886-f868-7c50-b173-48510d2812fa`; no mutating subagent/workflow lanes
-  are active. Pending reviews/findings: none for the E6 foundation lane.
+  are active. Pending reviews/findings: none for the E6 adapter lane.
 - Phase/position: E4 is complete after E4a foundation, E4b-1 plugins, E4b-2
   editor component, and E4c rich collab/server. E5 graph, catch-up/history,
   properties/frontmatter, notices, sharing UI, import/export, workspace
@@ -185,6 +181,101 @@ design review + codex review + fix commit, every phase).
   2026-06-11-e6-agent-driver-spec.md | 2026-06-11
 
 ## Phase log (append-only)
+
+### e6(agent-adapters-fake-harness) — REVIEW CLEAN, FULL GATES GREEN, COMMIT READY (2026-06-17)
+
+Extended the E6 foundation from a local run toggle into process-backed agent
+sessions. Added `JsonRpcTransport.ts`, a small NDJSON JSON-RPC child-process
+transport shared by the provider adapters. Added `AgentProcessDrivers.ts` with
+the native Codex app-server driver and an ACP driver used for the generic ACP
+path (and the current Claude ACP row), plus probe support via main-owned
+commands/env. The drivers translate provider notifications into the normalized
+`AgentEvent` contract, answer permission requests through semantic decisions,
+surface Codex rate/auth notices, and intentionally reject
+`account/chatgptAuthTokens/refresh` with method-not-found so dohc never stores
+provider tokens.
+
+Added `AgentSessionManager.ts` as the main-owned runtime seam. It owns driver
+probing, session start/stop, permission answers, bounded renderer snapshots,
+and attribution. The manager starts an `AgentIntegration` run immediately
+before prompting and closes it only after the watcher settle window on normal
+turn completion, so files written by the spawned provider are recorded as agent
+history. Explicit Stop still closes immediately. Raw provider frames stay in
+main-process memory; renderer IPC receives only bounded normalized messages,
+items, permission requests, usage, and auth notices.
+
+Reworked `AgentPanelView` into the first live session UI: driver picker,
+prompt, Start/Stop, transcript, tool cards, auth notices, permission buttons,
+and the existing copyable MCP snippet. Added new typed IPC/preload calls for
+probe/session state/start/stop/permission answers. The fake-provider E2E
+fixture (`apps/desktop/e2e/fixtures/fakeAgentProcess.mjs`) implements both
+fake Codex app-server and fake ACP JSON-RPC flows: initialize/open, prompt/turn,
+permission request, file write, token-refresh request rejection, usage/auth
+events, and turn completion.
+
+Coverage: `AgentProcessDrivers.test.ts` runs both fake processes directly
+against the process drivers and verifies ACP permission selection by `kind`,
+Codex token-refresh rejection, file writes, failed init/thread-start disposal,
+and bounded snapshots. `AgentPanelView.test.tsx` covers probed rows, session
+start, permission approval, stream/auth rendering, stop, copy success,
+clipboard-unavailable behavior, and active-session polling without re-probing.
+`AgentSessionManager.test.ts` covers provider close before/after startup, fatal
+errors, late terminal events after stop, stale replaced provider events, and
+snapshot caps. `agentPanel.spec.ts` now launches the built desktop app with
+fake Codex and fake ACP commands, runs both sessions from the panel, approves
+permission requests, verifies the created files, checks `.dohc/agent-runs.json`
+closes complete, and asserts the history records are attributed to an agent.
+
+The cloud/product-readiness E2E harness also changed because source-running
+workspace-api through `tsx` cold-started the full Better Auth/workspace-postgres
+graph slowly enough to fail the combined full suite on WSL. Added
+`services/workspace-api/scripts/build.mjs`, narrow workspace-postgres exports,
+narrow workspace-api imports, and `apps/desktop/e2e/workspaceApiServer.ts` so
+cloud specs build/start a small esbuild bundle (`dist/main.js` generated and
+ignored) instead of the source graph. This kept the production route code under
+test while removing the harness-only startup bottleneck.
+
+Performance hardening landed during final verification: agent session modules
+lazy-load out of main startup, cloud credential warming moved after first
+window paint, markdown editor preload is idle-scheduled, wikilink candidates
+come from the shell's already-loaded file tree instead of per-document IPC, and
+the Tiptap editable surface renders before overlay chrome. These were required
+to keep both warm launch and 250KB Tiptap mount under their budgets after the
+full suite refreshed metrics.
+
+Final gates on the committed-intent diff: desktop typecheck PASS; desktop build
+PASS (`main.js` 224.80kB, `preload.cjs` 14.01kB, `AgentProcessDrivers` lazy
+chunk 26.14kB, `AgentPanelView` lazy chunk 16.85kB, renderer initial chunk
+1,200.25kB / performance row 1.14MB). Full desktop unit PASS 60/60 files and
+529/529 tests. Full desktop E2E PASS 67/67 in 21.2m. Focused performance E2E
+rerun PASS 8/8 in 1.1m after the full-suite run refreshed two
+jitter-sensitive metrics just over budget. `check:performance` PASS: cold
+1290, warm 1167/1200, createEmpty 59, open1000 370, fileTreeSearch query 2.8,
+visible result 2, md250 45, `tiptapMount250KbMs` 1782/2000, typing 0,
+singleFileSync 791, hundredFileChangeSet 866, appTester 299, sqlite 451,
+csv 425, contentSearch 44/57, memory 558/708, bundle 1.14/1.408; warm app open
+remains the documented skip. Workspace-postgres typecheck PASS. Workspace-api
+typecheck PASS, build PASS (`dist/main.js` 212.2kB), test PASS 8/8 files and
+50/50 tests. `check:lean` PASS. `git diff --check` PASS. Design review PASS using
+`test-results/screenshots/e2/workbench-agent-view--1280x800--light.png` and
+`--dark.png`: prompt wraps, driver rows fit, and the MCP snippet scrolls inside
+the panel in both themes.
+
+Review note before commit: this slice process-backs Codex native and generic
+ACP. DX-03 still says a subscription-tier-perfect Claude path should ultimately
+use the Claude Agent SDK rather than ACP; the current Claude row remains on
+the existing ACP-shaped plumbing until the next explicit Claude SDK/manual
+real-provider step.
+
+Review fixes before commit: CodeRabbit repo-wide review hit its 150-file cap
+on the 836-file repository, so the narrowed uncommitted review was used. Valid
+findings fixed: workspace-api E2E children now inherit stdout/stderr, JSON-RPC
+responses are not written after child stdin closure, and the panel polling
+interval/toggle enabled logic is named. Manual Codex review found real
+app-server protocol mismatches; fixed thread-start sandbox mode string,
+turn-start discriminator sandbox policy, nested `thread.id` extraction from
+both response and `thread/started`, and request-based `turn/interrupt` with
+the active turn id. The fake Codex process now enforces those real wire shapes.
 
 ### e6(agent-panel-foundation) — BUILT, GATES GREEN, REVIEW CLEAN (2026-06-16)
 

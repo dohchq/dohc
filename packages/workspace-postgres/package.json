@@ -3,7 +3,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./blobStore": "./src/blobStore.ts",
+    "./repositories/workspaces": "./src/repositories/workspaces.ts",
+    "./services/backend": "./src/services/backend.ts",
+    "./services/provisioning": "./src/services/provisioning.ts"
   },
   "scripts": {
     "test": "vitest run --no-file-parallelism",

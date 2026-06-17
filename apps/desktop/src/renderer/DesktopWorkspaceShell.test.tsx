@@ -96,6 +96,32 @@ function makeBridge(
       activeRun: null,
       lastRun: null,
     })),
+    getMcpConfig: vi.fn(async () => ({
+      command: "dohc-mcp",
+      args: ["--workspace", WORKSPACE.rootPath, "--home", "/tmp/dohc-home"],
+      workspacePath: WORKSPACE.rootPath,
+      home: "/tmp/dohc-home",
+    })),
+    probeAgentDrivers: vi.fn(async () => ({
+      drivers: [],
+      session: null,
+    })),
+    getAgentSessionState: vi.fn(async () => ({
+      drivers: [],
+      session: null,
+    })),
+    startAgentSession: vi.fn(async () => ({
+      drivers: [],
+      session: null,
+    })),
+    stopAgentSession: vi.fn(async () => ({
+      drivers: [],
+      session: null,
+    })),
+    answerAgentPermission: vi.fn(async () => ({
+      drivers: [],
+      session: null,
+    })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
@@ -287,7 +313,7 @@ describe("workspace management", () => {
     await user.keyboard("{Enter}");
 
     const dialog = await screen.findByTestId("workspace-management-dialog");
-    expect(within(dialog).getByText("owner@dohc.test")).toBeTruthy();
+    expect(await within(dialog).findByText("owner@dohc.test")).toBeTruthy();
     expect(bridge.listWorkspaceMembers).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
     });

@@ -29,6 +29,8 @@ import type {
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 
+const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
+
 // Builds the privileged URL the dohc-file protocol serves bytes from. The
 // main process resolves <workspaceId> to a real workspace root and enforces
 // path containment, so this URL can't escape the workspace.
@@ -302,13 +304,14 @@ function MarkdownView(props: {
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  knownFiles?: ReadonlyArray<WikilinkFile>;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.body.length <= WYSIWYG_MARKDOWN_THRESHOLD_BYTES ? "wysiwyg" : "read",
   );
   const [draft, setDraft] = useState(props.body);
   const [savedBody, setSavedBody] = useState(props.body);
-  const [knownFiles, setKnownFiles] = useState<WikilinkFile[]>([]);
+  const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [propertiesOpen, setPropertiesOpen] = useState(false);
   // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
@@ -356,33 +359,6 @@ function MarkdownView(props: {
     );
     setPendingScrollLine(null);
   }, [pendingScrollLine, mode]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void bridge()
-      .listWorkspaceFiles({ workspaceId: props.workspaceId })
-      .then((result) => {
-        if (cancelled) return;
-        setKnownFiles(
-          result.files
-            .filter((file) => /\.(md|markdown)$/i.test(file.path))
-            .map((file) => {
-              const pathNoExt = file.path.replace(/\.md$/i, "");
-              return {
-                path: file.path,
-                title: pathNoExt.split("/").pop() ?? file.path,
-                fileId: null,
-              };
-            }),
-        );
-      })
-      .catch(() => {
-        if (!cancelled) setKnownFiles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.workspaceId]);
 
   // Lift the save state to the shell (smallest seam): the active editor tab
   // shows a dirty dot while this is not "saved".
@@ -1073,6 +1049,7 @@ export function FileInspector(props: {
   // Registers the active editor's draft flush with the shell (same "only
   // dirty source" scoping): explorer ops await it before re-pathing files.
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;
 }) {
   const kind = classifyForView(props.path);
@@ -1135,6 +1112,7 @@ export function FileInspector(props: {
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
+            knownFiles={props.knownMarkdownFiles}
           />
         </div>
       );
