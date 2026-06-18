@@ -409,7 +409,6 @@ function GraphMap(props: {
     startClientY: number;
     moved: boolean;
   } | null>(null);
-  const suppressClickRef = useRef<string | null>(null);
   const { points, edges, setNodePosition, releaseNode } = useForceGraph(
     props.graph,
     props.activePath,
@@ -446,12 +445,13 @@ function GraphMap(props: {
   function endDrag(event: React.PointerEvent<SVGSVGElement>) {
     const drag = dragRef.current;
     if (!drag) return;
+    const shouldOpen = !drag.moved;
     releaseNode(drag.path);
-    if (drag.moved) suppressClickRef.current = drag.path;
     dragRef.current = null;
     if (svgRef.current?.hasPointerCapture(event.pointerId)) {
       svgRef.current.releasePointerCapture(event.pointerId);
     }
+    if (shouldOpen) props.onOpenPath(drag.path);
   }
 
   return (
@@ -524,13 +524,6 @@ function GraphMap(props: {
               };
               setNodePosition(node.path, point.x, point.y, true);
               svgRef.current?.setPointerCapture(event.pointerId);
-            }}
-            onClick={() => {
-              if (suppressClickRef.current === node.path) {
-                suppressClickRef.current = null;
-                return;
-              }
-              props.onOpenPath(node.path);
             }}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {

@@ -53,7 +53,7 @@ describe("GraphView", () => {
     ).toBe("Open or focus beta.md");
 
     await userEvent.click(
-      screen.getAllByTestId("graph-file-row").find((row) => row.dataset.path === "beta.md")!,
+      screen.getAllByTestId("graph-node").find((node) => node.dataset.path === "beta.md")!,
     );
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
   });

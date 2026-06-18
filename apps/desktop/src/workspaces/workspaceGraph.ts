@@ -40,36 +40,6 @@ const MAX_GRAPH_FILE_TEXT_BYTES = 512 * 1024;
 const MAX_GRAPH_TOTAL_TEXT_BYTES = 32 * 1024 * 1024;
 
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdx"]);
-const NON_GRAPH_TARGET_EXTENSIONS = new Set([
-  ".avif",
-  ".bmp",
-  ".csv",
-  ".db",
-  ".doc",
-  ".docx",
-  ".gif",
-  ".jpeg",
-  ".jpg",
-  ".json",
-  ".jsonl",
-  ".m4a",
-  ".mov",
-  ".mp3",
-  ".mp4",
-  ".ogg",
-  ".pdf",
-  ".png",
-  ".sqlite",
-  ".sqlite3",
-  ".svg",
-  ".tsv",
-  ".txt",
-  ".wav",
-  ".webp",
-  ".xls",
-  ".xlsx",
-  ".zip",
-]);
 const WIKILINK_RE = /(?<!!)\[\[([^\]\n]{1,500})\]\]/g;
 
 type LinkCandidate = {
@@ -299,9 +269,7 @@ function isLocalGraphTarget(raw: string): boolean {
   if (target.startsWith("//") || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(target)) {
     return false;
   }
-  const pathPart = target.split(/[?#]/)[0] ?? "";
-  const ext = posix.extname(pathPart).toLowerCase();
-  return !NON_GRAPH_TARGET_EXTENSIONS.has(ext);
+  return true;
 }
 
 function normalizeRawTarget(
@@ -355,8 +323,9 @@ export function extractMarkdownGraphLinks(
   return links;
 }
 
-function withoutMarkdownExtension(path: string): string {
-  return path.replace(/\.(md|markdown|mdx)$/i, "");
+function withoutGraphExtension(path: string): string {
+  const ext = posix.extname(path);
+  return ext ? path.slice(0, -ext.length) : path;
 }
 
 function createPathIndex(paths: string[]): PathIndex {
@@ -372,12 +341,12 @@ function createPathIndex(paths: string[]): PathIndex {
     setUnique(index.byPathLower, path.toLowerCase(), path);
     setUnique(
       index.byStemLower,
-      posix.basename(withoutMarkdownExtension(path)).toLowerCase(),
+      posix.basename(withoutGraphExtension(path)).toLowerCase(),
       path,
     );
     setUnique(
       index.byPathWithoutExtLower,
-      withoutMarkdownExtension(path).toLowerCase(),
+      withoutGraphExtension(path).toLowerCase(),
       path,
     );
   }
@@ -474,20 +443,27 @@ function resolveLinkTarget(
 
 export function buildMarkdownGraph(
   docs: MarkdownGraphDocument[],
-  options: { omittedFileCount?: number } = {},
+  options: {
+    allPaths?: string[];
+    omittedFileCount?: number;
+    scannedFileCount?: number;
+  } = {},
 ): WorkspaceGraph {
+  const allPaths = [...(options.allPaths ?? docs.map((doc) => doc.path))]
+    .filter((path, index, paths) => paths.indexOf(path) === index)
+    .sort((a, b) => a.localeCompare(b));
   const sortedDocs = [...docs]
     .filter((doc) => isMarkdownGraphPath(doc.path))
     .sort((a, b) => a.path.localeCompare(b.path));
-  const paths = sortedDocs.map((doc) => doc.path);
-  const index = createPathIndex(paths);
+  const docByPath = new Map(sortedDocs.map((doc) => [doc.path, doc]));
+  const index = createPathIndex(allPaths);
   const stats = new Map<string, { incoming: number; outgoing: number }>();
   const edges: WorkspaceGraphEdge[] = [];
   const edgeKeys = new Set<string>();
   let unresolvedLinks = 0;
   let processedLinkCandidates = 0;
 
-  for (const path of paths) {
+  for (const path of allPaths) {
     stats.set(path, { incoming: 0, outgoing: 0 });
   }
 
@@ -518,11 +494,13 @@ export function buildMarkdownGraph(
     }
   }
 
-  const nodes = sortedDocs.map((doc) => ({
-    path: doc.path,
-    title: titleFor(doc.path, doc.text),
-    outgoing: stats.get(doc.path)?.outgoing ?? 0,
-    incoming: stats.get(doc.path)?.incoming ?? 0,
+  const nodes = allPaths.map((path) => ({
+    path,
+    title: docByPath.has(path)
+      ? titleFor(path, docByPath.get(path)!.text)
+      : posix.basename(path).slice(0, 120),
+    outgoing: stats.get(path)?.outgoing ?? 0,
+    incoming: stats.get(path)?.incoming ?? 0,
   }));
 
   edges.sort(
@@ -536,7 +514,7 @@ export function buildMarkdownGraph(
     nodes,
     edges,
     unresolvedLinks,
-    scannedFileCount: sortedDocs.length,
+    scannedFileCount: options.scannedFileCount ?? sortedDocs.length,
     omittedFileCount: options.omittedFileCount ?? 0,
     truncatedFileCount: sortedDocs.filter((doc) => doc.truncated).length,
   };
@@ -566,13 +544,11 @@ async function readGraphText(
 
 export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGraph> {
   const listed = await listFiles(rootPath);
-  const markdownPaths = listed.files
-    .filter((file) => file.kind === "file" && isMarkdownGraphPath(file.path))
-    .map((file) => file.path);
-  const selected = markdownPaths.slice(0, MAX_GRAPH_FILES);
+  const graphPaths = listed.files.map((file) => file.path).slice(0, MAX_GRAPH_FILES);
+  const selected = graphPaths.filter((path) => isMarkdownGraphPath(path));
   const docs: MarkdownGraphDocument[] = [];
   let totalTextBytes = 0;
-  let omittedFileCount = Math.max(0, markdownPaths.length - selected.length);
+  let omittedFileCount = Math.max(0, listed.files.length - graphPaths.length);
 
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index];
@@ -591,6 +567,8 @@ export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGra
   }
 
   return buildMarkdownGraph(docs, {
+    allPaths: graphPaths,
     omittedFileCount,
+    scannedFileCount: graphPaths.length,
   });
 }

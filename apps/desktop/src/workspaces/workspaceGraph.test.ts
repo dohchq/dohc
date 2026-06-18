@@ -50,7 +50,10 @@ describe("extractMarkdownGraphLinks", () => {
       ),
     ).toEqual([
       { kind: "wikilink", target: "Alpha" },
+      { kind: "wikilink", target: "attachment.pdf" },
       { kind: "markdown", target: "docs/beta.md" },
+      { kind: "markdown", target: "attachments/brief.pdf" },
+      { kind: "markdown", target: "data/table.csv" },
       { kind: "markdown", target: "Daily%20Note" },
       { kind: "markdown", target: "docs/ADR(draft).md" },
       { kind: "markdown", target: "after-code.md" },
@@ -133,6 +136,34 @@ describe("buildMarkdownGraph", () => {
       { source: "source.md", target: "Project Plan.md", kind: "markdown" },
     ]);
     expect(graph.unresolvedLinks).toBe(0);
+  });
+
+  it("includes non-markdown files as nodes and resolves links to them", () => {
+    const graph = buildMarkdownGraph(
+      [
+        {
+          path: "notes/source.md",
+          text: "# Source\n[Table](../data/table.csv)\n[[Plain]]\n",
+        },
+      ],
+      {
+        allPaths: [
+          "data/table.csv",
+          "notes/plain.txt",
+          "notes/source.md",
+        ],
+      },
+    );
+
+    expect(graph.nodes).toMatchObject([
+      { path: "data/table.csv", title: "table.csv", outgoing: 0, incoming: 1 },
+      { path: "notes/plain.txt", title: "plain.txt", outgoing: 0, incoming: 1 },
+      { path: "notes/source.md", title: "Source", outgoing: 2, incoming: 0 },
+    ]);
+    expect(graph.edges).toEqual([
+      { source: "notes/source.md", target: "data/table.csv", kind: "markdown" },
+      { source: "notes/source.md", target: "notes/plain.txt", kind: "wikilink" },
+    ]);
   });
 
   it("treats ambiguous basename wikilinks as unresolved instead of guessing", () => {
@@ -222,7 +253,7 @@ describe("buildMarkdownGraph", () => {
 });
 
 describe("readWorkspaceGraph", () => {
-  it("reads only real markdown files from the workspace listing", async () => {
+  it("includes all real files from the workspace listing", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await mkdir(join(root, "notes"), { recursive: true });
     await writeFile(join(root, ".dohc", "hidden.md"), "[[Visible]]");
@@ -237,6 +268,7 @@ describe("readWorkspaceGraph", () => {
     const graph = await readWorkspaceGraph(root);
     expect(graph.nodes.map((node) => node.path)).toEqual([
       "index.md",
+      "notes/data.txt",
       "notes/visible.md",
     ]);
     expect(graph.edges).toEqual([
@@ -254,8 +286,8 @@ describe("readWorkspaceGraph", () => {
     }
 
     const graph = await readWorkspaceGraph(root);
-    expect(graph.scannedFileCount).toBeLessThan(70);
+    expect(graph.nodes).toHaveLength(70);
+    expect(graph.scannedFileCount).toBe(70);
     expect(graph.omittedFileCount).toBeGreaterThan(0);
-    expect(graph.truncatedFileCount).toBeGreaterThan(0);
   });
 });
