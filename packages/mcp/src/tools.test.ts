@@ -58,6 +58,7 @@ async function bindCloudWorkspace(
     serverUrl?: string;
     remoteWorkspaceId?: string;
     token?: string;
+    credentials?: boolean;
   } = {},
 ) {
   const serverUrl = options.serverUrl ?? "http://cloud.test";
@@ -77,6 +78,7 @@ async function bindCloudWorkspace(
       ],
     }),
   );
+  if (options.credentials === false) return;
   await writeFile(
     join(ctx.home, "dohc-cloud.json"),
     JSON.stringify({
@@ -219,6 +221,29 @@ function fakeCloudServer() {
   };
 
   return { fetchImpl, files, seen, set };
+}
+
+async function withCloudEnv<T>(
+  env: Record<string, string | undefined>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prior = {
+    DOHC_MCP_CLOUD_SERVER_URL: process.env.DOHC_MCP_CLOUD_SERVER_URL,
+    DOHC_MCP_CLOUD_EMAIL: process.env.DOHC_MCP_CLOUD_EMAIL,
+    DOHC_MCP_CLOUD_TOKEN: process.env.DOHC_MCP_CLOUD_TOKEN,
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 describe("mcp tool path containment", () => {
@@ -426,6 +451,33 @@ describe("mcp tools operate on allowed paths", () => {
         provenance: { source: "sync" },
         files: [{ path: "notes/remote.md", operation: "write" }],
       });
+    });
+  });
+
+  it("sync_cloud can use desktop-injected cloud env instead of reading the credential file", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { credentials: false });
+      await writeFile(join(ctx.root, "notes.md"), "from managed desktop\n");
+      const server = fakeCloudServer();
+
+      await withCloudEnv(
+        {
+          DOHC_MCP_CLOUD_SERVER_URL: "http://cloud.test",
+          DOHC_MCP_CLOUD_EMAIL: "ice@example.test",
+          DOHC_MCP_CLOUD_TOKEN: "env-token",
+        },
+        async () => {
+          const result = await syncCloud(ctx, { direction: "push" }, { fetch: server.fetchImpl });
+          expect(result).toMatchObject({
+            ok: true,
+            pushed: 1,
+            pushedPaths: ["notes.md"],
+          });
+        },
+      );
+
+      expect(server.files.get("notes.md")?.body).toBe("from managed desktop\n");
+      expect(server.seen.authHeaders.every((header) => header === "Bearer env-token")).toBe(true);
     });
   });
 

@@ -89,7 +89,7 @@ export interface AgentSessionStartInput {
   mode: "approval-required" | "auto-accept-edits" | "full-access";
   model?: string;
   resumeCursor?: unknown;
-  mcp: { command: string; args: string[] };
+  mcp: { command: string; args: string[]; env?: Record<string, string> };
   onEvent: (event: AgentEvent) => void;
   permissionPolicy?: (event: Extract<AgentEvent, { kind: "permission-request" }>) => PermissionDecision | null;
   logDir?: string;

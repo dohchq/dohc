@@ -470,6 +470,29 @@ function mcpConfigFor(rootPath: string): {
   };
 }
 
+function mcpRuntimeConfigFor(rootPath: string): {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+} {
+  const config = mcpConfigFor(rootPath);
+  const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
+  const remote = workspace?.remote;
+  const env =
+    remote && cachedCredentials && credentialMatchesRemote(remote.serverUrl)
+      ? {
+          DOHC_MCP_CLOUD_SERVER_URL: cachedCredentials.serverUrl,
+          DOHC_MCP_CLOUD_EMAIL: cachedCredentials.email,
+          DOHC_MCP_CLOUD_TOKEN: cachedCredentials.token,
+        }
+      : undefined;
+  return {
+    command: config.command,
+    args: config.args,
+    ...(env ? { env } : {}),
+  };
+}
+
 function engineForWorkspace(workspace: { workspaceId: string; rootPath: string }) {
   const remote = findWorkspace(workspace.workspaceId)?.remote;
   if (!remote || !cachedCredentials) return null;
@@ -520,10 +543,7 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
       integration: agentIntegration,
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
-      mcpFor: (rootPath) => {
-        const config = mcpConfigFor(rootPath);
-        return { command: config.command, args: config.args };
-      },
+      mcpFor: mcpRuntimeConfigFor,
     });
   }
   return cachedAgentSessions;
@@ -1472,6 +1492,7 @@ function registerIpcHandlers(): void {
     const input = StartAgentSessionPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     await activity.open(workspace);
+    await warmCredentialCache();
     const sessions = await agentSessionManager();
     return AgentPanelSnapshotResult.parse(await sessions.startSession(input));
   });

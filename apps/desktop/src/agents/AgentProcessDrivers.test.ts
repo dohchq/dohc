@@ -97,6 +97,27 @@ describe("process-backed agent drivers", () => {
     await session.dispose();
   });
 
+  it("passes MCP env through the ACP session config", async () => {
+    const root = await workspaceRoot();
+    const driver = createDesktopAgentDrivers({
+      DOHC_AGENT_GENERIC_ACP_COMMAND: process.execPath,
+      DOHC_AGENT_GENERIC_ACP_ARGS_JSON: JSON.stringify([fakeAgent, "acp-require-mcp-env"]),
+    }).find((entry) => entry.id === "generic-acp");
+    expect(driver).toBeDefined();
+
+    const session = await driver!.startSession({
+      workspaceRoot: root,
+      mode: "approval-required",
+      mcp: {
+        command: "dohc-mcp",
+        args: ["--workspace", root],
+        env: { DOHC_MCP_CLOUD_TOKEN: "env-token" },
+      },
+      onEvent: () => {},
+    });
+    await session.dispose();
+  });
+
   it("runs the fake Codex app-server lifecycle and rejects token refresh storage", async () => {
     const root = await workspaceRoot();
     const driver = createDesktopAgentDrivers({
@@ -152,6 +173,27 @@ describe("process-backed agent drivers", () => {
     await expect(readFile(join(root, "notes", "codex-output.md"), "utf8")).resolves.toContain(
       "Fake Codex wrote this",
     );
+    await session.dispose();
+  });
+
+  it("passes MCP env through the Codex app-server config", async () => {
+    const root = await workspaceRoot();
+    const driver = createDesktopAgentDrivers({
+      DOHC_AGENT_CODEX_COMMAND: process.execPath,
+      DOHC_AGENT_CODEX_ARGS_JSON: JSON.stringify([fakeAgent, "codex-require-mcp-env"]),
+    }).find((entry) => entry.id === "codex-app-server");
+    expect(driver).toBeDefined();
+
+    const session = await driver!.startSession({
+      workspaceRoot: root,
+      mode: "approval-required",
+      mcp: {
+        command: "dohc-mcp",
+        args: ["--workspace", root],
+        env: { DOHC_MCP_CLOUD_TOKEN: "env-token" },
+      },
+      onEvent: () => {},
+    });
     await session.dispose();
   });
 

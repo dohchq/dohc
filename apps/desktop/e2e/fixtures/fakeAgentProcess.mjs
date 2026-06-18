@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const mode = process.argv[2] ?? "acp";
+const requireMcpEnv = mode.endsWith("-require-mcp-env");
+const protocolMode = requireMcpEnv ? mode.replace("-require-mcp-env", "") : mode;
 if (process.argv.includes("--version")) {
   console.log(`fake-${mode} 1.0.0`);
   process.exit(0);
@@ -200,10 +202,17 @@ input.on("line", (line) => {
       else waiter.resolve(message.result);
       return;
     }
-    if (mode === "acp") {
+    if (protocolMode === "acp") {
       if (message.method === "initialize") {
         respond(message.id, { protocolVersion: 1 });
       } else if (message.method === "session/new") {
+        if (
+          requireMcpEnv &&
+          message.params?.mcpServers?.[0]?.env?.DOHC_MCP_CLOUD_TOKEN !== "env-token"
+        ) {
+          respondError(message.id, "missing MCP env");
+          return;
+        }
         respond(message.id, {
           sessionId: "fake-acp-session",
           models: [{ id: "fake-acp", name: "Fake ACP" }],
@@ -220,7 +229,7 @@ input.on("line", (line) => {
       }
       return;
     }
-    if (mode === "acp-fail-init") {
+    if (protocolMode === "acp-fail-init") {
       if (message.method === "initialize") respondError(message.id, "fake ACP init failed");
       else if (message.id) respond(message.id, {});
       return;
@@ -228,8 +237,15 @@ input.on("line", (line) => {
     if (message.method === "initialize") {
       respond(message.id, { userAgent: "fake-codex/1.0.0" });
     } else if (message.method === "thread/start") {
-      if (mode === "codex-fail-thread") {
+      if (protocolMode === "codex-fail-thread") {
         respondError(message.id, "fake Codex thread failed");
+        return;
+      }
+      if (
+        requireMcpEnv &&
+        message.params?.config?.mcp_servers?.dohc?.env?.DOHC_MCP_CLOUD_TOKEN !== "env-token"
+      ) {
+        respondError(message.id, "missing MCP env");
         return;
       }
       if (

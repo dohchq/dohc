@@ -23,7 +23,12 @@ class FakeSession implements AgentSession {
   async dispose(): Promise<void> {}
 }
 
-function harness(options: { startSession?: (input: AgentSessionStartInput) => Promise<AgentSession> } = {}) {
+function harness(
+  options: {
+    startSession?: (input: AgentSessionStartInput) => Promise<AgentSession>;
+    mcpFor?: (rootPath: string) => AgentSessionStartInput["mcp"];
+  } = {},
+) {
   const eventHandlers: Array<(event: AgentEvent) => void> = [];
   let runCount = 0;
   const driver: AgentDriver = {
@@ -59,7 +64,7 @@ function harness(options: { startSession?: (input: AgentSessionStartInput) => Pr
     registry: createAgentDriverRegistry([driver]),
     integration,
     rootFor: () => "/tmp/workspace",
-    mcpFor: () => ({ command: "dohc-mcp", args: [] }),
+    mcpFor: options.mcpFor ?? (() => ({ command: "dohc-mcp", args: [] })),
     now: () => 10,
   });
   return {
@@ -75,6 +80,33 @@ function harness(options: { startSession?: (input: AgentSessionStartInput) => Pr
 }
 
 describe("AgentSessionManager", () => {
+  it("passes main-owned MCP env through to the selected driver", async () => {
+    const captured: AgentSessionStartInput[] = [];
+    const { manager } = harness({
+      mcpFor: () => ({
+        command: "dohc-mcp",
+        args: ["--workspace", "/tmp/workspace"],
+        env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+      }),
+      async startSession(input) {
+        captured.push(input);
+        return new FakeSession();
+      },
+    });
+
+    await manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+
+    expect(captured[0]?.mcp).toEqual({
+      command: "dohc-mcp",
+      args: ["--workspace", "/tmp/workspace"],
+      env: { DOHC_MCP_CLOUD_TOKEN: "tok" },
+    });
+  });
+
   it("ends attribution as failed when the provider closes before turn completion", async () => {
     const { manager, endAgentRun, emit } = harness();
     await manager.startSession({

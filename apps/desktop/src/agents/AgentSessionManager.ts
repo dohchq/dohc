@@ -77,7 +77,7 @@ export interface AgentSessionManagerOptions {
   registry: AgentDriverRegistry;
   integration: AgentIntegration;
   rootFor(workspaceId: string): string | null;
-  mcpFor(rootPath: string): { command: string; args: string[] };
+  mcpFor(rootPath: string): { command: string; args: string[]; env?: Record<string, string> };
   now?: () => number;
 }
 

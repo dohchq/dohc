@@ -101,8 +101,29 @@ function probeResult(installed: boolean, version?: string, errorMessage?: string
   };
 }
 
-function mcpServers(input: AgentSessionStartInput): Array<{ name: string; command: string; args: string[] }> {
-  return [{ name: "dohc", command: input.mcp.command, args: input.mcp.args }];
+function mcpServers(
+  input: AgentSessionStartInput,
+): Array<{ name: string; command: string; args: string[]; env?: Record<string, string> }> {
+  return [
+    {
+      name: "dohc",
+      command: input.mcp.command,
+      args: input.mcp.args,
+      ...(input.mcp.env ? { env: input.mcp.env } : {}),
+    },
+  ];
+}
+
+function codexMcpServer(input: AgentSessionStartInput): {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+} {
+  return {
+    command: input.mcp.command,
+    args: input.mcp.args,
+    ...(input.mcp.env ? { env: input.mcp.env } : {}),
+  };
 }
 
 type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
@@ -589,7 +610,7 @@ class CodexAppServerDriver implements AgentDriver {
         sandbox: policy.threadSandbox,
         config: {
           mcp_servers: {
-            dohc: { command: input.mcp.command, args: input.mcp.args },
+            dohc: codexMcpServer(input),
           },
         },
       });
