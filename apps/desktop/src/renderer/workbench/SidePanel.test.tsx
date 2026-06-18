@@ -35,8 +35,8 @@ describe("sidebar resize guards", () => {
     const onWidthChange = vi.fn();
     const handle = renderPanel(onWidthChange);
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, clientX: 240 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 320 });
-    expect(onWidthChange).toHaveBeenCalledWith(320);
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 1200 });
+    expect(onWidthChange).toHaveBeenCalledWith(1200);
     fireEvent.pointerUp(handle);
     fireEvent.pointerMove(handle, { buttons: 0, clientX: 400 });
     expect(onWidthChange).toHaveBeenCalledTimes(1);

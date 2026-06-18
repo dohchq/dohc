@@ -65,7 +65,7 @@ export function SidePanel(props: {
         onLostPointerCapture={() => {
           dragLeft.current = null;
         }}
-        className="absolute -right-0.5 top-0 z-10 h-full w-1 cursor-col-resize hover:bg-line"
+        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
       />
     </aside>
   );

@@ -42,6 +42,7 @@ const STORED_STATE: WorkspaceUiState = {
   tabs: ["b.md"],
   activeTab: "b.md",
   historyVisible: true,
+  historyWidth: 360,
 };
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -308,6 +309,7 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+    expect((await screen.findByTestId("history-timeline")).style.width).toBe("360px");
   });
 });
 
@@ -523,6 +525,39 @@ describe("history rail", () => {
     await user.click(screen.getByTestId("history-restore"));
 
     expect(await screen.findByTestId("history-timeline")).toBeTruthy();
+  });
+
+  it("can be resized well beyond the old narrow rail width", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    const rail = await screen.findByTestId("history-timeline");
+    Object.defineProperty(rail, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 720,
+        y: 0,
+        left: 720,
+        top: 0,
+        right: 1000,
+        bottom: 800,
+        width: 280,
+        height: 800,
+        toJSON: () => {},
+      }),
+    });
+
+    const handle = screen.getByTestId("history-resize");
+    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100 });
+
+    await waitFor(() => {
+      expect(rail.style.width).toBe("900px");
+    });
   });
 });
 

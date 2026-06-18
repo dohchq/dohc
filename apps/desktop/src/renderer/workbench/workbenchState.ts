@@ -30,6 +30,7 @@ export interface WorkbenchState {
   // The right-hand history rail (default ON — specs assert the timeline with
   // zero clicks). Independent of the left panel's History view.
   historyVisible: boolean;
+  historyWidth: number;
   // Explorer state (Phase E3), persisted with the rest: which folders are
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
@@ -45,9 +46,12 @@ export interface WorkbenchState {
   lastCatchUpSeenHistoryIndex: number | null;
 }
 
-export const SIDEBAR_MIN_WIDTH = 200;
-export const SIDEBAR_MAX_WIDTH = 480;
+export const SIDEBAR_MIN_WIDTH = 160;
+export const SIDEBAR_MAX_WIDTH = 2400;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
+export const HISTORY_MIN_WIDTH = 180;
+export const HISTORY_MAX_WIDTH = 2400;
+export const HISTORY_DEFAULT_WIDTH = 280;
 // Bounds the persisted payload (and the tab strip) — not a UX target.
 export const MAX_OPEN_TABS = 100;
 // Bounds the persisted explorer state the same way (oldest entries give way).
@@ -64,6 +68,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     tabs: [],
     activeTab: null,
     historyVisible: true,
+    historyWidth: HISTORY_DEFAULT_WIDTH,
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
@@ -76,6 +81,11 @@ export function defaultWorkbenchState(): WorkbenchState {
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
+
+export function clampHistoryWidth(width: number): number {
+  if (!Number.isFinite(width)) return HISTORY_DEFAULT_WIDTH;
+  return Math.min(HISTORY_MAX_WIDTH, Math.max(HISTORY_MIN_WIDTH, Math.round(width)));
 }
 
 // Open (or re-activate) a file's tab. No duplicates; opening always
@@ -149,6 +159,11 @@ export function toggleHistory(state: WorkbenchState): WorkbenchState {
 export function setSidebarWidth(state: WorkbenchState, width: number): WorkbenchState {
   const clamped = clampSidebarWidth(width);
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
+}
+
+export function setHistoryWidth(state: WorkbenchState, width: number): WorkbenchState {
+  const clamped = clampHistoryWidth(width);
+  return clamped === state.historyWidth ? state : { ...state, historyWidth: clamped };
 }
 
 // Capped append: at the bound the OLDEST entry gives way (openTab precedent)
@@ -281,6 +296,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     tabs: state.tabs.map((tab) => tab.path),
     activeTab: state.activeTab,
     historyVisible: state.historyVisible,
+    historyWidth: clampHistoryWidth(state.historyWidth),
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
@@ -334,6 +350,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
   const rawHistoryVisible = own("historyVisible");
+  const rawHistoryWidth = own("historyWidth");
   const rawLastCatchUpSeenAtMs = own("lastCatchUpSeenAtMs");
   const rawLastCatchUpSeenChangeSetId = own("lastCatchUpSeenChangeSetId");
   const rawLastCatchUpSeenHistoryIndex = own("lastCatchUpSeenHistoryIndex");
@@ -353,6 +370,10 @@ export function parseUiState(raw: unknown): WorkbenchState {
       typeof rawHistoryVisible === "boolean"
         ? rawHistoryVisible
         : defaults.historyVisible,
+    historyWidth:
+      typeof rawHistoryWidth === "number"
+        ? clampHistoryWidth(rawHistoryWidth)
+        : defaults.historyWidth,
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),

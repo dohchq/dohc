@@ -18,6 +18,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import type {
   ChangeSetRecord,
@@ -52,6 +53,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   activateTab,
   closeTab,
+  clampHistoryWidth,
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   isGraphTabPath,
@@ -63,6 +65,7 @@ import {
   serializeUiState,
   setCatchUpSeenAt,
   setFolderExpanded,
+  setHistoryWidth,
   setSidebarWidth,
   setView,
   toggleFolderExpanded,
@@ -281,6 +284,76 @@ function HistoryView(props: {
       ) : null}
       <HistoryList changeSets={props.changeSets} />
     </>
+  );
+}
+
+function HistoryRail(props: {
+  width: number;
+  onWidthChange: (width: number) => void;
+  onCollapse: () => void;
+  children: ReactNode;
+}) {
+  const railRef = useRef<HTMLElement>(null);
+  const dragRight = useRef<number | null>(null);
+
+  return (
+    <aside
+      ref={railRef}
+      data-testid="history-timeline"
+      aria-label="History"
+      className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
+      style={{ width: props.width }}
+    >
+      <div
+        data-testid="history-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize history"
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          dragRight.current =
+            railRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (dragRight.current === null) return;
+          if ((event.buttons & 1) === 0) {
+            dragRight.current = null;
+            return;
+          }
+          props.onWidthChange(clampHistoryWidth(dragRight.current - event.clientX));
+        }}
+        onPointerUp={() => {
+          dragRight.current = null;
+        }}
+        onPointerCancel={() => {
+          dragRight.current = null;
+        }}
+        onLostPointerCapture={() => {
+          dragRight.current = null;
+        }}
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
+      />
+      {/* Same header grammar + h-9 band as the side panel: the two
+          peer chrome surfaces speak one language and their hairlines
+          meet the tab strip's on the same pixel row. */}
+      <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+          History
+        </span>
+        <button
+          type="button"
+          data-testid="history-collapse"
+          aria-label="Collapse history"
+          title="Collapse history"
+          onClick={props.onCollapse}
+          className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+        >
+          <PanelRight size={13} aria-hidden />
+        </button>
+      </header>
+      {props.children}
+    </aside>
   );
 }
 
@@ -1319,36 +1392,18 @@ export function DesktopWorkspaceShell(props: {
             Default-visible right rail (specs assert it with zero clicks);
             toggleable via the toggle-history command. */}
         {wb.historyVisible ? (
-          <aside
-            data-testid="history-timeline"
-            aria-label="History"
-            className="flex w-64 shrink-0 flex-col border-l border-line bg-panel-2"
+          <HistoryRail
+            width={wb.historyWidth}
+            onWidthChange={(width) => mutateWb((state) => setHistoryWidth(state, width))}
+            onCollapse={() => mutateWb(toggleHistory)}
           >
-            {/* Same header grammar + h-9 band as the side panel: the two
-                peer chrome surfaces speak one language and their hairlines
-                meet the tab strip's on the same pixel row. */}
-            <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-                History
-              </span>
-              <button
-                type="button"
-                data-testid="history-collapse"
-                aria-label="Collapse history"
-                title="Collapse history"
-                onClick={() => mutateWb(toggleHistory)}
-                className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-              >
-                <PanelRight size={13} aria-hidden />
-              </button>
-            </header>
             <HistoryView
               changeSets={changeSets}
               catchUp={catchUp}
               conflictSummaries={conflictSummaries}
               onMarkCaughtUp={markCaughtUp}
             />
-          </aside>
+          </HistoryRail>
         ) : (
           <aside
             aria-label="History collapsed"

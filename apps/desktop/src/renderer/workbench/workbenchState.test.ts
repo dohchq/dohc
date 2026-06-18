@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   activateTab,
+  clampHistoryWidth,
   clampSidebarWidth,
   closeTab,
   defaultWorkbenchState,
+  HISTORY_DEFAULT_WIDTH,
+  HISTORY_MAX_WIDTH,
+  HISTORY_MIN_WIDTH,
   moveTab,
   openTab,
   parseUiState,
   serializeUiState,
   setCatchUpSeenAt,
   setSidebarWidth,
+  setHistoryWidth,
   setView,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -142,19 +147,35 @@ describe("views and panels", () => {
   });
 });
 
-describe("sidebar width", () => {
-  it("clamps into [MIN, MAX] and rounds; non-finite resets to the default", () => {
+describe("rail widths", () => {
+  it("clamps sidebars into generous bounds and rounds; non-finite resets to the default", () => {
     expect(clampSidebarWidth(10)).toBe(SIDEBAR_MIN_WIDTH);
     expect(clampSidebarWidth(9999)).toBe(SIDEBAR_MAX_WIDTH);
+    expect(clampSidebarWidth(1200)).toBe(1200);
     expect(clampSidebarWidth(300.6)).toBe(301);
     expect(clampSidebarWidth(Number.NaN)).toBe(SIDEBAR_DEFAULT_WIDTH);
     expect(clampSidebarWidth(Number.POSITIVE_INFINITY)).toBe(SIDEBAR_DEFAULT_WIDTH);
+  });
+
+  it("clamps history into the same generous resize range", () => {
+    expect(clampHistoryWidth(10)).toBe(HISTORY_MIN_WIDTH);
+    expect(clampHistoryWidth(9999)).toBe(HISTORY_MAX_WIDTH);
+    expect(clampHistoryWidth(1200)).toBe(1200);
+    expect(clampHistoryWidth(300.6)).toBe(301);
+    expect(clampHistoryWidth(Number.NaN)).toBe(HISTORY_DEFAULT_WIDTH);
+    expect(clampHistoryWidth(Number.POSITIVE_INFINITY)).toBe(HISTORY_DEFAULT_WIDTH);
   });
 
   it("setSidebarWidth stores the clamped width and no-ops on no change", () => {
     const state = defaultWorkbenchState();
     expect(setSidebarWidth(state, 320).sidebarWidth).toBe(320);
     expect(setSidebarWidth(state, SIDEBAR_DEFAULT_WIDTH)).toBe(state);
+  });
+
+  it("setHistoryWidth stores the clamped width and no-ops on no change", () => {
+    const state = defaultWorkbenchState();
+    expect(setHistoryWidth(state, 360).historyWidth).toBe(360);
+    expect(setHistoryWidth(state, HISTORY_DEFAULT_WIDTH)).toBe(state);
   });
 });
 
@@ -163,6 +184,7 @@ describe("ui-state persistence round-trip", () => {
     let state = withTabs("notes/a.md", "notes/b.md");
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
+    state = setHistoryWidth(state, 444);
     state = toggleHistory(state);
     expect(parseUiState(serializeUiState(state))).toEqual(state);
   });
@@ -178,10 +200,12 @@ describe("ui-state persistence round-trip", () => {
   it("parse clamps width, dedupes tabs, drops junk entries, bounds the count", () => {
     const state = parseUiState({
       sidebarWidth: 5,
+      historyWidth: 9999,
       tabs: ["a.md", "a.md", 42, "", "b.md"],
       activeTab: "missing.md",
     });
     expect(state.sidebarWidth).toBe(SIDEBAR_MIN_WIDTH);
+    expect(state.historyWidth).toBe(HISTORY_MAX_WIDTH);
     expect(state.tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     // An activeTab that no surviving tab carries falls back to the first tab.
     expect(state.activeTab).toBe("a.md");

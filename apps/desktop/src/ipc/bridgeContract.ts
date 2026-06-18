@@ -5,6 +5,8 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  HISTORY_MAX_WIDTH,
+  HISTORY_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   VIEW_IDS,
@@ -1005,6 +1007,7 @@ export const WorkspaceUiState = z.object({
   tabs: z.array(PATH_STRING).max(MAX_OPEN_TABS),
   activeTab: PATH_STRING.nullable(),
   historyVisible: z.boolean(),
+  historyWidth: z.number().int().min(HISTORY_MIN_WIDTH).max(HISTORY_MAX_WIDTH).optional(),
   // Additive (Phase E3 explorer), still version 1: optional fields parse old
   // files, and zod's non-strict parse drops unknown keys for old readers.
   expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),
