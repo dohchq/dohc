@@ -1114,10 +1114,14 @@ export function DesktopWorkspaceShell(props: {
         files={files}
         folders={folders}
         activeTab={wb.activeTab}
+        openTabs={wb.tabs}
+        dirtyTab={activeTabDirty ? wb.activeTab : null}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         createRequest={createRequest}
         onOpenFile={openFile}
+        onActivateTab={activateEditorTab}
+        onCloseTab={closeFileTab}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}

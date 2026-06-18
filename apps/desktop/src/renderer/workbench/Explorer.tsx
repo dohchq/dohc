@@ -7,6 +7,7 @@ import {
   FolderOpen,
   LayoutGrid,
   Pin,
+  X,
 } from "lucide-react";
 import {
   memo,
@@ -31,6 +32,7 @@ import {
   type PendingTreeChange,
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
+import { isGraphTabPath } from "./workbenchState";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -44,12 +46,16 @@ export interface ExplorerProps {
   files: WorkspaceFileEntry[];
   folders: string[];
   activeTab: string | null;
+  openTabs: Array<{ path: string }>;
+  dirtyTab: string | null;
   expandedFolders: string[];
   pinned: string[];
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
   onOpenFile: (path: string) => void;
+  onActivateTab: (path: string) => void;
+  onCloseTab: (path: string) => void;
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
   onTogglePin: (path: string) => void;
@@ -116,6 +122,17 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   if (kind === "database") return <Database size={13} aria-hidden className="shrink-0" />;
   if (kind === "app-source") return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   return <FileText size={13} aria-hidden className="shrink-0" />;
+}
+
+function editorTitle(path: string): string {
+  return isGraphTabPath(path) ? "Graph" : leafOf(path);
+}
+
+function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
+  if (isGraphTabPath(props.path)) {
+    return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
+  }
+  return <FileKindIcon kind={props.kind ?? "file"} />;
 }
 
 // Depth indent with guide lines (one per ancestor level).
@@ -258,6 +275,7 @@ export function Explorer(props: ExplorerProps) {
     onTogglePin,
   } = props;
   const [pending, setPending] = useState<PendingTreeChange[]>([]);
+  const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editValue, setEditValue] = useState("");
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
@@ -298,6 +316,12 @@ export function Explorer(props: ExplorerProps) {
     () => applyPendingTreeMoves(props.files, props.folders, pending),
     [props.files, props.folders, pending],
   );
+
+  const fileKindByPath = useMemo(() => {
+    const map = new Map<string, WorkspaceFileEntry["kind"]>();
+    for (const file of projected.files) map.set(file.path, file.kind);
+    return map;
+  }, [projected.files]);
 
   const expandedSet = useMemo(
     () => new Set(props.expandedFolders),
@@ -1020,6 +1044,97 @@ export function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
+        <section
+          data-testid="open-editors-section"
+          aria-label="Open editors"
+          className="mb-1 border-b border-line pb-1"
+        >
+          <button
+            type="button"
+            data-testid="open-editors-toggle"
+            aria-expanded={openEditorsExpanded}
+            onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
+            className="flex h-6 w-full items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
+          >
+            <ChevronRight
+              size={11}
+              aria-hidden
+              className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+            />
+            <span className="min-w-0 flex-1 truncate">Open Editors</span>
+            {props.openTabs.length > 0 ? (
+              <span
+                aria-label={`${props.openTabs.length} open editor${props.openTabs.length === 1 ? "" : "s"}`}
+                className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
+              >
+                {props.openTabs.length}
+              </span>
+            ) : null}
+          </button>
+
+          {openEditorsExpanded ? (
+            props.openTabs.length > 0 ? (
+              <ul className="m-0 list-none p-0">
+                {props.openTabs.map((tab) => {
+                  const active = props.activeTab === tab.path;
+                  const dirty = props.dirtyTab === tab.path;
+                  const title = editorTitle(tab.path);
+                  return (
+                    <li
+                      key={tab.path}
+                      data-testid="open-editor-row"
+                      data-path={tab.path}
+                      data-active={active}
+                      className={`group flex h-7 items-center ${
+                        active ? "bg-line text-ink" : "text-muted hover:bg-line/50 hover:text-ink"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        title={tab.path}
+                        onClick={() => props.onActivateTab(tab.path)}
+                        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[13px] outline-none"
+                      >
+                        <OpenEditorIcon
+                          path={tab.path}
+                          kind={fileKindByPath.get(tab.path) ?? null}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{title}</span>
+                        {dirty ? (
+                          <span
+                            data-testid="open-editor-dirty"
+                            aria-label="Unsaved changes"
+                            className="size-1.5 shrink-0 rounded-full bg-muted"
+                          />
+                        ) : null}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="open-editor-close"
+                        aria-label={`Close ${title}`}
+                        title={`Close ${title}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          props.onCloseTab(tab.path);
+                        }}
+                        className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line hover:text-ink focus:opacity-100 ${
+                          active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                        }`}
+                      >
+                        <X size={13} aria-hidden />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <div className="px-3 py-1.5 text-[11px] text-subtle">
+                No open editors
+              </div>
+            )
+          ) : null}
+        </section>
+
         {props.pinned.length > 0 ? (
           <section
             data-testid="explorer-pinned"

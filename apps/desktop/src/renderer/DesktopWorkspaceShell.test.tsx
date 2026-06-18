@@ -512,6 +512,39 @@ describe("graph view", () => {
   });
 });
 
+describe("open editors", () => {
+  it("mirrors tabs in the explorer and supports activate and close", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const treeRows = await screen.findAllByTestId("tree-row");
+    const rowA = treeRows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    const rowB = treeRows.find((row) => row.getAttribute("data-path") === "b.md")!;
+
+    await user.click(rowA);
+    await user.click(rowB);
+    await screen.findByTestId("tab-b.md");
+
+    const editorRows = () => screen.getAllByTestId("open-editor-row");
+    const openA = () =>
+      editorRows().find((row) => row.getAttribute("data-path") === "a.md")!;
+    const openB = () =>
+      editorRows().find((row) => row.getAttribute("data-path") === "b.md")!;
+
+    expect(openA()).toBeTruthy();
+    expect(openB().getAttribute("data-active")).toBe("true");
+
+    await user.click(within(openA()).getByText("a.md"));
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+    expect(openA().getAttribute("data-active")).toBe("true");
+
+    await user.click(within(openA()).getByLabelText("Close a.md"));
+    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
+    expect(editorRows().map((row) => row.getAttribute("data-path"))).toEqual(["b.md"]);
+  });
+});
+
 describe("history rail", () => {
   it("can be collapsed and restored from the right edge", async () => {
     const bridge = makeBridge(Promise.resolve(null));
