@@ -345,25 +345,65 @@ table {
 }
 
 .dohc-graph-node {
-  cursor: grab;
+  cursor: pointer;
   transform-box: fill-box;
   transform-origin: center;
   animation: dohc-graph-node-in 360ms ease-out both;
-  transition: transform 160ms ease;
+  transition: transform 140ms ease;
 }
 
 .dohc-graph-node:active {
   cursor: grabbing;
 }
 
-.dohc-graph-node circle {
+.dohc-graph-node-halo {
+  fill: transparent;
+  stroke: var(--dohc-match);
+  stroke-width: 1.5;
+  opacity: 0;
   transition:
-    fill 160ms ease,
-    stroke 160ms ease;
+    opacity 140ms ease,
+    stroke-width 140ms ease;
 }
 
-.dohc-graph-node:hover {
-  transform: scale(1.04);
+.dohc-graph-node-dot {
+  fill: var(--dohc-panel);
+  stroke: var(--dohc-muted);
+  transition:
+    fill 140ms ease,
+    stroke 140ms ease,
+    stroke-width 140ms ease;
+}
+
+.dohc-graph-node-dot[data-active='true'] {
+  fill: var(--dohc-ink);
+  stroke: var(--dohc-ink);
+}
+
+.dohc-graph-node text {
+  transition:
+    fill 140ms ease,
+    font-weight 140ms ease;
+}
+
+.dohc-graph-node:is(:hover, :focus-visible) {
+  transform: scale(1.16);
+}
+
+.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-halo {
+  opacity: 0.34;
+  stroke-width: 2.5;
+}
+
+.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-dot {
+  fill: var(--dohc-match);
+  stroke: var(--dohc-ink);
+  stroke-width: 2.25;
+}
+
+.dohc-graph-node:is(:hover, :focus-visible) text {
+  fill: var(--dohc-match);
+  font-weight: 650;
 }
 
 @keyframes dohc-graph-edge-draw {

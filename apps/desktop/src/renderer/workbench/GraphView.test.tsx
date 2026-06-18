@@ -45,6 +45,12 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
       "1 unresolved",
     );
+    expect(
+      screen
+        .getAllByTestId("graph-node")
+        .find((node) => node.dataset.path === "beta.md")
+        ?.getAttribute("aria-label"),
+    ).toBe("Open or focus beta.md");
 
     await userEvent.click(
       screen.getAllByTestId("graph-file-row").find((row) => row.dataset.path === "beta.md")!,

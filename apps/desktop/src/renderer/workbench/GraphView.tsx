@@ -509,7 +509,8 @@ function GraphMap(props: {
             data-path={node.path}
             role="button"
             tabIndex={0}
-            aria-label={node.path}
+            aria-label={`Open or focus ${node.path}`}
+            data-active={active ? "true" : "false"}
             className="dohc-graph-node outline-none"
             style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
             onPointerDown={(event) => {
@@ -538,11 +539,19 @@ function GraphMap(props: {
               }
             }}
           >
+            <title>{`Open or focus ${node.path}`}</title>
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r={node.radius + (props.variant === "page" ? 8 : 5)}
+              className="dohc-graph-node-halo"
+            />
             <circle
               cx={node.x}
               cy={node.y}
               r={node.radius}
-              className={active ? "fill-ink stroke-ink" : "fill-panel stroke-muted"}
+              className="dohc-graph-node-dot"
+              data-active={active ? "true" : "false"}
               strokeWidth={active ? 2 : 1.25}
             />
             <text
@@ -552,6 +561,7 @@ function GraphMap(props: {
               stroke="var(--dohc-bg)"
               strokeWidth={props.variant === "page" ? 4 : 3}
               paintOrder="stroke"
+              data-active={active ? "true" : "false"}
               className={
                 active
                   ? props.variant === "page"
