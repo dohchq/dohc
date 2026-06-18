@@ -16,10 +16,12 @@ import {
   deleteWorkspacePath,
   importData,
   listWorkspaceFiles,
+  listChanges,
   listWorkspaces,
   moveWorkspacePath,
   openInDohc,
   queryDatabase,
+  readChange,
   readWorkspaceFile,
   resolveConflict,
   share,
@@ -66,6 +68,30 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { sinceMs: z.number().int().nonnegative().optional() },
     },
     async (args) => text(await syncNow(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_changes",
+    {
+      description: "List dohc change sets for history, provenance, and sync-aware collaboration.",
+      inputSchema: {
+        sinceMs: z.number().int().nonnegative().optional(),
+        limit: z.number().int().positive().max(500).optional(),
+        includeFiles: z.boolean().optional(),
+      },
+    },
+    async (args) => text(await listChanges(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_read_change",
+    {
+      description: "Read one dohc change set, including touched files, author, provenance, and boundary crossings.",
+      inputSchema: {
+        id: z.string().min(1).max(500),
+      },
+    },
+    async (args) => text(await readChange(ctx, args)),
   );
 
   server.registerTool(

@@ -8,10 +8,12 @@ import {
   deleteWorkspacePath,
   importData,
   listWorkspaceFiles,
+  listChanges,
   listWorkspaces,
   moveWorkspacePath,
   openInDohc,
   queryDatabase,
+  readChange,
   readWorkspaceFile,
   resolveConflict,
   safeResolve,
@@ -233,7 +235,46 @@ describe("mcp tools operate on allowed paths", () => {
 
       const pending = await syncNow(ctx, { sinceMs: 0 });
       expect(pending).toMatchObject({ clean: false, pendingChangeCount: 1 });
+      expect(pending.cursorMs).toBeGreaterThan(0);
       expect(pending.pending[0]).toMatchObject({ summary: "Created report", fileCount: 1 });
+    });
+  });
+
+  it("lists and reads MCP-recorded change sets for collaboration-aware agents", async () => {
+    await withWorkspace(async (ctx) => {
+      const write = await writeWorkspaceFile(ctx, {
+        path: "notes/plan.txt",
+        content: "draft\n",
+        summary: "Agent drafted plan",
+      });
+      expect(write).toMatchObject({ ok: true });
+      if (!write.ok) return;
+
+      const listed = await listChanges(ctx, { includeFiles: true });
+      expect(listed).toMatchObject({
+        count: 1,
+        totalAvailable: 1,
+        hasMore: false,
+      });
+      expect(listed.changes[0]).toMatchObject({
+        id: write.changeSetId,
+        kind: "agent-run",
+        summary: "Agent drafted plan",
+        author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+        provenance: { source: "agent-run" },
+        files: [{ path: "notes/plan.txt", operation: "write" }],
+      });
+
+      await expect(readChange(ctx, { id: write.changeSetId })).resolves.toMatchObject({
+        ok: true,
+        change: {
+          id: write.changeSetId,
+          files: [{ path: "notes/plan.txt", operation: "write" }],
+        },
+      });
+      await expect(readChange(ctx, { id: "missing" })).resolves.toMatchObject({
+        ok: false,
+      });
     });
   });
 

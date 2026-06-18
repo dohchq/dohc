@@ -16,7 +16,11 @@ import {
   type ChangeProvenance,
   type FileChange,
 } from "@dohc/workspace-core";
-import { createChangeSetStore, mergeMarkdown } from "@dohc/workspace-history";
+import {
+  createChangeSetStore,
+  mergeMarkdown,
+  type HistoryRecord,
+} from "@dohc/workspace-history";
 import { runStaticAppCheck } from "@dohc/app-tester/static";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -475,9 +479,11 @@ export async function workspaceStatus(ctx: ToolContext) {
 export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
   const store = createChangeSetStore(ctx.root);
   const pending = await store.listSince(args.sinceMs ?? 0);
+  const latest = pending.at(-1);
   return {
     pendingChangeCount: pending.length,
     clean: pending.length === 0,
+    cursorMs: latest?.recordedAtMs ?? args.sinceMs ?? 0,
     pending: pending.map((record) => ({
       id: record.id,
       recordedAtMs: record.recordedAtMs,
@@ -485,6 +491,50 @@ export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
       fileCount: record.files.length,
     })),
   };
+}
+
+// --- dohc_list_changes / dohc_read_change ----------------------------------
+
+function changeSummary(record: HistoryRecord, includeFiles: boolean) {
+  return {
+    id: record.id,
+    recordedAtMs: record.recordedAtMs,
+    kind: record.kind,
+    author: record.author,
+    summary: record.summary,
+    fileCount: record.files.length,
+    boundaryCrossings: record.boundaryCrossings,
+    ...(record.provenance ? { provenance: record.provenance } : {}),
+    ...(includeFiles ? { files: record.files } : {}),
+  };
+}
+
+export async function listChanges(
+  ctx: ToolContext,
+  args: { sinceMs?: number; limit?: number; includeFiles?: boolean } = {},
+) {
+  const store = createChangeSetStore(ctx.root);
+  const records =
+    args.sinceMs === undefined ? await store.list() : await store.listSince(args.sinceMs);
+  const limit = Math.min(500, Math.max(1, Math.floor(args.limit ?? 50)));
+  const selected = records.slice(0, limit);
+  const cursorMs = selected.reduce(
+    (max, record) => Math.max(max, record.recordedAtMs),
+    args.sinceMs ?? 0,
+  );
+  return {
+    changes: selected.map((record) => changeSummary(record, args.includeFiles ?? false)),
+    count: selected.length,
+    totalAvailable: records.length,
+    hasMore: records.length > selected.length,
+    cursorMs,
+  };
+}
+
+export async function readChange(ctx: ToolContext, args: { id: string }) {
+  const record = await createChangeSetStore(ctx.root).get(args.id);
+  if (!record) return { ok: false as const, reason: `change set not found: ${args.id}` };
+  return { ok: true as const, change: changeSummary(record, true) };
 }
 
 // --- dohc_create_app --------------------------------------------------------
