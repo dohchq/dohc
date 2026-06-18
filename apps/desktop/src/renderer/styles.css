@@ -349,7 +349,8 @@ table {
   transform-box: fill-box;
   transform-origin: center;
   animation: dohc-graph-node-in 360ms ease-out both;
-  transition: transform 140ms ease;
+  transition: transform 82ms cubic-bezier(0.18, 0.9, 0.2, 1);
+  will-change: transform;
 }
 
 .dohc-graph-node:active {
@@ -362,17 +363,17 @@ table {
   stroke-width: 1.5;
   opacity: 0;
   transition:
-    opacity 140ms ease,
-    stroke-width 140ms ease;
+    opacity 70ms linear,
+    stroke-width 90ms cubic-bezier(0.18, 0.9, 0.2, 1);
 }
 
 .dohc-graph-node-dot {
   fill: var(--dohc-panel);
   stroke: var(--dohc-muted);
   transition:
-    fill 140ms ease,
-    stroke 140ms ease,
-    stroke-width 140ms ease;
+    fill 70ms linear,
+    stroke 70ms linear,
+    stroke-width 82ms cubic-bezier(0.18, 0.9, 0.2, 1);
 }
 
 .dohc-graph-node-dot[data-active='true'] {
@@ -382,8 +383,8 @@ table {
 
 .dohc-graph-node text {
   transition:
-    fill 140ms ease,
-    font-weight 140ms ease;
+    fill 70ms linear,
+    font-weight 70ms linear;
 }
 
 .dohc-graph-node:is(:hover, :focus-visible) {
