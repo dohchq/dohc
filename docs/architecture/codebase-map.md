@@ -100,15 +100,20 @@ nothing consumes a deleted backend.
 ## packages/mcp — local agent surface
 
 - **Owns:** the `dohc-mcp` stdio server and every MCP tool schema; all path
-  arguments go through workspace-core validation; DB queries are read-only
+  arguments go through workspace-core validation; visible workspace file
+  tools are broad (list/read/write/search/move/delete/create directory),
+  while history, cloud sync, app testing, data import, conflict resolution,
+  and share-boundary tools preserve dohc semantics. DB queries are read-only
   and bounded. Consumes two library-shaped services (the audited cross-layer
   edges named in the header): `@dohc/app-tester/static` (app trust check)
   and `@dohc/sqlite-worker` (query engine).
 - **Must not import:** apps, electron, web.
 - **Imported by:** desktop (dependency provides the `dohc-mcp` bin; spawned,
-  not imported).
-- **Proof:** `src/tools` tests (17) + desktop E2E `localAgent.spec.ts`
-  (real MCP client over stdio).
+  not imported). Desktop-managed agent sessions may inject `DOHC_MCP_CLOUD_*`
+  env values into the spawned MCP config after the main process has loaded
+  matching cloud credentials; copyable user config stays token-free.
+- **Proof:** `src/tools` tests + desktop `AgentProcessDrivers` env tests +
+  desktop E2E `localAgent.spec.ts` (real MCP client over stdio).
 
 ## packages/brand / packages/performance
 

@@ -109,15 +109,40 @@ Code, Codex, …) as a stdio child; desktop Settings shows the copyable
 Stdio means only the configured tool can talk to it — no shared-secret auth
 surface to manage.
 
-Ten tools, all path-contained in `packages/mcp/src/tools.ts`:
-`dohc_list_workspaces`, `dohc_workspace_status`, `dohc_sync_now`,
-`dohc_create_app`, `dohc_test_app`, `dohc_import_data`,
-`dohc_query_database`, `dohc_share`, `dohc_resolve_conflict`,
-`dohc_open_in_dohc`.
+MCP is deliberately broad for visible workspace files: agents can list,
+read, write, search, create directories, move, and delete paths via
+`dohc_list_files`, `dohc_read_file`, `dohc_write_file`,
+`dohc_search_files`, `dohc_create_directory`, `dohc_move_path`, and
+`dohc_delete_path`. Those tools are not markdown-only. They operate on the
+same local files the user can touch, while every path still goes through
+workspace-core validation and realpath containment, and `.dohc`, `.git`,
+`node_modules`, symlink escapes, and hidden dohc internals stay out of the
+user-facing surface.
 
-Agent writes land on disk like any other write, so the watcher records them —
-attributed to the agent via the active-run slot above. The proof is
-`apps/desktop/e2e/localAgent.spec.ts`.
+The dohc-aware layer is the point of the server, not a restriction on useful
+file access:
+
+- History/provenance: `dohc_list_changes`, `dohc_read_change`, and
+  `dohc_sync_now` expose recorded change sets and sync cursors.
+- Cloud sync: `dohc_sync_cloud` runs the merge sync engine when the workspace
+  is cloud-bound. Standalone MCP reads `dohc-cloud.json` when it can; Desktop
+  managed agent sessions inject `DOHC_MCP_CLOUD_*` environment values after
+  decrypting safeStorage credentials in the main process. The copyable
+  Settings snippet never contains tokens.
+- Apps/data: `dohc_create_app`, `dohc_test_app`, `dohc_import_data`, and
+  `dohc_query_database` let an agent build/test source-backed apps and query
+  visible databases without bypassing app trust or database read bounds.
+- Collaboration boundaries: `dohc_share` returns `needs-confirmation` for
+  sharing, and `dohc_resolve_conflict` only returns a clean merge when the
+  markdown three-way merge is unambiguous.
+- Desktop affordance: `dohc_list_workspaces`, `dohc_workspace_status`, and
+  `dohc_open_in_dohc` let the agent orient the user in the desktop workspace.
+
+MCP writes record dohc change sets directly. Agent writes made through the
+desktop provider process are also attributed via the active-run slot above.
+The proofs are `packages/mcp/src/tools.test.ts`,
+`apps/desktop/src/agents/AgentProcessDrivers.test.ts`, and
+`apps/desktop/e2e/localAgent.spec.ts` (real MCP client over stdio).
 
 ## Where cloud fits
 
