@@ -78,6 +78,14 @@ const bridge: DohcDesktopBridge = {
   },
   importWorkspaceFiles: (payload) =>
     ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
+  createDataFragment: (payload) =>
+    ipcRenderer.invoke(CHANNELS.createDataFragment, payload),
+  listDataFragments: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listDataFragments, payload),
+  readDataFragment: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readDataFragment, payload),
+  revokeDataFragment: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revokeDataFragment, payload),
   readWorkspaceText: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceText, payload),
   writeWorkspaceText: (payload) =>

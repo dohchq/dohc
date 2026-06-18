@@ -12,6 +12,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ChangeSetRecord,
+  ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   WorkspaceSearchPayload,
   WorkspaceUiState,
@@ -147,8 +148,58 @@ function makeBridge(
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
+    showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
     showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
     getDroppedFilePaths: vi.fn(() => []),
+    cloudStatus: vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true,
+    })),
+    createDataFragment: vi.fn(async () => ({
+      fragment: {
+        fragmentId: "fragment-created",
+        sourceWorkspaceId: "ws-shell-test",
+        sourcePath: "a.md",
+        title: "Shared data",
+        preview: "10 apples",
+        contentType: "text/plain",
+        createdBy: "owner-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        recipientEmail: "peer@dohc.test",
+      },
+    })),
+    listDataFragments: vi.fn(async () => ({
+      fragments: [
+        {
+          fragmentId: "fragment-1",
+          sourceWorkspaceId: "source-ws",
+          sourcePath: "source.md",
+          title: "Apple count",
+          preview: "10 apples",
+          contentType: "text/plain",
+          createdBy: "owner-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          recipientEmail: "me@dohc.test",
+        },
+      ],
+    })),
+    readDataFragment: vi.fn(async () => ({
+      fragment: {
+        fragmentId: "fragment-1",
+        sourceWorkspaceId: "source-ws",
+        sourcePath: "source.md",
+        title: "Apple count",
+        preview: "10 apples",
+        contentType: "text/plain",
+        createdBy: "owner-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+        recipientEmail: "me@dohc.test",
+        body: "10 apples",
+      },
+    })),
+    revokeDataFragment: vi.fn(async () => undefined),
     listWorkspaceShares: vi.fn(async () => ({ shares: [] })),
     listWorkspaceMembers: vi.fn(async () => ({
       members: [{ userId: "owner-1", email: "owner@dohc.test", role: "owner" }],
@@ -484,7 +535,7 @@ describe("imports and exports", () => {
     await user.click(await screen.findByTestId("import-export-open"));
 
     const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getByText("Import / export")).toBeTruthy();
+    expect(within(dialog).getByText("Import / export data")).toBeTruthy();
     await user.click(within(dialog).getByTestId("export-workspace-action"));
     await waitFor(() => {
       expect(bridge.exportWorkspaceZip).toHaveBeenCalledWith({
@@ -495,6 +546,28 @@ describe("imports and exports", () => {
 });
 
 describe("native workbench context menus", () => {
+  it("opens import/export data from a file tree context menu", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showExplorerMenu.mockResolvedValue("import-export");
+    renderShell(bridge);
+
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (item) => item.getAttribute("data-path") === "a.md",
+    )!;
+    fireEvent.contextMenu(row);
+
+    await waitFor(() => {
+      expect(bridge.showExplorerMenu).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        kind: "file",
+        path: "a.md",
+        pinned: false,
+      });
+    });
+    const dialog = await screen.findByTestId("import-export-dialog");
+    expect(within(dialog).getAllByText("a.md").length).toBeGreaterThan(0);
+  });
+
   it("routes tab context menu commands through existing tab actions", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
@@ -532,6 +605,34 @@ describe("native workbench context menus", () => {
         context: "editor",
       });
     });
+  });
+
+  it("opens import/export data from the editor context menu", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("import-export");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
+
+    const dialog = await screen.findByTestId("import-export-dialog");
+    expect(within(dialog).getByText("Data fragment")).toBeTruthy();
+    expect(within(dialog).getByText("Files and archives")).toBeTruthy();
+  });
+
+  it("opens import/export data for the tab path from the tab context menu", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("import-export");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await user.click(screen.getByText("b.md"));
+    fireEvent.contextMenu(await screen.findByTestId("tab-a.md"));
+
+    const dialog = await screen.findByTestId("import-export-dialog");
+    expect(within(dialog).getAllByText("a.md").length).toBeGreaterThan(0);
   });
 
   it("routes status bar context menu commands to panel actions", async () => {

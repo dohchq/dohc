@@ -16,6 +16,8 @@ describe("Postgres workspace schema scaffold", () => {
       "database_operations",
       "permissions",
       "shares",
+      "data_fragments",
+      "data_fragment_shares",
       "workspace_invitations",
       "locks",
       "app_packages",
@@ -31,6 +33,8 @@ describe("Postgres workspace schema scaffold", () => {
       "workspace_events_workspace_created_idx",
       "locks_workspace_target_idx",
       "database_operations_file_version_idx",
+      "data_fragments_workspace_created_idx",
+      "data_fragment_shares_recipient_created_idx",
     ]);
   });
 });

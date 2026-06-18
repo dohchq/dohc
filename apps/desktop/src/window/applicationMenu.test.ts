@@ -50,6 +50,18 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
   });
 
+  it("surfaces data import/export in the File menu", () => {
+    const { template, sendCommand } = build();
+    const item = items(template, "File").find(
+      (entry) => entry.label === "Import / Export Data…",
+    );
+    const fakeWindow = { id: 3 };
+
+    (item?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "import-export");
+  });
+
   it("Open Recent lists known workspaces and activates the picked one", () => {
     const { template, openRecentWorkspace, recentWorkspaces } = build();
     const openRecent = items(template, "File").find((i) => i.label === "Open Recent");

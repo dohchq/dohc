@@ -332,6 +332,7 @@ export function DesktopWorkspaceShell(props: {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sharePath, setSharePath] = useState<string | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
+  const [importExportPath, setImportExportPath] = useState<string | null>(null);
   const [importExportSelectionText, setImportExportSelectionText] = useState("");
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
@@ -803,10 +804,16 @@ export function DesktopWorkspaceShell(props: {
   const openAgentView = useCallback(() => {
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
   }, [mutateWb]);
-  const openImportExportDialog = useCallback(() => {
-    setImportExportSelectionText(readSelectedText());
+  const openImportExportDialog = useCallback((path?: string | null) => {
+    const targetPath = path === undefined ? activeDocumentPath : path;
+    const canUseSelection =
+      targetPath !== null &&
+      activeDocumentPath !== null &&
+      targetPath === activeDocumentPath;
+    setImportExportPath(targetPath && !isGraphTabPath(targetPath) ? targetPath : null);
+    setImportExportSelectionText(canUseSelection ? readSelectedText() : "");
     setImportExportOpen(true);
-  }, []);
+  }, [activeDocumentPath]);
 
   const runWorkbenchMenuCommand = useCallback(
     (command: WorkbenchMenuCommand, path?: string) => {
@@ -818,6 +825,10 @@ export function DesktopWorkspaceShell(props: {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path && !isGraphTabPath(path)) {
         showPathInExplorer(path);
+      } else if (command === "import-export") {
+        openImportExportDialog(
+          path && !isGraphTabPath(path) ? path : activeDocumentPath,
+        );
       } else if (command === "open-agent") {
         openAgentView();
       } else if (command === "open-history") {
@@ -830,7 +841,15 @@ export function DesktopWorkspaceShell(props: {
         toggleTheme();
       }
     },
-    [closeFileTab, closeOtherTabs, openAgentView, openHistoryView, showPathInExplorer],
+    [
+      activeDocumentPath,
+      closeFileTab,
+      closeOtherTabs,
+      openAgentView,
+      openHistoryView,
+      openImportExportDialog,
+      showPathInExplorer,
+    ],
   );
 
   const showWorkbenchMenu = useCallback(
@@ -942,8 +961,13 @@ export function DesktopWorkspaceShell(props: {
         run: () => void openWorkspaceFolder(),
       },
       {
+        id: "import-export",
+        label: "Import / export data",
+        run: openImportExportDialog,
+      },
+      {
         id: "import-files",
-        label: "Import / export workspace",
+        label: "Import files",
         run: openImportExportDialog,
       },
       {
@@ -1025,6 +1049,7 @@ export function DesktopWorkspaceShell(props: {
         onBeforeChanges={flushActiveDraft}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
+        onImportExport={openImportExportDialog}
         onRefresh={() => void refreshFiles()}
         onNewFileDialog={() => setNewFileOpen(true)}
       />
@@ -1048,7 +1073,7 @@ export function DesktopWorkspaceShell(props: {
             event.preventDefault();
             openImportExportDialog();
           }}
-          onClick={openImportExportDialog}
+          onClick={() => openImportExportDialog()}
           className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
         >
           <Archive size={13} aria-hidden />
@@ -1269,7 +1294,7 @@ export function DesktopWorkspaceShell(props: {
                       event.preventDefault();
                       openImportExportDialog();
                     }}
-                    onClick={openImportExportDialog}
+                    onClick={() => openImportExportDialog()}
                     className="font-mono text-xs text-subtle hover:text-ink"
                   >
                     import / export
@@ -1452,7 +1477,7 @@ export function DesktopWorkspaceShell(props: {
           >
             <LazyImportExportDialog
               workspaceId={workspaceId}
-              activePath={wb.activeTab}
+              activePath={importExportPath}
               selectedText={importExportSelectionText}
               onImported={() => void refreshFiles()}
               onClose={() => setImportExportOpen(false)}

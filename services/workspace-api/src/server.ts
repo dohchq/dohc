@@ -19,6 +19,13 @@ import {
   revokeShare,
   type CreateShareRequest,
 } from "./routes/shares";
+import {
+  createDataFragment,
+  getDataFragment,
+  listIncomingDataFragments,
+  revokeDataFragment,
+  type CreateDataFragmentRequest,
+} from "./routes/dataFragments";
 import { applyWorkspaceSync, type ApplySyncRequest } from "./routes/sync";
 import {
   createWorkspace as createWorkspaceRoute,
@@ -46,6 +53,7 @@ type WorkspaceRoute =
   | { route: "assets"; workspaceId: string }
   | { route: "sync"; workspaceId: string; action: "apply" }
   | { route: "collab"; workspaceId: string; action: "token" }
+  | { route: "data-fragments"; workspaceId: string }
   | { route: "events"; workspaceId: string }
   | { route: "shares"; workspaceId: string }
   | { route: "members"; workspaceId: string }
@@ -91,6 +99,18 @@ export function createWorkspaceApiHandler({
           const actor = await resolveActor(request, "");
           return jsonResponse(await listMyShares(shared, actor.userId));
         }
+        if (request.method === "GET" && parts.length === 2 && parts[0] === "me" && parts[1] === "data-fragments") {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await listIncomingDataFragments(shared, actor.userId));
+        }
+        if (request.method === "GET" && parts.length === 2 && parts[0] === "data-fragments" && parts[1]) {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await getDataFragment(shared, actor.userId, parts[1]));
+        }
+        if (request.method === "DELETE" && parts.length === 2 && parts[0] === "data-fragments" && parts[1]) {
+          const actor = await resolveActor(request, "");
+          return jsonResponse(await revokeDataFragment(shared, actor.userId, parts[1]));
+        }
         if (request.method === "DELETE" && parts.length === 2 && parts[0] === "shares" && parts[1]) {
           const actor = await resolveActor(request, "");
           return jsonResponse(await revokeShare(shared, actor.userId, parts[1]));
@@ -129,6 +149,11 @@ export function createWorkspaceApiHandler({
       if (route.route === "collab" && route.action === "token" && request.method === "POST") {
         return jsonResponse(
           await mintCollabToken(collab, actor, await readJson<CollabTokenRequest>(request)),
+        );
+      }
+      if (route.route === "data-fragments" && request.method === "POST") {
+        return jsonResponse(
+          await createDataFragment(shared, actor, () => readJson<CreateDataFragmentRequest>(request)),
         );
       }
       if (route.route === "events" && request.method === "GET") {
@@ -190,6 +215,9 @@ function parseWorkspaceRoute(request: Request): WorkspaceRoute {
   }
   if (section === "collab" && parts[3] === "token" && parts.length === 4) {
     return { route: "collab", workspaceId, action: "token" };
+  }
+  if (section === "data-fragments" && parts.length === 3) {
+    return { route: "data-fragments", workspaceId };
   }
   if (section === "events" && parts.length === 3) {
     return { route: "events", workspaceId };

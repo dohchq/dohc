@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AppRuntimeRpcPayload } from "./bridgeContract";
+import { AppRuntimeRpcPayload, CreateDataFragmentPayload } from "./bridgeContract";
 
 describe("AppRuntimeRpcPayload", () => {
   const base = { workspaceId: "ws-apps", appRoot: "finance/.apps/ledger" };
@@ -98,6 +98,48 @@ describe("AppRuntimeRpcPayload", () => {
             record: { id: "x", values: Array.from({ length: 501 }, () => 0) },
           },
         },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("data fragment IPC contract", () => {
+  it("accepts a bounded Cloud data fragment export request", () => {
+    expect(
+      CreateDataFragmentPayload.parse({
+        workspaceId: "ws-fragments",
+        sourcePath: "notes/day.md",
+        body: "10 apples",
+        recipientEmail: "peer@dohc.test",
+      }),
+    ).toEqual({
+      workspaceId: "ws-fragments",
+      sourcePath: "notes/day.md",
+      body: "10 apples",
+      recipientEmail: "peer@dohc.test",
+    });
+  });
+
+  it("rejects empty, oversized, or malformed data fragment export requests", () => {
+    expect(
+      CreateDataFragmentPayload.safeParse({
+        workspaceId: "ws-fragments",
+        body: "",
+        recipientEmail: "peer@dohc.test",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateDataFragmentPayload.safeParse({
+        workspaceId: "ws-fragments",
+        body: "x".repeat(200_001),
+        recipientEmail: "peer@dohc.test",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateDataFragmentPayload.safeParse({
+        workspaceId: "ws-fragments",
+        body: "10 apples",
+        recipientEmail: "not-an-email",
       }).success,
     ).toBe(false);
   });

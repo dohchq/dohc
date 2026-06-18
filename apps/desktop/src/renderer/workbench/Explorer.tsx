@@ -63,6 +63,7 @@ export interface ExplorerProps {
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   onImportFiles: (droppedPaths?: string[]) => void;
+  onImportExport: (path: string | null) => void;
   onRefresh: () => void;
   onNewFileDialog: () => void;
 }
@@ -606,6 +607,9 @@ export function Explorer(props: ExplorerProps) {
         case "import-files":
           props.onImportFiles();
           break;
+        case "import-export":
+          props.onImportExport(kind === "file" ? (path ?? null) : null);
+          break;
         case "open-externally":
           // Main performed the containment-checked reveal already.
           break;
@@ -619,6 +623,7 @@ export function Explorer(props: ExplorerProps) {
       onTogglePin,
       exportZip,
       props.onImportFiles,
+      props.onImportExport,
     ],
   );
 

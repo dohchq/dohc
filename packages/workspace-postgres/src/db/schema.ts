@@ -31,6 +31,8 @@ export const workspaceTables = [
   "database_operations",
   "permissions",
   "shares",
+  "data_fragments",
+  "data_fragment_shares",
   "workspace_invitations",
   "locks",
   "app_packages",
@@ -44,6 +46,8 @@ export const migrationIndexes = [
   "workspace_events_workspace_created_idx",
   "locks_workspace_target_idx",
   "database_operations_file_version_idx",
+  "data_fragments_workspace_created_idx",
+  "data_fragment_shares_recipient_created_idx",
 ] as const;
 
 const scopedTimestamps = {
@@ -248,6 +252,49 @@ export const shares = pgTable(
     uniqueIndex("shares_audience_unique")
       .on(table.workspaceId, table.targetKind, table.targetId, table.recipientUserId)
       .where(isNull(table.deletedAt)),
+  ],
+);
+
+export const dataFragments = pgTable(
+  "data_fragments",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    sourcePath: text("source_path"),
+    title: text("title").notNull(),
+    preview: text("preview").notNull(),
+    contentType: text("content_type").notNull(),
+    body: text("body").notNull(),
+    createdBy: text("created_by").notNull(),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    index("data_fragments_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const dataFragmentShares = pgTable(
+  "data_fragment_shares",
+  {
+    id: text("id").primaryKey(),
+    fragmentId: text("fragment_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    recipientUserId: text("recipient_user_id").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    createdBy: text("created_by").notNull(),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    uniqueIndex("data_fragment_shares_audience_unique")
+      .on(table.fragmentId, table.recipientUserId)
+      .where(isNull(table.deletedAt)),
+    index("data_fragment_shares_recipient_created_idx").on(
+      table.recipientUserId,
+      table.createdAt,
+    ),
   ],
 );
 

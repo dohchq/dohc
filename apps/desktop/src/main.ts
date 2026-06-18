@@ -49,6 +49,8 @@ import {
   CloudStatusResult,
   CollabTokenPayload,
   CollabTokenResult,
+  CreateDataFragmentPayload,
+  CreateDataFragmentResult,
   CreateWorkspaceInvitePayload,
   CreateWorkspaceInviteResult,
   CreateWorkspaceSharePayload,
@@ -60,6 +62,8 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
+  ListDataFragmentsPayload,
+  ListDataFragmentsResult,
   DesktopMarksResult,
   LaunchMarksResult,
   RunAppTesterPayload,
@@ -86,8 +90,11 @@ import {
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
   ReadWorkspaceDatabasePayload,
+  ReadDataFragmentPayload,
+  ReadDataFragmentResult,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
+  RevokeDataFragmentPayload,
   RevokeWorkspaceSharePayload,
   RevokeWorkspaceInvitePayload,
   WriteWorkspaceTextPayload,
@@ -123,6 +130,12 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import {
+  createCloudDataFragment,
+  listCloudDataFragments,
+  readCloudDataFragment,
+  revokeCloudDataFragment,
+} from "./workspaces/cloudDataFragments";
 import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createCloudSyncEngine } from "./workspaces/cloudSyncEngine";
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
@@ -922,18 +935,26 @@ function registerIpcHandlers(): void {
           ? [
               item("New File", "new-file"),
               item("New Folder", "new-folder"),
-              item("Import Files…", "import-files"),
+              item("Import / Export Data…", "import-export"),
               separator,
+              item("Import Files…", "import-files"),
               item("Export Workspace as Zip…", "export-zip"),
             ]
           : [
               ...(input.kind === "folder"
-                ? [item("New File", "new-file"), item("New Folder", "new-folder"), separator]
+                ? [
+                    item("New File", "new-file"),
+                    item("New Folder", "new-folder"),
+                    separator,
+                  ]
                 : []),
               item("Rename", "rename"),
               item("Delete", "delete"),
               input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
               separator,
+              ...(input.kind === "file"
+                ? [item("Import / Export Data…", "import-export")]
+                : []),
               item("Export as Zip…", "export-zip"),
               item("Reveal in File Manager", "open-externally"),
             ];
@@ -999,6 +1020,8 @@ function registerIpcHandlers(): void {
               item("Close Tab", "close-tab"),
               item("Close Other Tabs", "close-other-tabs"),
               separator,
+              item("Import / Export Data…", "import-export"),
+              separator,
               item("Copy Path", "copy-path"),
               item("Show in Explorer", "show-in-explorer"),
             ]
@@ -1012,7 +1035,7 @@ function registerIpcHandlers(): void {
                 separator,
                 item("Toggle Theme", "toggle-theme"),
               ]
-            : editRoles;
+            : [item("Import / Export Data…", "import-export"), separator, ...editRoles];
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({
@@ -1051,6 +1074,49 @@ function registerIpcHandlers(): void {
       ? []
       : await copyIntoWorkspace(workspace.rootPath, result.filePaths);
     return ImportWorkspaceFilesResult.parse({ imported });
+  });
+
+  ipcMain.handle(CHANNELS.createDataFragment, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateDataFragmentPayload.parse(payload);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
+    return CreateDataFragmentResult.parse(
+      await createCloudDataFragment(
+        (path, init) => cloudJson(input.workspaceId, path, init),
+        remote.remoteWorkspaceId,
+        input,
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.listDataFragments, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListDataFragmentsPayload.parse(payload);
+    return ListDataFragmentsResult.parse(
+      await listCloudDataFragments((path, init) =>
+        cloudJson(input.workspaceId, path, init),
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.readDataFragment, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadDataFragmentPayload.parse(payload);
+    return ReadDataFragmentResult.parse(
+      await readCloudDataFragment(
+        (path, init) => cloudJson(input.workspaceId, path, init),
+        input.fragmentId,
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.revokeDataFragment, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeDataFragmentPayload.parse(payload);
+    await revokeCloudDataFragment(
+      (path, init) => cloudJson(input.workspaceId, path, init),
+      input.fragmentId,
+    );
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {

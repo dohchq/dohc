@@ -621,6 +621,9 @@ export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 const EMAIL_STRING = z.string().email().max(320);
 const SHARE_ID = z.string().min(1).max(200);
 const SHARE_CAPABILITY = z.enum(["view", "edit"]);
+const DATA_FRAGMENT_ID = z.string().min(1).max(200);
+const DATA_FRAGMENT_BODY = z.string().min(1).max(200_000);
+const DATA_FRAGMENT_TEXT = z.string().min(1).max(500);
 
 export const WorkspaceShareRow = z.object({
   shareId: SHARE_ID,
@@ -671,6 +674,63 @@ export const RevokeWorkspaceSharePayload = z.object({
 export type RevokeWorkspaceSharePayload = z.infer<
   typeof RevokeWorkspaceSharePayload
 >;
+
+export const DataFragmentSummary = z.object({
+  fragmentId: DATA_FRAGMENT_ID,
+  sourceWorkspaceId: WORKSPACE_ID,
+  sourcePath: PATH_STRING.nullable(),
+  title: DATA_FRAGMENT_TEXT,
+  preview: DATA_FRAGMENT_TEXT,
+  contentType: z.string().min(1).max(100),
+  createdBy: z.string().min(1).max(200),
+  createdAt: z.string().min(1).max(100),
+  recipientEmail: EMAIL_STRING.nullable(),
+});
+export type DataFragmentSummary = z.infer<typeof DataFragmentSummary>;
+
+export const CreateDataFragmentPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  sourcePath: PATH_STRING.optional(),
+  title: DATA_FRAGMENT_TEXT.optional(),
+  contentType: z.string().min(1).max(100).optional(),
+  body: DATA_FRAGMENT_BODY,
+  recipientEmail: EMAIL_STRING,
+});
+export type CreateDataFragmentPayload = z.infer<typeof CreateDataFragmentPayload>;
+
+export const CreateDataFragmentResult = z.object({
+  fragment: DataFragmentSummary,
+});
+export type CreateDataFragmentResult = z.infer<typeof CreateDataFragmentResult>;
+
+export const ListDataFragmentsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListDataFragmentsPayload = z.infer<typeof ListDataFragmentsPayload>;
+
+export const ListDataFragmentsResult = z.object({
+  fragments: z.array(DataFragmentSummary).max(500),
+});
+export type ListDataFragmentsResult = z.infer<typeof ListDataFragmentsResult>;
+
+export const ReadDataFragmentPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  fragmentId: DATA_FRAGMENT_ID,
+});
+export type ReadDataFragmentPayload = z.infer<typeof ReadDataFragmentPayload>;
+
+export const ReadDataFragmentResult = z.object({
+  fragment: DataFragmentSummary.extend({
+    body: DATA_FRAGMENT_BODY,
+  }),
+});
+export type ReadDataFragmentResult = z.infer<typeof ReadDataFragmentResult>;
+
+export const RevokeDataFragmentPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  fragmentId: DATA_FRAGMENT_ID,
+});
+export type RevokeDataFragmentPayload = z.infer<typeof RevokeDataFragmentPayload>;
 
 export const WorkspaceMemberRow = z.object({
   userId: z.string().min(1).max(200),
@@ -1078,6 +1138,16 @@ export interface DohcDesktopBridge {
   importWorkspaceFiles(
     payload: ImportWorkspaceFilesPayload,
   ): Promise<ImportWorkspaceFilesResult>;
+  createDataFragment(
+    payload: CreateDataFragmentPayload,
+  ): Promise<CreateDataFragmentResult>;
+  listDataFragments(
+    payload: ListDataFragmentsPayload,
+  ): Promise<ListDataFragmentsResult>;
+  readDataFragment(
+    payload: ReadDataFragmentPayload,
+  ): Promise<ReadDataFragmentResult>;
+  revokeDataFragment(payload: RevokeDataFragmentPayload): Promise<void>;
   readWorkspaceText(
     payload: ReadWorkspaceTextPayload,
   ): Promise<ReadWorkspaceTextResult>;

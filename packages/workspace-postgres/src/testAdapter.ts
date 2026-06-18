@@ -77,6 +77,8 @@ async function truncateWorkspaceTables(pool: pg.Pool) {
       atom_revisions,
       atoms,
       locks,
+      data_fragment_shares,
+      data_fragments,
       shares,
       permissions,
       folders,

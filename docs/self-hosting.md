@@ -67,15 +67,15 @@ at boot if a dev `.env` leaks it into a real deployment.
 
    ```bash
    export POSTGRES_URL=postgres://dohc:<POSTGRES_PASSWORD>@127.0.0.1:54329/dohc
-   for f in packages/workspace-postgres/src/db/migrations/000{1,2,3}_*.sql; do
+   for f in packages/workspace-postgres/src/db/migrations/*.sql; do
      psql "$POSTGRES_URL" -f "$f"
    done
    ```
 
    `0001` is the workspace schema, `0002` the Better Auth tables (required
-   for login), `0003` the partial path-uniqueness indexes (required —
-   without it delete-then-recreate wedges). There is no packaged migration
-   runner yet; this is the honest current path.
+   for login), and later migrations add correctness fixes and Cloud primitives
+   such as invitations, share uniqueness, and data fragments. There is no
+   packaged migration runner yet; this is the honest current path.
 
 3. Create the first user and connect the desktop. Launch dohc Desktop with
    your server as the cloud endpoint:
