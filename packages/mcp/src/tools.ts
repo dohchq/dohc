@@ -14,6 +14,7 @@ import {
   validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
+  type ChangeSetKind,
   type FileChange,
 } from "@dohc/workspace-core";
 import {
@@ -21,6 +22,13 @@ import {
   mergeMarkdown,
   type HistoryRecord,
 } from "@dohc/workspace-history";
+import {
+  createMergeSync,
+  ServerBindingMismatchError,
+  UnauthorizedSyncError,
+  type FetchLike,
+  type MergeSyncResult,
+} from "@dohc/workspace-sync";
 import { runStaticAppCheck } from "@dohc/app-tester/static";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -98,7 +106,7 @@ async function recordChange(
   input: {
     files: FileChange[];
     summary: string;
-    kind?: "agent-run" | "import";
+    kind?: ChangeSetKind;
     provenance?: ChangeProvenance;
   },
 ) {
@@ -433,24 +441,25 @@ export async function deleteWorkspacePath(
   }
 }
 
-// --- dohc_list_workspaces ---------------------------------------------------
+// --- dohc_list_workspaces / cloud binding helpers ---------------------------
+
+interface RemoteIdentity {
+  serverUrl: string;
+  remoteWorkspaceId: string;
+}
+
+interface RegistryWorkspace {
+  workspaceId: string;
+  rootPath: string;
+  kind: string;
+  mode?: string;
+  remote?: RemoteIdentity;
+}
 
 interface RegistryFile {
   version?: number;
-  workspaces?: Array<{ workspaceId: string; rootPath: string; kind: string; mode: string }>;
+  workspaces?: RegistryWorkspace[];
 }
-
-export async function listWorkspaces(ctx: ToolContext) {
-  const registry = await readJson<RegistryFile>(join(ctx.home, "dohc-workspaces.json"));
-  const workspaces = (registry?.workspaces ?? []).map((w) => ({
-    workspaceId: w.workspaceId,
-    rootPath: w.rootPath,
-    kind: w.kind,
-  }));
-  return { workspaces };
-}
-
-// --- dohc_workspace_status --------------------------------------------------
 
 interface SyncManifest {
   workspaceId?: string;
@@ -458,20 +467,168 @@ interface SyncManifest {
   remoteWorkspaceId?: string;
 }
 
-export async function workspaceStatus(ctx: ToolContext) {
-  const manifest = await readJson<SyncManifest>(
-    join(ctx.root, ".dohc", "sync-manifest.json"),
+type CloudCredentialLoad =
+  | { ok: true; status: "available"; serverUrl: string; email: string; token: string }
+  | { ok: false; status: "missing" | "encrypted" | "invalid"; reason: string };
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function normalizeServerUrl(serverUrl: string): string {
+  return serverUrl.replace(/\/+$/, "");
+}
+
+async function readRegistry(ctx: ToolContext): Promise<RegistryFile | null> {
+  return readJson<RegistryFile>(join(ctx.home, "dohc-workspaces.json"));
+}
+
+async function readSyncManifest(ctx: ToolContext): Promise<SyncManifest | null> {
+  return readJson<SyncManifest>(join(ctx.root, ".dohc", "sync-manifest.json"));
+}
+
+async function findWorkspaceEntry(ctx: ToolContext): Promise<RegistryWorkspace | null> {
+  const registry = await readRegistry(ctx);
+  const workspaces = registry?.workspaces ?? [];
+  const realRoot = await realpath(ctx.root).catch(() => ctx.root);
+  for (const workspace of workspaces) {
+    if (workspace.rootPath === ctx.root) return workspace;
+    const realWorkspaceRoot = await realpath(workspace.rootPath).catch(() => workspace.rootPath);
+    if (realWorkspaceRoot === realRoot) return workspace;
+  }
+  return null;
+}
+
+function validRemote(remote: unknown): remote is RemoteIdentity {
+  return (
+    remote !== null &&
+    typeof remote === "object" &&
+    nonEmptyString((remote as RemoteIdentity).serverUrl) &&
+    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId)
   );
-  if (!manifest) return { synced: false, scope: "local" as const };
+}
+
+async function remoteForCurrentWorkspace(
+  ctx: ToolContext,
+): Promise<(RemoteIdentity & { workspaceId?: string }) | null> {
+  const entry = await findWorkspaceEntry(ctx);
+  if (validRemote(entry?.remote)) {
+    return { workspaceId: entry?.workspaceId, ...entry.remote };
+  }
+
+  // A workspace can carry a sync manifest even if the desktop registry is not
+  // available to this MCP process (e.g. copied config or test fixture). Treat
+  // the manifest as a fallback binding, never as an auth credential.
+  const manifest = await readSyncManifest(ctx);
+  if (nonEmptyString(manifest?.serverUrl) && nonEmptyString(manifest?.remoteWorkspaceId)) {
+    return {
+      workspaceId: manifest.workspaceId,
+      serverUrl: manifest.serverUrl,
+      remoteWorkspaceId: manifest.remoteWorkspaceId,
+    };
+  }
+
+  return null;
+}
+
+async function loadCloudCredentials(ctx: ToolContext): Promise<CloudCredentialLoad> {
+  const credentials = await readJson<{
+    version?: unknown;
+    serverUrl?: unknown;
+    email?: unknown;
+    token?: unknown;
+  }>(join(ctx.home, "dohc-cloud.json"));
+  if (
+    !credentials ||
+    credentials.version !== 1 ||
+    !nonEmptyString(credentials.serverUrl) ||
+    !nonEmptyString(credentials.email) ||
+    !nonEmptyString(credentials.token)
+  ) {
+    return { ok: false, status: "missing", reason: "Sign in to dohc Cloud first." };
+  }
+
+  if (credentials.token.startsWith("plain:")) {
+    const token = credentials.token.slice("plain:".length);
+    if (!token) {
+      return { ok: false, status: "invalid", reason: "dohc Cloud session token is empty." };
+    }
+    return {
+      ok: true,
+      status: "available",
+      serverUrl: credentials.serverUrl,
+      email: credentials.email,
+      token,
+    };
+  }
+
+  if (credentials.token.startsWith("enc:")) {
+    return {
+      ok: false,
+      status: "encrypted",
+      reason:
+        "dohc Cloud session is encrypted by Desktop safeStorage; open dohc Desktop or use a desktop-brokered MCP session to sync.",
+    };
+  }
+
+  return { ok: false, status: "invalid", reason: "dohc Cloud session token has an unknown format." };
+}
+
+function credentialStatusFor(
+  remote: RemoteIdentity | null,
+  credentials: CloudCredentialLoad,
+):
+  | { cloudConnected: false; credentialStatus: "not-needed" | "missing" | "encrypted" | "invalid" | "server-mismatch" }
+  | { cloudConnected: true; credentialStatus: "available" } {
+  if (!remote) return { cloudConnected: false, credentialStatus: "not-needed" };
+  if (!credentials.ok) {
+    return { cloudConnected: false, credentialStatus: credentials.status };
+  }
+  if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
+    return { cloudConnected: false, credentialStatus: "server-mismatch" };
+  }
+  return { cloudConnected: true, credentialStatus: "available" };
+}
+
+export async function listWorkspaces(ctx: ToolContext) {
+  const registry = await readRegistry(ctx);
+  const workspaces = (registry?.workspaces ?? []).map((w) => ({
+    workspaceId: w.workspaceId,
+    rootPath: w.rootPath,
+    kind: w.kind,
+    ...(w.remote ? { remote: w.remote } : {}),
+  }));
+  return { workspaces };
+}
+
+// --- dohc_workspace_status --------------------------------------------------
+
+export async function workspaceStatus(ctx: ToolContext) {
+  const [manifest, remote, credentials] = await Promise.all([
+    readSyncManifest(ctx),
+    remoteForCurrentWorkspace(ctx),
+    loadCloudCredentials(ctx),
+  ]);
+  const remoteWorkspaceId = remote?.remoteWorkspaceId ?? manifest?.remoteWorkspaceId;
+  const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
+  const synced = !!remoteWorkspaceId;
+  const credential = credentialStatusFor(
+    remoteWorkspaceId && serverUrl ? { serverUrl, remoteWorkspaceId } : null,
+    credentials,
+  );
   return {
-    synced: !!manifest.remoteWorkspaceId,
-    scope: manifest.remoteWorkspaceId ? ("cloud" as const) : ("local" as const),
-    ...(manifest.workspaceId ? { workspaceId: manifest.workspaceId } : {}),
-    ...(manifest.serverUrl ? { serverUrl: manifest.serverUrl } : {}),
+    synced,
+    scope: synced ? ("cloud" as const) : ("local" as const),
+    ...credential,
+    ...(manifest?.workspaceId ?? remote?.workspaceId
+      ? { workspaceId: manifest?.workspaceId ?? remote?.workspaceId }
+      : {}),
+    ...(remoteWorkspaceId ? { remoteWorkspaceId } : {}),
+    ...(serverUrl ? { serverUrl } : {}),
   };
 }
 
-// --- dohc_sync_now ----------------------------------------------------------
+// --- dohc_sync_now / dohc_sync_cloud ---------------------------------------
 
 // Local-first: "sync" reports the change sets recorded since the cursor (what
 // would be pushed) rather than performing a network push. A clean state means
@@ -491,6 +648,145 @@ export async function syncNow(ctx: ToolContext, args: { sinceMs?: number }) {
       fileCount: record.files.length,
     })),
   };
+}
+
+type SyncCloudDirection = "pull" | "push" | "push-pull";
+
+function emptyMergeResult(): MergeSyncResult {
+  return {
+    pushed: 0,
+    pulled: 0,
+    deletedLocally: 0,
+    pushedPaths: [],
+    pulledPaths: [],
+    deletedLocalPaths: [],
+    conflicts: [],
+    skipped: [],
+  };
+}
+
+function combineMergeResults(...results: MergeSyncResult[]): MergeSyncResult {
+  return results.reduce<MergeSyncResult>(
+    (total, result) => ({
+      pushed: total.pushed + result.pushed,
+      pulled: total.pulled + result.pulled,
+      deletedLocally: total.deletedLocally + result.deletedLocally,
+      pushedPaths: [...total.pushedPaths, ...result.pushedPaths],
+      pulledPaths: [...total.pulledPaths, ...result.pulledPaths],
+      deletedLocalPaths: [...total.deletedLocalPaths, ...result.deletedLocalPaths],
+      conflicts: [...total.conflicts, ...result.conflicts],
+      skipped: [...total.skipped, ...result.skipped],
+    }),
+    emptyMergeResult(),
+  );
+}
+
+async function recordCloudPull(
+  ctx: ToolContext,
+  result: MergeSyncResult,
+): Promise<{ changeSetId: string; recordedAtMs: number } | { historyError: string } | null> {
+  const files: FileChange[] = [
+    ...result.pulledPaths.map((path) => ({ path, operation: "write" as const })),
+    ...result.deletedLocalPaths.map((path) => ({ path, operation: "delete" as const })),
+  ];
+  if (files.length === 0) return null;
+
+  try {
+    const record = await recordChange(ctx, {
+      kind: "sync",
+      provenance: { source: "sync" },
+      files,
+      summary: `MCP synced ${files.length} ${files.length === 1 ? "file" : "files"} from dohc Cloud`,
+    });
+    return { changeSetId: record.id, recordedAtMs: record.recordedAtMs };
+  } catch (error) {
+    return { historyError: failureReason(error, "cloud sync history could not be recorded") };
+  }
+}
+
+export async function syncCloud(
+  ctx: ToolContext,
+  args: { direction?: SyncCloudDirection } = {},
+  options: { fetch?: FetchLike } = {},
+) {
+  const remote = await remoteForCurrentWorkspace(ctx);
+  if (!remote) {
+    return { ok: false as const, reason: "Workspace is local-only; enable dohc Cloud sync first." };
+  }
+
+  const credentials = await loadCloudCredentials(ctx);
+  if (!credentials.ok) {
+    return {
+      ok: false as const,
+      reason: credentials.reason,
+      credentialStatus: credentials.status,
+    };
+  }
+  if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
+    return {
+      ok: false as const,
+      reason: `dohc Cloud session is for ${credentials.serverUrl}, but this workspace is bound to ${remote.serverUrl}.`,
+      credentialStatus: "server-mismatch" as const,
+    };
+  }
+
+  const recordable = await ensureRecordable(ctx);
+  if (recordable) return recordable;
+
+  const direction = args.direction ?? "push-pull";
+  const sync = createMergeSync({
+    rootDir: ctx.root,
+    remoteWorkspaceId: remote.remoteWorkspaceId,
+    serverUrl: remote.serverUrl,
+    token: credentials.token,
+    fetch: options.fetch,
+  });
+
+  try {
+    await sync.initialize();
+    const pull =
+      direction === "pull" || direction === "push-pull"
+        ? await sync.pull()
+        : emptyMergeResult();
+    const history = await recordCloudPull(ctx, pull);
+    const push =
+      direction === "push" || direction === "push-pull"
+        ? await sync.push()
+        : emptyMergeResult();
+    const result = combineMergeResults(pull, push);
+    return {
+      ok: true as const,
+      direction,
+      remoteWorkspaceId: remote.remoteWorkspaceId,
+      serverUrl: remote.serverUrl,
+      pushed: result.pushed,
+      pulled: result.pulled,
+      deletedLocally: result.deletedLocally,
+      pushedPaths: result.pushedPaths,
+      pulledPaths: result.pulledPaths,
+      deletedLocalPaths: result.deletedLocalPaths,
+      conflicts: result.conflicts,
+      skipped: result.skipped,
+      ...(history ?? {}),
+    };
+  } catch (error) {
+    if (error instanceof UnauthorizedSyncError) {
+      return {
+        ok: false as const,
+        reason: error.message,
+        authExpired: true,
+        credentialStatus: "expired" as const,
+      };
+    }
+    if (error instanceof ServerBindingMismatchError) {
+      return {
+        ok: false as const,
+        reason: error.message,
+        serverBindingMismatch: true,
+      };
+    }
+    return { ok: false as const, reason: failureReason(error, "cloud sync failed") };
+  }
 }
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------

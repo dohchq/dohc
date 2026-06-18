@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { FetchLike } from "@dohc/workspace-sync";
 import {
   createWorkspaceDirectory,
   createApp,
@@ -18,6 +19,7 @@ import {
   resolveConflict,
   safeResolve,
   share,
+  syncCloud,
   syncNow,
   testApp,
   writeWorkspaceFile,
@@ -48,6 +50,175 @@ const TRAVERSALS = [
   "/etc/passwd",
   ".dohc/sync-manifest.json",
 ];
+
+async function bindCloudWorkspace(
+  ctx: ToolContext,
+  options: {
+    serverUrl?: string;
+    remoteWorkspaceId?: string;
+    token?: string;
+  } = {},
+) {
+  const serverUrl = options.serverUrl ?? "http://cloud.test";
+  const remoteWorkspaceId = options.remoteWorkspaceId ?? "ws-1";
+  await writeFile(
+    join(ctx.home, "dohc-workspaces.json"),
+    JSON.stringify({
+      version: 1,
+      workspaces: [
+        {
+          workspaceId: "local-ws",
+          rootPath: ctx.root,
+          kind: "personal",
+          mode: "local-first",
+          remote: { serverUrl, remoteWorkspaceId },
+        },
+      ],
+    }),
+  );
+  await writeFile(
+    join(ctx.home, "dohc-cloud.json"),
+    JSON.stringify({
+      version: 1,
+      serverUrl,
+      email: "ice@example.test",
+      token: options.token ?? "plain:device-token",
+    }),
+  );
+}
+
+function fakeCloudServer() {
+  const files = new Map<
+    string,
+    {
+      id: string;
+      kind: "atom" | "asset";
+      contentType: string;
+      revision: number;
+      body?: string;
+      bytesBase64?: string;
+    }
+  >();
+  const seen = { authHeaders: [] as string[], appliedOps: [] as unknown[][] };
+
+  function set(path: string, body: string, contentType = "text/markdown") {
+    const prior = files.get(path);
+    files.set(path, {
+      id: `id-${path}`,
+      kind: "atom",
+      contentType,
+      revision: (prior?.revision ?? 0) + 1,
+      body,
+    });
+  }
+
+  function summary(path: string) {
+    const file = files.get(path)!;
+    return {
+      id: file.id,
+      path,
+      kind: file.kind,
+      contentType: file.contentType,
+      revision: String(file.revision),
+    };
+  }
+
+  function apply(op: Record<string, unknown>): { ok: boolean; error?: string; file?: unknown } {
+    const path = String(op.path ?? "");
+    const existing = files.get(path);
+    if (op.op === "create") {
+      if (existing) return { ok: false, error: "File path already exists" };
+      files.set(path, {
+        id: `id-${path}`,
+        kind: String(op.kind ?? "atom") === "asset" ? "asset" : "atom",
+        contentType: String(op.mediaType ?? "text/markdown"),
+        revision: 1,
+        ...(typeof op.body === "string"
+          ? { body: op.body }
+          : { bytesBase64: String(op.bytesBase64 ?? "") }),
+      });
+      return { ok: true, file: summary(path) };
+    }
+    if (op.op === "update") {
+      if (!existing) return { ok: false, error: "Asset not found" };
+      if (String(existing.revision) !== String(op.expectedRevision)) {
+        return { ok: false, error: "Expected revision is stale" };
+      }
+      files.set(path, {
+        ...existing,
+        contentType: String(op.mediaType ?? existing.contentType),
+        revision: existing.revision + 1,
+        ...(typeof op.body === "string"
+          ? { body: op.body, bytesBase64: undefined }
+          : { bytesBase64: String(op.bytesBase64 ?? ""), body: undefined }),
+      });
+      return { ok: true, file: summary(path) };
+    }
+    if (op.op === "delete") {
+      files.delete(path);
+      return { ok: true };
+    }
+    if (op.op === "rename") {
+      const fromPath = String(op.fromPath ?? "");
+      const toPath = String(op.toPath ?? "");
+      const source = files.get(fromPath);
+      if (!source) return { ok: false, error: "Asset not found" };
+      files.delete(fromPath);
+      files.set(toPath, { ...source, revision: source.revision + 1 });
+      return { ok: true, file: summary(toPath) };
+    }
+    return { ok: false, error: `unsupported op ${String(op.op)}` };
+  }
+
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    seen.authHeaders.push(headers.get("authorization") ?? "");
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+
+    if (url.endsWith("/sync/apply") && init?.method === "POST") {
+      const { operations } = JSON.parse(String(init.body)) as {
+        operations: Array<Record<string, unknown>>;
+      };
+      seen.appliedOps.push(operations);
+      const results = operations.map((op) => ({
+        path: op.op === "rename" ? String(op.toPath) : String(op.path),
+        ...apply(op),
+      }));
+      return json({
+        ok: true,
+        applied: results.filter((result) => result.ok).length,
+        results,
+      });
+    }
+
+    if (/\/files$/.test(url)) {
+      return json({ ok: true, files: [...files.keys()].map(summary) });
+    }
+
+    const fileMatch = /\/files\/(.+)$/.exec(url);
+    if (fileMatch) {
+      const path = decodeURIComponent(fileMatch[1]!);
+      const file = files.get(path);
+      if (!file) return json({ ok: false, error: "not found" }, 404);
+      return json({
+        ok: true,
+        file: {
+          revision: String(file.revision),
+          ...(file.body !== undefined ? { body: file.body } : { bytesBase64: file.bytesBase64 }),
+        },
+      });
+    }
+
+    return json({ ok: false, error: `unexpected ${url}` }, 500);
+  };
+
+  return { fetchImpl, files, seen, set };
+}
 
 describe("mcp tool path containment", () => {
   it("safeResolve accepts an in-root path and rejects every traversal", async () => {
@@ -188,9 +359,89 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status reports a matching cloud credential as connected", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx);
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        synced: true,
+        scope: "cloud",
+        remoteWorkspaceId: "ws-1",
+        serverUrl: "http://cloud.test",
+        cloudConnected: true,
+        credentialStatus: "available",
+      });
+    });
+  });
+
   it("sync_now reports a clean local state with no history", async () => {
     await withWorkspace(async (ctx) => {
       expect(await syncNow(ctx, {})).toMatchObject({ clean: true, pendingChangeCount: 0 });
+    });
+  });
+
+  it("sync_cloud pushes local workspace files through the bound dohc Cloud workspace", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx);
+      await writeFile(join(ctx.root, "notes.md"), "from local\n");
+      const server = fakeCloudServer();
+
+      const result = await syncCloud(ctx, { direction: "push" }, { fetch: server.fetchImpl });
+      expect(result).toMatchObject({
+        ok: true,
+        direction: "push",
+        pushed: 1,
+        pushedPaths: ["notes.md"],
+        remoteWorkspaceId: "ws-1",
+      });
+      expect(server.files.get("notes.md")?.body).toBe("from local\n");
+      expect(server.seen.authHeaders.every((header) => header === "Bearer device-token")).toBe(true);
+    });
+  });
+
+  it("sync_cloud pulls remote files and records visible sync history", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx);
+      const server = fakeCloudServer();
+      server.set("notes/remote.md", "from cloud\n");
+
+      const result = await syncCloud(ctx, { direction: "pull" }, { fetch: server.fetchImpl });
+      expect(result).toMatchObject({
+        ok: true,
+        direction: "pull",
+        pulled: 1,
+        pulledPaths: ["notes/remote.md"],
+      });
+      await expect(readFile(join(ctx.root, "notes", "remote.md"), "utf8")).resolves.toBe(
+        "from cloud\n",
+      );
+
+      const history = await listChanges(ctx, { includeFiles: true });
+      expect(history).toMatchObject({ count: 1, totalAvailable: 1 });
+      expect(history.changes[0]).toMatchObject({
+        kind: "sync",
+        provenance: { source: "sync" },
+        files: [{ path: "notes/remote.md", operation: "write" }],
+      });
+    });
+  });
+
+  it("sync_cloud refuses encrypted desktop credentials in a standalone MCP process", async () => {
+    await withWorkspace(async (ctx) => {
+      await bindCloudWorkspace(ctx, { token: "enc:sealed-token" });
+      await expect(syncCloud(ctx, { direction: "pull" }, { fetch: fakeCloudServer().fetchImpl })).resolves.toMatchObject({
+        ok: false,
+        credentialStatus: "encrypted",
+        reason: expect.stringContaining("safeStorage"),
+      });
+    });
+  });
+
+  it("sync_cloud keeps local-only workspaces offline instead of inventing a remote", async () => {
+    await withWorkspace(async (ctx) => {
+      await expect(syncCloud(ctx, { direction: "push" }, { fetch: fakeCloudServer().fetchImpl })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("local-only"),
+      });
     });
   });
 

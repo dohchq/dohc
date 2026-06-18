@@ -87,6 +87,9 @@ export interface MergeSyncResult {
   pushed: number;
   pulled: number;
   deletedLocally: number;
+  pushedPaths: string[];
+  pulledPaths: string[];
+  deletedLocalPaths: string[];
   // Workspace-relative paths whose remote content landed as <path>.conflict.
   conflicts: string[];
   // Files skipped (e.g. too large for the server cap) so the UI can surface
@@ -132,6 +135,9 @@ const EMPTY_RESULT: MergeSyncResult = {
   pushed: 0,
   pulled: 0,
   deletedLocally: 0,
+  pushedPaths: [],
+  pulledPaths: [],
+  deletedLocalPaths: [],
   conflicts: [],
   skipped: [],
 };
@@ -276,7 +282,8 @@ export function createMergeSync({
       // ok advance the baseline, so a partial failure leaves the rest pending
       // for a clean retry, and an edit during the push window stays dirty.
       const files = { ...manifest.files };
-      const okByPath = new Map(results.filter((result) => result.ok).map((result) => [result.path, result]));
+      const okResults = results.filter((result) => result.ok);
+      const okByPath = new Map(okResults.map((result) => [result.path, result]));
       for (const operation of candidate) {
         const path = operation.op === "rename" ? operation.toPath : operation.path;
         const result = okByPath.get(path);
@@ -300,7 +307,16 @@ export function createMergeSync({
       }
 
       await writeManifest(rootDir, withBinding({ ...manifest, files }));
-      return { pushed: applied, pulled: 0, deletedLocally: 0, conflicts: [], skipped };
+      return {
+        pushed: applied,
+        pulled: 0,
+        deletedLocally: 0,
+        pushedPaths: okResults.map((result) => result.path),
+        pulledPaths: [],
+        deletedLocalPaths: [],
+        conflicts: [],
+        skipped,
+      };
     },
 
     async pull() {
@@ -312,6 +328,8 @@ export function createMergeSync({
       const files = { ...manifest.files };
       let pulled = 0;
       let deletedLocally = 0;
+      const pulledPaths: string[] = [];
+      const deletedLocalPaths: string[] = [];
       const conflicts: string[] = [];
 
       for (const file of remote) {
@@ -350,11 +368,13 @@ export function createMergeSync({
           if (cleanRename && targetStillClean && !remotePaths.has(cleanRename.path)) {
             await writeWorkspaceFile(rootDir, cleanRename.path, bytes);
             pulled += 1;
+            pulledPaths.push(cleanRename.path);
             files[path] = baselineEntry(file, read.file.revision, remoteSha);
             continue;
           }
           await writeWorkspaceFile(rootDir, `${path}.conflict`, bytes);
           conflicts.push(path);
+          pulledPaths.push(`${path}.conflict`);
           continue;
         }
 
@@ -376,11 +396,13 @@ export function createMergeSync({
         if (dirty) {
           await writeWorkspaceFile(rootDir, `${path}.conflict`, bytes);
           conflicts.push(path);
+          pulledPaths.push(`${path}.conflict`);
           continue;
         }
 
         await writeWorkspaceFile(rootDir, path, bytes);
         pulled += 1;
+        pulledPaths.push(path);
         files[path] = baselineEntry(file, read.file.revision, remoteSha);
       }
 
@@ -404,13 +426,23 @@ export function createMergeSync({
         if (liveSha === entry.sha256) {
           await rm(resolveWorkspacePath(rootDir, path), { force: true });
           deletedLocally += 1;
+          deletedLocalPaths.push(path);
         }
         // Dirty local copy stays; entry drops so the next push re-creates it.
         delete files[path];
       }
 
       await writeManifest(rootDir, withBinding({ ...manifest, files }));
-      return { pushed: 0, pulled, deletedLocally, conflicts, skipped: [] };
+      return {
+        pushed: 0,
+        pulled,
+        deletedLocally,
+        pushedPaths: [],
+        pulledPaths,
+        deletedLocalPaths,
+        conflicts,
+        skipped: [],
+      };
     },
   };
 

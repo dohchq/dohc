@@ -25,6 +25,7 @@ import {
   readWorkspaceFile,
   resolveConflict,
   share,
+  syncCloud,
   syncNow,
   testApp,
   writeWorkspaceFile,
@@ -68,6 +69,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { sinceMs: z.number().int().nonnegative().optional() },
     },
     async (args) => text(await syncNow(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_sync_cloud",
+    {
+      description:
+        "Run dohc Cloud merge sync for this workspace. Pull merges safely; push sends local file changes already recorded in history.",
+      inputSchema: {
+        direction: z.enum(["pull", "push", "push-pull"]).optional(),
+      },
+    },
+    async (args) => text(await syncCloud(ctx, args)),
   );
 
   server.registerTool(

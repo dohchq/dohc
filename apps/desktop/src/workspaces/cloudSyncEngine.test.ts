@@ -6,6 +6,9 @@ const noResult: MergeSyncResult = {
   pushed: 0,
   pulled: 0,
   deletedLocally: 0,
+  pushedPaths: [],
+  pulledPaths: [],
+  deletedLocalPaths: [],
   conflicts: [],
   skipped: [],
 };
