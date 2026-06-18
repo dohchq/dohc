@@ -73,6 +73,15 @@ type EditingState =
 
 type VisibleRow = FlatRow & { kind: WorkspaceFileEntry["kind"] | null };
 
+type DropPreview = {
+  targetPath: string | null;
+  targetDir: string;
+  kind: "move" | "copy" | "blocked";
+  label: string;
+};
+
+type RowDropPreview = Pick<DropPreview, "kind" | "label">;
+
 function leafOf(path: string): string {
   const slash = path.lastIndexOf("/");
   return slash < 0 ? path : path.slice(slash + 1);
@@ -85,6 +94,40 @@ function ancestorsOf(path: string): string[] {
     out.push(segments.slice(0, i).join("/"));
   }
   return out;
+}
+
+function externalDragHasFiles(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer.types).includes("Files");
+}
+
+function itemCountLabel(count: number): string {
+  return count === 1 ? "item" : `${count} items`;
+}
+
+function targetDirLabel(targetDir: string): string {
+  return targetDir === "" ? "root" : leafOf(targetDir);
+}
+
+function dropPreviewLabel(
+  kind: DropPreview["kind"],
+  targetDir: string,
+  targetIsFolder: boolean,
+  count: number,
+  reason?: string,
+): string {
+  if (kind === "copy") {
+    if (targetIsFolder) return "Import here";
+    return `Import to ${targetDirLabel(targetDir)}`;
+  }
+  if (kind === "blocked") {
+    return reason?.includes("already") ? "No change" : "Cannot move here";
+  }
+  if (targetIsFolder) {
+    return count === 1 ? "Move into" : `Move ${itemCountLabel(count)} into`;
+  }
+  return count === 1
+    ? `Move to ${targetDirLabel(targetDir)}`
+    : `Move ${itemCountLabel(count)} to ${targetDirLabel(targetDir)}`;
 }
 
 // Typed-path semantics from the old FileTree: a plain name lands in the
@@ -123,7 +166,7 @@ const TreeRow = memo(function TreeRow(props: {
   selected: boolean;
   active: boolean;
   focused: boolean;
-  dropTarget: boolean;
+  dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
@@ -131,8 +174,15 @@ const TreeRow = memo(function TreeRow(props: {
   onRowDragOver: (path: string, event: DragEvent) => void;
   onRowDrop: (path: string, event: DragEvent) => void;
   onRowDragLeave: () => void;
+  onRowDragEnd: () => void;
 }) {
   const { row } = props;
+  const dropClass =
+    props.dropPreview?.kind === "blocked"
+      ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+      : props.dropPreview
+        ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
+        : "";
   return (
     <li role="none">
       <button
@@ -141,6 +191,7 @@ const TreeRow = memo(function TreeRow(props: {
         data-testid="tree-row"
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
+        data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-selected={props.selected}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
@@ -153,6 +204,7 @@ const TreeRow = memo(function TreeRow(props: {
         onDragOver={(event) => props.onRowDragOver(row.fullPath, event)}
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
+        onDragEnd={props.onRowDragEnd}
         // Three distinguishable read-outs (VS Code list semantics): the
         // ACTIVE-tab row keeps the strongest fill, selected-not-active rows a
         // lighter fill (Delete/drag act on the SELECTION — the visuals must
@@ -161,9 +213,9 @@ const TreeRow = memo(function TreeRow(props: {
         // Background style) — box-shadow/background only, NEVER `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
-        className={`flex h-7 w-full items-center gap-1.5 pr-2 text-left text-[13px] outline-none ${
-          props.dropTarget
-            ? "bg-line/70 text-ink"
+        className={`relative flex h-7 w-full items-center gap-1.5 pr-2 text-left text-[13px] outline-none ${
+          props.dropPreview
+            ? dropClass
             : props.active
               ? "bg-line text-ink"
               : props.selected
@@ -171,6 +223,14 @@ const TreeRow = memo(function TreeRow(props: {
                 : "text-muted hover:bg-line/50 hover:text-ink"
         } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
       >
+        {props.dropPreview ? (
+          <span
+            aria-hidden
+            className={`absolute bottom-1 left-0 top-1 w-0.5 rounded-full ${
+              props.dropPreview.kind === "blocked" ? "bg-danger" : "bg-ink"
+            }`}
+          />
+        ) : null}
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
@@ -192,7 +252,19 @@ const TreeRow = memo(function TreeRow(props: {
             <FileKindIcon kind={row.kind ?? "file"} />
           </>
         )}
-        <span className="truncate">{leafOf(row.fullPath)}</span>
+        <span className="min-w-0 flex-1 truncate">{leafOf(row.fullPath)}</span>
+        {props.dropPreview ? (
+          <span
+            data-testid="tree-drop-label"
+            className={`ml-2 max-w-28 shrink-0 truncate rounded-sm px-1.5 py-0.5 text-[10px] font-medium ${
+              props.dropPreview.kind === "blocked"
+                ? "bg-danger/10 text-danger"
+                : "bg-bg text-ink"
+            }`}
+          >
+            {props.dropPreview.label}
+          </span>
+        ) : null}
       </button>
     </li>
   );
@@ -221,7 +293,7 @@ export function Explorer(props: ExplorerProps) {
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -390,7 +462,7 @@ export function Explorer(props: ExplorerProps) {
           toPath: action.toPath,
         });
       }
-      setSelection(new Set());
+      if (changes.length > 0) setSelection(new Set());
       void runChanges(changes, (change) =>
         change.kind === "file" || change.kind === "folder"
           ? bridge().moveWorkspacePath({
@@ -616,27 +688,98 @@ export function Explorer(props: ExplorerProps) {
     [selection, isFolderPath],
   );
 
+  const clearDragPreview = useCallback(() => {
+    setDropPreview(null);
+    if (hoverExpandTimer.current) {
+      clearTimeout(hoverExpandTimer.current);
+      hoverExpandTimer.current = null;
+    }
+  }, []);
+
   const targetDirFor = useCallback(
     (path: string): string => (isFolderPath(path) ? path : parentDir(path)),
     [isFolderPath],
   );
 
+  const previewForDrop = useCallback(
+    (
+      event: DragEvent,
+      targetPath: string | null,
+      targetDir: string,
+      targetIsFolder: boolean,
+    ): DropPreview | null => {
+      const sources = dragSources.current;
+      if (sources) {
+        const actions = sources.map((source) => planDrop(source, { parentDir: targetDir }));
+        const moveCount = actions.filter((action) => action.kind !== "noop").length;
+        const firstNoop = actions.find((action) => action.kind === "noop");
+        const kind: DropPreview["kind"] = moveCount > 0 ? "move" : "blocked";
+        return {
+          targetPath,
+          targetDir,
+          kind,
+          label: dropPreviewLabel(
+            kind,
+            targetDir,
+            targetIsFolder,
+            moveCount || sources.length,
+            firstNoop?.reason,
+          ),
+        };
+      }
+
+      if (!externalDragHasFiles(event)) return null;
+      return {
+        targetPath,
+        targetDir,
+        kind: "copy",
+        label: dropPreviewLabel("copy", targetDir, targetIsFolder, 1),
+      };
+    },
+    [],
+  );
+
+  const showDropPreview = useCallback((preview: DropPreview | null) => {
+    setDropPreview((current) =>
+      current?.targetPath === preview?.targetPath &&
+      current?.targetDir === preview?.targetDir &&
+      current?.kind === preview?.kind &&
+      current?.label === preview?.label
+        ? current
+        : preview,
+    );
+  }, []);
+
   const onRowDragOver = useCallback(
     (path: string, event: DragEvent) => {
-      event.preventDefault();
       event.stopPropagation();
-      event.dataTransfer.dropEffect = dragSources.current ? "move" : "copy";
       const dir = targetDirFor(path);
-      setDropTarget((current) => (current === dir ? current : dir));
+      const preview = previewForDrop(event, path, dir, isFolderPath(path));
+      if (!preview) {
+        event.dataTransfer.dropEffect = "none";
+        showDropPreview(null);
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect =
+        preview.kind === "blocked" ? "none" : preview.kind === "copy" ? "copy" : "move";
+      showDropPreview(preview);
       // Auto-expand a collapsed folder under a hovering drag.
-      if (isFolderPath(path) && !expandedSet.has(path)) {
+      if (preview.kind !== "blocked" && isFolderPath(path) && !expandedSet.has(path)) {
         if (hoverExpandTimer.current) clearTimeout(hoverExpandTimer.current);
         hoverExpandTimer.current = setTimeout(() => {
           onSetFolderExpanded(path, true);
         }, 600);
       }
     },
-    [targetDirFor, isFolderPath, expandedSet, onSetFolderExpanded],
+    [
+      targetDirFor,
+      previewForDrop,
+      isFolderPath,
+      showDropPreview,
+      expandedSet,
+      onSetFolderExpanded,
+    ],
   );
 
   const onRowDragLeave = useCallback(() => {
@@ -650,8 +793,7 @@ export function Explorer(props: ExplorerProps) {
     (targetDir: string, event: DragEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      setDropTarget(null);
-      if (hoverExpandTimer.current) clearTimeout(hoverExpandTimer.current);
+      clearDragPreview();
       if (dragSources.current) {
         const sources = dragSources.current;
         dragSources.current = null;
@@ -666,7 +808,7 @@ export function Explorer(props: ExplorerProps) {
         if (paths.length > 0) props.onImportFiles(paths);
       }
     },
-    [performMoves, props.onImportFiles],
+    [clearDragPreview, performMoves, props.onImportFiles],
   );
 
   const onRowDrop = useCallback(
@@ -674,15 +816,39 @@ export function Explorer(props: ExplorerProps) {
     [handleDrop, targetDirFor],
   );
 
-  const onContainerDragOver = useCallback((event: DragEvent) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = dragSources.current ? "move" : "copy";
-    setDropTarget((current) => (current === "" ? current : ""));
-  }, []);
+  const onRowDragEnd = useCallback(() => {
+    dragSources.current = null;
+    clearDragPreview();
+  }, [clearDragPreview]);
+
+  const onContainerDragOver = useCallback(
+    (event: DragEvent) => {
+      const preview = previewForDrop(event, null, "", false);
+      if (!preview) {
+        event.dataTransfer.dropEffect = "none";
+        showDropPreview(null);
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect =
+        preview.kind === "blocked" ? "none" : preview.kind === "copy" ? "copy" : "move";
+      showDropPreview(preview);
+    },
+    [previewForDrop, showDropPreview],
+  );
 
   const onContainerDrop = useCallback(
     (event: DragEvent) => handleDrop("", event),
     [handleDrop],
+  );
+
+  const onContainerDragLeave = useCallback(
+    (event: DragEvent<HTMLElement>) => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && event.currentTarget.contains(next)) return;
+      clearDragPreview();
+    },
+    [clearDragPreview],
   );
 
   // ---- keyboard ----
@@ -818,6 +984,7 @@ export function Explorer(props: ExplorerProps) {
   // Insert the create-editbox right under its parent folder row (or at the
   // top for a root create); a rename-editbox replaces its row in place.
   const renderedRows: ReactNode[] = [];
+  const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
   if (editing?.mode === "create" && editing.parentPath === "") {
     renderedRows.push(editRow(0));
   }
@@ -833,7 +1000,11 @@ export function Explorer(props: ExplorerProps) {
         selected={selection.has(row.fullPath)}
         active={props.activeTab === row.fullPath}
         focused={focusedPath === row.fullPath}
-        dropTarget={dropTarget !== null && dropTarget !== "" && row.isFolder && dropTarget === row.fullPath}
+        dropPreview={
+          dropPreview?.targetPath === row.fullPath
+            ? { kind: dropPreview.kind, label: dropPreview.label }
+            : null
+        }
         registerRef={registerRef}
         onRowClick={onRowClick}
         onRowContextMenu={onRowContextMenu}
@@ -841,6 +1012,7 @@ export function Explorer(props: ExplorerProps) {
         onRowDragOver={onRowDragOver}
         onRowDrop={onRowDrop}
         onRowDragLeave={onRowDragLeave}
+        onRowDragEnd={onRowDragEnd}
       />,
     );
     if (
@@ -862,12 +1034,30 @@ export function Explorer(props: ExplorerProps) {
         onKeyDown={onTreeKeyDown}
         onDragOver={onContainerDragOver}
         onDrop={onContainerDrop}
-        onDragLeave={() => setDropTarget(null)}
+        onDragLeave={onContainerDragLeave}
         onContextMenu={onContainerContextMenu}
         className={`min-h-0 flex-1 overflow-y-auto py-1 ${
-          dropTarget === "" ? "outline outline-1 -outline-offset-2 outline-ink/30" : ""
+          rootDropPreview
+            ? `outline outline-1 -outline-offset-2 ${
+                rootDropPreview.kind === "blocked" ? "outline-danger/30" : "outline-ink/30"
+              }`
+            : ""
         }`}
       >
+        {rootDropPreview ? (
+          <div
+            data-testid="tree-root-drop-preview"
+            data-drop-state={rootDropPreview.kind}
+            className={`mx-2 mb-1 flex h-7 items-center rounded-sm border px-2 text-[11px] font-medium ${
+              rootDropPreview.kind === "blocked"
+                ? "border-danger/30 bg-danger/10 text-danger"
+                : "border-ink/20 bg-line/60 text-ink"
+            }`}
+          >
+            <span className="truncate">{rootDropPreview.label}</span>
+          </div>
+        ) : null}
+
         {props.pinned.length > 0 ? (
           <section
             data-testid="explorer-pinned"

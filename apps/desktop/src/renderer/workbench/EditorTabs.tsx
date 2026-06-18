@@ -18,9 +18,13 @@ const Tab = memo(function Tab(props: {
   path: string;
   active: boolean;
   dirty: boolean;
+  dragging: boolean;
+  dropBefore: boolean;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
   onContextMenu: (path: string) => void;
+  onDragPreview: (path: string, toIndex: number) => void;
+  onDragEnd: () => void;
   onMove: (path: string, toIndex: number) => void;
 }) {
   const name = fileName(props.path);
@@ -69,6 +73,7 @@ const Tab = memo(function Tab(props: {
         // (capture lost mid-reorder), a buttons-up move must end the drag,
         // or plain hovering would keep reordering.
         if ((event.buttons & 1) === 0) {
+          if (state.active) props.onDragEnd();
           drag.current = null;
           return;
         }
@@ -88,23 +93,37 @@ const Tab = memo(function Tab(props: {
           const box = sibling.getBoundingClientRect();
           if (box.left + box.width / 2 < event.clientX) toIndex += 1;
         }
+        props.onDragPreview(props.path, toIndex);
         props.onMove(props.path, toIndex);
       }}
       onPointerUp={() => {
+        if (drag.current?.active) props.onDragEnd();
         drag.current = null;
       }}
       onPointerCancel={() => {
+        if (drag.current?.active) props.onDragEnd();
         drag.current = null;
       }}
       // The strip's bottom hairline is drawn PER TAB so the active one can
       // break it: transparent bottom border + the editor's bg merge the tab
       // with its document (VS Code/Zed treatment) instead of severing it.
-      className={`group flex h-9 shrink-0 cursor-default items-center gap-1.5 border-b border-r border-line px-3 text-[13px] ${
-        props.active
-          ? "border-b-transparent bg-bg text-ink"
-          : "bg-panel-2 text-muted hover:bg-line/50 hover:text-ink"
+      className={`group relative flex h-9 shrink-0 select-none items-center gap-1.5 border-b border-r border-line px-3 text-[13px] transition-[background-color,box-shadow,color,transform] ${
+        props.dragging
+          ? "z-10 -translate-y-px cursor-grabbing border-b-transparent bg-bg text-ink shadow-md ring-1 ring-inset ring-ink/20"
+          : `cursor-default ${
+              props.active
+                ? "border-b-transparent bg-bg text-ink"
+                : "bg-panel-2 text-muted hover:bg-line/50 hover:text-ink"
+            }`
       }`}
     >
+      {props.dropBefore ? (
+        <span
+          data-testid="tab-drop-marker"
+          aria-hidden
+          className="absolute -left-px bottom-1.5 top-1.5 z-20 w-0.5 rounded-full bg-ink"
+        />
+      ) : null}
       {props.dirty ? (
         <span
           data-testid="tab-dirty"
@@ -149,6 +168,10 @@ export function EditorTabs(props: {
   onMove: (path: string, toIndex: number) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
+  const [dragPreview, setDragPreview] = useState<{
+    path: string;
+    toIndex: number;
+  } | null>(null);
   if (props.tabs.length === 0) return null;
   return (
     <div data-testid="editor-tabs" className="relative flex h-9 shrink-0 bg-panel-2">
@@ -163,9 +186,16 @@ export function EditorTabs(props: {
             path={tab.path}
             active={tab.path === props.activeTab}
             dirty={tab.path === props.activeTab && props.activeTabDirty}
+            dragging={dragPreview?.path === tab.path}
+            dropBefore={
+              dragPreview !== null &&
+              props.tabs[dragPreview.toIndex]?.path === tab.path
+            }
             onActivate={props.onActivate}
             onClose={props.onClose}
             onContextMenu={props.onContextMenu}
+            onDragPreview={(path, toIndex) => setDragPreview({ path, toIndex })}
+            onDragEnd={() => setDragPreview(null)}
             onMove={props.onMove}
           />
         ))}

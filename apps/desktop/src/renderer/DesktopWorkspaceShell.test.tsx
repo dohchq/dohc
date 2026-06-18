@@ -360,6 +360,31 @@ describe("content search", () => {
   });
 });
 
+describe("file tree drag preview", () => {
+  it("marks no-op drops before release", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    const rows = await screen.findAllByTestId("tree-row");
+    const rowA = rows.find((row) => row.getAttribute("data-path") === "a.md")!;
+    const rowB = rows.find((row) => row.getAttribute("data-path") === "b.md")!;
+    const dataTransfer = {
+      effectAllowed: "move",
+      dropEffect: "move",
+      files: [],
+      types: [],
+      setData: vi.fn(),
+    };
+
+    fireEvent.dragStart(rowA, { dataTransfer });
+    fireEvent.dragOver(rowB, { dataTransfer });
+
+    expect(rowB.dataset.dropState).toBe("blocked");
+    expect(within(rowB).getByTestId("tree-drop-label").textContent).toBe("No change");
+    expect(dataTransfer.dropEffect).toBe("none");
+  });
+});
+
 describe("graph view", () => {
   it("opens as a side panel first, then opens the full graph in an editor tab", async () => {
     const bridge = makeBridge(Promise.resolve(null));
