@@ -24,3 +24,13 @@ describe("markdown editor layout css", () => {
     expect(document).not.toContain("100vh");
   });
 });
+
+describe("workbench cursor css", () => {
+  it("uses a pointer cursor for clickable app chrome", () => {
+    const clickableChrome = cssRule(
+      '.app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]):not(:disabled)',
+    );
+
+    expect(clickableChrome).toContain("cursor: pointer;");
+  });
+});

@@ -513,6 +513,23 @@ describe("graph view", () => {
 });
 
 describe("open editors", () => {
+  it("collapses and restores the file tree section", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
+    await user.click(screen.getByTestId("explorer-files-toggle"));
+
+    expect(screen.queryAllByTestId("tree-row")).toHaveLength(0);
+    expect(screen.getByTestId("explorer-files-toggle").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+
+    await user.click(screen.getByTestId("explorer-files-toggle"));
+    expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
+  });
+
   it("mirrors tabs in the explorer and supports activate and close", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

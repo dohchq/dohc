@@ -276,6 +276,7 @@ export function Explorer(props: ExplorerProps) {
   } = props;
   const [pending, setPending] = useState<PendingTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
+  const [filesExpanded, setFilesExpanded] = useState(true);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editValue, setEditValue] = useState("");
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
@@ -1135,81 +1136,102 @@ export function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
-        {props.pinned.length > 0 ? (
-          <section
-            data-testid="explorer-pinned"
-            aria-label="Pinned"
-            className="mb-1 border-b border-line pb-1"
-          >
-            <header className="flex h-6 items-center gap-1.5 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
-              <Pin size={10} aria-hidden />
-              Pinned
-            </header>
-            <ul className="m-0 list-none p-0">
-              {props.pinned.map((path) => (
-                <li key={path}>
-                  <button
-                    type="button"
-                    data-testid="pinned-row"
-                    data-path={path}
-                    onClick={() =>
-                      isFolderPath(path)
-                        ? onSetFolderExpanded(path, true)
-                        : onOpenFile(path)
-                    }
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void dispatchMenu(
-                        isFolderPath(path) ? "folder" : "file",
-                        path,
-                        true,
-                      );
-                    }}
-                    className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink"
-                  >
-                    {isFolderPath(path) ? (
-                      <Folder size={13} aria-hidden className="shrink-0" />
-                    ) : (
-                      <FileKindIcon
-                        kind={
-                          projected.files.find((file) => file.path === path)?.kind ??
-                          "file"
-                        }
-                      />
-                    )}
-                    <span className="truncate">{leafOf(path)}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-
-        {empty ? (
+        <section data-testid="explorer-files-section" aria-label="Files">
           <button
             type="button"
-            onClick={props.onNewFileDialog}
-            className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
+            data-testid="explorer-files-toggle"
+            aria-expanded={filesExpanded}
+            onClick={() => setFilesExpanded((expanded) => !expanded)}
+            className="flex h-6 w-full items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
           >
-            <FilePlus2 size={13} aria-hidden />
-            Create your first file
+            <ChevronRight
+              size={11}
+              aria-hidden
+              className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+            />
+            <span className="min-w-0 flex-1 truncate">Files</span>
           </button>
-        ) : (
-          <ul role="tree" aria-label="Workspace files" className="m-0 list-none p-0">
-            {renderedRows}
-          </ul>
-        )}
 
-        {opError ? (
-          <p
-            data-testid="explorer-error"
-            role="alert"
-            className="mx-3 mt-2 text-[11px] text-danger"
-          >
-            {opError}
-          </p>
-        ) : null}
+          {filesExpanded ? (
+            <>
+              {props.pinned.length > 0 ? (
+                <section
+                  data-testid="explorer-pinned"
+                  aria-label="Pinned"
+                  className="mb-1 border-b border-line pb-1"
+                >
+                  <header className="flex h-6 items-center gap-1.5 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+                    <Pin size={10} aria-hidden />
+                    Pinned
+                  </header>
+                  <ul className="m-0 list-none p-0">
+                    {props.pinned.map((path) => (
+                      <li key={path}>
+                        <button
+                          type="button"
+                          data-testid="pinned-row"
+                          data-path={path}
+                          onClick={() =>
+                            isFolderPath(path)
+                              ? onSetFolderExpanded(path, true)
+                              : onOpenFile(path)
+                          }
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            void dispatchMenu(
+                              isFolderPath(path) ? "folder" : "file",
+                              path,
+                              true,
+                            );
+                          }}
+                          className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink"
+                        >
+                          {isFolderPath(path) ? (
+                            <Folder size={13} aria-hidden className="shrink-0" />
+                          ) : (
+                            <FileKindIcon
+                              kind={
+                                projected.files.find((file) => file.path === path)?.kind ??
+                                "file"
+                              }
+                            />
+                          )}
+                          <span className="truncate">{leafOf(path)}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+
+              {empty ? (
+                <button
+                  type="button"
+                  onClick={props.onNewFileDialog}
+                  className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
+                >
+                  <FilePlus2 size={13} aria-hidden />
+                  Create your first file
+                </button>
+              ) : (
+                <ul role="tree" aria-label="Workspace files" className="m-0 list-none p-0">
+                  {renderedRows}
+                </ul>
+              )}
+
+              {opError ? (
+                <p
+                  data-testid="explorer-error"
+                  role="alert"
+                  className="mx-3 mt-2 text-[11px] text-danger"
+                >
+                  {opError}
+                </p>
+              ) : null}
+            </>
+          ) : null}
+        </section>
       </nav>
 
       {confirmDelete ? (

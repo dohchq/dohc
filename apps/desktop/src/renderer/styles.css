@@ -119,6 +119,10 @@ table {
   cursor: default;
 }
 
+.app-chrome :is(button, [role="button"], [role="tab"], [role="treeitem"]):not(:disabled) {
+  cursor: pointer;
+}
+
 /* Native window chrome: the titlebar strip drags the window; every
  * interactive child must opt out or it becomes un-clickable. */
 .titlebar-drag {
