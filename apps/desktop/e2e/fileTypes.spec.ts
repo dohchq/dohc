@@ -68,6 +68,12 @@ test("each file type opens its own native view", async () => {
   await expect(page.getByTestId("view-markdown")).toContainText("A markdown note.");
   // Rendered as a document: the "# Today" heading becomes an <h1>, hash gone.
   await expect(page.getByTestId("view-markdown").locator("h1")).toHaveText("Today");
+  const shortMarkdownScroll = await page
+    .getByTestId("view-markdown")
+    .evaluate((el) => ({ clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }));
+  expect(shortMarkdownScroll.scrollHeight).toBeLessThanOrEqual(
+    shortMarkdownScroll.clientHeight + 1,
+  );
   await page.screenshot({ path: `${SHOT_DIR}/markdown--1280x800--light.png` });
 
   await open("data/transactions.csv");

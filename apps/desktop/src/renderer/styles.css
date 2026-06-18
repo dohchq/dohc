@@ -131,12 +131,14 @@ table {
 /* Tiptap document editor (E4): graphite-minimal, dense enough for daily work. */
 .dohc-tiptap-editor {
   position: relative;
+  height: 100%;
   min-height: 100%;
   background: var(--dohc-bg);
 }
 
 .dohc-notion-editor {
-  min-height: calc(100vh - 96px);
+  box-sizing: border-box;
+  min-height: 100%;
   padding: 28px 56px 80px 72px;
   color: var(--dohc-ink);
   cursor: text;
