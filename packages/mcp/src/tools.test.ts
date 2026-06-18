@@ -1,18 +1,24 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  createWorkspaceDirectory,
   createApp,
+  deleteWorkspacePath,
   importData,
+  listWorkspaceFiles,
   listWorkspaces,
+  moveWorkspacePath,
   openInDohc,
   queryDatabase,
+  readWorkspaceFile,
   resolveConflict,
   safeResolve,
   share,
   syncNow,
   testApp,
+  writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
@@ -104,6 +110,49 @@ describe("mcp tool path containment", () => {
       }
     });
   });
+
+  it("workspace file tools refuse traversal and .dohc internals", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "ok.txt"), "ok");
+      for (const evil of TRAVERSALS) {
+        await expect(listWorkspaceFiles(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
+        await expect(readWorkspaceFile(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
+        await expect(
+          writeWorkspaceFile(ctx, { path: evil, content: "nope" }),
+        ).resolves.toMatchObject({ ok: false });
+        await expect(
+          createWorkspaceDirectory(ctx, { path: evil }),
+        ).resolves.toMatchObject({ ok: false });
+        await expect(
+          moveWorkspacePath(ctx, { fromPath: "ok.txt", toPath: evil }),
+        ).resolves.toMatchObject({ ok: false });
+        await expect(deleteWorkspacePath(ctx, { path: evil })).resolves.toMatchObject({
+          ok: false,
+        });
+      }
+    });
+  });
+
+  it("workspace mutations refuse a symlinked .dohc before changing visible files", async () => {
+    await withWorkspace(async (ctx) => {
+      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-metadata-outside-"));
+      await symlink(outside, join(ctx.root, ".dohc"));
+
+      await expect(
+        writeWorkspaceFile(ctx, { path: "notes/new.txt", content: "nope" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("symlink") });
+      await expect(readFile(join(ctx.root, "notes/new.txt"), "utf8")).rejects.toThrow();
+
+      await writeFile(join(ctx.root, "keep.txt"), "still here");
+      await expect(deleteWorkspacePath(ctx, { path: "keep.txt" })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("symlink"),
+      });
+      await expect(readFile(join(ctx.root, "keep.txt"), "utf8")).resolves.toBe("still here");
+
+      await rm(outside, { recursive: true, force: true });
+    });
+  });
 });
 
 describe("mcp tools operate on allowed paths", () => {
@@ -140,6 +189,104 @@ describe("mcp tools operate on allowed paths", () => {
   it("sync_now reports a clean local state with no history", async () => {
     await withWorkspace(async (ctx) => {
       expect(await syncNow(ctx, {})).toMatchObject({ clean: true, pendingChangeCount: 0 });
+    });
+  });
+
+  it("writes, reads, and lists arbitrary visible files while recording sync-visible history", async () => {
+    await withWorkspace(async (ctx) => {
+      const written = await writeWorkspaceFile(ctx, {
+        path: "docs/report.html",
+        content: "<h1>I ate 10 apples</h1>\n",
+        summary: "Created report",
+      });
+      expect(written).toMatchObject({ ok: true, path: "docs/report.html" });
+
+      const read = await readWorkspaceFile(ctx, { path: "docs/report.html" });
+      expect(read).toMatchObject({
+        ok: true,
+        path: "docs/report.html",
+        content: "<h1>I ate 10 apples</h1>\n",
+      });
+      if (read.ok) expect(read.sha256).toBe(written.ok ? written.sha256 : "");
+
+      await expect(
+        readWorkspaceFile(ctx, { path: "docs/report.html", maxBytes: 8, offsetBytes: 4 }),
+      ).resolves.toMatchObject({
+        ok: true,
+        offsetBytes: 4,
+        truncated: true,
+        content: "I ate 10",
+      });
+
+      const listed = await listWorkspaceFiles(ctx, { path: "docs" });
+      expect(listed).toMatchObject({ ok: true });
+      if (listed.ok) {
+        expect(listed.entries).toEqual([
+          {
+            path: "docs/report.html",
+            kind: "file",
+            bytes: 25,
+            mediaType: "text/html",
+          },
+        ]);
+      }
+
+      const pending = await syncNow(ctx, { sinceMs: 0 });
+      expect(pending).toMatchObject({ clean: false, pendingChangeCount: 1 });
+      expect(pending.pending[0]).toMatchObject({ summary: "Created report", fileCount: 1 });
+    });
+  });
+
+  it("supports optimistic write checks without making them mandatory", async () => {
+    await withWorkspace(async (ctx) => {
+      const first = await writeWorkspaceFile(ctx, { path: "notes/day.txt", content: "one\n" });
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+
+      await expect(
+        writeWorkspaceFile(ctx, {
+          path: "notes/day.txt",
+          content: "two\n",
+          expectedSha256: first.sha256,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(
+        writeWorkspaceFile(ctx, {
+          path: "notes/day.txt",
+          content: "stale\n",
+          expectedSha256: first.sha256,
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("expectedSha256") });
+
+      await expect(
+        writeWorkspaceFile(ctx, { path: "notes/day.txt", content: "free write\n" }),
+      ).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  it("moves paths and deletes recoverably while recording history", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
+      const moved = await moveWorkspacePath(ctx, {
+        fromPath: "drafts/todo.txt",
+        toPath: "archive/todo.txt",
+      });
+      expect(moved).toMatchObject({
+        ok: true,
+        fromPath: "drafts/todo.txt",
+        toPath: "archive/todo.txt",
+      });
+      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).resolves.toBe("ship\n");
+
+      const deleted = await deleteWorkspacePath(ctx, { path: "archive/todo.txt" });
+      expect(deleted).toMatchObject({ ok: true, path: "archive/todo.txt", trashed: true });
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toThrow();
+      const trash = await readdir(join(ctx.root, ".dohc", "trash"));
+      expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
+
+      const pending = await syncNow(ctx, { sinceMs: 0 });
+      expect(pending.pending.map((entry) => entry.fileCount)).toEqual([1, 2, 1]);
     });
   });
 

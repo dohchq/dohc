@@ -11,15 +11,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
+  createWorkspaceDirectory,
   createApp,
+  deleteWorkspacePath,
   importData,
+  listWorkspaceFiles,
   listWorkspaces,
+  moveWorkspacePath,
   openInDohc,
   queryDatabase,
+  readWorkspaceFile,
   resolveConflict,
   share,
   syncNow,
   testApp,
+  writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
@@ -60,6 +66,85 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { sinceMs: z.number().int().nonnegative().optional() },
     },
     async (args) => text(await syncNow(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_list_files",
+    {
+      description: "List visible files and folders in the workspace. Hidden dohc internals are omitted.",
+      inputSchema: {
+        path: z.string().max(4096).optional(),
+        recursive: z.boolean().optional(),
+      },
+    },
+    async (args) => text(await listWorkspaceFiles(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_read_file",
+    {
+      description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        encoding: z.enum(["utf8", "base64"]).optional(),
+        maxBytes: z.number().int().positive().max(10 * 1024 * 1024).optional(),
+        offsetBytes: z.number().int().nonnegative().optional(),
+      },
+    },
+    async (args) => text(await readWorkspaceFile(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_write_file",
+    {
+      description: "Write any visible workspace file and record a dohc change set so sync/history can see it.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        content: z.string(),
+        encoding: z.enum(["utf8", "base64"]).optional(),
+        expectedSha256: z.string().length(64).optional(),
+        summary: z.string().max(500).optional(),
+      },
+    },
+    async (args) => text(await writeWorkspaceFile(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_create_directory",
+    {
+      description: "Create a visible workspace directory and record it in dohc history.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        summary: z.string().max(500).optional(),
+      },
+    },
+    async (args) => text(await createWorkspaceDirectory(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_move_path",
+    {
+      description: "Move or rename a visible workspace file/folder and record the change for sync/history.",
+      inputSchema: {
+        fromPath: z.string().min(1).max(4096),
+        toPath: z.string().min(1).max(4096),
+        overwrite: z.boolean().optional(),
+        summary: z.string().max(500).optional(),
+      },
+    },
+    async (args) => text(await moveWorkspacePath(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_delete_path",
+    {
+      description: "Delete a visible workspace file/folder by moving it to dohc's recoverable trash and recording the change.",
+      inputSchema: {
+        path: z.string().min(1).max(4096),
+        summary: z.string().max(500).optional(),
+      },
+    },
+    async (args) => text(await deleteWorkspacePath(ctx, args)),
   );
 
   server.registerTool(
