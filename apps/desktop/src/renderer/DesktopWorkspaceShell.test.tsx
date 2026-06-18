@@ -519,6 +519,25 @@ describe("graph view", () => {
 });
 
 describe("open editors", () => {
+  it("highlights the full open editors and files header bars on hover", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    expect(screen.getByTestId("open-editors-header").className).toContain(
+      "hover:bg-line/40",
+    );
+    expect(screen.getByTestId("explorer-files-header").className).toContain(
+      "hover:bg-line/40",
+    );
+    expect(screen.getByTestId("open-editors-toggle").className).not.toContain(
+      "hover:bg-line/40",
+    );
+    expect(screen.getByTestId("explorer-files-toggle").className).not.toContain(
+      "hover:bg-line/40",
+    );
+  });
+
   it("collapses and restores the file tree section", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -573,6 +592,38 @@ describe("open editors", () => {
     await user.click(screen.getByLabelText("Refresh explorer"));
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(refreshCount),
+    );
+  });
+
+  it("creates files and folders from the files title actions at the focused tree context", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "docs/a.md", kind: "file" as const }],
+      folders: ["docs"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("docs"));
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("notes.md{Enter}");
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "docs/notes.md",
+      }),
+    );
+
+    await user.click(await screen.findByText("a.md"));
+    await user.click(screen.getByLabelText("New folder"));
+    await user.keyboard("assets{Enter}");
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFolder).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "docs/assets",
+      }),
     );
   });
 

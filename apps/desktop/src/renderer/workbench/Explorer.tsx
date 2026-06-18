@@ -154,7 +154,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-30"
     >
       {props.children}
     </button>
@@ -402,6 +402,7 @@ export function Explorer(props: ExplorerProps) {
     (kind: "file" | "folder", parentPath: string) => {
       // beginPending auto-expands the target dir (old FileTree behavior) so
       // the editbox is actually visible.
+      setFilesExpanded(true);
       if (parentPath) {
         for (const ancestor of [...ancestorsOf(parentPath), parentPath]) {
           onSetFolderExpanded(ancestor, true);
@@ -412,6 +413,23 @@ export function Explorer(props: ExplorerProps) {
       setEditing({ mode: "create", kind, parentPath });
     },
     [onSetFolderExpanded],
+  );
+
+  const creationParentPath = useCallback(() => {
+    const selectedPath = selection.size === 1 ? [...selection][0] : null;
+    const target =
+      focusedPath ??
+      selectedPath ??
+      (props.activeTab && !isGraphTabPath(props.activeTab) ? props.activeTab : null);
+    if (!target) return "";
+    return isFolderPath(target) ? target : parentDir(target);
+  }, [focusedPath, isFolderPath, props.activeTab, selection]);
+
+  const beginCreateAtFocus = useCallback(
+    (kind: "file" | "folder") => {
+      beginCreate(kind, creationParentPath());
+    },
+    [beginCreate, creationParentPath],
   );
 
   const beginRename = useCallback((path: string, isFolder: boolean) => {
@@ -1076,13 +1094,16 @@ export function Explorer(props: ExplorerProps) {
           aria-label="Open editors"
           className="mb-1 border-b border-line pb-1"
         >
-          <header className="flex h-6 items-center gap-1 pr-1">
+          <header
+            data-testid="open-editors-header"
+            className="group flex h-6 items-center gap-1 pr-1 hover:bg-line/40"
+          >
             <button
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1180,13 +1201,16 @@ export function Explorer(props: ExplorerProps) {
         </section>
 
         <section data-testid="explorer-files-section" aria-label="Files">
-          <header className="flex h-6 items-center gap-1 pr-1">
+          <header
+            data-testid="explorer-files-header"
+            className="group flex h-6 items-center gap-1 pr-1 hover:bg-line/40"
+          >
             <button
               type="button"
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle group-hover:text-muted"
             >
               <ChevronRight
                 size={11}
@@ -1196,10 +1220,13 @@ export function Explorer(props: ExplorerProps) {
               <span className="min-w-0 flex-1 truncate">Files</span>
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
-              <SectionActionButton label="New file" onClick={() => beginCreate("file", "")}>
+              <SectionActionButton label="New file" onClick={() => beginCreateAtFocus("file")}>
                 <FilePlus2 size={13} aria-hidden />
               </SectionActionButton>
-              <SectionActionButton label="New folder" onClick={() => beginCreate("folder", "")}>
+              <SectionActionButton
+                label="New folder"
+                onClick={() => beginCreateAtFocus("folder")}
+              >
                 <FolderPlus size={13} aria-hidden />
               </SectionActionButton>
               <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
