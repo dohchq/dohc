@@ -30,6 +30,10 @@ const DEBOUNCE_MS = 150;
 // copy; the authoritative cap lives in the main-process engine.
 const RESULT_CAP = 2000;
 
+function isBlankSearchQuery(value: string): boolean {
+  return value.trim().length === 0;
+}
+
 function basenameOf(path: string): string {
   const slash = path.lastIndexOf("/");
   return slash === -1 ? path : path.slice(slash + 1);
@@ -217,7 +221,7 @@ export function SearchView(props: {
     setShowAllGroups(new Set());
     setGroupWindow(GROUP_WINDOW_STEP);
     setSelected(-1);
-    if (options.query.length === 0) {
+    if (isBlankSearchQuery(options.query)) {
       clear();
       return;
     }
@@ -243,6 +247,10 @@ export function SearchView(props: {
   // Debounced search-as-you-type (Enter searches immediately, below).
   function onQueryChange(value: string): void {
     setQuery(value);
+    if (isBlankSearchQuery(value)) {
+      issueNow(currentOptions({ query: value }));
+      return;
+    }
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {
       issueNow(currentOptions({ query: value }));

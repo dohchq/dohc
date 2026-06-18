@@ -13,8 +13,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ChangeSetRecord,
   ShowWorkbenchMenuResult,
+  WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
+import type { SearchResultsEvent } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 
@@ -69,11 +71,13 @@ function makeBridge(
 ) {
   let changeSets = initialChangeSets;
   let activityCallback: (() => void) | null = null;
+  let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   return {
     setChangeSets: (next: ChangeSetRecord[]) => {
       changeSets = next;
     },
     emitWorkspaceActivity: () => activityCallback?.(),
+    emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
@@ -170,8 +174,13 @@ function makeBridge(
     onMenuCommand: vi.fn(() => () => {}),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
-    onSearchResults: vi.fn(() => () => {}),
-    searchWorkspace: vi.fn(async () => undefined),
+    onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
+      searchCallback = callback;
+      return () => {
+        searchCallback = null;
+      };
+    }),
+    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
   };
 }
@@ -296,6 +305,57 @@ describe("active file sharing", () => {
     expect(await within(dialog).findByText("Only you have access.")).toBeTruthy();
     expect(bridge.listWorkspaceShares).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
+    });
+  });
+});
+
+describe("content search", () => {
+  it("clears the activity badge as soon as the query is cleared", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    const input = await screen.findByTestId("search-input");
+
+    await user.type(input, "apples");
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+
+    const searchPayload = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    act(() => {
+      bridge.emitSearchResults({
+        searchId: searchPayload.searchId,
+        entries: [
+          {
+            path: "a.md",
+            line: 1,
+            column: 9,
+            preview: "I ate 10 apples",
+            matchStart: 9,
+            matchEnd: 15,
+          },
+          {
+            path: "b.md",
+            line: 2,
+            column: 4,
+            preview: "two apples",
+            matchStart: 4,
+            matchEnd: 10,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("activity-search-count").textContent).toBe("2"),
+    );
+
+    await user.clear(input);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("activity-search-count")).toBeNull();
     });
   });
 });
