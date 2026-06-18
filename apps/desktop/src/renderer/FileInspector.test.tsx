@@ -215,6 +215,50 @@ describe("markdown editor unmount flush", () => {
     expect(onSharePath).toHaveBeenCalledWith("a.md");
   });
 
+  it("edits plain text files through the same bounded write seam", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "hello",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+
+    const editor = (await screen.findByTestId(
+      "view-text-editor",
+    )) as HTMLTextAreaElement;
+    await user.click(editor);
+    editor.setSelectionRange(editor.value.length, editor.value.length);
+    await user.keyboard(" world");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/plain.txt",
+      text: "hello world",
+    });
+  });
+
+  it("edits CSV cells and saves the table file", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+    await user.clear(cells[3]!);
+    await user.type(cells[3]!, "43");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/table.csv",
+      text: "date,amount\n2026-06-10,43",
+    });
+  });
+
   it("routes database and app-source share actions to their active file paths", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();

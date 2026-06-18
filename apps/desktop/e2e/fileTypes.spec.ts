@@ -72,17 +72,19 @@ test("each file type opens its own native view", async () => {
 
   await open("data/transactions.csv");
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(2);
-  await expect(page.getByTestId("view-csv")).toContainText("amount");
+  await expect(page.getByTestId("view-csv").locator("input").nth(1)).toHaveValue(
+    "amount",
+  );
   await page.screenshot({ path: `${SHOT_DIR}/csv--1280x800--light.png` });
   // Raw toggle switches table <-> source and back.
   await page.getByTestId("csv-raw-toggle").click();
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(0);
-  await expect(page.getByTestId("view-csv")).toContainText("date,amount");
+  await expect(page.getByTestId("csv-raw-editor")).toHaveValue(/date,amount/);
   await page.getByTestId("csv-raw-toggle").click();
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(2);
 
   await open("data/config.json");
-  await expect(page.getByTestId("view-json")).toContainText('"ready": true');
+  await expect(page.getByTestId("view-json-editor")).toHaveValue(/"ready": true/);
 
   await open("uploads/receipt.png");
   await expect(page.getByTestId("view-image")).toBeVisible();

@@ -137,15 +137,29 @@ table {
 
 .dohc-notion-editor {
   min-height: calc(100vh - 96px);
-  padding: 28px 48px 80px;
+  padding: 28px 56px 80px 72px;
   color: var(--dohc-ink);
+  cursor: text;
   font-size: 15px;
   line-height: 1.65;
   outline: none;
+  user-select: text;
 }
 
 .dohc-notion-editor > * {
   max-width: 820px;
+}
+
+.dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
+  cursor: text;
+}
+
+.dohc-readable-text,
+.dohc-code-textarea,
+.dohc-csv-cell,
+.dohc-csv-raw-editor {
+  cursor: text;
+  user-select: text;
 }
 
 .dohc-notion-editor h1 {
@@ -269,11 +283,12 @@ table {
 
 .dohc-block-affordance {
   position: absolute;
-  left: 18px;
+  top: 0.2em;
+  left: -48px;
+  z-index: 3;
   display: inline-flex;
   gap: 2px;
   opacity: 0;
-  transform: translateX(-100%);
   transition: opacity 120ms ease;
 }
 
@@ -287,10 +302,13 @@ table {
   width: 18px;
   height: 18px;
   place-items: center;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 4px;
+  background: var(--dohc-bg);
   color: var(--dohc-subtle);
   font-size: 13px;
+  line-height: 1;
 }
 
 .dohc-block-plus::before {
@@ -305,6 +323,46 @@ table {
   border-color: var(--dohc-line);
   background: var(--dohc-panel-2);
   color: var(--dohc-ink);
+}
+
+.dohc-graph-edge {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: dohc-graph-edge-draw 520ms ease-out forwards;
+}
+
+.dohc-graph-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: dohc-graph-node-in 360ms ease-out both;
+  transition: transform 160ms ease;
+}
+
+.dohc-graph-node circle {
+  transition:
+    fill 160ms ease,
+    stroke 160ms ease;
+}
+
+.dohc-graph-node:hover {
+  transform: scale(1.04);
+}
+
+@keyframes dohc-graph-edge-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes dohc-graph-node-in {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .dohc-code-block-toolbar {

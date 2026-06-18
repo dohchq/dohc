@@ -308,6 +308,19 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
+function readSelectedText(): string {
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLTextAreaElement ||
+    (active instanceof HTMLInputElement && active.type === "text")
+  ) {
+    const start = active.selectionStart ?? 0;
+    const end = active.selectionEnd ?? 0;
+    return start === end ? "" : active.value.slice(start, end);
+  }
+  return window.getSelection()?.toString() ?? "";
+}
+
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -334,6 +347,7 @@ export function DesktopWorkspaceShell(props: {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sharePath, setSharePath] = useState<string | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
+  const [importExportSelectionText, setImportExportSelectionText] = useState("");
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
@@ -773,6 +787,10 @@ export function DesktopWorkspaceShell(props: {
   const openAgentView = useCallback(() => {
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
   }, [mutateWb]);
+  const openImportExportDialog = useCallback(() => {
+    setImportExportSelectionText(readSelectedText());
+    setImportExportOpen(true);
+  }, []);
 
   const runWorkbenchMenuCommand = useCallback(
     (command: WorkbenchMenuCommand, path?: string) => {
@@ -910,12 +928,12 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "import-files",
         label: "Import / export workspace",
-        run: () => setImportExportOpen(true),
+        run: openImportExportDialog,
       },
       {
         id: "export-workspace",
         label: "Export workspace as zip",
-        run: () => setImportExportOpen(true),
+        run: openImportExportDialog,
       },
       {
         id: "toggle-sidebar",
@@ -958,7 +976,13 @@ export function DesktopWorkspaceShell(props: {
         run: toggleTheme,
       },
     ],
-    [openWorkspaceFolder, closeActiveTab, mutateWb, requestExplorerCreate],
+    [
+      openWorkspaceFolder,
+      closeActiveTab,
+      mutateWb,
+      requestExplorerCreate,
+      openImportExportDialog,
+    ],
   );
 
   useEffect(() => {
@@ -1004,7 +1028,11 @@ export function DesktopWorkspaceShell(props: {
         <button
           type="button"
           data-testid="import-export-open"
-          onClick={() => setImportExportOpen(true)}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            openImportExportDialog();
+          }}
+          onClick={openImportExportDialog}
           className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
         >
           <Archive size={13} aria-hidden />
@@ -1047,7 +1075,7 @@ export function DesktopWorkspaceShell(props: {
         />
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
-        {wb.sidebarVisible ? (
+        {wb.sidebarVisible && wb.activeView !== "graph" ? (
           <SidePanel
             title={activityViewLabel(wb.activeView)}
             width={wb.sidebarWidth}
@@ -1096,15 +1124,6 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="search" />}>
                 <LazySearchView search={search} onOpenResult={openSearchResult} />
               </Suspense>
-            ) : wb.activeView === "graph" ? (
-              <Suspense fallback={<PanelLoading label="graph" />}>
-                <LazyGraphView
-                  workspaceId={workspaceId}
-                  activePath={wb.activeTab}
-                  refreshKey={graphRefreshKey}
-                  onOpenPath={openFile}
-                />
-              </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
                 changeSets={changeSets}
@@ -1128,75 +1147,93 @@ export function DesktopWorkspaceShell(props: {
 
         {/* Editor area: tab strip + the active tab's inspector */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          <EditorTabs
-            tabs={wb.tabs}
-            activeTab={wb.activeTab}
-            activeTabDirty={activeTabDirty}
-            onActivate={openFile}
-            onClose={closeFileTab}
-            onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
-            onMove={moveFileTab}
-          />
-          <div
-            className="flex min-h-0 flex-1 flex-col"
-            onContextMenu={(event) => {
-              event.preventDefault();
-              void showWorkbenchMenu("editor");
-            }}
-          >
-            {wb.activeTab ? (
-              <FileInspector
-                key={wb.activeTab}
+          {wb.activeView === "graph" ? (
+            <Suspense fallback={<PanelLoading label="graph" />}>
+              <LazyGraphView
                 workspaceId={workspaceId}
-                path={wb.activeTab}
-                refreshKey={changeSets.length}
+                activePath={wb.activeTab}
+                refreshKey={graphRefreshKey}
                 onOpenPath={openFile}
-                scrollTarget={searchScrollTarget ?? undefined}
-                onScrollConsumed={consumeScrollTarget}
-                onSaveStateChange={onSaveStateChange}
-                registerDraftFlush={registerDraftFlush}
-                knownMarkdownFiles={markdownWikilinkFiles}
-                onSharePath={setSharePath}
+                variant="page"
               />
-            ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-              <span className="text-sm text-muted">
-                Select a file, or create one
-              </span>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setNewFileOpen(true)}
-                  className="font-mono text-xs text-subtle hover:text-ink"
-                >
-                  Ctrl N · new file
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPaletteOpen(true)}
-                  className="font-mono text-xs text-subtle hover:text-ink"
-                >
-                  Ctrl K · commands
-                </button>
-                <button
-                  type="button"
-                  data-testid="empty-import-export"
-                  onClick={() => setImportExportOpen(true)}
-                  className="font-mono text-xs text-subtle hover:text-ink"
-                >
-                  import / export
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setQuickOpenOpen(true)}
-                  className="font-mono text-xs text-subtle hover:text-ink"
-                >
-                  Ctrl P · go to file
-                </button>
+            </Suspense>
+          ) : (
+            <>
+              <EditorTabs
+                tabs={wb.tabs}
+                activeTab={wb.activeTab}
+                activeTabDirty={activeTabDirty}
+                onActivate={openFile}
+                onClose={closeFileTab}
+                onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
+                onMove={moveFileTab}
+              />
+              <div
+                className="flex min-h-0 flex-1 flex-col"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  void showWorkbenchMenu("editor");
+                }}
+              >
+                {wb.activeTab ? (
+                  <FileInspector
+                    key={wb.activeTab}
+                    workspaceId={workspaceId}
+                    path={wb.activeTab}
+                    refreshKey={changeSets.length}
+                    onOpenPath={openFile}
+                    scrollTarget={searchScrollTarget ?? undefined}
+                    onScrollConsumed={consumeScrollTarget}
+                    onSaveStateChange={onSaveStateChange}
+                    registerDraftFlush={registerDraftFlush}
+                    knownMarkdownFiles={markdownWikilinkFiles}
+                    onSharePath={setSharePath}
+                  />
+                ) : (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+                    <span className="text-sm text-muted">
+                      Select a file, or create one
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setNewFileOpen(true)}
+                        className="font-mono text-xs text-subtle hover:text-ink"
+                      >
+                        Ctrl N · new file
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPaletteOpen(true)}
+                        className="font-mono text-xs text-subtle hover:text-ink"
+                      >
+                        Ctrl K · commands
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="empty-import-export"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          openImportExportDialog();
+                        }}
+                        onClick={openImportExportDialog}
+                        className="font-mono text-xs text-subtle hover:text-ink"
+                      >
+                        import / export
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setQuickOpenOpen(true)}
+                        className="font-mono text-xs text-subtle hover:text-ink"
+                      >
+                        Ctrl P · go to file
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-              </div>
-            )}
-          </div>
+            </>
+          )}
         </main>
 
         {/* History timeline — the "git log for everyday people". Every
@@ -1216,6 +1253,16 @@ export function DesktopWorkspaceShell(props: {
               <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
                 History
               </span>
+              <button
+                type="button"
+                data-testid="history-collapse"
+                aria-label="Collapse history"
+                title="Collapse history"
+                onClick={() => mutateWb(toggleHistory)}
+                className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+              >
+                <PanelRight size={13} aria-hidden />
+              </button>
             </header>
             <HistoryView
               changeSets={changeSets}
@@ -1339,6 +1386,7 @@ export function DesktopWorkspaceShell(props: {
             <LazyImportExportDialog
               workspaceId={workspaceId}
               activePath={wb.activeTab}
+              selectedText={importExportSelectionText}
               onImported={() => void refreshFiles()}
               onClose={() => setImportExportOpen(false)}
             />

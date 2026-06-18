@@ -13,6 +13,8 @@ import { ImportExportDialog } from "./ImportExportDialog";
 const bridge = {
   importWorkspaceFiles: vi.fn(async () => ({ imported: ["receipt.md"] })),
   exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
+  readWorkspaceText: vi.fn(async () => ({ text: "I ate", truncated: false })),
+  writeWorkspaceText: vi.fn(async () => undefined),
   getDroppedFilePaths: vi.fn(() => ["/outside/drop.md"]),
 };
 
@@ -109,6 +111,33 @@ describe("ImportExportDialog", () => {
         droppedPaths: ["/outside/drop.md"],
       });
     });
+  });
+
+  it("imports a data fragment into the active file instead of requiring a whole-file export", async () => {
+    const onImported = vi.fn();
+    render(
+      <ImportExportDialog
+        workspaceId="ws-import-export"
+        activePath="notes/plan.md"
+        selectedText="10 apples"
+        onImported={onImported}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByTestId("fragment-text") as HTMLTextAreaElement).value).toBe(
+      "10 apples",
+    );
+    await userEvent.click(screen.getByTestId("import-fragment-action"));
+
+    await waitFor(() => {
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-import-export",
+        relativePath: "notes/plan.md",
+        text: "I ate\n10 apples",
+      });
+    });
+    expect(onImported).toHaveBeenCalledOnce();
   });
 
   it("strips Electron IPC prefixes before displaying errors", async () => {

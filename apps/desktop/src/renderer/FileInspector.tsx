@@ -2,6 +2,7 @@ import {
   FileText,
   Image as ImageIcon,
   Music,
+  Plus,
   Share2,
   SlidersHorizontal,
   Table,
@@ -286,6 +287,98 @@ const MARKDOWN_COMPONENTS = {
     <span className="text-accent underline">{p.children}</span>
   ),
 };
+
+type SaveState = "saved" | "saving" | "error";
+
+function useAutosavedTextDraft(props: {
+  body: string;
+  workspaceId: string;
+  path: string;
+  disabled?: boolean;
+  onSaveStateChange?: (state: SaveState) => void;
+  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+}) {
+  const [draft, setDraft] = useState(props.body);
+  const [saveState, setSaveState] = useState<SaveState>("saved");
+  const latestDraft = useRef(props.body);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unsavedDraft = useRef(false);
+
+  useEffect(() => {
+    props.onSaveStateChange?.(saveState);
+  }, [saveState, props.onSaveStateChange]);
+
+  useEffect(() => {
+    if (unsavedDraft.current) return;
+    setDraft(props.body);
+    latestDraft.current = props.body;
+    setSaveState("saved");
+  }, [props.body, props.path]);
+
+  async function saveNow(): Promise<void> {
+    if (props.disabled) return;
+    const text = latestDraft.current;
+    unsavedDraft.current = false;
+    setSaveState("saving");
+    try {
+      await bridge().writeWorkspaceText({
+        workspaceId: props.workspaceId,
+        relativePath: props.path,
+        text,
+      });
+      setDraft(text);
+      setSaveState("saved");
+    } catch {
+      unsavedDraft.current = true;
+      setSaveState("error");
+    }
+  }
+
+  function scheduleSave(next: string) {
+    setDraft(next);
+    latestDraft.current = next;
+    if (props.disabled) return;
+    unsavedDraft.current = true;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void saveNow(), 800);
+  }
+
+  const { workspaceId, path, registerDraftFlush } = props;
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (!unsavedDraft.current || props.disabled) return;
+      unsavedDraft.current = false;
+      void bridge()
+        .writeWorkspaceText({
+          workspaceId,
+          relativePath: path,
+          text: latestDraft.current,
+        })
+        .catch(() => undefined);
+    };
+  }, [workspaceId, path, props.disabled]);
+
+  useEffect(() => {
+    if (!registerDraftFlush) return;
+    registerDraftFlush(async () => {
+      if (!unsavedDraft.current || props.disabled) return;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      await saveNow();
+    });
+    return () => registerDraftFlush(null);
+    // saveNow uses refs for the draft; workspace/path are stable per keyed inspector.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerDraftFlush, props.disabled]);
+
+  return {
+    draft,
+    saveState,
+    setDraft: scheduleSave,
+    saveNow,
+  };
+}
 
 // Document + source-mode editor. Edits autosave on a short settle (and
 // Ctrl/Cmd+S) through the bounded write IPC; the watcher then records the
@@ -751,7 +844,7 @@ function MarkdownView(props: {
       ) : (
         <div
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto p-6 text-[15px]"
+          className="dohc-readable-text min-h-0 flex-1 overflow-auto p-6 text-[15px]"
         >
           {renderedDocument}
         </div>
@@ -775,30 +868,63 @@ function CsvView({
   workspaceId,
   path,
   onOpenPath,
+  truncated,
+  onSaveStateChange,
+  registerDraftFlush,
 }: {
   body: string;
   workspaceId: string;
   path: string;
   onOpenPath?: (path: string) => void;
+  truncated?: boolean;
+  onSaveStateChange?: (state: SaveState) => void;
+  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
 }) {
   const [raw, setRaw] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const rows = useMemo(
-    () =>
-      body
-        .trim()
-        .split(/\r?\n/)
-        .filter((line) => line.length > 0)
-        .map((line) => line.split(",")),
-    [body],
-  );
+  const draft = useAutosavedTextDraft({
+    body,
+    workspaceId,
+    path,
+    disabled: truncated,
+    onSaveStateChange,
+    registerDraftFlush,
+  });
+  const rows = useMemo(() => parseCsvRows(draft.draft), [draft.draft]);
   const [header, ...data] = rows;
   // Bounded preview (Phase 16): an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
-  // inspect a CSV; working with all of them is what Import to SQLite is for.
+  // inspect and edit common CSVs; working with all of them is what Import to
+  // SQLite or raw mode is for.
   const MAX_PREVIEW_ROWS = 500;
   const previewRows = data.length > MAX_PREVIEW_ROWS ? data.slice(0, MAX_PREVIEW_ROWS) : data;
+
+  function updateCell(rowIndex: number, cellIndex: number, value: string) {
+    const next = rows.map((row) => [...row]);
+    while (next.length <= rowIndex) next.push([]);
+    while (next[rowIndex]!.length <= cellIndex) next[rowIndex]!.push("");
+    next[rowIndex]![cellIndex] = value;
+    draft.setDraft(stringifyCsvRows(next));
+  }
+
+  function addRow() {
+    if (rows.length === 0) {
+      draft.setDraft("column\n");
+      return;
+    }
+    const width = Math.max(1, header?.length ?? 1);
+    draft.setDraft(stringifyCsvRows([...rows, Array.from({ length: width }, () => "")]));
+  }
+
+  function addColumn() {
+    if (rows.length === 0) {
+      draft.setDraft("column\n");
+      return;
+    }
+    const next = rows.length > 0 ? rows.map((row) => [...row, ""]) : [[""]];
+    draft.setDraft(stringifyCsvRows(next));
+  }
 
   async function importToSqlite() {
     if (importing) return;
@@ -826,10 +952,45 @@ function CsvView({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
       <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
+        <span
+          data-testid="csv-save-state"
+          data-state={draft.saveState}
+          className={`mr-auto text-[11px] ${draft.saveState === "error" ? "text-danger" : "text-subtle"}`}
+        >
+          {truncated
+            ? "Read-only"
+            : draft.saveState === "saved"
+              ? "Saved"
+              : draft.saveState === "saving"
+                ? "Saving..."
+                : "Couldn't save"}
+        </span>
         {importError ? (
           <span data-testid="csv-import-error" className="px-1 text-[11px] text-danger">
             {importError}
           </span>
+        ) : null}
+        {!raw && !truncated ? (
+          <>
+            <button
+              type="button"
+              onClick={addRow}
+              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+              data-testid="csv-add-row"
+            >
+              <Plus size={12} aria-hidden />
+              Row
+            </button>
+            <button
+              type="button"
+              onClick={addColumn}
+              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+              data-testid="csv-add-column"
+            >
+              <Plus size={12} aria-hidden />
+              Column
+            </button>
+          </>
         ) : null}
         {onOpenPath ? (
           <button
@@ -852,9 +1013,20 @@ function CsvView({
         </button>
       </div>
       {raw ? (
-        <pre className="min-h-0 flex-1 overflow-auto p-4 font-mono text-[13px] text-ink">
-          {body}
-        </pre>
+        <textarea
+          data-testid="csv-raw-editor"
+          value={draft.draft}
+          onChange={(event) => draft.setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+              event.preventDefault();
+              void draft.saveNow();
+            }
+          }}
+          readOnly={truncated}
+          spellCheck={false}
+          className="dohc-csv-raw-editor min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
+        />
       ) : !header ? (
         <Empty>Empty table</Empty>
       ) : (
@@ -867,7 +1039,14 @@ function CsvView({
                     key={i}
                     className="border border-line bg-panel-2 px-2 py-1 text-left font-medium"
                   >
-                    {cell}
+                    <input
+                      data-testid="csv-cell"
+                      aria-label={`Header column ${i + 1}`}
+                      value={cell}
+                      readOnly={truncated}
+                      onChange={(event) => updateCell(0, i, event.target.value)}
+                      className="dohc-csv-cell w-full min-w-24 bg-transparent text-ink outline-none read-only:text-muted"
+                    />
                   </th>
                 ))}
               </tr>
@@ -875,9 +1054,16 @@ function CsvView({
             <tbody>
               {previewRows.map((row, r) => (
                 <tr key={r}>
-                  {row.map((cell, c) => (
+                  {Array.from({ length: header.length }, (_, c) => (
                     <td key={c} className="border border-line px-2 py-1">
-                      {cell}
+                      <input
+                        data-testid="csv-cell"
+                        aria-label={`Row ${r + 1} column ${c + 1}`}
+                        value={row[c] ?? ""}
+                        readOnly={truncated}
+                        onChange={(event) => updateCell(r + 1, c, event.target.value)}
+                        className="dohc-csv-cell w-full min-w-24 bg-transparent text-ink outline-none read-only:text-muted"
+                      />
                     </td>
                   ))}
                 </tr>
@@ -897,6 +1083,60 @@ function CsvView({
       )}
     </div>
   );
+}
+
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"' && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function stringifyCsvRows(rows: string[][]): string {
+  return rows
+    .map((row) =>
+      row
+        .map((cell) =>
+          /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell,
+        )
+        .join(","),
+    )
+    .join("\n");
 }
 
 function ImageView({ url, path }: { url: string; path: string }) {
@@ -942,33 +1182,90 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
-function CodeView({
+function TextEditorView({
   body,
   testId,
+  language,
   scrollLine,
+  workspaceId,
+  path,
+  truncated,
+  onSaveStateChange,
+  registerDraftFlush,
 }: {
   body: string;
   testId: string;
+  language: string;
+  workspaceId: string;
+  path: string;
+  truncated?: boolean;
+  onSaveStateChange?: (state: SaveState) => void;
+  registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   // Search-result landing for read-only text views (Phase E5.0): scroll the
   // pre so the matched line sits in the upper third.
   scrollLine?: number;
 }) {
-  const preRef = useRef<HTMLPreElement>(null);
+  const editor = useAutosavedTextDraft({
+    body,
+    workspaceId,
+    path,
+    disabled: truncated,
+    onSaveStateChange,
+    registerDraftFlush,
+  });
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (scrollLine === undefined) return;
-    const pre = preRef.current;
-    if (!pre) return;
-    const lineHeight = Number.parseFloat(getComputedStyle(pre).lineHeight) || 20;
-    pre.scrollTop = Math.max(0, (scrollLine - 1) * lineHeight - pre.clientHeight / 3);
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const { start, end } = lineSpanInText(textarea.value, scrollLine);
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+    const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 20;
+    textarea.scrollTop = Math.max(
+      0,
+      (scrollLine - 1) * lineHeight - textarea.clientHeight / 3,
+    );
   }, [scrollLine]);
   return (
-    <pre
-      ref={preRef}
+    <div
       data-testid={testId}
-      className="min-h-0 flex-1 overflow-auto p-4 font-mono text-[13px] text-ink"
+      className="flex min-h-0 flex-1 flex-col"
     >
-      {body}
-    </pre>
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-3">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-subtle">
+          {language}
+        </span>
+        <span
+          data-testid={`${testId}-save-state`}
+          data-state={editor.saveState}
+          className={`ml-auto text-[11px] ${editor.saveState === "error" ? "text-danger" : "text-subtle"}`}
+        >
+          {truncated
+            ? "Read-only"
+            : editor.saveState === "saved"
+              ? "Saved"
+              : editor.saveState === "saving"
+                ? "Saving..."
+                : "Couldn't save"}
+        </span>
+      </div>
+      <textarea
+        ref={textareaRef}
+        data-testid={`${testId}-editor`}
+        value={editor.draft}
+        onChange={(event) => editor.setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+            event.preventDefault();
+            void editor.saveNow();
+          }
+        }}
+        readOnly={truncated}
+        spellCheck={false}
+        className="dohc-code-textarea min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
+      />
+    </div>
   );
 }
 
@@ -1131,6 +1428,9 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             onOpenPath={props.onOpenPath}
+            truncated={truncated}
+            onSaveStateChange={props.onSaveStateChange}
+            registerDraftFlush={props.registerDraftFlush}
           />
         </div>
       );
@@ -1145,9 +1445,15 @@ export function FileInspector(props: {
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
-          <CodeView
+          <TextEditorView
             body={text ?? ""}
             testId={kind === "json" ? "view-json" : "view-text"}
+            language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
+            workspaceId={props.workspaceId}
+            path={props.path}
+            truncated={truncated}
+            onSaveStateChange={props.onSaveStateChange}
+            registerDraftFlush={props.registerDraftFlush}
             scrollLine={
               props.scrollTarget?.path === props.path
                 ? props.scrollTarget.line

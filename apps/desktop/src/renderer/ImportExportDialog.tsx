@@ -1,6 +1,6 @@
 import { Archive, CheckCircle2, Download, Upload, X } from "lucide-react";
 import type { DragEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { bridge } from "./bridge";
 
 type Status =
@@ -21,15 +21,21 @@ function pluralFile(count: number): string {
 export function ImportExportDialog(props: {
   workspaceId: string;
   activePath: string | null;
+  selectedText?: string;
   onImported: () => void;
   onClose: () => void;
 }) {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [dragActive, setDragActive] = useState(false);
+  const [fragmentText, setFragmentText] = useState(props.selectedText ?? "");
   const canUseActivePath = useMemo(
     () => typeof props.activePath === "string" && props.activePath.length > 0,
     [props.activePath],
   );
+
+  useEffect(() => {
+    setFragmentText(props.selectedText ?? "");
+  }, [props.selectedText]);
 
   async function importPaths(droppedPaths?: string[]) {
     setStatus({ kind: "busy", label: "Importing..." });
@@ -62,6 +68,63 @@ export function ImportExportDialog(props: {
         kind: "success",
         message: result.path ? `Exported ${result.path}.` : "Export canceled.",
       });
+    } catch (cause) {
+      setStatus({ kind: "error", message: errorMessage(cause) });
+    }
+  }
+
+  async function copyFragment() {
+    const body = fragmentText.trim().length > 0 ? fragmentText : (props.selectedText ?? "");
+    if (body.trim().length === 0) {
+      setStatus({ kind: "error", message: "Select or enter data to export." });
+      return;
+    }
+    setStatus({ kind: "busy", label: "Exporting fragment..." });
+    const payload = {
+      kind: "dohc.fragment.v1",
+      sourcePath: props.activePath,
+      body,
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setStatus({
+        kind: "success",
+        message: "Copied data fragment.",
+      });
+    } catch (cause) {
+      setStatus({ kind: "error", message: errorMessage(cause) });
+    }
+  }
+
+  async function importFragment() {
+    if (!canUseActivePath || !props.activePath) {
+      setStatus({ kind: "error", message: "Open a file before importing data." });
+      return;
+    }
+    const body = parseFragmentBody(fragmentText);
+    if (body.trim().length === 0) {
+      setStatus({ kind: "error", message: "Paste data to import." });
+      return;
+    }
+    setStatus({ kind: "busy", label: "Importing fragment..." });
+    try {
+      const current = await bridge().readWorkspaceText({
+        workspaceId: props.workspaceId,
+        relativePath: props.activePath,
+      });
+      const separator =
+        current.text.length === 0 || current.text.endsWith("\n") ? "" : "\n";
+      await bridge().writeWorkspaceText({
+        workspaceId: props.workspaceId,
+        relativePath: props.activePath,
+        text: `${current.text}${separator}${body}`,
+      });
+      props.onImported();
+      setStatus({ kind: "success", message: "Imported data fragment." });
     } catch (cause) {
       setStatus({ kind: "error", message: errorMessage(cause) });
     }
@@ -104,6 +167,45 @@ export function ImportExportDialog(props: {
       </header>
 
       <div className="space-y-3 p-4">
+        <section className="rounded border border-line bg-bg p-3">
+          <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <p className="m-0 text-xs font-medium text-ink">Data fragment</p>
+              <p className="m-0 truncate font-mono text-[11px] text-subtle">
+                {props.activePath ?? "No file selected"}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="export-fragment-action"
+              disabled={busy}
+              onClick={() => void copyFragment()}
+              className="ml-auto h-8 shrink-0 rounded bg-accent px-3 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40"
+            >
+              Export selection
+            </button>
+          </div>
+          <textarea
+            data-testid="fragment-text"
+            value={fragmentText}
+            onChange={(event) => setFragmentText(event.target.value)}
+            placeholder="Paste or select data"
+            spellCheck={false}
+            className="mt-3 h-24 w-full resize-none rounded border border-line bg-panel px-2 py-1.5 font-mono text-[12px] text-ink outline-none focus:border-ink"
+          />
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              data-testid="import-fragment-action"
+              disabled={busy || !canUseActivePath}
+              onClick={() => void importFragment()}
+              className="h-8 rounded border border-line px-3 text-xs text-muted hover:border-ink/40 hover:text-ink disabled:opacity-40"
+            >
+              Import into file
+            </button>
+          </div>
+        </section>
+
         <div
           data-testid="import-drop-zone"
           onDragEnter={(event) => {
@@ -191,4 +293,16 @@ export function ImportExportDialog(props: {
       </div>
     </section>
   );
+}
+
+function parseFragmentBody(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as { kind?: unknown; body?: unknown };
+    if (parsed.kind === "dohc.fragment.v1" && typeof parsed.body === "string") {
+      return parsed.body;
+    }
+  } catch {
+    // Plain text is a valid fragment input.
+  }
+  return value;
 }

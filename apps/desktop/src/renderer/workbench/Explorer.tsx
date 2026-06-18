@@ -949,20 +949,36 @@ export function Explorer(props: ExplorerProps) {
         <Overlay onClose={() => setConfirmDelete(null)}>
           <div
             data-testid="delete-confirm"
-            className="w-105 max-w-[80vw] rounded-lg border border-line bg-panel p-4 shadow-lg"
+            className="flex max-h-[calc(100vh-32px)] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
           >
-            <p className="m-0 text-sm text-ink">
-              Delete{" "}
-              {confirmDelete.length === 1
-                ? leafOf(confirmDelete[0]!)
-                : `${confirmDelete.length} items`}
-              ?
-            </p>
-            <p className="mb-0 mt-2 text-xs text-muted">
-              It moves to the system trash — or to this workspace's .dohc/trash
-              folder on drives without one — and can be restored from there.
-            </p>
-            <div className="mt-3 flex justify-end gap-2">
+            <div className="min-h-0 overflow-auto p-4">
+              <p className="m-0 text-sm text-ink">
+                Delete{" "}
+                <span className="break-all font-medium">
+                  {confirmDelete.length === 1
+                    ? leafOf(confirmDelete[0]!)
+                    : `${confirmDelete.length} items`}
+                </span>
+                ?
+              </p>
+              <p className="mb-0 mt-2 text-xs text-muted">
+                It moves to the system trash — or to this workspace's .dohc/trash
+                folder on drives without one — and can be restored from there.
+              </p>
+              {confirmDelete.length > 1 ? (
+                <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+                  {confirmDelete.map((path) => (
+                    <li
+                      key={path}
+                      className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
+                    >
+                      <span className="break-all">{path}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
               <button
                 type="button"
                 onClick={() => setConfirmDelete(null)}
