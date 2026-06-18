@@ -4,8 +4,11 @@ import { expect, test } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { childProcessEnv, launchApp } from "./launch";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 // Phase 11: local agent + MCP. Two surfaces are proven end to end:
 //  1. The DESKTOP settings panel honestly exposes the MCP integration — the
@@ -87,8 +90,8 @@ test("the dohc MCP server serves workspace tools over stdio and refuses traversa
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [
-      join(process.cwd(), "node_modules/tsx/dist/cli.mjs"),
-      join(process.cwd(), "packages/mcp/src/server.ts"),
+      join(REPO_ROOT, "node_modules/tsx/dist/cli.mjs"),
+      join(REPO_ROOT, "packages/mcp/src/server.ts"),
       "--workspace",
       root,
       "--home",
@@ -107,20 +110,31 @@ test("the dohc MCP server serves workspace tools over stdio and refuses traversa
       return JSON.parse(res.content[0].text);
     };
 
-    // All ten advertised tools are present.
+    // The full workspace MCP surface is present: broad file affordances plus
+    // dohc history/cloud/app/database/share primitives.
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         "dohc_create_app",
+        "dohc_create_directory",
+        "dohc_delete_path",
         "dohc_import_data",
+        "dohc_list_changes",
+        "dohc_list_files",
         "dohc_list_workspaces",
+        "dohc_move_path",
         "dohc_open_in_dohc",
         "dohc_query_database",
+        "dohc_read_change",
+        "dohc_read_file",
         "dohc_resolve_conflict",
+        "dohc_search_files",
         "dohc_share",
+        "dohc_sync_cloud",
         "dohc_sync_now",
         "dohc_test_app",
+        "dohc_write_file",
         "dohc_workspace_status",
       ].sort(),
     );
@@ -145,8 +159,57 @@ test("the dohc MCP server serves workspace tools over stdio and refuses traversa
       }),
     ).toMatchObject({ ok: true });
 
-    // Local-first: nothing has been recorded as pending, so sync reports clean.
-    expect(await parse("dohc_sync_now")).toMatchObject({ clean: true, pendingChangeCount: 0 });
+    // Agents can work with arbitrary visible workspace files like a normal
+    // local folder, while dohc records the changes for history/sync.
+    const write = await parse("dohc_write_file", {
+      path: "notes/agent.txt",
+      content: "I ate 10 apples\n",
+      summary: "Agent wrote note",
+    });
+    expect(write).toMatchObject({ ok: true, path: "notes/agent.txt" });
+    expect(await parse("dohc_read_file", { path: "notes/agent.txt" })).toMatchObject({
+      ok: true,
+      content: "I ate 10 apples\n",
+    });
+    expect(await parse("dohc_search_files", { query: "10 apples" })).toMatchObject({
+      ok: true,
+      matches: [expect.objectContaining({ path: "notes/agent.txt", line: 1 })],
+    });
+    expect(await parse("dohc_list_files", { path: "notes" })).toMatchObject({
+      ok: true,
+      entries: expect.arrayContaining([
+        expect.objectContaining({ path: "notes/agent.txt", kind: "file" }),
+      ]),
+    });
+
+    const history = await parse("dohc_list_changes", { includeFiles: true });
+    expect(history).toMatchObject({
+      count: 2,
+      changes: expect.arrayContaining([
+        expect.objectContaining({ summary: "Agent wrote note" }),
+        expect.objectContaining({ summary: "MCP created app ledger" }),
+      ]),
+    });
+    const noteChange = (history.changes as Array<{ id: string; summary: string }>).find(
+      (change) => change.summary === "Agent wrote note",
+    );
+    expect(noteChange).toBeTruthy();
+    expect(await parse("dohc_read_change", { id: noteChange!.id })).toMatchObject({
+      ok: true,
+      change: expect.objectContaining({
+        summary: "Agent wrote note",
+        files: [{ path: "notes/agent.txt", operation: "write" }],
+      }),
+    });
+
+    expect(await parse("dohc_sync_now")).toMatchObject({
+      clean: false,
+      pendingChangeCount: 2,
+    });
+    expect(await parse("dohc_sync_cloud", { direction: "push" })).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("local-only"),
+    });
 
     // #1 security property: a path that escapes the workspace root is refused.
     const escaped = await parse("dohc_open_in_dohc", { path: "../../../etc/passwd" });
