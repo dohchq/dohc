@@ -18,6 +18,7 @@ import {
   readWorkspaceFile,
   resolveConflict,
   safeResolve,
+  searchWorkspaceFiles,
   share,
   syncCloud,
   syncNow,
@@ -290,6 +291,9 @@ describe("mcp tool path containment", () => {
       for (const evil of TRAVERSALS) {
         await expect(listWorkspaceFiles(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
         await expect(readWorkspaceFile(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
+        await expect(searchWorkspaceFiles(ctx, { path: evil, query: "ok" })).resolves.toMatchObject({
+          ok: false,
+        });
         await expect(
           writeWorkspaceFile(ctx, { path: evil, content: "nope" }),
         ).resolves.toMatchObject({ ok: false });
@@ -488,6 +492,90 @@ describe("mcp tools operate on allowed paths", () => {
       expect(pending).toMatchObject({ clean: false, pendingChangeCount: 1 });
       expect(pending.cursorMs).toBeGreaterThan(0);
       expect(pending.pending[0]).toMatchObject({ summary: "Created report", fileCount: 1 });
+    });
+  });
+
+  it("searches visible paths and text content while hiding workspace internals", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "docs"), { recursive: true });
+      await writeFile(join(ctx.root, "docs", "report.txt"), "I ate 10 apples\nNot pears\n");
+      await writeFile(join(ctx.root, "docs", "apples.csv"), "name,count\napple,10\n");
+      await mkdir(join(ctx.root, ".dohc", "history"), { recursive: true });
+      await writeFile(join(ctx.root, ".dohc", "history", "secret.txt"), "10 apples hidden\n");
+      await mkdir(join(ctx.root, ".git"), { recursive: true });
+      await writeFile(join(ctx.root, ".git", "config"), "10 apples hidden\n");
+      await mkdir(join(ctx.root, "node_modules", "pkg"), { recursive: true });
+      await writeFile(join(ctx.root, "node_modules", "pkg", "index.js"), "10 apples hidden\n");
+
+      const result = await searchWorkspaceFiles(ctx, { query: "apples" });
+      expect(result).toMatchObject({ ok: true, query: "apples", mode: "both" });
+      if (!result.ok) return;
+
+      expect(result.matches).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "content",
+            path: "docs/report.txt",
+            line: 1,
+            column: 10,
+            preview: "I ate 10 apples",
+          }),
+          expect.objectContaining({
+            type: "path",
+            path: "docs/apples.csv",
+            preview: "docs/apples.csv",
+          }),
+        ]),
+      );
+      expect(result.matches.map((match) => match.path)).not.toContain(".dohc/history/secret.txt");
+      expect(result.matches.map((match) => match.path)).not.toContain(".git/config");
+      expect(result.matches.map((match) => match.path)).not.toContain("node_modules/pkg/index.js");
+    });
+  });
+
+  it("supports bounded regex search and reports skipped large or binary files", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "notes.txt"), "One apple\nTwo apples\n");
+      await writeFile(join(ctx.root, "big.txt"), "apple".repeat(100));
+      await writeFile(join(ctx.root, "image.png"), Buffer.from([0, 1, 2, 3]));
+
+      const regex = await searchWorkspaceFiles(ctx, {
+        query: "two\\s+apples",
+        regex: true,
+      });
+      expect(regex).toMatchObject({
+        ok: true,
+        matches: [
+          expect.objectContaining({
+            type: "content",
+            path: "notes.txt",
+            line: 2,
+            column: 1,
+          }),
+        ],
+      });
+
+      const bounded = await searchWorkspaceFiles(ctx, {
+        query: "apple",
+        mode: "content",
+        maxResults: 1,
+      });
+      expect(bounded).toMatchObject({ ok: true, matchCount: 1, limitHit: true });
+
+      const skipped = await searchWorkspaceFiles(ctx, {
+        query: "apple",
+        mode: "content",
+        maxFileBytes: 10,
+      });
+      expect(skipped).toMatchObject({ ok: true });
+      if (skipped.ok) {
+        expect(skipped.skipped).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ path: "big.txt", reason: expect.stringContaining("maxFileBytes") }),
+            expect.objectContaining({ path: "image.png", reason: expect.stringContaining("binary") }),
+          ]),
+        );
+      }
     });
   });
 

@@ -50,6 +50,10 @@ const MCP_AUTHOR: ChangeAuthor = {
 };
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
 const HARD_READ_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_SEARCH_MAX_RESULTS = 100;
+const HARD_SEARCH_MAX_RESULTS = 1000;
+const DEFAULT_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const SEARCH_PREVIEW_CHARS = 200;
 
 // Is `absolute` REALLY inside `root` after resolving symlinks? Lexical
 // containment (validateUserWritePath) stops ../ and friends, but a symlink that
@@ -191,6 +195,22 @@ async function readJson<T>(path: string): Promise<T | null> {
 // --- workspace filesystem ---------------------------------------------------
 
 type WorkspaceFileKind = "file" | "directory";
+type WorkspaceSearchMode = "content" | "path" | "both";
+type WorkspaceSearchMatch =
+  | {
+      type: "content";
+      path: string;
+      mediaType: string;
+      line: number;
+      column: number;
+      preview: string;
+    }
+  | {
+      type: "path";
+      path: string;
+      mediaType?: string;
+      preview: string;
+    };
 
 export async function listWorkspaceFiles(
   ctx: ToolContext,
@@ -300,6 +320,235 @@ export async function readWorkspaceFile(
       reason: failureReason(error, `failed to read: ${args.path}`),
     };
   }
+}
+
+function isSearchableText(mediaType: string, path: string, bytes: Buffer): boolean {
+  const lower = `${mediaType} ${path}`.toLowerCase();
+  if (
+    lower.includes("image/") ||
+    lower.includes("audio/") ||
+    lower.includes("video/") ||
+    lower.includes("pdf") ||
+    lower.includes("sqlite") ||
+    lower.endsWith(".db")
+  ) {
+    return false;
+  }
+  return !bytes.includes(0);
+}
+
+function pathMatchesQuery(
+  path: string,
+  query: string,
+  caseSensitive: boolean,
+  regex: RegExp | null,
+): boolean {
+  if (regex) {
+    regex.lastIndex = 0;
+    return regex.test(path);
+  }
+  return caseSensitive
+    ? path.includes(query)
+    : path.toLowerCase().includes(query.toLowerCase());
+}
+
+function fixedStringIndexes(line: string, query: string, caseSensitive: boolean): number[] {
+  const indexes: number[] = [];
+  const haystack = caseSensitive ? line : line.toLowerCase();
+  const needle = caseSensitive ? query : query.toLowerCase();
+  for (
+    let index = haystack.indexOf(needle);
+    index !== -1;
+    index = haystack.indexOf(needle, index + Math.max(1, needle.length))
+  ) {
+    indexes.push(index);
+  }
+  return indexes;
+}
+
+function regexIndexes(line: string, regex: RegExp): number[] {
+  const indexes: number[] = [];
+  regex.lastIndex = 0;
+  for (;;) {
+    const match = regex.exec(line);
+    if (!match) break;
+    indexes.push(match.index);
+    if (match[0].length === 0) regex.lastIndex += 1;
+  }
+  return indexes;
+}
+
+function previewLine(line: string, matchIndex: number): string {
+  if (line.length <= SEARCH_PREVIEW_CHARS) return line;
+  const start = Math.max(0, matchIndex - 60);
+  const end = Math.min(line.length, start + SEARCH_PREVIEW_CHARS);
+  return `${start > 0 ? "..." : ""}${line.slice(start, end)}${end < line.length ? "..." : ""}`;
+}
+
+export async function searchWorkspaceFiles(
+  ctx: ToolContext,
+  args: {
+    query: string;
+    path?: string;
+    mode?: WorkspaceSearchMode;
+    caseSensitive?: boolean;
+    regex?: boolean;
+    maxResults?: number;
+    maxFileBytes?: number;
+  },
+): Promise<
+  | {
+      ok: true;
+      query: string;
+      root: string;
+      mode: WorkspaceSearchMode;
+      matches: WorkspaceSearchMatch[];
+      matchCount: number;
+      limitHit: boolean;
+      skipped: Array<{ path: string; reason: string }>;
+    }
+  | { ok: false; reason: string }
+> {
+  if (args.query.length === 0) {
+    return { ok: false as const, reason: "query must not be empty" };
+  }
+  const root =
+    args.path && args.path.trim().length > 0
+      ? await safeResolve(ctx, args.path)
+      : { ok: true as const, absolute: ctx.root, normalized: "" };
+  if (!root.ok) return { ok: false as const, reason: root.reason };
+
+  let regex: RegExp | null = null;
+  if (args.regex) {
+    try {
+      regex = new RegExp(args.query, `g${args.caseSensitive ? "" : "i"}`);
+    } catch (error) {
+      return { ok: false as const, reason: failureReason(error, "invalid regex") };
+    }
+  }
+
+  const mode = args.mode ?? "both";
+  const caseSensitive = args.caseSensitive ?? false;
+  const maxResults = Math.min(
+    HARD_SEARCH_MAX_RESULTS,
+    Math.max(1, Math.floor(args.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS)),
+  );
+  const maxFileBytes = Math.min(
+    HARD_READ_MAX_BYTES,
+    Math.max(1, Math.floor(args.maxFileBytes ?? DEFAULT_SEARCH_MAX_FILE_BYTES)),
+  );
+  const matches: WorkspaceSearchMatch[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+  let limitHit = false;
+
+  function pushMatch(match: WorkspaceSearchMatch): boolean {
+    if (matches.length >= maxResults) {
+      limitHit = true;
+      return false;
+    }
+    matches.push(match);
+    if (matches.length >= maxResults) {
+      limitHit = true;
+      return false;
+    }
+    return true;
+  }
+
+  async function searchFile(absolute: string, relativePath: string): Promise<boolean> {
+    const info = await stat(absolute);
+    const mediaType = mediaTypeForPath(relativePath) ?? "application/octet-stream";
+
+    if (mode !== "content" && pathMatchesQuery(relativePath, args.query, caseSensitive, regex)) {
+      if (!pushMatch({ type: "path", path: relativePath, mediaType, preview: relativePath })) {
+        return false;
+      }
+    }
+
+    if (mode === "path") return true;
+    if (info.size > maxFileBytes) {
+      skipped.push({ path: relativePath, reason: `file exceeds maxFileBytes (${info.size})` });
+      return true;
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(absolute);
+    } catch (error) {
+      skipped.push({ path: relativePath, reason: failureReason(error, "read failed") });
+      return true;
+    }
+    if (!isSearchableText(mediaType, relativePath, bytes)) {
+      skipped.push({ path: relativePath, reason: "binary or unsupported text encoding" });
+      return true;
+    }
+
+    const lines = bytes.toString("utf8").split(/\r?\n/);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const line = lines[lineIndex] ?? "";
+      const indexes = regex
+        ? regexIndexes(line, regex)
+        : fixedStringIndexes(line, args.query, caseSensitive);
+      for (const matchIndex of indexes) {
+        if (
+          !pushMatch({
+            type: "content",
+            path: relativePath,
+            mediaType,
+            line: lineIndex + 1,
+            column: matchIndex + 1,
+            preview: previewLine(line, matchIndex),
+          })
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  async function walk(absolute: string, prefix: string): Promise<boolean> {
+    const info = await lstat(absolute).catch(() => null);
+    if (!info) {
+      skipped.push({ path: prefix || ".", reason: "path not found" });
+      return true;
+    }
+    if (info.isSymbolicLink()) return true;
+    if (info.isFile()) return searchFile(absolute, prefix);
+    if (!info.isDirectory()) {
+      skipped.push({ path: prefix || ".", reason: "not a file or directory" });
+      return true;
+    }
+
+    const dirents = await readdir(absolute, { withFileTypes: true }).catch((error: unknown) => {
+      skipped.push({ path: prefix || ".", reason: failureReason(error, "directory read failed") });
+      return null;
+    });
+    if (!dirents) return true;
+    for (const dirent of dirents) {
+      const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+      if (hasIgnoredSegment(rel) || dirent.isSymbolicLink()) continue;
+      const child = join(absolute, dirent.name);
+      if (!(await walk(child, rel))) return false;
+    }
+    return true;
+  }
+
+  try {
+    await walk(root.absolute, root.normalized);
+  } catch (error) {
+    return { ok: false as const, reason: failureReason(error, "search failed") };
+  }
+
+  return {
+    ok: true as const,
+    query: args.query,
+    root: root.normalized,
+    mode,
+    matches,
+    matchCount: matches.length,
+    limitHit,
+    skipped,
+  };
 }
 
 export async function writeWorkspaceFile(

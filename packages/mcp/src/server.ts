@@ -24,6 +24,7 @@ import {
   readChange,
   readWorkspaceFile,
   resolveConflict,
+  searchWorkspaceFiles,
   share,
   syncCloud,
   syncNow,
@@ -131,6 +132,24 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await readWorkspaceFile(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_search_files",
+    {
+      description:
+        "Search visible workspace file paths and text contents. Hidden dohc internals, .git, node_modules, symlinks, oversized files, and binary files are skipped.",
+      inputSchema: {
+        query: z.string().min(1).max(4096),
+        path: z.string().max(4096).optional(),
+        mode: z.enum(["content", "path", "both"]).optional(),
+        caseSensitive: z.boolean().optional(),
+        regex: z.boolean().optional(),
+        maxResults: z.number().int().positive().max(1000).optional(),
+        maxFileBytes: z.number().int().positive().max(10 * 1024 * 1024).optional(),
+      },
+    },
+    async (args) => text(await searchWorkspaceFiles(ctx, args)),
   );
 
   server.registerTool(
