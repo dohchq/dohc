@@ -154,4 +154,21 @@ describe("notice center", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
+
+  it("closes the notice popover on outside click while preserving inside clicks", async () => {
+    renderBar({
+      syncStatus: {
+        state: "cloud-disconnected",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+      },
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("notice-center"));
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+
+    await userEvent.click(document.body);
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
 });

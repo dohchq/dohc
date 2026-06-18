@@ -1,19 +1,23 @@
 import type {
   ChangeAuthor,
   ChangeProvenance,
+  ChangeSet,
+  FileChangeSnapshot,
   WatcherEvent,
   WatcherEventBatch,
 } from "@dohc/workspace-core";
 import {
   collapseSqliteSidecars,
+  isTextMediaType,
+  mediaTypeForPath,
   shouldIgnoreWatchPath,
   watchWorkspaceEvents,
 } from "@dohc/workspace-fs";
 import { createChangeSetStore, humanSummary } from "@dohc/workspace-history";
 import { batchToChangeSet } from "@dohc/workspace-sync";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { desktopMarks } from "../performance/desktopMarks";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
@@ -21,6 +25,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 // active (an MCP-driven turn the user started), its writes are attributed to
 // the agent instead — see ActiveAgentRun below.
 const LOCAL_USER: ChangeAuthor = { kind: "user", userId: "local" };
+const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
 
 // The active-run fact a batch attributes to: who the agent is and which run it
 // belongs to. workspaceActivity owns the slot; the watcher only reads it.
@@ -36,6 +41,124 @@ async function sha256OrUndefined(absolute: string): Promise<string | undefined> 
   } catch {
     return undefined;
   }
+}
+
+type HistorySnapshotEntry = {
+  mediaType: string;
+  snapshot: FileChangeSnapshot;
+};
+
+function sha256Bytes(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function readHistorySnapshotEntry(
+  rootPath: string,
+  path: string,
+): Promise<HistorySnapshotEntry | null> {
+  const mediaType = mediaTypeForPath(path);
+  const absolute = join(rootPath, path);
+  try {
+    const info = await stat(absolute);
+    if (!info.isFile()) {
+      return {
+        mediaType,
+        snapshot: {
+          sizeBytes: info.size,
+          unavailableReason: "unreadable",
+        },
+      };
+    }
+    if (!isTextMediaType(mediaType, path)) {
+      return {
+        mediaType,
+        snapshot: {
+          sizeBytes: info.size,
+          unavailableReason: "binary",
+        },
+      };
+    }
+    if (info.size > MAX_HISTORY_TEXT_SNAPSHOT_BYTES) {
+      return {
+        mediaType,
+        snapshot: {
+          sizeBytes: info.size,
+          unavailableReason: "too-large",
+          truncated: true,
+        },
+      };
+    }
+    const bytes = await readFile(absolute);
+    return {
+      mediaType,
+      snapshot: {
+        sizeBytes: bytes.length,
+        sha256: sha256Bytes(bytes),
+        text: bytes.toString("utf8"),
+        truncated: false,
+      },
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    return {
+      mediaType,
+      snapshot: { unavailableReason: "unreadable" },
+    };
+  }
+}
+
+async function seedHistorySnapshotCache(
+  rootPath: string,
+): Promise<Map<string, HistorySnapshotEntry>> {
+  const cache = new Map<string, HistorySnapshotEntry>();
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = join(dir, entry.name);
+      const path = relative(rootPath, absolute).replace(/\\/g, "/");
+      if (!path || shouldIgnoreWatchPath(path)) continue;
+      if (entry.isDirectory()) {
+        await walk(absolute);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const snapshot = await readHistorySnapshotEntry(rootPath, path);
+      if (snapshot) cache.set(path, snapshot);
+    }
+  }
+
+  await walk(rootPath);
+  return cache;
+}
+
+async function attachHistorySnapshots(
+  rootPath: string,
+  cache: Map<string, HistorySnapshotEntry>,
+  set: ChangeSet,
+): Promise<ChangeSet> {
+  const files = await Promise.all(
+    set.files.map(async (file) => {
+      const before = cache.get(file.path) ?? null;
+      const after =
+        file.operation === "delete"
+          ? null
+          : await readHistorySnapshotEntry(rootPath, file.path);
+
+      if (after) cache.set(file.path, after);
+      else cache.delete(file.path);
+
+      return {
+        ...file,
+        mediaType: after?.mediaType ?? before?.mediaType ?? mediaTypeForPath(file.path),
+        before: before?.snapshot ?? null,
+        after: after?.snapshot ?? null,
+      };
+    }),
+  );
+
+  return { ...set, files };
 }
 
 // Turn the watcher's settled changed paths into WatcherEvents. Operation is
@@ -94,6 +217,7 @@ export function startWorkspaceWatch(
 ): WorkspaceWatchHandle {
   const store = createChangeSetStore(workspace.rootPath);
   const now = options.now ?? (() => Date.now());
+  let snapshotCache = new Map<string, HistorySnapshotEntry>();
 
   async function recordBatch(paths: string[]): Promise<void> {
     // Defense in depth: never record changes to .dohc/** (our own history
@@ -125,7 +249,11 @@ export function startWorkspaceWatch(
     const provenance: ChangeProvenance | undefined = run
       ? { source: "agent-run", agentRunId: run.agentRunId }
       : undefined;
-    const changeSet = batchToChangeSet(batch, { author, ...(provenance ? { provenance } : {}) });
+    const changeSet = await attachHistorySnapshots(
+      workspace.rootPath,
+      snapshotCache,
+      batchToChangeSet(batch, { author, ...(provenance ? { provenance } : {}) }),
+    );
     await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
     desktopMarks.measureSince("sync-batch", "sync-batch-start");
     desktopMarks.mark("sync-batch-complete");
@@ -152,8 +280,12 @@ export function startWorkspaceWatch(
     },
   );
 
+  const ready = watcher.ready.then(async () => {
+    snapshotCache = await seedHistorySnapshotCache(workspace.rootPath);
+  });
+
   return {
-    ready: watcher.ready,
+    ready,
     stop: async () => {
       watcher.stop();
       await recording;

@@ -35,7 +35,7 @@ import {
   type PendingTreeChange,
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
-import { isGraphTabPath } from "./workbenchState";
+import { isGraphTabPath, isHistoryTabPath, isVirtualTabPath } from "./workbenchState";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -131,11 +131,13 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 }
 
 function editorTitle(path: string): string {
-  return isGraphTabPath(path) ? "Graph" : leafOf(path);
+  if (isGraphTabPath(path)) return "Graph";
+  if (isHistoryTabPath(path)) return "History";
+  return leafOf(path);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
-  if (isGraphTabPath(props.path)) {
+  if (isVirtualTabPath(props.path)) {
     return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   }
   return <FileKindIcon kind={props.kind ?? "file"} />;
@@ -420,7 +422,7 @@ export function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-      (props.activeTab && !isGraphTabPath(props.activeTab) ? props.activeTab : null);
+    (props.activeTab && !isVirtualTabPath(props.activeTab) ? props.activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : parentDir(target);
   }, [focusedPath, isFolderPath, props.activeTab, selection]);

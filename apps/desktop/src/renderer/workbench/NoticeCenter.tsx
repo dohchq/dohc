@@ -7,7 +7,7 @@ import {
   Download,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
@@ -39,6 +39,8 @@ export function NoticeCenter(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const centerRef = useRef<HTMLDivElement | null>(null);
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(
     () =>
@@ -47,6 +49,21 @@ export function NoticeCenter(props: {
       }),
     [],
   );
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (centerRef.current?.contains(target)) return;
+      if (toggleRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
 
   const notices = useMemo<Notice[]>(() => {
     const next: Notice[] = [];
@@ -129,6 +146,7 @@ export function NoticeCenter(props: {
 
       {open ? (
         <div
+          ref={centerRef}
           data-testid="notice-center"
           role="dialog"
           aria-label="Notices"
@@ -198,6 +216,7 @@ export function NoticeCenter(props: {
       ) : null}
 
       <button
+        ref={toggleRef}
         type="button"
         data-testid="notice-center-toggle"
         aria-label={count > 0 ? `Notices (${count})` : "Notices"}

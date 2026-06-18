@@ -1,14 +1,17 @@
 import { ChevronDown, X } from "lucide-react";
 import { memo, useRef, useState } from "react";
-import { isGraphTabPath } from "./workbenchState";
+import { isGraphTabPath, isHistoryTabPath } from "./workbenchState";
 
 function fileName(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
+  if (isHistoryTabPath(path)) return "History";
   return path.split("/").pop() ?? path;
 }
 
 function tabTitle(path: string): string {
-  return isGraphTabPath(path) ? "Workspace graph" : path;
+  if (isGraphTabPath(path)) return "Workspace graph";
+  if (isHistoryTabPath(path)) return "Workspace history";
+  return path;
 }
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)

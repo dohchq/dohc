@@ -11,6 +11,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ChangeSetDetailRecord,
+  ChangeSetFileRecord,
   ChangeSetRecord,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
@@ -70,6 +72,11 @@ function changeSet(id: string, recordedAtMs: number, humanSummary: string): Chan
 function makeBridge(
   uiStatePromise: Promise<WorkspaceUiState | null>,
   initialChangeSets: ChangeSetRecord[] = [],
+  filesByChangeSetId: Record<string, ChangeSetFileRecord[]> = {},
+  detailsByChangeSetId: Record<
+    string,
+    Partial<Pick<ChangeSetDetailRecord, "boundaryCrossings" | "provenance">>
+  > = {},
 ) {
   let changeSets = initialChangeSets;
   let activityCallback: (() => void) | null = null;
@@ -94,6 +101,30 @@ function makeBridge(
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     listChangeSets: vi.fn(async () => ({ changeSets })),
+    readChangeSet: vi.fn(async (payload: { changeSetId: string }) => {
+      const record = changeSets.find((change) => change.id === payload.changeSetId);
+      const details = detailsByChangeSetId[payload.changeSetId];
+      const files = filesByChangeSetId[payload.changeSetId] ?? [
+        {
+          path: "notes/today.md",
+          operation: "write" as const,
+          mediaType: "text/markdown",
+          before: { text: "# Today\nBefore\n", truncated: false },
+          after: { text: "# Today\nAfter\n", truncated: false },
+        },
+      ];
+      return {
+        changeSet: record
+          ? {
+            ...record,
+            files,
+              boundaryCrossings:
+                details?.boundaryCrossings ?? record.boundaryCrossingPreview ?? [],
+              ...(details?.provenance ? { provenance: details.provenance } : {}),
+            }
+          : null,
+      };
+    }),
     readCatchUpSummary: vi.fn(async () => {
       const latest = changeSets[changeSets.length - 1] ?? null;
       return {
@@ -518,6 +549,34 @@ describe("graph view", () => {
   });
 });
 
+describe("history page", () => {
+  it("opens history as a full editor tab from the history side panel", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-history-tab", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("history-open-tab"));
+
+    const historyTab = await screen.findByTestId("tab-dohc://history");
+    expect(historyTab.dataset.active).toBe("true");
+    const page = await screen.findByTestId("history-page");
+    expect(within(page).getAllByText("ice edited notes/today.md").length).toBeGreaterThan(
+      0,
+    );
+
+    await user.click(within(page).getByRole("button", { name: /notes\/today\.md/i }));
+    expect(await within(page).findByTestId("history-change-details")).toBeTruthy();
+    expect(bridge.readChangeSet).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+      changeSetId: "change-history-tab",
+    });
+  });
+});
+
 describe("open editors", () => {
   it("highlights the full open editors and files header bars on hover", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -885,6 +944,555 @@ describe("workspace management", () => {
     expect(bridge.listWorkspaceInvites).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
     });
+  });
+});
+
+describe("history details", () => {
+  it("groups history rows by day and flags review-required changes before expansion", async () => {
+    const dayOne = new Date(2026, 0, 2, 12, 0).getTime();
+    const dayTwo = new Date(2026, 0, 1, 12, 0).getTime();
+    const bridge = makeBridge(Promise.resolve(null), [
+      {
+        ...changeSet("review-change", dayOne, "ice shared notes/public.md"),
+        reviewRequired: true,
+        boundaryCrossingCount: 1,
+        boundaryCrossingPreview: ["private-to-shared"],
+      },
+      changeSet("ordinary-change", dayOne - 60_000, "ice edited notes/today.md"),
+      changeSet("older-change", dayTwo, "ice edited notes/yesterday.md"),
+    ]);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    const headings = await historyRail.findAllByTestId("history-day-heading");
+    expect(headings.map((heading) => heading.getAttribute("dateTime"))).toEqual([
+      "2026-01-02",
+      "2026-01-01",
+    ]);
+    expect(historyRail.getByTestId("history-review-badge").textContent).toBe(
+      "Needs review",
+    );
+    expect(historyRail.getByTestId("history-review-badge").getAttribute("title")).toBe(
+      "Private to shared",
+    );
+    expect(historyRail.getByTestId("history-review-reason-preview").textContent).toBe(
+      "Private to shared",
+    );
+
+    await user.click(await historyRail.findByRole("button", { name: /public\.md/i }));
+    expect((await historyRail.findByTestId("history-review-reasons")).textContent).toContain(
+      "Private to shared",
+    );
+  });
+
+  it("filters history by search text and review-required changes", async () => {
+    const bridge = makeBridge(Promise.resolve(null), [
+      {
+        ...changeSet("review", 3000, "ice shared notes/public.md"),
+        fileCount: 2,
+        reviewRequired: true,
+        boundaryCrossingCount: 1,
+        boundaryCrossingPreview: ["private-to-shared"],
+        lineStats: {
+          added: 1,
+          removed: 1,
+          changedFileCount: 1,
+          unavailableFileCount: 1,
+        },
+      },
+      {
+        ...changeSet("apples", 2000, "ice edited notes/apples.md"),
+        lineStats: {
+          added: 10,
+          removed: 0,
+          changedFileCount: 1,
+          unavailableFileCount: 0,
+        },
+      },
+      {
+        ...changeSet("budget", 1000, "ice edited finance/budget.csv"),
+        lineStats: {
+          added: 0,
+          removed: 4,
+          changedFileCount: 1,
+          unavailableFileCount: 0,
+        },
+      },
+    ]);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("3/3");
+    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("3");
+    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("4");
+    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
+      "+11 -5 · 1 not diffed",
+    );
+
+    await user.type(historyRail.getByTestId("history-search-input"), "apples");
+
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/3");
+    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("0");
+    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
+      "+10 -0",
+    );
+    expect(
+      within(historyRail.getByTestId("history-list")).getByText(
+        "ice edited notes/apples.md",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(historyRail.getByTestId("history-list")).queryByText(
+        "ice edited finance/budget.csv",
+      ),
+    ).toBeNull();
+
+    await user.click(historyRail.getByTestId("history-search-clear"));
+    await user.click(historyRail.getByTestId("history-review-filter"));
+
+    expect(
+      historyRail.getByTestId("history-review-filter").getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/3");
+    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("2");
+    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
+      "+1 -1 · 1 not diffed",
+    );
+    expect(
+      within(historyRail.getByTestId("history-list")).getByText(
+        "ice shared notes/public.md",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(historyRail.getByTestId("history-list")).queryByText(
+        "ice edited notes/apples.md",
+      ),
+    ).toBeNull();
+  });
+
+  it("filters history by people or agent authors", async () => {
+    const bridge = makeBridge(Promise.resolve(null), [
+      {
+        ...changeSet("agent-plan", 3000, "codex updated docs/plan.md"),
+        author: { kind: "agent", agentId: "codex", onBehalfOf: "ice" },
+        fileCount: 2,
+        lineStats: {
+          added: 8,
+          removed: 2,
+          changedFileCount: 2,
+          unavailableFileCount: 0,
+        },
+      },
+      {
+        ...changeSet("user-note", 2000, "ice edited notes/today.md"),
+        lineStats: {
+          added: 1,
+          removed: 0,
+          changedFileCount: 1,
+          unavailableFileCount: 0,
+        },
+      },
+    ]);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("2/2");
+
+    await user.click(historyRail.getByTestId("history-author-filter-agent"));
+
+    expect(
+      historyRail.getByTestId("history-author-filter-agent").getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/2");
+    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
+    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("2");
+    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe("+8 -2");
+    expect(
+      within(historyRail.getByTestId("history-list")).getByText(
+        "codex updated docs/plan.md",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(historyRail.getByTestId("history-list")).queryByText(
+        "ice edited notes/today.md",
+      ),
+    ).toBeNull();
+
+    await user.click(historyRail.getByTestId("history-author-filter-user"));
+
+    expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/2");
+    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe("+1 -0");
+    expect(
+      within(historyRail.getByTestId("history-list")).getByText(
+        "ice edited notes/today.md",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(historyRail.getByTestId("history-list")).queryByText(
+        "codex updated docs/plan.md",
+      ),
+    ).toBeNull();
+  });
+
+  it("shows a bounded touched-file preview on collapsed history rows", async () => {
+    const bridge = makeBridge(Promise.resolve(null), [
+      {
+        ...changeSet("many-files", 2000, "ice edited project files"),
+        fileCount: 5,
+        filePreview: [
+          { path: "notes/one.md", operation: "write" },
+          { path: "notes/two.md", operation: "write" },
+          { path: "data/old.csv", operation: "delete" },
+          { path: "docs/renamed.md", operation: "rename" },
+        ],
+        lineStats: {
+          added: 12,
+          removed: 5,
+          changedFileCount: 3,
+          unavailableFileCount: 1,
+        },
+      },
+    ]);
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    const preview = await historyRail.findByTestId("history-file-preview");
+
+    expect(preview.textContent).toContain("notes/one.md");
+    expect(preview.textContent).toContain("data/old.csv");
+    expect(preview.textContent).toContain("docs/renamed.md");
+    expect(preview.textContent).toContain("+1");
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
+      "+12 -5 · 1 not diffed",
+    );
+  });
+
+  it("expands a change set into touched files and a readable text diff", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-1", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+
+    expect(historyRail.getByTestId("history-recorded-at").getAttribute("dateTime")).toBe(
+      new Date(2000).toISOString(),
+    );
+    await waitFor(() =>
+      expect(bridge.readChangeSet).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "change-1",
+      }),
+    );
+    expect(await historyRail.findByTestId("history-change-details")).toBeTruthy();
+    expect(
+      (await historyRail.findByTestId("history-detail-total-counts")).textContent,
+    ).toBe("+1 -1");
+    expect(historyRail.getByTestId("history-detail-summary").textContent).toContain(
+      "1 restorable file",
+    );
+    expect(historyRail.getByText("notes/today.md")).toBeTruthy();
+    expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
+      "+1 -1",
+    );
+
+    const diff = await historyRail.findByTestId("history-file-diff");
+    expect(diff.textContent).toContain("-Before");
+    expect(diff.textContent).toContain("+After");
+  });
+
+  it("explains why an agent change happened from provenance", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [
+        {
+          ...changeSet("agent-provenance", 2000, "codex updated docs/plan.md"),
+          kind: "agent-run",
+          author: { kind: "agent", agentId: "codex", onBehalfOf: "ice" },
+        },
+      ],
+      {
+        "agent-provenance": [
+          {
+            path: "docs/plan.md",
+            operation: "write",
+            mediaType: "text/markdown",
+            before: { text: "old plan\n", truncated: false },
+            after: { text: "new plan\n", truncated: false },
+          },
+        ],
+      },
+      {
+        "agent-provenance": {
+          provenance: {
+            source: "agent-run",
+            agentRunId: "run-123",
+            prompt: "Make the launch plan easier to review.",
+          },
+        },
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /docs\/plan\.md/i }));
+
+    expect(await historyRail.findByTestId("history-provenance")).toBeTruthy();
+    expect(historyRail.getByTestId("history-provenance-title").textContent).toBe(
+      "Agent run",
+    );
+    expect(historyRail.getByTestId("history-provenance-detail").textContent).toBe(
+      "Make the launch plan easier to review.",
+    );
+  });
+
+  it("keeps separated edits as separated diff hunks", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-multi", 2000, "ice edited notes/today.md")],
+      {
+        "change-multi": [
+          {
+            path: "notes/today.md",
+            operation: "write",
+            mediaType: "text/markdown",
+            before: {
+              text: "title\nold apples\nkept middle\nold oranges\nclosing\n",
+              truncated: false,
+            },
+            after: {
+              text: "title\nnew apples\nkept middle\nnew oranges\nclosing\n",
+              truncated: false,
+            },
+          },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+
+    expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
+      "+2 -2",
+    );
+    const diff = await historyRail.findByTestId("history-file-diff");
+    const removedLines = [...diff.querySelectorAll('[data-kind="removed"]')].map(
+      (line) => line.textContent,
+    );
+    const addedLines = [...diff.querySelectorAll('[data-kind="added"]')].map(
+      (line) => line.textContent,
+    );
+    const contextLines = [...diff.querySelectorAll('[data-kind="context"]')].map(
+      (line) => line.textContent,
+    );
+
+    expect(removedLines.join("\n")).toContain("old apples");
+    expect(removedLines.join("\n")).toContain("old oranges");
+    expect(addedLines.join("\n")).toContain("new apples");
+    expect(addedLines.join("\n")).toContain("new oranges");
+    expect(contextLines.join("\n")).toContain("kept middle");
+  });
+
+  it("opens and closes a full compare view for captured text changes", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-compare", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+    await user.click(await historyRail.findByTestId("history-compare-open"));
+
+    const dialog = await screen.findByTestId("history-compare-dialog");
+    expect(within(dialog).getByText("notes/today.md")).toBeTruthy();
+    expect(within(dialog).getByTestId("history-compare-counts").textContent).toBe(
+      "+1 -1",
+    );
+    expect(within(dialog).getByTestId("history-compare-before").textContent).toContain(
+      "Before",
+    );
+    expect(within(dialog).getByTestId("history-compare-after").textContent).toContain(
+      "After",
+    );
+    expect(within(dialog).getByTestId("history-compare-diff").textContent).toContain(
+      "-Before",
+    );
+    expect(within(dialog).getByTestId("history-compare-diff").textContent).toContain(
+      "+After",
+    );
+
+    await user.click(within(dialog).getByTestId("history-compare-close"));
+    await waitFor(() => expect(screen.queryByTestId("history-compare-dialog")).toBeNull());
+  });
+
+  it("opens the live file from the compare dialog and closes the dialog", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-compare-open", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+    await user.click(await historyRail.findByTestId("history-compare-open"));
+
+    const dialog = await screen.findByTestId("history-compare-dialog");
+    await user.click(within(dialog).getByTestId("history-compare-open-file"));
+
+    await waitFor(() => expect(screen.queryByTestId("history-compare-dialog")).toBeNull());
+    expect((await screen.findByTestId("tab-notes/today.md")).dataset.active).toBe(
+      "true",
+    );
+  });
+
+  it("opens a touched file from the expanded history details", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-open", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+    await user.click(await historyRail.findByTestId("history-open-file"));
+
+    const tab = await screen.findByTestId("tab-notes/today.md");
+    expect(tab.dataset.active).toBe("true");
+  });
+
+  it("does not offer to open a deleted history file", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-delete", 2000, "ice deleted notes/today.md")],
+      {
+        "change-delete": [
+          {
+            path: "notes/today.md",
+            operation: "delete",
+            mediaType: "text/markdown",
+            before: { text: "# Today\nGone\n", truncated: false },
+            after: { unavailableReason: "missing" },
+          },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+
+    expect(await historyRail.findByTestId("history-change-details")).toBeTruthy();
+    expect(historyRail.queryByTestId("history-open-file")).toBeNull();
+  });
+
+  it("restores every restorable text file in an expanded change", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-restore-all", 2000, "ice edited docs")],
+      {
+        "change-restore-all": [
+          {
+            path: "docs/a.md",
+            operation: "write",
+            mediaType: "text/markdown",
+            before: { text: "before a", truncated: false },
+            after: { text: "after a", truncated: false },
+          },
+          {
+            path: "docs/b.txt",
+            operation: "write",
+            mediaType: "text/plain",
+            before: { text: "before b", truncated: false },
+            after: { text: "after b", truncated: false },
+          },
+          {
+            path: "docs/data.bin",
+            operation: "write",
+            mediaType: "application/octet-stream",
+            before: { unavailableReason: "binary" },
+            after: { unavailableReason: "binary" },
+          },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /ice edited docs/i }));
+    await user.click(await historyRail.findByTestId("history-restore-all"));
+
+    expect((await historyRail.findByTestId("history-restore-all-state")).textContent).toContain(
+      "Restore previous text for 2 files",
+    );
+    await user.click(historyRail.getByTestId("history-restore-all-confirm"));
+
+    await waitFor(() => {
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "docs/a.md",
+        text: "before a",
+      });
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "docs/b.txt",
+        text: "before b",
+      });
+    });
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalledWith(
+      expect.objectContaining({ relativePath: "docs/data.bin" }),
+    );
+    expect(historyRail.getByTestId("history-restore-all-state").textContent).toContain(
+      "Restored previous text for 2 files",
+    );
+  });
+
+  it("restores captured previous text from an expanded history file", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-restore", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
+    await user.click(await historyRail.findByTestId("history-restore-previous"));
+    expect(
+      (await historyRail.findByTestId("history-restore-state")).textContent,
+    ).toContain("Restore the saved previous text");
+
+    await user.click(historyRail.getByTestId("history-restore-confirm"));
+
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "notes/today.md",
+        text: "# Today\nBefore\n",
+      }),
+    );
+    expect(
+      (await historyRail.findByTestId("history-restore-state")).textContent,
+    ).toContain("Previous text restored");
   });
 });
 

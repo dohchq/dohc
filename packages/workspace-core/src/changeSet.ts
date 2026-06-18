@@ -21,6 +21,17 @@ export type ChangeAuthor =
 export interface FileChange {
   path: string;
   operation: "write" | "delete" | "rename";
+  mediaType?: string;
+  before?: FileChangeSnapshot | null;
+  after?: FileChangeSnapshot | null;
+}
+
+export interface FileChangeSnapshot {
+  sha256?: string;
+  sizeBytes?: number;
+  text?: string;
+  truncated?: boolean;
+  unavailableReason?: "missing" | "binary" | "too-large" | "unreadable";
 }
 
 // Where a change came from — a prompt, an import source, an agent run — so

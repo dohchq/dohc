@@ -8,6 +8,9 @@ import {
   HISTORY_DEFAULT_WIDTH,
   HISTORY_MAX_WIDTH,
   HISTORY_MIN_WIDTH,
+  HISTORY_TAB_PATH,
+  isHistoryTabPath,
+  isVirtualTabPath,
   moveTab,
   openTab,
   parseUiState,
@@ -70,6 +73,12 @@ describe("tabs", () => {
     // The oldest NON-active tab gave way instead.
     expect(state.tabs.some((tab) => tab.path === "f1.md")).toBe(false);
     expect(state.activeTab).toBe("new.md");
+  });
+
+  it("recognizes history as a virtual workbench tab", () => {
+    expect(isHistoryTabPath(HISTORY_TAB_PATH)).toBe(true);
+    expect(isVirtualTabPath(HISTORY_TAB_PATH)).toBe(true);
+    expect(isVirtualTabPath("notes/today.md")).toBe(false);
   });
 
   it("activateTab only activates an OPEN tab", () => {

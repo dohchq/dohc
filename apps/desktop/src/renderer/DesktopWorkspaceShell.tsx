@@ -1,14 +1,20 @@
 import {
   Bot,
   CheckCheck,
+  ChevronRight,
   Cloud,
+  ExternalLink,
+  FileText,
   History,
   Maximize2,
   PanelRight,
   RefreshCw,
+  Search,
   User,
+  X,
 } from "lucide-react";
 import {
+  Fragment,
   Suspense,
   lazy,
   useCallback,
@@ -19,7 +25,10 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  ChangeSetDetailRecord,
+  ChangeSetFileRecord,
   ChangeSetRecord,
+  FileChangeSnapshot,
   SyncStatusResult,
   WorkbenchMenuCommand,
   WorkspaceFileEntry,
@@ -54,7 +63,10 @@ import {
   clampHistoryWidth,
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
+  HISTORY_TAB_PATH,
   isGraphTabPath,
+  isHistoryTabPath,
+  isVirtualTabPath,
   moveTab,
   openTab,
   parseUiState,
@@ -163,45 +175,1267 @@ function uniqueUntitledTextPath(
   return `Untitled ${Date.now()}.txt`;
 }
 
+type HistoryDetailState =
+  | { status: "loading" }
+  | { status: "ready"; changeSet: ChangeSetDetailRecord | null }
+  | { status: "error" };
+
+type DiffLine = {
+  kind: "context" | "added" | "removed" | "note";
+  text: string;
+};
+
+type HistoryRestoreState =
+  | { status: "confirm" }
+  | { status: "restoring" }
+  | { status: "restored" }
+  | { status: "error"; message: string };
+
+type HistoryRestoreAllState =
+  | { status: "confirm"; count: number }
+  | { status: "restoring"; count: number }
+  | { status: "restored"; count: number }
+  | { status: "error"; count: number; message: string };
+
+type HistoryCompareSelection = {
+  file: ChangeSetFileRecord;
+};
+
+type HistoryAuthorFilter = "all" | "user" | "agent";
+
+const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
+
+function splitDiffLines(text: string): string[] {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (normalized.length === 0) return [];
+  const lines = normalized.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function buildContiguousDiff(before: string[], after: string[]): DiffLine[] {
+  let prefix = 0;
+  while (
+    prefix < before.length &&
+    prefix < after.length &&
+    before[prefix] === after[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix + prefix < before.length &&
+    suffix + prefix < after.length &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const out: DiffLine[] = [];
+  const contextBefore = before.slice(Math.max(0, prefix - 2), prefix);
+  for (const line of contextBefore) out.push({ kind: "context", text: line });
+
+  const removed = before.slice(prefix, before.length - suffix);
+  const added = after.slice(prefix, after.length - suffix);
+  for (const line of removed) out.push({ kind: "removed", text: line });
+  for (const line of added) out.push({ kind: "added", text: line });
+
+  const contextAfter = after.slice(after.length - suffix, after.length - suffix + 2);
+  for (const line of contextAfter) out.push({ kind: "context", text: line });
+  return out;
+}
+
+function buildLineDiff(before: string[], after: string[]): DiffLine[] {
+  if (before.length === 0) {
+    return after.map((text) => ({ kind: "added", text }));
+  }
+  if (after.length === 0) {
+    return before.map((text) => ({ kind: "removed", text }));
+  }
+
+  const cellCount = (before.length + 1) * (after.length + 1);
+  if (cellCount > HISTORY_LCS_DIFF_CELL_LIMIT) {
+    return buildContiguousDiff(before, after);
+  }
+
+  const columnCount = after.length + 1;
+  const table = new Uint32Array(cellCount);
+  const at = (beforeIndex: number, afterIndex: number) =>
+    beforeIndex * columnCount + afterIndex;
+
+  for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
+    for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
+      if (before[beforeIndex] === after[afterIndex]) {
+        table[at(beforeIndex, afterIndex)] =
+          table[at(beforeIndex + 1, afterIndex + 1)] + 1;
+      } else {
+        table[at(beforeIndex, afterIndex)] = Math.max(
+          table[at(beforeIndex + 1, afterIndex)],
+          table[at(beforeIndex, afterIndex + 1)],
+        );
+      }
+    }
+  }
+
+  const out: DiffLine[] = [];
+  let beforeIndex = 0;
+  let afterIndex = 0;
+  while (beforeIndex < before.length && afterIndex < after.length) {
+    if (before[beforeIndex] === after[afterIndex]) {
+      out.push({ kind: "context", text: before[beforeIndex] });
+      beforeIndex += 1;
+      afterIndex += 1;
+    } else if (
+      table[at(beforeIndex + 1, afterIndex)] >=
+      table[at(beforeIndex, afterIndex + 1)]
+    ) {
+      out.push({ kind: "removed", text: before[beforeIndex] });
+      beforeIndex += 1;
+    } else {
+      out.push({ kind: "added", text: after[afterIndex] });
+      afterIndex += 1;
+    }
+  }
+
+  while (beforeIndex < before.length) {
+    out.push({ kind: "removed", text: before[beforeIndex] });
+    beforeIndex += 1;
+  }
+  while (afterIndex < after.length) {
+    out.push({ kind: "added", text: after[afterIndex] });
+    afterIndex += 1;
+  }
+  return out;
+}
+
+function compactDiffLines(
+  lines: DiffLine[],
+  contextRadius = 2,
+  limit = 80,
+): DiffLine[] {
+  const changedIndexes = lines.flatMap((line, index) =>
+    line.kind === "added" || line.kind === "removed" ? [index] : [],
+  );
+  if (changedIndexes.length === 0) return [{ kind: "context", text: "No text changes" }];
+
+  const keep = new Set<number>();
+  for (const changedIndex of changedIndexes) {
+    for (
+      let index = Math.max(0, changedIndex - contextRadius);
+      index <= Math.min(lines.length - 1, changedIndex + contextRadius);
+      index += 1
+    ) {
+      keep.add(index);
+    }
+  }
+
+  const out: DiffLine[] = [];
+  let hiddenCount = 0;
+  const flushHidden = () => {
+    if (hiddenCount === 0) return;
+    out.push({
+      kind: "note",
+      text: `${hiddenCount} unchanged line${hiddenCount === 1 ? "" : "s"} hidden`,
+    });
+    hiddenCount = 0;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.kind === "context" && !keep.has(index)) {
+      hiddenCount += 1;
+      continue;
+    }
+    flushHidden();
+    out.push(line);
+  }
+  flushHidden();
+
+  if (out.length <= limit) return out;
+  return [
+    ...out.slice(0, limit),
+    {
+      kind: "note",
+      text: `${out.length - limit} more diff line${
+        out.length - limit === 1 ? "" : "s"
+      } hidden`,
+    },
+  ];
+}
+
+function buildDiffPreview(
+  beforeText: string | undefined,
+  afterText: string | undefined,
+  limit = 80,
+): DiffLine[] {
+  const before = splitDiffLines(beforeText ?? "");
+  const after = splitDiffLines(afterText ?? "");
+  if (beforeText === afterText) return [{ kind: "context", text: "No text changes" }];
+  return compactDiffLines(buildLineDiff(before, after), 2, limit);
+}
+
+function changedLineCounts(
+  beforeText: string | undefined,
+  afterText: string | undefined,
+): { added: number; removed: number } | null {
+  if (beforeText === undefined && afterText === undefined) return null;
+  const before = splitDiffLines(beforeText ?? "");
+  const after = splitDiffLines(afterText ?? "");
+  if (beforeText === afterText) return { added: 0, removed: 0 };
+  return buildLineDiff(before, after).reduce(
+    (counts, line) => {
+      if (line.kind === "added") counts.added += 1;
+      if (line.kind === "removed") counts.removed += 1;
+      return counts;
+    },
+    { added: 0, removed: 0 },
+  );
+}
+
+function fileOperationLabel(file: ChangeSetFileRecord): string {
+  if (file.operation === "delete") return "Deleted";
+  if (file.operation === "rename") return "Renamed";
+  if (!file.before && file.after) return "Created";
+  return "Changed";
+}
+
+function historyFilePreviewTone(operation: ChangeSetFileRecord["operation"]): string {
+  if (operation === "delete") return "border-danger/30 bg-danger/5 text-danger";
+  if (operation === "rename") return "border-accent/30 bg-accent/5 text-ink";
+  return "border-line bg-bg text-muted";
+}
+
+function historyLineStatsText(stats: ChangeSetRecord["lineStats"]): string | null {
+  if (!stats) return null;
+  const parts: string[] = [];
+  if (stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0) {
+    parts.push(`+${stats.added} -${stats.removed}`);
+  }
+  if (stats.unavailableFileCount > 0) {
+    parts.push(`${stats.unavailableFileCount} not diffed`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+type HistoryOverviewMetrics = {
+  changeCount: number;
+  fileTouchCount: number;
+  reviewCount: number;
+  added: number;
+  removed: number;
+  unavailableFileCount: number;
+};
+
+function historyOverviewMetrics(changeSets: ChangeSetRecord[]): HistoryOverviewMetrics {
+  return changeSets.reduce<HistoryOverviewMetrics>(
+    (totals, change) => {
+      totals.changeCount += 1;
+      totals.fileTouchCount += change.fileCount;
+      if (change.reviewRequired) totals.reviewCount += 1;
+      if (change.lineStats) {
+        totals.added += change.lineStats.added;
+        totals.removed += change.lineStats.removed;
+        totals.unavailableFileCount += change.lineStats.unavailableFileCount;
+      }
+      return totals;
+    },
+    {
+      changeCount: 0,
+      fileTouchCount: 0,
+      reviewCount: 0,
+      added: 0,
+      removed: 0,
+      unavailableFileCount: 0,
+    },
+  );
+}
+
+function historyOverviewLineText(metrics: HistoryOverviewMetrics): string {
+  const hasKnownLines = metrics.added > 0 || metrics.removed > 0;
+  const parts: string[] = [];
+  if (hasKnownLines) parts.push(`+${metrics.added} -${metrics.removed}`);
+  if (metrics.unavailableFileCount > 0) {
+    parts.push(`${metrics.unavailableFileCount} not diffed`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "No text edits";
+}
+
+function snapshotUnavailable(snapshot: FileChangeSnapshot | null | undefined): string | null {
+  const reason = snapshot?.unavailableReason;
+  if (!reason) return null;
+  if (reason === "binary") return "Binary or structured file";
+  if (reason === "too-large") return "Text snapshot is too large for inline history";
+  if (reason === "missing") return "File was missing";
+  return "Snapshot unavailable";
+}
+
+function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
+  if (author.kind === "agent") return `${author.agentId} for ${author.onBehalfOf}`;
+  return author.userId;
+}
+
+function historyKindLabel(kind: ChangeSetRecord["kind"]): string {
+  if (kind === "agent-run") return "Agent run";
+  if (kind === "app-build") return "App build";
+  if (kind === "user-edit") return "User edit";
+  return kind[0].toUpperCase() + kind.slice(1);
+}
+
+function historyBoundaryLabel(
+  boundary: NonNullable<ChangeSetRecord["boundaryCrossingPreview"]>[number],
+): string {
+  if (boundary === "public-share") return "Public share";
+  if (boundary === "external-export") return "External export";
+  if (boundary === "permission-change") return "Permission change";
+  if (boundary === "bulk-delete") return "Bulk delete";
+  if (boundary === "app-trust") return "App trust";
+  if (boundary === "private-to-shared") return "Private to shared";
+  if (boundary === "unmergeable-overwrite") return "Overwrite conflict";
+  return boundary;
+}
+
+function historyBoundaryLabels(
+  boundaries: ChangeSetRecord["boundaryCrossingPreview"] | undefined,
+): string[] {
+  return boundaries?.map(historyBoundaryLabel) ?? [];
+}
+
+function historyProvenanceSummary(
+  provenance: ChangeSetDetailRecord["provenance"],
+): { title: string; detail: string | null } | null {
+  if (!provenance) return null;
+  if (provenance.source === "agent-run") {
+    return {
+      title: "Agent run",
+      detail:
+        provenance.prompt ??
+        (provenance.agentRunId ? `Run ${provenance.agentRunId}` : null),
+    };
+  }
+  if (provenance.source === "import") {
+    return {
+      title: "Import",
+      detail: provenance.importPath ?? null,
+    };
+  }
+  if (provenance.source === "sync") return { title: "Cloud sync", detail: null };
+  if (provenance.source === "app-build") return { title: "App build", detail: null };
+  return { title: "User edit", detail: null };
+}
+
+function historySearchText(change: ChangeSetRecord): string {
+  return [
+    change.humanSummary,
+    change.summary,
+    historyAuthorLabel(change.author),
+    historyKindLabel(change.kind),
+    ...(change.filePreview?.map((file) => file.path) ?? []),
+    ...historyBoundaryLabels(change.boundaryCrossingPreview),
+    change.reviewRequired ? "needs review review required boundary" : "",
+  ]
+    .join("\n")
+    .toLowerCase();
+}
+
+function formatHistoryRecordedAt(recordedAtMs: number): {
+  label: string;
+  iso: string;
+} {
+  const recordedAt = new Date(recordedAtMs);
+  return {
+    label: recordedAt.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+    iso: recordedAt.toISOString(),
+  };
+}
+
+function historyDayKey(recordedAtMs: number): string {
+  const recordedAt = new Date(recordedAtMs);
+  const month = String(recordedAt.getMonth() + 1).padStart(2, "0");
+  const day = String(recordedAt.getDate()).padStart(2, "0");
+  return `${recordedAt.getFullYear()}-${month}-${day}`;
+}
+
+function formatHistoryDay(recordedAtMs: number): {
+  label: string;
+  dateTime: string;
+} {
+  const recordedAt = new Date(recordedAtMs);
+  return {
+    label: recordedAt.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }),
+    dateTime: historyDayKey(recordedAtMs),
+  };
+}
+
+function historyChangeTotals(files: ChangeSetFileRecord[]): {
+  added: number;
+  removed: number;
+  diffFileCount: number;
+  restorableFileCount: number;
+} {
+  return files.reduce(
+    (totals, file) => {
+      const counts = changedLineCounts(file.before?.text, file.after?.text);
+      if (counts) {
+        totals.added += counts.added;
+        totals.removed += counts.removed;
+        totals.diffFileCount += 1;
+      }
+      if (typeof file.before?.text === "string") {
+        totals.restorableFileCount += 1;
+      }
+      return totals;
+    },
+    { added: 0, removed: 0, diffFileCount: 0, restorableFileCount: 0 },
+  );
+}
+
+function restorableHistoryFiles(files: ChangeSetFileRecord[]): ChangeSetFileRecord[] {
+  return files.filter((file) => typeof file.before?.text === "string");
+}
+
+function HistoryCompareTextPane({
+  label,
+  text,
+  unavailable,
+  tone,
+}: {
+  label: "Before" | "After";
+  text: string | undefined;
+  unavailable: string | null;
+  tone: "removed" | "added";
+}) {
+  const testId = label === "Before" ? "history-compare-before" : "history-compare-after";
+  const toneClass =
+    tone === "added" ? "border-success/20 bg-success/5" : "border-danger/20 bg-danger/5";
+  return (
+    <section className={`min-h-0 rounded border ${toneClass}`}>
+      <div className="flex h-8 items-center border-b border-line px-3">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+          {label}
+        </span>
+      </div>
+      {typeof text === "string" ? (
+        <pre
+          data-testid={testId}
+          className="m-0 max-h-[42vh] min-h-40 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-5 text-ink"
+        >
+          {text.length > 0 ? text : "Empty file"}
+        </pre>
+      ) : (
+        <div
+          data-testid={testId}
+          className="flex min-h-40 items-center justify-center px-4 py-6 text-center text-[12px] text-subtle"
+        >
+          {unavailable ?? "No captured text for this side of the change."}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HistoryCompareDialog({
+  selection,
+  onClose,
+  onOpenFile,
+}: {
+  selection: HistoryCompareSelection;
+  onClose: () => void;
+  onOpenFile: (path: string) => void;
+}) {
+  const file = selection.file;
+  const before = file.before?.text;
+  const after = file.after?.text;
+  const counts = changedLineCounts(before, after);
+  const diffLines = buildDiffPreview(before, after, 400);
+  const beforeUnavailable = snapshotUnavailable(file.before);
+  const afterUnavailable = snapshotUnavailable(file.after);
+
+  return (
+    <Overlay onClose={onClose}>
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-compare-title"
+        data-testid="history-compare-dialog"
+        className="flex max-h-[calc(100vh-7rem)] w-[min(1120px,calc(100vw-2rem))] flex-col overflow-hidden rounded-md border border-line bg-panel shadow-2xl"
+      >
+        <header className="flex shrink-0 items-start gap-3 border-b border-line px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              History compare
+            </span>
+            <h2
+              id="history-compare-title"
+              className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink"
+            >
+              {file.path}
+            </h2>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+              <span>{fileOperationLabel(file)}</span>
+              {counts ? (
+                <span className="font-mono" data-testid="history-compare-counts">
+                  +{counts.added} -{counts.removed}
+                </span>
+              ) : null}
+              {file.mediaType ? <span>{file.mediaType}</span> : null}
+            </div>
+          </div>
+          {file.operation !== "delete" ? (
+            <button
+              type="button"
+              data-testid="history-compare-open-file"
+              onClick={() => {
+                onOpenFile(file.path);
+                onClose();
+              }}
+              className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            >
+              <ExternalLink size={12} aria-hidden />
+              Open file
+            </button>
+          ) : null}
+          <button
+            type="button"
+            data-testid="history-compare-close"
+            aria-label="Close compare"
+            title="Close compare"
+            onClick={onClose}
+            className="grid size-7 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          >
+            <X size={14} aria-hidden />
+          </button>
+        </header>
+        <div className="min-h-0 overflow-auto p-4">
+          <div className="grid min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <HistoryCompareTextPane
+              label="Before"
+              text={before}
+              unavailable={beforeUnavailable}
+              tone="removed"
+            />
+            <HistoryCompareTextPane
+              label="After"
+              text={after}
+              unavailable={afterUnavailable}
+              tone="added"
+            />
+          </div>
+          <section className="mt-3 rounded border border-line bg-bg">
+            <div className="flex h-8 items-center border-b border-line px-3">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+                Changed lines
+              </span>
+            </div>
+            <div
+              data-testid="history-compare-diff"
+              className="max-h-64 overflow-auto py-1 font-mono text-[11px] leading-5"
+            >
+              {diffLines.map((line, index) => (
+                <div
+                  key={`${index}:${line.kind}:${line.text}`}
+                  data-kind={line.kind}
+                  className={`grid grid-cols-[28px_minmax(0,1fr)] px-3 ${
+                    line.kind === "added"
+                      ? "bg-success/10 text-success"
+                      : line.kind === "removed"
+                        ? "bg-danger/10 text-danger"
+                        : line.kind === "note"
+                          ? "text-subtle"
+                          : "text-muted"
+                  }`}
+                >
+                  <span aria-hidden className="select-none text-center">
+                    {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
+                  </span>
+                  <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </section>
+    </Overlay>
+  );
+}
+
+function HistoryFileDiff({
+  file,
+  restoreState,
+  onRequestRestore,
+  onCancelRestore,
+  onConfirmRestore,
+  onOpenCompare,
+  onOpenFile,
+}: {
+  file: ChangeSetFileRecord;
+  restoreState?: HistoryRestoreState;
+  onRequestRestore: (file: ChangeSetFileRecord) => void;
+  onCancelRestore: (file: ChangeSetFileRecord) => void;
+  onConfirmRestore: (file: ChangeSetFileRecord) => void;
+  onOpenCompare: (file: ChangeSetFileRecord) => void;
+  onOpenFile: (path: string) => void;
+}) {
+  const before = file.before;
+  const after = file.after;
+  const hasCapturedSnapshot = before !== undefined || after !== undefined;
+  const beforeReason = snapshotUnavailable(before);
+  const afterReason = snapshotUnavailable(after);
+  const canDiff = typeof before?.text === "string" || typeof after?.text === "string";
+  const canRestorePrevious = typeof before?.text === "string";
+  const lines = canDiff ? buildDiffPreview(before?.text, after?.text) : [];
+  const counts = changedLineCounts(before?.text, after?.text);
+
+  return (
+    <li className="rounded border border-line bg-bg">
+      <div className="flex min-w-0 items-center gap-2 border-b border-line px-2 py-1.5">
+        <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
+        <span className="min-w-0 flex-1 truncate text-[11px] text-ink">{file.path}</span>
+        {counts ? (
+          <span
+            data-testid="history-diff-counts"
+            className="shrink-0 font-mono text-[10px] text-subtle"
+          >
+            +{counts.added} -{counts.removed}
+          </span>
+        ) : null}
+        <span className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-subtle">
+          {fileOperationLabel(file)}
+        </span>
+        {file.operation !== "delete" ? (
+          <button
+            type="button"
+            data-testid="history-open-file"
+            aria-label={`Open ${file.path}`}
+            title="Open file"
+            onClick={() => onOpenFile(file.path)}
+            className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+          >
+            <ExternalLink size={12} aria-hidden />
+          </button>
+        ) : null}
+        {canRestorePrevious ? (
+          <button
+            type="button"
+            data-testid="history-restore-previous"
+            disabled={restoreState?.status === "restoring"}
+            onClick={() => onRequestRestore(file)}
+            className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-50"
+          >
+            Restore previous
+          </button>
+        ) : null}
+        {canDiff ? (
+          <button
+            type="button"
+            data-testid="history-compare-open"
+            onClick={() => onOpenCompare(file)}
+            className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
+          >
+            Open compare
+          </button>
+        ) : null}
+      </div>
+      {restoreState ? (
+        <div
+          data-testid="history-restore-state"
+          className={`border-b border-line px-2 py-2 text-[11px] ${
+            restoreState.status === "error"
+              ? "text-danger"
+              : restoreState.status === "restored"
+                ? "text-success"
+                : "text-muted"
+          }`}
+        >
+          {restoreState.status === "confirm" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1">
+                Restore the saved previous text to this file.
+              </span>
+              <button
+                type="button"
+                onClick={() => onCancelRestore(file)}
+                className="rounded px-1.5 py-0.5 text-subtle hover:bg-line/50 hover:text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="history-restore-confirm"
+                onClick={() => onConfirmRestore(file)}
+                className="rounded bg-ink px-1.5 py-0.5 text-bg hover:opacity-90"
+              >
+                Restore
+              </button>
+            </div>
+          ) : restoreState.status === "restoring" ? (
+            "Restoring previous text..."
+          ) : restoreState.status === "restored" ? (
+            "Previous text restored. A new history entry will appear after the save is recorded."
+          ) : (
+            restoreState.message
+          )}
+        </div>
+      ) : null}
+      {canDiff ? (
+        <div
+          data-testid="history-file-diff"
+          className="max-h-56 overflow-auto py-1 font-mono text-[11px] leading-5"
+        >
+          {lines.map((line, index) => (
+            <div
+              key={`${index}:${line.kind}:${line.text}`}
+              data-kind={line.kind}
+              className={`grid grid-cols-[24px_minmax(0,1fr)] px-2 ${
+                line.kind === "added"
+                  ? "bg-success/10 text-success"
+                  : line.kind === "removed"
+                    ? "bg-danger/10 text-danger"
+                    : line.kind === "note"
+                      ? "text-subtle"
+                      : "text-muted"
+              }`}
+            >
+              <span aria-hidden className="select-none text-center">
+                {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
+              </span>
+              <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="px-2 py-2 text-[11px] text-subtle">
+          {!hasCapturedSnapshot
+            ? "Diff was not captured for this older change."
+            : beforeReason ?? afterReason ?? "No readable text diff for this file."}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function HistoryChangeDetails({
+  state,
+  restoreStateFor,
+  restoreAllState,
+  onRequestRestore,
+  onCancelRestore,
+  onConfirmRestore,
+  onRequestRestoreAll,
+  onCancelRestoreAll,
+  onConfirmRestoreAll,
+  onOpenCompare,
+  onOpenFile,
+}: {
+  state: HistoryDetailState | undefined;
+  restoreStateFor: (file: ChangeSetFileRecord) => HistoryRestoreState | undefined;
+  restoreAllState?: HistoryRestoreAllState;
+  onRequestRestore: (file: ChangeSetFileRecord) => void;
+  onCancelRestore: (file: ChangeSetFileRecord) => void;
+  onConfirmRestore: (file: ChangeSetFileRecord) => void;
+  onRequestRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
+  onCancelRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
+  onConfirmRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
+  onOpenCompare: (file: ChangeSetFileRecord) => void;
+  onOpenFile: (path: string) => void;
+}) {
+  if (!state || state.status === "loading") {
+    return <div className="px-2 py-2 text-[11px] text-subtle">Loading change details...</div>;
+  }
+  if (state.status === "error") {
+    return <div className="px-2 py-2 text-[11px] text-danger">Could not load change details.</div>;
+  }
+  if (!state.changeSet) {
+    return <div className="px-2 py-2 text-[11px] text-subtle">This change no longer exists.</div>;
+  }
+
+  const change = state.changeSet;
+  const totals = historyChangeTotals(change.files);
+  const restorableFiles = restorableHistoryFiles(change.files);
+  const boundaryLabels = historyBoundaryLabels(change.boundaryCrossings);
+  const provenance = historyProvenanceSummary(change.provenance);
+
+  return (
+    <div data-testid="history-change-details" className="mt-2 space-y-2">
+      <div
+        data-testid="history-detail-summary"
+        className="grid gap-1 rounded border border-line bg-bg px-2 py-2 text-[11px] text-muted"
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>
+            {change.files.length} touched file{change.files.length === 1 ? "" : "s"}
+          </span>
+          {totals.diffFileCount > 0 ? (
+            <span
+              data-testid="history-detail-total-counts"
+              className="font-mono text-subtle"
+            >
+              +{totals.added} -{totals.removed}
+            </span>
+          ) : null}
+          {totals.restorableFileCount > 0 ? (
+            <span>
+              {totals.restorableFileCount} restorable file
+              {totals.restorableFileCount === 1 ? "" : "s"}
+            </span>
+          ) : null}
+          {change.boundaryCrossings.length > 0 ? (
+            <span className="font-medium text-danger">Needs review</span>
+          ) : null}
+          {restorableFiles.length > 1 ? (
+            <button
+              type="button"
+              data-testid="history-restore-all"
+              disabled={restoreAllState?.status === "restoring"}
+              onClick={() => onRequestRestoreAll(change)}
+              className="ml-auto rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-50"
+            >
+              Restore all
+            </button>
+          ) : null}
+        </div>
+        {restoreAllState ? (
+          <div
+            data-testid="history-restore-all-state"
+            className={`mt-1 border-t border-line pt-2 ${
+              restoreAllState.status === "error"
+                ? "text-danger"
+                : restoreAllState.status === "restored"
+                  ? "text-success"
+                  : "text-muted"
+            }`}
+          >
+            {restoreAllState.status === "confirm" ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="min-w-0 flex-1">
+                  Restore previous text for {restoreAllState.count} files in this change.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onCancelRestoreAll(change)}
+                  className="rounded px-1.5 py-0.5 text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  data-testid="history-restore-all-confirm"
+                  onClick={() => onConfirmRestoreAll(change)}
+                  className="rounded bg-ink px-1.5 py-0.5 text-bg hover:opacity-90"
+                >
+                  Restore
+                </button>
+              </div>
+            ) : restoreAllState.status === "restoring" ? (
+              `Restoring ${restoreAllState.count} files...`
+            ) : restoreAllState.status === "restored" ? (
+              `Restored previous text for ${restoreAllState.count} files.`
+            ) : (
+              restoreAllState.message
+            )}
+          </div>
+        ) : null}
+        {boundaryLabels.length > 0 ? (
+          <div
+            data-testid="history-review-reasons"
+            className="flex flex-wrap gap-1 border-t border-line pt-2"
+          >
+            {boundaryLabels.map((label) => (
+              <span
+                key={label}
+                className="rounded border border-danger/30 bg-danger/5 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {provenance ? (
+        <div
+          data-testid="history-provenance"
+          className="rounded border border-line bg-bg px-2 py-1.5 text-[11px] text-muted"
+        >
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            Why
+          </div>
+          <div
+            data-testid="history-provenance-title"
+            className="mt-0.5 font-medium text-ink"
+          >
+            {provenance.title}
+          </div>
+          {provenance.detail ? (
+            <div
+              data-testid="history-provenance-detail"
+              className="mt-1 whitespace-pre-wrap break-words leading-snug text-muted"
+            >
+              {provenance.detail}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <ul className="m-0 space-y-2 p-0">
+        {change.files.map((file) => (
+          <HistoryFileDiff
+            key={`${file.operation}:${file.path}`}
+            file={file}
+            restoreState={restoreStateFor(file)}
+            onRequestRestore={onRequestRestore}
+            onCancelRestore={onCancelRestore}
+            onConfirmRestore={onConfirmRestore}
+            onOpenCompare={onOpenCompare}
+            onOpenFile={onOpenFile}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // The timeline body, shared by the right history rail and the side panel's
 // History view (both render the same root-owned changeSets — never a second
 // subscription). The pinned history-timeline testid stays on the RAIL only.
-function HistoryList({ changeSets }: { changeSets: ChangeSetRecord[] }) {
+function HistoryList({
+  workspaceId,
+  changeSets,
+  onOpenFile,
+  emptyLabel = "No changes yet",
+  emptyDescription = "Edits — yours or your agent's — show up here as a timeline you can review.",
+}: {
+  workspaceId: string;
+  changeSets: ChangeSetRecord[];
+  onOpenFile: (path: string) => void;
+  emptyLabel?: string;
+  emptyDescription?: string;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailsById, setDetailsById] = useState<Record<string, HistoryDetailState>>({});
+  const [restoreByKey, setRestoreByKey] = useState<Record<string, HistoryRestoreState>>({});
+  const [restoreAllById, setRestoreAllById] = useState<
+    Record<string, HistoryRestoreAllState>
+  >({});
+  const [compareSelection, setCompareSelection] =
+    useState<HistoryCompareSelection | null>(null);
+
+  const restoreKey = useCallback(
+    (file: ChangeSetFileRecord) => `${expandedId ?? "none"}:${file.path}`,
+    [expandedId],
+  );
+
+  const toggleChange = useCallback(
+    (id: string) => {
+      setExpandedId((current) => (current === id ? null : id));
+      if (detailsById[id]) return;
+      setDetailsById((current) => ({ ...current, [id]: { status: "loading" } }));
+      void bridge()
+        .readChangeSet({ workspaceId, changeSetId: id })
+        .then((result) => {
+          setDetailsById((current) => ({
+            ...current,
+            [id]: { status: "ready", changeSet: result.changeSet },
+          }));
+        })
+        .catch(() => {
+          setDetailsById((current) => ({ ...current, [id]: { status: "error" } }));
+        });
+    },
+    [detailsById, workspaceId],
+  );
+
+  const requestRestore = useCallback(
+    (file: ChangeSetFileRecord) => {
+      if (typeof file.before?.text !== "string") return;
+      const key = restoreKey(file);
+      setRestoreByKey((current) => ({ ...current, [key]: { status: "confirm" } }));
+    },
+    [restoreKey],
+  );
+
+  const cancelRestore = useCallback(
+    (file: ChangeSetFileRecord) => {
+      const key = restoreKey(file);
+      setRestoreByKey((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    },
+    [restoreKey],
+  );
+
+  const confirmRestore = useCallback(
+    (file: ChangeSetFileRecord) => {
+      const text = file.before?.text;
+      if (typeof text !== "string") return;
+      const key = restoreKey(file);
+      setRestoreByKey((current) => ({ ...current, [key]: { status: "restoring" } }));
+      void bridge()
+        .writeWorkspaceText({
+          workspaceId,
+          relativePath: file.path,
+          text,
+        })
+        .then(() => {
+          setRestoreByKey((current) => ({ ...current, [key]: { status: "restored" } }));
+        })
+        .catch((cause) => {
+          setRestoreByKey((current) => ({
+            ...current,
+            [key]: {
+              status: "error",
+              message: cause instanceof Error ? cause.message : "Could not restore previous text.",
+            },
+          }));
+        });
+    },
+    [restoreKey, workspaceId],
+  );
+
+  const requestRestoreAll = useCallback((changeSet: ChangeSetDetailRecord) => {
+    const count = restorableHistoryFiles(changeSet.files).length;
+    if (count === 0) return;
+    setRestoreAllById((current) => ({
+      ...current,
+      [changeSet.id]: { status: "confirm", count },
+    }));
+  }, []);
+
+  const cancelRestoreAll = useCallback((changeSet: ChangeSetDetailRecord) => {
+    setRestoreAllById((current) => {
+      const next = { ...current };
+      delete next[changeSet.id];
+      return next;
+    });
+  }, []);
+
+  const confirmRestoreAll = useCallback(
+    (changeSet: ChangeSetDetailRecord) => {
+      const filesToRestore = restorableHistoryFiles(changeSet.files);
+      if (filesToRestore.length === 0) return;
+      setRestoreAllById((current) => ({
+        ...current,
+        [changeSet.id]: { status: "restoring", count: filesToRestore.length },
+      }));
+      void Promise.all(
+        filesToRestore.map((file) =>
+          bridge().writeWorkspaceText({
+            workspaceId,
+            relativePath: file.path,
+            text: file.before!.text!,
+          }),
+        ),
+      )
+        .then(() => {
+          setRestoreAllById((current) => ({
+            ...current,
+            [changeSet.id]: { status: "restored", count: filesToRestore.length },
+          }));
+        })
+        .catch((cause) => {
+          setRestoreAllById((current) => ({
+            ...current,
+            [changeSet.id]: {
+              status: "error",
+              count: filesToRestore.length,
+              message:
+                cause instanceof Error
+                  ? cause.message
+                  : "Could not restore every restorable file.",
+            },
+          }));
+        });
+    },
+    [workspaceId],
+  );
+
   if (changeSets.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
-        <span className="text-xs text-muted">No changes yet</span>
-        <span className="text-[11px] text-subtle">
-          Edits — yours or your agent's — show up here as a timeline you can
-          review.
-        </span>
+        <span className="text-xs text-muted">{emptyLabel}</span>
+        <span className="text-[11px] text-subtle">{emptyDescription}</span>
       </div>
     );
   }
   return (
-    <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
-      {changeSets.map((change) => (
-        <li
-          key={change.id}
-          data-testid="change-set"
-          className="flex flex-col gap-0.5 border-b border-line px-3 py-2"
-        >
-          <span className="flex items-center gap-1.5 text-[12px] text-ink">
-            {change.author.kind === "agent" ? (
-              <Bot size={12} aria-hidden className="shrink-0 text-subtle" />
-            ) : (
-              <User size={12} aria-hidden className="shrink-0 text-subtle" />
-            )}
-            <span className="truncate">{change.humanSummary}</span>
-          </span>
-          <span className="text-[10px] text-subtle">
-            {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-            {" · "}
-            {change.kind}
-          </span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul
+        data-testid="history-list"
+        className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0"
+      >
+        {changeSets.map((change, index) => {
+          const expanded = expandedId === change.id;
+          const recordedAt = formatHistoryRecordedAt(change.recordedAtMs);
+          const day = formatHistoryDay(change.recordedAtMs);
+          const lineStatsLabel = historyLineStatsText(change.lineStats);
+          const boundaryLabels = historyBoundaryLabels(change.boundaryCrossingPreview);
+          const previousDayKey =
+            index > 0 ? historyDayKey(changeSets[index - 1].recordedAtMs) : null;
+          const showDayHeading = previousDayKey !== day.dateTime;
+          return (
+            <Fragment key={change.id}>
+              {showDayHeading ? (
+                <li className="sticky top-0 z-[1] border-b border-line bg-panel-2 px-3 py-1">
+                  <time
+                    data-testid="history-day-heading"
+                    dateTime={day.dateTime}
+                    className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                  >
+                    {day.label}
+                  </time>
+                </li>
+              ) : null}
+              <li
+                data-testid="change-set"
+                data-expanded={expanded}
+                className="border-b border-line px-2 py-2"
+              >
+                <button
+                  type="button"
+                  className="group flex w-full items-start gap-2 rounded px-1 py-1 text-left hover:bg-line/40"
+                  onClick={() => toggleChange(change.id)}
+                  aria-expanded={expanded}
+                >
+                  <ChevronRight
+                    size={13}
+                    aria-hidden
+                    className={`mt-0.5 shrink-0 text-subtle transition-transform ${expanded ? "rotate-90" : ""}`}
+                  />
+                  {change.author.kind === "agent" ? (
+                    <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                  ) : (
+                    <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
+                        {change.humanSummary}
+                      </span>
+                      {change.reviewRequired ? (
+                        <span
+                          data-testid="history-review-badge"
+                          className="shrink-0 rounded border border-danger/30 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+                          title={
+                            boundaryLabels.length > 0
+                              ? boundaryLabels.join(", ")
+                              : `${change.boundaryCrossingCount ?? 1} review boundary${
+                                  (change.boundaryCrossingCount ?? 1) === 1
+                                    ? ""
+                                    : "ies"
+                                }`
+                          }
+                        >
+                          Needs review
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="block text-[10px] text-subtle">
+                      {historyAuthorLabel(change.author)}
+                      {" · "}
+                      <time
+                        data-testid="history-recorded-at"
+                        dateTime={recordedAt.iso}
+                        title={recordedAt.iso}
+                      >
+                        {recordedAt.label}
+                      </time>
+                      {" · "}
+                      {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
+                      {" · "}
+                      {historyKindLabel(change.kind)}
+                      {lineStatsLabel ? (
+                        <>
+                          {" · "}
+                          <span
+                            data-testid="history-line-stats"
+                            className="font-mono text-subtle"
+                          >
+                            {lineStatsLabel}
+                          </span>
+                        </>
+                      ) : null}
+                      {boundaryLabels.length > 0 ? (
+                        <>
+                          {" · "}
+                          <span
+                            data-testid="history-review-reason-preview"
+                            className="font-medium text-danger"
+                          >
+                            {boundaryLabels[0]}
+                            {(change.boundaryCrossingCount ?? boundaryLabels.length) >
+                            boundaryLabels.length
+                              ? ` +${
+                                  (change.boundaryCrossingCount ?? boundaryLabels.length) -
+                                  boundaryLabels.length
+                                }`
+                              : ""}
+                          </span>
+                        </>
+                      ) : null}
+                    </span>
+                    {change.filePreview && change.filePreview.length > 0 ? (
+                      <span
+                        data-testid="history-file-preview"
+                        className="mt-1 flex min-w-0 flex-wrap gap-1"
+                      >
+                        {change.filePreview.map((file) => (
+                          <span
+                            key={`${file.operation}:${file.path}`}
+                            title={file.path}
+                            className={`max-w-full truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${historyFilePreviewTone(
+                              file.operation,
+                            )}`}
+                          >
+                            {file.path}
+                          </span>
+                        ))}
+                        {change.fileCount > change.filePreview.length ? (
+                          <span className="rounded border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-subtle">
+                            +{change.fileCount - change.filePreview.length}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+                {expanded ? (
+                  <HistoryChangeDetails
+                    state={detailsById[change.id]}
+                    restoreStateFor={(file) => restoreByKey[restoreKey(file)]}
+                    restoreAllState={restoreAllById[change.id]}
+                    onRequestRestore={requestRestore}
+                    onCancelRestore={cancelRestore}
+                    onConfirmRestore={confirmRestore}
+                    onRequestRestoreAll={requestRestoreAll}
+                    onCancelRestoreAll={cancelRestoreAll}
+                    onConfirmRestoreAll={confirmRestoreAll}
+                    onOpenCompare={(file) => setCompareSelection({ file })}
+                    onOpenFile={onOpenFile}
+                  />
+                ) : null}
+              </li>
+            </Fragment>
+          );
+        })}
+      </ul>
+      {compareSelection ? (
+        <HistoryCompareDialog
+          selection={compareSelection}
+          onClose={() => setCompareSelection(null)}
+          onOpenFile={onOpenFile}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -275,11 +1509,35 @@ function CatchUpSummaryCard(props: {
 }
 
 function HistoryView(props: {
+  workspaceId: string;
   changeSets: ChangeSetRecord[];
   catchUp: CatchUpState;
   conflictSummaries: string[];
   onMarkCaughtUp: () => void;
+  onOpenFile: (path: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [reviewOnly, setReviewOnly] = useState(false);
+  const [authorFilter, setAuthorFilter] = useState<HistoryAuthorFilter>("all");
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredChangeSets = useMemo(
+    () =>
+      props.changeSets.filter((change) => {
+        if (reviewOnly && !change.reviewRequired) return false;
+        if (authorFilter !== "all" && change.author.kind !== authorFilter) {
+          return false;
+        }
+        if (!normalizedQuery) return true;
+        return historySearchText(change).includes(normalizedQuery);
+      }),
+    [authorFilter, normalizedQuery, props.changeSets, reviewOnly],
+  );
+  const overview = useMemo(
+    () => historyOverviewMetrics(filteredChangeSets),
+    [filteredChangeSets],
+  );
+  const filterActive =
+    normalizedQuery.length > 0 || reviewOnly || authorFilter !== "all";
   const showCatchUp =
     props.changeSets.length > 0 ||
     props.catchUp.status !== "ready" ||
@@ -293,7 +1551,150 @@ function HistoryView(props: {
           onMarkCaughtUp={props.onMarkCaughtUp}
         />
       ) : null}
-      <HistoryList changeSets={props.changeSets} />
+      {props.changeSets.length > 0 ? (
+        <>
+          <section
+            data-testid="history-overview"
+            className="grid shrink-0 grid-cols-2 gap-1.5 border-b border-line bg-panel px-2 py-2"
+          >
+            <div className="rounded border border-line bg-bg px-2 py-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-subtle">
+                Changes
+              </div>
+              <div
+                data-testid="history-overview-changes"
+                className="mt-0.5 text-[13px] font-semibold text-ink"
+              >
+                {overview.changeCount}
+              </div>
+            </div>
+            <div className="rounded border border-line bg-bg px-2 py-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-subtle">
+                Review
+              </div>
+              <div
+                data-testid="history-overview-review"
+                className={`mt-0.5 text-[13px] font-semibold ${
+                  overview.reviewCount > 0 ? "text-danger" : "text-ink"
+                }`}
+              >
+                {overview.reviewCount}
+              </div>
+            </div>
+            <div className="rounded border border-line bg-bg px-2 py-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-subtle">
+                File touches
+              </div>
+              <div
+                data-testid="history-overview-files"
+                className="mt-0.5 text-[13px] font-semibold text-ink"
+              >
+                {overview.fileTouchCount}
+              </div>
+            </div>
+            <div className="rounded border border-line bg-bg px-2 py-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-subtle">
+                Lines
+              </div>
+              <div
+                data-testid="history-overview-lines"
+                className="mt-0.5 truncate font-mono text-[12px] text-subtle"
+                title={historyOverviewLineText(overview)}
+              >
+                {historyOverviewLineText(overview)}
+              </div>
+            </div>
+          </section>
+          <div
+            data-testid="history-filter-bar"
+            className="shrink-0 border-b border-line bg-panel-2 px-2 py-2"
+          >
+            <label className="flex h-7 min-w-0 items-center gap-1.5 rounded border border-line bg-bg px-2 text-[11px] text-muted">
+              <Search size={12} aria-hidden className="shrink-0 text-subtle" />
+              <input
+                type="search"
+                data-testid="history-search-input"
+                aria-label="Search history"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search history"
+                className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-subtle"
+              />
+              {query.length > 0 ? (
+                <button
+                  type="button"
+                  data-testid="history-search-clear"
+                  aria-label="Clear history search"
+                  title="Clear history search"
+                  onClick={() => setQuery("")}
+                  className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              ) : null}
+            </label>
+            <div
+              data-testid="history-author-filter"
+              className="mt-1.5 grid grid-cols-3 rounded border border-line bg-bg p-0.5"
+            >
+              {(
+                [
+                  ["all", "All"],
+                  ["user", "People"],
+                  ["agent", "Agents"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  data-testid={`history-author-filter-${value}`}
+                  aria-pressed={authorFilter === value}
+                  onClick={() => setAuthorFilter(value)}
+                  className={`h-6 rounded text-[10px] ${
+                    authorFilter === value
+                      ? "bg-ink text-bg"
+                      : "text-muted hover:bg-line/50 hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="mt-1.5 flex min-w-0 items-center justify-between gap-2">
+              <button
+                type="button"
+                data-testid="history-review-filter"
+                aria-pressed={reviewOnly}
+                onClick={() => setReviewOnly((current) => !current)}
+                className={`h-6 rounded border px-2 text-[11px] ${
+                  reviewOnly
+                    ? "border-danger/40 bg-danger/10 text-danger"
+                    : "border-line text-muted hover:bg-line/50 hover:text-ink"
+                }`}
+              >
+                Needs review
+              </button>
+              <span
+                data-testid="history-filter-count"
+                className="shrink-0 text-[10px] text-subtle"
+              >
+                {filteredChangeSets.length}/{props.changeSets.length}
+              </span>
+            </div>
+          </div>
+        </>
+      ) : null}
+      <HistoryList
+        workspaceId={props.workspaceId}
+        changeSets={filteredChangeSets}
+        onOpenFile={props.onOpenFile}
+        emptyLabel={filterActive ? "No matching changes" : undefined}
+        emptyDescription={
+          filterActive
+            ? "Adjust the search or review filter to see more history."
+            : undefined
+        }
+      />
     </>
   );
 }
@@ -500,7 +1901,7 @@ export function DesktopWorkspaceShell(props: {
       ].join("\0"),
     [changeSets, files],
   );
-  const activeDocumentPath = isGraphTabPath(wb.activeTab) ? null : wb.activeTab;
+  const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -739,9 +2140,12 @@ export function DesktopWorkspaceShell(props: {
   const openGraphTab = useCallback(() => {
     mutateWb((state) => openTab(state, GRAPH_TAB_PATH));
   }, [mutateWb]);
+  const openHistoryTab = useCallback(() => {
+    mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
+  }, [mutateWb]);
   const activateEditorTab = useCallback(
     (path: string) => {
-      if (isGraphTabPath(path)) {
+      if (isVirtualTabPath(path)) {
         mutateWb((state) => activateTab(state, path));
         return;
       }
@@ -773,7 +2177,7 @@ export function DesktopWorkspaceShell(props: {
       if (
         next.activeTab !== current.activeTab &&
         next.activeTab !== null &&
-        !isGraphTabPath(next.activeTab)
+        !isVirtualTabPath(next.activeTab)
       ) {
         rendererMarks.mark("file-open-start");
       }
@@ -786,7 +2190,7 @@ export function DesktopWorkspaceShell(props: {
     const current = wbRef.current;
     if (!current.activeTab) return;
     const next = closeTab(current, current.activeTab);
-    if (next.activeTab !== null && !isGraphTabPath(next.activeTab)) {
+    if (next.activeTab !== null && !isVirtualTabPath(next.activeTab)) {
       rendererMarks.mark("file-open-start");
     }
     mutateWb((state) => (state.activeTab ? closeTab(state, state.activeTab) : state));
@@ -804,7 +2208,7 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => {
       const current = wbRef.current;
       if (!current.tabs.some((tab) => tab.path === path)) return;
-      if (current.activeTab !== path && !isGraphTabPath(path)) {
+      if (current.activeTab !== path && !isVirtualTabPath(path)) {
         rendererMarks.mark("file-open-start");
       }
       mutateWb((state) => {
@@ -917,7 +2321,7 @@ export function DesktopWorkspaceShell(props: {
       targetPath !== null &&
       activeDocumentPath !== null &&
       targetPath === activeDocumentPath;
-    setImportExportPath(targetPath && !isGraphTabPath(targetPath) ? targetPath : null);
+    setImportExportPath(targetPath && !isVirtualTabPath(targetPath) ? targetPath : null);
     setImportExportSelectionText(canUseSelection ? readSelectedText() : "");
     setImportExportOpen(true);
   }, [activeDocumentPath]);
@@ -928,13 +2332,13 @@ export function DesktopWorkspaceShell(props: {
         closeFileTab(path);
       } else if (command === "close-other-tabs" && path) {
         closeOtherTabs(path);
-      } else if (command === "copy-path" && path && !isGraphTabPath(path)) {
+      } else if (command === "copy-path" && path && !isVirtualTabPath(path)) {
         void navigator.clipboard?.writeText(path);
-      } else if (command === "show-in-explorer" && path && !isGraphTabPath(path)) {
+      } else if (command === "show-in-explorer" && path && !isVirtualTabPath(path)) {
         showPathInExplorer(path);
       } else if (command === "import-export") {
         openImportExportDialog(
-          path && !isGraphTabPath(path) ? path : activeDocumentPath,
+          path && !isVirtualTabPath(path) ? path : activeDocumentPath,
         );
       } else if (command === "open-agent") {
         openAgentView();
@@ -1228,16 +2632,28 @@ export function DesktopWorkspaceShell(props: {
             onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
             actions={
               wb.activeView === "history" ? (
-                <button
-                  type="button"
-                  data-testid="history-rail-toggle"
-                  aria-label="Toggle history rail"
-                  title="Toggle history rail"
-                  onClick={() => mutateWb(toggleHistory)}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <PanelRight size={13} aria-hidden />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    data-testid="history-open-tab"
+                    aria-label="Open history in tab"
+                    title="Open history in tab"
+                    onClick={openHistoryTab}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  >
+                    <Maximize2 size={13} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="history-rail-toggle"
+                    aria-label="Toggle history rail"
+                    title="Toggle history rail"
+                    onClick={() => mutateWb(toggleHistory)}
+                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  >
+                    <PanelRight size={13} aria-hidden />
+                  </button>
+                </>
               ) : wb.activeView === "graph" ? (
                 <button
                   type="button"
@@ -1290,10 +2706,12 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
+                workspaceId={workspaceId}
                 changeSets={changeSets}
                 catchUp={catchUp}
                 conflictSummaries={conflictSummaries}
                 onMarkCaughtUp={markCaughtUp}
+                onOpenFile={openFile}
               />
             ) : wb.activeView === "agent" ? (
               <Suspense fallback={<PanelLoading label="agent" />}>
@@ -1335,6 +2753,20 @@ export function DesktopWorkspaceShell(props: {
                   variant="page"
                 />
               </Suspense>
+            ) : isHistoryTabPath(wb.activeTab) ? (
+              <div
+                data-testid="history-page"
+                className="flex min-h-0 flex-1 flex-col bg-bg"
+              >
+                <HistoryView
+                  workspaceId={workspaceId}
+                  changeSets={changeSets}
+                  catchUp={catchUp}
+                  conflictSummaries={conflictSummaries}
+                  onMarkCaughtUp={markCaughtUp}
+                  onOpenFile={openFile}
+                />
+              </div>
             ) : wb.activeTab ? (
               <FileInspector
                 key={wb.activeTab}
@@ -1405,10 +2837,12 @@ export function DesktopWorkspaceShell(props: {
             onCollapse={() => mutateWb(toggleHistory)}
           >
             <HistoryView
+              workspaceId={workspaceId}
               changeSets={changeSets}
               catchUp={catchUp}
               conflictSummaries={conflictSummaries}
               onMarkCaughtUp={markCaughtUp}
+              onOpenFile={openFile}
             />
           </HistoryRail>
         ) : (

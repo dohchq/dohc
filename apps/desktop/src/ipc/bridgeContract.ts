@@ -364,6 +364,31 @@ const ChangeAuthorSchema = z.union([
   }),
 ]);
 
+export const ChangeSetFilePreview = z.object({
+  path: z.string().min(1),
+  operation: z.enum(["write", "delete", "rename"]),
+});
+export type ChangeSetFilePreview = z.infer<typeof ChangeSetFilePreview>;
+
+export const ChangeSetLineStats = z.object({
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  changedFileCount: z.number().int().nonnegative(),
+  unavailableFileCount: z.number().int().nonnegative(),
+});
+export type ChangeSetLineStats = z.infer<typeof ChangeSetLineStats>;
+
+const BoundaryCrossingSchema = z.enum([
+  "public-share",
+  "external-export",
+  "permission-change",
+  "bulk-delete",
+  "app-trust",
+  "private-to-shared",
+  "unmergeable-overwrite",
+]);
+export type BoundaryCrossingRecord = z.infer<typeof BoundaryCrossingSchema>;
+
 export const ChangeSetRecord = z.object({
   id: z.string().min(1),
   recordedAtMs: z.number(),
@@ -372,13 +397,63 @@ export const ChangeSetRecord = z.object({
   summary: z.string(),
   humanSummary: z.string(),
   fileCount: z.number().int().nonnegative(),
+  reviewRequired: z.boolean().optional(),
+  boundaryCrossingCount: z.number().int().nonnegative().optional(),
+  filePreview: z.array(ChangeSetFilePreview).optional(),
+  lineStats: ChangeSetLineStats.optional(),
+  boundaryCrossingPreview: z.array(BoundaryCrossingSchema).optional(),
 });
 export type ChangeSetRecord = z.infer<typeof ChangeSetRecord>;
+
+export const FileChangeSnapshot = z.object({
+  sha256: z.string().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  text: z.string().optional(),
+  truncated: z.boolean().optional(),
+  unavailableReason: z
+    .enum(["missing", "binary", "too-large", "unreadable"])
+    .optional(),
+});
+export type FileChangeSnapshot = z.infer<typeof FileChangeSnapshot>;
+
+export const ChangeSetFileRecord = z.object({
+  path: z.string().min(1),
+  operation: z.enum(["write", "delete", "rename"]),
+  mediaType: z.string().optional(),
+  before: FileChangeSnapshot.nullable().optional(),
+  after: FileChangeSnapshot.nullable().optional(),
+});
+export type ChangeSetFileRecord = z.infer<typeof ChangeSetFileRecord>;
+
+export const ChangeSetDetailRecord = ChangeSetRecord.extend({
+  files: z.array(ChangeSetFileRecord),
+  provenance: z
+    .object({
+      source: z.enum(["user-edit", "agent-run", "import", "sync", "app-build"]),
+      prompt: z.string().optional(),
+      agentRunId: z.string().optional(),
+      importPath: z.string().optional(),
+    })
+    .optional(),
+  boundaryCrossings: z.array(BoundaryCrossingSchema),
+});
+export type ChangeSetDetailRecord = z.infer<typeof ChangeSetDetailRecord>;
 
 export const ListChangeSetsResult = z.object({
   changeSets: z.array(ChangeSetRecord),
 });
 export type ListChangeSetsResult = z.infer<typeof ListChangeSetsResult>;
+
+export const ReadChangeSetPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  changeSetId: z.string().min(1).max(500),
+});
+export type ReadChangeSetPayload = z.infer<typeof ReadChangeSetPayload>;
+
+export const ReadChangeSetResult = z.object({
+  changeSet: ChangeSetDetailRecord.nullable(),
+});
+export type ReadChangeSetResult = z.infer<typeof ReadChangeSetResult>;
 
 export const ReadCatchUpSummaryPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1203,6 +1278,7 @@ export interface DohcDesktopBridge {
   listChangeSets(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;
+  readChangeSet(payload: ReadChangeSetPayload): Promise<ReadChangeSetResult>;
   readCatchUpSummary(
     payload: ReadCatchUpSummaryPayload,
   ): Promise<ReadCatchUpSummaryResult>;

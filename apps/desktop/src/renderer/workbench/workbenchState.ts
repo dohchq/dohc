@@ -16,9 +16,18 @@ export const VIEW_IDS = [
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
 export const GRAPH_TAB_PATH = "dohc://graph";
+export const HISTORY_TAB_PATH = "dohc://history";
 
 export function isGraphTabPath(path: string | null): boolean {
   return path === GRAPH_TAB_PATH;
+}
+
+export function isHistoryTabPath(path: string | null): boolean {
+  return path === HISTORY_TAB_PATH;
+}
+
+export function isVirtualTabPath(path: string | null): boolean {
+  return isGraphTabPath(path) || isHistoryTabPath(path);
 }
 
 export interface WorkbenchState {

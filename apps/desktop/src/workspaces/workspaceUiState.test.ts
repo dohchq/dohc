@@ -11,8 +11,9 @@ import {
 import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
 
 const roots: string[] = [];
+const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-ui-state-"));
+  const root = await mkdtemp(join(tempBase, "dohc-ui-state-"));
   roots.push(root);
   return root;
 }
@@ -122,5 +123,42 @@ describe("ui-state writes never reach history", () => {
     expect(paths).toContain("notes.md");
     expect(paths.some((path) => path.includes(".dohc"))).toBe(false);
     expect(paths.some((path) => path.includes("ui-state"))).toBe(false);
+  });
+});
+
+describe("workspace watcher history snapshots", () => {
+  it("records bounded before and after text for readable file edits", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "notes.md"), "# Notes\nBefore\n");
+    const workspace = {
+      workspaceId: "ws-history-snapshot-test",
+      rootPath: root,
+      kind: "personal",
+      mode: "local-first",
+    } as CreatedWorkspace;
+
+    let resolveFirst: (() => void) | null = null;
+    const firstRecord = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const handle = startWorkspaceWatch(workspace, {
+      settleMs: 60,
+      onRecorded: () => resolveFirst?.(),
+    });
+    await handle.ready;
+
+    await writeFile(join(root, "notes.md"), "# Notes\nAfter\n");
+    await firstRecord;
+    await handle.stop();
+
+    const records = await createChangeSetStore(root).list();
+    expect(records).toHaveLength(1);
+    expect(records[0].files[0]).toMatchObject({
+      path: "notes.md",
+      operation: "write",
+      mediaType: "text/markdown",
+      before: { text: "# Notes\nBefore\n", truncated: false },
+      after: { text: "# Notes\nAfter\n", truncated: false },
+    });
   });
 });

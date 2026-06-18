@@ -214,6 +214,27 @@ table {
 .dohc-notion-editor ul,
 .dohc-notion-editor ol {
   padding-left: 24px;
+  list-style-position: outside;
+}
+
+.dohc-notion-editor ul:not([data-type="taskList"]) {
+  list-style-type: disc;
+}
+
+.dohc-notion-editor ol:not([data-type="taskList"]) {
+  list-style-type: decimal;
+}
+
+.dohc-notion-editor ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) {
+  list-style-type: circle;
+}
+
+.dohc-notion-editor ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) {
+  list-style-type: square;
+}
+
+.dohc-notion-editor li > p {
+  margin: 0;
 }
 
 .dohc-notion-editor ul[data-type="taskList"] {

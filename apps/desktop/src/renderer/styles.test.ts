@@ -23,6 +23,16 @@ describe("markdown editor layout css", () => {
     expect(document).toContain("min-height: 100%;");
     expect(document).not.toContain("100vh");
   });
+
+  it("keeps typed markdown list input rules visibly list-like", () => {
+    const unordered = cssRule('.dohc-notion-editor ul:not([data-type="taskList"])');
+    const ordered = cssRule('.dohc-notion-editor ol:not([data-type="taskList"])');
+    const taskList = cssRule('.dohc-notion-editor ul[data-type="taskList"]');
+
+    expect(unordered).toContain("list-style-type: disc;");
+    expect(ordered).toContain("list-style-type: decimal;");
+    expect(taskList).toContain("list-style: none;");
+  });
 });
 
 describe("workbench cursor css", () => {

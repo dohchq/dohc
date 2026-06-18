@@ -133,6 +133,8 @@ const bridge: DohcDesktopBridge = {
   openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
   listChangeSets: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChangeSets, payload),
+  readChangeSet: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readChangeSet, payload),
   readCatchUpSummary: (payload) =>
     ipcRenderer.invoke(CHANNELS.readCatchUpSummary, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),

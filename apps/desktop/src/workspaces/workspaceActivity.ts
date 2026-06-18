@@ -1,8 +1,10 @@
-import { deriveSyncStatus } from "@dohc/workspace-core";
+import { deriveSyncStatus, type FileChange } from "@dohc/workspace-core";
 import { catchUpSummary } from "@dohc/workspace-history";
 import type {
+  ChangeSetLineStats,
   ReadCatchUpSummaryPayload,
   ReadCatchUpSummaryResult,
+  ReadChangeSetResult,
   ChangeSetRecord,
   SyncStatusResult,
 } from "../ipc/bridgeContract";
@@ -29,6 +31,88 @@ interface WatchedWorkspace {
 
 const MAX_CATCH_UP_LINES = 50;
 const MAX_CATCH_UP_LINE_CHARS = 500;
+const HISTORY_FILE_PREVIEW_LIMIT = 4;
+const HISTORY_BOUNDARY_PREVIEW_LIMIT = 3;
+const HISTORY_LIST_DIFF_CELL_LIMIT = 60_000;
+
+function splitHistoryLines(text: string): string[] {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (normalized.length === 0) return [];
+  const lines = normalized.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function countChangedLines(
+  beforeText: string | undefined,
+  afterText: string | undefined,
+): { added: number; removed: number } | null {
+  if (beforeText === undefined && afterText === undefined) return null;
+  if (beforeText === afterText) return { added: 0, removed: 0 };
+  const before = splitHistoryLines(beforeText ?? "");
+  const after = splitHistoryLines(afterText ?? "");
+  if (before.length === 0) return { added: after.length, removed: 0 };
+  if (after.length === 0) return { added: 0, removed: before.length };
+
+  const cellCount = (before.length + 1) * (after.length + 1);
+  if (cellCount > HISTORY_LIST_DIFF_CELL_LIMIT) {
+    return { added: after.length, removed: before.length };
+  }
+
+  const columnCount = after.length + 1;
+  const table = new Uint16Array(cellCount);
+  const at = (beforeIndex: number, afterIndex: number) =>
+    beforeIndex * columnCount + afterIndex;
+
+  for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
+    for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
+      if (before[beforeIndex] === after[afterIndex]) {
+        table[at(beforeIndex, afterIndex)] =
+          table[at(beforeIndex + 1, afterIndex + 1)] + 1;
+      } else {
+        table[at(beforeIndex, afterIndex)] = Math.max(
+          table[at(beforeIndex + 1, afterIndex)],
+          table[at(beforeIndex, afterIndex + 1)],
+        );
+      }
+    }
+  }
+
+  const common = table[at(0, 0)];
+  return {
+    added: after.length - common,
+    removed: before.length - common,
+  };
+}
+
+function summarizeLineStats(files: FileChange[]): ChangeSetLineStats | undefined {
+  const stats = files.reduce<ChangeSetLineStats>(
+    (totals, file) => {
+      const counts = countChangedLines(file.before?.text, file.after?.text);
+      if (!counts) {
+        totals.unavailableFileCount += 1;
+        return totals;
+      }
+      totals.added += counts.added;
+      totals.removed += counts.removed;
+      if (counts.added > 0 || counts.removed > 0) {
+        totals.changedFileCount += 1;
+      }
+      return totals;
+    },
+    { added: 0, removed: 0, changedFileCount: 0, unavailableFileCount: 0 },
+  );
+
+  if (
+    stats.added === 0 &&
+    stats.removed === 0 &&
+    stats.changedFileCount === 0 &&
+    stats.unavailableFileCount === 0
+  ) {
+    return undefined;
+  }
+  return stats;
+}
 
 export interface WorkspaceActivityOptions {
   // Live facts main owns: whether this workspace has cloud sync enabled
@@ -179,7 +263,41 @@ export function createWorkspaceActivity(
       summary: record.summary,
       humanSummary: humanSummary(record),
       fileCount: record.files.length,
+      reviewRequired: record.boundaryCrossings.length > 0,
+      boundaryCrossingCount: record.boundaryCrossings.length,
+      filePreview: record.files
+        .slice(0, HISTORY_FILE_PREVIEW_LIMIT)
+        .map((file) => ({ path: file.path, operation: file.operation })),
+      lineStats: summarizeLineStats(record.files),
+      boundaryCrossingPreview: record.boundaryCrossings.slice(
+        0,
+        HISTORY_BOUNDARY_PREVIEW_LIMIT,
+      ),
     }));
+  }
+
+  async function readChangeSet(
+    workspace: CreatedWorkspace,
+    id: string,
+  ): Promise<ReadChangeSetResult> {
+    const store = createChangeSetStore(workspace.rootPath);
+    const record = await store.get(id);
+    return {
+      changeSet: record
+        ? {
+            id: record.id,
+            recordedAtMs: record.recordedAtMs,
+            kind: record.kind,
+            author: record.author,
+            summary: record.summary,
+            humanSummary: humanSummary(record),
+            fileCount: record.files.length,
+            files: record.files,
+            boundaryCrossings: record.boundaryCrossings,
+            ...(record.provenance ? { provenance: record.provenance } : {}),
+          }
+        : null,
+    };
   }
 
   async function readCatchUpSummary(
@@ -261,6 +379,7 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngines,
     listChangeSets,
+    readChangeSet,
     readCatchUpSummary,
     getStatus,
     setAgentRun,
