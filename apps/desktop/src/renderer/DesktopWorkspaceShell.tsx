@@ -7,6 +7,7 @@ import {
   History,
   Maximize2,
   PanelRight,
+  RefreshCw,
   User,
 } from "lucide-react";
 import {
@@ -69,7 +70,6 @@ import {
   togglePinned,
   toggleSidebar,
   VIEW_IDS,
-  type ViewId,
   type WorkbenchState,
 } from "./workbench/workbenchState";
 
@@ -120,6 +120,9 @@ const LazySearchView = lazy(() =>
 );
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
+);
+const LazyAppsView = lazy(() =>
+  import("./workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
 );
 const LazyAgentPanelView = lazy(() =>
   import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
@@ -281,30 +284,6 @@ function HistoryView(props: {
   );
 }
 
-// Designed empty states for the views whose real content lands later in this
-// plan (apps E5) — the rail itself is the seam. Search graduated to its real
-// view in E5.0; graph graduated in E5 graph (GraphView); agent in E6.
-const EMPTY_VIEW_COPY: Partial<Record<ViewId, { title: string; body: string }>> = {
-  apps: {
-    title: "Apps panel is on its way",
-    body: "Your workspace apps get a dedicated home later in this plan.",
-  },
-};
-
-function EmptyView({ view }: { view: ViewId }) {
-  const copy = EMPTY_VIEW_COPY[view];
-  if (!copy) return null;
-  return (
-    <div
-      data-testid="view-empty-state"
-      className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-    >
-      <span className="text-xs text-muted">{copy.title}</span>
-      <span className="text-[11px] text-subtle">{copy.body}</span>
-    </div>
-  );
-}
-
 function PanelLoading({ label }: { label: string }) {
   return (
     <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
@@ -345,6 +324,7 @@ export function DesktopWorkspaceShell(props: {
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
+  const [appsRefreshKey, setAppsRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -536,6 +516,11 @@ export function DesktopWorkspaceShell(props: {
     setFiles(result.files);
     setFolders(result.folders ?? []);
   }, [workspaceId]);
+
+  const refreshApps = useCallback(() => {
+    setAppsRefreshKey((key) => key + 1);
+    void refreshFiles();
+  }, [refreshFiles]);
 
   const refreshHistory = useCallback(async () => {
     const [history, status, agent] = await Promise.all([
@@ -1134,6 +1119,17 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "apps" ? (
+                <button
+                  type="button"
+                  data-testid="apps-refresh"
+                  aria-label="Refresh apps"
+                  title="Refresh apps"
+                  onClick={refreshApps}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <RefreshCw size={13} aria-hidden />
+                </button>
               ) : wb.activeView === "explorer" ? (
                 <>
                   <button
@@ -1176,6 +1172,15 @@ export function DesktopWorkspaceShell(props: {
                   variant="panel"
                 />
               </Suspense>
+            ) : wb.activeView === "apps" ? (
+              <Suspense fallback={<PanelLoading label="apps" />}>
+                <LazyAppsView
+                  workspaceId={workspaceId}
+                  files={files}
+                  refreshKey={appsRefreshKey}
+                  onOpenPath={openFile}
+                />
+              </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
                 changeSets={changeSets}
@@ -1191,9 +1196,7 @@ export function DesktopWorkspaceShell(props: {
                   onAgentActiveChange={setAgentActive}
                 />
               </Suspense>
-            ) : (
-              <EmptyView view={wb.activeView} />
-            )}
+            ) : null}
           </SidePanel>
         ) : null}
 
