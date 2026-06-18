@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
@@ -21,6 +22,15 @@ type GraphPoint = WorkspaceGraphNode & {
   radius: number;
 };
 
+type ForceNode = GraphPoint & {
+  index: number;
+  vx: number;
+  vy: number;
+  dragging: boolean;
+};
+
+type VisibleGraphEdge = WorkspaceGraphResult["edges"][number];
+
 const EMPTY_GRAPH: WorkspaceGraphResult = {
   nodes: [],
   edges: [],
@@ -36,8 +46,8 @@ const GRAPH_LAYOUT: Record<
   GraphVariant,
   { width: number; height: number; nodeLimit: number; edgeLimit: number }
 > = {
-  panel: { width: 320, height: 220, nodeLimit: 36, edgeLimit: 120 },
-  page: { width: 960, height: 620, nodeLimit: 120, edgeLimit: 500 },
+  panel: { width: 360, height: 250, nodeLimit: 36, edgeLimit: 120 },
+  page: { width: 1200, height: 760, nodeLimit: 140, edgeLimit: 650 },
 };
 
 function degree(node: Pick<WorkspaceGraphNode, "incoming" | "outgoing">): number {
@@ -52,72 +62,323 @@ function compareGraphNodes(activePath: string | null) {
   };
 }
 
-function layoutGraph(
-  nodes: WorkspaceGraphNode[],
+function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
+  return variant === "page"
+    ? Math.min(24, 9 + degree(node) * 0.9)
+    : Math.min(13, 6 + degree(node) * 0.75);
+}
+
+function requestGraphFrame(callback: FrameRequestCallback): number {
+  if (typeof globalThis.requestAnimationFrame === "function") {
+    return globalThis.requestAnimationFrame(callback);
+  }
+  return Number(globalThis.setTimeout(() => callback(performance.now()), 16));
+}
+
+function cancelGraphFrame(handle: number): void {
+  if (typeof globalThis.cancelAnimationFrame === "function") {
+    globalThis.cancelAnimationFrame(handle);
+  }
+  globalThis.clearTimeout(handle);
+}
+
+function initialGraphNode(
+  node: WorkspaceGraphNode,
+  index: number,
+  count: number,
   activePath: string | null,
   variant: GraphVariant,
-): GraphPoint[] {
+  previous: ForceNode | undefined,
+): ForceNode {
   const layout = GRAPH_LAYOUT[variant];
-  const ordered = [...nodes].sort(compareGraphNodes(activePath)).slice(0, layout.nodeLimit);
-  if (ordered.length === 0) return [];
-  if (ordered.length === 1) {
-    return [
-      {
-        ...ordered[0],
-        x: layout.width / 2,
-        y: layout.height / 2,
-        radius: variant === "page" ? 18 : 12,
-      },
-    ];
+  const radius = graphRadius(node, variant);
+  if (previous) {
+    return {
+      ...node,
+      index,
+      radius,
+      x: Math.min(layout.width - radius - 16, Math.max(radius + 16, previous.x)),
+      y: Math.min(layout.height - radius - 16, Math.max(radius + 16, previous.y)),
+      vx: previous.vx,
+      vy: previous.vy,
+      dragging: false,
+    };
   }
 
-  const radiusX = variant === "page" ? 360 : 118;
-  const radiusY = variant === "page" ? 230 : 76;
-  const hasActiveNode =
-    activePath !== null && ordered.some((node) => node.path === activePath);
-  if (!hasActiveNode) {
-    return ordered.map((node, index) => {
-      const angle =
-        ordered.length === 2
-          ? index * Math.PI
-          : -Math.PI / 2 + (Math.PI * 2 * index) / ordered.length;
-      return {
-        ...node,
-        x: layout.width / 2 + Math.cos(angle) * radiusX,
-        y: layout.height / 2 + Math.sin(angle) * radiusY,
-        radius:
-          variant === "page"
-            ? Math.min(22, 9 + degree(node) * 0.9)
-            : Math.min(12, 6 + degree(node) * 0.75),
-      };
-    });
+  const centerX = layout.width / 2;
+  const centerY = layout.height / 2;
+  if (count === 1 || node.path === activePath) {
+    return {
+      ...node,
+      index,
+      radius,
+      x: centerX,
+      y: centerY,
+      vx: 0,
+      vy: 0,
+      dragging: false,
+    };
   }
+  const ringCount = activePath ? Math.max(1, count - 1) : count;
+  const ringIndex = activePath ? Math.max(0, index - 1) : index;
+  const angle =
+    ringCount === 2
+      ? ringIndex * Math.PI
+      : -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
+  const spreadX = variant === "page" ? 350 : 128;
+  const spreadY = variant === "page" ? 235 : 82;
+  return {
+    ...node,
+    index,
+    radius,
+    x: centerX + Math.cos(angle) * spreadX,
+    y: centerY + Math.sin(angle) * spreadY,
+    vx: 0,
+    vy: 0,
+    dragging: false,
+  };
+}
 
-  const center = ordered[0];
-  const ring = ordered.slice(1);
-  return [
-    {
-      ...center,
-      x: layout.width / 2,
-      y: layout.height / 2,
-      radius:
-        variant === "page"
-          ? Math.min(28, 12 + degree(center))
-          : Math.min(15, 8 + degree(center)),
+function snapshotNodes(nodes: ForceNode[]): GraphPoint[] {
+  return nodes.map(
+    ({ index: _index, vx: _vx, vy: _vy, dragging: _dragging, ...node }) =>
+      node,
+  );
+}
+
+function visibleEdges(
+  graph: WorkspaceGraphResult,
+  nodes: ForceNode[],
+  variant: GraphVariant,
+): VisibleGraphEdge[] {
+  const paths = new Set(nodes.map((node) => node.path));
+  return graph.edges
+    .filter((edge) => paths.has(edge.source) && paths.has(edge.target))
+    .slice(0, GRAPH_LAYOUT[variant].edgeLimit);
+}
+
+function useForceGraph(
+  graph: WorkspaceGraphResult,
+  activePath: string | null,
+  variant: GraphVariant,
+) {
+  const layout = GRAPH_LAYOUT[variant];
+  const ordered = useMemo(
+    () =>
+      [...graph.nodes]
+        .sort(compareGraphNodes(activePath))
+        .slice(0, layout.nodeLimit),
+    [graph.nodes, activePath, layout.nodeLimit],
+  );
+  const [points, setPoints] = useState<GraphPoint[]>([]);
+  const nodesRef = useRef<ForceNode[]>([]);
+  const edgesRef = useRef<VisibleGraphEdge[]>([]);
+  const frameRef = useRef<number | null>(null);
+  const alphaRef = useRef(0);
+  const activePathRef = useRef(activePath);
+  const variantRef = useRef(variant);
+
+  const step = useCallback(() => {
+    const nodes = nodesRef.current;
+    const edges = edgesRef.current;
+    const currentLayout = GRAPH_LAYOUT[variantRef.current];
+    const currentActivePath = activePathRef.current;
+    const byPath = new Map(nodes.map((node) => [node.path, node]));
+    const dragging = nodes.some((node) => node.dragging);
+    const alpha = dragging ? Math.max(alphaRef.current, 0.22) : alphaRef.current;
+    const centerX = currentLayout.width / 2;
+    const centerY = currentLayout.height / 2;
+    const hasActive =
+      currentActivePath !== null && nodes.some((node) => node.path === currentActivePath);
+
+    for (const node of nodes) {
+      if (node.dragging) continue;
+      const active = node.path === currentActivePath;
+      const centerStrength = active ? 0.09 : hasActive ? 0.006 : 0.014;
+      node.vx += (centerX - node.x) * centerStrength * alpha;
+      node.vy += (centerY - node.y) * centerStrength * alpha;
+
+      if (hasActive && !active) {
+        const ringIndex = Math.max(0, node.index - 1);
+        const ringCount = Math.max(1, nodes.length - 1);
+        const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
+        const ringX =
+          centerX + Math.cos(angle) * (variantRef.current === "page" ? 360 : 120);
+        const ringY =
+          centerY + Math.sin(angle) * (variantRef.current === "page" ? 240 : 82);
+        node.vx += (ringX - node.x) * 0.004 * alpha;
+        node.vy += (ringY - node.y) * 0.004 * alpha;
+      }
+    }
+
+    for (const edge of edges) {
+      const source = byPath.get(edge.source);
+      const target = byPath.get(edge.target);
+      if (!source || !target) continue;
+      const dx = target.x - source.x;
+      const dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const desired =
+        variantRef.current === "page"
+          ? edge.kind === "wikilink"
+            ? 150
+            : 116
+          : edge.kind === "wikilink"
+            ? 58
+            : 46;
+      const force = (distance - desired) * 0.018 * alpha;
+      const fx = (dx / distance) * force;
+      const fy = (dy / distance) * force;
+      if (!source.dragging) {
+        source.vx += fx;
+        source.vy += fy;
+      }
+      if (!target.dragging) {
+        target.vx -= fx;
+        target.vy -= fy;
+      }
+    }
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i]!;
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j]!;
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let distance = Math.hypot(dx, dy);
+        if (distance < 0.1) {
+          dx = (j % 3) + 0.25;
+          dy = (i % 5) + 0.5;
+          distance = Math.hypot(dx, dy);
+        }
+        const nx = dx / distance;
+        const ny = dy / distance;
+        const charge =
+          ((variantRef.current === "page" ? 2800 : 680) * alpha) /
+          Math.max(80, distance * distance);
+        if (!a.dragging) {
+          a.vx -= nx * charge;
+          a.vy -= ny * charge;
+        }
+        if (!b.dragging) {
+          b.vx += nx * charge;
+          b.vy += ny * charge;
+        }
+        const minDistance =
+          a.radius + b.radius + (variantRef.current === "page" ? 34 : 16);
+        if (distance < minDistance) {
+          const push = ((minDistance - distance) / distance) * 0.38 * alpha;
+          if (!a.dragging) {
+            a.vx -= dx * push;
+            a.vy -= dy * push;
+          }
+          if (!b.dragging) {
+            b.vx += dx * push;
+            b.vy += dy * push;
+          }
+        }
+      }
+    }
+
+    let maxVelocity = 0;
+    for (const node of nodes) {
+      if (node.dragging) {
+        node.vx = 0;
+        node.vy = 0;
+        continue;
+      }
+      node.vx *= 0.84;
+      node.vy *= 0.84;
+      node.x = Math.min(
+        currentLayout.width - node.radius - 18,
+        Math.max(node.radius + 18, node.x + node.vx),
+      );
+      node.y = Math.min(
+        currentLayout.height - node.radius - 28,
+        Math.max(node.radius + 18, node.y + node.vy),
+      );
+      maxVelocity = Math.max(maxVelocity, Math.abs(node.vx), Math.abs(node.vy));
+    }
+
+    setPoints(snapshotNodes(nodes));
+    alphaRef.current = dragging ? 0.28 : alphaRef.current * 0.982;
+    if (dragging || alphaRef.current > 0.008 || maxVelocity > 0.018) {
+      frameRef.current = requestGraphFrame(step);
+      return;
+    }
+    frameRef.current = null;
+  }, []);
+
+  const restart = useCallback(
+    (boost = 0.7) => {
+      alphaRef.current = Math.max(alphaRef.current, boost);
+      if (frameRef.current === null) frameRef.current = requestGraphFrame(step);
     },
-    ...ring.map((node, index) => {
-      const angle = -Math.PI / 2 + (Math.PI * 2 * index) / ring.length;
-      return {
-        ...node,
-        x: layout.width / 2 + Math.cos(angle) * radiusX,
-        y: layout.height / 2 + Math.sin(angle) * radiusY,
-        radius:
-          variant === "page"
-            ? Math.min(22, 9 + degree(node) * 0.9)
-            : Math.min(12, 6 + degree(node) * 0.75),
-      };
-    }),
-  ];
+    [step],
+  );
+
+  useEffect(() => {
+    activePathRef.current = activePath;
+    variantRef.current = variant;
+  }, [activePath, variant]);
+
+  useEffect(() => {
+    const previous = new Map(nodesRef.current.map((node) => [node.path, node]));
+    const nodes = ordered.map((node, index) =>
+      initialGraphNode(
+        node,
+        index,
+        ordered.length,
+        activePath,
+        variant,
+        previous.get(node.path),
+      ),
+    );
+    nodesRef.current = nodes;
+    edgesRef.current = visibleEdges(graph, nodes, variant);
+    setPoints(snapshotNodes(nodes));
+    restart(0.86);
+  }, [activePath, graph, ordered, restart, variant]);
+
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) cancelGraphFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  }, []);
+
+  const setNodePosition = useCallback(
+    (path: string, x: number, y: number, dragging: boolean) => {
+      const node = nodesRef.current.find((entry) => entry.path === path);
+      if (!node) return;
+      node.dragging = dragging;
+      node.x = Math.min(layout.width - node.radius - 18, Math.max(node.radius + 18, x));
+      node.y = Math.min(layout.height - node.radius - 28, Math.max(node.radius + 18, y));
+      node.vx = 0;
+      node.vy = 0;
+      setPoints(snapshotNodes(nodesRef.current));
+      restart(dragging ? 0.55 : 0.32);
+    },
+    [layout.height, layout.width, restart],
+  );
+
+  const releaseNode = useCallback(
+    (path: string) => {
+      const node = nodesRef.current.find((entry) => entry.path === path);
+      if (!node) return;
+      node.dragging = false;
+      restart(0.34);
+    },
+    [restart],
+  );
+
+  return {
+    points,
+    edges: edgesRef.current,
+    setNodePosition,
+    releaseNode,
+    restart,
+  };
 }
 
 function graphStatus(graph: WorkspaceGraphResult): string | null {
@@ -141,28 +402,72 @@ function GraphMap(props: {
   onOpenPath: (path: string) => void;
 }) {
   const layout = GRAPH_LAYOUT[props.variant];
-  const points = useMemo(
-    () => layoutGraph(props.graph.nodes, props.activePath, props.variant),
-    [props.graph.nodes, props.activePath, props.variant],
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<{
+    path: string;
+    startClientX: number;
+    startClientY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef<string | null>(null);
+  const { points, edges, setNodePosition, releaseNode } = useForceGraph(
+    props.graph,
+    props.activePath,
+    props.variant,
   );
   const byPath = useMemo(
     () => new Map(points.map((point) => [point.path, point])),
     [points],
   );
-  const edges = props.graph.edges
-    .filter((edge) => byPath.has(edge.source) && byPath.has(edge.target))
-    .slice(0, layout.edgeLimit);
+
+  function pointFromPointer(event: React.PointerEvent<SVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    const width = rect?.width && rect.width > 0 ? rect.width : layout.width;
+    const height = rect?.height && rect.height > 0 ? rect.height : layout.height;
+    const left = rect?.left ?? 0;
+    const top = rect?.top ?? 0;
+    return {
+      x: ((event.clientX - left) / width) * layout.width,
+      y: ((event.clientY - top) / height) * layout.height,
+    };
+  }
+
+  function moveDrag(event: React.PointerEvent<SVGSVGElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const point = pointFromPointer(event);
+    const moved =
+      Math.abs(event.clientX - drag.startClientX) > 3 ||
+      Math.abs(event.clientY - drag.startClientY) > 3;
+    drag.moved ||= moved;
+    setNodePosition(drag.path, point.x, point.y, true);
+  }
+
+  function endDrag(event: React.PointerEvent<SVGSVGElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    releaseNode(drag.path);
+    if (drag.moved) suppressClickRef.current = drag.path;
+    dragRef.current = null;
+    if (svgRef.current?.hasPointerCapture(event.pointerId)) {
+      svgRef.current.releasePointerCapture(event.pointerId);
+    }
+  }
 
   return (
     <svg
+      ref={svgRef}
       data-testid="graph-map"
       viewBox={`0 0 ${layout.width} ${layout.height}`}
       role="img"
       aria-label="Workspace graph"
+      onPointerMove={moveDrag}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
       className={
         props.variant === "page"
-          ? "min-h-0 w-full flex-1 bg-bg"
-          : "h-56 w-full shrink-0 border-y border-line bg-bg"
+          ? "min-h-0 w-full flex-1 touch-none bg-bg"
+          : "h-60 w-full shrink-0 touch-none border-y border-line bg-bg"
       }
     >
       <rect width={layout.width} height={layout.height} className="fill-bg" />
@@ -205,9 +510,27 @@ function GraphMap(props: {
             role="button"
             tabIndex={0}
             aria-label={node.path}
-            className="dohc-graph-node cursor-pointer outline-none"
+            className="dohc-graph-node outline-none"
             style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
-            onClick={() => props.onOpenPath(node.path)}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              const point = pointFromPointer(event);
+              dragRef.current = {
+                path: node.path,
+                startClientX: event.clientX,
+                startClientY: event.clientY,
+                moved: false,
+              };
+              setNodePosition(node.path, point.x, point.y, true);
+              svgRef.current?.setPointerCapture(event.pointerId);
+            }}
+            onClick={() => {
+              if (suppressClickRef.current === node.path) {
+                suppressClickRef.current = null;
+                return;
+              }
+              props.onOpenPath(node.path);
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
@@ -323,6 +646,15 @@ export function GraphView(props: {
         <output data-testid="graph-link-count" className="text-[11px] text-muted">
           {graph.edges.length} link{graph.edges.length === 1 ? "" : "s"}
         </output>
+        {notice ? (
+          <span
+            data-testid="graph-unresolved-count"
+            className="inline-flex items-center gap-1.5 text-[11px] text-subtle"
+          >
+            <Unlink size={12} aria-hidden />
+            {notice}
+          </span>
+        ) : null}
         <button
           type="button"
           aria-label="Refresh graph"
@@ -353,7 +685,7 @@ export function GraphView(props: {
         <div
           className={
             variant === "page"
-              ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]"
+              ? "flex min-h-0 flex-1"
               : "flex min-h-0 flex-1 flex-col"
           }
         >
@@ -363,54 +695,43 @@ export function GraphView(props: {
             variant={variant}
             onOpenPath={props.onOpenPath}
           />
-          <div
-            className={
-              variant === "page"
-                ? "flex min-h-0 flex-col border-l border-line bg-panel"
-                : "flex min-h-0 flex-1 flex-col"
-            }
-          >
-            {notice ? (
-              <div
-                data-testid="graph-unresolved-count"
-                className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[11px] text-subtle"
-              >
-                <Unlink size={12} aria-hidden />
-                {notice}
-              </div>
-            ) : null}
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              {rows.map((node) => {
-                const active = node.path === props.activePath;
-                return (
-                  <button
-                    key={node.path}
-                    type="button"
-                    data-testid="graph-file-row"
-                    data-path={node.path}
-                    data-active={active ? "true" : "false"}
-                    onClick={() => props.onOpenPath(node.path)}
-                    className={`flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left hover:bg-line/40 ${
-                      active ? "bg-line/50 text-ink" : "text-muted"
-                    }`}
-                  >
-                    <span className="grid size-6 shrink-0 place-items-center rounded border border-line bg-panel text-[10px] font-semibold text-subtle">
-                      {degree(node)}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs text-ink">{node.title}</span>
-                      <span className="block truncate font-mono text-[10px] text-subtle">
-                        {node.path}
+          {variant === "page" ? null : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                {rows.map((node) => {
+                  const active = node.path === props.activePath;
+                  return (
+                    <button
+                      key={node.path}
+                      type="button"
+                      data-testid="graph-file-row"
+                      data-path={node.path}
+                      data-active={active ? "true" : "false"}
+                      onClick={() => props.onOpenPath(node.path)}
+                      className={`flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left hover:bg-line/40 ${
+                        active ? "bg-line/50 text-ink" : "text-muted"
+                      }`}
+                    >
+                      <span className="grid size-6 shrink-0 place-items-center rounded border border-line bg-panel text-[10px] font-semibold text-subtle">
+                        {degree(node)}
                       </span>
-                    </span>
-                    <span className="font-mono text-[10px] text-subtle">
-                      {node.incoming}/{node.outgoing}
-                    </span>
-                  </button>
-                );
-              })}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs text-ink">
+                          {node.title}
+                        </span>
+                        <span className="block truncate font-mono text-[10px] text-subtle">
+                          {node.path}
+                        </span>
+                      </span>
+                      <span className="font-mono text-[10px] text-subtle">
+                        {node.incoming}/{node.outgoing}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

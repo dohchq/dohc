@@ -4,6 +4,7 @@ import {
   CheckCheck,
   FilePlus2,
   FolderPlus,
+  History,
   PanelRight,
   User,
 } from "lucide-react";
@@ -782,7 +783,11 @@ export function DesktopWorkspaceShell(props: {
     [mutateWb],
   );
   const openHistoryView = useCallback(() => {
-    mutateWb((state) => ({ ...setView(state, "history"), sidebarVisible: true }));
+    mutateWb((state) => ({
+      ...setView(state, "history"),
+      sidebarVisible: true,
+      historyVisible: true,
+    }));
   }, [mutateWb]);
   const openAgentView = useCallback(() => {
     mutateWb((state) => ({ ...setView(state, "agent"), sidebarVisible: true }));
@@ -1271,7 +1276,23 @@ export function DesktopWorkspaceShell(props: {
               onMarkCaughtUp={markCaughtUp}
             />
           </aside>
-        ) : null}
+        ) : (
+          <aside
+            aria-label="History collapsed"
+            className="flex w-9 shrink-0 justify-center border-l border-line bg-panel-2 pt-2"
+          >
+            <button
+              type="button"
+              data-testid="history-restore"
+              aria-label="Restore history"
+              title="Restore history"
+              onClick={() => mutateWb(toggleHistory)}
+              className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            >
+              <History size={13} aria-hidden />
+            </button>
+          </aside>
+        )}
       </div>
 
       <StatusBar

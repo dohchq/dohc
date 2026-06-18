@@ -156,10 +156,23 @@ table {
 
 .dohc-readable-text,
 .dohc-code-textarea,
+.dohc-code-editor,
+.dohc-code-editor .cm-content,
+.dohc-code-editor .cm-line,
+.dohc-code-editor .cm-line *,
 .dohc-csv-cell,
 .dohc-csv-raw-editor {
   cursor: text;
   user-select: text;
+}
+
+.dohc-code-editor .cm-editor,
+.dohc-code-editor .cm-scroller {
+  height: 100%;
+}
+
+.dohc-code-editor .cm-editor {
+  background: var(--dohc-bg);
 }
 
 .dohc-notion-editor h1 {
@@ -332,10 +345,15 @@ table {
 }
 
 .dohc-graph-node {
+  cursor: grab;
   transform-box: fill-box;
   transform-origin: center;
   animation: dohc-graph-node-in 360ms ease-out both;
   transition: transform 160ms ease;
+}
+
+.dohc-graph-node:active {
+  cursor: grabbing;
 }
 
 .dohc-graph-node circle {

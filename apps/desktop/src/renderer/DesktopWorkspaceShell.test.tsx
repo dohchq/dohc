@@ -289,6 +289,22 @@ describe("active file sharing", () => {
   });
 });
 
+describe("history rail", () => {
+  it("can be collapsed and restored from the right edge", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("history-timeline");
+    await user.click(screen.getByTestId("history-collapse"));
+
+    expect(screen.queryByTestId("history-timeline")).toBeNull();
+    await user.click(screen.getByTestId("history-restore"));
+
+    expect(await screen.findByTestId("history-timeline")).toBeTruthy();
+  });
+});
+
 describe("imports and exports", () => {
   it("opens the import/export panel from the explorer footer", async () => {
     const bridge = makeBridge(Promise.resolve(null));

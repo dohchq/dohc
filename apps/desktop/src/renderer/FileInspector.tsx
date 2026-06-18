@@ -1,4 +1,33 @@
 import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+} from "@codemirror/commands";
+import { css } from "@codemirror/lang-css";
+import { html } from "@codemirror/lang-html";
+import { javascript } from "@codemirror/lang-javascript";
+import { json as jsonLanguage } from "@codemirror/lang-json";
+import {
+  bracketMatching,
+  defaultHighlightStyle,
+  foldGutter,
+  foldKeymap,
+  indentOnInput,
+  syntaxHighlighting,
+} from "@codemirror/language";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import {
+  drawSelection,
+  dropCursor,
+  EditorView,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  keymap,
+  lineNumbers,
+  rectangularSelection,
+} from "@codemirror/view";
+import {
   FileText,
   Image as ImageIcon,
   Music,
@@ -6,6 +35,7 @@ import {
   Share2,
   SlidersHorizontal,
   Table,
+  Trash2,
 } from "lucide-react";
 import {
   Suspense,
@@ -77,7 +107,46 @@ export function lineSpanInText(
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
 const AUDIO_EXT = new Set(["m4a", "mp3", "wav", "ogg"]);
 const DB_EXT = new Set(["sqlite", "sqlite3", "db"]);
-const TEXT_EXT = new Set(["md", "markdown", "txt", "csv", "json", "html", "tsx", "ts", "css", "js"]);
+const TABLE_EXT = new Set(["csv", "tsv", "tab"]);
+const TEXT_EXT = new Set([
+  "md",
+  "markdown",
+  "txt",
+  "json",
+  "html",
+  "htm",
+  "xml",
+  "css",
+  "scss",
+  "sass",
+  "less",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "mjs",
+  "cjs",
+  "yaml",
+  "yml",
+  "toml",
+  "ini",
+  "env",
+  "log",
+  "sql",
+  "sh",
+  "bash",
+  "zsh",
+  "ps1",
+  "py",
+  "rb",
+  "go",
+  "rs",
+  "java",
+  "c",
+  "cpp",
+  "h",
+  "hpp",
+]);
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 const RAW_FRONTMATTER_RE =
   /^(---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?)([\s\S]*)$/;
@@ -155,7 +224,7 @@ export function classifyForView(path: string): FileViewKind {
   if (path.includes("/.apps/") || path.startsWith(".apps/")) return "app-source";
   const ext = extensionOf(path);
   if (ext === "md" || ext === "markdown") return "markdown";
-  if (ext === "csv") return "csv";
+  if (TABLE_EXT.has(ext)) return "csv";
   if (ext === "json") return "json";
   if (IMAGE_EXT.has(ext)) return "image";
   if (AUDIO_EXT.has(ext)) return "audio";
@@ -287,6 +356,80 @@ const MARKDOWN_COMPONENTS = {
     <span className="text-accent underline">{p.children}</span>
   ),
 };
+
+const CODEMIRROR_THEME = EditorView.theme({
+  "&": {
+    height: "100%",
+    backgroundColor: "var(--dohc-bg)",
+    color: "var(--dohc-ink)",
+    fontSize: "13px",
+  },
+  ".cm-scroller": {
+    fontFamily:
+      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+  },
+  ".cm-content": {
+    minHeight: "100%",
+    padding: "14px 0 80px",
+    caretColor: "var(--dohc-ink)",
+    cursor: "text",
+  },
+  ".cm-line": {
+    padding: "0 16px",
+    lineHeight: "1.58",
+    cursor: "text",
+  },
+  ".cm-gutters": {
+    backgroundColor: "var(--dohc-panel)",
+    borderRight: "1px solid var(--dohc-line)",
+    color: "var(--dohc-subtle)",
+  },
+  ".cm-activeLineGutter": {
+    backgroundColor: "var(--dohc-panel-2)",
+    color: "var(--dohc-ink)",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "color-mix(in srgb, var(--dohc-line) 38%, transparent)",
+  },
+  ".cm-cursor": {
+    borderLeftColor: "var(--dohc-ink)",
+  },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+    backgroundColor: "color-mix(in srgb, var(--dohc-accent) 24%, transparent)",
+  },
+  ".cm-foldGutter span": {
+    color: "var(--dohc-subtle)",
+  },
+  ".cm-content[contenteditable=false]": {
+    color: "var(--dohc-muted)",
+  },
+  "&.cm-focused": {
+    outline: "none",
+  },
+});
+
+function codeMirrorLanguage(path: string, language: string): Extension {
+  const ext = extensionOf(path) || language.toLowerCase();
+  if (ext === "json") return jsonLanguage();
+  if (ext === "html" || ext === "htm") return html();
+  if (ext === "css" || ext === "scss" || ext === "sass" || ext === "less") {
+    return css();
+  }
+  if (["js", "jsx", "mjs", "cjs", "ts", "tsx"].includes(ext)) {
+    return javascript({
+      jsx: ext === "jsx" || ext === "tsx",
+      typescript: ext === "ts" || ext === "tsx",
+    });
+  }
+  return [];
+}
+
+function readOnlyExtension(readOnly: boolean): Extension {
+  return [
+    EditorState.readOnly.of(readOnly),
+    EditorView.editable.of(!readOnly),
+  ];
+}
 
 type SaveState = "saved" | "saving" | "error";
 
@@ -891,7 +1034,11 @@ function CsvView({
     onSaveStateChange,
     registerDraftFlush,
   });
-  const rows = useMemo(() => parseCsvRows(draft.draft), [draft.draft]);
+  const delimiter = delimiterForPath(path);
+  const rows = useMemo(
+    () => parseDelimitedRows(draft.draft, delimiter),
+    [draft.draft, delimiter],
+  );
   const [header, ...data] = rows;
   // Bounded preview (Phase 16): an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
@@ -899,31 +1046,63 @@ function CsvView({
   // SQLite or raw mode is for.
   const MAX_PREVIEW_ROWS = 500;
   const previewRows = data.length > MAX_PREVIEW_ROWS ? data.slice(0, MAX_PREVIEW_ROWS) : data;
+  const columnCount = Math.max(
+    header?.length ?? 0,
+    ...previewRows.map((row) => row.length),
+  );
+
+  function setRows(next: string[][]) {
+    draft.setDraft(stringifyDelimitedRows(next, delimiter));
+  }
+
+  function columnName(index: number): string {
+    return index === 0 ? "column" : `column_${index + 1}`;
+  }
 
   function updateCell(rowIndex: number, cellIndex: number, value: string) {
     const next = rows.map((row) => [...row]);
     while (next.length <= rowIndex) next.push([]);
     while (next[rowIndex]!.length <= cellIndex) next[rowIndex]!.push("");
     next[rowIndex]![cellIndex] = value;
-    draft.setDraft(stringifyCsvRows(next));
+    setRows(next);
   }
 
   function addRow() {
     if (rows.length === 0) {
-      draft.setDraft("column\n");
+      setRows([["column"], [""]]);
       return;
     }
-    const width = Math.max(1, header?.length ?? 1);
-    draft.setDraft(stringifyCsvRows([...rows, Array.from({ length: width }, () => "")]));
+    const width = Math.max(1, columnCount);
+    setRows([...rows, Array.from({ length: width }, () => "")]);
   }
 
   function addColumn() {
     if (rows.length === 0) {
-      draft.setDraft("column\n");
+      setRows([["column"]]);
       return;
     }
-    const next = rows.length > 0 ? rows.map((row) => [...row, ""]) : [[""]];
-    draft.setDraft(stringifyCsvRows(next));
+    const width = Math.max(0, columnCount);
+    const next = rows.map((row, index) => {
+      const cells = [...row];
+      while (cells.length < width) cells.push("");
+      cells.push(index === 0 ? columnName(width) : "");
+      return cells;
+    });
+    setRows(next);
+  }
+
+  function deleteRow(rowIndex: number) {
+    const next = rows.filter((_, index) => index !== rowIndex);
+    setRows(next);
+  }
+
+  function deleteColumn(cellIndex: number) {
+    const next = rows.map((row) => row.filter((_, index) => index !== cellIndex));
+    if (next.every((row) => row.length === 0)) {
+      draft.setDraft("");
+      return;
+    }
+    setRows(next);
   }
 
   async function importToSqlite() {
@@ -1028,25 +1207,76 @@ function CsvView({
           className="dohc-csv-raw-editor min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
         />
       ) : !header ? (
-        <Empty>Empty table</Empty>
+        <div
+          data-testid="csv-empty-table"
+          className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+        >
+          <Table size={22} aria-hidden className="text-subtle" />
+          <div className="flex flex-col gap-1">
+            <span className="text-sm text-ink">Empty table</span>
+            <span className="text-xs text-subtle">No rows or columns</span>
+          </div>
+          {!truncated ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={addRow}
+                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+                data-testid="csv-empty-add-row"
+              >
+                <Plus size={12} aria-hidden />
+                Row
+              </button>
+              <button
+                type="button"
+                onClick={addColumn}
+                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-line/50 hover:text-ink"
+                data-testid="csv-empty-add-column"
+              >
+                <Plus size={12} aria-hidden />
+                Column
+              </button>
+            </div>
+          ) : null}
+        </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr>
-                {header.map((cell, i) => (
+                {!truncated ? (
+                  <th
+                    aria-label="Row actions"
+                    className="w-9 border border-line bg-panel-2 px-1 py-1"
+                  />
+                ) : null}
+                {Array.from({ length: columnCount }, (_, i) => (
                   <th
                     key={i}
                     className="border border-line bg-panel-2 px-2 py-1 text-left font-medium"
                   >
-                    <input
-                      data-testid="csv-cell"
-                      aria-label={`Header column ${i + 1}`}
-                      value={cell}
-                      readOnly={truncated}
-                      onChange={(event) => updateCell(0, i, event.target.value)}
-                      className="dohc-csv-cell w-full min-w-24 bg-transparent text-ink outline-none read-only:text-muted"
-                    />
+                    <div className="flex items-center gap-1">
+                      <input
+                        data-testid="csv-cell"
+                        aria-label={`Header column ${i + 1}`}
+                        value={header[i] ?? ""}
+                        readOnly={truncated}
+                        onChange={(event) => updateCell(0, i, event.target.value)}
+                        className="dohc-csv-cell min-w-24 flex-1 bg-transparent text-ink outline-none read-only:text-muted"
+                      />
+                      {!truncated ? (
+                        <button
+                          type="button"
+                          data-testid="csv-delete-column"
+                          aria-label={`Delete column ${i + 1}`}
+                          title="Delete column"
+                          onClick={() => deleteColumn(i)}
+                          className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/60 hover:text-danger"
+                        >
+                          <Trash2 size={11} aria-hidden />
+                        </button>
+                      ) : null}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -1054,7 +1284,21 @@ function CsvView({
             <tbody>
               {previewRows.map((row, r) => (
                 <tr key={r}>
-                  {Array.from({ length: header.length }, (_, c) => (
+                  {!truncated ? (
+                    <td className="border border-line bg-panel px-1 py-1 text-center">
+                      <button
+                        type="button"
+                        data-testid="csv-delete-row"
+                        aria-label={`Delete row ${r + 1}`}
+                        title="Delete row"
+                        onClick={() => deleteRow(r + 1)}
+                        className="grid size-5 place-items-center rounded text-subtle hover:bg-line/60 hover:text-danger"
+                      >
+                        <Trash2 size={11} aria-hidden />
+                      </button>
+                    </td>
+                  ) : null}
+                  {Array.from({ length: columnCount }, (_, c) => (
                     <td key={c} className="border border-line px-2 py-1">
                       <input
                         data-testid="csv-cell"
@@ -1085,7 +1329,12 @@ function CsvView({
   );
 }
 
-function parseCsvRows(text: string): string[][] {
+function delimiterForPath(path: string): "," | "\t" {
+  const ext = extensionOf(path);
+  return ext === "tsv" || ext === "tab" ? "\t" : ",";
+}
+
+function parseDelimitedRows(text: string, delimiter: "," | "\t"): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = "";
@@ -1107,7 +1356,7 @@ function parseCsvRows(text: string): string[][] {
 
     if (char === '"') {
       quoted = true;
-    } else if (char === ",") {
+    } else if (char === delimiter) {
       row.push(cell);
       cell = "";
     } else if (char === "\n") {
@@ -1127,14 +1376,16 @@ function parseCsvRows(text: string): string[][] {
   return rows;
 }
 
-function stringifyCsvRows(rows: string[][]): string {
+function stringifyDelimitedRows(rows: string[][], delimiter: "," | "\t"): string {
   return rows
     .map((row) =>
       row
         .map((cell) =>
-          /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell,
+          cell.includes(delimiter) || /["\r\n]/.test(cell)
+            ? `"${cell.replace(/"/g, '""')}"`
+            : cell,
         )
-        .join(","),
+        .join(delimiter),
     )
     .join("\n");
 }
@@ -1182,6 +1433,139 @@ function ImageView({ url, path }: { url: string; path: string }) {
   );
 }
 
+function SourceCodeEditor(props: {
+  testId: string;
+  value: string;
+  language: string;
+  path: string;
+  readOnly?: boolean;
+  scrollLine?: number;
+  onChange: (next: string) => void;
+  onSave: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const readOnlyCompartment = useRef(new Compartment()).current;
+  const languageCompartment = useRef(new Compartment()).current;
+  const onChangeRef = useRef(props.onChange);
+  const onSaveRef = useRef(props.onSave);
+  const applyingRemoteValue = useRef(false);
+
+  useEffect(() => {
+    onChangeRef.current = props.onChange;
+    onSaveRef.current = props.onSave;
+  });
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc: props.value,
+        extensions: [
+          lineNumbers(),
+          foldGutter(),
+          highlightActiveLineGutter(),
+          history(),
+          drawSelection(),
+          dropCursor(),
+          rectangularSelection(),
+          indentOnInput(),
+          bracketMatching(),
+          highlightActiveLine(),
+          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          EditorState.allowMultipleSelections.of(true),
+          EditorState.tabSize.of(2),
+          EditorView.lineWrapping,
+          CODEMIRROR_THEME,
+          readOnlyCompartment.of(readOnlyExtension(Boolean(props.readOnly))),
+          languageCompartment.of(codeMirrorLanguage(props.path, props.language)),
+          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...foldKeymap]),
+          EditorView.domEventHandlers({
+            keydown(event) {
+              if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+                onSaveRef.current();
+                return true;
+              }
+              return false;
+            },
+          }),
+          EditorView.updateListener.of((update) => {
+            if (!update.docChanged || applyingRemoteValue.current) return;
+            onChangeRef.current(update.state.doc.toString());
+          }),
+        ],
+      }),
+    });
+    viewRef.current = view;
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // The editor is intentionally created once; reactive pieces are
+    // reconfigured through compartments/effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current === props.value) return;
+    applyingRemoteValue.current = true;
+    view.dispatch({
+      changes: { from: 0, to: current.length, insert: props.value },
+    });
+    applyingRemoteValue.current = false;
+  }, [props.value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.reconfigure(readOnlyExtension(Boolean(props.readOnly))),
+    });
+  }, [props.readOnly, readOnlyCompartment]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: languageCompartment.reconfigure(
+        codeMirrorLanguage(props.path, props.language),
+      ),
+    });
+  }, [props.path, props.language, languageCompartment]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (props.scrollLine === undefined || !view) return;
+    const lineNumber = Math.max(
+      1,
+      Math.min(props.scrollLine, view.state.doc.lines),
+    );
+    const line = view.state.doc.line(lineNumber);
+    view.focus();
+    view.dispatch({
+      selection: { anchor: line.from, head: line.to },
+      effects: EditorView.scrollIntoView(line.from, { y: "center" }),
+    });
+  }, [props.scrollLine]);
+
+  return (
+    <div
+      ref={hostRef}
+      data-testid={props.testId}
+      className="dohc-code-editor min-h-0 flex-1"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) viewRef.current?.focus();
+      }}
+    />
+  );
+}
+
 function TextEditorView({
   body,
   testId,
@@ -1213,20 +1597,6 @@ function TextEditorView({
     onSaveStateChange,
     registerDraftFlush,
   });
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    if (scrollLine === undefined) return;
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const { start, end } = lineSpanInText(textarea.value, scrollLine);
-    textarea.focus();
-    textarea.setSelectionRange(start, end);
-    const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 20;
-    textarea.scrollTop = Math.max(
-      0,
-      (scrollLine - 1) * lineHeight - textarea.clientHeight / 3,
-    );
-  }, [scrollLine]);
   return (
     <div
       data-testid={testId}
@@ -1250,20 +1620,15 @@ function TextEditorView({
                 : "Couldn't save"}
         </span>
       </div>
-      <textarea
-        ref={textareaRef}
-        data-testid={`${testId}-editor`}
+      <SourceCodeEditor
+        testId={`${testId}-editor`}
         value={editor.draft}
-        onChange={(event) => editor.setDraft(event.target.value)}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "s") {
-            event.preventDefault();
-            void editor.saveNow();
-          }
-        }}
+        language={language}
+        path={path}
         readOnly={truncated}
-        spellCheck={false}
-        className="dohc-code-textarea min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
+        scrollLine={scrollLine}
+        onChange={editor.setDraft}
+        onSave={() => void editor.saveNow()}
       />
     </div>
   );
@@ -1340,11 +1705,11 @@ export function FileInspector(props: {
   // once a mounted view applied it, so plain re-opens never re-jump.
   scrollTarget?: ScrollTarget;
   onScrollConsumed?: () => void;
-  // Editor save-state seam for the tab strip's dirty indicator. Only the
-  // markdown editor saves locally, so it is the only dirty source.
+  // Editor save-state seam for the tab strip's dirty indicator. Editable
+  // source/table/document views all report through the same small contract.
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
-  // Registers the active editor's draft flush with the shell (same "only
-  // dirty source" scoping): explorer ops await it before re-pathing files.
+  // Registers the active editor's draft flush with the shell: explorer ops
+  // await it before re-pathing files.
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;

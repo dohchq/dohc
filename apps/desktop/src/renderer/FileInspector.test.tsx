@@ -31,6 +31,7 @@ describe("classifyForView dispatch", () => {
     ["notes/today.md", "markdown"],
     ["readme.markdown", "markdown"],
     ["data/transactions.csv", "csv"],
+    ["data/report.tsv", "csv"],
     ["data/config.json", "json"],
     ["notes/plain.txt", "text"],
     ["uploads/receipt.png", "image"],
@@ -120,6 +121,18 @@ describe("markdown editor unmount flush", () => {
   };
 
   beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class ResizeObserver {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+      Number(setTimeout(() => callback(performance.now()), 16)),
+    );
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -223,12 +236,11 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
 
-    const editor = (await screen.findByTestId(
-      "view-text-editor",
-    )) as HTMLTextAreaElement;
-    await user.click(editor);
-    editor.setSelectionRange(editor.value.length, editor.value.length);
-    await user.keyboard(" world");
+    const editor = await screen.findByTestId("view-text-editor");
+    const content = editor.querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{Control>}a{/Control}");
+    await user.keyboard("hello world");
     view.unmount();
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
@@ -256,6 +268,25 @@ describe("markdown editor unmount flush", () => {
       workspaceId: "ws-1",
       relativePath: "data/table.csv",
       text: "date,amount\n2026-06-10,43",
+    });
+  });
+
+  it("can start editing an empty CSV as a table", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const view = render(<FileInspector workspaceId="ws-1" path="data/empty.csv" />);
+
+    await screen.findByTestId("csv-empty-table");
+    await user.click(screen.getByTestId("csv-empty-add-row"));
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "data/empty.csv",
+      text: "column\n",
     });
   });
 
