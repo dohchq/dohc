@@ -87,6 +87,7 @@ function makeBridge(
         { path: "a.md", kind: "file" as const },
         { path: "b.md", kind: "file" as const },
       ],
+      folders: [] as string[],
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
@@ -380,8 +381,46 @@ describe("file tree drag preview", () => {
     fireEvent.dragOver(rowB, { dataTransfer });
 
     expect(rowB.dataset.dropState).toBe("blocked");
-    expect(within(rowB).getByTestId("tree-drop-label").textContent).toBe("No change");
+    expect(within(rowB).queryByTestId("tree-drop-label")).toBeNull();
     expect(dataTransfer.dropEffect).toBe("none");
+  });
+
+  it("highlights a hovered folder and its visible contents", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [
+        { path: "docs/a.md", kind: "file" as const },
+        { path: "docs/b.md", kind: "file" as const },
+        { path: "loose.md", kind: "file" as const },
+      ],
+      folders: ["docs"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const folder = await screen.findByText("docs");
+    await user.click(folder);
+
+    const rows = await screen.findAllByTestId("tree-row");
+    const source = rows.find((row) => row.getAttribute("data-path") === "loose.md")!;
+    const docs = rows.find((row) => row.getAttribute("data-path") === "docs")!;
+    const childA = rows.find((row) => row.getAttribute("data-path") === "docs/a.md")!;
+    const childB = rows.find((row) => row.getAttribute("data-path") === "docs/b.md")!;
+    const dataTransfer = {
+      effectAllowed: "move",
+      dropEffect: "move",
+      files: [],
+      types: [],
+      setData: vi.fn(),
+    };
+
+    fireEvent.dragStart(source, { dataTransfer });
+    fireEvent.dragOver(docs, { dataTransfer });
+
+    expect(docs.dataset.dropState).toBe("move");
+    expect(childA.dataset.dropState).toBe("move");
+    expect(childB.dataset.dropState).toBe("move");
+    expect(within(docs).queryByTestId("tree-drop-label")).toBeNull();
   });
 });
 

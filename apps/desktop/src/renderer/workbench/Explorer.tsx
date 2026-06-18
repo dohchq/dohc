@@ -77,10 +77,13 @@ type DropPreview = {
   targetPath: string | null;
   targetDir: string;
   kind: "move" | "copy" | "blocked";
-  label: string;
+  targetIsFolder: boolean;
 };
 
-type RowDropPreview = Pick<DropPreview, "kind" | "label">;
+type RowDropPreview = {
+  kind: DropPreview["kind"];
+  role: "target" | "contained";
+};
 
 function leafOf(path: string): string {
   const slash = path.lastIndexOf("/");
@@ -98,36 +101,6 @@ function ancestorsOf(path: string): string[] {
 
 function externalDragHasFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer.types).includes("Files");
-}
-
-function itemCountLabel(count: number): string {
-  return count === 1 ? "item" : `${count} items`;
-}
-
-function targetDirLabel(targetDir: string): string {
-  return targetDir === "" ? "root" : leafOf(targetDir);
-}
-
-function dropPreviewLabel(
-  kind: DropPreview["kind"],
-  targetDir: string,
-  targetIsFolder: boolean,
-  count: number,
-  reason?: string,
-): string {
-  if (kind === "copy") {
-    if (targetIsFolder) return "Import here";
-    return `Import to ${targetDirLabel(targetDir)}`;
-  }
-  if (kind === "blocked") {
-    return reason?.includes("already") ? "No change" : "Cannot move here";
-  }
-  if (targetIsFolder) {
-    return count === 1 ? "Move into" : `Move ${itemCountLabel(count)} into`;
-  }
-  return count === 1
-    ? `Move to ${targetDirLabel(targetDir)}`
-    : `Move ${itemCountLabel(count)} to ${targetDirLabel(targetDir)}`;
 }
 
 // Typed-path semantics from the old FileTree: a plain name lands in the
@@ -179,9 +152,13 @@ const TreeRow = memo(function TreeRow(props: {
   const { row } = props;
   const dropClass =
     props.dropPreview?.kind === "blocked"
-      ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+      ? props.dropPreview.role === "target"
+        ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+        : "bg-danger/5 text-danger"
       : props.dropPreview
-        ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
+        ? props.dropPreview.role === "target"
+          ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
+          : "bg-line/35 text-ink"
         : "";
   return (
     <li role="none">
@@ -227,7 +204,11 @@ const TreeRow = memo(function TreeRow(props: {
           <span
             aria-hidden
             className={`absolute bottom-1 left-0 top-1 w-0.5 rounded-full ${
-              props.dropPreview.kind === "blocked" ? "bg-danger" : "bg-ink"
+              props.dropPreview.role === "target"
+                ? props.dropPreview.kind === "blocked"
+                  ? "bg-danger"
+                  : "bg-ink"
+                : "bg-transparent"
             }`}
           />
         ) : null}
@@ -253,18 +234,6 @@ const TreeRow = memo(function TreeRow(props: {
           </>
         )}
         <span className="min-w-0 flex-1 truncate">{leafOf(row.fullPath)}</span>
-        {props.dropPreview ? (
-          <span
-            data-testid="tree-drop-label"
-            className={`ml-2 max-w-28 shrink-0 truncate rounded-sm px-1.5 py-0.5 text-[10px] font-medium ${
-              props.dropPreview.kind === "blocked"
-                ? "bg-danger/10 text-danger"
-                : "bg-bg text-ink"
-            }`}
-          >
-            {props.dropPreview.label}
-          </span>
-        ) : null}
       </button>
     </li>
   );
@@ -712,19 +681,12 @@ export function Explorer(props: ExplorerProps) {
       if (sources) {
         const actions = sources.map((source) => planDrop(source, { parentDir: targetDir }));
         const moveCount = actions.filter((action) => action.kind !== "noop").length;
-        const firstNoop = actions.find((action) => action.kind === "noop");
         const kind: DropPreview["kind"] = moveCount > 0 ? "move" : "blocked";
         return {
           targetPath,
           targetDir,
           kind,
-          label: dropPreviewLabel(
-            kind,
-            targetDir,
-            targetIsFolder,
-            moveCount || sources.length,
-            firstNoop?.reason,
-          ),
+          targetIsFolder,
         };
       }
 
@@ -733,7 +695,7 @@ export function Explorer(props: ExplorerProps) {
         targetPath,
         targetDir,
         kind: "copy",
-        label: dropPreviewLabel("copy", targetDir, targetIsFolder, 1),
+        targetIsFolder,
       };
     },
     [],
@@ -744,7 +706,7 @@ export function Explorer(props: ExplorerProps) {
       current?.targetPath === preview?.targetPath &&
       current?.targetDir === preview?.targetDir &&
       current?.kind === preview?.kind &&
-      current?.label === preview?.label
+      current?.targetIsFolder === preview?.targetIsFolder
         ? current
         : preview,
     );
@@ -985,6 +947,19 @@ export function Explorer(props: ExplorerProps) {
   // top for a root create); a rename-editbox replaces its row in place.
   const renderedRows: ReactNode[] = [];
   const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
+  const dropPreviewForRow = (row: VisibleRow): RowDropPreview | null => {
+    if (!dropPreview || dropPreview.targetPath === null) return null;
+    if (dropPreview.targetPath === row.fullPath) {
+      return { kind: dropPreview.kind, role: "target" };
+    }
+    if (
+      dropPreview.targetIsFolder &&
+      row.fullPath.startsWith(`${dropPreview.targetPath}/`)
+    ) {
+      return { kind: dropPreview.kind, role: "contained" };
+    }
+    return null;
+  };
   if (editing?.mode === "create" && editing.parentPath === "") {
     renderedRows.push(editRow(0));
   }
@@ -1000,11 +975,7 @@ export function Explorer(props: ExplorerProps) {
         selected={selection.has(row.fullPath)}
         active={props.activeTab === row.fullPath}
         focused={focusedPath === row.fullPath}
-        dropPreview={
-          dropPreview?.targetPath === row.fullPath
-            ? { kind: dropPreview.kind, label: dropPreview.label }
-            : null
-        }
+        dropPreview={dropPreviewForRow(row)}
         registerRef={registerRef}
         onRowClick={onRowClick}
         onRowContextMenu={onRowContextMenu}
@@ -1044,20 +1015,6 @@ export function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {rootDropPreview ? (
-          <div
-            data-testid="tree-root-drop-preview"
-            data-drop-state={rootDropPreview.kind}
-            className={`mx-2 mb-1 flex h-7 items-center rounded-sm border px-2 text-[11px] font-medium ${
-              rootDropPreview.kind === "blocked"
-                ? "border-danger/30 bg-danger/10 text-danger"
-                : "border-ink/20 bg-line/60 text-ink"
-            }`}
-          >
-            <span className="truncate">{rootDropPreview.label}</span>
-          </div>
-        ) : null}
-
         {props.pinned.length > 0 ? (
           <section
             data-testid="explorer-pinned"
