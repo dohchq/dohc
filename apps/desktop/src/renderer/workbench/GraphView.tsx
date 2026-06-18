@@ -44,10 +44,31 @@ type GraphVariant = "panel" | "page";
 
 const GRAPH_LAYOUT: Record<
   GraphVariant,
-  { width: number; height: number; nodeLimit: number; edgeLimit: number }
+  {
+    width: number;
+    height: number;
+    nodeLimit: number;
+    edgeLimit: number;
+    pairwiseLimit: number;
+    labelLimit: number;
+  }
 > = {
-  panel: { width: 260, height: 420, nodeLimit: 36, edgeLimit: 120 },
-  page: { width: 1200, height: 760, nodeLimit: 140, edgeLimit: 650 },
+  panel: {
+    width: 260,
+    height: 420,
+    nodeLimit: 2000,
+    edgeLimit: 10000,
+    pairwiseLimit: 160,
+    labelLimit: 80,
+  },
+  page: {
+    width: 1200,
+    height: 760,
+    nodeLimit: 2000,
+    edgeLimit: 10000,
+    pairwiseLimit: 280,
+    labelLimit: 180,
+  },
 };
 
 function degree(node: Pick<WorkspaceGraphNode, "incoming" | "outgoing">): number {
@@ -239,9 +260,13 @@ function useForceGraph(
       }
     }
 
-    for (let i = 0; i < nodes.length; i += 1) {
+    const pairwiseLimit = Math.min(
+      nodes.length,
+      GRAPH_LAYOUT[variantRef.current].pairwiseLimit,
+    );
+    for (let i = 0; i < pairwiseLimit; i += 1) {
       const a = nodes[i]!;
-      for (let j = i + 1; j < nodes.length; j += 1) {
+      for (let j = i + 1; j < pairwiseLimit; j += 1) {
         const b = nodes[j]!;
         let dx = b.x - a.x;
         let dy = b.y - a.y;
@@ -502,6 +527,7 @@ function GraphMap(props: {
       })}
       {points.map((node, index) => {
         const active = node.path === props.activePath;
+        const showLabel = active || index < layout.labelLimit;
         return (
           <g
             key={node.path}
@@ -547,28 +573,30 @@ function GraphMap(props: {
               data-active={active ? "true" : "false"}
               strokeWidth={active ? 2 : 1.25}
             />
-            <text
-              x={node.x}
-              y={node.y + node.radius + (props.variant === "page" ? 18 : 17)}
-              textAnchor="middle"
-              stroke="var(--dohc-bg)"
-              strokeWidth={props.variant === "page" ? 4 : 3}
-              paintOrder="stroke"
-              data-active={active ? "true" : "false"}
-              className={
-                active
-                  ? props.variant === "page"
-                    ? "fill-ink text-[13px]"
-                    : "fill-ink text-[11px]"
-                  : props.variant === "page"
-                    ? "fill-muted text-[12px]"
-                    : "fill-muted text-[11px]"
-              }
-            >
-              {node.title.length > (props.variant === "page" ? 28 : 22)
-                ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
-                : node.title}
-            </text>
+            {showLabel ? (
+              <text
+                x={node.x}
+                y={node.y + node.radius + (props.variant === "page" ? 18 : 17)}
+                textAnchor="middle"
+                stroke="var(--dohc-bg)"
+                strokeWidth={props.variant === "page" ? 4 : 3}
+                paintOrder="stroke"
+                data-active={active ? "true" : "false"}
+                className={
+                  active
+                    ? props.variant === "page"
+                      ? "fill-ink text-[13px]"
+                      : "fill-ink text-[11px]"
+                    : props.variant === "page"
+                      ? "fill-muted text-[12px]"
+                      : "fill-muted text-[11px]"
+                }
+              >
+                {node.title.length > (props.variant === "page" ? 28 : 22)
+                  ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
+                  : node.title}
+              </text>
+            ) : null}
           </g>
         );
       })}
