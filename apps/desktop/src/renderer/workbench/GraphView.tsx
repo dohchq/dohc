@@ -46,7 +46,7 @@ const GRAPH_LAYOUT: Record<
   GraphVariant,
   { width: number; height: number; nodeLimit: number; edgeLimit: number }
 > = {
-  panel: { width: 300, height: 360, nodeLimit: 36, edgeLimit: 120 },
+  panel: { width: 260, height: 420, nodeLimit: 36, edgeLimit: 120 },
   page: { width: 1200, height: 760, nodeLimit: 140, edgeLimit: 650 },
 };
 
@@ -65,7 +65,7 @@ function compareGraphNodes(activePath: string | null) {
 function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
   return variant === "page"
     ? Math.min(24, 9 + degree(node) * 0.9)
-    : Math.min(18, 9 + degree(node) * 0.95);
+    : Math.min(24, 12 + degree(node) * 1.15);
 }
 
 function requestGraphFrame(callback: FrameRequestCallback): number {
@@ -125,8 +125,8 @@ function initialGraphNode(
     ringCount === 2
       ? ringIndex * Math.PI
       : -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
-  const spreadX = variant === "page" ? 350 : 104;
-  const spreadY = variant === "page" ? 235 : 132;
+  const spreadX = variant === "page" ? 350 : 88;
+  const spreadY = variant === "page" ? 235 : 158;
   return {
     ...node,
     index,
@@ -203,9 +203,9 @@ function useForceGraph(
         const ringCount = Math.max(1, nodes.length - 1);
         const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
         const ringX =
-          centerX + Math.cos(angle) * (variantRef.current === "page" ? 360 : 104);
+          centerX + Math.cos(angle) * (variantRef.current === "page" ? 360 : 88);
         const ringY =
-          centerY + Math.sin(angle) * (variantRef.current === "page" ? 240 : 132);
+          centerY + Math.sin(angle) * (variantRef.current === "page" ? 240 : 158);
         node.vx += (ringX - node.x) * 0.004 * alpha;
         node.vy += (ringY - node.y) * 0.004 * alpha;
       }
@@ -224,8 +224,8 @@ function useForceGraph(
             ? 150
             : 116
           : edge.kind === "wikilink"
-            ? 78
-            : 62;
+            ? 94
+            : 74;
       const force = (distance - desired) * 0.018 * alpha;
       const fx = (dx / distance) * force;
       const fy = (dy / distance) * force;
@@ -254,7 +254,7 @@ function useForceGraph(
         const nx = dx / distance;
         const ny = dy / distance;
         const charge =
-          ((variantRef.current === "page" ? 2800 : 1050) * alpha) /
+          ((variantRef.current === "page" ? 2800 : 1400) * alpha) /
           Math.max(80, distance * distance);
         if (!a.dragging) {
           a.vx -= nx * charge;
@@ -265,7 +265,7 @@ function useForceGraph(
           b.vy += ny * charge;
         }
         const minDistance =
-          a.radius + b.radius + (variantRef.current === "page" ? 34 : 22);
+          a.radius + b.radius + (variantRef.current === "page" ? 34 : 28);
         if (distance < minDistance) {
           const push = ((minDistance - distance) / distance) * 0.38 * alpha;
           if (!a.dragging) {
@@ -467,7 +467,7 @@ function GraphMap(props: {
       className={
         props.variant === "page"
           ? "min-h-0 w-full flex-1 touch-none bg-bg"
-          : "h-72 w-full shrink-0 touch-none border-y border-line bg-bg"
+          : "h-96 w-full shrink-0 touch-none border-y border-line bg-bg"
       }
     >
       <rect width={layout.width} height={layout.height} className="fill-bg" />
@@ -536,7 +536,7 @@ function GraphMap(props: {
             <circle
               cx={node.x}
               cy={node.y}
-              r={node.radius + (props.variant === "page" ? 8 : 7)}
+              r={node.radius + (props.variant === "page" ? 8 : 9)}
               className="dohc-graph-node-halo"
             />
             <circle
@@ -549,7 +549,7 @@ function GraphMap(props: {
             />
             <text
               x={node.x}
-              y={node.y + node.radius + (props.variant === "page" ? 18 : 15)}
+              y={node.y + node.radius + (props.variant === "page" ? 18 : 17)}
               textAnchor="middle"
               stroke="var(--dohc-bg)"
               strokeWidth={props.variant === "page" ? 4 : 3}
@@ -559,14 +559,14 @@ function GraphMap(props: {
                 active
                   ? props.variant === "page"
                     ? "fill-ink text-[13px]"
-                    : "fill-ink text-[10px]"
+                    : "fill-ink text-[11px]"
                   : props.variant === "page"
                     ? "fill-muted text-[12px]"
-                    : "fill-muted text-[10px]"
+                    : "fill-muted text-[11px]"
               }
             >
-              {node.title.length > (props.variant === "page" ? 28 : 20)
-                ? `${node.title.slice(0, props.variant === "page" ? 27 : 19)}…`
+              {node.title.length > (props.variant === "page" ? 28 : 22)
+                ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
                 : node.title}
             </text>
           </g>
