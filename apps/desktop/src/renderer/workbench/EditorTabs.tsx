@@ -1,8 +1,14 @@
 import { ChevronDown, X } from "lucide-react";
 import { memo, useRef, useState } from "react";
+import { isGraphTabPath } from "./workbenchState";
 
 function fileName(path: string): string {
+  if (isGraphTabPath(path)) return "Graph";
   return path.split("/").pop() ?? path;
+}
+
+function tabTitle(path: string): string {
+  return isGraphTabPath(path) ? "Workspace graph" : path;
 }
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
@@ -32,7 +38,7 @@ const Tab = memo(function Tab(props: {
       aria-selected={props.active}
       data-testid={`tab-${props.path}`}
       data-active={props.active || undefined}
-      title={props.path}
+      title={tabTitle(props.path)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();

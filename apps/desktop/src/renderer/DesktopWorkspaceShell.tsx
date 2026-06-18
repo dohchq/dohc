@@ -5,6 +5,7 @@ import {
   FilePlus2,
   FolderPlus,
   History,
+  Maximize2,
   PanelRight,
   User,
 } from "lucide-react";
@@ -48,8 +49,11 @@ import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
+  activateTab,
   closeTab,
   defaultWorkbenchState,
+  GRAPH_TAB_PATH,
+  isGraphTabPath,
   moveTab,
   openTab,
   parseUiState,
@@ -431,6 +435,7 @@ export function DesktopWorkspaceShell(props: {
       ].join("\0"),
     [changeSets, files],
   );
+  const activeDocumentPath = isGraphTabPath(wb.activeTab) ? null : wb.activeTab;
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -661,6 +666,19 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
+  const openGraphTab = useCallback(() => {
+    mutateWb((state) => openTab(state, GRAPH_TAB_PATH));
+  }, [mutateWb]);
+  const activateEditorTab = useCallback(
+    (path: string) => {
+      if (isGraphTabPath(path)) {
+        mutateWb((state) => activateTab(state, path));
+        return;
+      }
+      openFile(path);
+    },
+    [mutateWb, openFile],
+  );
 
   // Search-result click: open + land at the line (source mode this phase).
   const openSearchResult = useCallback(
@@ -682,7 +700,11 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => {
       const current = wbRef.current;
       const next = closeTab(current, path);
-      if (next.activeTab !== current.activeTab && next.activeTab !== null) {
+      if (
+        next.activeTab !== current.activeTab &&
+        next.activeTab !== null &&
+        !isGraphTabPath(next.activeTab)
+      ) {
         rendererMarks.mark("file-open-start");
       }
       mutateWb((state) => closeTab(state, path));
@@ -694,7 +716,9 @@ export function DesktopWorkspaceShell(props: {
     const current = wbRef.current;
     if (!current.activeTab) return;
     const next = closeTab(current, current.activeTab);
-    if (next.activeTab !== null) rendererMarks.mark("file-open-start");
+    if (next.activeTab !== null && !isGraphTabPath(next.activeTab)) {
+      rendererMarks.mark("file-open-start");
+    }
     mutateWb((state) => (state.activeTab ? closeTab(state, state.activeTab) : state));
   }, [mutateWb]);
 
@@ -702,7 +726,9 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => {
       const current = wbRef.current;
       if (!current.tabs.some((tab) => tab.path === path)) return;
-      if (current.activeTab !== path) rendererMarks.mark("file-open-start");
+      if (current.activeTab !== path && !isGraphTabPath(path)) {
+        rendererMarks.mark("file-open-start");
+      }
       mutateWb((state) => {
         if (!state.tabs.some((tab) => tab.path === path)) return state;
         if (state.tabs.length === 1 && state.activeTab === path) return state;
@@ -803,9 +829,9 @@ export function DesktopWorkspaceShell(props: {
         closeFileTab(path);
       } else if (command === "close-other-tabs" && path) {
         closeOtherTabs(path);
-      } else if (command === "copy-path" && path) {
+      } else if (command === "copy-path" && path && !isGraphTabPath(path)) {
         void navigator.clipboard?.writeText(path);
-      } else if (command === "show-in-explorer" && path) {
+      } else if (command === "show-in-explorer" && path && !isGraphTabPath(path)) {
         showPathInExplorer(path);
       } else if (command === "open-agent") {
         openAgentView();
@@ -1080,7 +1106,7 @@ export function DesktopWorkspaceShell(props: {
         />
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
-        {wb.sidebarVisible && wb.activeView !== "graph" ? (
+        {wb.sidebarVisible ? (
           <SidePanel
             title={activityViewLabel(wb.activeView)}
             width={wb.sidebarWidth}
@@ -1096,6 +1122,17 @@ export function DesktopWorkspaceShell(props: {
                   className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
                 >
                   <PanelRight size={13} aria-hidden />
+                </button>
+              ) : wb.activeView === "graph" ? (
+                <button
+                  type="button"
+                  data-testid="graph-open-tab"
+                  aria-label="Open graph in tab"
+                  title="Open graph in tab"
+                  onClick={openGraphTab}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <Maximize2 size={13} aria-hidden />
                 </button>
               ) : wb.activeView === "explorer" ? (
                 <>
@@ -1129,6 +1166,16 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="search" />}>
                 <LazySearchView search={search} onOpenResult={openSearchResult} />
               </Suspense>
+            ) : wb.activeView === "graph" ? (
+              <Suspense fallback={<PanelLoading label="graph" />}>
+                <LazyGraphView
+                  workspaceId={workspaceId}
+                  activePath={activeDocumentPath}
+                  refreshKey={graphRefreshKey}
+                  onOpenPath={openFile}
+                  variant="panel"
+                />
+              </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
                 changeSets={changeSets}
@@ -1152,93 +1199,89 @@ export function DesktopWorkspaceShell(props: {
 
         {/* Editor area: tab strip + the active tab's inspector */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          {wb.activeView === "graph" ? (
-            <Suspense fallback={<PanelLoading label="graph" />}>
-              <LazyGraphView
+          <EditorTabs
+            tabs={wb.tabs}
+            activeTab={wb.activeTab}
+            activeTabDirty={activeTabDirty}
+            onActivate={activateEditorTab}
+            onClose={closeFileTab}
+            onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
+            onMove={moveFileTab}
+          />
+          <div
+            className="flex min-h-0 flex-1 flex-col"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              void showWorkbenchMenu("editor");
+            }}
+          >
+            {isGraphTabPath(wb.activeTab) ? (
+              <Suspense fallback={<PanelLoading label="graph" />}>
+                <LazyGraphView
+                  workspaceId={workspaceId}
+                  activePath={activeDocumentPath}
+                  refreshKey={graphRefreshKey}
+                  onOpenPath={openFile}
+                  variant="page"
+                />
+              </Suspense>
+            ) : wb.activeTab ? (
+              <FileInspector
+                key={wb.activeTab}
                 workspaceId={workspaceId}
-                activePath={wb.activeTab}
-                refreshKey={graphRefreshKey}
+                path={wb.activeTab}
+                refreshKey={changeSets.length}
                 onOpenPath={openFile}
-                variant="page"
+                scrollTarget={searchScrollTarget ?? undefined}
+                onScrollConsumed={consumeScrollTarget}
+                onSaveStateChange={onSaveStateChange}
+                registerDraftFlush={registerDraftFlush}
+                knownMarkdownFiles={markdownWikilinkFiles}
+                onSharePath={setSharePath}
               />
-            </Suspense>
-          ) : (
-            <>
-              <EditorTabs
-                tabs={wb.tabs}
-                activeTab={wb.activeTab}
-                activeTabDirty={activeTabDirty}
-                onActivate={openFile}
-                onClose={closeFileTab}
-                onContextMenu={(path) => void showWorkbenchMenu("tab", path)}
-                onMove={moveFileTab}
-              />
-              <div
-                className="flex min-h-0 flex-1 flex-col"
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  void showWorkbenchMenu("editor");
-                }}
-              >
-                {wb.activeTab ? (
-                  <FileInspector
-                    key={wb.activeTab}
-                    workspaceId={workspaceId}
-                    path={wb.activeTab}
-                    refreshKey={changeSets.length}
-                    onOpenPath={openFile}
-                    scrollTarget={searchScrollTarget ?? undefined}
-                    onScrollConsumed={consumeScrollTarget}
-                    onSaveStateChange={onSaveStateChange}
-                    registerDraftFlush={registerDraftFlush}
-                    knownMarkdownFiles={markdownWikilinkFiles}
-                    onSharePath={setSharePath}
-                  />
-                ) : (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-                    <span className="text-sm text-muted">
-                      Select a file, or create one
-                    </span>
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setNewFileOpen(true)}
-                        className="font-mono text-xs text-subtle hover:text-ink"
-                      >
-                        Ctrl N · new file
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPaletteOpen(true)}
-                        className="font-mono text-xs text-subtle hover:text-ink"
-                      >
-                        Ctrl K · commands
-                      </button>
-                      <button
-                        type="button"
-                        data-testid="empty-import-export"
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          openImportExportDialog();
-                        }}
-                        onClick={openImportExportDialog}
-                        className="font-mono text-xs text-subtle hover:text-ink"
-                      >
-                        import / export
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setQuickOpenOpen(true)}
-                        className="font-mono text-xs text-subtle hover:text-ink"
-                      >
-                        Ctrl P · go to file
-                      </button>
-                    </div>
-                  </div>
-                )}
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+                <span className="text-sm text-muted">
+                  Select a file, or create one
+                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setNewFileOpen(true)}
+                    className="font-mono text-xs text-subtle hover:text-ink"
+                  >
+                    Ctrl N · new file
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaletteOpen(true)}
+                    className="font-mono text-xs text-subtle hover:text-ink"
+                  >
+                    Ctrl K · commands
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="empty-import-export"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      openImportExportDialog();
+                    }}
+                    onClick={openImportExportDialog}
+                    className="font-mono text-xs text-subtle hover:text-ink"
+                  >
+                    import / export
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickOpenOpen(true)}
+                    className="font-mono text-xs text-subtle hover:text-ink"
+                  >
+                    Ctrl P · go to file
+                  </button>
+                </div>
               </div>
-            </>
-          )}
+            )}
+          </div>
         </main>
 
         {/* History timeline — the "git log for everyday people". Every

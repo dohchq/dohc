@@ -15,6 +15,11 @@ export const VIEW_IDS = [
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
+export const GRAPH_TAB_PATH = "dohc://graph";
+
+export function isGraphTabPath(path: string | null): boolean {
+  return path === GRAPH_TAB_PATH;
+}
 
 export interface WorkbenchState {
   activeView: ViewId;

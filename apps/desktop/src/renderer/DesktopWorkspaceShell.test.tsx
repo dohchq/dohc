@@ -128,6 +128,17 @@ function makeBridge(
       session: null,
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
+    readWorkspaceGraph: vi.fn(async () => ({
+      nodes: [
+        { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
+        { path: "b.md", title: "B", incoming: 1, outgoing: 0 },
+      ],
+      edges: [{ source: "a.md", target: "b.md", kind: "wikilink" as const }],
+      unresolvedLinks: 0,
+      scannedFileCount: 2,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
@@ -285,6 +296,41 @@ describe("active file sharing", () => {
     expect(await within(dialog).findByText("Only you have access.")).toBeTruthy();
     expect(bridge.listWorkspaceShares).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
+    });
+  });
+});
+
+describe("graph view", () => {
+  it("opens as a side panel first, then opens the full graph in an editor tab", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+
+    await user.click(screen.getByTestId("activity-graph"));
+
+    expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
+    expect(screen.getByTestId("view-markdown")).toBeTruthy();
+    await waitFor(() => {
+      expect(
+        screen
+          .getAllByTestId("graph-view")
+          .some((view) => view.getAttribute("data-variant") === "panel"),
+      ).toBe(true);
+    });
+
+    await user.click(screen.getByTestId("graph-open-tab"));
+
+    const graphTab = await screen.findByTestId("tab-dohc://graph");
+    expect(graphTab.dataset.active).toBe("true");
+    await waitFor(() => {
+      expect(
+        screen
+          .getAllByTestId("graph-view")
+          .some((view) => view.getAttribute("data-variant") === "page"),
+      ).toBe(true);
     });
   });
 });
