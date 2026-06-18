@@ -2,8 +2,6 @@ import {
   Bot,
   CheckCheck,
   Cloud,
-  FilePlus2,
-  FolderPlus,
   History,
   Maximize2,
   PanelRight,
@@ -150,6 +148,19 @@ function describeConflictForCatchUp(path: string, conflictPath: string): string 
 function ancestorDirs(path: string): string[] {
   const segments = path.split("/");
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
+}
+
+function uniqueUntitledTextPath(
+  files: WorkspaceFileEntry[],
+  folders: string[],
+): string {
+  const occupied = new Set([...files.map((file) => file.path), ...folders]);
+  if (!occupied.has("Untitled.txt")) return "Untitled.txt";
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `Untitled ${index}.txt`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  return `Untitled ${Date.now()}.txt`;
 }
 
 // The timeline body, shared by the right history rail and the side panel's
@@ -781,6 +792,14 @@ export function DesktopWorkspaceShell(props: {
     mutateWb((state) => (state.activeTab ? closeTab(state, state.activeTab) : state));
   }, [mutateWb]);
 
+  const closeAllTabs = useCallback(() => {
+    mutateWb((state) =>
+      state.tabs.length === 0 && state.activeTab === null
+        ? state
+        : { ...state, tabs: [], activeTab: null },
+    );
+  }, [mutateWb]);
+
   const closeOtherTabs = useCallback(
     (path: string) => {
       const current = wbRef.current;
@@ -867,6 +886,21 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => mutateWb((state) => togglePinned(state, path)),
     [mutateWb],
   );
+  const collapseExplorerFolders = useCallback(() => {
+    mutateWb((state) =>
+      state.expandedFolders.length === 0
+        ? state
+        : { ...state, expandedFolders: [] },
+    );
+  }, [mutateWb]);
+  const createUntitledTextFile = useCallback(async () => {
+    const result = await bridge().createWorkspaceFile({
+      workspaceId,
+      relativePath: uniqueUntitledTextPath(files, folders),
+    });
+    await refreshFiles();
+    openFile(result.path);
+  }, [files, folders, openFile, refreshFiles, workspaceId]);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -1122,6 +1156,9 @@ export function DesktopWorkspaceShell(props: {
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
+        onCloseAllTabs={closeAllTabs}
+        onNewUntitledTextFile={() => void createUntitledTextFile()}
+        onCollapseFolders={collapseExplorerFolders}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
@@ -1134,17 +1171,6 @@ export function DesktopWorkspaceShell(props: {
       />
 
       <footer className="flex flex-col border-t border-line px-1 py-1">
-        <button
-          type="button"
-          onClick={() => setNewFileOpen(true)}
-          className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
-        >
-          <FilePlus2 size={13} aria-hidden />
-          New file
-          <kbd className="ml-auto font-mono text-[10px] text-subtle">
-            Ctrl N
-          </kbd>
-        </button>
         <button
           type="button"
           data-testid="import-export-open"
@@ -1234,29 +1260,6 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <RefreshCw size={13} aria-hidden />
                 </button>
-              ) : wb.activeView === "explorer" ? (
-                <>
-                  <button
-                    type="button"
-                    data-testid="explorer-new-file"
-                    aria-label="New file"
-                    title="New file"
-                    onClick={() => requestExplorerCreate("file")}
-                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                  >
-                    <FilePlus2 size={13} aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="explorer-new-folder"
-                    aria-label="New folder"
-                    title="New folder"
-                    onClick={() => requestExplorerCreate("folder")}
-                    className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                  >
-                    <FolderPlus size={13} aria-hidden />
-                  </button>
-                </>
               ) : undefined
             }
           >

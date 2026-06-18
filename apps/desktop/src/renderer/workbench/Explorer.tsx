@@ -1,12 +1,15 @@
 import {
+  ChevronsUp,
   ChevronRight,
   Database,
   FilePlus2,
   FileText,
   Folder,
+  FolderPlus,
   FolderOpen,
   LayoutGrid,
   Pin,
+  RefreshCw,
   X,
 } from "lucide-react";
 import {
@@ -56,6 +59,9 @@ export interface ExplorerProps {
   onOpenFile: (path: string) => void;
   onActivateTab: (path: string) => void;
   onCloseTab: (path: string) => void;
+  onCloseAllTabs: () => void;
+  onNewUntitledTextFile: () => void;
+  onCollapseFolders: () => void;
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
   onTogglePin: (path: string) => void;
@@ -133,6 +139,26 @@ function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] 
     return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   }
   return <FileKindIcon kind={props.kind ?? "file"} />;
+}
+
+function SectionActionButton(props: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={props.label}
+      title={props.label}
+      disabled={props.disabled}
+      onClick={props.onClick}
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+    >
+      {props.children}
+    </button>
+  );
 }
 
 // Depth indent with guide lines (one per ancestor level).
@@ -1050,28 +1076,45 @@ export function Explorer(props: ExplorerProps) {
           aria-label="Open editors"
           className="mb-1 border-b border-line pb-1"
         >
-          <button
-            type="button"
-            data-testid="open-editors-toggle"
-            aria-expanded={openEditorsExpanded}
-            onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-            className="flex h-6 w-full items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
-          >
-            <ChevronRight
-              size={11}
-              aria-hidden
-              className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
-            />
-            <span className="min-w-0 flex-1 truncate">Open Editors</span>
-            {props.openTabs.length > 0 ? (
-              <span
-                aria-label={`${props.openTabs.length} open editor${props.openTabs.length === 1 ? "" : "s"}`}
-                className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
+          <header className="flex h-6 items-center gap-1 pr-1">
+            <button
+              type="button"
+              data-testid="open-editors-toggle"
+              aria-expanded={openEditorsExpanded}
+              onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
+            >
+              <ChevronRight
+                size={11}
+                aria-hidden
+                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+              />
+              <span className="min-w-0 flex-1 truncate">Open Editors</span>
+              {props.openTabs.length > 0 ? (
+                <span
+                  aria-label={`${props.openTabs.length} open editor${props.openTabs.length === 1 ? "" : "s"}`}
+                  className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
+                >
+                  {props.openTabs.length}
+                </span>
+              ) : null}
+            </button>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <SectionActionButton
+                label="New untitled text file"
+                onClick={props.onNewUntitledTextFile}
               >
-                {props.openTabs.length}
-              </span>
-            ) : null}
-          </button>
+                <FilePlus2 size={13} aria-hidden />
+              </SectionActionButton>
+              <SectionActionButton
+                label="Close all editors"
+                disabled={props.openTabs.length === 0}
+                onClick={props.onCloseAllTabs}
+              >
+                <X size={13} aria-hidden />
+              </SectionActionButton>
+            </div>
+          </header>
 
           {openEditorsExpanded ? (
             props.openTabs.length > 0 ? (
@@ -1094,7 +1137,7 @@ export function Explorer(props: ExplorerProps) {
                         type="button"
                         title={tab.path}
                         onClick={() => props.onActivateTab(tab.path)}
-                        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[13px] outline-none"
+                        className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px] outline-none"
                       >
                         <OpenEditorIcon
                           path={tab.path}
@@ -1137,20 +1180,39 @@ export function Explorer(props: ExplorerProps) {
         </section>
 
         <section data-testid="explorer-files-section" aria-label="Files">
-          <button
-            type="button"
-            data-testid="explorer-files-toggle"
-            aria-expanded={filesExpanded}
-            onClick={() => setFilesExpanded((expanded) => !expanded)}
-            className="flex h-6 w-full items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
-          >
-            <ChevronRight
-              size={11}
-              aria-hidden
-              className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
-            />
-            <span className="min-w-0 flex-1 truncate">Files</span>
-          </button>
+          <header className="flex h-6 items-center gap-1 pr-1">
+            <button
+              type="button"
+              data-testid="explorer-files-toggle"
+              aria-expanded={filesExpanded}
+              onClick={() => setFilesExpanded((expanded) => !expanded)}
+              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-[10px] font-semibold uppercase tracking-wide text-subtle hover:bg-line/40 hover:text-muted"
+            >
+              <ChevronRight
+                size={11}
+                aria-hidden
+                className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+              />
+              <span className="min-w-0 flex-1 truncate">Files</span>
+            </button>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <SectionActionButton label="New file" onClick={() => beginCreate("file", "")}>
+                <FilePlus2 size={13} aria-hidden />
+              </SectionActionButton>
+              <SectionActionButton label="New folder" onClick={() => beginCreate("folder", "")}>
+                <FolderPlus size={13} aria-hidden />
+              </SectionActionButton>
+              <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
+                <RefreshCw size={13} aria-hidden />
+              </SectionActionButton>
+              <SectionActionButton
+                label="Collapse folders in explorer"
+                onClick={props.onCollapseFolders}
+              >
+                <ChevronsUp size={13} aria-hidden />
+              </SectionActionButton>
+            </div>
+          </header>
 
           {filesExpanded ? (
             <>

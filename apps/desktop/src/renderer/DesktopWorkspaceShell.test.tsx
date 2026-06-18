@@ -147,6 +147,12 @@ function makeBridge(
       truncatedFileCount: 0,
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    createWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
+      path: payload.relativePath,
+    })),
+    createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
+      path: payload.relativePath,
+    })),
     importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"] })),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
@@ -528,6 +534,62 @@ describe("open editors", () => {
 
     await user.click(screen.getByTestId("explorer-files-toggle"));
     expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
+  });
+
+  it("surfaces open-editor title actions for untitled files and close-all", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New untitled text file"));
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Untitled.txt",
+    });
+    expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
+
+    await user.click(screen.getByLabelText("Close all editors"));
+    await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
+    expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
+  });
+
+  it("surfaces file title actions for create, refresh, and collapse folders", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    expect(await screen.findByLabelText("New file name")).toBeTruthy();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByLabelText("New folder"));
+    expect(await screen.findByLabelText("New folder name")).toBeTruthy();
+    await user.keyboard("{Escape}");
+
+    const refreshCount = bridge.listWorkspaceFiles.mock.calls.length;
+    await user.click(screen.getByLabelText("Refresh explorer"));
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(refreshCount),
+    );
+  });
+
+  it("collapses all expanded folders from the files title action", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "docs/a.md", kind: "file" as const }],
+      folders: ["docs"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("docs"));
+    await screen.findByText("a.md");
+    await user.click(screen.getByLabelText("Collapse folders in explorer"));
+
+    await waitFor(() => expect(screen.queryByText("a.md")).toBeNull());
   });
 
   it("mirrors tabs in the explorer and supports activate and close", async () => {
