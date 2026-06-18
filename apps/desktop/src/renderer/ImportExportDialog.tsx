@@ -1,14 +1,10 @@
 import {
-  Archive,
   CheckCircle2,
   Cloud,
-  Download,
   Inbox,
   Send,
-  Upload,
   X,
 } from "lucide-react";
-import type { DragEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { DataFragmentSummary } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -24,10 +20,6 @@ function errorMessage(cause: unknown): string {
   return text.replace(/^Error invoking remote method '[^']+': Error: /, "");
 }
 
-function pluralFile(count: number): string {
-  return count === 1 ? "1 file" : `${count} files`;
-}
-
 export function ImportExportDialog(props: {
   workspaceId: string;
   activePath: string | null;
@@ -36,7 +28,6 @@ export function ImportExportDialog(props: {
   onClose: () => void;
 }) {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
-  const [dragActive, setDragActive] = useState(false);
   const [fragmentText, setFragmentText] = useState(props.selectedText ?? "");
   const [recipientEmail, setRecipientEmail] = useState("");
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
@@ -94,42 +85,6 @@ export function ImportExportDialog(props: {
       cancelled = true;
     };
   }, [props.workspaceId]);
-
-  async function importPaths(droppedPaths?: string[]) {
-    setStatus({ kind: "busy", label: "Importing..." });
-    try {
-      const result = await bridge().importWorkspaceFiles({
-        workspaceId: props.workspaceId,
-        ...(droppedPaths ? { droppedPaths } : {}),
-      });
-      props.onImported();
-      setStatus({
-        kind: "success",
-        message:
-          result.imported.length > 0
-            ? `Imported ${pluralFile(result.imported.length)}.`
-            : "No files imported.",
-      });
-    } catch (cause) {
-      setStatus({ kind: "error", message: errorMessage(cause) });
-    }
-  }
-
-  async function exportZip(relativePath?: string) {
-    setStatus({ kind: "busy", label: "Exporting..." });
-    try {
-      const result = await bridge().exportWorkspaceZip({
-        workspaceId: props.workspaceId,
-        ...(relativePath ? { relativePath } : {}),
-      });
-      setStatus({
-        kind: "success",
-        message: result.path ? `Exported ${result.path}.` : "Export canceled.",
-      });
-    } catch (cause) {
-      setStatus({ kind: "error", message: errorMessage(cause) });
-    }
-  }
 
   async function exportDataFragment() {
     const body = fragmentText.trim().length > 0 ? fragmentText : (props.selectedText ?? "");
@@ -196,17 +151,6 @@ export function ImportExportDialog(props: {
     }
   }
 
-  function onDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault();
-    setDragActive(false);
-    const paths = bridge().getDroppedFilePaths([...event.dataTransfer.files]);
-    if (paths.length === 0) {
-      setStatus({ kind: "success", message: "No files imported." });
-      return;
-    }
-    void importPaths(paths);
-  }
-
   const busy = status.kind === "busy";
   const cloudAvailable = cloudReady === true;
 
@@ -216,16 +160,16 @@ export function ImportExportDialog(props: {
       className="flex w-[min(560px,calc(100vw-32px))] flex-col rounded-md border border-line bg-panel text-sm text-ink shadow-lg"
     >
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
-        <Archive size={15} aria-hidden className="text-subtle" />
+        <Cloud size={15} aria-hidden className="text-subtle" />
         <div className="min-w-0">
-          <h2 className="m-0 text-sm font-semibold">Import / export data</h2>
+          <h2 className="m-0 text-sm font-semibold">Data fragments</h2>
           <p className="m-0 truncate font-mono text-[11px] text-subtle">
             {props.activePath ?? "No target file"}
           </p>
         </div>
         <button
           type="button"
-          aria-label="Close import export dialog"
+          aria-label="Close data fragments dialog"
           onClick={props.onClose}
           className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
         >
@@ -237,7 +181,7 @@ export function ImportExportDialog(props: {
         <section className="rounded border border-ink/20 bg-bg p-3">
           <div className="flex items-start gap-2">
             <div className="min-w-0">
-              <p className="m-0 text-xs font-semibold text-ink">Data fragment</p>
+              <p className="m-0 text-xs font-semibold text-ink">Cloud data fragment</p>
               <p className="m-0 truncate font-mono text-[11px] text-subtle">
                 {props.activePath ?? "No file selected"}
               </p>
@@ -329,82 +273,6 @@ export function ImportExportDialog(props: {
                 </button>
               </div>
             </div>
-          </div>
-        </section>
-
-        <section className="rounded border border-line bg-bg p-3">
-          <div className="mb-2 flex items-center gap-2">
-            <Archive size={14} aria-hidden className="text-subtle" />
-            <div className="min-w-0">
-              <p className="m-0 text-xs font-medium text-ink">Files and archives</p>
-              <p className="m-0 truncate text-[11px] text-subtle">
-                Whole-file import and zip export
-              </p>
-            </div>
-          </div>
-
-          <div
-            data-testid="import-drop-zone"
-            onDragEnter={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "copy";
-              setDragActive(true);
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={onDrop}
-            className={`flex min-h-16 items-center gap-3 rounded border border-dashed px-3 py-3 ${
-              dragActive ? "border-ink bg-line/40" : "border-line bg-panel"
-            }`}
-          >
-            <Upload size={16} aria-hidden className="shrink-0 text-subtle" />
-            <div className="min-w-0 flex-1">
-              <p className="m-0 text-xs font-medium text-ink">Import files</p>
-              <p className="m-0 truncate text-[11px] text-subtle">Copy files into this workspace</p>
-            </div>
-            <button
-              type="button"
-              data-testid="import-files-action"
-              disabled={busy}
-              onClick={() => void importPaths()}
-              className="h-8 shrink-0 rounded bg-accent px-3 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40"
-            >
-              Import
-            </button>
-          </div>
-
-          <div className="mt-2 grid gap-2 sm:grid-cols-2">
-            <button
-              type="button"
-              data-testid="export-workspace-action"
-              disabled={busy}
-              onClick={() => void exportZip()}
-              className="flex h-11 items-center gap-2 rounded border border-line bg-panel px-3 text-left text-xs text-muted hover:border-ink/40 hover:text-ink disabled:opacity-40"
-            >
-              <Download size={15} aria-hidden className="shrink-0" />
-              <span className="min-w-0">
-                <span className="block font-medium text-ink">Export workspace zip</span>
-                <span className="block truncate text-[11px] text-subtle">All files</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              data-testid="export-current-action"
-              disabled={busy || !canUseActivePath}
-              onClick={() => void exportZip(props.activePath ?? undefined)}
-              className="flex h-11 items-center gap-2 rounded border border-line bg-panel px-3 text-left text-xs text-muted hover:border-ink/40 hover:text-ink disabled:opacity-40"
-            >
-              <Download size={15} aria-hidden className="shrink-0" />
-              <span className="min-w-0">
-                <span className="block font-medium text-ink">Export file zip</span>
-                <span className="block truncate font-mono text-[11px] text-subtle">
-                  {props.activePath ?? "No file selected"}
-                </span>
-              </span>
-            </button>
           </div>
         </section>
 

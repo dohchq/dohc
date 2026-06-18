@@ -71,7 +71,9 @@ export function buildMenuTemplate(options: {
                 }))
               : [{ label: "No Recent Workspaces", enabled: false }],
         },
-        command("Import / Export Data…", "import-export"),
+        command("Data Fragments…", "import-export"),
+        command("Import Files…", "import-files"),
+        command("Export Workspace as Zip…", "export-workspace"),
         { type: "separator" },
         command("Close Tab", "close-tab", "CommandOrControl+W"),
         // VS Code convention: Ctrl+W closes the TAB (renderer-owned above),

@@ -526,8 +526,8 @@ describe("history rail", () => {
   });
 });
 
-describe("imports and exports", () => {
-  it("opens the import/export panel from the explorer footer", async () => {
+describe("data fragments and file transfers", () => {
+  it("opens the data-fragment panel from the explorer footer", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -535,8 +535,25 @@ describe("imports and exports", () => {
     await user.click(await screen.findByTestId("import-export-open"));
 
     const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getByText("Import / export data")).toBeTruthy();
-    await user.click(within(dialog).getByTestId("export-workspace-action"));
+    expect(within(dialog).getByText("Data fragments")).toBeTruthy();
+    expect(within(dialog).queryByText("Files and archives")).toBeNull();
+  });
+
+  it("keeps file import and workspace zip export as separate commands", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() => {
+      expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+      });
+    });
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Export workspace as zip"));
     await waitFor(() => {
       expect(bridge.exportWorkspaceZip).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
@@ -617,8 +634,8 @@ describe("native workbench context menus", () => {
     fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
 
     const dialog = await screen.findByTestId("import-export-dialog");
-    expect(within(dialog).getByText("Data fragment")).toBeTruthy();
-    expect(within(dialog).getByText("Files and archives")).toBeTruthy();
+    expect(within(dialog).getByText("Cloud data fragment")).toBeTruthy();
+    expect(within(dialog).queryByText("Files and archives")).toBeNull();
   });
 
   it("opens import/export data for the tab path from the tab context menu", async () => {

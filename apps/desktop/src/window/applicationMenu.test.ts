@@ -50,16 +50,35 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
   });
 
-  it("surfaces data import/export in the File menu", () => {
+  it("surfaces data fragments in the File menu", () => {
     const { template, sendCommand } = build();
     const item = items(template, "File").find(
-      (entry) => entry.label === "Import / Export Data…",
+      (entry) => entry.label === "Data Fragments…",
     );
     const fakeWindow = { id: 3 };
 
     (item?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
 
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "import-export");
+  });
+
+  it("keeps file import and zip export separate from data fragments", () => {
+    const { template, sendCommand } = build();
+    const fileItems = items(template, "File");
+    const importFiles = fileItems.find((entry) => entry.label === "Import Files…");
+    const exportWorkspace = fileItems.find(
+      (entry) => entry.label === "Export Workspace as Zip…",
+    );
+    const fakeWindow = { id: 4 };
+
+    (importFiles?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    (exportWorkspace?.click as (a: unknown, b: unknown) => void)(
+      undefined,
+      fakeWindow,
+    );
+
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "import-files");
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "export-workspace");
   });
 
   it("Open Recent lists known workspaces and activates the picked one", () => {

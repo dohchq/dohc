@@ -1,7 +1,7 @@
 import {
-  Archive,
   Bot,
   CheckCheck,
+  Cloud,
   FilePlus2,
   FolderPlus,
   History,
@@ -962,18 +962,18 @@ export function DesktopWorkspaceShell(props: {
       },
       {
         id: "import-export",
-        label: "Import / export data",
+        label: "Data fragments",
         run: openImportExportDialog,
       },
       {
         id: "import-files",
         label: "Import files",
-        run: openImportExportDialog,
+        run: () => void importFiles(),
       },
       {
         id: "export-workspace",
         label: "Export workspace as zip",
-        run: openImportExportDialog,
+        run: () => void bridge().exportWorkspaceZip({ workspaceId }),
       },
       {
         id: "toggle-sidebar",
@@ -1019,9 +1019,11 @@ export function DesktopWorkspaceShell(props: {
     [
       openWorkspaceFolder,
       closeActiveTab,
+      importFiles,
       mutateWb,
       requestExplorerCreate,
       openImportExportDialog,
+      workspaceId,
     ],
   );
 
@@ -1076,8 +1078,8 @@ export function DesktopWorkspaceShell(props: {
           onClick={() => openImportExportDialog()}
           className="flex h-7 w-full items-center gap-1.5 rounded px-2 text-xs text-muted hover:bg-line/50 hover:text-ink"
         >
-          <Archive size={13} aria-hidden />
-          Import / export
+          <Cloud size={13} aria-hidden />
+          Data fragments
         </button>
       </footer>
     </>
@@ -1297,7 +1299,7 @@ export function DesktopWorkspaceShell(props: {
                     onClick={() => openImportExportDialog()}
                     className="font-mono text-xs text-subtle hover:text-ink"
                   >
-                    import / export
+                    data fragments
                   </button>
                   <button
                     type="button"

@@ -935,7 +935,7 @@ function registerIpcHandlers(): void {
           ? [
               item("New File", "new-file"),
               item("New Folder", "new-folder"),
-              item("Import / Export Data…", "import-export"),
+              item("Data Fragments…", "import-export"),
               separator,
               item("Import Files…", "import-files"),
               item("Export Workspace as Zip…", "export-zip"),
@@ -953,7 +953,7 @@ function registerIpcHandlers(): void {
               input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
               separator,
               ...(input.kind === "file"
-                ? [item("Import / Export Data…", "import-export")]
+                ? [item("Data Fragments…", "import-export")]
                 : []),
               item("Export as Zip…", "export-zip"),
               item("Reveal in File Manager", "open-externally"),
@@ -1020,7 +1020,7 @@ function registerIpcHandlers(): void {
               item("Close Tab", "close-tab"),
               item("Close Other Tabs", "close-other-tabs"),
               separator,
-              item("Import / Export Data…", "import-export"),
+              item("Data Fragments…", "import-export"),
               separator,
               item("Copy Path", "copy-path"),
               item("Show in Explorer", "show-in-explorer"),
@@ -1035,7 +1035,7 @@ function registerIpcHandlers(): void {
                 separator,
                 item("Toggle Theme", "toggle-theme"),
               ]
-            : [item("Import / Export Data…", "import-export"), separator, ...editRoles];
+            : [item("Data Fragments…", "import-export"), separator, ...editRoles];
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({

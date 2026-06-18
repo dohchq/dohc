@@ -8,6 +8,7 @@ export const MENU_COMMANDS = [
   "open-workspace",
   "import-export",
   "import-files",
+  "export-workspace",
   "command-palette",
   "quick-open",
   "toggle-sidebar",
