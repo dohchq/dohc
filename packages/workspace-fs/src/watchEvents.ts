@@ -215,6 +215,9 @@ export function watchWorkspaceEvents(
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
+    watcher.off("add", onEvent);
+    watcher.off("change", onEvent);
+    watcher.off("unlink", onEvent);
     // Flush any settled-but-not-yet-emitted changes so a save right before
     // stop/quit is recorded into history rather than silently dropped.
     flush();

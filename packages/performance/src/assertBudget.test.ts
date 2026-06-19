@@ -195,6 +195,14 @@ describe("parseMeasurements", () => {
       parseMeasurements(
         JSON.stringify({
           ...valid,
+          multiplierJustifications: { coldLaunchToShellMs: "   " },
+        }),
+      ),
+    ).toThrow(/multiplier justification.*coldLaunchToShellMs.*non-empty/);
+    expect(() =>
+      parseMeasurements(
+        JSON.stringify({
+          ...valid,
           ratchets: { workspaceMemoryWorkingSetMb: { value: -1 } },
         }),
       ),
