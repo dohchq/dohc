@@ -59,6 +59,8 @@ function deferred<T>() {
 }
 
 function changeSet(id: string, recordedAtMs: number, humanSummary: string): ChangeSetRecord {
+  const pathMatch = humanSummary.match(/\b(?:edited|updated|deleted|shared)\s+([^\s]+)$/i);
+  const previewPath = pathMatch?.[1] ?? "notes/today.md";
   return {
     id,
     recordedAtMs,
@@ -67,6 +69,12 @@ function changeSet(id: string, recordedAtMs: number, humanSummary: string): Chan
     summary: humanSummary,
     humanSummary,
     fileCount: 1,
+    filePreview: [
+      {
+        path: previewPath,
+        operation: /\bdeleted\b/i.test(humanSummary) ? "delete" : "write",
+      },
+    ],
   };
 }
 
@@ -560,8 +568,15 @@ describe("history page", () => {
       0,
     );
 
-    await user.click(within(page).getByRole("button", { name: /notes\/today\.md/i }));
-    expect(await within(page).findByTestId("history-change-details")).toBeTruthy();
+    await user.click(
+      within(page).getByRole("button", { name: /open diff for notes\/today\.md/i }),
+    );
+    expect((await screen.findByTestId("tab-dohc://history")).dataset.active).toBeUndefined();
+    expect(
+      (await screen.findByTestId(
+        `tab-${historyDiffTabPath("change-history-tab", "notes/today.md")}`,
+      )).dataset.active,
+    ).toBe("true");
     expect(bridge.readChangeSet).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       changeSetId: "change-history-tab",
@@ -940,7 +955,7 @@ describe("workspace management", () => {
 });
 
 describe("history details", () => {
-  it("groups history rows by day and flags review-required changes before expansion", async () => {
+  it("groups history rows by day and flags review-required changes in compact rows", async () => {
     const dayOne = new Date(2026, 0, 2, 12, 0).getTime();
     const dayTwo = new Date(2026, 0, 1, 12, 0).getTime();
     const bridge = makeBridge(Promise.resolve(null), [
@@ -953,7 +968,6 @@ describe("history details", () => {
       changeSet("ordinary-change", dayOne - 60_000, "ice edited notes/today.md"),
       changeSet("older-change", dayTwo, "ice edited notes/yesterday.md"),
     ]);
-    const user = userEvent.setup();
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
@@ -968,14 +982,10 @@ describe("history details", () => {
     expect(historyRail.getByTestId("history-review-badge").getAttribute("title")).toBe(
       "Private to shared",
     );
-    expect(historyRail.getByTestId("history-review-reason-preview").textContent).toBe(
-      "Private to shared",
-    );
-
-    await user.click(await historyRail.findByRole("button", { name: /public\.md/i }));
-    expect((await historyRail.findByTestId("history-review-reasons")).textContent).toContain(
-      "Private to shared",
-    );
+    expect(historyRail.queryByTestId("history-change-details")).toBeNull();
+    expect(
+      historyRail.getByTestId("history-list").querySelector("[aria-expanded]"),
+    ).toBeNull();
   });
 
   it("filters history by search text and review-required changes", async () => {
@@ -1134,7 +1144,7 @@ describe("history details", () => {
     ).toBeNull();
   });
 
-  it("shows a bounded touched-file preview on collapsed history rows", async () => {
+  it("shows a bounded touched-file preview as compact diff buttons", async () => {
     const bridge = makeBridge(Promise.resolve(null), [
       {
         ...changeSet("many-files", 2000, "ice edited project files"),
@@ -1162,12 +1172,13 @@ describe("history details", () => {
     expect(preview.textContent).toContain("data/old.csv");
     expect(preview.textContent).toContain("docs/renamed.md");
     expect(preview.textContent).toContain("+1");
+    expect(within(preview).getAllByTestId("history-diff-open")).toHaveLength(4);
     expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
       "+12 -5 · 1 not diffed",
     );
   });
 
-  it("expands a change set into touched files and opens a readable diff tab", async () => {
+  it("opens a compact history file chip as a unified diff tab", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-1", 2000, "ice edited notes/today.md")],
@@ -1176,90 +1187,33 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
 
     expect(historyRail.getByTestId("history-recorded-at").getAttribute("dateTime")).toBe(
       new Date(2000).toISOString(),
     );
+    expect(historyRail.queryByTestId("history-change-details")).toBeNull();
+    expect(historyRail.queryByText("-Before")).toBeNull();
+
+    await user.click(await historyRail.findByTestId("history-diff-open"));
+
     await waitFor(() =>
       expect(bridge.readChangeSet).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
         changeSetId: "change-1",
       }),
     );
-    expect(await historyRail.findByTestId("history-change-details")).toBeTruthy();
-    expect(
-      (await historyRail.findByTestId("history-detail-total-counts")).textContent,
-    ).toBe("+1 -1");
-    expect(historyRail.getByTestId("history-detail-summary").textContent).toContain(
-      "1 restorable file",
-    );
-    expect(historyRail.getByText("notes/today.md")).toBeTruthy();
-    expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
-      "+1 -1",
-    );
-    expect(historyRail.queryByText("-Before")).toBeNull();
-
-    await user.click(historyRail.getByTestId("history-diff-open"));
 
     const diffTabPath = historyDiffTabPath("change-1", "notes/today.md");
     const diffTab = await screen.findByTestId(`tab-${diffTabPath}`);
     expect(diffTab.dataset.active).toBe("true");
     expect(diffTab.textContent).toContain("Diff: today.md");
     const diffPage = within(await screen.findByTestId("history-diff-page"));
-    expect(diffPage.getByTestId("history-compare-counts").textContent).toBe("+1 -1");
-    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
-      "-Before",
+    expect(diffPage.getByTestId("history-diff-counts").textContent).toBe("+1 -1");
+    const diff = diffPage.getByTestId("history-diff-lines");
+    expect(diff.querySelector('[data-kind="removed"]')?.textContent).toContain(
+      "Before",
     );
-    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
-      "+After",
-    );
-  });
-
-  it("explains why an agent change happened from provenance", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(null),
-      [
-        {
-          ...changeSet("agent-provenance", 2000, "codex updated docs/plan.md"),
-          kind: "agent-run",
-          author: { kind: "agent", agentId: "codex", onBehalfOf: "ice" },
-        },
-      ],
-      {
-        "agent-provenance": [
-          {
-            path: "docs/plan.md",
-            operation: "write",
-            mediaType: "text/markdown",
-            before: { text: "old plan\n", truncated: false },
-            after: { text: "new plan\n", truncated: false },
-          },
-        ],
-      },
-      {
-        "agent-provenance": {
-          provenance: {
-            source: "agent-run",
-            agentRunId: "run-123",
-            prompt: "Make the launch plan easier to review.",
-          },
-        },
-      },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /docs\/plan\.md/i }));
-
-    expect(await historyRail.findByTestId("history-provenance")).toBeTruthy();
-    expect(historyRail.getByTestId("history-provenance-title").textContent).toBe(
-      "Agent run",
-    );
-    expect(historyRail.getByTestId("history-provenance-detail").textContent).toBe(
-      "Make the launch plan easier to review.",
-    );
+    expect(diff.querySelector('[data-kind="added"]')?.textContent).toContain("After");
   });
 
   it("keeps separated edits as separated diff hunks", async () => {
@@ -1288,12 +1242,7 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-
-    expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
-      "+2 -2",
-    );
-    await user.click(historyRail.getByTestId("history-diff-open"));
+    await user.click(await historyRail.findByTestId("history-diff-open"));
     const diff = within(await screen.findByTestId("history-diff-page")).getByTestId(
       "history-diff-lines",
     );
@@ -1323,7 +1272,6 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
     await user.click(await historyRail.findByTestId("history-diff-open"));
 
     const diffTabPath = historyDiffTabPath("change-compare", "notes/today.md");
@@ -1331,20 +1279,13 @@ describe("history details", () => {
       "true",
     );
     const diffPage = within(await screen.findByTestId("history-diff-page"));
-    expect(diffPage.getByText("notes/today.md")).toBeTruthy();
-    expect(diffPage.getByTestId("history-compare-counts").textContent).toBe("+1 -1");
-    expect(diffPage.getByTestId("history-compare-before").textContent).toContain(
+    expect(diffPage.getAllByText("notes/today.md").length).toBeGreaterThan(0);
+    expect(diffPage.getByTestId("history-diff-counts").textContent).toBe("+1 -1");
+    const diff = diffPage.getByTestId("history-diff-lines");
+    expect(diff.querySelector('[data-kind="removed"]')?.textContent).toContain(
       "Before",
     );
-    expect(diffPage.getByTestId("history-compare-after").textContent).toContain(
-      "After",
-    );
-    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
-      "-Before",
-    );
-    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
-      "+After",
-    );
+    expect(diff.querySelector('[data-kind="added"]')?.textContent).toContain("After");
   });
 
   it("opens the live file from the history diff tab", async () => {
@@ -1356,7 +1297,6 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
     await user.click(await historyRail.findByTestId("history-diff-open"));
 
     const diffPage = within(await screen.findByTestId("history-diff-page"));
@@ -1367,136 +1307,4 @@ describe("history details", () => {
     );
   });
 
-  it("opens a touched file from the expanded history details", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(null),
-      [changeSet("change-open", 2000, "ice edited notes/today.md")],
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-    await user.click(await historyRail.findByTestId("history-open-file"));
-
-    const tab = await screen.findByTestId("tab-notes/today.md");
-    expect(tab.dataset.active).toBe("true");
-  });
-
-  it("does not offer to open a deleted history file", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(null),
-      [changeSet("change-delete", 2000, "ice deleted notes/today.md")],
-      {
-        "change-delete": [
-          {
-            path: "notes/today.md",
-            operation: "delete",
-            mediaType: "text/markdown",
-            before: { text: "# Today\nGone\n", truncated: false },
-            after: { unavailableReason: "missing" },
-          },
-        ],
-      },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-
-    expect(await historyRail.findByTestId("history-change-details")).toBeTruthy();
-    expect(historyRail.queryByTestId("history-open-file")).toBeNull();
-  });
-
-  it("restores every restorable text file in an expanded change", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(null),
-      [changeSet("change-restore-all", 2000, "ice edited docs")],
-      {
-        "change-restore-all": [
-          {
-            path: "docs/a.md",
-            operation: "write",
-            mediaType: "text/markdown",
-            before: { text: "before a", truncated: false },
-            after: { text: "after a", truncated: false },
-          },
-          {
-            path: "docs/b.txt",
-            operation: "write",
-            mediaType: "text/plain",
-            before: { text: "before b", truncated: false },
-            after: { text: "after b", truncated: false },
-          },
-          {
-            path: "docs/data.bin",
-            operation: "write",
-            mediaType: "application/octet-stream",
-            before: { unavailableReason: "binary" },
-            after: { unavailableReason: "binary" },
-          },
-        ],
-      },
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /ice edited docs/i }));
-    await user.click(await historyRail.findByTestId("history-restore-all"));
-
-    expect((await historyRail.findByTestId("history-restore-all-state")).textContent).toContain(
-      "Restore previous text for 2 files",
-    );
-    await user.click(historyRail.getByTestId("history-restore-all-confirm"));
-
-    await waitFor(() => {
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        relativePath: "docs/a.md",
-        text: "before a",
-      });
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        relativePath: "docs/b.txt",
-        text: "before b",
-      });
-    });
-    expect(bridge.writeWorkspaceText).not.toHaveBeenCalledWith(
-      expect.objectContaining({ relativePath: "docs/data.bin" }),
-    );
-    expect(historyRail.getByTestId("history-restore-all-state").textContent).toContain(
-      "Restored previous text for 2 files",
-    );
-  });
-
-  it("restores captured previous text from an expanded history file", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(null),
-      [changeSet("change-restore", 2000, "ice edited notes/today.md")],
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-    await user.click(await historyRail.findByTestId("history-restore-previous"));
-    expect(
-      (await historyRail.findByTestId("history-restore-state")).textContent,
-    ).toContain("Restore the saved previous text");
-
-    await user.click(historyRail.getByTestId("history-restore-confirm"));
-
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        relativePath: "notes/today.md",
-        text: "# Today\nBefore\n",
-      }),
-    );
-    expect(
-      (await historyRail.findByTestId("history-restore-state")).textContent,
-    ).toContain("Previous text restored");
-  });
 });

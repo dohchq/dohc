@@ -1,6 +1,5 @@
 import {
   Bot,
-  ChevronRight,
   Cloud,
   ExternalLink,
   FileText,
@@ -25,6 +24,7 @@ import {
 } from "react";
 import type {
   ChangeSetDetailRecord,
+  ChangeSetFilePreview,
   ChangeSetFileRecord,
   ChangeSetRecord,
   FileChangeSnapshot,
@@ -161,27 +161,17 @@ function uniqueUntitledTextPath(
   return `Untitled ${Date.now()}.txt`;
 }
 
-type HistoryDetailState =
-  | { status: "loading" }
-  | { status: "ready"; changeSet: ChangeSetDetailRecord | null }
-  | { status: "error" };
-
 type DiffLine = {
-  kind: "context" | "added" | "removed" | "note";
+  kind: "context" | "added" | "removed";
   text: string;
 };
 
-type HistoryRestoreState =
-  | { status: "confirm" }
-  | { status: "restoring" }
-  | { status: "restored" }
-  | { status: "error"; message: string };
-
-type HistoryRestoreAllState =
-  | { status: "confirm"; count: number }
-  | { status: "restoring"; count: number }
-  | { status: "restored"; count: number }
-  | { status: "error"; count: number; message: string };
+type UnifiedDiffLine = {
+  kind: DiffLine["kind"] | "note";
+  text: string;
+  oldLineNumber: number | null;
+  newLineNumber: number | null;
+};
 
 type HistoryAuthorFilter = "all" | "user" | "agent";
 
@@ -291,15 +281,24 @@ function buildLineDiff(before: string[], after: string[]): DiffLine[] {
   return out;
 }
 
-function compactDiffLines(
-  lines: DiffLine[],
+function compactUnifiedDiffLines(
+  lines: UnifiedDiffLine[],
   contextRadius = 2,
   limit = 80,
-): DiffLine[] {
+): UnifiedDiffLine[] {
   const changedIndexes = lines.flatMap((line, index) =>
     line.kind === "added" || line.kind === "removed" ? [index] : [],
   );
-  if (changedIndexes.length === 0) return [{ kind: "context", text: "No text changes" }];
+  if (changedIndexes.length === 0) {
+    return [
+      {
+        kind: "note",
+        text: "No text changes",
+        oldLineNumber: null,
+        newLineNumber: null,
+      },
+    ];
+  }
 
   const keep = new Set<number>();
   for (const changedIndex of changedIndexes) {
@@ -312,13 +311,15 @@ function compactDiffLines(
     }
   }
 
-  const out: DiffLine[] = [];
+  const out: UnifiedDiffLine[] = [];
   let hiddenCount = 0;
   const flushHidden = () => {
     if (hiddenCount === 0) return;
     out.push({
       kind: "note",
       text: `${hiddenCount} unchanged line${hiddenCount === 1 ? "" : "s"} hidden`,
+      oldLineNumber: null,
+      newLineNumber: null,
     });
     hiddenCount = 0;
   };
@@ -342,19 +343,61 @@ function compactDiffLines(
       text: `${out.length - limit} more diff line${
         out.length - limit === 1 ? "" : "s"
       } hidden`,
+      oldLineNumber: null,
+      newLineNumber: null,
     },
   ];
 }
 
-function buildDiffPreview(
+function buildUnifiedDiffLines(
   beforeText: string | undefined,
   afterText: string | undefined,
-  limit = 80,
-): DiffLine[] {
+  limit = 600,
+): UnifiedDiffLine[] {
   const before = splitDiffLines(beforeText ?? "");
   const after = splitDiffLines(afterText ?? "");
-  if (beforeText === afterText) return [{ kind: "context", text: "No text changes" }];
-  return compactDiffLines(buildLineDiff(before, after), 2, limit);
+  if (beforeText === afterText) {
+    return [
+      {
+        kind: "note",
+        text: "No text changes",
+        oldLineNumber: null,
+        newLineNumber: null,
+      },
+    ];
+  }
+
+  let oldLineNumber = 1;
+  let newLineNumber = 1;
+  const numbered = buildLineDiff(before, after).map<UnifiedDiffLine>((line) => {
+    if (line.kind === "added") {
+      const out = {
+        ...line,
+        oldLineNumber: null,
+        newLineNumber,
+      };
+      newLineNumber += 1;
+      return out;
+    }
+    if (line.kind === "removed") {
+      const out = {
+        ...line,
+        oldLineNumber,
+        newLineNumber: null,
+      };
+      oldLineNumber += 1;
+      return out;
+    }
+    const out = {
+      ...line,
+      oldLineNumber,
+      newLineNumber,
+    };
+    oldLineNumber += 1;
+    newLineNumber += 1;
+    return out;
+  });
+  return compactUnifiedDiffLines(numbered, 3, limit);
 }
 
 function changedLineCounts(
@@ -375,7 +418,10 @@ function changedLineCounts(
   );
 }
 
-function fileOperationLabel(file: ChangeSetFileRecord): string {
+function fileOperationLabel(
+  file: Pick<ChangeSetFileRecord, "operation"> &
+    Partial<Pick<ChangeSetFileRecord, "before" | "after">>,
+): string {
   if (file.operation === "delete") return "Deleted";
   if (file.operation === "rename") return "Renamed";
   if (!file.before && file.after) return "Created";
@@ -483,29 +529,6 @@ function historyBoundaryLabels(
   return boundaries?.map(historyBoundaryLabel) ?? [];
 }
 
-function historyProvenanceSummary(
-  provenance: ChangeSetDetailRecord["provenance"],
-): { title: string; detail: string | null } | null {
-  if (!provenance) return null;
-  if (provenance.source === "agent-run") {
-    return {
-      title: "Agent run",
-      detail:
-        provenance.prompt ??
-        (provenance.agentRunId ? `Run ${provenance.agentRunId}` : null),
-    };
-  }
-  if (provenance.source === "import") {
-    return {
-      title: "Import",
-      detail: provenance.importPath ?? null,
-    };
-  }
-  if (provenance.source === "sync") return { title: "Cloud sync", detail: null };
-  if (provenance.source === "app-build") return { title: "App build", detail: null };
-  return { title: "User edit", detail: null };
-}
-
 function historySearchText(change: ChangeSetRecord): string {
   return [
     change.humanSummary,
@@ -559,70 +582,34 @@ function formatHistoryDay(recordedAtMs: number): {
   };
 }
 
-function historyChangeTotals(files: ChangeSetFileRecord[]): {
-  added: number;
-  removed: number;
-  diffFileCount: number;
-  restorableFileCount: number;
-} {
-  return files.reduce(
-    (totals, file) => {
-      const counts = changedLineCounts(file.before?.text, file.after?.text);
-      if (counts) {
-        totals.added += counts.added;
-        totals.removed += counts.removed;
-        totals.diffFileCount += 1;
-      }
-      if (typeof file.before?.text === "string") {
-        totals.restorableFileCount += 1;
-      }
-      return totals;
-    },
-    { added: 0, removed: 0, diffFileCount: 0, restorableFileCount: 0 },
-  );
-}
-
-function restorableHistoryFiles(files: ChangeSetFileRecord[]): ChangeSetFileRecord[] {
-  return files.filter((file) => typeof file.before?.text === "string");
-}
-
-function HistoryCompareTextPane({
-  label,
-  text,
-  unavailable,
-  tone,
+function HistoryFileChip({
+  changeSetId,
+  file,
+  onOpenDiff,
 }: {
-  label: "Before" | "After";
-  text: string | undefined;
-  unavailable: string | null;
-  tone: "removed" | "added";
+  changeSetId: string;
+  file: ChangeSetFilePreview;
+  onOpenDiff: (changeSetId: string, filePath: string) => void;
 }) {
-  const testId = label === "Before" ? "history-compare-before" : "history-compare-after";
-  const toneClass =
-    tone === "added" ? "border-success/20 bg-success/5" : "border-danger/20 bg-danger/5";
   return (
-    <section className={`min-h-0 rounded border ${toneClass}`}>
-      <div className="flex h-8 items-center border-b border-line px-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          {label}
+    <button
+      type="button"
+      data-testid="history-diff-open"
+      title={`Open diff for ${file.path}`}
+      aria-label={`Open diff for ${file.path}`}
+      onClick={() => onOpenDiff(changeSetId, file.path)}
+      className={`flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded border px-1.5 text-left text-[10px] leading-none transition-colors hover:border-ink/30 hover:bg-line/60 hover:text-ink ${historyFilePreviewTone(
+        file.operation,
+      )}`}
+    >
+      <FileText size={11} aria-hidden className="shrink-0 opacity-70" />
+      <span className="min-w-0 truncate">{file.path}</span>
+      {file.operation !== "write" ? (
+        <span className="shrink-0 uppercase tracking-wide">
+          {fileOperationLabel(file)}
         </span>
-      </div>
-      {typeof text === "string" ? (
-        <pre
-          data-testid={testId}
-          className="m-0 max-h-[42vh] min-h-40 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-5 text-ink"
-        >
-          {text.length > 0 ? text : "Empty file"}
-        </pre>
-      ) : (
-        <div
-          data-testid={testId}
-          className="flex min-h-40 items-center justify-center px-4 py-6 text-center text-[12px] text-subtle"
-        >
-          {unavailable ?? "No captured text for this side of the change."}
-        </div>
-      )}
-    </section>
+      ) : null}
+    </button>
   );
 }
 
@@ -687,9 +674,20 @@ function HistoryDiffPage({
   const before = file.before?.text;
   const after = file.after?.text;
   const counts = changedLineCounts(before, after);
-  const diffLines = buildDiffPreview(before, after, 400);
-  const beforeUnavailable = snapshotUnavailable(file.before);
-  const afterUnavailable = snapshotUnavailable(file.after);
+  const unavailable =
+    before === undefined && after === undefined
+      ? snapshotUnavailable(file.before) ?? snapshotUnavailable(file.after)
+      : null;
+  const diffLines: UnifiedDiffLine[] = unavailable
+    ? [
+        {
+          kind: "note",
+          text: unavailable,
+          oldLineNumber: null,
+          newLineNumber: null,
+        },
+      ]
+    : buildUnifiedDiffLines(before, after, 800);
 
   return (
     <section
@@ -710,7 +708,7 @@ function HistoryDiffPage({
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
             <span>{fileOperationLabel(file)}</span>
             {counts ? (
-              <span className="font-mono" data-testid="history-compare-counts">
+              <span className="font-mono" data-testid="history-diff-counts">
                 +{counts.added} -{counts.removed}
               </span>
             ) : null}
@@ -733,49 +731,63 @@ function HistoryDiffPage({
         ) : null}
       </header>
       <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
-        <div className="grid min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <HistoryCompareTextPane
-            label="Before"
-            text={before}
-            unavailable={beforeUnavailable}
-            tone="removed"
-          />
-          <HistoryCompareTextPane
-            label="After"
-            text={after}
-            unavailable={afterUnavailable}
-            tone="added"
-          />
-        </div>
-        <section className="mt-3 rounded border border-line bg-bg">
-          <div className="flex h-8 items-center border-b border-line px-3">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-              Changed lines
+        <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
+          <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
+            <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+              {file.path}
             </span>
+            {counts ? (
+              <span className="shrink-0 font-mono text-[11px] text-subtle">
+                +{counts.added} -{counts.removed}
+              </span>
+            ) : null}
           </div>
           <div
             data-testid="history-diff-lines"
-            className="max-h-[42vh] overflow-y-auto overflow-x-hidden py-1 font-mono text-[11px] leading-5"
+            className="overflow-x-hidden py-1 font-mono text-[12px] leading-5"
           >
             {diffLines.map((line, index) => (
-              <div
-                key={`${index}:${line.kind}:${line.text}`}
-                data-kind={line.kind}
-                className={`grid grid-cols-[28px_minmax(0,1fr)] px-3 ${
-                  line.kind === "added"
-                    ? "bg-success/10 text-success"
-                    : line.kind === "removed"
-                      ? "bg-danger/10 text-danger"
-                      : line.kind === "note"
-                        ? "text-subtle"
+              line.kind === "note" ? (
+                <div
+                  key={`${index}:${line.text}`}
+                  data-kind={line.kind}
+                  className="border-y border-line/70 bg-panel px-3 py-1.5 text-center text-[11px] text-subtle"
+                >
+                  {line.text}
+                </div>
+              ) : (
+                <div
+                  key={`${index}:${line.kind}:${line.text}`}
+                  data-kind={line.kind}
+                  className={`grid min-w-0 grid-cols-[44px_44px_24px_minmax(0,1fr)] ${
+                    line.kind === "added"
+                      ? "bg-success/10 text-success"
+                      : line.kind === "removed"
+                        ? "bg-danger/10 text-danger"
                         : "text-muted"
-                }`}
-              >
-                <span aria-hidden className="select-none text-center">
-                  {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
-                </span>
-                <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
-              </div>
+                  }`}
+                >
+                  <span
+                    aria-hidden
+                    className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
+                  >
+                    {line.oldLineNumber ?? ""}
+                  </span>
+                  <span
+                    aria-hidden
+                    className="select-none border-r border-line/60 px-2 text-right text-[11px] text-subtle"
+                  >
+                    {line.newLineNumber ?? ""}
+                  </span>
+                  <span aria-hidden className="select-none text-center">
+                    {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
+                  </span>
+                  <code className="min-w-0 whitespace-pre-wrap break-words pr-3 font-inherit text-inherit">
+                    {line.text.length > 0 ? line.text : " "}
+                  </code>
+                </div>
+              )
             ))}
           </div>
         </section>
@@ -784,459 +796,20 @@ function HistoryDiffPage({
   );
 }
 
-function HistoryFileDiff({
-  file,
-  restoreState,
-  onRequestRestore,
-  onCancelRestore,
-  onConfirmRestore,
-  onOpenDiff,
-  onOpenFile,
-}: {
-  file: ChangeSetFileRecord;
-  restoreState?: HistoryRestoreState;
-  onRequestRestore: (file: ChangeSetFileRecord) => void;
-  onCancelRestore: (file: ChangeSetFileRecord) => void;
-  onConfirmRestore: (file: ChangeSetFileRecord) => void;
-  onOpenDiff: (file: ChangeSetFileRecord) => void;
-  onOpenFile: (path: string) => void;
-}) {
-  const before = file.before;
-  const after = file.after;
-  const canDiff = typeof before?.text === "string" || typeof after?.text === "string";
-  const canRestorePrevious = typeof before?.text === "string";
-  const counts = changedLineCounts(before?.text, after?.text);
-
-  return (
-    <li className="min-w-0 rounded border border-line bg-bg">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5 px-2 py-1.5">
-        <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-ink">{file.path}</span>
-        {counts ? (
-          <span
-            data-testid="history-diff-counts"
-            className="shrink-0 font-mono text-[10px] text-subtle"
-          >
-            +{counts.added} -{counts.removed}
-          </span>
-        ) : null}
-        <span className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-subtle">
-          {fileOperationLabel(file)}
-        </span>
-        {file.operation !== "delete" ? (
-          <button
-            type="button"
-            data-testid="history-open-file"
-            aria-label={`Open ${file.path}`}
-            title="Open file"
-            onClick={() => onOpenFile(file.path)}
-            className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-          >
-            <ExternalLink size={12} aria-hidden />
-          </button>
-        ) : null}
-        {canRestorePrevious ? (
-          <button
-            type="button"
-            data-testid="history-restore-previous"
-            disabled={restoreState?.status === "restoring"}
-            onClick={() => onRequestRestore(file)}
-            className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-50"
-          >
-            Restore previous
-          </button>
-        ) : null}
-        {canDiff ? (
-          <button
-            type="button"
-            data-testid="history-diff-open"
-            onClick={() => onOpenDiff(file)}
-            className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
-          >
-            Open diff
-          </button>
-        ) : null}
-      </div>
-      {restoreState ? (
-        <div
-          data-testid="history-restore-state"
-          className={`border-b border-line px-2 py-2 text-[11px] ${
-            restoreState.status === "error"
-              ? "text-danger"
-              : restoreState.status === "restored"
-                ? "text-success"
-                : "text-muted"
-          }`}
-        >
-          {restoreState.status === "confirm" ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="min-w-0 flex-1">
-                Restore the saved previous text to this file.
-              </span>
-              <button
-                type="button"
-                onClick={() => onCancelRestore(file)}
-                className="rounded px-1.5 py-0.5 text-subtle hover:bg-line/50 hover:text-ink"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="history-restore-confirm"
-                onClick={() => onConfirmRestore(file)}
-                className="rounded bg-ink px-1.5 py-0.5 text-bg hover:opacity-90"
-              >
-                Restore
-              </button>
-            </div>
-          ) : restoreState.status === "restoring" ? (
-            "Restoring previous text..."
-          ) : restoreState.status === "restored" ? (
-            "Previous text restored. A new history entry will appear after the save is recorded."
-          ) : (
-            restoreState.message
-          )}
-        </div>
-      ) : null}
-    </li>
-  );
-}
-
-function HistoryChangeDetails({
-  state,
-  restoreStateFor,
-  restoreAllState,
-  onRequestRestore,
-  onCancelRestore,
-  onConfirmRestore,
-  onRequestRestoreAll,
-  onCancelRestoreAll,
-  onConfirmRestoreAll,
-  onOpenDiff,
-  onOpenFile,
-}: {
-  state: HistoryDetailState | undefined;
-  restoreStateFor: (file: ChangeSetFileRecord) => HistoryRestoreState | undefined;
-  restoreAllState?: HistoryRestoreAllState;
-  onRequestRestore: (file: ChangeSetFileRecord) => void;
-  onCancelRestore: (file: ChangeSetFileRecord) => void;
-  onConfirmRestore: (file: ChangeSetFileRecord) => void;
-  onRequestRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
-  onCancelRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
-  onConfirmRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
-  onOpenDiff: (file: ChangeSetFileRecord) => void;
-  onOpenFile: (path: string) => void;
-}) {
-  if (!state || state.status === "loading") {
-    return <div className="px-2 py-2 text-[11px] text-subtle">Loading change details...</div>;
-  }
-  if (state.status === "error") {
-    return <div className="px-2 py-2 text-[11px] text-danger">Could not load change details.</div>;
-  }
-  if (!state.changeSet) {
-    return <div className="px-2 py-2 text-[11px] text-subtle">This change no longer exists.</div>;
-  }
-
-  const change = state.changeSet;
-  const totals = historyChangeTotals(change.files);
-  const restorableFiles = restorableHistoryFiles(change.files);
-  const boundaryLabels = historyBoundaryLabels(change.boundaryCrossings);
-  const provenance = historyProvenanceSummary(change.provenance);
-
-  return (
-    <div data-testid="history-change-details" className="mt-2 space-y-2">
-      <div
-        data-testid="history-detail-summary"
-        className="grid gap-1 rounded border border-line bg-bg px-2 py-2 text-[11px] text-muted"
-      >
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span>
-            {change.files.length} touched file{change.files.length === 1 ? "" : "s"}
-          </span>
-          {totals.diffFileCount > 0 ? (
-            <span
-              data-testid="history-detail-total-counts"
-              className="font-mono text-subtle"
-            >
-              +{totals.added} -{totals.removed}
-            </span>
-          ) : null}
-          {totals.restorableFileCount > 0 ? (
-            <span>
-              {totals.restorableFileCount} restorable file
-              {totals.restorableFileCount === 1 ? "" : "s"}
-            </span>
-          ) : null}
-          {change.boundaryCrossings.length > 0 ? (
-            <span className="font-medium text-danger">Needs review</span>
-          ) : null}
-          {restorableFiles.length > 1 ? (
-            <button
-              type="button"
-              data-testid="history-restore-all"
-              disabled={restoreAllState?.status === "restoring"}
-              onClick={() => onRequestRestoreAll(change)}
-              className="ml-auto rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-50"
-            >
-              Restore all
-            </button>
-          ) : null}
-        </div>
-        {restoreAllState ? (
-          <div
-            data-testid="history-restore-all-state"
-            className={`mt-1 border-t border-line pt-2 ${
-              restoreAllState.status === "error"
-                ? "text-danger"
-                : restoreAllState.status === "restored"
-                  ? "text-success"
-                  : "text-muted"
-            }`}
-          >
-            {restoreAllState.status === "confirm" ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1">
-                  Restore previous text for {restoreAllState.count} files in this change.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onCancelRestoreAll(change)}
-                  className="rounded px-1.5 py-0.5 text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  data-testid="history-restore-all-confirm"
-                  onClick={() => onConfirmRestoreAll(change)}
-                  className="rounded bg-ink px-1.5 py-0.5 text-bg hover:opacity-90"
-                >
-                  Restore
-                </button>
-              </div>
-            ) : restoreAllState.status === "restoring" ? (
-              `Restoring ${restoreAllState.count} files...`
-            ) : restoreAllState.status === "restored" ? (
-              `Restored previous text for ${restoreAllState.count} files.`
-            ) : (
-              restoreAllState.message
-            )}
-          </div>
-        ) : null}
-        {boundaryLabels.length > 0 ? (
-          <div
-            data-testid="history-review-reasons"
-            className="flex flex-wrap gap-1 border-t border-line pt-2"
-          >
-            {boundaryLabels.map((label) => (
-              <span
-                key={label}
-                className="rounded border border-danger/30 bg-danger/5 px-1.5 py-0.5 text-[10px] font-medium text-danger"
-              >
-                {label}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
-      {provenance ? (
-        <div
-          data-testid="history-provenance"
-          className="rounded border border-line bg-bg px-2 py-1.5 text-[11px] text-muted"
-        >
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
-            Why
-          </div>
-          <div
-            data-testid="history-provenance-title"
-            className="mt-0.5 font-medium text-ink"
-          >
-            {provenance.title}
-          </div>
-          {provenance.detail ? (
-            <div
-              data-testid="history-provenance-detail"
-              className="mt-1 whitespace-pre-wrap break-words leading-snug text-muted"
-            >
-              {provenance.detail}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      <ul className="m-0 space-y-2 p-0">
-        {change.files.map((file) => (
-          <HistoryFileDiff
-            key={`${file.operation}:${file.path}`}
-            file={file}
-            restoreState={restoreStateFor(file)}
-            onRequestRestore={onRequestRestore}
-            onCancelRestore={onCancelRestore}
-            onConfirmRestore={onConfirmRestore}
-            onOpenDiff={onOpenDiff}
-            onOpenFile={onOpenFile}
-          />
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 // The timeline body, shared by the right history rail and the side panel's
 // History view (both render the same root-owned changeSets — never a second
 // subscription). The pinned history-timeline testid stays on the RAIL only.
 function HistoryList({
-  workspaceId,
   changeSets,
-  onOpenFile,
   onOpenDiff,
   emptyLabel = "No changes yet",
   emptyDescription = "Edits — yours or your agent's — show up here as a timeline you can review.",
 }: {
-  workspaceId: string;
   changeSets: ChangeSetRecord[];
-  onOpenFile: (path: string) => void;
-  onOpenDiff: (changeSetId: string, file: ChangeSetFileRecord) => void;
+  onOpenDiff: (changeSetId: string, filePath: string) => void;
   emptyLabel?: string;
   emptyDescription?: string;
 }) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [detailsById, setDetailsById] = useState<Record<string, HistoryDetailState>>({});
-  const [restoreByKey, setRestoreByKey] = useState<Record<string, HistoryRestoreState>>({});
-  const [restoreAllById, setRestoreAllById] = useState<
-    Record<string, HistoryRestoreAllState>
-  >({});
-
-  const restoreKey = useCallback(
-    (file: ChangeSetFileRecord) => `${expandedId ?? "none"}:${file.path}`,
-    [expandedId],
-  );
-
-  const toggleChange = useCallback(
-    (id: string) => {
-      setExpandedId((current) => (current === id ? null : id));
-      if (detailsById[id]) return;
-      setDetailsById((current) => ({ ...current, [id]: { status: "loading" } }));
-      void bridge()
-        .readChangeSet({ workspaceId, changeSetId: id })
-        .then((result) => {
-          setDetailsById((current) => ({
-            ...current,
-            [id]: { status: "ready", changeSet: result.changeSet },
-          }));
-        })
-        .catch(() => {
-          setDetailsById((current) => ({ ...current, [id]: { status: "error" } }));
-        });
-    },
-    [detailsById, workspaceId],
-  );
-
-  const requestRestore = useCallback(
-    (file: ChangeSetFileRecord) => {
-      if (typeof file.before?.text !== "string") return;
-      const key = restoreKey(file);
-      setRestoreByKey((current) => ({ ...current, [key]: { status: "confirm" } }));
-    },
-    [restoreKey],
-  );
-
-  const cancelRestore = useCallback(
-    (file: ChangeSetFileRecord) => {
-      const key = restoreKey(file);
-      setRestoreByKey((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [restoreKey],
-  );
-
-  const confirmRestore = useCallback(
-    (file: ChangeSetFileRecord) => {
-      const text = file.before?.text;
-      if (typeof text !== "string") return;
-      const key = restoreKey(file);
-      setRestoreByKey((current) => ({ ...current, [key]: { status: "restoring" } }));
-      void bridge()
-        .writeWorkspaceText({
-          workspaceId,
-          relativePath: file.path,
-          text,
-        })
-        .then(() => {
-          setRestoreByKey((current) => ({ ...current, [key]: { status: "restored" } }));
-        })
-        .catch((cause) => {
-          setRestoreByKey((current) => ({
-            ...current,
-            [key]: {
-              status: "error",
-              message: cause instanceof Error ? cause.message : "Could not restore previous text.",
-            },
-          }));
-        });
-    },
-    [restoreKey, workspaceId],
-  );
-
-  const requestRestoreAll = useCallback((changeSet: ChangeSetDetailRecord) => {
-    const count = restorableHistoryFiles(changeSet.files).length;
-    if (count === 0) return;
-    setRestoreAllById((current) => ({
-      ...current,
-      [changeSet.id]: { status: "confirm", count },
-    }));
-  }, []);
-
-  const cancelRestoreAll = useCallback((changeSet: ChangeSetDetailRecord) => {
-    setRestoreAllById((current) => {
-      const next = { ...current };
-      delete next[changeSet.id];
-      return next;
-    });
-  }, []);
-
-  const confirmRestoreAll = useCallback(
-    (changeSet: ChangeSetDetailRecord) => {
-      const filesToRestore = restorableHistoryFiles(changeSet.files);
-      if (filesToRestore.length === 0) return;
-      setRestoreAllById((current) => ({
-        ...current,
-        [changeSet.id]: { status: "restoring", count: filesToRestore.length },
-      }));
-      void Promise.all(
-        filesToRestore.map((file) =>
-          bridge().writeWorkspaceText({
-            workspaceId,
-            relativePath: file.path,
-            text: file.before!.text!,
-          }),
-        ),
-      )
-        .then(() => {
-          setRestoreAllById((current) => ({
-            ...current,
-            [changeSet.id]: { status: "restored", count: filesToRestore.length },
-          }));
-        })
-        .catch((cause) => {
-          setRestoreAllById((current) => ({
-            ...current,
-            [changeSet.id]: {
-              status: "error",
-              count: filesToRestore.length,
-              message:
-                cause instanceof Error
-                  ? cause.message
-                  : "Could not restore every restorable file.",
-            },
-          }));
-        });
-    },
-    [workspaceId],
-  );
-
   if (changeSets.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
@@ -1252,7 +825,6 @@ function HistoryList({
         className="m-0 min-h-0 flex-1 list-none overflow-y-auto overflow-x-hidden p-0"
       >
         {changeSets.map((change, index) => {
-          const expanded = expandedId === change.id;
           const recordedAt = formatHistoryRecordedAt(change.recordedAtMs);
           const day = formatHistoryDay(change.recordedAtMs);
           const lineStatsLabel = historyLineStatsText(change.lineStats);
@@ -1275,28 +847,17 @@ function HistoryList({
               ) : null}
               <li
                 data-testid="change-set"
-                data-expanded={expanded}
-                className="border-b border-line px-2 py-2"
+                className="border-b border-line px-3 py-2 transition-colors hover:bg-line/25"
               >
-                <button
-                  type="button"
-                  className="group flex w-full items-start gap-2 rounded px-1 py-1 text-left hover:bg-line/40"
-                  onClick={() => toggleChange(change.id)}
-                  aria-expanded={expanded}
-                >
-                  <ChevronRight
-                    size={13}
-                    aria-hidden
-                    className={`mt-0.5 shrink-0 text-subtle transition-transform ${expanded ? "rotate-90" : ""}`}
-                  />
+                <div className="flex min-w-0 items-start gap-2">
                   {change.author.kind === "agent" ? (
                     <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
                   ) : (
                     <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
                   )}
-                  <span className="min-w-0 flex-1">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
                         {change.humanSummary}
                       </span>
                       {change.reviewRequired ? (
@@ -1316,7 +877,7 @@ function HistoryList({
                           Needs review
                         </span>
                       ) : null}
-                    </span>
+                    </div>
                     <span className="block text-[10px] text-subtle">
                       {historyAuthorLabel(change.author)}
                       {" · "}
@@ -1329,8 +890,6 @@ function HistoryList({
                       </time>
                       {" · "}
                       {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-                      {" · "}
-                      {historyKindLabel(change.kind)}
                       {lineStatsLabel ? (
                         <>
                           {" · "}
@@ -1342,65 +901,29 @@ function HistoryList({
                           </span>
                         </>
                       ) : null}
-                      {boundaryLabels.length > 0 ? (
-                        <>
-                          {" · "}
-                          <span
-                            data-testid="history-review-reason-preview"
-                            className="font-medium text-danger"
-                          >
-                            {boundaryLabels[0]}
-                            {(change.boundaryCrossingCount ?? boundaryLabels.length) >
-                            boundaryLabels.length
-                              ? ` +${
-                                  (change.boundaryCrossingCount ?? boundaryLabels.length) -
-                                  boundaryLabels.length
-                                }`
-                              : ""}
-                          </span>
-                        </>
-                      ) : null}
                     </span>
                     {change.filePreview && change.filePreview.length > 0 ? (
-                      <span
+                      <div
                         data-testid="history-file-preview"
                         className="mt-1 flex min-w-0 flex-wrap gap-1"
                       >
                         {change.filePreview.map((file) => (
-                          <span
+                          <HistoryFileChip
                             key={`${file.operation}:${file.path}`}
-                            title={file.path}
-                            className={`max-w-full truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${historyFilePreviewTone(
-                              file.operation,
-                            )}`}
-                          >
-                            {file.path}
-                          </span>
+                            changeSetId={change.id}
+                            file={file}
+                            onOpenDiff={onOpenDiff}
+                          />
                         ))}
                         {change.fileCount > change.filePreview.length ? (
                           <span className="rounded border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-subtle">
                             +{change.fileCount - change.filePreview.length}
                           </span>
                         ) : null}
-                      </span>
+                      </div>
                     ) : null}
-                  </span>
-                </button>
-                {expanded ? (
-                  <HistoryChangeDetails
-                    state={detailsById[change.id]}
-                    restoreStateFor={(file) => restoreByKey[restoreKey(file)]}
-                    restoreAllState={restoreAllById[change.id]}
-                    onRequestRestore={requestRestore}
-                    onCancelRestore={cancelRestore}
-                    onConfirmRestore={confirmRestore}
-                    onRequestRestoreAll={requestRestoreAll}
-                    onCancelRestoreAll={cancelRestoreAll}
-                    onConfirmRestoreAll={confirmRestoreAll}
-                    onOpenDiff={(file) => onOpenDiff(change.id, file)}
-                    onOpenFile={onOpenFile}
-                  />
-                ) : null}
+                  </div>
+                </div>
               </li>
             </Fragment>
           );
@@ -1411,10 +934,8 @@ function HistoryList({
 }
 
 function HistoryView(props: {
-  workspaceId: string;
   changeSets: ChangeSetRecord[];
-  onOpenFile: (path: string) => void;
-  onOpenDiff: (changeSetId: string, file: ChangeSetFileRecord) => void;
+  onOpenDiff: (changeSetId: string, filePath: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [reviewOnly, setReviewOnly] = useState(false);
@@ -1574,9 +1095,7 @@ function HistoryView(props: {
         </>
       ) : null}
       <HistoryList
-        workspaceId={props.workspaceId}
         changeSets={filteredChangeSets}
-        onOpenFile={props.onOpenFile}
         onOpenDiff={props.onOpenDiff}
         emptyLabel={filterActive ? "No matching changes" : undefined}
         emptyDescription={
@@ -1943,8 +1462,8 @@ export function DesktopWorkspaceShell(props: {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
   const openHistoryDiffTab = useCallback(
-    (changeSetId: string, file: ChangeSetFileRecord) => {
-      mutateWb((state) => openTab(state, historyDiffTabPath(changeSetId, file.path)));
+    (changeSetId: string, filePath: string) => {
+      mutateWb((state) => openTab(state, historyDiffTabPath(changeSetId, filePath)));
     },
     [mutateWb],
   );
@@ -2511,9 +2030,7 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "history" ? (
               <HistoryView
-                workspaceId={workspaceId}
                 changeSets={changeSets}
-                onOpenFile={openFile}
                 onOpenDiff={openHistoryDiffTab}
               />
             ) : wb.activeView === "agent" ? (
@@ -2562,9 +2079,7 @@ export function DesktopWorkspaceShell(props: {
                 className="flex min-h-0 flex-1 flex-col bg-bg"
               >
                 <HistoryView
-                  workspaceId={workspaceId}
                   changeSets={changeSets}
-                  onOpenFile={openFile}
                   onOpenDiff={openHistoryDiffTab}
                 />
               </div>
@@ -2644,9 +2159,7 @@ export function DesktopWorkspaceShell(props: {
             onCollapse={() => mutateWb(toggleHistory)}
           >
             <HistoryView
-              workspaceId={workspaceId}
               changeSets={changeSets}
-              onOpenFile={openFile}
               onOpenDiff={openHistoryDiffTab}
             />
           </HistoryRail>
