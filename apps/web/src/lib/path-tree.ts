@@ -1,0 +1,221 @@
+// Path-tree utilities. The vault is path-addressed (Obsidian-style),
+// but the UI reads as a real recursive tree (Notion-style) — these
+// helpers bridge the two.
+
+export type FileRow = {
+  id: string
+  path: string
+  title?: string | null
+  kind?: 'atom' | 'asset' | 'database'
+  contentType?: string
+  revision?: string
+  // Last-write timestamp (projected by api.atoms.list). Absent on callers
+  // that don't project it.
+  updatedAt?: number
+  // html-atoms-v1 §5 — 'html' ⇒ tree badges it as a page (no `.html`
+  // extension exists). Advisory/additive; absent on legacy rows.
+  type?: 'html' | 'command' | 'skill' | null
+  // file-org-v1 §3.1 (Track-4 D4.4a) — lock/star surface for the
+  // tree's affordance rendering. Defaults to false on rows that
+  // predate Track-4.
+  systemLocked?: boolean
+  userLocked?: boolean
+  starred?: boolean
+  // emoji-icons — user-chosen icon emoji (null/absent ⇒ default icon)
+  icon?: string | null
+  // D4.8e — rename-proof fileId from frontmatter. The editor's
+  // formula plugin resolves `{= id.key }` references to the file
+  // with this id (read via api.atoms.list projection). null on
+  // legacy rows that predate Track-1.
+  fileId?: string | null
+}
+
+type TreePage = {
+  path: string
+  title: string | null
+  type?: 'html' | 'command' | 'skill' | null
+  // file-org-v1 D4.4a — passed through to TreeNode so leaf rows
+  // can render the lock/star icons. Folder rows carry these via
+  // their own folderMetadata join (D4.5).
+  systemLocked?: boolean
+  userLocked?: boolean
+  starred?: boolean
+  // emoji-icons — user-chosen icon emoji (null/absent ⇒ default icon)
+  icon?: string | null
+  // D4.8e — rename-proof fileId, passed through for share indicators
+  // and URL-stable page routing.
+  fileId?: string | null
+}
+
+export type TreeNode = {
+  segment: string             // last path segment (e.g. "team" or "anna.md")
+  fullPath: string            // unique key for state/expand maps
+  page: TreePage | null       // the atom that IS this node (leaf, or folder's index.md)
+  children: TreeNode[]
+  // file-org-v1 §4.3 / D4.5 — folder-row cosmetic state. Only set
+  // on folder nodes (page === null).
+  icon?: string | null
+  color?: string | null
+  starred?: boolean
+}
+
+// file-org-v1 v9 fold (Codex R8-6 DISPOSITIVE) — the input is the
+// UNION of legacy strings and rich folder objects. UI consumers
+// that already pass `string[]` keep working byte-identically; new
+// callers can pass {path, icon?, color?, starred?} to surface
+// folder cosmetics. The picker on the FileTree consumes the rich
+// shape (`api.folders.list` returns it post-D4.1a).
+export type FolderInput = string | {
+  path: string
+  icon?: string | null
+  color?: string | null
+  starred?: boolean
+}
+
+const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+const APP_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
+
+// `.apps/<name>/…` holds app source folders (see workspace-core
+// classifyPath); source files there keep their extension in labels.
+function isAppSourcePath(path: string): boolean {
+  const parts = pathSegments(path)
+  const appsIndex = parts.indexOf('.apps')
+  return (
+    appsIndex >= 0 &&
+    appsIndex <= parts.length - 3 &&
+    Boolean(parts[appsIndex + 1])
+  )
+}
+
+function isSourceCodeFilePath(path: string): boolean {
+  return SOURCE_CODE_EXT_RE.test(path) || (
+    isAppSourcePath(path) && APP_SOURCE_EXT_RE.test(path)
+  )
+}
+
+// Build a tree from atoms + explicit folder rows. Obsidian-style:
+// folders are first-class containers (can sit empty), atoms are leaves.
+// Each atom is a leaf node at its full path — no folder-as-page
+// conflation. `team/index.md` is just a file inside the team folder.
+export function buildTree(
+  files: FileRow[],
+  folders: FolderInput[] = [],
+): TreeNode {
+  const root: TreeNode = {
+    segment: '',
+    fullPath: '',
+    page: null,
+    children: [],
+  }
+
+  // Ensure every explicit folder has a node (even if empty). Carry
+  // the cosmetic state (icon/color/starred) onto the folder node
+  // so the render site can read it without a separate join.
+  for (const f of folders) {
+    if (typeof f === 'string') {
+      ensureFolderNode(root, f)
+    } else {
+      const node = ensureFolderNode(root, f.path)
+      node.icon = f.icon ?? null
+      node.color = f.color ?? null
+      node.starred = f.starred === true
+    }
+  }
+
+  for (const f of files) {
+    const segments = pathSegments(f.path)
+    if (segments.length === 0) continue
+    let cursor = root
+    let acc = ''
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]!
+      const isLast = i === segments.length - 1
+      acc = acc ? `${acc}/${seg}` : seg
+      let child = cursor.children.find((c) => c.segment === seg)
+      if (!child) {
+        child = {
+          segment: seg,
+          fullPath: acc,
+          page: null,
+          children: [],
+        }
+        cursor.children.push(child)
+      }
+      if (isLast) {
+        child.page = {
+          path: f.path,
+          title: f.title ?? null,
+          type: f.type ?? null,
+          systemLocked: f.systemLocked,
+          userLocked: f.userLocked,
+          starred: f.starred,
+          icon: f.icon ?? null,
+          fileId: f.fileId ?? null,
+        }
+      } else {
+        cursor = child
+      }
+    }
+  }
+  sortTree(root)
+  return root
+}
+
+function ensureFolderNode(root: TreeNode, folderPath: string): TreeNode {
+  const segments = pathSegments(folderPath)
+  let cursor = root
+  let acc = ''
+  for (const seg of segments) {
+    acc = acc ? `${acc}/${seg}` : seg
+    let child = cursor.children.find((c) => c.segment === seg)
+    if (!child) {
+      child = { segment: seg, fullPath: acc, page: null, children: [] }
+      cursor.children.push(child)
+    }
+    cursor = child
+  }
+  return cursor
+}
+
+function pathSegments(path: string): string[] {
+  return path.split('/').filter(Boolean)
+}
+
+// file-org-v1 §5.7 / D4.5 — sort order:
+//   1. folders before leaves (Obsidian / Notion convention)
+//   2. within each tier, STARRED before UNSTARRED
+//   3. ties broken by alphabetical (locale-aware)
+//
+// A folder is "starred" when its folderMetadata row has starred=true
+// (carried through `FolderInput.starred` onto the node). A leaf is
+// "starred" when its FileRow.starred=true (carried through
+// `TreePage.starred`). Empty folders (no children, but present in
+// the input folder list) sort as folders. The whole rule reduces to
+// a 3-tuple compare; ties broken locale-aware.
+function sortTree(node: TreeNode) {
+  node.children.sort((a, b) => {
+    const aIsFolder = a.page === null
+    const bIsFolder = b.page === null
+    if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1
+    const aStarred = aIsFolder ? a.starred === true : a.page?.starred === true
+    const bStarred = bIsFolder ? b.starred === true : b.page?.starred === true
+    if (aStarred !== bStarred) return aStarred ? -1 : 1
+    return a.segment.localeCompare(b.segment)
+  })
+  node.children.forEach(sortTree)
+}
+
+// Display label for a tree node.
+export function nodeLabel(node: TreeNode): string {
+  if (node.fullPath === '.context/me.md') return 'Me'
+  if (node.fullPath === '.context/intent.md') return 'Intent'
+  if (node.fullPath === '.context/company.md') return 'Company'
+  if (node.fullPath === '.skills') return 'Skills'
+  if (node.fullPath === '.commands') return 'Commands'
+  if (node.page && isSourceCodeFilePath(node.page.path)) return node.segment
+  if (node.page?.title) return node.page.title
+  // D4.16 — strip the rendering extension (.md OR .html) so a
+  // titleless file shows its clean name (e.g. `dashboard`, not
+  // `dashboard.html`).
+  return node.segment.replace(/\.(md|html)$/i, '')
+}

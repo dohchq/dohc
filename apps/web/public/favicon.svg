@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 104">
+  <title>dohc</title>
+  <!-- dohc drop-lobe mark. Single stroked lobe contour with a central
+       datum dot. Light mark graphite (#2d342e); dark mark warm ink
+       (#f4f1ea) so the dot reads light in dark mode. -->
+  <style>
+    .lobe { stroke: #2d342e; fill: none; stroke-width: 8; stroke-linejoin: round; }
+    .dot { fill: #2d342e; }
+    @media (prefers-color-scheme: dark) {
+      .lobe { stroke: #f4f1ea; }
+      .dot { fill: #f4f1ea; }
+    }
+  </style>
+  <path class="lobe" d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"/>
+  <circle class="dot" cx="38" cy="58" r="9"/>
+</svg>
