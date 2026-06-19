@@ -40,6 +40,7 @@ import { CommandPalette, type Command } from "./CommandPalette";
 import {
   FileInspector,
   preloadMarkdownEditor,
+  type PendingFileUndo,
   type ScrollTarget,
 } from "./FileInspector";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -574,7 +575,7 @@ function HistoryDiffPage({
   workspaceId: string;
   tabPath: string;
   onOpenFile: (path: string) => void;
-  onRestored: () => void;
+  onRestored: (undo?: Omit<PendingFileUndo, "token">) => void;
 }) {
   const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -677,7 +678,18 @@ function HistoryDiffPage({
             ? "Reverted by moving the created file out of the workspace."
             : "Reverted this file to the previous text.",
       });
-      onRestored();
+      onRestored(
+        result.restored === "text" &&
+          typeof result.undoText === "string" &&
+          typeof file.before?.text === "string" &&
+          result.undoText !== file.before.text
+          ? {
+              path: file.path,
+              restoredText: file.before.text,
+              undoText: result.undoText,
+            }
+          : undefined,
+      );
     } catch (error) {
       setRestoreState({
         status: "error",
@@ -1196,6 +1208,10 @@ export function DesktopWorkspaceShell(props: {
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [appsRefreshKey, setAppsRefreshKey] = useState(0);
+  const pendingUndoToken = useRef(0);
+  const [pendingFileUndos, setPendingFileUndos] = useState<
+    Record<string, PendingFileUndo>
+  >({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1452,10 +1468,33 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
-  const refreshAfterHistoryRestore = useCallback(() => {
-    void refreshFiles();
-    void refreshHistory();
-  }, [refreshFiles, refreshHistory]);
+  const refreshAfterHistoryRestore = useCallback(
+    (undo?: Omit<PendingFileUndo, "token">) => {
+      if (undo) {
+        const token = pendingUndoToken.current + 1;
+        pendingUndoToken.current = token;
+        setPendingFileUndos((current) => ({
+          ...current,
+          [undo.path]: { ...undo, token },
+        }));
+      }
+      void refreshFiles();
+      void refreshHistory();
+    },
+    [refreshFiles, refreshHistory],
+  );
+  const consumePendingFileUndo = useCallback((token: number) => {
+    setPendingFileUndos((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [path, undo] of Object.entries(current)) {
+        if (undo.token !== token) continue;
+        delete next[path];
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, []);
   const activateEditorTab = useCallback(
     (path: string) => {
       if (isVirtualTabPath(path)) {
@@ -2092,6 +2131,8 @@ export function DesktopWorkspaceShell(props: {
                 registerDraftFlush={registerDraftFlush}
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onSharePath={setSharePath}
+                pendingUndo={pendingFileUndos[wb.activeTab]}
+                onPendingUndoConsumed={consumePendingFileUndo}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">

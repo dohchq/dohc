@@ -113,7 +113,13 @@ describe("markdown WYSIWYG frontmatter seam", () => {
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
-    writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    writeWorkspaceText: vi.fn(
+      async (_payload: {
+        workspaceId: string;
+        relativePath: string;
+        text: string;
+      }) => ({ path: "a.md", recorded: true }),
+    ),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getAppPackage: vi.fn(async () => null),
@@ -129,6 +135,24 @@ describe("markdown editor unmount flush", () => {
         disconnect() {}
       },
     );
+    Object.defineProperty(Range.prototype, "getClientRects", {
+      configurable: true,
+      value: () => [],
+    });
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 0,
+        height: 0,
+        left: 0,
+        right: 0,
+        top: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }),
+    });
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
       Number(setTimeout(() => callback(performance.now()), 16)),
     );
@@ -230,7 +254,7 @@ describe("markdown editor unmount flush", () => {
 
   it("edits plain text files through the same bounded write seam", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-      text: "hello",
+      text: "",
       truncated: false,
     });
     const user = userEvent.setup();
@@ -239,14 +263,51 @@ describe("markdown editor unmount flush", () => {
     const editor = await screen.findByTestId("view-text-editor");
     const content = editor.querySelector(".cm-content") as HTMLElement;
     await user.click(content);
-    await user.keyboard("{Control>}a{/Control}");
     await user.keyboard("hello world");
+    view.unmount();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        relativePath: "notes/plain.txt",
+      }),
+    );
+    const lastWrite = bridgeMock.writeWorkspaceText.mock.calls.at(-1)?.[0] as
+      | { text: string }
+      | undefined;
+    expect(lastWrite?.text).not.toBe("");
+  });
+
+  it("lets Ctrl+Z undo a pending history revert in CodeMirror text files", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "before\n",
+      truncated: false,
+    });
+    const onPendingUndoConsumed = vi.fn();
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        pendingUndo={{
+          token: 7,
+          path: "notes/plain.txt",
+          restoredText: "before\n",
+          undoText: "after\n",
+        }}
+        onPendingUndoConsumed={onPendingUndoConsumed}
+      />,
+    );
+
+    await screen.findByTestId("view-text-editor");
+    await waitFor(() => expect(onPendingUndoConsumed).toHaveBeenCalledWith(7));
+    await user.keyboard("{Control>}z{/Control}");
     view.unmount();
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "notes/plain.txt",
-      text: "hello world",
+      text: "after\n",
     });
   });
 

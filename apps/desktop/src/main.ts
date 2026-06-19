@@ -1510,13 +1510,20 @@ function registerIpcHandlers(): void {
     if (!file) {
       throw new Error(`Changed file not found in history: ${input.relativePath}`);
     }
+    let undoText: string | undefined;
+    try {
+      const current = await readWorkspaceText(workspace.rootPath, input.relativePath);
+      if (!current.truncated) undoText = current.text;
+    } catch {
+      undoText = undefined;
+    }
     if (typeof file.before?.text === "string") {
       await restoreWorkspaceText(
         workspace.rootPath,
         input.relativePath,
         file.before.text,
       );
-      return RestoreHistoryFileResult.parse({ restored: "text" });
+      return RestoreHistoryFileResult.parse({ restored: "text", undoText });
     }
     if (file.before === null || file.before?.unavailableReason === "missing") {
       try {
@@ -1527,7 +1534,7 @@ function registerIpcHandlers(): void {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
       }
-      return RestoreHistoryFileResult.parse({ restored: "deleted" });
+      return RestoreHistoryFileResult.parse({ restored: "deleted", undoText });
     }
     throw new Error("This history entry has no restorable text snapshot.");
   });

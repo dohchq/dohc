@@ -464,6 +464,7 @@ export type RestoreHistoryFilePayload = z.infer<typeof RestoreHistoryFilePayload
 
 export const RestoreHistoryFileResult = z.object({
   restored: z.enum(["text", "deleted"]),
+  undoText: z.string().max(2 * 1024 * 1024).optional(),
 });
 export type RestoreHistoryFileResult = z.infer<typeof RestoreHistoryFileResult>;
 

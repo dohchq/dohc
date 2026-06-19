@@ -3,6 +3,7 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  isolateHistory,
 } from "@codemirror/commands";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
@@ -16,7 +17,12 @@ import {
   indentOnInput,
   syntaxHighlighting,
 } from "@codemirror/language";
-import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  Transaction,
+  type Extension,
+} from "@codemirror/state";
 import {
   drawSelection,
   dropCursor,
@@ -84,6 +90,15 @@ export interface ScrollTarget {
   line: number;
   nonce: number;
 }
+
+export type PendingFileUndo = {
+  token: number;
+  path: string;
+  restoredText: string;
+  undoText: string;
+};
+
+type PendingTextUndo = Omit<PendingFileUndo, "path">;
 
 // [start, end) character span of 1-based `line` within `text` (end excludes
 // the newline). Lines past the end clamp to the last line. Pure — unit
@@ -541,6 +556,8 @@ function MarkdownView(props: {
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
+  pendingUndo?: PendingTextUndo;
+  onPendingUndoConsumed?: (token: number) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.body.length <= WYSIWYG_MARKDOWN_THRESHOLD_BYTES ? "wysiwyg" : "read",
@@ -550,6 +567,17 @@ function MarkdownView(props: {
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const editorPendingUndo = useMemo(
+    () =>
+      props.pendingUndo
+        ? {
+            token: props.pendingUndo.token,
+            restoredText: markdownEditorBody(props.pendingUndo.restoredText),
+            undoText: markdownEditorBody(props.pendingUndo.undoText),
+          }
+        : undefined,
+    [props.pendingUndo],
+  );
   // Search lands HERE (Phase E5.0): the rendered document has no per-line DOM
   // to anchor, so the smallest honest seam is opening SOURCE mode and
   // selecting the matched line. Phase E4's WYSIWYG editor takes this seam
@@ -870,6 +898,8 @@ function MarkdownView(props: {
               path={props.path}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
+              pendingUndo={editorPendingUndo}
+              onPendingUndoConsumed={props.onPendingUndoConsumed}
               collab={{
                 ydoc: collab.ydoc,
                 status: collab.status,
@@ -980,6 +1010,8 @@ function MarkdownView(props: {
               path={props.path}
               knownFiles={knownFiles}
               onOpenWikilink={openWikilink}
+              pendingUndo={editorPendingUndo}
+              onPendingUndoConsumed={props.onPendingUndoConsumed}
               collab={null}
             />
           </Suspense>
@@ -1440,6 +1472,8 @@ function SourceCodeEditor(props: {
   path: string;
   readOnly?: boolean;
   scrollLine?: number;
+  pendingUndo?: PendingTextUndo;
+  onPendingUndoConsumed?: (token: number) => void;
   onChange: (next: string) => void;
   onSave: () => void;
 }) {
@@ -1450,6 +1484,7 @@ function SourceCodeEditor(props: {
   const onChangeRef = useRef(props.onChange);
   const onSaveRef = useRef(props.onSave);
   const applyingRemoteValue = useRef(false);
+  const appliedUndoToken = useRef<number | null>(null);
 
   useEffect(() => {
     onChangeRef.current = props.onChange;
@@ -1517,9 +1552,46 @@ function SourceCodeEditor(props: {
     applyingRemoteValue.current = true;
     view.dispatch({
       changes: { from: 0, to: current.length, insert: props.value },
+      annotations: Transaction.addToHistory.of(false),
     });
     applyingRemoteValue.current = false;
   }, [props.value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    const pendingUndo = props.pendingUndo;
+    if (!view || !pendingUndo || props.readOnly) return;
+    if (appliedUndoToken.current === pendingUndo.token) return;
+    const current = view.state.doc.toString();
+    if (current !== pendingUndo.restoredText) {
+      props.onPendingUndoConsumed?.(pendingUndo.token);
+      return;
+    }
+    appliedUndoToken.current = pendingUndo.token;
+    applyingRemoteValue.current = true;
+    view.dispatch({
+      changes: {
+        from: 0,
+        to: current.length,
+        insert: pendingUndo.undoText,
+      },
+      annotations: [
+        Transaction.addToHistory.of(false),
+        isolateHistory.of("full"),
+      ],
+    });
+    view.dispatch({
+      changes: {
+        from: 0,
+        to: pendingUndo.undoText.length,
+        insert: pendingUndo.restoredText,
+      },
+      annotations: isolateHistory.of("full"),
+    });
+    applyingRemoteValue.current = false;
+    view.focus();
+    props.onPendingUndoConsumed?.(pendingUndo.token);
+  }, [props.pendingUndo, props.readOnly, props.onPendingUndoConsumed]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1576,6 +1648,8 @@ function TextEditorView({
   truncated,
   onSaveStateChange,
   registerDraftFlush,
+  pendingUndo,
+  onPendingUndoConsumed,
 }: {
   body: string;
   testId: string;
@@ -1585,6 +1659,8 @@ function TextEditorView({
   truncated?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
+  pendingUndo?: PendingTextUndo;
+  onPendingUndoConsumed?: (token: number) => void;
   // Search-result landing for read-only text views (Phase E5.0): scroll the
   // pre so the matched line sits in the upper third.
   scrollLine?: number;
@@ -1627,6 +1703,8 @@ function TextEditorView({
         path={path}
         readOnly={truncated}
         scrollLine={scrollLine}
+        pendingUndo={pendingUndo}
+        onPendingUndoConsumed={onPendingUndoConsumed}
         onChange={editor.setDraft}
         onSave={() => void editor.saveNow()}
       />
@@ -1713,6 +1791,8 @@ export function FileInspector(props: {
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
   knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;
+  pendingUndo?: PendingFileUndo;
+  onPendingUndoConsumed?: (token: number) => void;
 }) {
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
@@ -1722,6 +1802,14 @@ export function FileInspector(props: {
     isText,
     props.refreshKey ?? 0,
   );
+  const pendingTextUndo =
+    props.pendingUndo?.path === props.path
+      ? {
+          token: props.pendingUndo.token,
+          restoredText: props.pendingUndo.restoredText,
+          undoText: props.pendingUndo.undoText,
+        }
+      : undefined;
   // Consume the jump AFTER the child view's own effects applied it (child
   // effects run before this parent effect). Text views wait for the loaded
   // text; every other kind has nowhere to land, so consume immediately.
@@ -1775,6 +1863,8 @@ export function FileInspector(props: {
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             knownFiles={props.knownMarkdownFiles}
+            pendingUndo={pendingTextUndo}
+            onPendingUndoConsumed={props.onPendingUndoConsumed}
           />
         </div>
       );
@@ -1824,6 +1914,8 @@ export function FileInspector(props: {
                 ? props.scrollTarget.line
                 : undefined
             }
+            pendingUndo={pendingTextUndo}
+            onPendingUndoConsumed={props.onPendingUndoConsumed}
           />
         </div>
       );

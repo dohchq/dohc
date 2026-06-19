@@ -56,6 +56,12 @@ export type MarkdownEditorCollab = {
   synced: boolean;
 };
 
+export type MarkdownEditorPendingUndo = {
+  token: number;
+  restoredText: string;
+  undoText: string;
+};
+
 export type MarkdownEditorProps = {
   value: string;
   onDirty: () => void;
@@ -65,6 +71,8 @@ export type MarkdownEditorProps = {
   onOpenWikilink?: (path: string) => void;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
+  pendingUndo?: MarkdownEditorPendingUndo;
+  onPendingUndoConsumed?: (token: number) => void;
 };
 
 type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
@@ -910,6 +918,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onOpenWikilink,
       autoFocus,
       collab,
+      pendingUndo,
+      onPendingUndoConsumed,
       collaborationExtension,
       workspaceId: _workspaceId,
       path: _path,
@@ -927,6 +937,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockSelectRef = useRef<(pos: number) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const dirtyTrackingReadyRef = useRef(false);
+    const applyingPendingUndoRef = useRef(false);
+    const appliedPendingUndoToken = useRef<number | null>(null);
     const includePlaceholdersRef = useRef(
       value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS,
     );
@@ -1038,6 +1050,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         immediatelyRender: true,
         onUpdate() {
           if (collabActive) return;
+          if (applyingPendingUndoRef.current) return;
           if (!dirtyTrackingReadyRef.current) return;
           onDirty();
         },
@@ -1203,6 +1216,32 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       const frame = requestAnimationFrame(() => editor.commands.focus("end"));
       return () => cancelAnimationFrame(frame);
     }, [autoFocus, editor]);
+
+    useEffect(() => {
+      if (!editor || collabActive || !pendingUndo) return;
+      if (appliedPendingUndoToken.current === pendingUndo.token) return;
+      const current = editor.getMarkdown();
+      if (current !== pendingUndo.restoredText) {
+        onPendingUndoConsumed?.(pendingUndo.token);
+        return;
+      }
+      appliedPendingUndoToken.current = pendingUndo.token;
+      applyingPendingUndoRef.current = true;
+      try {
+        editor.commands.setContent(pendingUndo.undoText, {
+          contentType: "markdown",
+          emitUpdate: false,
+        });
+        editor.commands.setContent(pendingUndo.restoredText, {
+          contentType: "markdown",
+          emitUpdate: false,
+        });
+        editor.commands.focus("end");
+      } finally {
+        applyingPendingUndoRef.current = false;
+      }
+      onPendingUndoConsumed?.(pendingUndo.token);
+    }, [editor, collabActive, pendingUndo, onPendingUndoConsumed]);
 
     useImperativeHandle(
       ref,
