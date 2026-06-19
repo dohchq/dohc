@@ -346,6 +346,7 @@ export const CHANNELS = {
   listChangeSets: "desktop:list-change-sets",
   readChangeSet: "desktop:read-change-set",
   restoreHistoryFile: "desktop:restore-history-file",
+  undoHistoryFileRestore: "desktop:undo-history-file-restore",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",

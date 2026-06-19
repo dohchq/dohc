@@ -140,14 +140,28 @@ export async function readWorkspaceText(
   relativePath: string,
 ): Promise<{ text: string; truncated: boolean }> {
   const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath);
+  const info = await stat(realTarget);
+  if (!info.isFile()) {
+    throw new Error(`Text path is not a file: ${relativePath}`);
+  }
   // Bounded read: only the first MAX_TEXT_BYTES (+1 byte to detect overflow)
   // ever enters memory, so a multi-GB file can't freeze the main process.
   const handle = await open(realTarget, "r");
   try {
     const buf = Buffer.alloc(MAX_TEXT_BYTES + 1);
-    const { bytesRead } = await handle.read(buf, 0, MAX_TEXT_BYTES + 1, 0);
-    const truncated = bytesRead > MAX_TEXT_BYTES;
-    const slice = buf.subarray(0, Math.min(bytesRead, MAX_TEXT_BYTES));
+    let totalBytesRead = 0;
+    while (totalBytesRead < buf.length) {
+      const { bytesRead } = await handle.read(
+        buf,
+        totalBytesRead,
+        buf.length - totalBytesRead,
+        totalBytesRead,
+      );
+      if (bytesRead === 0) break;
+      totalBytesRead += bytesRead;
+    }
+    const truncated = totalBytesRead > MAX_TEXT_BYTES || info.size > MAX_TEXT_BYTES;
+    const slice = buf.subarray(0, Math.min(totalBytesRead, MAX_TEXT_BYTES));
     return { text: slice.toString("utf8"), truncated };
   } finally {
     await handle.close();

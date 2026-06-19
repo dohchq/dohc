@@ -1803,7 +1803,8 @@ export function FileInspector(props: {
     props.refreshKey ?? 0,
   );
   const pendingTextUndo =
-    props.pendingUndo?.path === props.path
+    props.pendingUndo?.path === props.path &&
+    text === props.pendingUndo.restoredText
       ? {
           token: props.pendingUndo.token,
           restoredText: props.pendingUndo.restoredText,

@@ -167,6 +167,7 @@ function makeBridge(
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
     restoreHistoryFile: vi.fn(async () => ({ restored: "text" as const })),
+    undoHistoryFileRestore: vi.fn(async () => ({ restored: "text" as const })),
     readWorkspaceGraph: vi.fn(async () => ({
       nodes: [
         { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
@@ -1322,7 +1323,7 @@ describe("history details", () => {
     );
   });
 
-  it("reverts a history diff file back to its previous text snapshot", async () => {
+  it("restores a history diff file after confirmation and exposes undo", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-revert", 2000, "ice edited notes/today.md")],
@@ -1334,7 +1335,12 @@ describe("history details", () => {
     await user.click(await historyRail.findByTestId("history-change-open"));
 
     const diffPage = within(await screen.findByTestId("history-diff-page"));
-    await user.click(diffPage.getByTestId("history-diff-revert-file"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    expect(bridge.restoreHistoryFile).not.toHaveBeenCalled();
+
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    expect(confirm.getByText(/only restores this one file/i)).toBeTruthy();
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
 
     await waitFor(() =>
       expect(bridge.restoreHistoryFile).toHaveBeenCalledWith({
@@ -1345,9 +1351,49 @@ describe("history details", () => {
     );
     expect(
       (await diffPage.findByTestId("history-diff-restore-status")).textContent,
-    ).toBe("Reverted this file to the previous text.");
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(bridge.listChangeSets).toHaveBeenCalledTimes(2));
+    ).toBe("Restored the previous snapshot. Undo restore is available here.");
+    await user.click(await diffPage.findByTestId("history-diff-undo-restore"));
+    await waitFor(() =>
+      expect(bridge.undoHistoryFileRestore).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "change-revert",
+        relativePath: "notes/today.md",
+      }),
+    );
+    expect(
+      (await diffPage.findByTestId("history-diff-restore-status")).textContent,
+    ).toBe("Undid the restore.");
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(bridge.listChangeSets).toHaveBeenCalledTimes(3));
+  });
+
+  it("shows a safe refusal when history restore detects a stale live file", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-stale-revert", 2000, "ice edited notes/today.md")],
+    );
+    bridge.restoreHistoryFile.mockRejectedValueOnce(
+      new Error(
+        "Cannot restore notes/today.md because the live file changed since this history item.",
+      ),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+
+    expect(
+      (await diffPage.findByTestId("history-diff-restore-status")).textContent,
+    ).toBe(
+      "Cannot restore notes/today.md because the live file changed since this history item.",
+    );
+    expect(diffPage.queryByTestId("history-diff-undo-restore")).toBeNull();
   });
 
 });

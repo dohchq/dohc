@@ -152,9 +152,12 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
-  restoreWorkspaceText,
   writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
+import {
+  restoreHistoryFileSnapshot,
+  undoHistoryFileRestoreSnapshot,
+} from "./workspaces/historyRestore";
 import {
   applyDatabaseEdit,
   importToDatabase,
@@ -1510,33 +1513,33 @@ function registerIpcHandlers(): void {
     if (!file) {
       throw new Error(`Changed file not found in history: ${input.relativePath}`);
     }
-    let undoText: string | undefined;
-    try {
-      const current = await readWorkspaceText(workspace.rootPath, input.relativePath);
-      if (!current.truncated) undoText = current.text;
-    } catch {
-      undoText = undefined;
+    return RestoreHistoryFileResult.parse(
+      await restoreHistoryFileSnapshot({
+        rootPath: workspace.rootPath,
+        file,
+        trashItem: (p) => shell.trashItem(p),
+      }),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.undoHistoryFileRestore, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RestoreHistoryFilePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const result = await activity.readChangeSet(workspace, input.changeSetId);
+    const file = result.changeSet?.files.find(
+      (entry) => entry.path === input.relativePath,
+    );
+    if (!file) {
+      throw new Error(`Changed file not found in history: ${input.relativePath}`);
     }
-    if (typeof file.before?.text === "string") {
-      await restoreWorkspaceText(
-        workspace.rootPath,
-        input.relativePath,
-        file.before.text,
-      );
-      return RestoreHistoryFileResult.parse({ restored: "text", undoText });
-    }
-    if (file.before === null || file.before?.unavailableReason === "missing") {
-      try {
-        await deletePath(workspace.rootPath, input.relativePath, (p) =>
-          shell.trashItem(p),
-        );
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-      }
-      return RestoreHistoryFileResult.parse({ restored: "deleted", undoText });
-    }
-    throw new Error("This history entry has no restorable text snapshot.");
+    return RestoreHistoryFileResult.parse(
+      await undoHistoryFileRestoreSnapshot({
+        rootPath: workspace.rootPath,
+        file,
+        trashItem: (p) => shell.trashItem(p),
+      }),
+    );
   });
 
   ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {

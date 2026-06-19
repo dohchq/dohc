@@ -1,5 +1,10 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { filterSlashCommands, findSlashCommandMatch } from "./MarkdownEditor";
+import {
+  filterSlashCommands,
+  findEmptyListItemParagraph,
+  findSlashCommandMatch,
+} from "./MarkdownEditor";
 
 describe("MarkdownEditor slash commands", () => {
   it("detects a trailing slash command query inside plain text", () => {
@@ -25,5 +30,33 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("todo").map((item) => item.id)).toEqual([
       "task-list",
     ]);
+  });
+});
+
+describe("MarkdownEditor empty list item focus", () => {
+  it("recognizes an empty ordered-list item as a valid cursor target", () => {
+    const ol = document.createElement("ol");
+    ol.innerHTML = `
+      <li><p>Test</p></li>
+      <li><p>Test</p></li>
+      <li><p><br class="ProseMirror-trailingBreak"></p></li>
+    `;
+    const emptyParagraph = ol.querySelector("li:last-child > p");
+
+    expect(findEmptyListItemParagraph(ol.querySelector("li:last-child"))).toBe(
+      emptyParagraph,
+    );
+    expect(
+      findEmptyListItemParagraph(
+        ol.querySelector("li:last-child br.ProseMirror-trailingBreak"),
+      ),
+    ).toBe(emptyParagraph);
+  });
+
+  it("leaves populated list items to the browser/ProseMirror default", () => {
+    const ol = document.createElement("ol");
+    ol.innerHTML = "<li><p>Test</p></li>";
+
+    expect(findEmptyListItemParagraph(ol.querySelector("li"))).toBeNull();
   });
 });

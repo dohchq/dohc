@@ -235,6 +235,7 @@ table {
 
 .dohc-notion-editor li > p {
   margin: 0;
+  min-height: 1.65em;
 }
 
 .dohc-notion-editor ul[data-type="taskList"] {

@@ -75,7 +75,8 @@ describe("size caps", () => {
   it("bounded text read truncates instead of buffering an oversized file", async () => {
     const root = await makeWorkspace();
     const big = join(root, "notes", "big.md");
-    await writeFile(big, "y".repeat(2 * 1024 * 1024 + 10));
+    await writeFile(big, "");
+    await truncate(big, 2 * 1024 * 1024 + 10);
     const result = await readWorkspaceText(root, "notes/big.md");
     expect(result.truncated).toBe(true);
     expect(result.text.length).toBe(2 * 1024 * 1024);

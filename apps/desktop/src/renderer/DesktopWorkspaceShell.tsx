@@ -40,7 +40,6 @@ import { CommandPalette, type Command } from "./CommandPalette";
 import {
   FileInspector,
   preloadMarkdownEditor,
-  type PendingFileUndo,
   type ScrollTarget,
 } from "./FileInspector";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -450,6 +449,19 @@ function snapshotUnavailable(snapshot: FileChangeSnapshot | null | undefined): s
   return "Snapshot unavailable";
 }
 
+function snapshotIsMissing(snapshot: FileChangeSnapshot | null | undefined) {
+  return snapshot === null || snapshot?.unavailableReason === "missing";
+}
+
+function historyFileCanRestore(file: ChangeSetFileRecord) {
+  if (file.operation === "rename") return false;
+  const beforeText = typeof file.before?.text === "string";
+  const afterText = typeof file.after?.text === "string";
+  if (beforeText && afterText) return true;
+  if (beforeText && snapshotIsMissing(file.after)) return true;
+  return snapshotIsMissing(file.before) && afterText;
+}
+
 function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
   if (author.kind === "agent") return `${author.agentId} for ${author.onBehalfOf}`;
   return author.userId;
@@ -569,13 +581,15 @@ function HistoryLineStats({
 function HistoryDiffPage({
   workspaceId,
   tabPath,
+  onBeforeRestore,
   onOpenFile,
   onRestored,
 }: {
   workspaceId: string;
   tabPath: string;
+  onBeforeRestore: () => Promise<void>;
   onOpenFile: (path: string) => void;
-  onRestored: (undo?: Omit<PendingFileUndo, "token">) => void;
+  onRestored: () => void;
 }) {
   const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -586,9 +600,12 @@ function HistoryDiffPage({
   const [restoreState, setRestoreState] = useState<
     | { status: "idle" }
     | { status: "restoring" }
+    | { status: "undoing" }
     | { status: "restored"; restored: "text" | "deleted"; message: string }
     | { status: "error"; message: string }
   >({ status: "idle" });
+  const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
+  const [restoreCanUndo, setRestoreCanUndo] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -613,6 +630,8 @@ function HistoryDiffPage({
   }, [parsed, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
+    setConfirmRestoreOpen(false);
+    setRestoreCanUndo(false);
   }, [tabPath]);
 
   if (!parsed || state.status === "error") {
@@ -648,9 +667,15 @@ function HistoryDiffPage({
       : file.operation !== "delete" ||
         (restoreState.status === "restored" && restoreState.restored === "text");
   const canRestore =
-    typeof file.before?.text === "string" ||
-    file.before === null ||
-    file.before?.unavailableReason === "missing";
+    historyFileCanRestore(file);
+  const restoreBusy =
+    restoreState.status === "restoring" || restoreState.status === "undoing";
+  const restoreDetail =
+    typeof file.before?.text === "string" && snapshotIsMissing(file.after)
+      ? "The missing file will be recreated from this snapshot."
+      : snapshotIsMissing(file.before) && typeof file.after?.text === "string"
+        ? "The current created file will be moved to trash if it still matches this diff."
+        : "The live file will be returned to the version before this history item.";
   const diffLines: UnifiedDiffLine[] = unavailable
     ? [
         {
@@ -662,9 +687,12 @@ function HistoryDiffPage({
       ]
     : buildUnifiedDiffLines(before, after, 800);
   const restoreFile = async () => {
-    if (!parsed || !canRestore || restoreState.status === "restoring") return;
+    if (!parsed || !canRestore || restoreBusy) return;
+    setConfirmRestoreOpen(false);
     setRestoreState({ status: "restoring" });
+    setRestoreCanUndo(false);
     try {
+      await onBeforeRestore();
       const result = await bridge().restoreHistoryFile({
         workspaceId,
         changeSetId: parsed.changeSetId,
@@ -675,28 +703,48 @@ function HistoryDiffPage({
         restored: result.restored,
         message:
           result.restored === "deleted"
-            ? "Reverted by moving the created file out of the workspace."
-            : "Reverted this file to the previous text.",
+            ? "Moved the created file to trash. Undo restore is available here."
+            : "Restored the previous snapshot. Undo restore is available here.",
       });
-      onRestored(
-        result.restored === "text" &&
-          typeof result.undoText === "string" &&
-          typeof file.before?.text === "string" &&
-          result.undoText !== file.before.text
-          ? {
-              path: file.path,
-              restoredText: file.before.text,
-              undoText: result.undoText,
-            }
-          : undefined,
-      );
+      setRestoreCanUndo(true);
+      onRestored();
     } catch (error) {
       setRestoreState({
         status: "error",
         message:
           error instanceof Error
             ? error.message
-            : "Could not revert this history change.",
+            : "Could not restore this history snapshot.",
+      });
+    }
+  };
+  const undoRestore = async () => {
+    if (!parsed || !restoreCanUndo || restoreBusy) return;
+    setRestoreState({ status: "undoing" });
+    try {
+      await onBeforeRestore();
+      const result = await bridge().undoHistoryFileRestore({
+        workspaceId,
+        changeSetId: parsed.changeSetId,
+        relativePath: file.path,
+      });
+      setRestoreState({
+        status: "restored",
+        restored: result.restored,
+        message:
+          result.restored === "deleted"
+            ? "Undid the restore by moving the file to trash."
+            : "Undid the restore.",
+      });
+      setRestoreCanUndo(false);
+      onRestored();
+    } catch (error) {
+      setRestoreState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not undo this restore.",
       });
     }
   };
@@ -754,19 +802,33 @@ function HistoryDiffPage({
         </div>
         <button
           type="button"
-          data-testid="history-diff-revert-file"
-          onClick={() => void restoreFile()}
-          disabled={!canRestore || restoreState.status === "restoring"}
+          data-testid="history-diff-restore-file"
+          onClick={() => setConfirmRestoreOpen(true)}
+          disabled={!canRestore || restoreBusy || restoreCanUndo}
           title={
-            canRestore
-              ? "Revert this file to its state before this change"
-              : "This history entry has no restorable text snapshot"
+            restoreCanUndo
+              ? "This snapshot is already restored"
+              : canRestore
+                ? "Restore this file to its state before this change"
+                : "Only small text history snapshots can be restored safely"
           }
           className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Undo2 size={12} aria-hidden />
-          {restoreState.status === "restoring" ? "Reverting..." : "Revert"}
+          {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
         </button>
+        {restoreCanUndo ? (
+          <button
+            type="button"
+            data-testid="history-diff-undo-restore"
+            onClick={() => void undoRestore()}
+            disabled={restoreBusy}
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Undo2 size={12} aria-hidden />
+            {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
+          </button>
+        ) : null}
         {canOpenFile ? (
           <button
             type="button"
@@ -853,6 +915,51 @@ function HistoryDiffPage({
           </div>
         </section>
       </div>
+      {confirmRestoreOpen ? (
+        <Overlay onClose={() => setConfirmRestoreOpen(false)}>
+          <div
+            data-testid="history-diff-restore-confirm"
+            className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-diff-restore-confirm-title"
+          >
+            <h3
+              id="history-diff-restore-confirm-title"
+              className="m-0 text-sm font-semibold text-ink"
+            >
+              Restore previous snapshot?
+            </h3>
+            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+              This only restores this one file and records a new history entry.
+              dohc will stop if the live file no longer matches this diff.
+            </p>
+            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+              <span className="font-mono text-ink">{file.path}</span>
+              <br />
+              {restoreDetail}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                data-testid="history-diff-cancel-restore"
+                onClick={() => setConfirmRestoreOpen(false)}
+                className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="history-diff-confirm-restore"
+                onClick={() => void restoreFile()}
+                className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
+              >
+                Restore snapshot
+              </button>
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
     </section>
   );
 }
@@ -1208,10 +1315,6 @@ export function DesktopWorkspaceShell(props: {
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
   const [appsRefreshKey, setAppsRefreshKey] = useState(0);
-  const pendingUndoToken = useRef(0);
-  const [pendingFileUndos, setPendingFileUndos] = useState<
-    Record<string, PendingFileUndo>
-  >({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1464,37 +1567,21 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
   const openHistoryDiffTab = useCallback(
     (changeSetId: string, filePath: string) => {
-      mutateWb((state) => openTab(state, historyDiffTabPath(changeSetId, filePath)));
+      void flushActiveDraft().finally(() => {
+        mutateWb((state) =>
+          openTab(state, historyDiffTabPath(changeSetId, filePath)),
+        );
+      });
     },
-    [mutateWb],
+    [flushActiveDraft, mutateWb],
   );
   const refreshAfterHistoryRestore = useCallback(
-    (undo?: Omit<PendingFileUndo, "token">) => {
-      if (undo) {
-        const token = pendingUndoToken.current + 1;
-        pendingUndoToken.current = token;
-        setPendingFileUndos((current) => ({
-          ...current,
-          [undo.path]: { ...undo, token },
-        }));
-      }
+    () => {
       void refreshFiles();
       void refreshHistory();
     },
     [refreshFiles, refreshHistory],
   );
-  const consumePendingFileUndo = useCallback((token: number) => {
-    setPendingFileUndos((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const [path, undo] of Object.entries(current)) {
-        if (undo.token !== token) continue;
-        delete next[path];
-        changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, []);
   const activateEditorTab = useCallback(
     (path: string) => {
       if (isVirtualTabPath(path)) {
@@ -2115,6 +2202,7 @@ export function DesktopWorkspaceShell(props: {
               <HistoryDiffPage
                 workspaceId={workspaceId}
                 tabPath={wb.activeTab ?? ""}
+                onBeforeRestore={flushActiveDraft}
                 onOpenFile={openFile}
                 onRestored={refreshAfterHistoryRestore}
               />
@@ -2131,8 +2219,6 @@ export function DesktopWorkspaceShell(props: {
                 registerDraftFlush={registerDraftFlush}
                 knownMarkdownFiles={markdownWikilinkFiles}
                 onSharePath={setSharePath}
-                pendingUndo={pendingFileUndos[wb.activeTab]}
-                onPendingUndoConsumed={consumePendingFileUndo}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">

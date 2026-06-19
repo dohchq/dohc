@@ -28,10 +28,12 @@ describe("markdown editor layout css", () => {
     const unordered = cssRule('.dohc-notion-editor ul:not([data-type="taskList"])');
     const ordered = cssRule('.dohc-notion-editor ol:not([data-type="taskList"])');
     const taskList = cssRule('.dohc-notion-editor ul[data-type="taskList"]');
+    const listParagraph = cssRule(".dohc-notion-editor li > p");
 
     expect(unordered).toContain("list-style-type: disc;");
     expect(ordered).toContain("list-style-type: decimal;");
     expect(taskList).toContain("list-style: none;");
+    expect(listParagraph).toContain("min-height: 1.65em;");
   });
 });
 

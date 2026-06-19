@@ -251,6 +251,7 @@ const slashCommandKey = new PluginKey("dohc-slash-command");
 const blockControlsKey = new PluginKey("dohc-block-controls");
 const codeLanguageKey = new PluginKey("dohc-code-language");
 const codeBlockContinuationKey = new PluginKey("dohc-code-block-continuation");
+const emptyListItemFocusKey = new PluginKey("dohc-empty-list-item-focus");
 
 const CODE_LANGUAGE_OPTIONS = [
   { value: "", label: "Plain text" },
@@ -347,6 +348,75 @@ function isEditableEditor(editor: Editor | null | undefined): boolean {
   if ((editor as { isEditable?: boolean }).isEditable === false) return false;
   if ((editor.view as { editable?: boolean }).editable === false) return false;
   return true;
+}
+
+function directElementChild(
+  parent: HTMLElement,
+  predicate: (element: HTMLElement) => boolean,
+): HTMLElement | null {
+  for (const child of parent.children) {
+    if (child instanceof HTMLElement && predicate(child)) return child;
+  }
+  return null;
+}
+
+export function findEmptyListItemParagraph(
+  target: EventTarget | null,
+): HTMLElement | null {
+  if (!(target instanceof HTMLElement)) return null;
+  const item = target.closest("li");
+  if (!item) return null;
+  const paragraph =
+    directElementChild(item, (child) => child.tagName === "P") ??
+    directElementChild(item, (child) => child.tagName === "DIV")?.querySelector(
+      ":scope > p",
+    );
+  if (!(paragraph instanceof HTMLElement)) return null;
+  const text = paragraph.textContent?.replace(/\u200b/g, "").trim() ?? "";
+  return text.length === 0 ? paragraph : null;
+}
+
+function focusEmptyListItemParagraph(
+  view: EditorView,
+  event: MouseEvent,
+): boolean {
+  if (
+    event.button !== 0 ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    view.editable === false
+  ) {
+    return false;
+  }
+  const paragraph = findEmptyListItemParagraph(event.target);
+  if (!paragraph || !view.dom.contains(paragraph)) return false;
+
+  const candidates: number[] = [];
+  for (const offset of [0, paragraph.childNodes.length]) {
+    try {
+      const pos = view.posAtDOM(paragraph, offset);
+      candidates.push(pos, pos + 1);
+    } catch {
+      // The DOM may be between ProseMirror-managed nodes during teardown.
+    }
+  }
+
+  for (const pos of candidates) {
+    if (pos < 0 || pos > view.state.doc.content.size) continue;
+    const $pos = view.state.doc.resolve(pos);
+    if (!$pos.parent.isTextblock) continue;
+    event.preventDefault();
+    view.dispatch(
+      view.state.tr
+        .setSelection(TextSelection.create(view.state.doc, pos))
+        .scrollIntoView(),
+    );
+    view.focus();
+    return true;
+  }
+  return false;
 }
 
 function readSlashCommandState(
@@ -844,6 +914,19 @@ function makeCodeBlockContinuationPlugin() {
   });
 }
 
+function makeEmptyListItemFocusPlugin() {
+  return new Plugin({
+    key: emptyListItemFocusKey,
+    props: {
+      handleDOMEvents: {
+        mousedown(view, event) {
+          return focusEmptyListItemParagraph(view, event);
+        },
+      },
+    },
+  });
+}
+
 function SlashCommandMenu({
   state,
   onSelect,
@@ -1005,6 +1088,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               wikilinkClickPlugin,
               makeCodeBlockChromePlugin(),
               makeCodeBlockContinuationPlugin(),
+              makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
             ];
           },
