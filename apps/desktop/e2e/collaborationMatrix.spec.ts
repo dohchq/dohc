@@ -25,6 +25,7 @@ const SERVICE_START_TIMEOUT_MS = 600_000;
 let api: ChildProcess;
 let hocuspocus: ChildProcess;
 let apps: ElectronApplication[] = [];
+let seededClients: SeededClient[] = [];
 const serviceOutput = new WeakMap<ChildProcess, string[]>();
 
 type SeededClient = { home: string; root: string };
@@ -127,6 +128,14 @@ test.afterEach(async () => {
   const closing = apps;
   apps = [];
   await Promise.all(closing.map((app) => app.close().catch(() => undefined)));
+  const clients = seededClients;
+  seededClients = [];
+  await Promise.all(
+    clients.flatMap((client) => [
+      rm(client.home, { recursive: true, force: true }),
+      rm(dirname(client.root), { recursive: true, force: true }),
+    ]),
+  );
 });
 
 test.afterAll(async () => {
@@ -151,7 +160,9 @@ async function seedSharedClient(
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), body);
   }
-  return { home, root };
+  const client = { home, root };
+  seededClients.push(client);
+  return client;
 }
 
 function envFor(client: SeededClient): Record<string, string> {

@@ -27,8 +27,12 @@ type HistoryRecord = {
 };
 
 const seededWorkspaces: Array<{ home: string; root: string }> = [];
+const launchedApps: ElectronApplication[] = [];
 
 test.afterEach(async () => {
+  await Promise.all(
+    launchedApps.splice(0).map((app) => app.close().catch(() => undefined)),
+  );
   await Promise.all(
     seededWorkspaces.splice(0).flatMap(({ home, root }) => [
       rm(home, { recursive: true, force: true }),
@@ -63,6 +67,7 @@ async function seedWorkspace(
 
 async function openSeeded(home: string, root: string) {
   const app = await launchApp({ DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: root });
+  launchedApps.push(app);
   const page = await app.firstWindow();
   await page.getByRole("button", { name: /open an existing folder/i }).click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
@@ -448,7 +453,9 @@ test("history restore smoke: stale live files are refused and do not create rest
   await expect(page.getByTestId("history-diff-restore-status")).toContainText(
     /live file changed/i,
   );
-  expect(readFileSync(stalePath, "utf8")).toBe("manual later\n");
+  await expect
+    .poll(() => readFileSync(stalePath, "utf8"), { timeout: 10_000 })
+    .toBe("manual later\n");
 
   const records = await historyRecords(root);
   expect(
