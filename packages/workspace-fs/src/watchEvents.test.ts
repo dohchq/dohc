@@ -1,6 +1,4 @@
-import { existsSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -9,6 +7,7 @@ import {
   shouldIgnoreWatchPath,
   watchWorkspaceEvents,
 } from "./watchEvents";
+import { nativeTmpdir } from "./testTemp";
 
 describe("shouldIgnoreWatchPath", () => {
   it("ignores everything under the reserved .dohc/ tree", () => {
@@ -105,11 +104,7 @@ describe("shouldIgnoreWatchPath", () => {
 const update = (path: string): WatcherEvent => ({ path, operation: "update" });
 
 async function mkWatchRoot(): Promise<string> {
-  // In WSL, os.tmpdir() can inherit Windows TEMP/TMP and land under /mnt/c,
-  // where chokidar may not receive inotify events. Watcher tests need a native
-  // Linux filesystem so a red test means watcher behavior, not DrvFs plumbing.
-  const base = process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
-  return mkdtemp(join(base, "dohc-watch-"));
+  return mkdtemp(join(nativeTmpdir(), "dohc-watch-"));
 }
 
 describe("collapseSqliteSidecars", () => {

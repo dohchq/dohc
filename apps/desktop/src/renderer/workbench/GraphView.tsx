@@ -479,7 +479,7 @@ function GraphMap(props: {
       typeof svg.releasePointerCapture === "function" &&
       svg.hasPointerCapture(event.pointerId)
     ) {
-      svg.releasePointerCapture(event.pointerId);
+      svg?.releasePointerCapture(event.pointerId);
     }
     if (shouldOpen) props.onOpenPath(drag.path);
   }
@@ -556,7 +556,7 @@ function GraphMap(props: {
               setNodePosition(node.path, point.x, point.y, true);
               const svg = svgRef.current;
               if (typeof svg?.setPointerCapture === "function") {
-                svg.setPointerCapture(event.pointerId);
+                svg?.setPointerCapture(event.pointerId);
               }
             }}
             onKeyDown={(event) => {

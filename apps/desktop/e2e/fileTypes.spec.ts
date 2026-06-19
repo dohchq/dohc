@@ -57,8 +57,16 @@ async function replaceCodeMirror(page: Page, editorTestId: string, text: string)
   await expect(editor).toBeVisible();
   await editor.click();
   await page.keyboard.press("ControlOrMeta+a");
-  await page.keyboard.type(text);
-  await expect(editor).toContainText(text.split("\n").find(Boolean) ?? text);
+  await page.keyboard.insertText(text);
+  await expect
+    .poll(() =>
+      editor
+        .locator(".cm-line")
+        .evaluateAll((lines) =>
+          lines.map((line) => line.textContent ?? "").join("\n"),
+        ),
+    )
+    .toBe(text);
   await page.keyboard.press("ControlOrMeta+s");
 }
 

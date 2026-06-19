@@ -197,7 +197,15 @@ async function pgQuery(
           reject(new Error(stderr || error.message));
           return;
         }
-        resolve(JSON.parse(stdout || "[]") as Array<Record<string, unknown>>);
+        try {
+          resolve(JSON.parse(stdout || "[]") as Array<Record<string, unknown>>);
+        } catch (parseError) {
+          reject(
+            new Error(
+              `failed to parse pgQuery JSON output: ${String(parseError)}\n${stdout}`,
+            ),
+          );
+        }
       },
     );
   });
@@ -271,21 +279,25 @@ async function mintToken(email: string): Promise<string> {
 }
 
 async function serverFiles(token: string, workspaceId: string): Promise<Set<string>> {
-  const data = (await (
-    await fetch(`${API_URL}/workspaces/${workspaceId}/files`, {
-      headers: { authorization: `Bearer ${token}` },
-    })
-  ).json()) as { files?: Array<{ path: string }> };
+  const response = await fetch(`${API_URL}/workspaces/${workspaceId}/files`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`serverFiles failed (${response.status}): ${await response.text()}`);
+  }
+  const data = (await response.json()) as { files?: Array<{ path: string }> };
   return new Set((data.files ?? []).map((file) => file.path));
 }
 
 async function serverRead(token: string, workspaceId: string, path: string): Promise<string> {
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-  const data = (await (
-    await fetch(`${API_URL}/workspaces/${workspaceId}/files/${encodedPath}`, {
-      headers: { authorization: `Bearer ${token}` },
-    })
-  ).json()) as { file?: { body?: string } };
+  const response = await fetch(`${API_URL}/workspaces/${workspaceId}/files/${encodedPath}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`serverRead failed (${response.status}): ${await response.text()}`);
+  }
+  const data = (await response.json()) as { file?: { body?: string } };
   return data.file?.body ?? "";
 }
 

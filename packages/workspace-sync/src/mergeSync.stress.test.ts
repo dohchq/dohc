@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mediaTypeForPath } from "@dohc/workspace-fs";
 import type { FetchLike } from "./cloudSync";
 import { createMergeSync, type MergeSync } from "./cloudSync";
 import { nativeTmpdir } from "./testTemp";
@@ -31,10 +32,7 @@ function fakeServer() {
   const seen: { appliedOps: unknown[][] } = { appliedOps: [] };
 
   function contentTypeFor(path: string) {
-    if (path.endsWith(".md")) return "text/markdown";
-    if (path.endsWith(".csv")) return "text/csv";
-    if (path.endsWith(".html")) return "text/html";
-    return "text/plain";
+    return mediaTypeForPath(path);
   }
 
   function set(path: string, body: string, contentType = contentTypeFor(path)) {

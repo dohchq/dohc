@@ -84,7 +84,7 @@ try {
     `,
     [hocuspocusTables],
   );
-  if (existingHocuspocusTables.rowCount > 0) {
+  if (existingHocuspocusTables.rows.length > 0) {
     await client.query(`
       truncate table
         ${existingHocuspocusTables.rows
