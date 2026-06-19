@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ElectronApplication } from "playwright";
@@ -64,9 +64,13 @@ async function historyRecords(root: string): Promise<HistoryRecord[]> {
   const historyDir = join(root, ".dohc", "history");
   try {
     const files = await readdir(historyDir);
-    const records = files
-      .filter((name) => name.endsWith(".json") && name !== "index.json")
-      .map((name) => JSON.parse(readFileSync(join(historyDir, name), "utf8")) as HistoryRecord);
+    const records = await Promise.all(
+      files
+        .filter((name) => name.endsWith(".json") && name !== "index.json")
+        .map(async (name) =>
+          JSON.parse(await readFile(join(historyDir, name), "utf8")) as HistoryRecord,
+        ),
+    );
     return records.sort(
       (a, b) => b.recordedAtMs - a.recordedAtMs || b.id.localeCompare(a.id),
     );

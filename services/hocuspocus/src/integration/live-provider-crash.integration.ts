@@ -280,8 +280,9 @@ describe.sequential('live Hocuspocus provider persistence', () => {
       await waitUntilEveryDocContains('[burst-tail]')
 
       const away = providers.pop()
-      docs.pop()
+      const awayDoc = docs.pop()
       away?.destroy()
+      awayDoc?.destroy()
 
       body(0).insert(0, '[while-one-client-away]')
       await waitUntilEveryDocContains('[while-one-client-away]')
@@ -297,7 +298,7 @@ describe.sequential('live Hocuspocus provider persistence', () => {
       expect(await countUpdates(pool, documentName)).toBeGreaterThan(0)
 
       for (const provider of providers.splice(0)) provider.destroy()
-      docs.splice(0)
+      for (const doc of docs.splice(0)) doc.destroy()
       await server.destroy()
       server = await startServer()
 
@@ -311,6 +312,7 @@ describe.sequential('live Hocuspocus provider persistence', () => {
       )
     } finally {
       for (const provider of providers.splice(0)) provider.destroy()
+      for (const doc of docs.splice(0)) doc.destroy()
       await server.destroy().catch(() => undefined)
     }
   })

@@ -53,12 +53,39 @@ function renderMarkdownImage(attrs: {
   src?: unknown
   title?: unknown
 }): string {
-  const alt = String(attrs.alt ?? '').replaceAll(']', '\\]')
-  const src = String(attrs.src ?? '').replaceAll(')', '\\)')
+  const alt = String(attrs.alt ?? '')
+    .replaceAll('\\', '\\\\')
+    .replaceAll('[', '\\[')
+    .replaceAll(']', '\\]')
+  const src = String(attrs.src ?? '')
+    .replaceAll('\\', '\\\\')
+    .replaceAll('(', '\\(')
+    .replaceAll(')', '\\)')
   const title = typeof attrs.title === 'string' && attrs.title.length > 0
-    ? ` "${attrs.title.replaceAll('"', '\\"')}"`
+    ? ` "${attrs.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
     : ''
   return `![${alt}](${src}${title})`
+}
+
+function escapedPunctuationValue(token: {
+  content?: unknown
+  text?: unknown
+  markup?: unknown
+  raw?: unknown
+}): string {
+  const content = token.content ?? token.text
+  if (content != null) return String(content)
+  return String(token.markup ?? token.raw ?? '').replace(/^\\/, '')
+}
+
+function imageAltText(token: {
+  text?: unknown
+  tokens?: Array<{ text?: unknown }>
+}): string {
+  if (Array.isArray(token.tokens)) {
+    return token.tokens.map((child) => String(child.text ?? '')).join('')
+  }
+  return String(token.text ?? '')
 }
 
 const DohcImage = Node.create({
@@ -96,7 +123,7 @@ const DohcImage = Node.create({
   parseMarkdown: (token, helpers) =>
     helpers.createNode('image', {
       src: token.href ?? '',
-      alt: token.text ?? '',
+      alt: imageAltText(token),
       title: token.title ?? null,
     }),
 
@@ -131,7 +158,7 @@ const DohcEscapedPunctuation = Node.create({
 
   parseMarkdown: (token, helpers) =>
     helpers.createNode('escapedPunctuation', {
-      value: token.text ?? String(token.raw ?? '').replace(/^\\/, ''),
+      value: escapedPunctuationValue(token),
     }),
 
   renderMarkdown: (node) => `\\${String(node.attrs?.value ?? '')}`,

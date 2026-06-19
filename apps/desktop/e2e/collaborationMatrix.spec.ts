@@ -237,20 +237,26 @@ async function mintToken(email: string): Promise<string> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ userCode: code.user_code, email }),
   });
-  await new Promise((resolve) => setTimeout(resolve, 3200));
-  const token = (await (
-    await fetch(`${API_URL}/api/auth/device/token`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: code.device_code,
-        client_id: "dohc-collaboration-matrix",
-      }),
-    })
-  ).json()) as { access_token?: string };
-  if (!token.access_token) throw new Error(`could not mint token for ${email}`);
-  return token.access_token;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const token = (await (
+      await fetch(`${API_URL}/api/auth/device/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: code.device_code,
+          client_id: "dohc-collaboration-matrix",
+        }),
+      })
+    ).json()) as { access_token?: string; error?: string };
+    if (token.access_token) return token.access_token;
+    if (token.error && token.error !== "authorization_pending") {
+      throw new Error(`token error for ${email}: ${token.error}`);
+    }
+    if (Date.now() > deadline) throw new Error(`token polling timed out for ${email}`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }
 
 async function serverFiles(token: string, workspaceId: string): Promise<Set<string>> {

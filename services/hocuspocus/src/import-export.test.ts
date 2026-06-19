@@ -132,6 +132,7 @@ describe('hocuspocus markdown import/export', () => {
       '',
       'A paragraph with **bold**, *emphasis*, ***both***, `code`,',
       '[a link](https://example.com), and ![diagram](assets/diagram.png "Architecture").',
+      'Backslash image: ![diagram \\ one](assets\\diagram.png "Title \\ one").',
       '',
       '```ts',
       'const answer = 42',
@@ -153,6 +154,7 @@ describe('hocuspocus markdown import/export', () => {
       '`code`',
       '[a link](https://example.com)',
       '![diagram](assets/diagram.png "Architecture")',
+      '![diagram \\\\ one](assets\\\\diagram.png "Title \\\\ one")',
       '```ts\nconst answer = 42\n```',
     ])
   })

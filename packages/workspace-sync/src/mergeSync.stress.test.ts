@@ -26,6 +26,11 @@ function pick<T>(rng: () => number, values: T[]): T {
   return values[Math.floor(rng() * values.length)]!;
 }
 
+function nativeTmpdir(): string {
+  if (process.platform !== "win32" && existsSync("/tmp")) return "/tmp";
+  return tmpdir();
+}
+
 function fakeServer() {
   const files = new Map<string, RemoteEntry>();
   const seen: { appliedOps: unknown[][] } = { appliedOps: [] };
@@ -156,7 +161,7 @@ beforeEach(async () => {
 });
 
 async function makeRoot(label: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), `dohc-sync-stress-${label}-`));
+  const root = await mkdtemp(join(nativeTmpdir(), `dohc-sync-stress-${label}-`));
   await mkdir(join(root, ".dohc", "history"), { recursive: true });
   await writeFile(
     join(root, ".dohc", "manifest.json"),
