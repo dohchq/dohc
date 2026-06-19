@@ -211,6 +211,7 @@ export function SourceCodeEditor(props: {
     if (appliedUndoToken.current === pendingUndo.token) return;
     const current = view.state.doc.toString();
     if (current !== pendingUndo.restoredText) {
+      appliedUndoToken.current = pendingUndo.token;
       props.onPendingUndoConsumed?.(pendingUndo.token);
       return;
     }

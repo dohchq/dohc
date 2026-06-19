@@ -554,8 +554,9 @@ function GraphMap(props: {
                 moved: false,
               };
               setNodePosition(node.path, point.x, point.y, true);
-              if (typeof svgRef.current?.setPointerCapture === "function") {
-                svgRef.current.setPointerCapture(event.pointerId);
+              const svg = svgRef.current;
+              if (typeof svg?.setPointerCapture === "function") {
+                svg.setPointerCapture(event.pointerId);
               }
             }}
             onKeyDown={(event) => {
