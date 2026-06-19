@@ -15,9 +15,8 @@ import {
 
 function row(path: string, opts: Partial<FileRow> = {}): FileRow {
   return {
-    _id: `id_${path}`,
+    id: `id_${path}`,
     path,
-    source: 'user',
     ...opts,
   }
 }

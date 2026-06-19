@@ -3,14 +3,14 @@
 // shell, tests, and any future transport keep a single seam.
 
 export type WorkspaceFile = {
-  _id: string
+  id: string
+  workspaceId: string
   path: string
   title?: string | null
-  source: string
   kind: 'atom' | 'asset' | 'database'
   contentType: string
-  revision?: string
-  updatedAt?: number
+  revision: string
+  updatedAt: number
 }
 
 export type DohcBackendClient = {

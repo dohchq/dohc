@@ -9,12 +9,13 @@ import { FileViewer } from './FileViewer'
   true
 
 const FILE: WorkspaceFile = {
-  _id: 'f1',
+  id: 'f1',
+  workspaceId: 'ws-1',
   path: 'notes/plan.md',
-  source: 'user',
   kind: 'atom',
   contentType: 'text/markdown',
   revision: '3',
+  updatedAt: 3,
 }
 
 function clientWith(overrides: Partial<DohcBackendClient> = {}): DohcBackendClient {
@@ -23,13 +24,14 @@ function clientWith(overrides: Partial<DohcBackendClient> = {}): DohcBackendClie
     readText: vi.fn(async () => ({ body: '# Plan', revision: '3' })),
     createTextFile: vi.fn(),
     writeText: vi.fn(async ({ path, body }) => ({
-      _id: 'f1',
+      id: 'f1',
+      workspaceId: 'ws-1',
       path,
       body,
-      source: 'user',
       kind: 'atom' as const,
       contentType: 'text/markdown',
       revision: '4',
+      updatedAt: 4,
     })),
     uploadFile: vi.fn(),
     ...overrides,
@@ -120,14 +122,18 @@ describe('FileViewer', () => {
 
   it('keeps the draft when a successful save response omits the next revision', async () => {
     const client = clientWith({
-      writeText: vi.fn(async ({ path, body }) => ({
-        _id: 'f1',
-        path,
-        body,
-        source: 'user',
-        kind: 'atom' as const,
-        contentType: 'text/markdown',
-      })),
+      writeText: vi.fn(
+        async ({ path, body }) =>
+          ({
+            id: 'f1',
+            workspaceId: 'ws-1',
+            path,
+            body,
+            kind: 'atom' as const,
+            contentType: 'text/markdown',
+            updatedAt: 4,
+          }) as unknown as WorkspaceFile,
+      ),
     })
     await act(async () => {
       root.render(<FileViewer backendClient={client} file={FILE} />)

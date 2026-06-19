@@ -12,20 +12,22 @@ import { CloudSessionProvider } from './session'
 
 const FILES: WorkspaceFile[] = [
   {
-    _id: 'f1',
+    id: 'f1',
+    workspaceId: 'ws-1',
     path: 'notes/plan.md',
-    source: 'user',
     kind: 'atom',
     contentType: 'text/markdown',
     revision: '1',
+    updatedAt: 1,
   },
   {
-    _id: 'f2',
+    id: 'f2',
+    workspaceId: 'ws-1',
     path: 'readme.md',
-    source: 'user',
     kind: 'atom',
     contentType: 'text/markdown',
     revision: '1',
+    updatedAt: 1,
   },
 ]
 
@@ -34,12 +36,13 @@ function fakeBackend(): DohcBackendClient {
     listFiles: vi.fn(async () => FILES),
     readText: vi.fn(async () => ({ body: '# Plan', revision: '1' })),
     createTextFile: vi.fn(async ({ path }) => ({
-      _id: 'f3',
+      id: 'f3',
+      workspaceId: 'ws-1',
       path,
-      source: 'user',
       kind: 'atom' as const,
       contentType: 'text/markdown',
       revision: '1',
+      updatedAt: 1,
     })),
     writeText: vi.fn(),
     uploadFile: vi.fn(),

@@ -3,10 +3,9 @@
 // helpers bridge the two.
 
 export type FileRow = {
-  _id: string
+  id: string
   path: string
   title?: string | null
-  source: string
   kind?: 'atom' | 'asset' | 'database'
   contentType?: string
   revision?: string

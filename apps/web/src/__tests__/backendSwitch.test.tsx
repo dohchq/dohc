@@ -29,38 +29,42 @@ function fakeClient(label: string): DohcBackendClient {
   return {
     listFiles: vi.fn(async () => [
       {
-        _id: `${label}_file`,
+        id: `${label}_file`,
+        workspaceId: 'ws-1',
         path: `${label}/note.md`,
-        source: 'user',
         kind: 'atom' as const,
         contentType: 'text/markdown',
         revision: '1',
+        updatedAt: 1,
       },
     ]),
     readText: vi.fn(async () => ({ body: `${label} body`, revision: '1' })),
     createTextFile: vi.fn(async ({ path }) => ({
-      _id: `${label}_created`,
+      id: `${label}_created`,
+      workspaceId: 'ws-1',
       path,
-      source: 'user',
       kind: 'atom' as const,
       contentType: 'text/markdown',
       revision: '1',
+      updatedAt: 1,
     })),
     writeText: vi.fn(async ({ path }) => ({
-      _id: `${label}_written`,
+      id: `${label}_written`,
+      workspaceId: 'ws-1',
       path,
-      source: 'user',
       kind: 'atom' as const,
       contentType: 'text/markdown',
       revision: '2',
+      updatedAt: 2,
     })),
     uploadFile: vi.fn(async ({ path }) => ({
-      _id: `${label}_uploaded`,
+      id: `${label}_uploaded`,
+      workspaceId: 'ws-1',
       path,
-      source: 'user',
       kind: 'asset' as const,
       contentType: 'text/csv',
       revision: '1',
+      updatedAt: 1,
     })),
   }
 }
@@ -127,12 +131,13 @@ describe('cloud backend client seam', () => {
       return Response.json({
         ok: true,
         file: {
-          _id: 'pg_file',
+          id: 'pg_file',
+          workspaceId: 'ws-1',
           path: 'finance/ledger.md',
-          source: 'user',
           kind: 'atom',
           contentType: 'text/markdown',
           revision: '5',
+          updatedAt: 5,
           body: '# Ledger',
         },
       })
@@ -195,6 +200,54 @@ describe('cloud backend client seam', () => {
     expect(atob(uploadBody.bytesBase64)).toBe('a,b\n')
   })
 
+  it('validates canonical workspace-api file ids before returning payloads', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/files')) {
+        return Response.json({
+          ok: true,
+          files: [
+            {
+              id: 'pg_file',
+              workspaceId: 'ws-1',
+              path: 'notes/journal.md',
+              kind: 'atom',
+              contentType: 'text/markdown',
+              revision: '7',
+              updatedAt: 7,
+            },
+          ],
+        })
+      }
+      return Response.json({
+        ok: true,
+        file: {
+          id: 'pg_file',
+          workspaceId: 'ws-1',
+          path: 'notes/journal.md',
+          kind: 'atom',
+          contentType: 'text/markdown',
+          revision: '7',
+          updatedAt: 7,
+          body: '# Journal\n',
+        },
+      })
+    })
+    const client = createPostgresBackendClient({
+      workspaceId: 'ws-1',
+      baseUrl: 'https://cloud.example',
+      fetch: fetchImpl,
+    })
+
+    await expect(client.listFiles()).resolves.toEqual([
+      expect.objectContaining({ id: 'pg_file', workspaceId: 'ws-1' }),
+    ])
+    await expect(client.readText('notes/journal.md')).resolves.toEqual({
+      body: '# Journal\n',
+      revision: '7',
+    })
+  })
+
   it('rejects malformed file responses before they weaken revision semantics', async () => {
     const client = createPostgresBackendClient({
       workspaceId: 'ws-1',
@@ -203,12 +256,13 @@ describe('cloud backend client seam', () => {
         Response.json({
           ok: true,
           file: {
-            _id: 'pg_file',
+            id: 'pg_file',
+            workspaceId: 'ws-1',
             path: 'notes/missing.md',
-            source: 'user',
             kind: 'atom',
             contentType: 'text/markdown',
             body: '# Missing',
+            updatedAt: 5,
           },
         }),
       ),

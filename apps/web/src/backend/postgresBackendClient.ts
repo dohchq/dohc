@@ -16,8 +16,9 @@ type PostgresBackendClientOptions = {
   fetch?: typeof globalThis.fetch
 }
 
-type FileResponse = { ok?: boolean; file?: WorkspaceFile & { body?: string } }
-type FilesResponse = { ok?: boolean; files: WorkspaceFile[] }
+type RawWorkspaceFile = Partial<WorkspaceFile> & { body?: unknown }
+type FileResponse = { ok?: boolean; file?: RawWorkspaceFile }
+type FilesResponse = { ok?: boolean; files: RawWorkspaceFile[] }
 
 export function createDohcBackendClient({
   workspaceId,
@@ -53,7 +54,7 @@ export function createPostgresBackendClient(
       if (!Array.isArray(result.files)) {
         throw new Error('Workspace API returned an invalid files response.')
       }
-      return result.files
+      return result.files.map((file) => requireWorkspaceFile({ file }, 'listFiles'))
     },
 
     async readText(path) {
@@ -123,19 +124,31 @@ function requireWorkspaceFile(
   if (!file || typeof file !== 'object') {
     throw new Error(`Workspace API ${operation} response is missing file.`)
   }
+  const kind = file.kind
   if (
-    typeof file._id !== 'string' ||
+    typeof file.id !== 'string' ||
+    typeof file.workspaceId !== 'string' ||
     typeof file.path !== 'string' ||
-    typeof file.source !== 'string' ||
-    !['atom', 'asset', 'database'].includes(file.kind) ||
-    typeof file.contentType !== 'string'
+    (kind !== 'atom' && kind !== 'asset' && kind !== 'database') ||
+    typeof file.contentType !== 'string' ||
+    typeof file.updatedAt !== 'number'
   ) {
     throw new Error(`Workspace API ${operation} response contains an invalid file.`)
   }
   if (typeof file.revision !== 'string' || file.revision.length === 0) {
     throw new Error(`Workspace API ${operation} response is missing file.revision.`)
   }
-  return file as WorkspaceFile & { revision: string; body?: string }
+  return {
+    id: file.id,
+    workspaceId: file.workspaceId,
+    path: file.path,
+    title: file.title ?? null,
+    kind,
+    contentType: file.contentType,
+    revision: file.revision,
+    updatedAt: file.updatedAt,
+    ...(typeof file.body === 'string' ? { body: file.body } : {}),
+  }
 }
 
 function atomKindForContentType(contentType: string) {
