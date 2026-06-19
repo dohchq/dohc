@@ -1,6 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- dohc app icon: graphite rounded square, "d" glyph in the light ink.
-       Rendered to icon.png by scripts/render-icon.mjs (re-run after edits). -->
-  <rect x="16" y="16" width="480" height="480" rx="108" fill="#18181b"/>
-  <text x="252" y="368" font-family="ui-sans-serif, system-ui, sans-serif" font-size="320" font-weight="600" text-anchor="middle" fill="#fafafa">d</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="dohc">
+  <title>dohc</title>
+  <!-- dohc app icon: drop-lobe mark centered on warm paper with ~14% safe
+       padding. Rendered to icon.png by scripts/render-icon.mjs. -->
+  <rect width="512" height="512" rx="112" fill="#f7f6f1"/>
+  <g transform="translate(160 144) scale(2)">
+    <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+      fill="none" stroke="#2d342e" stroke-width="8" stroke-linejoin="round"/>
+    <circle cx="38" cy="58" r="9" fill="#2d342e"/>
+  </g>
 </svg>
