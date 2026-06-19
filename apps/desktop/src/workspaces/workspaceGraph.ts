@@ -562,7 +562,7 @@ export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGra
       docs.push({ path, text: result.text, truncated: result.truncated });
     } catch {
       // The watcher may have observed a file that was moved or deleted by the
-      // time graph reads it. The graph is a view; the next refresh will catch up.
+      // time graph reads it. The graph is a view; the next refresh will pick it up.
     }
   }
 

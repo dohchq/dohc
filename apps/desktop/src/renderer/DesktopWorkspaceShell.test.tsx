@@ -22,6 +22,7 @@ import type {
 import type { SearchResultsEvent } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import { historyDiffTabPath } from "./workbench/workbenchState";
 
 const WORKSPACE: Workspace = {
   workspaceId: "ws-shell-test",
@@ -123,15 +124,6 @@ function makeBridge(
               ...(details?.provenance ? { provenance: details.provenance } : {}),
             }
           : null,
-      };
-    }),
-    readCatchUpSummary: vi.fn(async () => {
-      const latest = changeSets[changeSets.length - 1] ?? null;
-      return {
-        lines: changeSets.map((change) => change.humanSummary),
-        latestRecordedAtMs: latest?.recordedAtMs ?? null,
-        latestChangeSetId: latest?.id ?? null,
-        latestHistoryIndex: changeSets.length > 0 ? changeSets.length - 1 : null,
       };
     }),
     getAgentRunStatus: vi.fn(async () => ({
@@ -1175,7 +1167,7 @@ describe("history details", () => {
     );
   });
 
-  it("expands a change set into touched files and a readable text diff", async () => {
+  it("expands a change set into touched files and opens a readable diff tab", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-1", 2000, "ice edited notes/today.md")],
@@ -1206,10 +1198,22 @@ describe("history details", () => {
     expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
       "+1 -1",
     );
+    expect(historyRail.queryByText("-Before")).toBeNull();
 
-    const diff = await historyRail.findByTestId("history-file-diff");
-    expect(diff.textContent).toContain("-Before");
-    expect(diff.textContent).toContain("+After");
+    await user.click(historyRail.getByTestId("history-diff-open"));
+
+    const diffTabPath = historyDiffTabPath("change-1", "notes/today.md");
+    const diffTab = await screen.findByTestId(`tab-${diffTabPath}`);
+    expect(diffTab.dataset.active).toBe("true");
+    expect(diffTab.textContent).toContain("Diff: today.md");
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    expect(diffPage.getByTestId("history-compare-counts").textContent).toBe("+1 -1");
+    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
+      "-Before",
+    );
+    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
+      "+After",
+    );
   });
 
   it("explains why an agent change happened from provenance", async () => {
@@ -1289,7 +1293,10 @@ describe("history details", () => {
     expect((await historyRail.findByTestId("history-diff-counts")).textContent).toBe(
       "+2 -2",
     );
-    const diff = await historyRail.findByTestId("history-file-diff");
+    await user.click(historyRail.getByTestId("history-diff-open"));
+    const diff = within(await screen.findByTestId("history-diff-page")).getByTestId(
+      "history-diff-lines",
+    );
     const removedLines = [...diff.querySelectorAll('[data-kind="removed"]')].map(
       (line) => line.textContent,
     );
@@ -1307,7 +1314,7 @@ describe("history details", () => {
     expect(contextLines.join("\n")).toContain("kept middle");
   });
 
-  it("opens and closes a full compare view for captured text changes", async () => {
+  it("opens a history diff editor tab for captured text changes", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-compare", 2000, "ice edited notes/today.md")],
@@ -1317,31 +1324,30 @@ describe("history details", () => {
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
     await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-    await user.click(await historyRail.findByTestId("history-compare-open"));
+    await user.click(await historyRail.findByTestId("history-diff-open"));
 
-    const dialog = await screen.findByTestId("history-compare-dialog");
-    expect(within(dialog).getByText("notes/today.md")).toBeTruthy();
-    expect(within(dialog).getByTestId("history-compare-counts").textContent).toBe(
-      "+1 -1",
+    const diffTabPath = historyDiffTabPath("change-compare", "notes/today.md");
+    expect((await screen.findByTestId(`tab-${diffTabPath}`)).dataset.active).toBe(
+      "true",
     );
-    expect(within(dialog).getByTestId("history-compare-before").textContent).toContain(
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    expect(diffPage.getByText("notes/today.md")).toBeTruthy();
+    expect(diffPage.getByTestId("history-compare-counts").textContent).toBe("+1 -1");
+    expect(diffPage.getByTestId("history-compare-before").textContent).toContain(
       "Before",
     );
-    expect(within(dialog).getByTestId("history-compare-after").textContent).toContain(
+    expect(diffPage.getByTestId("history-compare-after").textContent).toContain(
       "After",
     );
-    expect(within(dialog).getByTestId("history-compare-diff").textContent).toContain(
+    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
       "-Before",
     );
-    expect(within(dialog).getByTestId("history-compare-diff").textContent).toContain(
+    expect(diffPage.getByTestId("history-diff-lines").textContent).toContain(
       "+After",
     );
-
-    await user.click(within(dialog).getByTestId("history-compare-close"));
-    await waitFor(() => expect(screen.queryByTestId("history-compare-dialog")).toBeNull());
   });
 
-  it("opens the live file from the compare dialog and closes the dialog", async () => {
+  it("opens the live file from the history diff tab", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-compare-open", 2000, "ice edited notes/today.md")],
@@ -1351,12 +1357,11 @@ describe("history details", () => {
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
     await user.click(await historyRail.findByRole("button", { name: /notes\/today\.md/i }));
-    await user.click(await historyRail.findByTestId("history-compare-open"));
+    await user.click(await historyRail.findByTestId("history-diff-open"));
 
-    const dialog = await screen.findByTestId("history-compare-dialog");
-    await user.click(within(dialog).getByTestId("history-compare-open-file"));
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-open-file"));
 
-    await waitFor(() => expect(screen.queryByTestId("history-compare-dialog")).toBeNull());
     expect((await screen.findByTestId("tab-notes/today.md")).dataset.active).toBe(
       "true",
     );
@@ -1493,41 +1498,5 @@ describe("history details", () => {
     expect(
       (await historyRail.findByTestId("history-restore-state")).textContent,
     ).toContain("Previous text restored");
-  });
-});
-
-describe("catch-up refresh", () => {
-  it("reloads when a non-top history record arrives", async () => {
-    const newest = changeSet("newest", 2000, "ice edited notes/newest.md");
-    const bridge = makeBridge(Promise.resolve(null), [newest]);
-    renderShell(bridge);
-
-    await waitFor(() => {
-      expect(bridge.listChangeSets).toHaveBeenCalled();
-      expect(bridge.readCatchUpSummary.mock.calls.length).toBeGreaterThanOrEqual(1);
-    });
-    const initialReadCount = bridge.readCatchUpSummary.mock.calls.length;
-
-    bridge.setChangeSets([
-      newest,
-      changeSet("same-time-behind", 2000, "ice edited notes/behind.md"),
-    ]);
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-
-    await waitFor(() => {
-      expect(bridge.readCatchUpSummary.mock.calls.length).toBeGreaterThan(
-        initialReadCount,
-      );
-    });
-    const historyRail = within(screen.getByTestId("history-timeline"));
-    await waitFor(() => {
-      expect(
-        historyRail
-          .getAllByTestId("catch-up-line")
-          .map((line) => line.textContent),
-      ).toContain("ice edited notes/behind.md");
-    });
   });
 });

@@ -1,16 +1,30 @@
 import { ChevronDown, X } from "lucide-react";
 import { memo, useRef, useState } from "react";
-import { isGraphTabPath, isHistoryTabPath } from "./workbenchState";
+import {
+  isGraphTabPath,
+  isHistoryDiffTabPath,
+  isHistoryTabPath,
+  parseHistoryDiffTabPath,
+} from "./workbenchState";
 
 function fileName(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
+  if (isHistoryDiffTabPath(path)) {
+    const parsed = parseHistoryDiffTabPath(path);
+    const name = parsed?.filePath.split("/").pop() ?? "Diff";
+    return `Diff: ${name}`;
+  }
   return path.split("/").pop() ?? path;
 }
 
 function tabTitle(path: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
+  if (isHistoryDiffTabPath(path)) {
+    const parsed = parseHistoryDiffTabPath(path);
+    return parsed ? `History diff: ${parsed.filePath}` : "History diff";
+  }
   return path;
 }
 

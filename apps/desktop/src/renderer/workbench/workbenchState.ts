@@ -17,6 +17,13 @@ export const VIEW_IDS = [
 export type ViewId = (typeof VIEW_IDS)[number];
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
+export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
+
+export function historyDiffTabPath(changeSetId: string, filePath: string): string {
+  return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
+    changeSetId,
+  )}?file=${encodeURIComponent(filePath)}`;
+}
 
 export function isGraphTabPath(path: string | null): boolean {
   return path === GRAPH_TAB_PATH;
@@ -26,8 +33,32 @@ export function isHistoryTabPath(path: string | null): boolean {
   return path === HISTORY_TAB_PATH;
 }
 
+export function isHistoryDiffTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
+}
+
+export function parseHistoryDiffTabPath(
+  path: string | null,
+): { changeSetId: string; filePath: string } | null {
+  if (typeof path !== "string" || !path.startsWith(HISTORY_DIFF_TAB_PREFIX)) {
+    return null;
+  }
+  const suffix = path.slice(HISTORY_DIFF_TAB_PREFIX.length);
+  const separator = suffix.indexOf("?file=");
+  if (separator <= 0) return null;
+  try {
+    const changeSetId = decodeURIComponent(suffix.slice(0, separator));
+    const filePath = decodeURIComponent(suffix.slice(separator + "?file=".length));
+    return changeSetId.length > 0 && filePath.length > 0
+      ? { changeSetId, filePath }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isVirtualTabPath(path: string | null): boolean {
-  return isGraphTabPath(path) || isHistoryTabPath(path);
+  return isGraphTabPath(path) || isHistoryTabPath(path) || isHistoryDiffTabPath(path);
 }
 
 export interface WorkbenchState {
@@ -47,12 +78,6 @@ export interface WorkbenchState {
   // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
-  // Newest history cursor the user explicitly marked caught-up (Phase E5).
-  // The id/index make the cursor stable across same-ms records and clock skew;
-  // the timestamp remains for compatibility with older ui-state files.
-  lastCatchUpSeenAtMs: number;
-  lastCatchUpSeenChangeSetId: string | null;
-  lastCatchUpSeenHistoryIndex: number | null;
 }
 
 export const SIDEBAR_MIN_WIDTH = 160;
@@ -81,9 +106,6 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
-    lastCatchUpSeenAtMs: 0,
-    lastCatchUpSeenChangeSetId: null,
-    lastCatchUpSeenHistoryIndex: null,
   };
 }
 
@@ -216,34 +238,6 @@ export function recordRecentFile(state: WorkbenchState, path: string): Workbench
   return { ...state, recentFiles };
 }
 
-export function setCatchUpSeenAt(
-  state: WorkbenchState,
-  seenAtMs: number,
-  changeSetId: string | null = null,
-  historyIndex: number | null = null,
-): WorkbenchState {
-  if (!Number.isFinite(seenAtMs) || seenAtMs < 0) return state;
-  const next = Math.floor(seenAtMs);
-  const nextChangeSetId =
-    typeof changeSetId === "string" && changeSetId.length > 0 ? changeSetId : null;
-  const nextHistoryIndex =
-    typeof historyIndex === "number" &&
-    Number.isFinite(historyIndex) &&
-    historyIndex >= 0
-      ? Math.floor(historyIndex)
-      : null;
-  return next === state.lastCatchUpSeenAtMs &&
-    nextChangeSetId === state.lastCatchUpSeenChangeSetId &&
-    nextHistoryIndex === state.lastCatchUpSeenHistoryIndex
-    ? state
-    : {
-        ...state,
-        lastCatchUpSeenAtMs: next,
-        lastCatchUpSeenChangeSetId: nextChangeSetId,
-        lastCatchUpSeenHistoryIndex: nextHistoryIndex,
-      };
-}
-
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -309,13 +303,6 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
-    lastCatchUpSeenAtMs: state.lastCatchUpSeenAtMs,
-    ...(state.lastCatchUpSeenChangeSetId
-      ? { lastCatchUpSeenChangeSetId: state.lastCatchUpSeenChangeSetId }
-      : {}),
-    ...(state.lastCatchUpSeenHistoryIndex !== null
-      ? { lastCatchUpSeenHistoryIndex: state.lastCatchUpSeenHistoryIndex }
-      : {}),
   };
 }
 
@@ -360,9 +347,6 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawSidebarWidth = own("sidebarWidth");
   const rawHistoryVisible = own("historyVisible");
   const rawHistoryWidth = own("historyWidth");
-  const rawLastCatchUpSeenAtMs = own("lastCatchUpSeenAtMs");
-  const rawLastCatchUpSeenChangeSetId = own("lastCatchUpSeenChangeSetId");
-  const rawLastCatchUpSeenHistoryIndex = own("lastCatchUpSeenHistoryIndex");
   return {
     activeView: isViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
@@ -386,23 +370,5 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
-    lastCatchUpSeenAtMs:
-      typeof rawLastCatchUpSeenAtMs === "number" &&
-      Number.isFinite(rawLastCatchUpSeenAtMs) &&
-      rawLastCatchUpSeenAtMs >= 0
-        ? Math.floor(rawLastCatchUpSeenAtMs)
-        : defaults.lastCatchUpSeenAtMs,
-    lastCatchUpSeenChangeSetId:
-      typeof rawLastCatchUpSeenChangeSetId === "string" &&
-      rawLastCatchUpSeenChangeSetId.length > 0 &&
-      rawLastCatchUpSeenChangeSetId.length <= 500
-        ? rawLastCatchUpSeenChangeSetId
-        : defaults.lastCatchUpSeenChangeSetId,
-    lastCatchUpSeenHistoryIndex:
-      typeof rawLastCatchUpSeenHistoryIndex === "number" &&
-      Number.isFinite(rawLastCatchUpSeenHistoryIndex) &&
-      rawLastCatchUpSeenHistoryIndex >= 0
-        ? Math.floor(rawLastCatchUpSeenHistoryIndex)
-        : defaults.lastCatchUpSeenHistoryIndex,
   };
 }

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  catchUpSummary,
   describeConflict,
   mergeMarkdown,
   resolveConflict,
   storeProposal,
   type FileConflict,
 } from "./conflictResolution";
-import type { HistoryRecord } from "./changeSetStore";
 
 const BASE = "# Plan\n\nIntro paragraph.\n\n## Costs\n\nOld numbers.\n";
 
@@ -84,43 +82,5 @@ describe("conflict records (both versions preserved, humans first)", () => {
     const kept = resolveConflict(conflict, "keep-both");
     expect(kept.resolution).toBe("kept-both");
     expect(resolveConflict(conflict, "dismiss").resolution).toBe("dismissed");
-  });
-});
-
-describe("catch-up summary (returning to a shared workspace)", () => {
-  it("summarizes change sets since the user last looked, newest first, with attribution", () => {
-    const records: HistoryRecord[] = [
-      {
-        id: "a",
-        recordedAtMs: 100,
-        kind: "user-edit",
-        author: { kind: "user", userId: "maya" },
-        summary: "Edited 2 files",
-        files: [
-          { path: "notes/plan.md", operation: "write" },
-          { path: "notes/budget.md", operation: "write" },
-        ],
-        boundaryCrossings: [],
-      },
-      {
-        id: "b",
-        recordedAtMs: 200,
-        kind: "agent-run",
-        author: { kind: "agent", agentId: "codex", onBehalfOf: "maya" },
-        summary: "Edited 1 file",
-        files: [{ path: "finance/q3.md", operation: "write" }],
-        boundaryCrossings: [],
-      },
-    ];
-    const lines = catchUpSummary(records, 50);
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/maya's agent/i);
-    expect(lines[1]).toMatch(/maya/i);
-    // Plain prose, no markers or jargon.
-    for (const line of lines) expect(line).not.toMatch(/<<<<<<<|commit|sha/i);
-  });
-
-  it("is empty when nothing happened since", () => {
-    expect(catchUpSummary([], 0)).toEqual([]);
   });
 });

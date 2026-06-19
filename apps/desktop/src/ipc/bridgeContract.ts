@@ -455,22 +455,6 @@ export const ReadChangeSetResult = z.object({
 });
 export type ReadChangeSetResult = z.infer<typeof ReadChangeSetResult>;
 
-export const ReadCatchUpSummaryPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  sinceMs: z.number().int().nonnegative(),
-  sinceChangeSetId: z.string().min(1).max(500).optional(),
-  sinceHistoryIndex: z.number().int().nonnegative().optional(),
-});
-export type ReadCatchUpSummaryPayload = z.infer<typeof ReadCatchUpSummaryPayload>;
-
-export const ReadCatchUpSummaryResult = z.object({
-  lines: z.array(z.string().min(1).max(500)).max(50),
-  latestRecordedAtMs: z.number().int().nonnegative().nullable(),
-  latestChangeSetId: z.string().min(1).max(500).nullable(),
-  latestHistoryIndex: z.number().int().nonnegative().nullable(),
-});
-export type ReadCatchUpSummaryResult = z.infer<typeof ReadCatchUpSummaryResult>;
-
 const AppCheck = z.object({
   name: z.string(),
   status: z.string(),
@@ -1090,12 +1074,6 @@ export const WorkspaceUiState = z.object({
   // Additive (Phase E5.0 quick-open ranking), still version 1: the last ~20
   // opened files, most recent first — recency boosts quick-open results.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
-  // Additive (Phase E5 catch-up), still version 1: newest history record the
-  // user explicitly marked caught-up. The id/index disambiguate timestamp
-  // ties and clock skew while lastCatchUpSeenAtMs keeps old files readable.
-  lastCatchUpSeenAtMs: z.number().int().nonnegative().optional(),
-  lastCatchUpSeenChangeSetId: z.string().min(1).max(500).optional(),
-  lastCatchUpSeenHistoryIndex: z.number().int().nonnegative().optional(),
 });
 export type WorkspaceUiState = z.infer<typeof WorkspaceUiState>;
 
@@ -1279,9 +1257,6 @@ export interface DohcDesktopBridge {
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;
   readChangeSet(payload: ReadChangeSetPayload): Promise<ReadChangeSetResult>;
-  readCatchUpSummary(
-    payload: ReadCatchUpSummaryPayload,
-  ): Promise<ReadCatchUpSummaryResult>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;

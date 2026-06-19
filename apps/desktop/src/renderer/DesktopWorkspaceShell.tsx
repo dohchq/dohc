@@ -1,6 +1,5 @@
 import {
   Bot,
-  CheckCheck,
   ChevronRight,
   Cloud,
   ExternalLink,
@@ -64,16 +63,18 @@ import {
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  historyDiffTabPath,
   isGraphTabPath,
+  isHistoryDiffTabPath,
   isHistoryTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
+  parseHistoryDiffTabPath,
   parseUiState,
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
-  setCatchUpSeenAt,
   setFolderExpanded,
   setHistoryWidth,
   setSidebarWidth,
@@ -141,21 +142,6 @@ const LazyAgentPanelView = lazy(() =>
   import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
 );
 
-type CatchUpState = {
-  status: "loading" | "ready" | "error";
-  lines: string[];
-  latestRecordedAtMs: number | null;
-  latestChangeSetId: string | null;
-  latestHistoryIndex: number | null;
-};
-
-function describeConflictForCatchUp(path: string, conflictPath: string): string {
-  return (
-    `Both sides changed ${path}: your local version was kept, ` +
-    `while ${conflictPath} stores the other version. Both versions are kept until you choose.`
-  );
-}
-
 // Every folder above a path — expanded when a create/open must REVEAL it.
 function ancestorDirs(path: string): string[] {
   const segments = path.split("/");
@@ -196,10 +182,6 @@ type HistoryRestoreAllState =
   | { status: "restoring"; count: number }
   | { status: "restored"; count: number }
   | { status: "error"; count: number; message: string };
-
-type HistoryCompareSelection = {
-  file: ChangeSetFileRecord;
-};
 
 type HistoryAuthorFilter = "all" | "user" | "agent";
 
@@ -628,7 +610,7 @@ function HistoryCompareTextPane({
       {typeof text === "string" ? (
         <pre
           data-testid={testId}
-          className="m-0 max-h-[42vh] min-h-40 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-5 text-ink"
+          className="m-0 max-h-[42vh] min-h-40 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words p-3 font-mono text-[12px] leading-5 text-ink"
         >
           {text.length > 0 ? text : "Empty file"}
         </pre>
@@ -644,16 +626,64 @@ function HistoryCompareTextPane({
   );
 }
 
-function HistoryCompareDialog({
-  selection,
-  onClose,
+function HistoryDiffPage({
+  workspaceId,
+  tabPath,
   onOpenFile,
 }: {
-  selection: HistoryCompareSelection;
-  onClose: () => void;
+  workspaceId: string;
+  tabPath: string;
   onOpenFile: (path: string) => void;
 }) {
-  const file = selection.file;
+  const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "ready"; changeSet: ChangeSetDetailRecord | null }
+    | { status: "error" }
+  >({ status: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!parsed) {
+      setState({ status: "error" });
+      return;
+    }
+    setState({ status: "loading" });
+    void bridge()
+      .readChangeSet({ workspaceId, changeSetId: parsed.changeSetId })
+      .then((result) => {
+        if (!cancelled) {
+          setState({ status: "ready", changeSet: result.changeSet });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setState({ status: "error" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [parsed, workspaceId]);
+
+  if (!parsed || state.status === "error") {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
+        Could not load this history diff.
+      </div>
+    );
+  }
+  if (state.status === "loading") {
+    return <PanelLoading label="history diff" />;
+  }
+  const file =
+    state.changeSet?.files.find((entry) => entry.path === parsed.filePath) ?? null;
+  if (!state.changeSet || !file) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
+        This changed file is no longer in the history record.
+      </div>
+    );
+  }
+
   const before = file.before?.text;
   const after = file.after?.text;
   const counts = changedLineCounts(before, after);
@@ -662,110 +692,95 @@ function HistoryCompareDialog({
   const afterUnavailable = snapshotUnavailable(file.after);
 
   return (
-    <Overlay onClose={onClose}>
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="history-compare-title"
-        data-testid="history-compare-dialog"
-        className="flex max-h-[calc(100vh-7rem)] w-[min(1120px,calc(100vw-2rem))] flex-col overflow-hidden rounded-md border border-line bg-panel shadow-2xl"
-      >
-        <header className="flex shrink-0 items-start gap-3 border-b border-line px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
-              History compare
-            </span>
-            <h2
-              id="history-compare-title"
-              className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink"
-            >
-              {file.path}
-            </h2>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-              <span>{fileOperationLabel(file)}</span>
-              {counts ? (
-                <span className="font-mono" data-testid="history-compare-counts">
-                  +{counts.added} -{counts.removed}
-                </span>
-              ) : null}
-              {file.mediaType ? <span>{file.mediaType}</span> : null}
-            </div>
+    <section
+      data-testid="history-diff-page"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
+    >
+      <header className="flex shrink-0 items-start gap-3 border-b border-line bg-panel px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            History diff
+          </span>
+          <h2
+            id="history-diff-title"
+            className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink"
+          >
+            {file.path}
+          </h2>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+            <span>{fileOperationLabel(file)}</span>
+            {counts ? (
+              <span className="font-mono" data-testid="history-compare-counts">
+                +{counts.added} -{counts.removed}
+              </span>
+            ) : null}
+            {file.mediaType ? <span>{file.mediaType}</span> : null}
           </div>
-          {file.operation !== "delete" ? (
-            <button
-              type="button"
-              data-testid="history-compare-open-file"
-              onClick={() => {
-                onOpenFile(file.path);
-                onClose();
-              }}
-              className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-            >
-              <ExternalLink size={12} aria-hidden />
-              Open file
-            </button>
-          ) : null}
+          <p className="mb-0 mt-1 truncate text-[11px] text-subtle">
+            {state.changeSet.humanSummary}
+          </p>
+        </div>
+        {file.operation !== "delete" ? (
           <button
             type="button"
-            data-testid="history-compare-close"
-            aria-label="Close compare"
-            title="Close compare"
-            onClick={onClose}
-            className="grid size-7 shrink-0 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+            data-testid="history-diff-open-file"
+            onClick={() => onOpenFile(file.path)}
+            className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
           >
-            <X size={14} aria-hidden />
+            <ExternalLink size={12} aria-hidden />
+            Open file
           </button>
-        </header>
-        <div className="min-h-0 overflow-auto p-4">
-          <div className="grid min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <HistoryCompareTextPane
-              label="Before"
-              text={before}
-              unavailable={beforeUnavailable}
-              tone="removed"
-            />
-            <HistoryCompareTextPane
-              label="After"
-              text={after}
-              unavailable={afterUnavailable}
-              tone="added"
-            />
-          </div>
-          <section className="mt-3 rounded border border-line bg-bg">
-            <div className="flex h-8 items-center border-b border-line px-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-                Changed lines
-              </span>
-            </div>
-            <div
-              data-testid="history-compare-diff"
-              className="max-h-64 overflow-auto py-1 font-mono text-[11px] leading-5"
-            >
-              {diffLines.map((line, index) => (
-                <div
-                  key={`${index}:${line.kind}:${line.text}`}
-                  data-kind={line.kind}
-                  className={`grid grid-cols-[28px_minmax(0,1fr)] px-3 ${
-                    line.kind === "added"
-                      ? "bg-success/10 text-success"
-                      : line.kind === "removed"
-                        ? "bg-danger/10 text-danger"
-                        : line.kind === "note"
-                          ? "text-subtle"
-                          : "text-muted"
-                  }`}
-                >
-                  <span aria-hidden className="select-none text-center">
-                    {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
-                  </span>
-                  <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
-                </div>
-              ))}
-            </div>
-          </section>
+        ) : null}
+      </header>
+      <div className="min-h-0 overflow-auto overflow-x-hidden p-4">
+        <div className="grid min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <HistoryCompareTextPane
+            label="Before"
+            text={before}
+            unavailable={beforeUnavailable}
+            tone="removed"
+          />
+          <HistoryCompareTextPane
+            label="After"
+            text={after}
+            unavailable={afterUnavailable}
+            tone="added"
+          />
         </div>
-      </section>
-    </Overlay>
+        <section className="mt-3 rounded border border-line bg-bg">
+          <div className="flex h-8 items-center border-b border-line px-3">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+              Changed lines
+            </span>
+          </div>
+          <div
+            data-testid="history-diff-lines"
+            className="max-h-[42vh] overflow-y-auto overflow-x-hidden py-1 font-mono text-[11px] leading-5"
+          >
+            {diffLines.map((line, index) => (
+              <div
+                key={`${index}:${line.kind}:${line.text}`}
+                data-kind={line.kind}
+                className={`grid grid-cols-[28px_minmax(0,1fr)] px-3 ${
+                  line.kind === "added"
+                    ? "bg-success/10 text-success"
+                    : line.kind === "removed"
+                      ? "bg-danger/10 text-danger"
+                      : line.kind === "note"
+                        ? "text-subtle"
+                        : "text-muted"
+                }`}
+              >
+                <span aria-hidden className="select-none text-center">
+                  {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
+                </span>
+                <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </section>
   );
 }
 
@@ -775,7 +790,7 @@ function HistoryFileDiff({
   onRequestRestore,
   onCancelRestore,
   onConfirmRestore,
-  onOpenCompare,
+  onOpenDiff,
   onOpenFile,
 }: {
   file: ChangeSetFileRecord;
@@ -783,22 +798,18 @@ function HistoryFileDiff({
   onRequestRestore: (file: ChangeSetFileRecord) => void;
   onCancelRestore: (file: ChangeSetFileRecord) => void;
   onConfirmRestore: (file: ChangeSetFileRecord) => void;
-  onOpenCompare: (file: ChangeSetFileRecord) => void;
+  onOpenDiff: (file: ChangeSetFileRecord) => void;
   onOpenFile: (path: string) => void;
 }) {
   const before = file.before;
   const after = file.after;
-  const hasCapturedSnapshot = before !== undefined || after !== undefined;
-  const beforeReason = snapshotUnavailable(before);
-  const afterReason = snapshotUnavailable(after);
   const canDiff = typeof before?.text === "string" || typeof after?.text === "string";
   const canRestorePrevious = typeof before?.text === "string";
-  const lines = canDiff ? buildDiffPreview(before?.text, after?.text) : [];
   const counts = changedLineCounts(before?.text, after?.text);
 
   return (
-    <li className="rounded border border-line bg-bg">
-      <div className="flex min-w-0 items-center gap-2 border-b border-line px-2 py-1.5">
+    <li className="min-w-0 rounded border border-line bg-bg">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5 px-2 py-1.5">
         <FileText size={12} aria-hidden className="shrink-0 text-subtle" />
         <span className="min-w-0 flex-1 truncate text-[11px] text-ink">{file.path}</span>
         {counts ? (
@@ -838,11 +849,11 @@ function HistoryFileDiff({
         {canDiff ? (
           <button
             type="button"
-            data-testid="history-compare-open"
-            onClick={() => onOpenCompare(file)}
+            data-testid="history-diff-open"
+            onClick={() => onOpenDiff(file)}
             className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:bg-line/50 hover:text-ink"
           >
-            Open compare
+            Open diff
           </button>
         ) : null}
       </div>
@@ -887,39 +898,6 @@ function HistoryFileDiff({
           )}
         </div>
       ) : null}
-      {canDiff ? (
-        <div
-          data-testid="history-file-diff"
-          className="max-h-56 overflow-auto py-1 font-mono text-[11px] leading-5"
-        >
-          {lines.map((line, index) => (
-            <div
-              key={`${index}:${line.kind}:${line.text}`}
-              data-kind={line.kind}
-              className={`grid grid-cols-[24px_minmax(0,1fr)] px-2 ${
-                line.kind === "added"
-                  ? "bg-success/10 text-success"
-                  : line.kind === "removed"
-                    ? "bg-danger/10 text-danger"
-                    : line.kind === "note"
-                      ? "text-subtle"
-                      : "text-muted"
-              }`}
-            >
-              <span aria-hidden className="select-none text-center">
-                {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : ""}
-              </span>
-              <span className="min-w-0 whitespace-pre-wrap break-words">{line.text}</span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="px-2 py-2 text-[11px] text-subtle">
-          {!hasCapturedSnapshot
-            ? "Diff was not captured for this older change."
-            : beforeReason ?? afterReason ?? "No readable text diff for this file."}
-        </div>
-      )}
     </li>
   );
 }
@@ -934,7 +912,7 @@ function HistoryChangeDetails({
   onRequestRestoreAll,
   onCancelRestoreAll,
   onConfirmRestoreAll,
-  onOpenCompare,
+  onOpenDiff,
   onOpenFile,
 }: {
   state: HistoryDetailState | undefined;
@@ -946,7 +924,7 @@ function HistoryChangeDetails({
   onRequestRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
   onCancelRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
   onConfirmRestoreAll: (changeSet: ChangeSetDetailRecord) => void;
-  onOpenCompare: (file: ChangeSetFileRecord) => void;
+  onOpenDiff: (file: ChangeSetFileRecord) => void;
   onOpenFile: (path: string) => void;
 }) {
   if (!state || state.status === "loading") {
@@ -1094,7 +1072,7 @@ function HistoryChangeDetails({
             onRequestRestore={onRequestRestore}
             onCancelRestore={onCancelRestore}
             onConfirmRestore={onConfirmRestore}
-            onOpenCompare={onOpenCompare}
+            onOpenDiff={onOpenDiff}
             onOpenFile={onOpenFile}
           />
         ))}
@@ -1110,12 +1088,14 @@ function HistoryList({
   workspaceId,
   changeSets,
   onOpenFile,
+  onOpenDiff,
   emptyLabel = "No changes yet",
   emptyDescription = "Edits — yours or your agent's — show up here as a timeline you can review.",
 }: {
   workspaceId: string;
   changeSets: ChangeSetRecord[];
   onOpenFile: (path: string) => void;
+  onOpenDiff: (changeSetId: string, file: ChangeSetFileRecord) => void;
   emptyLabel?: string;
   emptyDescription?: string;
 }) {
@@ -1125,8 +1105,6 @@ function HistoryList({
   const [restoreAllById, setRestoreAllById] = useState<
     Record<string, HistoryRestoreAllState>
   >({});
-  const [compareSelection, setCompareSelection] =
-    useState<HistoryCompareSelection | null>(null);
 
   const restoreKey = useCallback(
     (file: ChangeSetFileRecord) => `${expandedId ?? "none"}:${file.path}`,
@@ -1271,7 +1249,7 @@ function HistoryList({
     <>
       <ul
         data-testid="history-list"
-        className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0"
+        className="m-0 min-h-0 flex-1 list-none overflow-y-auto overflow-x-hidden p-0"
       >
         {changeSets.map((change, index) => {
           const expanded = expandedId === change.id;
@@ -1419,7 +1397,7 @@ function HistoryList({
                     onRequestRestoreAll={requestRestoreAll}
                     onCancelRestoreAll={cancelRestoreAll}
                     onConfirmRestoreAll={confirmRestoreAll}
-                    onOpenCompare={(file) => setCompareSelection({ file })}
+                    onOpenDiff={(file) => onOpenDiff(change.id, file)}
                     onOpenFile={onOpenFile}
                   />
                 ) : null}
@@ -1428,93 +1406,15 @@ function HistoryList({
           );
         })}
       </ul>
-      {compareSelection ? (
-        <HistoryCompareDialog
-          selection={compareSelection}
-          onClose={() => setCompareSelection(null)}
-          onOpenFile={onOpenFile}
-        />
-      ) : null}
     </>
-  );
-}
-
-function CatchUpSummaryCard(props: {
-  catchUp: CatchUpState;
-  conflictSummaries: string[];
-  onMarkCaughtUp: () => void;
-}) {
-  const hasLines = props.catchUp.lines.length > 0;
-  const hasConflicts = props.conflictSummaries.length > 0;
-  return (
-    <section
-      data-testid="catch-up-summary"
-      data-state={props.catchUp.status}
-      className="shrink-0 border-b border-line bg-panel px-3 py-2"
-    >
-      <div className="flex items-center gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          Catch-up
-        </span>
-        <button
-          type="button"
-          data-testid="catch-up-mark-seen"
-          disabled={!hasLines}
-          onClick={props.onMarkCaughtUp}
-          className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40"
-          aria-label="Mark caught up"
-          title="Mark caught up"
-        >
-          <CheckCheck size={13} aria-hidden />
-        </button>
-      </div>
-      {props.catchUp.status === "loading" ? (
-        <p className="mb-0 mt-1 text-[11px] text-subtle">Checking history…</p>
-      ) : props.catchUp.status === "error" ? (
-        <p className="mb-0 mt-1 text-[11px] text-danger">Catch-up unavailable.</p>
-      ) : hasLines || hasConflicts ? (
-        <div className="mt-1 space-y-2">
-          {hasLines ? (
-            <ul className="m-0 list-none space-y-1 p-0">
-              {props.catchUp.lines.map((line, index) => (
-                <li
-                  key={`${index}:${line}`}
-                  data-testid="catch-up-line"
-                  className="text-[11px] leading-snug text-ink"
-                >
-                  {line}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {hasConflicts ? (
-            <ul className="m-0 list-none space-y-1 border-t border-line px-0 pb-0 pt-2">
-              {props.conflictSummaries.map((line, index) => (
-                <li
-                  key={`${index}:${line}`}
-                  data-testid="catch-up-conflict"
-                  className="text-[11px] leading-snug text-danger"
-                >
-                  {line}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : (
-        <p className="mb-0 mt-1 text-[11px] text-subtle">You're caught up.</p>
-      )}
-    </section>
   );
 }
 
 function HistoryView(props: {
   workspaceId: string;
   changeSets: ChangeSetRecord[];
-  catchUp: CatchUpState;
-  conflictSummaries: string[];
-  onMarkCaughtUp: () => void;
   onOpenFile: (path: string) => void;
+  onOpenDiff: (changeSetId: string, file: ChangeSetFileRecord) => void;
 }) {
   const [query, setQuery] = useState("");
   const [reviewOnly, setReviewOnly] = useState(false);
@@ -1538,19 +1438,8 @@ function HistoryView(props: {
   );
   const filterActive =
     normalizedQuery.length > 0 || reviewOnly || authorFilter !== "all";
-  const showCatchUp =
-    props.changeSets.length > 0 ||
-    props.catchUp.status !== "ready" ||
-    props.conflictSummaries.length > 0;
   return (
     <>
-      {showCatchUp ? (
-        <CatchUpSummaryCard
-          catchUp={props.catchUp}
-          conflictSummaries={props.conflictSummaries}
-          onMarkCaughtUp={props.onMarkCaughtUp}
-        />
-      ) : null}
       {props.changeSets.length > 0 ? (
         <>
           <section
@@ -1688,6 +1577,7 @@ function HistoryView(props: {
         workspaceId={props.workspaceId}
         changeSets={filteredChangeSets}
         onOpenFile={props.onOpenFile}
+        onOpenDiff={props.onOpenDiff}
         emptyLabel={filterActive ? "No matching changes" : undefined}
         emptyDescription={
           filterActive
@@ -1798,14 +1688,6 @@ export function DesktopWorkspaceShell(props: {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
   const [changeSets, setChangeSets] = useState<ChangeSetRecord[]>([]);
-  const [historyLoaded, setHistoryLoaded] = useState(false);
-  const [catchUp, setCatchUp] = useState<CatchUpState>({
-    status: "ready",
-    lines: [],
-    latestRecordedAtMs: null,
-    latestChangeSetId: null,
-    latestHistoryIndex: null,
-  });
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
@@ -1882,7 +1764,7 @@ export function DesktopWorkspaceShell(props: {
         .filter((file) => file.kind === "file" && file.path.endsWith(".conflict"))
         .slice(0, 5)
         .map((file) =>
-          describeConflictForCatchUp(file.path.replace(/\.conflict$/, ""), file.path),
+          `${file.path.replace(/\.conflict$/, "")} has a sync conflict (${file.path})`,
         ),
     [files],
   );
@@ -2017,90 +1899,7 @@ export function DesktopWorkspaceShell(props: {
     setChangeSets(history.changeSets);
     setSyncStatus(status);
     setAgentActive(agent.activeRun !== null);
-    setHistoryLoaded(true);
   }, [workspaceId]);
-
-  const catchUpRefreshKey = useMemo(
-    () =>
-      changeSets
-        .map((change) => `${change.id}:${change.recordedAtMs}`)
-        .join("\0"),
-    [changeSets],
-  );
-  useEffect(() => {
-    let cancelled = false;
-    if (!historyLoaded) return;
-    if (changeSets.length === 0) {
-      setCatchUp({
-        status: "ready",
-        lines: [],
-        latestRecordedAtMs: null,
-        latestChangeSetId: null,
-        latestHistoryIndex: null,
-      });
-      return;
-    }
-    setCatchUp((current) => ({ ...current, status: "loading" }));
-    void bridge()
-      .readCatchUpSummary({
-        workspaceId,
-        sinceMs: wb.lastCatchUpSeenAtMs,
-        ...(wb.lastCatchUpSeenChangeSetId
-          ? { sinceChangeSetId: wb.lastCatchUpSeenChangeSetId }
-          : {}),
-        ...(wb.lastCatchUpSeenHistoryIndex !== null
-          ? { sinceHistoryIndex: wb.lastCatchUpSeenHistoryIndex }
-          : {}),
-      })
-      .then((summary) => {
-        if (cancelled) return;
-        setCatchUp({
-          status: "ready",
-          lines: summary.lines,
-          latestRecordedAtMs: summary.latestRecordedAtMs,
-          latestChangeSetId: summary.latestChangeSetId,
-          latestHistoryIndex: summary.latestHistoryIndex,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCatchUp((current) => ({ ...current, status: "error" }));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    workspaceId,
-    wb.lastCatchUpSeenAtMs,
-    historyLoaded,
-    changeSets.length,
-    catchUpRefreshKey,
-  ]);
-
-  const markCaughtUp = useCallback(() => {
-    const seenAt = catchUp.latestRecordedAtMs ?? Date.now();
-    setCatchUp({
-      status: "ready",
-      lines: [],
-      latestRecordedAtMs: seenAt,
-      latestChangeSetId: catchUp.latestChangeSetId,
-      latestHistoryIndex: catchUp.latestHistoryIndex,
-    });
-    mutateWb((state) =>
-      setCatchUpSeenAt(
-        state,
-        seenAt,
-        catchUp.latestChangeSetId,
-        catchUp.latestHistoryIndex,
-      ),
-    );
-  }, [
-    catchUp.latestRecordedAtMs,
-    catchUp.latestChangeSetId,
-    catchUp.latestHistoryIndex,
-    mutateWb,
-  ]);
 
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
@@ -2143,6 +1942,12 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
+  const openHistoryDiffTab = useCallback(
+    (changeSetId: string, file: ChangeSetFileRecord) => {
+      mutateWb((state) => openTab(state, historyDiffTabPath(changeSetId, file.path)));
+    },
+    [mutateWb],
+  );
   const activateEditorTab = useCallback(
     (path: string) => {
       if (isVirtualTabPath(path)) {
@@ -2708,10 +2513,8 @@ export function DesktopWorkspaceShell(props: {
               <HistoryView
                 workspaceId={workspaceId}
                 changeSets={changeSets}
-                catchUp={catchUp}
-                conflictSummaries={conflictSummaries}
-                onMarkCaughtUp={markCaughtUp}
                 onOpenFile={openFile}
+                onOpenDiff={openHistoryDiffTab}
               />
             ) : wb.activeView === "agent" ? (
               <Suspense fallback={<PanelLoading label="agent" />}>
@@ -2761,12 +2564,16 @@ export function DesktopWorkspaceShell(props: {
                 <HistoryView
                   workspaceId={workspaceId}
                   changeSets={changeSets}
-                  catchUp={catchUp}
-                  conflictSummaries={conflictSummaries}
-                  onMarkCaughtUp={markCaughtUp}
                   onOpenFile={openFile}
+                  onOpenDiff={openHistoryDiffTab}
                 />
               </div>
+            ) : isHistoryDiffTabPath(wb.activeTab) ? (
+              <HistoryDiffPage
+                workspaceId={workspaceId}
+                tabPath={wb.activeTab ?? ""}
+                onOpenFile={openFile}
+              />
             ) : wb.activeTab ? (
               <FileInspector
                 key={wb.activeTab}
@@ -2839,10 +2646,8 @@ export function DesktopWorkspaceShell(props: {
             <HistoryView
               workspaceId={workspaceId}
               changeSets={changeSets}
-              catchUp={catchUp}
-              conflictSummaries={conflictSummaries}
-              onMarkCaughtUp={markCaughtUp}
               onOpenFile={openFile}
+              onOpenDiff={openHistoryDiffTab}
             />
           </HistoryRail>
         ) : (

@@ -6,16 +6,18 @@ import {
   closeTab,
   defaultWorkbenchState,
   HISTORY_DEFAULT_WIDTH,
+  historyDiffTabPath,
   HISTORY_MAX_WIDTH,
   HISTORY_MIN_WIDTH,
   HISTORY_TAB_PATH,
+  isHistoryDiffTabPath,
   isHistoryTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
+  parseHistoryDiffTabPath,
   parseUiState,
   serializeUiState,
-  setCatchUpSeenAt,
   setSidebarWidth,
   setHistoryWidth,
   setView,
@@ -79,6 +81,18 @@ describe("tabs", () => {
     expect(isHistoryTabPath(HISTORY_TAB_PATH)).toBe(true);
     expect(isVirtualTabPath(HISTORY_TAB_PATH)).toBe(true);
     expect(isVirtualTabPath("notes/today.md")).toBe(false);
+  });
+
+  it("recognizes history file diffs as virtual tabs with encoded file identity", () => {
+    const path = historyDiffTabPath("change 1", "notes/today plan.md");
+    expect(isHistoryDiffTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseHistoryDiffTabPath(path)).toEqual({
+      changeSetId: "change 1",
+      filePath: "notes/today plan.md",
+    });
+    expect(parseHistoryDiffTabPath("dohc://history-diff/change-only")).toBeNull();
+    expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
   });
 
   it("activateTab only activates an OPEN tab", () => {
@@ -223,34 +237,6 @@ describe("ui-state persistence round-trip", () => {
       tabs: Array.from({ length: MAX_OPEN_TABS + 50 }, (_, i) => `f${i}.md`),
     });
     expect(oversized.tabs).toHaveLength(MAX_OPEN_TABS);
-  });
-
-  it("persists the catch-up cursor and ignores invalid values", () => {
-    const state = setCatchUpSeenAt(defaultWorkbenchState(), 1234.9, "change-1", 4.9);
-    expect(state.lastCatchUpSeenAtMs).toBe(1234);
-    expect(state.lastCatchUpSeenChangeSetId).toBe("change-1");
-    expect(state.lastCatchUpSeenHistoryIndex).toBe(4);
-    const restored = parseUiState(serializeUiState(state));
-    expect(restored.lastCatchUpSeenAtMs).toBe(1234);
-    expect(restored.lastCatchUpSeenChangeSetId).toBe("change-1");
-    expect(restored.lastCatchUpSeenHistoryIndex).toBe(4);
-    expect(
-      parseUiState({ version: 1, lastCatchUpSeenAtMs: 123 }).lastCatchUpSeenAtMs,
-    ).toBe(123);
-    expect(
-      parseUiState({ version: 1, lastCatchUpSeenAtMs: -1 }).lastCatchUpSeenAtMs,
-    ).toBe(0);
-    expect(
-      parseUiState({
-        version: 1,
-        lastCatchUpSeenChangeSetId: "",
-        lastCatchUpSeenHistoryIndex: -1,
-      }),
-    ).toMatchObject({
-      lastCatchUpSeenChangeSetId: null,
-      lastCatchUpSeenHistoryIndex: null,
-    });
-    expect(setCatchUpSeenAt(state, Number.NaN)).toBe(state);
   });
 
   it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {

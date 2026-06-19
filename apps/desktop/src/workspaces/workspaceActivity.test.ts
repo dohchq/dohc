@@ -30,38 +30,7 @@ function workspace(): CreatedWorkspace {
   };
 }
 
-describe("workspaceActivity catch-up", () => {
-  it("summarizes omitted unseen entries before advancing the catch-up cursor", async () => {
-    const store = createChangeSetStore(root);
-    for (let i = 0; i < 52; i++) {
-      await store.record(
-        addFileChanges(
-          createChangeSet({
-            kind: "user-edit",
-            author: { kind: "user", userId: "ice" },
-            summary: `Edited ${i}`,
-          }),
-          [{ path: `notes/${i}.md`, operation: "write" }],
-        ),
-        { id: `change-${String(i).padStart(2, "0")}`, recordedAtMs: 1000 + i },
-      );
-    }
-
-    const activity = createWorkspaceActivity(() => {});
-    const summary = await activity.readCatchUpSummary(workspace(), {
-      workspaceId: "activity-test",
-      sinceMs: 0,
-    });
-
-    expect(summary.lines).toHaveLength(50);
-    expect(summary.lines[0]).toBe("ice edited notes/51.md");
-    expect(summary.lines[summary.lines.length - 1]).toBe(
-      "3 older changes not shown.",
-    );
-    expect(summary.latestChangeSetId).toBe("change-51");
-    expect(summary.latestHistoryIndex).toBe(51);
-  }, 15000);
-
+describe("workspaceActivity history", () => {
   it("reads one detailed change set with file snapshots for history expansion", async () => {
     const store = createChangeSetStore(root);
     await store.record(

@@ -35,7 +35,13 @@ import {
   type PendingTreeChange,
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
-import { isGraphTabPath, isHistoryTabPath, isVirtualTabPath } from "./workbenchState";
+import {
+  isGraphTabPath,
+  isHistoryDiffTabPath,
+  isHistoryTabPath,
+  isVirtualTabPath,
+  parseHistoryDiffTabPath,
+} from "./workbenchState";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -133,6 +139,10 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 function editorTitle(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
+  if (isHistoryDiffTabPath(path)) {
+    const parsed = parseHistoryDiffTabPath(path);
+    return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
+  }
   return leafOf(path);
 }
 

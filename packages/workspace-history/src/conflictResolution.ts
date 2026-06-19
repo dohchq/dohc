@@ -1,6 +1,3 @@
-import type { HistoryRecord } from "./changeSetStore";
-import { verbForKind } from "./changeSetStore";
-
 // Conflict handling for everyday people (plan Phase 10): safe markdown edits
 // merge silently; anything ambiguous preserves BOTH versions verbatim and
 // describes the situation in prose. Git conflict markers never appear — an AI
@@ -48,21 +45,4 @@ export function resolveConflict(
   const resolution =
     outcome === "apply" ? "applied" : outcome === "keep-both" ? "kept-both" : "dismissed";
   return { ...conflict, resolution };
-}
-
-// "While you were away": the change sets since the user last looked, newest
-// first, one plain-language line each. Attribution is by NAME (not "you") —
-// in a shared workspace the reader usually isn't the author.
-export function catchUpSummary(records: HistoryRecord[], sinceMs: number): string[] {
-  return records
-    .filter((record) => record.recordedAtMs > sinceMs)
-    .sort((a, b) => b.recordedAtMs - a.recordedAtMs)
-    .map((record) => {
-      const count = record.files.length;
-      const what = count === 1 ? record.files[0].path : `${count} files`;
-      const verb = verbForKind(record.kind);
-      return record.author.kind === "agent"
-        ? `${record.author.onBehalfOf}'s agent ${verb} ${what}`
-        : `${record.author.userId} ${verb} ${what}`;
-    });
 }

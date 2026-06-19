@@ -72,8 +72,6 @@ import {
   ListWorkspaceSharesResult,
   ListWorkspaceMembersResult,
   ListWorkspaceInvitesResult,
-  ReadCatchUpSummaryPayload,
-  ReadCatchUpSummaryResult,
   ReadChangeSetPayload,
   ReadChangeSetResult,
   ListChangeSetsResult,
@@ -1495,15 +1493,6 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     return ReadChangeSetResult.parse(
       await activity.readChangeSet(workspace, input.changeSetId),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.readCatchUpSummary, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadCatchUpSummaryPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return ReadCatchUpSummaryResult.parse(
-      await activity.readCatchUpSummary(workspace, input),
     );
   });
 

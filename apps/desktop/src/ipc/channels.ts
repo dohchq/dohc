@@ -345,7 +345,6 @@ export const CHANNELS = {
   openWorkspace: "desktop:open-workspace",
   listChangeSets: "desktop:list-change-sets",
   readChangeSet: "desktop:read-change-set",
-  readCatchUpSummary: "desktop:read-catch-up-summary",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",
