@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { expect } from "@playwright/test";
 import {
   _electron as electron,
   type ElectronApplication,
@@ -127,4 +128,13 @@ export async function openInTree(
   await leaf.waitFor({ state: "visible", timeout });
   if (click) await leaf.click();
   return leaf;
+}
+
+export async function runCommand(page: Page, label: string): Promise<void> {
+  await page.keyboard.press("ControlOrMeta+k");
+  const palette = page.getByTestId("command-palette");
+  await expect(palette).toBeVisible();
+  await page.keyboard.type(label);
+  await palette.getByRole("button", { name: label, exact: true }).click();
+  await expect(palette).toHaveCount(0);
 }

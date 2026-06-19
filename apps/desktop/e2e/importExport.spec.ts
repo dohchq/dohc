@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
-import { launchApp, openInTree } from "./launch";
+import { launchApp, openInTree, runCommand } from "./launch";
 
 const SCREENSHOT_DIR = "test-results/screenshots/e5-import-export";
 let activeApp: ElectronApplication | null = null;
@@ -65,15 +65,6 @@ async function setExplorerMenuChoice(
     if (value === null) delete process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
     else process.env.DOHC_TEST_EXPLORER_MENU_CHOICE = value;
   }, choice);
-}
-
-async function runCommand(page: Page, label: string): Promise<void> {
-  await page.keyboard.press("ControlOrMeta+k");
-  const palette = page.getByTestId("command-palette");
-  await expect(palette).toBeVisible();
-  await page.keyboard.type(label);
-  await palette.getByRole("button", { name: label, exact: true }).click();
-  await expect(palette).toHaveCount(0);
 }
 
 async function setTheme(page: Page, scheme: "light" | "dark") {

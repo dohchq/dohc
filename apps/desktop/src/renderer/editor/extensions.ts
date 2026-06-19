@@ -79,13 +79,24 @@ function escapedPunctuationValue(token: {
 }
 
 function imageAltText(token: {
+  content?: unknown
   text?: unknown
   tokens?: Array<{ text?: unknown }>
 }): string {
   if (Array.isArray(token.tokens)) {
     return token.tokens.map((child) => String(child.text ?? '')).join('')
   }
-  return String(token.text ?? '')
+  return String(token.content ?? token.text ?? '')
+}
+
+function imageTokenAttr(
+  token: unknown,
+  name: string,
+  fallback: unknown,
+): string {
+  const attrGet = (token as { attrGet?: (name: string) => unknown }).attrGet
+  const value = typeof attrGet === 'function' ? attrGet(name) : fallback
+  return String(value ?? '')
 }
 
 const DohcImage = Node.create({
@@ -122,9 +133,9 @@ const DohcImage = Node.create({
 
   parseMarkdown: (token, helpers) =>
     helpers.createNode('image', {
-      src: token.href ?? '',
+      src: imageTokenAttr(token, 'src', token.href),
       alt: imageAltText(token),
-      title: token.title ?? null,
+      title: imageTokenAttr(token, 'title', token.title) || null,
     }),
 
   renderMarkdown: (node) => renderMarkdownImage(node.attrs ?? {}),
@@ -143,7 +154,16 @@ const DohcEscapedPunctuation = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'span[data-dohc-escaped-punctuation]' }]
+    return [
+      {
+        tag: 'span[data-dohc-escaped-punctuation]',
+        getAttrs: (dom) => {
+          if (typeof dom === 'string') return false
+          const value = dom.getAttribute('data-dohc-escaped-punctuation')
+          return value != null ? { value } : false
+        },
+      },
+    ]
   },
 
   renderHTML({ node }) {

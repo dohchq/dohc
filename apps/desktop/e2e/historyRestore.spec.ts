@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ElectronApplication } from "playwright";
 import { launchApp } from "./launch";
 
@@ -26,6 +26,17 @@ type HistoryRecord = {
   };
 };
 
+const seededWorkspaces: Array<{ home: string; root: string }> = [];
+
+test.afterEach(async () => {
+  await Promise.all(
+    seededWorkspaces.splice(0).flatMap(({ home, root }) => [
+      rm(home, { recursive: true, force: true }),
+      rm(dirname(root), { recursive: true, force: true }),
+    ]),
+  );
+});
+
 async function seedWorkspace(
   workspaceId: string,
   files: Record<string, string>,
@@ -46,6 +57,7 @@ async function seedWorkspace(
     await mkdir(join(root, path, ".."), { recursive: true });
     await writeFile(join(root, path), body);
   }
+  seededWorkspaces.push({ home, root });
   return { home, root };
 }
 
