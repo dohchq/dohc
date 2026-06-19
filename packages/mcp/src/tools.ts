@@ -742,26 +742,26 @@ export async function deleteWorkspacePath(
       trashDir,
       `${Date.now()}-${randomUUID()}-${basename(resolved.normalized)}`,
     );
-    let record: Awaited<ReturnType<typeof recordChange>>;
+    await rename(resolved.absolute, trashedTo);
     try {
-      record = await recordChange(ctx, {
+      const record = await recordChange(ctx, {
         files: [{ path: resolved.normalized, operation: "delete" }],
         summary: args.summary ?? `MCP deleted ${resolved.normalized}`,
       });
+      return {
+        ok: true as const,
+        path: resolved.normalized,
+        trashed: true,
+        changeSetId: record.id,
+        recordedAtMs: record.recordedAtMs,
+      };
     } catch (error) {
+      await bestEffortRename(trashedTo, resolved.absolute);
       return {
         ok: false as const,
         reason: failureReason(error, `failed to record delete: ${args.path}`),
       };
     }
-    await rename(resolved.absolute, trashedTo);
-    return {
-      ok: true as const,
-      path: resolved.normalized,
-      trashed: true,
-      changeSetId: record.id,
-      recordedAtMs: record.recordedAtMs,
-    };
   } catch (error) {
     return {
       ok: false as const,
