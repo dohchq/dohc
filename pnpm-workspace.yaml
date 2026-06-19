@@ -2,3 +2,10 @@ packages:
   - "apps/*"
   - "packages/*"
   - "services/*"
+
+# pnpm 10 ignores dependency build scripts by default; Electron's binary
+# download runs in its postinstall, so it must be allowlisted explicitly.
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild

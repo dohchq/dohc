@@ -1,0 +1,75 @@
+# electron-builder packaging for the dohc desktop app. Build dist/ first
+# (electron-vite build), then run electron-builder from apps/desktop.
+#
+# SIGNING SAFETY — this config never fabricates a signature.
+# electron-builder signs only when real credentials are in the environment:
+#   macOS:   CSC_LINK (base64 .p12) + CSC_KEY_PASSWORD, plus notarization via
+#            APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID.
+#   Windows: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD.
+# Without them the artifact is UNSIGNED (scripts/package-smoke.mjs labels it
+# "SIGNING: unsigned (dev)"). forceCodeSigning stays unset here so local dev
+# packaging works; a release pipeline MUST export DOHC_REQUIRE_SIGNING=1 (the
+# package smoke then fails without credentials) and pass
+# `-c.forceCodeSigning=true` so a missing cert fails the build instead of
+# shipping an unsigned binary as a release.
+
+appId: app.dohc.desktop
+productName: dohc
+directories:
+  output: release
+  # App icon: build/icon.png (512px, rendered from icon.svg by
+  # scripts/render-icon.mjs); electron-builder derives ico/icns from it.
+  buildResources: build
+files:
+  - dist/**
+asar: true
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+# Workspace deps are raw TS bundled into dist by electron-vite; nothing needs
+# a native rebuild against Electron headers.
+npmRebuild: false
+
+# Release hardening: electron-builder flips these via @electron/fuses at
+# package time. Dev builds (electron-vite) stay stock — fuses only exist in
+# packaged binaries.
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  # MUST stay true while the renderer loads via window.loadFile: Vite emits
+  # crossorigin module scripts/stylesheets, and those are CORS-mode fetches
+  # over file:// — exactly the privilege this fuse grants. Disabling it
+  # blanks every packaged window (scripts/fuse-smoke.mjs boots a
+  # fuse-flipped binary to gate this). Workspace bytes still flow through
+  # dohc-file://, never raw file://.
+  grantFileProtocolExtraPrivileges: true
+
+mac:
+  category: public.app-category.productivity
+  # zip is required alongside dmg for macOS auto-updates (electron-updater).
+  target: [dmg, zip]
+  hardenedRuntime: true
+win:
+  target: [nsis]
+linux:
+  target: [AppImage]
+  category: Office
+
+fileAssociations:
+  - ext: [md, markdown, txt, csv, json]
+    name: dohc workspace document
+    description: Open with dohc
+    role: Editor
+
+# Auto-update feed STUB. The runtime feed comes from DOHC_UPDATE_URL
+# (src/updates/electronUpdater.ts setFeedURL); unset means updates are fully
+# disabled, so this RFC-reserved .invalid placeholder is never contacted.
+# RELEASE TRAP: replacing this url is NOT enough to ship real updates — end
+# users launch with no env vars, so updateFeedUrl() must also gain a packaged
+# fallback to the baked app-update.yml feed (env stays an override). Without
+# the code change a shipped release silently never updates.
+publish:
+  provider: generic
+  url: https://updates.dohc.invalid/desktop

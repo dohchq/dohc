@@ -1,0 +1,188 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { UpdateStateEvent } from "../../ipc/bridgeContract";
+import { StatusBar } from "./StatusBar";
+
+// Captures the renderer-side update listener exactly as the preload would
+// install it — the auto-updater itself never runs in dev/test (gated on
+// isPackaged + DOHC_UPDATE_URL), so the surface is driven with a fake.
+let pushUpdate: ((state: UpdateStateEvent) => void) | null = null;
+const unsubscribe = vi.fn();
+
+beforeEach(() => {
+  vi.stubGlobal("dohcDesktop", {
+    onUpdateState: (listener: (state: UpdateStateEvent) => void) => {
+      pushUpdate = listener;
+      return unsubscribe;
+    },
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+  pushUpdate = null;
+});
+
+function renderBar(
+  props: Partial<Parameters<typeof StatusBar>[0]> = {},
+) {
+  return render(
+    <StatusBar
+      workspaceName="my-notes"
+      syncStatus={props.syncStatus ?? null}
+      agentActive={props.agentActive ?? false}
+      conflictSummaries={props.conflictSummaries ?? []}
+      onConnectCloud={() => {}}
+      onOpenAgent={props.onOpenAgent ?? (() => {})}
+      onOpenHistory={props.onOpenHistory ?? (() => {})}
+      onOpenSettings={() => {}}
+      onToggleTheme={() => {}}
+      onContextMenu={props.onContextMenu ?? (() => {})}
+    />,
+  );
+}
+
+describe("update toast", () => {
+  it("shows the machine's message when an update becomes ready, and dismisses", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    });
+    const toast = await screen.findByTestId("update-toast");
+    expect(toast.textContent).toContain("Update 1.2.3 is ready");
+
+    await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+  });
+
+  it("ignores every non-ready state (checking/downloading/error stay silent)", () => {
+    renderBar();
+    for (const status of ["checking", "downloading", "offline", "error"] as const) {
+      pushUpdate?.({ status, message: "noise" });
+    }
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+  });
+
+  it("unsubscribes from the update channel on unmount", () => {
+    renderBar().unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+});
+
+describe("sync status surface", () => {
+  it("keeps the pinned testid/data-state and shows no count when clean", () => {
+    renderBar({
+      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+    });
+    const status = screen.getByTestId("sync-status");
+    expect(status.getAttribute("data-state")).toBe("synced");
+    expect(status.textContent).not.toContain("(");
+  });
+
+  it("shows the workspace name in the left cluster (plan E2 status-bar item)", () => {
+    renderBar();
+    expect(screen.getByTestId("status-workspace").textContent).toBe("my-notes");
+  });
+
+  it("appends the conflict COUNT only in the conflict state", () => {
+    renderBar({
+      syncStatus: {
+        state: "conflict",
+        pendingChangeCount: 2,
+        lastSyncedAtMs: null,
+        conflictCount: 2,
+      },
+    });
+    expect(screen.getByTestId("sync-status").textContent).toContain("Conflict (2)");
+  });
+});
+
+describe("notice center", () => {
+  it("collects conflict, agent, and update notices in one popover", async () => {
+    const onOpenHistory = vi.fn();
+    const onOpenAgent = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "conflict",
+        pendingChangeCount: 2,
+        lastSyncedAtMs: null,
+        conflictCount: 2,
+      },
+      agentActive: true,
+      conflictSummaries: ["Both sides changed notes/today.md."],
+      onOpenHistory,
+      onOpenAgent,
+    });
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const center = screen.getByTestId("notice-center");
+    expect(within(center).getByTestId("notice-center-count").textContent).toBe("3");
+    expect(within(center).getByTestId("notice-sync-conflict").textContent).toContain(
+      "Both sides changed notes/today.md.",
+    );
+    expect(within(center).getByTestId("notice-agent-active").textContent).toContain(
+      "Agent running",
+    );
+    expect(within(center).getByTestId("notice-update-ready").textContent).toContain(
+      "Update 1.2.3 is ready",
+    );
+
+    await userEvent.click(within(center).getByRole("button", { name: "Review" }));
+    expect(onOpenHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", { name: "Open" }),
+    );
+    expect(onOpenAgent).toHaveBeenCalledOnce();
+  });
+
+  it("shows all clear when there are no notices", async () => {
+    renderBar({
+      syncStatus: { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null },
+    });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+  });
+
+  it("keeps the notice center open when dismissing the update toast", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
+
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+  });
+
+  it("closes the notice popover on outside click while preserving inside clicks", async () => {
+    renderBar({
+      syncStatus: {
+        state: "cloud-disconnected",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+      },
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("notice-center"));
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+
+    await userEvent.click(document.body);
+    expect(screen.queryByTestId("notice-center")).toBeNull();
+  });
+});

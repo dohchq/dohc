@@ -1,0 +1,519 @@
+import {
+  classifyPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
+import type { ZipEntry } from "./zipWriter";
+
+// Deepest already-existing ancestor of a (possibly not-yet-created) path —
+// the part realpath can resolve, so we can check containment BEFORE mkdir.
+export async function existingAncestor(path: string): Promise<string> {
+  let current = path;
+  for (;;) {
+    try {
+      return await realpath(current);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
+  }
+}
+import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
+
+const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
+
+// True iff `child` is the same as or nested under `parent` (both real paths).
+// On Windows, relative() across drives returns an absolute path (e.g.
+// C:\ws -> D:\evil gives "D:\evil"), which is not a descendant.
+function isInside(parent: string, child: string): boolean {
+  if (child === parent) return true;
+  const rel = relative(parent, child);
+  return (
+    rel.length > 0 &&
+    !isAbsolute(rel) &&
+    !rel.startsWith("..") &&
+    !rel.startsWith(`${sep}`)
+  );
+}
+
+// Truncate a (decorative) basename so `${prefix}${name}` fits NAME_MAX — the
+// 255-BYTE per-component limit on ext4/APFS/NTFS. Byte-accurate, not char:
+// a multibyte sequence split at the cut decodes to U+FFFD, which we trim so
+// the trash entry never carries a dangling replacement char.
+function fitWithinNameMax(name: string, prefix: string): string {
+  const NAME_MAX = 255;
+  const budget = NAME_MAX - Buffer.byteLength(prefix, "utf8");
+  if (budget <= 0) return "";
+  if (Buffer.byteLength(name, "utf8") <= budget) return name;
+  return Buffer.from(name, "utf8")
+    .subarray(0, budget)
+    .toString("utf8")
+    .replace(/\uFFFD+$/, "");
+}
+
+export async function listFiles(
+  rootPath: string,
+): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
+  const entries: WorkspaceFileEntry[] = [];
+  // Directories ride along so EMPTY folders stay visible in the explorer
+  // tree (the walk already visits every dir — this is purely additive).
+  const folders: string[] = [];
+
+  async function walk(dir: string, prefix: string): Promise<void> {
+    const dirents = await readdir(dir, { withFileTypes: true });
+    for (const dirent of dirents) {
+      const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+      // Never follow symlinks: a dir/file symlink could point outside the
+      // workspace and leak names or recurse into foreign trees.
+      if (dirent.isSymbolicLink()) continue;
+      if (dirent.isDirectory()) {
+        if (!IGNORED_DIRS.has(dirent.name)) {
+          folders.push(rel);
+          await walk(join(dir, dirent.name), rel);
+        }
+      } else if (dirent.isFile()) {
+        entries.push({ path: rel, kind: classifyPath(rel).kind });
+      }
+    }
+  }
+
+  await walk(rootPath, "");
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  folders.sort((a, b) => a.localeCompare(b));
+  return { files: entries, folders };
+}
+
+export async function createFile(
+  rootPath: string,
+  relativePath: string,
+): Promise<string> {
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const absolute = join(rootPath, validated.normalized);
+  // Lexical validation can't see symlinks: a workspace-internal symlinked
+  // ancestor ("link/evil.md") could resolve outside the root. Check the real
+  // deepest-existing ancestor BEFORE mkdir, so a symlinked ancestor can't even
+  // cause directories to be created outside the workspace.
+  const realRoot = await realpath(rootPath);
+  if (!isInside(realRoot, await existingAncestor(dirname(absolute)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
+  await mkdir(dirname(absolute), { recursive: true });
+  // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
+  // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
+  if (!isInside(realRoot, await realpath(dirname(absolute)))) {
+    throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
+  }
+  await writeFile(absolute, "", { flag: "wx" }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  });
+  return validated.normalized;
+}
+
+// Imports copy external files into the workspace root by basename; existing
+// files are never overwritten (skipped, not errored — imports are additive).
+// TRUSTS ITS CALLER: copyFile FOLLOWS symlinks and this does no lstat. Its only
+// trusted entrypoint is the main-process file-dialog import (paths the user
+// picked in a native dialog). The UNtrusted entrypoint (renderer-supplied OS
+// drag-in) is importDroppedPaths, which lstat-screens sources first — never
+// wire renderer input straight into here.
+export async function copyIntoWorkspace(
+  rootPath: string,
+  absolutePaths: string[],
+): Promise<string[]> {
+  const imported: string[] = [];
+  for (const source of absolutePaths) {
+    const name = basename(source);
+    const validated = validateUserWritePath(name);
+    if (!validated.ok) continue;
+    try {
+      await copyFile(source, join(rootPath, validated.normalized), constants.COPYFILE_EXCL);
+      imported.push(validated.normalized);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  return imported;
+}
+
+// Defense in depth beyond the zod cap (bridgeContract): the handler refuses an
+// over-long batch ITSELF, so a code path that ever reaches here without the
+// schema (a future internal caller, a test) still cannot flood the import.
+const MAX_IMPORT_PATHS = 100;
+
+// OS drag-in import. TRUST DELTA vs copyIntoWorkspace's dialog path: these
+// absolute source paths are RENDERER-supplied (webUtils.getPathForFile in the
+// preload), not minted by a main-process file dialog — a compromised renderer
+// could forge the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to
+// have it copied into a possibly cloud-synced workspace. That residual is
+// inherent once file-write IPCs exist at all (renderer-compromise is already
+// game-over) and a GENUINE user drag may legitimately include any file the
+// user owns, so we do NOT gate by location. We DO bound it:
+//   - count is capped HERE (not just at the zod boundary);
+//   - only REAL regular files import — a FINAL-component symlink is refused
+//     before it is followed (lstat the original source, never realpath-then-
+//     isFile, which would promote a planted symlink-to-secret under the link's
+//     own innocuous name); directories and special files are skipped;
+//   - a source whose CANONICAL path is inside ANY registered workspace's .dohc
+//     is refused (the check runs on realpath(source), so an ancestor symlink
+//     cannot smuggle a metadata source past it).
+// EXPLICIT RESIDUAL (adversarial review, e3fix): a real regular file reached
+// through a symlinked ANCESTOR (e.g. drop `/stage/link/id_rsa` where
+// `link -> ~/.ssh`) still imports — lstat refuses only the final component, and
+// realpath then canonicalizes to the secret. This grants a compromised renderer
+// NOTHING beyond the residual above (it could just name `~/.ssh/id_rsa`
+// directly), and the only general guard — refusing every symlinked ancestor —
+// would false-reject legitimate drags through SYSTEM symlinks (macOS
+// /tmp -> /private/tmp, /var -> /private/var), i.e. silent import loss for zero
+// security gain. The real defense if this matters is a visible import-confirm
+// quarantine (deferred — needs product sign-off); until then it is accepted and
+// named here. Past these guards the copy is picker-grade: the same basename-
+// only, COPYFILE_EXCL copyIntoWorkspace the import dialog uses.
+export async function importDroppedPaths(
+  rootPath: string,
+  absolutePaths: string[],
+  registeredRoots: string[],
+): Promise<string[]> {
+  if (absolutePaths.length > MAX_IMPORT_PATHS) {
+    throw new Error(`Too many files dropped at once (max ${MAX_IMPORT_PATHS})`);
+  }
+  const realRoots: string[] = [];
+  for (const root of registeredRoots) {
+    try {
+      realRoots.push(await realpath(root));
+    } catch {
+      // A registered-but-deleted workspace can't contain a source.
+    }
+  }
+  const usable: string[] = [];
+  for (const source of absolutePaths) {
+    if (!isAbsolute(source)) continue;
+    let real: string;
+    try {
+      // lstat the ORIGINAL source (NOT realpath(source)): lstat does not follow
+      // the FINAL component, so a dropped symlink is observed AS a symlink and
+      // refused — never realpath-then-isFile, which would promote a planted
+      // symlink-to-secret. Only a real, regular file imports — directories,
+      // sockets, devices, FIFOs, and final-component symlinks all fall through.
+      // (Ancestor symlinks are the named residual above; realpath below
+      // canonicalizes for the .dohc-containment gate, which therefore holds
+      // even when an ancestor link was traversed.)
+      const linkStat = await lstat(source);
+      if (linkStat.isSymbolicLink() || !linkStat.isFile()) continue;
+      real = await realpath(source);
+    } catch {
+      continue;
+    }
+    const insideMetadata = realRoots.some((root) =>
+      isInside(join(root, ".dohc"), real),
+    );
+    if (insideMetadata) continue;
+    usable.push(real);
+  }
+  return copyIntoWorkspace(rootPath, usable);
+}
+
+// Creates a folder (recursively) with the createFile containment sandwich:
+// lexical validation first, then realpath containment of the deepest existing
+// ancestor BEFORE mkdir, re-checked after.
+export async function createFolder(
+  rootPath: string,
+  relativePath: string,
+): Promise<string> {
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
+  }
+  const absolute = join(rootPath, validated.normalized);
+  const realRoot = await realpath(rootPath);
+  if (!isInside(realRoot, await existingAncestor(absolute))) {
+    throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
+  }
+  await mkdir(absolute, { recursive: true });
+  if (!isInside(realRoot, await realpath(absolute))) {
+    throw new Error(`Invalid folder path (escapes workspace): ${relativePath}`);
+  }
+  return validated.normalized;
+}
+
+// ONE move engine for rename + drag-move (F2 and DnD both land here).
+// Rules, in order:
+//   1. BOTH sides pass validateUserWritePath — traversal/absolute/.dohc are
+//      refused on either side (isReservedPath inside; never special-cased).
+//   2. Folder into itself/descendant refused (mirrors planDrop's UI no-op).
+//   3. Source: realpath-contain the PARENT, then refuse a symlink source —
+//      the tree never lists symlinks, so no legitimate caller moves one.
+//   4. Destination parent: existingAncestor containment BEFORE mkdir -p,
+//      re-checked after (the createFile sandwich, verbatim).
+//   5. Overwrite refused: an existing destination throws — EXCEPT when
+//      realpath(dest) === realpath(source), the case-only rename on a
+//      case-insensitive filesystem (on Linux this branch never triggers).
+//      No merge semantics this phase: dir-onto-dir with the same name fails.
+//   6. One fs.rename (atomic on the same device). POSIX rename silently
+//      clobbers, so step 5 is the only overwrite guard; the check→rename
+//      TOCTOU window is accepted — main is the single writer on this path
+//      and the watcher records whatever actually happened.
+export async function movePath(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<string> {
+  const from = validateUserWritePath(fromPath);
+  if (!from.ok) {
+    throw new Error(`Invalid move source (${from.reason}): ${fromPath}`);
+  }
+  const to = validateUserWritePath(toPath);
+  if (!to.ok) {
+    throw new Error(`Invalid move destination (${to.reason}): ${toPath}`);
+  }
+  if (to.normalized === from.normalized || to.normalized.startsWith(`${from.normalized}/`)) {
+    throw new Error(`Cannot move a path into itself: ${fromPath}`);
+  }
+  const realRoot = await realpath(rootPath);
+  const absFrom = join(rootPath, from.normalized);
+  const realFromParent = await realpath(dirname(absFrom));
+  if (!isInside(realRoot, realFromParent)) {
+    throw new Error(`Invalid move source (escapes workspace): ${fromPath}`);
+  }
+  const sourceStat = await lstat(absFrom);
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(`Refusing to move a symlink: ${fromPath}`);
+  }
+  // Canonical source — used both for the descendant guard below and the
+  // case-only-rename carve-out. The symlink refusal above means realpath here
+  // resolves only ancestor links, never the source itself.
+  const realFrom = await realpath(absFrom);
+  const absTo = join(rootPath, to.normalized);
+  if (!isInside(realRoot, await existingAncestor(dirname(absTo)))) {
+    throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
+  }
+  await mkdir(dirname(absTo), { recursive: true });
+  const realDestParent = await realpath(dirname(absTo));
+  if (!isInside(realRoot, realDestParent)) {
+    throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
+  }
+  // Descendant guard, case-fold safe. The lexical self/descendant refusal at
+  // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
+  // "foo/bar" slips past it and would move a folder into its own (same-inode)
+  // subtree — corrupting it. Compare REAL paths: if the destination's parent
+  // resolves to the source itself or anywhere beneath it, refuse. (For a file
+  // source this is always false — a file has no descendants.)
+  if (isInside(realFrom, realDestParent)) {
+    throw new Error(`Cannot move a path into itself: ${fromPath}`);
+  }
+  const destExists = await lstat(absTo).then(
+    () => true,
+    () => false,
+  );
+  if (destExists) {
+    // Case-only rename carve-out: on a case-insensitive filesystem the
+    // destination "exists" because it IS the source under another case.
+    // Compare REAL paths (never strings) so a genuinely distinct file that
+    // case-collides still refuses — the carve-out must not reopen the
+    // overwrite hole.
+    if (realFrom !== (await realpath(absTo))) {
+      throw new Error(`Destination already exists: ${toPath}`);
+    }
+  }
+  // One fs.rename (atomic on the same device). The dest-exists check above and
+  // this rename have a TOCTOU window (a colluding LOCAL process could create
+  // the destination in between, and POSIX rename clobbers); accepted because
+  // main is the single writer on this path and Node exposes no renameat2
+  // RENAME_NOREPLACE. The watcher records whatever actually landed.
+  await rename(absFrom, absTo);
+  return to.normalized;
+}
+
+// Deletes are always RECOVERABLE — never a hard delete:
+//   1. shell.trashItem (injected): the OS trash on all three platforms
+//      (Windows IFileOperation, macOS trashItemAtURL, Linux g_file_trash).
+//   2. Fallback when the OS rejects (g_file_trash refuses cross-filesystem
+//      paths without a .Trash topdir — e.g. /mnt/c under WSL): MOVE the
+//      target into <root>/.dohc/trash/<epoch>-<leaf>. Same-filesystem by
+//      construction (the trash dir lives inside the workspace), so the
+//      rename succeeds exactly where trashItem failed. .dohc is invisible
+//      to tree/watcher/sync (hasIgnoredSegment), so the entry disappears
+//      like OS trash — and the RECOVERY STORY is opening
+//      <workspace>/.dohc/trash in any file manager and moving it back.
+// The metadata dir resolves through resolveWorkspaceMetadataDir (refuses a
+// symlinked .dohc), and the trash SUBDIR is re-validated after mkdir the same
+// way — a planted `.dohc/trash -> outside` symlink (the same malicious
+// attached-workspace threat, one level deeper; mkdir{recursive} is a silent
+// no-op on an existing symlink-to-dir) is refused before any rename.
+export async function deletePath(
+  rootPath: string,
+  relativePath: string,
+  trashItem: (absolutePath: string) => Promise<void>,
+): Promise<{ trashed: boolean }> {
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid delete path (${validated.reason}): ${relativePath}`);
+  }
+  const realRoot = await realpath(rootPath);
+  const absTarget = join(rootPath, validated.normalized);
+  // lstat does NOT follow the final component: decide on the LINK, not what it
+  // points at. Deleting a symlink must trash the LINK itself — realpath-ing it
+  // would resolve to (and trash) its target, which could be a real file
+  // anywhere on disk. A regular file/dir still goes through the realpath-then-
+  // contain idiom; a symlinked ANCESTOR escape is caught either way (lstat
+  // follows ancestor links, so realpath(absTarget) on a non-symlink leaf still
+  // resolves an escaping ancestor and fails containment).
+  const linkStat = await lstat(absTarget);
+  let target: string;
+  if (linkStat.isSymbolicLink()) {
+    const realParent = await realpath(dirname(absTarget));
+    if (!isInside(realRoot, realParent)) {
+      throw new Error(`Delete path escapes workspace: ${relativePath}`);
+    }
+    target = join(realParent, basename(absTarget));
+  } else {
+    target = await realpath(absTarget);
+    if (!isInside(realRoot, target)) {
+      throw new Error(`Delete path escapes workspace: ${relativePath}`);
+    }
+    if (target === realRoot) {
+      throw new Error("Refusing to delete the workspace root");
+    }
+  }
+  try {
+    await trashItem(target);
+    return { trashed: true };
+  } catch {
+    const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
+    await mkdir(trashDir, { recursive: true });
+    // Validate AFTER mkdir, lstat-first (a pre-check is insufficient: mkdir
+    // {recursive} silently no-ops on an existing symlink-to-dir, so only the
+    // post-mkdir state proves where the rename would land). The check sits
+    // immediately before the rename to keep the swap window minimal; a
+    // colluding local process racing a symlink into .dohc between this check
+    // and the rename is the accepted residual (Node has no renameat dirfd).
+    const trashStat = await lstat(trashDir);
+    if (trashStat.isSymbolicLink() || !trashStat.isDirectory()) {
+      throw new Error(".dohc/trash must be a real directory inside the workspace");
+    }
+    if (!isInside(realRoot, await realpath(trashDir))) {
+      throw new Error(".dohc/trash resolves outside the workspace");
+    }
+    // Collision-resistant name: back-to-back deletes (multi-select) share a
+    // Date.now() tick, and POSIX rename silently CLOBBERS an existing
+    // destination — two same-basename deletes would destroy the first file's
+    // bytes. The per-call UUID makes every trash entry unique. The basename is
+    // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
+    // a long source name + the 50-odd-byte unique prefix must not ENAMETOOLONG.
+    const prefix = `${Date.now()}-${randomUUID()}-`;
+    await rename(target, join(trashDir, `${prefix}${fitWithinNameMax(basename(target), prefix)}`));
+    return { trashed: false };
+  }
+}
+
+// Export bounds: policy caps for what main will buffer into one in-memory
+// archive (the container itself tops out at 65k entries / 4GB — zipWriter).
+const MAX_ZIP_ENTRIES = 2000;
+const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
+
+// Gathers the zip entries for a workspace export: the whole workspace, one
+// folder, or one file. Ignored segments (.dohc, .git, node_modules) and
+// symlinks never export — the same walk rules as listFiles. Bounded: more
+// than MAX_ZIP_ENTRIES files or MAX_ZIP_TOTAL_BYTES refuses (loudly, before
+// buffering everything) rather than producing a surprise multi-GB archive.
+export async function collectZipEntries(
+  rootPath: string,
+  relativePath?: string,
+): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  const realRoot = await realpath(rootPath);
+  let startAbsolute = realRoot;
+  let prefix = "";
+  let baseName = basename(realRoot);
+  if (relativePath !== undefined) {
+    const validated = validateUserWritePath(relativePath);
+    if (!validated.ok) {
+      throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
+    }
+    const realTarget = await realpath(join(rootPath, validated.normalized));
+    if (!isInside(realRoot, realTarget)) {
+      throw new Error(`Export path escapes workspace: ${relativePath}`);
+    }
+    startAbsolute = realTarget;
+    // Entries keep the exported folder/file as their top-level name so the
+    // extracted archive unpacks to "notes/…", not loose children.
+    prefix = basename(validated.normalized);
+    baseName = prefix.replace(/\.[^.]+$/, "") || prefix;
+  }
+
+  const entries: ZipEntry[] = [];
+  let totalBytes = 0;
+
+  async function add(absolute: string, archivePath: string): Promise<void> {
+    // Open no-follow, then fstat + bounded read from the SAME descriptor. The
+    // walk skips symlink dirents, but a file that was regular at readdir() time
+    // could be swapped for a symlink before we read it (TOCTOU) — O_NOFOLLOW
+    // makes open fail (ELOOP) on a final-component symlink, closing that
+    // window. Size comes from fstat on the open fd (not a prior stat that a
+    // concurrent grow could outrun), and the read is bounded to that size, so a
+    // file that grows after the cap check cannot blow the in-memory budget.
+    const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) {
+        throw new Error(`Refusing to export a non-regular file: ${archivePath}`);
+      }
+      totalBytes += st.size;
+      if (entries.length >= MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
+        throw new Error(
+          `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
+        );
+      }
+      const data = Buffer.alloc(st.size);
+      let read = 0;
+      while (read < data.length) {
+        const { bytesRead } = await handle.read(data, read, data.length - read, read);
+        if (bytesRead === 0) break;
+        read += bytesRead;
+      }
+      entries.push({
+        path: archivePath,
+        data: read === data.length ? data : data.subarray(0, read),
+        modifiedAt: st.mtime,
+      });
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async function walk(dir: string, archiveDir: string): Promise<void> {
+    const dirents = await readdir(dir, { withFileTypes: true });
+    for (const dirent of dirents) {
+      if (dirent.isSymbolicLink()) continue;
+      const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (dirent.isDirectory()) {
+        if (!IGNORED_DIRS.has(dirent.name)) await walk(join(dir, dirent.name), archivePath);
+      } else if (dirent.isFile()) {
+        await add(join(dir, dirent.name), archivePath);
+      }
+    }
+  }
+
+  if ((await stat(startAbsolute)).isDirectory()) {
+    await walk(startAbsolute, prefix);
+  } else {
+    await add(startAbsolute, prefix);
+  }
+  return { entries, baseName };
+}
