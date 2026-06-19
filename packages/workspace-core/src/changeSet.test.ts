@@ -72,6 +72,17 @@ describe("review requirements", () => {
 });
 
 describe("change provenance", () => {
+  it("accepts provenance whose source matches the change set kind", () => {
+    expect(() =>
+      createChangeSet({
+        kind: "history-restore",
+        author: { kind: "user", userId: "user-1" },
+        summary: "Restored a file",
+        provenance: { source: "history-restore", restoreOfChangeSetId: "change-1" },
+      }),
+    ).not.toThrow();
+  });
+
   it("rejects provenance whose source does not match the change set kind", () => {
     expect(() =>
       createChangeSet({
