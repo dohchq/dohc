@@ -60,7 +60,7 @@ function renderMarkdownImage(attrs: {
       .replaceAll(']', '\\]'),
   )
   const src = escapeMarkdownLineBreaks(
-    String(attrs.src ?? '')
+    sanitizeImageSrc(String(attrs.src ?? ''))
       .replaceAll('\\', '\\\\')
       .replaceAll('(', '\\(')
       .replaceAll(')', '\\)'),
@@ -77,6 +77,17 @@ function escapeMarkdownLineBreaks(value: string): string {
   return value
     .replaceAll('\n', '\\n')
     .replaceAll('\r', '\\r')
+}
+
+function sanitizeImageSrc(src: string): string {
+  const trimmed = src.trim()
+  if (trimmed.length === 0) return ''
+  const compactProtocol = /^[a-z][a-z\d+.-]*:/i.exec(
+    trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, ''),
+  )?.[0]
+  if (!compactProtocol) return trimmed
+  const protocol = compactProtocol.slice(0, -1).toLowerCase()
+  return protocol === 'http' || protocol === 'https' ? trimmed : ''
 }
 
 function escapedPunctuationValue(token: {
@@ -133,7 +144,7 @@ const DohcImage = Node.create({
         getAttrs: (dom) => {
           if (typeof dom === 'string') return false
           return {
-            src: dom.getAttribute('src') || '',
+            src: sanitizeImageSrc(dom.getAttribute('src') || ''),
             alt: dom.getAttribute('alt') || '',
             title: dom.getAttribute('title') || null,
           }
@@ -144,7 +155,7 @@ const DohcImage = Node.create({
 
   renderHTML({ node }) {
     const attrs: Record<string, string> = {
-      src: String(node.attrs.src ?? ''),
+      src: sanitizeImageSrc(String(node.attrs.src ?? '')),
       alt: String(node.attrs.alt ?? ''),
     }
     if (typeof node.attrs.title === 'string' && node.attrs.title.length > 0) {
@@ -157,7 +168,7 @@ const DohcImage = Node.create({
 
   parseMarkdown: (token, helpers) =>
     helpers.createNode('image', {
-      src: imageTokenAttr(token, 'src', token.href),
+      src: sanitizeImageSrc(imageTokenAttr(token, 'src', token.href)),
       alt: imageAltText(token),
       title: imageTokenAttr(token, 'title', token.title) || null,
     }),

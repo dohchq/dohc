@@ -265,6 +265,8 @@ test("history restore smoke: edit, restore, Ctrl+Z undo, restore again, durable 
 });
 
 test("history restore smoke: created file restore moves it away and undo recreates it", async () => {
+  // Restore flows wait on filesystem watcher/history settle loops; the longer
+  // timeout is a CI safety margin, not expected steady-state duration.
   test.setTimeout(90_000);
   const { home, root } = await seedWorkspace("history-restore-created", {
     "notes/anchor.md": "anchor\n",
@@ -334,6 +336,8 @@ test("history restore smoke: created file restore moves it away and undo recreat
 });
 
 test("history restore smoke: deleted file restore recreates it and undo removes it again", async () => {
+  // Restore flows wait on filesystem watcher/history settle loops; the longer
+  // timeout is a CI safety margin, not expected steady-state duration.
   test.setTimeout(90_000);
   const { home, root } = await seedWorkspace("history-restore-deleted", {
     "notes/deleted.md": "deleted body\n",
@@ -403,6 +407,8 @@ test("history restore smoke: deleted file restore recreates it and undo removes 
 });
 
 test("history restore smoke: stale live files are refused and do not create restore provenance", async () => {
+  // Restore flows wait on filesystem watcher/history settle loops; the longer
+  // timeout is a CI safety margin, not expected steady-state duration.
   test.setTimeout(90_000);
   const { home, root } = await seedWorkspace("history-restore-stale", {
     "notes/stale.md": "before\n",

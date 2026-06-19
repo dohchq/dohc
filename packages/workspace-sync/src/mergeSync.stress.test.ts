@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FetchLike } from "./cloudSync";
 import { createMergeSync, type MergeSync } from "./cloudSync";
+import { nativeTmpdir } from "./testTemp";
 
 type RemoteEntry = {
   id: string;
@@ -24,11 +24,6 @@ function seededRandom(seed: number): () => number {
 
 function pick<T>(rng: () => number, values: T[]): T {
   return values[Math.floor(rng() * values.length)]!;
-}
-
-function nativeTmpdir(): string {
-  if (process.platform !== "win32" && existsSync("/tmp")) return "/tmp";
-  return tmpdir();
 }
 
 function fakeServer() {
@@ -160,6 +155,13 @@ beforeEach(async () => {
   rootB = await makeRoot("b");
 });
 
+afterEach(async () => {
+  await Promise.all([
+    rm(rootA, { recursive: true, force: true }),
+    rm(rootB, { recursive: true, force: true }),
+  ]);
+});
+
 async function makeRoot(label: string): Promise<string> {
   const root = await mkdtemp(join(nativeTmpdir(), `dohc-sync-stress-${label}-`));
   await mkdir(join(root, ".dohc", "history"), { recursive: true });
@@ -217,7 +219,7 @@ async function assertConverged(
   await dohcSurvived(rootB);
   expect(Object.keys(remote).some((path) => path.endsWith(".conflict"))).toBe(false);
   for (const body of Object.values(remote)) {
-    expect(body).not.toMatch(/<<<<<<<|>>>>>>>/);
+    expect(body).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
   }
 }
 
@@ -317,8 +319,8 @@ describe("merge sync deterministic collaboration stress", () => {
 
         expect(await readFile(join(rootB, path), "utf8")).toBe(bEdit);
         expect(await readFile(join(rootB, `${path}.conflict`), "utf8")).toBe(aEdit);
-        expect(await readFile(join(rootB, path), "utf8")).not.toMatch(/<<<<<<<|>>>>>>>/);
-        expect(await readFile(join(rootB, `${path}.conflict`), "utf8")).not.toMatch(/<<<<<<<|>>>>>>>/);
+        expect(await readFile(join(rootB, path), "utf8")).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
+        expect(await readFile(join(rootB, `${path}.conflict`), "utf8")).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
 
         const push = await syncB.push();
         expect(push.pushed, trace.join("\n")).toBe(0);

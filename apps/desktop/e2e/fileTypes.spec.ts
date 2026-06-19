@@ -54,6 +54,7 @@ async function seededWorkspace(): Promise<string> {
 
 async function replaceCodeMirror(page: Page, editorTestId: string, text: string) {
   const editor = page.getByTestId(editorTestId).locator(".cm-content");
+  await expect(editor).toBeVisible();
   await editor.click();
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.type(text);
@@ -90,6 +91,7 @@ test("each file type opens its own native view", async () => {
   await page.screenshot({ path: `${SHOT_DIR}/markdown--1280x800--light.png` });
 
   await open("data/transactions.csv");
+  // The CSV grid adds a leading row-actions column before the source columns.
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(3);
   await expect(page.getByTestId("view-csv").locator("input").nth(1)).toHaveValue(
     "amount",
@@ -100,6 +102,7 @@ test("each file type opens its own native view", async () => {
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(0);
   await expect(page.getByTestId("csv-raw-editor")).toHaveValue(/date,amount/);
   await page.getByTestId("csv-raw-toggle").click();
+  // Back in table mode: row-actions column + date + amount.
   await expect(page.getByTestId("view-csv").locator("th")).toHaveCount(3);
 
   await open("data/config.json");

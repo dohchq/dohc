@@ -236,7 +236,6 @@ describe("watchWorkspaceEvents", () => {
 
   it("ignores .dohc writes but reports user files (chokidar passes absolute paths to ignored)", async () => {
     const { mkdir, rm, writeFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
     const root = await mkWatchRoot();
     try {
       const batches: string[][] = [];
@@ -291,7 +290,6 @@ describe("rule unification with workspace-core", () => {
 describe("settle max-window cap", () => {
   it("flushes a batch under continuous writes instead of starving forever", async () => {
     const { rm, writeFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
     const root = await mkWatchRoot();
     try {
       const batches: string[][] = [];

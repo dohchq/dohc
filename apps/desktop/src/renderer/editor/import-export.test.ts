@@ -20,7 +20,7 @@ function yDocFromBody(content: JSONContent[]): Y.Doc {
   prosemirrorJSONToYXmlFragment(
     getDohcProseMirrorSchema(),
     { type: 'doc', content },
-    doc.getXmlFragment('body'),
+    getDohcYDocBodyFragment(doc),
   )
   return doc
 }
@@ -206,6 +206,8 @@ describe('desktop editor markdown round-trip', () => {
       '',
       'A paragraph with **bold**, *emphasis*, ***both***, `code`,',
       '[a link](https://example.com), and ![diagram](assets/diagram.png "Architecture").',
+      // Backslashes in image attributes are escaped on serialization so
+      // source meaning survives the rich editor round-trip.
       'Backslash image: ![diagram \\ one](assets\\diagram.png "Title \\ one").',
       '',
       '```ts',
@@ -277,6 +279,38 @@ describe('desktop editor markdown round-trip', () => {
     expect(output).toBe(
       '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n',
     )
+  })
+
+  it('strips unsafe image protocols while preserving http and relative images', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '![relative](assets/diagram.png)',
+        '![remote](https://example.com/diagram.png)',
+        '![bad](javascript:alert)',
+        '![data](data:image/svg+xml;base64,PHN2Zz4=)',
+      ].join('\n'),
+      [
+        '![relative](assets/diagram.png)',
+        '![remote](https://example.com/diagram.png)',
+        '![bad]()',
+        '![data]()',
+      ],
+    )
+    expect(
+      yDocToMarkdown(
+        yDocFromBody([
+          {
+            type: 'paragraph',
+            content: [
+              {
+                type: 'image',
+                attrs: { alt: 'split', src: 'java\nscript:alert', title: null },
+              },
+            ],
+          },
+        ]),
+      ),
+    ).toBe('![split]()')
   })
 
   it('covers GFM tables, task lists, and strikethrough', () => {

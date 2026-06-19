@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { launchApp } from "./launch";
 
-// Phase E5 graph gate: local-first workspace graph from workspace links.
-// It proves wikilinks, relative markdown links, unresolved-link notice, and
-// click-to-open through the same tab path as Explorer/Search.
+// Phase E5 graph gate: local-first workspace graph from workspace links
+// (wikilinks and relative markdown links). It proves unresolved-link notice
+// and click-to-open through the same tab path as Explorer/Search.
 
 const SCREENSHOT_DIR = "test-results/screenshots/e5-graph";
 
