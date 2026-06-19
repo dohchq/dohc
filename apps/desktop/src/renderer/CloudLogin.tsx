@@ -36,6 +36,7 @@ export function CloudLogin(props: {
     sessionRef.current = session;
     clearPollTimer();
     setPhase({ kind: "loading" });
+    setWorkspaceSynced(false);
     setSyncBusy(false);
     setSyncError(null);
     void bridge()
