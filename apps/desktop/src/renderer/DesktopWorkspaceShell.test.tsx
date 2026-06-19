@@ -1144,7 +1144,7 @@ describe("history details", () => {
     ).toBeNull();
   });
 
-  it("shows a bounded touched-file preview as compact diff buttons", async () => {
+  it("shows bounded touched-file preview labels and colored line stats", async () => {
     const bridge = makeBridge(Promise.resolve(null), [
       {
         ...changeSet("many-files", 2000, "ice edited project files"),
@@ -1172,13 +1172,22 @@ describe("history details", () => {
     expect(preview.textContent).toContain("data/old.csv");
     expect(preview.textContent).toContain("docs/renamed.md");
     expect(preview.textContent).toContain("+1");
-    expect(within(preview).getAllByTestId("history-diff-open")).toHaveLength(4);
+    expect(within(preview).getAllByTestId("history-file-preview-entry")).toHaveLength(
+      4,
+    );
+    expect(within(preview).queryAllByRole("button")).toHaveLength(0);
     expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
       "+12 -5 · 1 not diffed",
     );
+    expect(historyRail.getByTestId("history-line-stats-added").className).toContain(
+      "text-success",
+    );
+    expect(historyRail.getByTestId("history-line-stats-removed").className).toContain(
+      "text-danger",
+    );
   });
 
-  it("opens a compact history file chip as a unified diff tab", async () => {
+  it("opens the whole history row as a unified diff tab", async () => {
     const bridge = makeBridge(
       Promise.resolve(null),
       [changeSet("change-1", 2000, "ice edited notes/today.md")],
@@ -1192,9 +1201,10 @@ describe("history details", () => {
       new Date(2000).toISOString(),
     );
     expect(historyRail.queryByTestId("history-change-details")).toBeNull();
+    expect(historyRail.queryByTestId("history-file-preview")).toBeNull();
     expect(historyRail.queryByText("-Before")).toBeNull();
 
-    await user.click(await historyRail.findByTestId("history-diff-open"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
 
     await waitFor(() =>
       expect(bridge.readChangeSet).toHaveBeenCalledWith({
@@ -1242,7 +1252,7 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByTestId("history-diff-open"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
     const diff = within(await screen.findByTestId("history-diff-page")).getByTestId(
       "history-diff-lines",
     );
@@ -1272,7 +1282,7 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByTestId("history-diff-open"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
 
     const diffTabPath = historyDiffTabPath("change-compare", "notes/today.md");
     expect((await screen.findByTestId(`tab-${diffTabPath}`)).dataset.active).toBe(
@@ -1297,7 +1307,7 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    await user.click(await historyRail.findByTestId("history-diff-open"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
 
     const diffPage = within(await screen.findByTestId("history-diff-page"));
     await user.click(diffPage.getByTestId("history-diff-open-file"));

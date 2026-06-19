@@ -582,23 +582,50 @@ function formatHistoryDay(recordedAtMs: number): {
   };
 }
 
-function HistoryFileChip({
-  changeSetId,
-  file,
-  onOpenDiff,
+function HistoryLineStats({
+  stats,
 }: {
-  changeSetId: string;
+  stats: NonNullable<ChangeSetRecord["lineStats"]>;
+}) {
+  const hasKnownLines =
+    stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0;
+  return (
+    <span
+      data-testid="history-line-stats"
+      className="font-mono"
+    >
+      {hasKnownLines ? (
+        <>
+          <span data-testid="history-line-stats-added" className="text-success">
+            +{stats.added}
+          </span>
+          {" "}
+          <span data-testid="history-line-stats-removed" className="text-danger">
+            -{stats.removed}
+          </span>
+        </>
+      ) : null}
+      {stats.unavailableFileCount > 0 ? (
+        <>
+          {hasKnownLines ? <span className="text-subtle"> · </span> : null}
+          <span className="text-subtle">
+            {stats.unavailableFileCount} not diffed
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+function HistoryFilePreviewPill({
+  file,
+}: {
   file: ChangeSetFilePreview;
-  onOpenDiff: (changeSetId: string, filePath: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      data-testid="history-diff-open"
-      title={`Open diff for ${file.path}`}
-      aria-label={`Open diff for ${file.path}`}
-      onClick={() => onOpenDiff(changeSetId, file.path)}
-      className={`flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded border px-1.5 text-left text-[10px] leading-none transition-colors hover:border-ink/30 hover:bg-line/60 hover:text-ink ${historyFilePreviewTone(
+    <span
+      data-testid="history-file-preview-entry"
+      className={`flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded border px-1.5 text-left text-[10px] leading-none ${historyFilePreviewTone(
         file.operation,
       )}`}
     >
@@ -609,7 +636,7 @@ function HistoryFileChip({
           {fileOperationLabel(file)}
         </span>
       ) : null}
-    </button>
+    </span>
   );
 }
 
@@ -829,9 +856,82 @@ function HistoryList({
           const day = formatHistoryDay(change.recordedAtMs);
           const lineStatsLabel = historyLineStatsText(change.lineStats);
           const boundaryLabels = historyBoundaryLabels(change.boundaryCrossingPreview);
+          const primaryFile = change.filePreview?.[0] ?? null;
+          const shouldShowFilePreview =
+            Boolean(change.filePreview?.length) && change.fileCount > 1;
           const previousDayKey =
             index > 0 ? historyDayKey(changeSets[index - 1].recordedAtMs) : null;
           const showDayHeading = previousDayKey !== day.dateTime;
+          const itemContent = (
+            <span className="flex min-w-0 items-start gap-2">
+              {change.author.kind === "agent" ? (
+                <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              ) : (
+                <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              )}
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
+                    {change.humanSummary}
+                  </span>
+                  {change.reviewRequired ? (
+                    <span
+                      data-testid="history-review-badge"
+                      className="shrink-0 rounded border border-danger/30 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+                      title={
+                        boundaryLabels.length > 0
+                          ? boundaryLabels.join(", ")
+                          : `${change.boundaryCrossingCount ?? 1} review boundary${
+                              (change.boundaryCrossingCount ?? 1) === 1
+                                ? ""
+                                : "ies"
+                            }`
+                      }
+                    >
+                      Needs review
+                    </span>
+                  ) : null}
+                </span>
+                <span className="block text-[10px] text-subtle">
+                  {historyAuthorLabel(change.author)}
+                  {" · "}
+                  <time
+                    data-testid="history-recorded-at"
+                    dateTime={recordedAt.iso}
+                    title={recordedAt.iso}
+                  >
+                    {recordedAt.label}
+                  </time>
+                  {" · "}
+                  {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
+                  {lineStatsLabel && change.lineStats ? (
+                    <>
+                      {" · "}
+                      <HistoryLineStats stats={change.lineStats} />
+                    </>
+                  ) : null}
+                </span>
+                {shouldShowFilePreview && change.filePreview ? (
+                  <span
+                    data-testid="history-file-preview"
+                    className="mt-1 flex min-w-0 flex-wrap gap-1"
+                  >
+                    {change.filePreview.map((file) => (
+                      <HistoryFilePreviewPill
+                        key={`${file.operation}:${file.path}`}
+                        file={file}
+                      />
+                    ))}
+                    {change.fileCount > change.filePreview.length ? (
+                      <span className="rounded border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-subtle">
+                        +{change.fileCount - change.filePreview.length}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+              </span>
+            </span>
+          );
           return (
             <Fragment key={change.id}>
               {showDayHeading ? (
@@ -847,83 +947,22 @@ function HistoryList({
               ) : null}
               <li
                 data-testid="change-set"
-                className="border-b border-line px-3 py-2 transition-colors hover:bg-line/25"
+                className="border-b border-line"
               >
-                <div className="flex min-w-0 items-start gap-2">
-                  {change.author.kind === "agent" ? (
-                    <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-                  ) : (
-                    <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
-                        {change.humanSummary}
-                      </span>
-                      {change.reviewRequired ? (
-                        <span
-                          data-testid="history-review-badge"
-                          className="shrink-0 rounded border border-danger/30 px-1.5 py-0.5 text-[10px] font-medium text-danger"
-                          title={
-                            boundaryLabels.length > 0
-                              ? boundaryLabels.join(", ")
-                              : `${change.boundaryCrossingCount ?? 1} review boundary${
-                                  (change.boundaryCrossingCount ?? 1) === 1
-                                    ? ""
-                                    : "ies"
-                                }`
-                          }
-                        >
-                          Needs review
-                        </span>
-                      ) : null}
-                    </div>
-                    <span className="block text-[10px] text-subtle">
-                      {historyAuthorLabel(change.author)}
-                      {" · "}
-                      <time
-                        data-testid="history-recorded-at"
-                        dateTime={recordedAt.iso}
-                        title={recordedAt.iso}
-                      >
-                        {recordedAt.label}
-                      </time>
-                      {" · "}
-                      {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-                      {lineStatsLabel ? (
-                        <>
-                          {" · "}
-                          <span
-                            data-testid="history-line-stats"
-                            className="font-mono text-subtle"
-                          >
-                            {lineStatsLabel}
-                          </span>
-                        </>
-                      ) : null}
-                    </span>
-                    {change.filePreview && change.filePreview.length > 0 ? (
-                      <div
-                        data-testid="history-file-preview"
-                        className="mt-1 flex min-w-0 flex-wrap gap-1"
-                      >
-                        {change.filePreview.map((file) => (
-                          <HistoryFileChip
-                            key={`${file.operation}:${file.path}`}
-                            changeSetId={change.id}
-                            file={file}
-                            onOpenDiff={onOpenDiff}
-                          />
-                        ))}
-                        {change.fileCount > change.filePreview.length ? (
-                          <span className="rounded border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-subtle">
-                            +{change.fileCount - change.filePreview.length}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+                {primaryFile ? (
+                  <button
+                    type="button"
+                    data-testid="history-change-open"
+                    title={`Open diff for ${primaryFile.path}`}
+                    aria-label={`Open diff for ${primaryFile.path}`}
+                    onClick={() => onOpenDiff(change.id, primaryFile.path)}
+                    className="block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  >
+                    {itemContent}
+                  </button>
+                ) : (
+                  <div className="px-3 py-2">{itemContent}</div>
+                )}
               </li>
             </Fragment>
           );
