@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { JSONContent } from '@tiptap/core'
+import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
+import * as Y from 'yjs'
 import {
+  getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
   yDocToMarkdown,
@@ -8,6 +12,16 @@ import {
 } from './import-export.js'
 
 type ExpectedMarkdownFragment = string | RegExp
+
+function yDocFromBody(content: JSONContent[]): Y.Doc {
+  const doc = new Y.Doc()
+  prosemirrorJSONToYXmlFragment(
+    getDohcProseMirrorSchema(),
+    { type: 'doc', content },
+    doc.getXmlFragment('body'),
+  )
+  return doc
+}
 
 function expectStableMarkdownRoundTrip(
   input: string,
@@ -176,6 +190,32 @@ describe('hocuspocus markdown import/export', () => {
         '\\[not a link](/somewhere)',
         '\\`not code`',
       ],
+    )
+  })
+
+  it('escapes line breaks inside inline markdown node attributes', () => {
+    const output = yDocToMarkdown(
+      yDocFromBody([
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'image',
+              attrs: {
+                alt: 'alt\ntext',
+                src: 'assets/a\nb.png',
+                title: 'title\r\nquote',
+              },
+            },
+            { type: 'text', text: ' ' },
+            { type: 'escapedPunctuation', attrs: { value: '\n' } },
+          ],
+        },
+      ]),
+    )
+
+    expect(output).toBe(
+      '![alt\\ntext](assets/a\\nb.png "title\\r\\nquote") \\\\n',
     )
   })
 

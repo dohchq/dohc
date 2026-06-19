@@ -53,18 +53,30 @@ function renderMarkdownImage(attrs: {
   src?: unknown
   title?: unknown
 }): string {
-  const alt = String(attrs.alt ?? '')
-    .replaceAll('\\', '\\\\')
-    .replaceAll('[', '\\[')
-    .replaceAll(']', '\\]')
-  const src = String(attrs.src ?? '')
-    .replaceAll('\\', '\\\\')
-    .replaceAll('(', '\\(')
-    .replaceAll(')', '\\)')
+  const alt = escapeMarkdownLineBreaks(
+    String(attrs.alt ?? '')
+      .replaceAll('\\', '\\\\')
+      .replaceAll('[', '\\[')
+      .replaceAll(']', '\\]'),
+  )
+  const src = escapeMarkdownLineBreaks(
+    String(attrs.src ?? '')
+      .replaceAll('\\', '\\\\')
+      .replaceAll('(', '\\(')
+      .replaceAll(')', '\\)'),
+  )
   const title = typeof attrs.title === 'string' && attrs.title.length > 0
-    ? ` "${attrs.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+    ? ` "${escapeMarkdownLineBreaks(
+        attrs.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"'),
+      )}"`
     : ''
   return `![${alt}](${src}${title})`
+}
+
+function escapeMarkdownLineBreaks(value: string): string {
+  return value
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '\\r')
 }
 
 function escapedPunctuationValue(token: {
@@ -193,7 +205,8 @@ const DohcEscapedPunctuation = Node.create({
       value: escapedPunctuationValue(token),
     }),
 
-  renderMarkdown: (node) => `\\${String(node.attrs?.value ?? '')}`,
+  renderMarkdown: (node) =>
+    `\\${escapeMarkdownLineBreaks(String(node.attrs?.value ?? ''))}`,
 })
 
 const DohcWikilink = Node.create({

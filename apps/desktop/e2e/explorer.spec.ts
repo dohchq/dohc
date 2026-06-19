@@ -320,9 +320,12 @@ test("drag-move into a folder (drop target + planDrop rules) and multi-select de
 
   // Drag a.md onto the target folder row → move INTO it (planDrop rule).
   const moveTransfer = await page.evaluateHandle(() => new DataTransfer());
-  await row(page, "a.md").dispatchEvent("dragstart", { dataTransfer: moveTransfer });
+  const sourceRow = await row(page, "a.md").elementHandle();
+  expect(sourceRow).not.toBeNull();
+  await sourceRow!.dispatchEvent("dragstart", { dataTransfer: moveTransfer });
   await targetRow.dispatchEvent("dragover", { dataTransfer: moveTransfer });
   await targetRow.dispatchEvent("drop", { dataTransfer: moveTransfer });
+  await sourceRow!.dispatchEvent("dragend", { dataTransfer: moveTransfer });
   await openInTree(page, "target/a.md", { click: false });
   await expect(row(page, "a.md")).toHaveCount(0);
   expect(existsSync(join(root, "target", "a.md"))).toBe(true);

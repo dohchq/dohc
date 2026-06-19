@@ -269,8 +269,9 @@ async function serverFiles(token: string, workspaceId: string): Promise<Set<stri
 }
 
 async function serverRead(token: string, workspaceId: string, path: string): Promise<string> {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const data = (await (
-    await fetch(`${API_URL}/workspaces/${workspaceId}/files/${path}`, {
+    await fetch(`${API_URL}/workspaces/${workspaceId}/files/${encodedPath}`, {
       headers: { authorization: `Bearer ${token}` },
     })
   ).json()) as { file?: { body?: string } };
