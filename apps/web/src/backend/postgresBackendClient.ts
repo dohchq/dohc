@@ -54,14 +54,16 @@ export function createPostgresBackendClient(
       if (!Array.isArray(result.files)) {
         throw new Error('Workspace API returned an invalid files response.')
       }
-      return result.files.map((file) => requireWorkspaceFile({ file }, 'listFiles'))
+      return result.files.map((file) =>
+        requireWorkspaceFile({ file }, 'listFiles', options.workspaceId),
+      )
     },
 
     async readText(path) {
       const result = await requestJson<FileResponse>(fetchImpl, filesUrl(path), {
         credentials: 'include',
       })
-      const file = requireWorkspaceFile(result, 'readText')
+      const file = requireWorkspaceFile(result, 'readText', options.workspaceId)
       if (typeof file.body !== 'string') {
         throw new Error('Workspace API readText response is missing file.body.')
       }
@@ -74,7 +76,7 @@ export function createPostgresBackendClient(
         filesUrl(input.path),
         jsonPost({ body: input.body, kind: atomKindForContentType(input.contentType) }),
       )
-      return requireWorkspaceFile(result, 'createTextFile')
+      return requireWorkspaceFile(result, 'createTextFile', options.workspaceId)
     },
 
     async writeText(input) {
@@ -83,7 +85,7 @@ export function createPostgresBackendClient(
         filesUrl(input.path),
         jsonPost({ body: input.body, expectedRevision: input.expectedRevision }),
       )
-      return requireWorkspaceFile(result, 'writeText')
+      return requireWorkspaceFile(result, 'writeText', options.workspaceId)
     },
 
     async uploadFile(input) {
@@ -101,7 +103,7 @@ export function createPostgresBackendClient(
           bytesBase64: await fileToBase64(input.file),
         }),
       )
-      return requireWorkspaceFile(result, 'uploadFile')
+      return requireWorkspaceFile(result, 'uploadFile', options.workspaceId)
     },
   }
 }
@@ -119,6 +121,7 @@ function encodeWorkspacePath(path: string) {
 function requireWorkspaceFile(
   result: FileResponse,
   operation: string,
+  expectedWorkspaceId: string,
 ): WorkspaceFile & { revision: string; body?: string } {
   const file = result.file
   if (!file || typeof file !== 'object') {
@@ -134,6 +137,9 @@ function requireWorkspaceFile(
     typeof file.updatedAt !== 'number'
   ) {
     throw new Error(`Workspace API ${operation} response contains an invalid file.`)
+  }
+  if (file.workspaceId !== expectedWorkspaceId) {
+    throw new Error(`Workspace API ${operation} response workspaceId mismatch.`)
   }
   if (typeof file.revision !== 'string' || file.revision.length === 0) {
     throw new Error(`Workspace API ${operation} response is missing file.revision.`)

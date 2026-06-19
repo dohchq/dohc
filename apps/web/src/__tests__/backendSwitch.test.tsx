@@ -248,6 +248,31 @@ describe('cloud backend client seam', () => {
     })
   })
 
+  it('rejects file payloads scoped to a different workspace', async () => {
+    const client = createPostgresBackendClient({
+      workspaceId: 'ws-1',
+      baseUrl: 'https://cloud.example',
+      fetch: vi.fn(async () =>
+        Response.json({
+          ok: true,
+          files: [
+            {
+              id: 'pg_file',
+              workspaceId: 'ws-2',
+              path: 'notes/journal.md',
+              kind: 'atom',
+              contentType: 'text/markdown',
+              revision: '7',
+              updatedAt: 7,
+            },
+          ],
+        }),
+      ),
+    })
+
+    await expect(client.listFiles()).rejects.toThrow(/workspaceId mismatch/)
+  })
+
   it('rejects malformed file responses before they weaken revision semantics', async () => {
     const client = createPostgresBackendClient({
       workspaceId: 'ws-1',
