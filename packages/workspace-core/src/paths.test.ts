@@ -5,6 +5,7 @@ import {
   defaultWorkspaceRoot,
   isReservedPath,
   validateAttachedFolder,
+  validateWorkspaceRootChoice,
   validateUserWritePath,
   hasIgnoredSegment,
 } from "./paths";
@@ -117,8 +118,7 @@ describe("path traversal", () => {
 });
 
 describe("workspace root choice", () => {
-  it("accepts ordinary folders, including outside the default root", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("accepts ordinary folders, including outside the default root", () => {
     expect(
       validateWorkspaceRootChoice("/home/ice/dohc/personal", "/home/ice").ok,
     ).toBe(true);
@@ -127,16 +127,14 @@ describe("workspace root choice", () => {
     ).toBe(true);
   });
 
-  it("rejects the filesystem root and the home directory itself", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("rejects the filesystem root and the home directory itself", () => {
     for (const dangerous of ["/", "/home/ice", "/home/ice/", "C:\\", "C:/"]) {
       const result = validateWorkspaceRootChoice(dangerous, "/home/ice");
       expect(result.ok).toBe(false);
     }
   });
 
-  it("rejects dot-segment disguises of root and home", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("rejects dot-segment disguises of root and home", () => {
     for (const disguised of [
       "/.",
       "/..",
@@ -149,21 +147,18 @@ describe("workspace root choice", () => {
     }
   });
 
-  it("rejects leading-double-slash and UNC disguises of root and home", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("rejects leading-double-slash and UNC disguises of root and home", () => {
     expect(validateWorkspaceRootChoice("//home/ice", "/home/ice").ok).toBe(false);
     expect(validateWorkspaceRootChoice("///", "/home/ice").ok).toBe(false);
     expect(validateWorkspaceRootChoice("//server", "/home/ice").ok).toBe(false);
     expect(validateWorkspaceRootChoice("//server/share", "/home/ice").ok).toBe(false);
   });
 
-  it("rejects case variants of the home directory (case-insensitive filesystems)", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("rejects case variants of the home directory (case-insensitive filesystems)", () => {
     expect(validateWorkspaceRootChoice("/Home/Ice", "/home/ice").ok).toBe(false);
   });
 
-  it("returns the normalized root so equality checks are canonical", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("returns the normalized root so equality checks are canonical", () => {
     const result = validateWorkspaceRootChoice(
       "/home/ice/dohc//personal/.",
       "/home/ice",
@@ -171,8 +166,7 @@ describe("workspace root choice", () => {
     expect(result).toEqual({ ok: true, normalized: "/home/ice/dohc/personal" });
   });
 
-  it("rejects relative paths", async () => {
-    const { validateWorkspaceRootChoice } = await import("./paths");
+  it("rejects relative paths", () => {
     expect(validateWorkspaceRootChoice("notes", "/home/ice").ok).toBe(false);
   });
 });

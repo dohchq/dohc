@@ -71,18 +71,20 @@ describe("databaseSyncStrategy (raw bytes are never CRDT-synced)", () => {
 });
 
 describe("database operation log", () => {
+  const validOperationInput = {
+    operationId: "op_1",
+    databasePath: "finance/wallet.sqlite",
+    table: "transactions",
+    op: "update" as const,
+    rowId: "txn_001",
+    payload: { category: "Groceries" },
+    version: 2,
+    appliedAt: 1_700_000_000_000,
+    author: { kind: "user" as const, userId: "local" },
+  };
+
   it("records a structured row edit as an inspectable, append-only operation", () => {
-    const op = createDatabaseOperation({
-      operationId: "op_1",
-      databasePath: "finance/wallet.sqlite",
-      table: "transactions",
-      op: "update",
-      rowId: "txn_001",
-      payload: { category: "Groceries" },
-      version: 2,
-      appliedAt: 1_700_000_000_000,
-      author: { kind: "user", userId: "local" },
-    });
+    const op = createDatabaseOperation(validOperationInput);
     expect(op.op).toBe("update");
     expect(op.rowId).toBe("txn_001");
     expect(op.version).toBe(2);
@@ -92,6 +94,33 @@ describe("database operation log", () => {
     const line = serializeDatabaseOperation(op);
     expect(line.endsWith("\n")).toBe(true);
     expect(JSON.parse(line)).toMatchObject({ operationId: "op_1", op: "update", version: 2 });
+  });
+
+  it("rejects invalid operation metadata before it reaches the append-only log", () => {
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, operationId: " " }),
+    ).toThrow(/operationId/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, databasePath: "" }),
+    ).toThrow(/databasePath/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, table: "" }),
+    ).toThrow(/table/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, rowId: "" }),
+    ).toThrow(/rowId/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, version: -1 }),
+    ).toThrow(/version/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, version: 1.5 }),
+    ).toThrow(/version/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, appliedAt: Number.NaN }),
+    ).toThrow(/appliedAt/);
+    expect(() =>
+      createDatabaseOperation({ ...validOperationInput, appliedAt: -1 }),
+    ).toThrow(/appliedAt/);
   });
 
   it("derives a stable, inspectable op-log path under .dohc for a visible db", () => {

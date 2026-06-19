@@ -47,10 +47,12 @@ describe("review requirements", () => {
 
   const crossings: BoundaryCrossing[] = [
     "public-share",
+    "external-export",
     "permission-change",
     "bulk-delete",
     "app-trust",
     "private-to-shared",
+    "unmergeable-overwrite",
   ];
 
   for (const crossing of crossings) {
@@ -67,6 +69,19 @@ describe("review requirements", () => {
       expect(set.boundaryCrossings).toContain(crossing);
     });
   }
+});
+
+describe("change provenance", () => {
+  it("rejects provenance whose source does not match the change set kind", () => {
+    expect(() =>
+      createChangeSet({
+        kind: "history-restore",
+        author: { kind: "user", userId: "user-1" },
+        summary: "Restored a file",
+        provenance: { source: "agent-run", agentRunId: "run-1" },
+      }),
+    ).toThrow(/does not match/);
+  });
 });
 
 describe("conflict summaries", () => {

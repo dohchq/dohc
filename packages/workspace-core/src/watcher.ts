@@ -4,14 +4,23 @@
 
 export type WatcherOperation = "create" | "update" | "delete" | "rename";
 
-export interface WatcherEvent {
+interface WatcherEventBase {
   path: string;
-  operation: WatcherOperation;
   sha256?: string;
   previousSha256?: string;
-  // For rename, the path the file moved from.
-  fromPath?: string;
 }
+
+export interface WatcherRenameEvent extends WatcherEventBase {
+  operation: "rename";
+  fromPath: string;
+}
+
+export interface WatcherFileEvent extends WatcherEventBase {
+  operation: Exclude<WatcherOperation, "rename">;
+  fromPath?: never;
+}
+
+export type WatcherEvent = WatcherRenameEvent | WatcherFileEvent;
 
 // A settled group of events: workspace-sync accumulates raw events and emits
 // one batch once the workspace has been quiet for `windowMs`. One batch maps

@@ -52,6 +52,17 @@ describe("deriveSyncStatus", () => {
     ).toBe("cloud-disconnected");
   });
 
+  it("keeps cloud-disconnected ahead of local-changes when offline edits are pending", () => {
+    const status = deriveSyncStatus({
+      ...base,
+      cloudEnabled: true,
+      cloudConnected: false,
+      pendingChangeCount: 2,
+    });
+    expect(status.state).toBe("cloud-disconnected");
+    expect(status.pendingChangeCount).toBe(2);
+  });
+
   it("carries pending count and last-synced through unchanged", () => {
     const status = deriveSyncStatus({
       ...base,

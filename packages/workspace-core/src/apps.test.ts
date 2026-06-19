@@ -132,6 +132,21 @@ describe("app trust gates broad workspace writes", () => {
     expect(
       appWriteAllowed(manifest, { trusted: true }, appRoot, "finance/.apps/ledger/../../../secret.md"),
     ).toBe(false);
+    expect(
+      appWriteAllowed(
+        manifest,
+        { trusted: true },
+        appRoot,
+        "finance\\.apps\\ledger\\..\\..\\..\\secret.md",
+      ),
+    ).toBe(false);
+  });
+
+  it("treats backslash control paths as .dohc writes", () => {
+    const root = parseAppManifest(JSON.stringify({ title: "Wide", write: ["**"] }));
+    expect(
+      appWriteAllowed(root, { trusted: true }, ".apps/wide", ".dohc\\apps-state.json"),
+    ).toBe(false);
   });
 });
 

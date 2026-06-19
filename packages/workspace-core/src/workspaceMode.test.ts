@@ -41,6 +41,16 @@ describe("manifest validation", () => {
     expect(result.status).toBe("invalid");
   });
 
+  it("rejects an empty workspaceId", () => {
+    const result = checkManifest({
+      version: 1,
+      workspaceId: "",
+      kind: "personal",
+      mode: "local-first",
+    });
+    expect(result.status).toBe("invalid");
+  });
+
   it("rejects an invalid kind or mode value", () => {
     expect(
       checkManifest({ version: 1, workspaceId: "ws-1", kind: "evil", mode: "local-first" }).status,

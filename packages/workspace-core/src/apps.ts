@@ -136,11 +136,18 @@ export function appWriteAllowed(
   appRoot: string,
   targetPath: string,
 ): boolean {
-  if (targetPath.split("/").includes("..")) return false;
-  if (isControlPath(targetPath)) return false;
-  if (targetPath === appRoot || targetPath.startsWith(`${appRoot}/`)) return true;
+  const normalizedTargetPath = targetPath.replace(/\\/g, "/");
+  const normalizedAppRoot = appRoot.replace(/\\/g, "/");
+  if (normalizedTargetPath.split("/").includes("..")) return false;
+  if (isControlPath(normalizedTargetPath)) return false;
+  if (
+    normalizedTargetPath === normalizedAppRoot ||
+    normalizedTargetPath.startsWith(`${normalizedAppRoot}/`)
+  ) {
+    return true;
+  }
   if (!trust.trusted) return false;
-  const rel = scopeRelative(appScope(appRoot), targetPath);
+  const rel = scopeRelative(appScope(normalizedAppRoot), normalizedTargetPath);
   if (rel === null) return false;
   return manifest.write.some((glob) => globToRegExp(glob).test(rel));
 }

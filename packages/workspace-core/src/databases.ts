@@ -95,6 +95,12 @@ export interface DatabaseOperation {
   author: ChangeAuthor;
 }
 
+function assertNonEmptyString(value: string, field: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Database operation ${field} must be a non-empty string`);
+  }
+}
+
 export function createDatabaseOperation(input: {
   operationId: string;
   databasePath: string;
@@ -106,6 +112,16 @@ export function createDatabaseOperation(input: {
   appliedAt: number;
   author: ChangeAuthor;
 }): DatabaseOperation {
+  assertNonEmptyString(input.operationId, "operationId");
+  assertNonEmptyString(input.databasePath, "databasePath");
+  assertNonEmptyString(input.table, "table");
+  assertNonEmptyString(input.rowId, "rowId");
+  if (!Number.isInteger(input.version) || input.version < 0) {
+    throw new Error("Database operation version must be a non-negative integer");
+  }
+  if (!Number.isFinite(input.appliedAt) || input.appliedAt < 0) {
+    throw new Error("Database operation appliedAt must be a valid timestamp");
+  }
   return {
     operationId: input.operationId,
     databasePath: input.databasePath,
