@@ -115,7 +115,19 @@ const DohcImage = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'img[src]' }]
+    return [
+      {
+        tag: 'img[src]',
+        getAttrs: (dom) => {
+          if (typeof dom === 'string') return false
+          return {
+            src: dom.getAttribute('src') || '',
+            alt: dom.getAttribute('alt') || '',
+            title: dom.getAttribute('title') || null,
+          }
+        },
+      },
+    ]
   },
 
   renderHTML({ node }) {

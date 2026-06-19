@@ -57,6 +57,7 @@ async function replaceCodeMirror(page: Page, editorTestId: string, text: string)
   await editor.click();
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.type(text);
+  await expect(editor).toContainText(text.split("\n").find(Boolean) ?? text);
   await page.keyboard.press("ControlOrMeta+s");
 }
 
@@ -184,7 +185,10 @@ test("editable non-markdown and table files persist to disk and history", async 
   });
 
   await openInTree(page, "data/empty.csv");
+  // Empty CSVs should start in the table-empty state, then expose add-row,
+  // add-column, "Header column X", and "Row 1 column Y" editing affordances.
   await expect(page.getByTestId("csv-empty-table")).toBeVisible();
+  await expect(page.getByTestId("csv-empty-add-row")).toBeVisible();
   await page.getByTestId("csv-empty-add-row").click();
   await page.getByTestId("csv-add-column").click();
   await page.getByLabel("Header column 1").fill("item");

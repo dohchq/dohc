@@ -54,7 +54,7 @@ async function seedWorkspace(
     }),
   );
   for (const [path, body] of Object.entries(files)) {
-    await mkdir(join(root, path, ".."), { recursive: true });
+    await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), body);
   }
   seededWorkspaces.push({ home, root });

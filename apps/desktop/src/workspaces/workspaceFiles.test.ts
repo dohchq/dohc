@@ -7,7 +7,6 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -20,12 +19,9 @@ import {
   listFiles,
   movePath,
 } from "./workspaceFiles";
+import { nativeTmpdir } from "./testTemp";
 
 let root: string;
-
-function nativeTmpdir(): string {
-  return process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
-}
 
 beforeEach(async () => {
   root = await mkdtemp(join(nativeTmpdir(), "dohc-files-"));

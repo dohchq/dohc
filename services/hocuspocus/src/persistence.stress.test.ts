@@ -46,11 +46,17 @@ describe('Y.Doc persistence stress', () => {
       for (let step = 0; step < 80; step++) {
         const clientIndex = pickInt(rng, clients.length)
         const client = clients[clientIndex]!
+        let capturedUpdate: Uint8Array | null = null
+        const captureUpdate = (update: Uint8Array) => {
+          capturedUpdate = update
+        }
+        client.on('update', captureUpdate)
         const op = mutateText(client, rng, `[c${clientIndex}:s${step}]`)
-        const update = Y.encodeStateAsUpdate(client)
+        client.off('update', captureUpdate)
+        if (!capturedUpdate) throw new Error(`No update captured for step ${step}`)
         const persisted = await store.appendUpdate({
           documentName,
-          update,
+          update: capturedUpdate,
           actorId: `user_${clientIndex}`,
           socketId: `socket_${clientIndex}`,
         })
@@ -60,9 +66,9 @@ describe('Y.Doc persistence stress', () => {
         // Broadcast after persistence succeeds, mirroring the server contract:
         // an accepted update must be durable before peers see it.
         for (const peer of clients) {
-          if (peer !== client) Y.applyUpdate(peer, update)
+          if (peer !== client) Y.applyUpdate(peer, capturedUpdate)
         }
-        Y.applyUpdate(canonical, update)
+        Y.applyUpdate(canonical, capturedUpdate)
 
         if (step > 0 && step % 17 === 0) {
           const snapshot = await store.storeSnapshot(documentName, canonical)

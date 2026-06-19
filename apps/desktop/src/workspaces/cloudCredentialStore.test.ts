@@ -1,6 +1,4 @@
-import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -8,6 +6,7 @@ import {
   type CloudCredentials,
   type TokenCipher,
 } from "./cloudCredentialStore";
+import { nativeTmpdir } from "./testTemp";
 
 // Stands in for safeStorage: reversible, with a marker so decrypt() can
 // reject ciphertext it did not produce (a foreign keychain's token).
@@ -28,10 +27,6 @@ const credentials: CloudCredentials = {
 };
 
 let dir: string;
-
-function nativeTmpdir(): string {
-  return process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
-}
 
 beforeEach(async () => {
   dir = await mkdtemp(join(nativeTmpdir(), "dohc-cloud-"));

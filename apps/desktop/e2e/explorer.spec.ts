@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
-import { launchApp, openInTree } from "./launch";
+import { launchApp, openInTree, setExplorerMenuChoice } from "./launch";
 
 // Phase E3 gate: explorer parity. Every file-management operation runs
 // through the real UI seams (inline editboxes, F2, Del + confirm, drag-move,
@@ -73,16 +73,6 @@ async function shotBothSchemes(page: Page, name: string): Promise<void> {
 // Playwright, so the main-process handler (test-mode only) reads
 // DOHC_TEST_EXPLORER_MENU_CHOICE per invoke — set it in the MAIN process
 // right before the right-click that should "choose" that item.
-async function setMenuChoice(
-  app: ElectronApplication,
-  choice: string | null,
-): Promise<void> {
-  await app.evaluate((_electron, value) => {
-    if (value === null) delete process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
-    else process.env.DOHC_TEST_EXPLORER_MENU_CHOICE = value;
-  }, choice);
-}
-
 async function setSavePath(app: ElectronApplication, path: string): Promise<void> {
   await app.evaluate((_electron, value) => {
     process.env.DOHC_TEST_SAVE_PATH = value;
@@ -191,7 +181,7 @@ test("create (inline file/folder incl. nested), rename (F2 + context menu), dele
   expect(existsSync(join(root, "docs"))).toBe(true);
 
   // --- Context menu (invoke seam): New File inside the folder ---
-  await setMenuChoice(app, "new-file");
+  await setExplorerMenuChoice(app, "new-file");
   await row(page, "docs").click({ button: "right" });
   await expect(editbox).toBeVisible();
   await editbox.fill("inside.md");
@@ -221,7 +211,7 @@ test("create (inline file/folder incl. nested), rename (F2 + context menu), dele
   await expectChangeSet(page, 4, /2 files/i);
 
   // --- Context-menu rename (folder): children move with it ---
-  await setMenuChoice(app, "rename");
+  await setExplorerMenuChoice(app, "rename");
   await row(page, "docs").click({ button: "right" });
   await expect(editbox).toBeVisible();
   // The object keeps its species mid-rename: folder icon + chevron stay in
@@ -375,7 +365,7 @@ test("pin/unpin via the context-menu seam; pins AND expansion persist across rel
   const { app, page } = await openSeeded(home, root);
 
   await openInTree(page, "notes/today.md"); // expands notes + opens the file
-  await setMenuChoice(app, "pin");
+  await setExplorerMenuChoice(app, "pin");
   await row(page, "notes/today.md").click({ button: "right" });
   const pinned = page.getByTestId("explorer-pinned");
   await expect(pinned).toBeVisible();
@@ -409,7 +399,7 @@ test("pin/unpin via the context-menu seam; pins AND expansion persist across rel
   await expect(row(page2, "notes/today.md")).toBeVisible();
 
   // Unpin from the pinned row's own context menu.
-  await setMenuChoice(second, "unpin");
+  await setExplorerMenuChoice(second, "unpin");
   await page2
     .getByTestId("explorer-pinned")
     .locator('[data-path="notes/today.md"]')
@@ -485,7 +475,7 @@ test("export zip (folder + whole workspace) through the context-menu seam — th
   // Folder export: right-click the notes folder, "Export as Zip…".
   const folderZip = join(outDir, "notes.zip");
   await setSavePath(app, folderZip);
-  await setMenuChoice(app, "export-zip");
+  await setExplorerMenuChoice(app, "export-zip");
   await row(page, "notes").click({ button: "right" });
   await expect.poll(() => existsSync(folderZip), { timeout: 10_000 }).toBe(true);
   expect(listZip(readFileSync(folderZip)).sort()).toEqual([
@@ -496,7 +486,7 @@ test("export zip (folder + whole workspace) through the context-menu seam — th
   // Whole-workspace export: the ROOT context menu (container background).
   const wsZip = join(outDir, "workspace.zip");
   await setSavePath(app, wsZip);
-  await setMenuChoice(app, "export-zip");
+  await setExplorerMenuChoice(app, "export-zip");
   const box = await tree(page).boundingBox();
   expect(box).not.toBeNull();
   // Right-click the empty area below the rows (the root menu surface).

@@ -138,3 +138,13 @@ export async function runCommand(page: Page, label: string): Promise<void> {
   await palette.getByRole("button", { name: label, exact: true }).click();
   await expect(palette).toHaveCount(0);
 }
+
+export async function setExplorerMenuChoice(
+  app: ElectronApplication,
+  choice: string | null,
+): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    if (value === null) delete process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
+    else process.env.DOHC_TEST_EXPLORER_MENU_CHOICE = value;
+  }, choice);
+}

@@ -222,7 +222,7 @@ export function SourceCodeEditor(props: {
         to: current.length,
         insert: pendingUndo.undoText,
       },
-      annotations: [Transaction.addToHistory.of(false), isolateHistory.of("full")],
+      annotations: Transaction.addToHistory.of(false),
     });
     view.dispatch({
       changes: {

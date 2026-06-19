@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ElectronApplication, Page } from "playwright";
-import { launchApp, openInTree, runCommand } from "./launch";
+import { launchApp, openInTree, runCommand, setExplorerMenuChoice } from "./launch";
 
 const SCREENSHOT_DIR = "test-results/screenshots/e5-import-export";
 let activeApp: ElectronApplication | null = null;
@@ -55,16 +55,6 @@ async function setSavePath(app: ElectronApplication, path: string): Promise<void
   await app.evaluate((_electron, value) => {
     process.env.DOHC_TEST_SAVE_PATH = value;
   }, path);
-}
-
-async function setExplorerMenuChoice(
-  app: ElectronApplication,
-  choice: string | null,
-): Promise<void> {
-  await app.evaluate((_electron, value) => {
-    if (value === null) delete process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
-    else process.env.DOHC_TEST_EXPLORER_MENU_CHOICE = value;
-  }, choice);
 }
 
 async function setTheme(page: Page, scheme: "light" | "dark") {
@@ -141,11 +131,8 @@ test("data fragments stay distinct from file import and zip export", async () =>
   const fileZip = join(outDir, "plan.zip");
   await setSavePath(app, fileZip);
   await setExplorerMenuChoice(app, "export-zip");
-  await openInTree(page, "notes/plan.md", { click: false });
-  await page
-    .getByTestId("file-tree")
-    .locator('[data-testid="tree-row"][data-path="notes/plan.md"]')
-    .click({ button: "right" });
+  const planRow = await openInTree(page, "notes/plan.md", { click: false });
+  await planRow.click({ button: "right" });
   await expect.poll(() => existsSync(fileZip), { timeout: 10_000 }).toBe(true);
   expect(listZip(readFileSync(fileZip))).toEqual(["plan.md"]);
   await setExplorerMenuChoice(app, null);

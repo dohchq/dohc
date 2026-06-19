@@ -289,12 +289,15 @@ describe.sequential('live Hocuspocus provider persistence', () => {
 
       await connectClient(99)
       await waitUntilEveryDocContains('[while-one-client-away]')
-      const convergedText = docs[0]!.getText('body').toString()
       await waitForCondition(
         'all live providers converge to one text',
-        () => docs.every((doc) => doc.getText('body').toString() === convergedText),
+        () => {
+          const reference = docs[0]!.getText('body').toString()
+          return docs.every((doc) => doc.getText('body').toString() === reference)
+        },
         10_000,
       )
+      const convergedText = docs[0]!.getText('body').toString()
       expect(await countUpdates(pool, documentName)).toBeGreaterThan(0)
 
       for (const provider of providers.splice(0)) provider.destroy()
