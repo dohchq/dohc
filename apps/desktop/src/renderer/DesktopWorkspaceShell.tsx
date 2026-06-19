@@ -439,49 +439,6 @@ function historyLineStatsText(stats: ChangeSetRecord["lineStats"]): string | nul
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-type HistoryOverviewMetrics = {
-  changeCount: number;
-  fileTouchCount: number;
-  reviewCount: number;
-  added: number;
-  removed: number;
-  unavailableFileCount: number;
-};
-
-function historyOverviewMetrics(changeSets: ChangeSetRecord[]): HistoryOverviewMetrics {
-  return changeSets.reduce<HistoryOverviewMetrics>(
-    (totals, change) => {
-      totals.changeCount += 1;
-      totals.fileTouchCount += change.fileCount;
-      if (change.reviewRequired) totals.reviewCount += 1;
-      if (change.lineStats) {
-        totals.added += change.lineStats.added;
-        totals.removed += change.lineStats.removed;
-        totals.unavailableFileCount += change.lineStats.unavailableFileCount;
-      }
-      return totals;
-    },
-    {
-      changeCount: 0,
-      fileTouchCount: 0,
-      reviewCount: 0,
-      added: 0,
-      removed: 0,
-      unavailableFileCount: 0,
-    },
-  );
-}
-
-function historyOverviewLineText(metrics: HistoryOverviewMetrics): string {
-  const hasKnownLines = metrics.added > 0 || metrics.removed > 0;
-  const parts: string[] = [];
-  if (hasKnownLines) parts.push(`+${metrics.added} -${metrics.removed}`);
-  if (metrics.unavailableFileCount > 0) {
-    parts.push(`${metrics.unavailableFileCount} not diffed`);
-  }
-  return parts.length > 0 ? parts.join(" · ") : "No text edits";
-}
-
 function snapshotUnavailable(snapshot: FileChangeSnapshot | null | undefined): string | null {
   const reason = snapshot?.unavailableReason;
   if (!reason) return null;
@@ -573,6 +530,38 @@ function formatHistoryDay(recordedAtMs: number): {
     }),
     dateTime: historyDayKey(recordedAtMs),
   };
+}
+
+function HistoryLineStats({
+  stats,
+}: {
+  stats: NonNullable<ChangeSetRecord["lineStats"]>;
+}) {
+  const hasKnownLines =
+    stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0;
+  return (
+    <span data-testid="history-line-stats" className="font-mono">
+      {hasKnownLines ? (
+        <>
+          <span data-testid="history-line-stats-added" className="text-success">
+            +{stats.added}
+          </span>
+          {" "}
+          <span data-testid="history-line-stats-removed" className="text-danger">
+            -{stats.removed}
+          </span>
+        </>
+      ) : null}
+      {stats.unavailableFileCount > 0 ? (
+        <>
+          {hasKnownLines ? <span className="text-subtle"> · </span> : null}
+          <span className="text-subtle">
+            {stats.unavailableFileCount} not diffed
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
 }
 
 function HistoryDiffPage({
@@ -789,6 +778,7 @@ function HistoryList({
         {changeSets.map((change, index) => {
           const recordedAt = formatHistoryRecordedAt(change.recordedAtMs);
           const day = formatHistoryDay(change.recordedAtMs);
+          const lineStatsLabel = historyLineStatsText(change.lineStats);
           const boundaryLabels = historyBoundaryLabels(change.boundaryCrossingPreview);
           const primaryFile = change.filePreview?.[0] ?? null;
           const previousDayKey =
@@ -836,6 +826,12 @@ function HistoryList({
                   </time>
                   {" · "}
                   {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
+                  {lineStatsLabel && change.lineStats ? (
+                    <>
+                      {" · "}
+                      <HistoryLineStats stats={change.lineStats} />
+                    </>
+                  ) : null}
                 </span>
               </span>
             </span>
@@ -900,68 +896,12 @@ function HistoryView(props: {
       }),
     [authorFilter, normalizedQuery, props.changeSets, reviewOnly],
   );
-  const overview = useMemo(
-    () => historyOverviewMetrics(filteredChangeSets),
-    [filteredChangeSets],
-  );
   const filterActive =
     normalizedQuery.length > 0 || reviewOnly || authorFilter !== "all";
   return (
     <>
       {props.changeSets.length > 0 ? (
         <>
-          <section
-            data-testid="history-overview"
-            className="grid shrink-0 grid-cols-2 gap-1.5 border-b border-line bg-panel px-2 py-2"
-          >
-            <div className="rounded border border-line bg-bg px-2 py-1.5">
-              <div className="text-[10px] uppercase tracking-wide text-subtle">
-                Changes
-              </div>
-              <div
-                data-testid="history-overview-changes"
-                className="mt-0.5 text-[13px] font-semibold text-ink"
-              >
-                {overview.changeCount}
-              </div>
-            </div>
-            <div className="rounded border border-line bg-bg px-2 py-1.5">
-              <div className="text-[10px] uppercase tracking-wide text-subtle">
-                Review
-              </div>
-              <div
-                data-testid="history-overview-review"
-                className={`mt-0.5 text-[13px] font-semibold ${
-                  overview.reviewCount > 0 ? "text-danger" : "text-ink"
-                }`}
-              >
-                {overview.reviewCount}
-              </div>
-            </div>
-            <div className="rounded border border-line bg-bg px-2 py-1.5">
-              <div className="text-[10px] uppercase tracking-wide text-subtle">
-                File touches
-              </div>
-              <div
-                data-testid="history-overview-files"
-                className="mt-0.5 text-[13px] font-semibold text-ink"
-              >
-                {overview.fileTouchCount}
-              </div>
-            </div>
-            <div className="rounded border border-line bg-bg px-2 py-1.5">
-              <div className="text-[10px] uppercase tracking-wide text-subtle">
-                Lines
-              </div>
-              <div
-                data-testid="history-overview-lines"
-                className="mt-0.5 truncate font-mono text-[12px] text-subtle"
-                title={historyOverviewLineText(overview)}
-              >
-                {historyOverviewLineText(overview)}
-              </div>
-            </div>
-          </section>
           <div
             data-testid="history-filter-bar"
             className="shrink-0 border-b border-line bg-panel-2 px-2 py-2"

@@ -1027,27 +1027,17 @@ describe("history details", () => {
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
     expect(historyRail.getByTestId("history-filter-count").textContent).toBe("3/3");
-    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("3");
-    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("4");
-    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
-      "+11 -5 · 1 not diffed",
-    );
+    expect(historyRail.queryByTestId("history-overview")).toBeNull();
 
     await user.type(historyRail.getByTestId("history-search-input"), "apples");
 
     expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/3");
-    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("0");
-    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
-      "+10 -0",
-    );
     expect(
       within(historyRail.getByTestId("history-list")).getByText(
         "ice edited notes/apples.md",
       ),
     ).toBeTruthy();
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe("+10 -0");
     expect(
       within(historyRail.getByTestId("history-list")).queryByText(
         "ice edited finance/budget.csv",
@@ -1061,17 +1051,14 @@ describe("history details", () => {
       historyRail.getByTestId("history-review-filter").getAttribute("aria-pressed"),
     ).toBe("true");
     expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/3");
-    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-review").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("2");
-    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe(
-      "+1 -1 · 1 not diffed",
-    );
     expect(
       within(historyRail.getByTestId("history-list")).getByText(
         "ice shared notes/public.md",
       ),
     ).toBeTruthy();
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
+      "+1 -1 · 1 not diffed",
+    );
     expect(
       within(historyRail.getByTestId("history-list")).queryByText(
         "ice edited notes/apples.md",
@@ -1114,14 +1101,12 @@ describe("history details", () => {
       historyRail.getByTestId("history-author-filter-agent").getAttribute("aria-pressed"),
     ).toBe("true");
     expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/2");
-    expect(historyRail.getByTestId("history-overview-changes").textContent).toBe("1");
-    expect(historyRail.getByTestId("history-overview-files").textContent).toBe("2");
-    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe("+8 -2");
     expect(
       within(historyRail.getByTestId("history-list")).getByText(
         "codex updated docs/plan.md",
       ),
     ).toBeTruthy();
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe("+8 -2");
     expect(
       within(historyRail.getByTestId("history-list")).queryByText(
         "ice edited notes/today.md",
@@ -1131,7 +1116,7 @@ describe("history details", () => {
     await user.click(historyRail.getByTestId("history-author-filter-user"));
 
     expect(historyRail.getByTestId("history-filter-count").textContent).toBe("1/2");
-    expect(historyRail.getByTestId("history-overview-lines").textContent).toBe("+1 -0");
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe("+1 -0");
     expect(
       within(historyRail.getByTestId("history-list")).getByText(
         "ice edited notes/today.md",
@@ -1144,7 +1129,7 @@ describe("history details", () => {
     ).toBeNull();
   });
 
-  it("keeps history rows minimal without file previews or per-row line stats", async () => {
+  it("keeps history rows minimal without file previews while showing line stats", async () => {
     const bridge = makeBridge(Promise.resolve(null), [
       {
         ...changeSet("many-files", 2000, "ice edited project files"),
@@ -1175,8 +1160,15 @@ describe("history details", () => {
     expect(row.textContent).toContain("5 files");
     expect(historyRail.queryByTestId("history-file-preview")).toBeNull();
     expect(historyRail.queryByTestId("history-file-preview-entry")).toBeNull();
-    expect(historyRail.queryByTestId("history-line-stats")).toBeNull();
-    expect(row.textContent).not.toContain("+12 -5");
+    expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
+      "+12 -5 · 1 not diffed",
+    );
+    expect(historyRail.getByTestId("history-line-stats-added").className).toContain(
+      "text-success",
+    );
+    expect(historyRail.getByTestId("history-line-stats-removed").className).toContain(
+      "text-danger",
+    );
     expect(row.textContent).not.toContain("notes/one.md");
   });
 
