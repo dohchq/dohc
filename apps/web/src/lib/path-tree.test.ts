@@ -94,6 +94,22 @@ describe('buildTree — D4.5 sort order (folders → starred → alphabetical)',
     expect(tree.children[0]!.color).toBeFalsy()
     expect(tree.children[0]!.starred).toBeFalsy()
   })
+
+  it('ignores empty path segments from repeated or trailing slashes', () => {
+    const tree = buildTree(
+      [row('team//a.md'), row('team/')],
+      ['archive//', 'ops/releases/'],
+    )
+
+    expect(tree.children.map((c) => c.segment)).toEqual(['archive', 'ops', 'team'])
+    const team = tree.children.find((c) => c.segment === 'team')!
+    expect(team.children.map((c) => c.segment)).toEqual(['a.md'])
+    const nonRootSegments = [
+      ...tree.children.map((c) => c.segment),
+      ...tree.children.flatMap((c) => c.children.map((child) => child.segment)),
+    ]
+    expect(nonRootSegments).not.toContain('')
+  })
 })
 
 describe('nodeLabel — canonical .context files', () => {

@@ -16,7 +16,7 @@ type PostgresBackendClientOptions = {
   fetch?: typeof globalThis.fetch
 }
 
-type FileResponse = { ok?: boolean; file: WorkspaceFile & { body?: string } }
+type FileResponse = { ok?: boolean; file?: WorkspaceFile & { body?: string } }
 type FilesResponse = { ok?: boolean; files: WorkspaceFile[] }
 
 export function createDohcBackendClient({
@@ -50,17 +50,21 @@ export function createPostgresBackendClient(
       const result = await requestJson<FilesResponse>(fetchImpl, filesUrl(), {
         credentials: 'include',
       })
-      return result.files ?? []
+      if (!Array.isArray(result.files)) {
+        throw new Error('Workspace API returned an invalid files response.')
+      }
+      return result.files
     },
 
     async readText(path) {
       const result = await requestJson<FileResponse>(fetchImpl, filesUrl(path), {
         credentials: 'include',
       })
-      return {
-        body: result.file?.body ?? '',
-        revision: result.file?.revision ?? '',
+      const file = requireWorkspaceFile(result, 'readText')
+      if (typeof file.body !== 'string') {
+        throw new Error('Workspace API readText response is missing file.body.')
       }
+      return { body: file.body, revision: file.revision }
     },
 
     async createTextFile(input) {
@@ -69,7 +73,7 @@ export function createPostgresBackendClient(
         filesUrl(input.path),
         jsonPost({ body: input.body, kind: atomKindForContentType(input.contentType) }),
       )
-      return result.file
+      return requireWorkspaceFile(result, 'createTextFile')
     },
 
     async writeText(input) {
@@ -78,7 +82,7 @@ export function createPostgresBackendClient(
         filesUrl(input.path),
         jsonPost({ body: input.body, expectedRevision: input.expectedRevision }),
       )
-      return result.file
+      return requireWorkspaceFile(result, 'writeText')
     },
 
     async uploadFile(input) {
@@ -96,7 +100,7 @@ export function createPostgresBackendClient(
           bytesBase64: await fileToBase64(input.file),
         }),
       )
-      return result.file
+      return requireWorkspaceFile(result, 'uploadFile')
     },
   }
 }
@@ -104,7 +108,34 @@ export function createPostgresBackendClient(
 // Workspace paths keep their `/` separators in the URL; each segment is
 // percent-encoded so names with spaces/odd characters round-trip.
 function encodeWorkspacePath(path: string) {
-  return path.split('/').map(encodeURIComponent).join('/')
+  const segments = path.split('/')
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error('Workspace paths cannot contain empty, ".", or ".." segments.')
+  }
+  return segments.map(encodeURIComponent).join('/')
+}
+
+function requireWorkspaceFile(
+  result: FileResponse,
+  operation: string,
+): WorkspaceFile & { revision: string; body?: string } {
+  const file = result.file
+  if (!file || typeof file !== 'object') {
+    throw new Error(`Workspace API ${operation} response is missing file.`)
+  }
+  if (
+    typeof file._id !== 'string' ||
+    typeof file.path !== 'string' ||
+    typeof file.source !== 'string' ||
+    !['atom', 'asset', 'database'].includes(file.kind) ||
+    typeof file.contentType !== 'string'
+  ) {
+    throw new Error(`Workspace API ${operation} response contains an invalid file.`)
+  }
+  if (typeof file.revision !== 'string' || file.revision.length === 0) {
+    throw new Error(`Workspace API ${operation} response is missing file.revision.`)
+  }
+  return file as WorkspaceFile & { revision: string; body?: string }
 }
 
 function atomKindForContentType(contentType: string) {

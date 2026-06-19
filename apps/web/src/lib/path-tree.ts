@@ -79,7 +79,7 @@ const APP_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 // `.apps/<name>/…` holds app source folders (see workspace-core
 // classifyPath); source files there keep their extension in labels.
 function isAppSourcePath(path: string): boolean {
-  const parts = path.split('/')
+  const parts = pathSegments(path)
   const appsIndex = parts.indexOf('.apps')
   return (
     appsIndex >= 0 &&
@@ -124,7 +124,8 @@ export function buildTree(
   }
 
   for (const f of files) {
-    const segments = f.path.split('/')
+    const segments = pathSegments(f.path)
+    if (segments.length === 0) continue
     let cursor = root
     let acc = ''
     for (let i = 0; i < segments.length; i++) {
@@ -162,7 +163,7 @@ export function buildTree(
 }
 
 function ensureFolderNode(root: TreeNode, folderPath: string): TreeNode {
-  const segments = folderPath.split('/')
+  const segments = pathSegments(folderPath)
   let cursor = root
   let acc = ''
   for (const seg of segments) {
@@ -175,6 +176,10 @@ function ensureFolderNode(root: TreeNode, folderPath: string): TreeNode {
     cursor = child
   }
   return cursor
+}
+
+function pathSegments(path: string): string[] {
+  return path.split('/').filter(Boolean)
 }
 
 // file-org-v1 §5.7 / D4.5 — sort order:

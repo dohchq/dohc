@@ -106,9 +106,19 @@ describe('CloudShell', () => {
       renderShell(root, client)
     })
     act(() => {
-      container.querySelector<HTMLButtonElement>('[data-testid="new-file-button"]')!.click()
+      container.querySelector<HTMLButtonElement>('[data-testid="tree-toggle"]')!.click()
     })
-    const input = container.querySelector<HTMLInputElement>('[data-testid="new-file-name"]')!
+    expect(container.querySelectorAll('[data-testid="cloud-file-tree"]')).toHaveLength(2)
+    act(() => {
+      const buttons = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('[data-testid="new-file-button"]'),
+      )
+      buttons.at(-1)!.click()
+    })
+    const inputs = Array.from(
+      container.querySelectorAll<HTMLInputElement>('[data-testid="new-file-name"]'),
+    )
+    const input = inputs.at(-1)!
     const setter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype,
       'value',
@@ -124,5 +134,6 @@ describe('CloudShell', () => {
       body: '',
       contentType: 'text/markdown',
     })
+    expect(container.querySelectorAll('[data-testid="cloud-file-tree"]')).toHaveLength(1)
   })
 })

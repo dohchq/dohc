@@ -10,6 +10,7 @@ import {
   createDohcBackendClient,
   createPostgresBackendClient,
 } from '../backend/postgresBackendClient'
+import { createCloudApi } from '../cloud/cloudApi'
 import { UploadFileButton } from '../components/UploadFileButton'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -192,6 +193,51 @@ describe('cloud backend client seam', () => {
       mediaType: 'text/csv',
     })
     expect(atob(uploadBody.bytesBase64)).toBe('a,b\n')
+  })
+
+  it('rejects malformed file responses before they weaken revision semantics', async () => {
+    const client = createPostgresBackendClient({
+      workspaceId: 'ws-1',
+      baseUrl: 'https://cloud.example',
+      fetch: vi.fn(async () =>
+        Response.json({
+          ok: true,
+          file: {
+            _id: 'pg_file',
+            path: 'notes/missing.md',
+            source: 'user',
+            kind: 'atom',
+            contentType: 'text/markdown',
+            body: '# Missing',
+          },
+        }),
+      ),
+    })
+
+    await expect(client.readText('notes/missing.md')).rejects.toThrow(/missing file\.revision/)
+  })
+
+  it('rejects dot segments before encoding workspace paths into URLs', async () => {
+    const client = createPostgresBackendClient({
+      workspaceId: 'ws-1',
+      baseUrl: 'https://cloud.example',
+      fetch: vi.fn(async () => Response.json({ ok: true, files: [] })),
+    })
+
+    await expect(client.readText('notes/../secret.md')).rejects.toThrow(/Workspace paths/)
+    await expect(client.readText('notes/./draft.md')).rejects.toThrow(/Workspace paths/)
+  })
+
+  it('keeps cookie credentials enforced even if a caller passes an override', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, user: null }))
+    const api = createCloudApi({ env: { VITE_DOHC_CLOUD_URL: '' }, fetch: fetchImpl })
+
+    await api.signInWithEmail({ email: 'ada@example.com', password: 'secret' })
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      '/api/auth/sign-in/email',
+      expect.objectContaining({ credentials: 'include' }),
+    )
   })
 
   it('binds the workspace id into the default client factory', async () => {

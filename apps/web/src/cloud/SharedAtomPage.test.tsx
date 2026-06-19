@@ -61,6 +61,18 @@ describe('SharedAtomPage (GET /shared/atoms/:atomId)', () => {
     expect(container.querySelector('[data-testid="shared-atom-body"]')).toBeNull()
   })
 
+  it('shows the denied state on 401 (auth required)', async () => {
+    const api = createCloudApi({
+      env: { VITE_DOHC_CLOUD_URL: '' },
+      fetch: vi.fn(async () => new Response('unauthorized', { status: 401 })),
+    })
+    await act(async () => {
+      root.render(<SharedAtomPage atomId="atom-1" api={api} />)
+    })
+    expect(container.textContent).toMatch(/Sign in to view this page/)
+    expect(container.querySelector('[data-testid="shared-atom-body"]')).toBeNull()
+  })
+
   it('shows the gone state on 404', async () => {
     const api = createCloudApi({
       env: { VITE_DOHC_CLOUD_URL: '' },

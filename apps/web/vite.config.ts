@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite'
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
-import { nitro } from 'nitro/vite'
 import viteReact from '@vitejs/plugin-react'
+import { nitro } from 'nitro/vite'
 import tailwindcss from '@tailwindcss/vite'
 
-// Plugin order matters: tanstackStart() MUST come before viteReact().
+// Plugin order matters: tanstackStart() before viteReact(), and
+// viteReact() before nitro(), so Start can own routing while React transforms
+// are available before Nitro's SSR build.
 const nitroPreset =
   process.env.NITRO_PRESET ?? (process.env.VERCEL ? 'vercel' : undefined)
 
@@ -31,8 +33,8 @@ export default defineConfig({
   },
   plugins: [
     tanstackStart(),
-    nitro(nitroPreset ? { preset: nitroPreset } : {}),
     viteReact(),
+    nitro(nitroPreset ? { preset: nitroPreset } : {}),
     tailwindcss(),
   ],
 })

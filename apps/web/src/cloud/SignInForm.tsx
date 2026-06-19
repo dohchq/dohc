@@ -95,7 +95,10 @@ export function SignInForm({
       <button
         data-testid="sign-in-mode-toggle"
         type="button"
-        onClick={() => setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in')}
+        onClick={() => {
+          setError(null)
+          setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in')
+        }}
         className="mt-1 text-center text-[12px] text-ink-dim hover:text-ink"
       >
         {mode === 'sign-in' ? 'New here? Create an account' : 'Have an account? Sign in'}

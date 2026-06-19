@@ -356,13 +356,12 @@
 
   /* Focus rings — warm-ink halo. Always visible on keyboard focus
    * (brand bible accessibility rule). */
-  :focus { outline: none; }
   button:focus-visible, a:focus-visible, summary:focus-visible {
     outline: 2px solid var(--color-ink);
     outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
-  input:focus-visible, textarea:focus-visible {
+  input:focus-visible, textarea:focus-visible, select:focus-visible {
     outline: 2px solid var(--color-ink);
     outline-offset: -1px;
   }
@@ -1033,11 +1032,8 @@
   height: 20px;
   border-radius: 4px;
   color: var(--color-ink-faint, var(--ink-faint));
-  opacity: 0;
-  transition: opacity var(--t-fast), background var(--t-fast);
-}
-.dohc-props__row:hover .dohc-props__remove {
   opacity: 1;
+  transition: background var(--t-fast), color var(--t-fast);
 }
 .dohc-props__remove:hover {
   background: var(--color-hover, var(--bg-panel));

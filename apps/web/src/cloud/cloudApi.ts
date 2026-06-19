@@ -38,8 +38,8 @@ export function createCloudApi({ env, fetch: fetchImpl }: CloudApiOptions = {}) 
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await doFetch(`${origin}${path}`, {
-      credentials: 'include',
       ...init,
+      credentials: 'include',
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')

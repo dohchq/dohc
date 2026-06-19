@@ -59,7 +59,13 @@ export function NotFoundPage({ mode = 'full' }: NotFoundPageProps = {}) {
             </a>
             <button
               type="button"
-              onClick={() => window.history.back()}
+              onClick={() => {
+                if (window.history.length > 1) {
+                  window.history.back()
+                } else {
+                  window.location.assign('/')
+                }
+              }}
               className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-rule bg-surface px-4 text-[13px] font-medium text-ink-dim shadow-xs transition-[border,background,color,transform] hover:-translate-y-px hover:border-rule-strong hover:bg-hover hover:text-ink"
             >
               <ArrowLeft className="size-4" strokeWidth={2} />

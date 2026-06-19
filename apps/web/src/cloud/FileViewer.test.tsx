@@ -117,4 +117,35 @@ describe('FileViewer', () => {
     expect(stillEditing).not.toBeNull()
     expect(stillEditing!.value).toBe('# Plan v2 (unsaved)')
   })
+
+  it('keeps the draft when a successful save response omits the next revision', async () => {
+    const client = clientWith({
+      writeText: vi.fn(async ({ path, body }) => ({
+        _id: 'f1',
+        path,
+        body,
+        source: 'user',
+        kind: 'atom' as const,
+        contentType: 'text/markdown',
+      })),
+    })
+    await act(async () => {
+      root.render(<FileViewer backendClient={client} file={FILE} />)
+    })
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[data-testid="file-edit"]')!.click()
+    })
+    const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="file-editor"]')!
+    setValue(editor, '# Plan v2 (needs revision)')
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="file-save"]')!.click()
+    })
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/without a new revision/)
+    const stillEditing = container.querySelector<HTMLTextAreaElement>(
+      '[data-testid="file-editor"]',
+    )
+    expect(stillEditing).not.toBeNull()
+    expect(stillEditing!.value).toBe('# Plan v2 (needs revision)')
+  })
 })

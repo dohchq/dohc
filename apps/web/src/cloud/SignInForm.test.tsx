@@ -97,6 +97,12 @@ describe('SignInForm (Better Auth email+password)', () => {
       '/api/auth/sign-up/email',
       expect.objectContaining({ method: 'POST', credentials: 'include' }),
     )
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body))
+    expect(body).toEqual({
+      email: 'ada@example.com',
+      password: 'hunter22',
+      name: 'ada@example.com',
+    })
     expect(onSignedIn).toHaveBeenCalledTimes(1)
   })
 
@@ -124,5 +130,35 @@ describe('SignInForm (Better Auth email+password)', () => {
 
     expect(onSignedIn).not.toHaveBeenCalled()
     expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/Sign-in failed/)
+  })
+
+  it('clears stale errors when switching sign-in modes', async () => {
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 401 }))
+    const api = createCloudApi({ env: { VITE_DOHC_CLOUD_URL: '' }, fetch: fetchImpl })
+
+    act(() => {
+      root.render(<SignInForm api={api} onSignedIn={vi.fn()} />)
+    })
+    setValue(
+      container.querySelector<HTMLInputElement>('[data-testid="sign-in-email"]')!,
+      'ada@example.com',
+    )
+    setValue(
+      container.querySelector<HTMLInputElement>('[data-testid="sign-in-password"]')!,
+      'wrong',
+    )
+    await act(async () => {
+      container
+        .querySelector('[data-testid="sign-in-form"]')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="sign-in-mode-toggle"]')!
+        .click()
+    })
+    expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 })

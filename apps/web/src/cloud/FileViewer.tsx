@@ -96,7 +96,10 @@ export function FileViewer({
         body: draft,
         expectedRevision: state.revision,
       })
-      setState({ status: 'ready', body: draft, revision: saved.revision ?? '' })
+      if (typeof saved.revision !== 'string' || saved.revision.length === 0) {
+        throw new Error('Save completed without a new revision. Your draft is still open.')
+      }
+      setState({ status: 'ready', body: draft, revision: saved.revision })
       setEditing(false)
     } catch (error) {
       // Conflict or outage: keep the draft visible, surface the cause.

@@ -12,9 +12,67 @@ const BROWSER_DIALOG_RE =
   /(?:\b(?:window|globalThis|self)\.)?\b(?:alert|confirm|prompt)\s*\(/g
 
 function stripComments(source: string) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+  let out = ''
+  let state: 'code' | 'line-comment' | 'block-comment' | 'single' | 'double' | 'template' =
+    'code'
+  let escaped = false
+
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]!
+    const next = source[i + 1]
+
+    if (state === 'line-comment') {
+      if (ch === '\n') {
+        out += ch
+        state = 'code'
+      }
+      continue
+    }
+
+    if (state === 'block-comment') {
+      if (ch === '\n') out += ch
+      if (ch === '*' && next === '/') {
+        i++
+        state = 'code'
+      }
+      continue
+    }
+
+    out += ch
+
+    if (state === 'single' || state === 'double' || state === 'template') {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (
+        (state === 'single' && ch === "'") ||
+        (state === 'double' && ch === '"') ||
+        (state === 'template' && ch === '`')
+      ) {
+        state = 'code'
+      }
+      continue
+    }
+
+    if (ch === '/' && next === '/') {
+      out = out.slice(0, -1)
+      i++
+      state = 'line-comment'
+    } else if (ch === '/' && next === '*') {
+      out = out.slice(0, -1)
+      i++
+      state = 'block-comment'
+    } else if (ch === "'") {
+      state = 'single'
+    } else if (ch === '"') {
+      state = 'double'
+    } else if (ch === '`') {
+      state = 'template'
+    }
+  }
+
+  return out
 }
 
 function extensionOf(path: string) {
@@ -48,6 +106,13 @@ describe('app production UX avoids browser dialogs', () => {
         'self.alert("x")',
       ].flatMap((source) => source.match(BROWSER_DIALOG_RE) ?? []),
     ).toEqual(['alert(', 'window.confirm(', 'globalThis.prompt(', 'self.alert('])
+  })
+
+  it('keeps // inside strings from hiding later dialog calls on the same line', () => {
+    const source = 'const url = "https://dohc.app//docs"; alert("blocked") // trailing'
+
+    expect(stripComments(source)).toContain('https://dohc.app//docs')
+    expect(stripComments(source).match(BROWSER_DIALOG_RE)).toEqual(['alert('])
   })
 
   it('does not call alert, confirm, or prompt in production source', () => {

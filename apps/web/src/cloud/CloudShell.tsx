@@ -68,6 +68,7 @@ export function CloudShell({
       setCreating(false)
       await loadFiles()
       setSelectedPath(path)
+      setTreeOpen(false)
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : 'Could not create the file.')
     }
@@ -100,6 +101,7 @@ export function CloudShell({
           onUploaded={(file) => {
             void loadFiles()
             setSelectedPath(file.path)
+            setTreeOpen(false)
           }}
         />
       </div>
