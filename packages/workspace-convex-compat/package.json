@@ -10,9 +10,17 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "3.0.77",
+    "@ai-sdk/openai": "3.0.67",
+    "@ai-sdk/provider": "3.0.10",
+    "@convex-dev/agent": "0.6.1",
     "@dohc/workspace-contracts": "workspace:*",
+    "@workos-inc/node": "^8.0.0",
+    "ai": "6.0.180",
     "convex": "^1.37.0",
-    "convex-test": "^0.0.51"
+    "convex-test": "^0.0.51",
+    "jose": "^6.2.3",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

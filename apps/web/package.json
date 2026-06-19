@@ -1,5 +1,5 @@
 {
-  "name": "@dohc/cloud-web",
+  "name": "@dohc/web",
   "private": true,
   "type": "module",
   "scripts": {
