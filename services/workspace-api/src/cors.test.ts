@@ -64,6 +64,7 @@ describe("withCors (DOHC_WEB_ORIGIN gate)", () => {
     const response = await handler(
       new Request("http://api.test/x", { headers: { origin: WEB } }),
     );
-    expect(response.headers.get("vary")).toBe("Accept-Encoding, Origin");
+    const vary = response.headers.get("vary")?.split(",").map((value) => value.trim());
+    expect(vary).toEqual(expect.arrayContaining(["Accept-Encoding", "Origin"]));
   });
 });

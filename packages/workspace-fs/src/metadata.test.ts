@@ -36,6 +36,35 @@ describe("workspace filesystem metadata", () => {
       await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
       await writeFile(join(root, MANIFEST_PATH), "null");
       await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+      await writeFile(
+        join(root, MANIFEST_PATH),
+        JSON.stringify({
+          version: 1,
+          workspaceId: "ws",
+          backend: "postgres",
+          files: {
+            "note.md": { id: "atom-1", kind: "atom", contentType: "text/markdown", revision: 42 },
+          },
+        }),
+      );
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+      await writeFile(
+        join(root, MANIFEST_PATH),
+        JSON.stringify({
+          version: 1,
+          workspaceId: "ws",
+          backend: "postgres",
+          files: {
+            "../note.md": {
+              id: "atom-1",
+              kind: "atom",
+              contentType: "text/markdown",
+              revision: "rev-1",
+            },
+          },
+        }),
+      );
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

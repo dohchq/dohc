@@ -44,6 +44,14 @@ describe('runStaticAppCheck', () => {
     expect(r.ok).toBe(true)
   })
 
+  it('rejects legacy SDK usage through dynamic imports', () => {
+    const r = runStaticAppCheck(
+      file("import { dohc } from '@dohc/app'\nexport async function load(){ return import('@dohc/view') }\nexport default function App(){ return null }"),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.failures[0]?.code).toBe('legacy-view-import')
+  })
+
   it('compiles code files independently so valid multi-file apps pass', () => {
     const r = runStaticAppCheck([
       {

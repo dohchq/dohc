@@ -176,10 +176,7 @@ export function createLocalSyncClient({
         return {
           applied: result.applied,
           conflicts: [],
-          approvalRequests: approvals.map((entry) => ({
-            path: entry.path,
-            reason: entry.error ?? "approval required",
-          })),
+          approvalRequests: [],
         };
       } catch (error) {
         // Fallback for a server that still THROWS an approval error instead of

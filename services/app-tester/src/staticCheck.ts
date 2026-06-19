@@ -50,6 +50,10 @@ function importSpecifiers(file: AppTestFile): string[] {
     ts.ScriptKind.TSX,
   )
   const specifiers: string[] = []
+  const stringLiteralText = (node: ts.Node): string | undefined => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text
+    return undefined
+  }
   const visit = (node: ts.Node) => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -57,6 +61,15 @@ function importSpecifiers(file: AppTestFile): string[] {
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
       specifiers.push(node.moduleSpecifier.text)
+    }
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length > 0
+    ) {
+      const firstArgument = node.arguments[0]
+      const specifier = firstArgument ? stringLiteralText(firstArgument) : undefined
+      if (specifier !== undefined) specifiers.push(specifier)
     }
     ts.forEachChild(node, visit)
   }

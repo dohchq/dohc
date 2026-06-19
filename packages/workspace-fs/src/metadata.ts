@@ -36,6 +36,26 @@ export class CorruptManifestError extends Error {}
 // manifest owned by workspace-core/desktop; this file is the sync baseline.
 export const MANIFEST_PATH = ".dohc/sync-manifest.json";
 
+function isSafeManifestPath(path: string): boolean {
+  const clean = path.trim().replace(/\\/g, "/");
+  return clean !== "" && !isAbsolute(clean) && !clean.startsWith("/") && !clean.split("/").includes("..");
+}
+
+function isManifestEntry(value: unknown): value is WorkspaceManifestEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as WorkspaceManifestEntry;
+  return (
+    typeof entry.id === "string" &&
+    entry.id.trim() !== "" &&
+    (entry.kind === "atom" || entry.kind === "asset" || entry.kind === "database") &&
+    typeof entry.contentType === "string" &&
+    entry.contentType.trim() !== "" &&
+    typeof entry.revision === "string" &&
+    entry.revision.trim() !== "" &&
+    (entry.sha256 === undefined || typeof entry.sha256 === "string")
+  );
+}
+
 export async function readManifest(rootDir: string): Promise<WorkspaceManifest> {
   // ENOENT propagates as a plain Error (code preserved) so callers can tell
   // "absent -> fresh" apart from "corrupt -> refuse". Parse/shape failures
@@ -60,6 +80,11 @@ export async function readManifest(rootDir: string): Promise<WorkspaceManifest> 
     Array.isArray((parsed as WorkspaceManifest).files)
   ) {
     throw new CorruptManifestError("dohc sync manifest is malformed.");
+  }
+  for (const [path, entry] of Object.entries((parsed as WorkspaceManifest).files)) {
+    if (!isSafeManifestPath(path) || !isManifestEntry(entry)) {
+      throw new CorruptManifestError(`dohc sync manifest file entry "${path}" is malformed.`);
+    }
   }
   return parsed as WorkspaceManifest;
 }
