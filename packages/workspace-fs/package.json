@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-contracts": "workspace:*"
+    "@dohc/workspace-contracts": "workspace:*",
+    "@dohc/workspace-core": "workspace:*",
+    "chokidar": "^5.0.0"
   },
   "devDependencies": {
     "@dohc/workspace-api": "workspace:*",

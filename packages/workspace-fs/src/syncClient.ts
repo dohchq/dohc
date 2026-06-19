@@ -7,6 +7,7 @@ import type {
   CreateAtomInput,
   RenameFileInput,
   SaveAssetInput,
+  UpdateAssetInput,
   WorkspaceBackend,
   WorkspaceFile,
   WriteAtomInput,
@@ -69,7 +70,7 @@ export type LocalSyncClient = {
   watch(options?: Partial<Omit<WatchWorkspaceOptions, "rootDir" | "onChange">>): () => void;
 };
 
-type ApiSyncOperation =
+export type ApiSyncOperation =
   | {
       op: "create";
       path: string;
@@ -142,18 +143,32 @@ export function createLocalSyncClient({
 
       const operations = await Promise.all(local.map((operation) => enrichOperation(rootDir, operation)));
       try {
-        const result = await postJson<{ ok: true; applied: number }>(
-          fetchImpl,
-          workspaceUrl(baseUrl, workspaceId, "sync/apply"),
-          { operations },
-        );
+        // sync/apply is per-op (non-fail-fast): a 200 can still carry failed
+        // ops in results[]. Approval-required failures surface as
+        // approvalRequests; any other per-op failure is a real error we raise.
+        const result = await postJson<{
+          ok: true;
+          applied: number;
+          results?: Array<{ path: string; ok: boolean; error?: string }>;
+        }>(fetchImpl, workspaceUrl(baseUrl, workspaceId, "sync/apply"), { operations });
+        const failures = (result.results ?? []).filter((entry) => !entry.ok);
+        const approvals = failures.filter((entry) => /approval/i.test(entry.error ?? ""));
+        const hardFailure = failures.find((entry) => !/approval/i.test(entry.error ?? ""));
+        if (hardFailure) {
+          throw new Error(hardFailure.error ?? "sync apply failed");
+        }
         await materialize();
         return {
           applied: result.applied,
           conflicts: [],
-          approvalRequests: [],
+          approvalRequests: approvals.map((entry) => ({
+            path: entry.path,
+            reason: entry.error ?? "approval required",
+          })),
         };
       } catch (error) {
+        // Fallback for a server that still THROWS an approval error instead of
+        // returning a per-op failure (older deployments).
         if (isApprovalError(error)) {
           return {
             applied: 0,
@@ -256,6 +271,31 @@ export function createHttpWorkspaceBackend({
       );
       return data.file;
     },
+    async updateAsset(_actor, input: UpdateAssetInput) {
+      // Binary update rides the sync/apply update op so the server's
+      // updateAsset arbitrates on expectedRevision.
+      const data = await postJson<{ ok: true; files: WorkspaceFile[]; results?: Array<{ ok: boolean; error?: string }> }>(
+        fetchImpl,
+        workspaceUrl(baseUrl, workspaceId, "sync/apply"),
+        {
+          operations: [
+            {
+              op: "update",
+              path: input.path,
+              expectedRevision: input.expectedRevision,
+              kind: input.kind,
+              mediaType: input.mediaType,
+              bytesBase64: Buffer.from(input.bytes).toString("base64"),
+            },
+          ],
+        },
+      );
+      const failed = data.results?.find((result) => !result.ok);
+      if (failed) throw new Error(failed.error ?? `update failed: ${input.path}`);
+      const file = data.files[0];
+      if (!file) throw new Error(`update did not return a file: ${input.path}`);
+      return file;
+    },
     async renameFile(_actor, input: RenameFileInput) {
       const fromFolder = input.fromPath.includes("/") ? input.fromPath.slice(0, input.fromPath.lastIndexOf("/")) : "";
       const toPath = fromFolder ? `${fromFolder}/${input.toName}` : input.toName;
@@ -290,7 +330,9 @@ async function localOperations(rootDir: string): Promise<FsDiffOperation[]> {
   return diff.operations.filter((operation) => !isConflictOperation(operation));
 }
 
-function isConflictOperation(operation: FsDiffOperation) {
+// Conflict markers (<path>.conflict) are LOCAL working artifacts only — never
+// upload them, or they propagate to every machine and cascade.
+export function isConflictOperation(operation: FsDiffOperation) {
   if (operation.op === "rename") {
     return operation.fromPath.endsWith(".conflict") || operation.toPath.endsWith(".conflict");
   }
@@ -382,7 +424,7 @@ async function readLocalConflictBody(rootDir: string, path: string) {
   return new TextDecoder().decode(bytes);
 }
 
-async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
+export async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
   if (operation.op === "delete" || operation.op === "rename") return operation;
 
   const path = assertSafeWorkspacePath(operation.path);

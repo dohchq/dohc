@@ -1,0 +1,32 @@
+{
+  "name": "@dohc/mcp",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dohc-mcp": "./src/server.ts"
+  },
+  "exports": {
+    ".": "./src/server.ts",
+    "./tools": "./src/tools.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/app-tester": "workspace:*",
+    "@dohc/sqlite-worker": "workspace:*",
+    "@dohc/workspace-core": "workspace:*",
+    "@dohc/workspace-history": "workspace:*",
+    "@dohc/workspace-sync": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

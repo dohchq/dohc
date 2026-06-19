@@ -40,7 +40,7 @@ export default function App() {
 }
 `;
 
-function fixture(backend: "convex" | "postgres"): RunAppTestInput {
+function fixture(backend: "postgres"): RunAppTestInput {
   return {
     backend,
     packageRoot: "finance/.apps/tracker",
@@ -107,7 +107,7 @@ function fixture(backend: "convex" | "postgres"): RunAppTestInput {
 }
 
 describe("app tester backend matrix", () => {
-  it.each(["convex", "postgres"] as const)(
+  it.each(["postgres"] as const)(
     "runs the finance tracker workflow against backend=%s",
     async (backend) => {
       const result = await runAppTest(fixture(backend));

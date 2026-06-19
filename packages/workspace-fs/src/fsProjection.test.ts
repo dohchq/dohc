@@ -106,6 +106,15 @@ function memoryBackend(initial: MemoryFile[]) {
       files.set(input.path, file);
       return file;
     },
+    async updateAsset(_actor, input) {
+      calls.push({ method: "updateAsset", input });
+      const existing = files.get(input.path);
+      if (!existing) throw new Error("not found");
+      if (existing.revision !== input.expectedRevision) throw new Error("stale revision");
+      const file = binaryFile(input.path, input.mediaType, input.bytes, input.kind === "sqlite" ? "database" : "asset", "rev-updated");
+      files.set(input.path, file);
+      return file;
+    },
     async renameFile(_actor, input) {
       calls.push({ method: "renameFile", input });
       const file = files.get(input.fromPath);
@@ -157,7 +166,7 @@ describe("workspace filesystem projection", () => {
         backend,
         actor,
         targetDir: dir,
-        backendMode: "convex",
+        backendMode: "postgres",
       });
 
       await expect(readFile(join(dir, "finance/transactions.csv"), "utf8")).resolves.toContain("Grab");
@@ -167,7 +176,7 @@ describe("workspace filesystem projection", () => {
       expect(manifest).toMatchObject({
         version: 1,
         workspaceId: actor.workspaceId,
-        backend: "convex",
+        backend: "postgres",
         files: {
           "finance/transactions.csv": {
             id: "atom:finance/transactions.csv",
@@ -222,7 +231,7 @@ describe("workspace filesystem projection", () => {
       const { backend, calls, files } = memoryBackend([
         textFile("notes/day.md", "# Day\n", "rev-1"),
       ]);
-      await materializeWorkspace({ backend, actor, targetDir: dir, backendMode: "convex" });
+      await materializeWorkspace({ backend, actor, targetDir: dir, backendMode: "postgres" });
       await writeFile(join(dir, "notes/day.md"), "# Day\nUpdated\n");
       files.get("notes/day.md")!.revision = "rev-remote";
 
@@ -246,7 +255,7 @@ describe("workspace filesystem projection", () => {
   it("rejects path traversal and represents binary creates as assets", async () => {
     await withTempDir(async (dir) => {
       const { backend, calls } = memoryBackend([]);
-      await materializeWorkspace({ backend, actor, targetDir: dir, backendMode: "convex" });
+      await materializeWorkspace({ backend, actor, targetDir: dir, backendMode: "postgres" });
       await writeFile(join(dir, "photo.png"), Buffer.from([1, 2, 3]));
 
       await applyFsDiff({ backend, actor, rootDir: dir, diff: await scanWorkspaceDiff(dir) });
@@ -283,11 +292,14 @@ describe("workspace filesystem projection", () => {
 
       await applyFsDiff({ backend, actor, rootDir: dir, diff: await scanWorkspaceDiff(dir) });
 
-      expect(calls.map((call) => call.method)).toEqual(["saveAsset"]);
+      // Updating an EXISTING asset routes through updateAsset (saveAsset is
+      // create-only) so the expectedRevision arbitrates.
+      expect(calls.map((call) => call.method)).toEqual(["updateAsset"]);
       expect(calls[0].input).toMatchObject({
         path: "finance/ledger.sqlite",
         kind: "sqlite",
         mediaType: "application/vnd.sqlite3",
+        expectedRevision: "rev-db",
         bytes: expect.any(Uint8Array),
       });
     });

@@ -52,6 +52,9 @@ function memoryBackend() {
     async saveAsset() {
       throw new Error("not used");
     },
+    async updateAsset() {
+      throw new Error("not used");
+    },
     async renameFile() {
       throw new Error("not used");
     },

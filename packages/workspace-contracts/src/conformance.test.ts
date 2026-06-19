@@ -3,6 +3,7 @@ import type {
   Actor,
   CreateAtomInput,
   SaveAssetInput,
+  UpdateAssetInput,
   WorkspaceBackend,
   WriteAtomInput,
 } from "./backend";
@@ -131,6 +132,27 @@ function createMemoryBackend(memberships: Set<string>): WorkspaceBackend {
         assetKind: input.kind,
         bytes: new Uint8Array(input.bytes),
         revisionNumber,
+      };
+      assets.set(key(actor.workspaceId, input.path), file);
+      return file;
+    },
+    async updateAsset(actor, input: UpdateAssetInput) {
+      assertMember(actor);
+      const existing = assets.get(key(actor.workspaceId, input.path));
+      if (!existing) throw new WorkspaceError("not_found", "File not found");
+      if (existing.revision !== input.expectedRevision) {
+        throw new WorkspaceError("conflict", "Expected revision is stale");
+      }
+      const revisionNumber = existing.revisionNumber + 1;
+      const file = {
+        ...existing,
+        mediaType: input.mediaType,
+        assetKind: input.kind,
+        bytes: new Uint8Array(input.bytes),
+        contentType: input.mediaType,
+        revision: String(revisionNumber),
+        revisionNumber,
+        updatedAt: revisionNumber,
       };
       assets.set(key(actor.workspaceId, input.path), file);
       return file;

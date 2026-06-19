@@ -2,6 +2,9 @@
   "name": "@dohc/sqlite-worker",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/sqliteEngine.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",

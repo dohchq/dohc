@@ -1,0 +1,5 @@
+{
+  "comment": "Committed resource-ratchet baselines (Phase 16 canonical run, WSL2). check-performance.mjs feeds these into assertRatchet so the +20% memory / +10% bundle rules actually arm in CI — the measurements JSON is gitignored and cannot carry a baseline. Landing a phase that intentionally moves a resource number must update the value here in the same commit (named in the Codex review prompt).",
+  "workspaceMemoryWorkingSetMb": 590,
+  "rendererInitialBundleMb": 1.28
+}

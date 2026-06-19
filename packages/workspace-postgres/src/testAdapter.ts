@@ -10,10 +10,12 @@ import {
 
 let currentPool: pg.Pool | null = null;
 
-const migrationUrl = new URL(
-  "./db/migrations/0001_initial.sql",
-  import.meta.url,
-);
+// Live tests apply the full migration chain so the partial path-unique indexes
+// (0003) are present — without them delete-then-recreate wedges (see phase-09).
+const migrationUrls = [
+  new URL("./db/migrations/0001_initial.sql", import.meta.url),
+  new URL("./db/migrations/0003_partial_path_unique.sql", import.meta.url),
+];
 
 export const postgresTestAdapter: WorkspaceBackendTestAdapter = {
   name: "postgres",
@@ -55,7 +57,9 @@ export const postgresTestAdapter: WorkspaceBackendTestAdapter = {
 };
 
 async function migrateAndReset(pool: pg.Pool) {
-  await pool.query(await readFile(migrationUrl, "utf8"));
+  for (const url of migrationUrls) {
+    await pool.query(await readFile(url, "utf8"));
+  }
   await truncateWorkspaceTables(pool);
 }
 
@@ -73,6 +77,8 @@ async function truncateWorkspaceTables(pool: pg.Pool) {
       atom_revisions,
       atoms,
       locks,
+      data_fragment_shares,
+      data_fragments,
       shares,
       permissions,
       folders,

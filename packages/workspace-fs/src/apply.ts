@@ -57,15 +57,22 @@ export async function applyFsDiff({
           body: new TextDecoder().decode(bytes),
         });
       } else {
-        await backend.saveAsset(actor, {
+        // Binary UPDATE goes to updateAsset (saveAsset is create-only) so the
+        // expectedRevision arbitrates instead of silently overwriting.
+        await backend.updateAsset(actor, {
           path,
+          expectedRevision: operation.expectedRevision,
           kind: assetKindForMediaType(entry.contentType, path),
           mediaType: entry.contentType,
           bytes,
         });
       }
     } else if (operation.op === "delete") {
-      await backend.deleteFile(actor, assertSafeWorkspacePath(operation.path));
+      await backend.deleteFile(
+        actor,
+        assertSafeWorkspacePath(operation.path),
+        operation.expectedRevision,
+      );
     } else {
       const fromPath = assertSafeWorkspacePath(operation.fromPath);
       const toPath = assertSafeWorkspacePath(operation.toPath);

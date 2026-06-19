@@ -1,3 +1,4 @@
+import { isNull } from "drizzle-orm";
 import {
   index,
   integer,
@@ -30,6 +31,9 @@ export const workspaceTables = [
   "database_operations",
   "permissions",
   "shares",
+  "data_fragments",
+  "data_fragment_shares",
+  "workspace_invitations",
   "locks",
   "app_packages",
   "app_trust_grants",
@@ -42,6 +46,8 @@ export const migrationIndexes = [
   "workspace_events_workspace_created_idx",
   "locks_workspace_target_idx",
   "database_operations_file_version_idx",
+  "data_fragments_workspace_created_idx",
+  "data_fragment_shares_recipient_created_idx",
 ] as const;
 
 const scopedTimestamps = {
@@ -118,7 +124,11 @@ export const atoms = pgTable(
     ...scopedTimestamps,
   },
   (table) => [
-    uniqueIndex("atoms_workspace_path_unique").on(table.workspaceId, table.path),
+    // Partial: uniqueness constrains LIVE rows only, so a soft-delete tombstone
+    // never blocks recreating or renaming onto the same path (migration 0003).
+    uniqueIndex("atoms_workspace_path_unique")
+      .on(table.workspaceId, table.path)
+      .where(isNull(table.deletedAt)),
   ],
 );
 
@@ -156,10 +166,10 @@ export const assets = pgTable(
     ...scopedTimestamps,
   },
   (table) => [
-    uniqueIndex("assets_workspace_path_unique").on(
-      table.workspaceId,
-      table.path,
-    ),
+    // Partial: see atoms_workspace_path_unique (migration 0003).
+    uniqueIndex("assets_workspace_path_unique")
+      .on(table.workspaceId, table.path)
+      .where(isNull(table.deletedAt)),
   ],
 );
 
@@ -221,15 +231,85 @@ export const permissions = pgTable("permissions", {
   ...scopedTimestamps,
 });
 
-export const shares = pgTable("shares", {
+export const shares = pgTable(
+  "shares",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetId: text("target_id").notNull(),
+    recipientUserId: text("recipient_user_id"),
+    recipientEmail: text("recipient_email"),
+    capability: text("capability").notNull(),
+    // Migration 0004: who created the share (revocation = sharer or owner).
+    createdBy: text("created_by"),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    // Migration 0005: ONE live share per audience — createShare's
+    // INSERT ... ON CONFLICT upsert targets this partial index, closing the
+    // concurrent-create duplicate-row race. Tombstones never block a reshare.
+    uniqueIndex("shares_audience_unique")
+      .on(table.workspaceId, table.targetKind, table.targetId, table.recipientUserId)
+      .where(isNull(table.deletedAt)),
+  ],
+);
+
+export const dataFragments = pgTable(
+  "data_fragments",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    sourcePath: text("source_path"),
+    title: text("title").notNull(),
+    preview: text("preview").notNull(),
+    contentType: text("content_type").notNull(),
+    body: text("body").notNull(),
+    createdBy: text("created_by").notNull(),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    index("data_fragments_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const dataFragmentShares = pgTable(
+  "data_fragment_shares",
+  {
+    id: text("id").primaryKey(),
+    fragmentId: text("fragment_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    recipientUserId: text("recipient_user_id").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    createdBy: text("created_by").notNull(),
+    ...scopedTimestamps,
+  },
+  (table) => [
+    uniqueIndex("data_fragment_shares_audience_unique")
+      .on(table.fragmentId, table.recipientUserId)
+      .where(isNull(table.deletedAt)),
+    index("data_fragment_shares_recipient_created_idx").on(
+      table.recipientUserId,
+      table.createdAt,
+    ),
+  ],
+);
+
+// Migration 0004: pending member invitations, claimed ONLY by the Better Auth
+// afterEmailVerification hook (or immediately when the invitee is an existing
+// VERIFIED user) — never at bare signup.
+export const workspaceInvitations = pgTable("workspace_invitations", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull(),
-  targetKind: text("target_kind").notNull(),
-  targetId: text("target_id").notNull(),
-  recipientUserId: text("recipient_user_id"),
-  recipientEmail: text("recipient_email"),
-  capability: text("capability").notNull(),
-  ...scopedTimestamps,
+  email: text("email").notNull(),
+  invitedBy: text("invited_by").notNull(),
+  role: text("role").notNull().default("member"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
 
 export const locks = pgTable(

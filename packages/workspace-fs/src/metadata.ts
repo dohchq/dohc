@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
+import { mediaTypeForPath as coreMediaTypeForPath } from "@dohc/workspace-core";
 
-export type WorkspaceBackendMode = "convex" | "postgres";
+export type WorkspaceBackendMode = "postgres";
 
 export type WorkspaceManifestEntry = {
   id: string;
@@ -17,16 +18,38 @@ export type WorkspaceManifest = {
   version: 1;
   workspaceId: string;
   backend: WorkspaceBackendMode;
+  // Server binding (Phase 9): the sync baseline is only valid against the
+  // server that produced it. Pull REFUSES (no deletes) if the engine is
+  // pointed at a different server/workspace — guards "re-point at an empty
+  // server -> mass-delete clean local files". Optional for back-compat with
+  // pre-binding manifests; initialize() writes them.
+  serverUrl?: string;
+  remoteWorkspaceId?: string;
   files: Record<string, WorkspaceManifestEntry>;
 };
 
-export const MANIFEST_PATH = ".dohc/manifest.json";
+// Thrown by readManifest when the file is present but unparseable/misshapen —
+// distinct from ENOENT (absent), which callers treat as "fresh, never synced".
+export class CorruptManifestError extends Error {}
+
+// Must never be .dohc/manifest.json: that path is the workspace IDENTITY
+// manifest owned by workspace-core/desktop; this file is the sync baseline.
+export const MANIFEST_PATH = ".dohc/sync-manifest.json";
 
 export async function readManifest(rootDir: string): Promise<WorkspaceManifest> {
+  // ENOENT propagates as a plain Error (code preserved) so callers can tell
+  // "absent -> fresh" apart from "corrupt -> refuse". Parse/shape failures
+  // become CorruptManifestError and must NEVER be silently reset to empty —
+  // that would re-create/conflict-spam every previously-synced file.
   const raw = await readFile(join(rootDir, MANIFEST_PATH), "utf8");
-  const parsed = JSON.parse(raw) as WorkspaceManifest;
+  let parsed: WorkspaceManifest;
+  try {
+    parsed = JSON.parse(raw) as WorkspaceManifest;
+  } catch {
+    throw new CorruptManifestError("dohc sync manifest is not valid JSON.");
+  }
   if (parsed.version !== 1 || !parsed.workspaceId || !parsed.backend) {
-    throw new Error("Invalid dohc workspace manifest.");
+    throw new CorruptManifestError("dohc sync manifest is malformed.");
   }
   return parsed;
 }
@@ -34,7 +57,11 @@ export async function readManifest(rootDir: string): Promise<WorkspaceManifest> 
 export async function writeManifest(rootDir: string, manifest: WorkspaceManifest) {
   const path = join(rootDir, MANIFEST_PATH);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+  // Atomic: temp + rename so a crash or the quit-path hard-exit never truncates
+  // the baseline mid-write (a truncated manifest would wedge sync).
+  const tmp = `${path}.tmp-${process.pid}`;
+  await writeFile(tmp, `${JSON.stringify(manifest, null, 2)}\n`);
+  await rename(tmp, path);
 }
 
 export function assertSafeWorkspacePath(path: string): string {
@@ -60,21 +87,11 @@ export function sha256(bytes: Uint8Array | string) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+// Delegates to the ONE extension -> media-type table in workspace-core;
+// sync metadata needs a concrete type, so unknown extensions become
+// octet-stream here.
 export function mediaTypeForPath(path: string): string {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown";
-  if (lower.endsWith(".txt")) return "text/plain";
-  if (lower.endsWith(".csv")) return "text/csv";
-  if (lower.endsWith(".json")) return "application/json";
-  if (lower.endsWith(".jsonl")) return "application/x-ndjson";
-  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".sqlite") || lower.endsWith(".sqlite3") || lower.endsWith(".db")) {
-    return "application/vnd.sqlite3";
-  }
-  return "application/octet-stream";
+  return coreMediaTypeForPath(path) ?? "application/octet-stream";
 }
 
 export function isSqliteMediaType(mediaType: string, path = "") {

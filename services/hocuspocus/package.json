@@ -2,6 +2,10 @@
   "name": "@dohc/hocuspocus",
   "private": true,
   "type": "module",
+  "exports": {
+    "./auth": "./src/auth.ts",
+    "./doc-name": "./src/doc-name.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
@@ -15,11 +19,11 @@
     "@hocuspocus/provider": "^4.1.0",
     "@hocuspocus/server": "^4.1.0",
     "@tiptap/core": "^3.23.6",
+    "@tiptap/extension-list": "3.23.6",
     "@tiptap/extension-table": "^3.23.6",
     "@tiptap/markdown": "^3.23.6",
     "@tiptap/pm": "^3.23.6",
     "@tiptap/starter-kit": "^3.23.6",
-    "convex": "^1.39.1",
     "jose": "^6.2.3",
     "js-yaml": "^4.1.1",
     "pg": "^8.21.0",

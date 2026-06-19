@@ -6,8 +6,8 @@ import {
   RevocationRegistry,
   writeNodeAdminResponse,
 } from './admin.js'
-import { createConvexAcl } from './convex-acl.js'
 import { createHocuspocusHooks, type HocuspocusAcl } from './hooks.js'
+import { createPostgresAcl } from './postgres-acl.js'
 import {
   PostgresYDocPersistenceBackend,
   PostgresYDocStore,
@@ -26,7 +26,7 @@ function requiredEnv(name: string): string {
 function createDevAllowAllAcl(): HocuspocusAcl {
   if (process.env.HOCUSPOCUS_ALLOW_DEV_ACL !== 'true') {
     throw new Error(
-      'Configure HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN, or set HOCUSPOCUS_ALLOW_DEV_ACL=true for local development only',
+      'Configure HOCUSPOCUS_WORKSPACE_DATABASE_URL, or set HOCUSPOCUS_ALLOW_DEV_ACL=true for local development only',
     )
   }
 
@@ -43,18 +43,15 @@ function createDevAllowAllAcl(): HocuspocusAcl {
   }
 }
 
-function createAclFromEnv(): HocuspocusAcl {
-  const convexUrl = process.env.HOCUSPOCUS_CONVEX_URL
-  const serverToken = process.env.HOCUSPOCUS_CONVEX_SERVER_TOKEN
-  if (convexUrl || serverToken) {
-    if (!convexUrl || !serverToken) {
-      throw new Error(
-        'Both HOCUSPOCUS_CONVEX_URL and HOCUSPOCUS_CONVEX_SERVER_TOKEN are required for Convex ACL',
-      )
-    }
-    return createConvexAcl({ convexUrl, serverToken })
+function createAclFromEnv(): { acl: HocuspocusAcl; close?: () => Promise<void> } {
+  // Deliberately NOT HOCUSPOCUS_DATABASE_URL: ydoc storage and the workspace
+  // db are separate concerns and may live in different Postgres instances.
+  const workspaceDatabaseUrl = process.env.HOCUSPOCUS_WORKSPACE_DATABASE_URL
+  if (workspaceDatabaseUrl) {
+    const pool = new Pool({ connectionString: workspaceDatabaseUrl })
+    return { acl: createPostgresAcl({ pool }), close: () => pool.end() }
   }
-  return createDevAllowAllAcl()
+  return { acl: createDevAllowAllAcl() }
 }
 
 export async function createServerFromEnv(): Promise<Server> {
@@ -66,7 +63,7 @@ export async function createServerFromEnv(): Promise<Server> {
   let poolEndPromise: Promise<void> | undefined
 
   const revocations = new RevocationRegistry()
-  const acl = createAclFromEnv()
+  const { acl, close: closeAcl } = createAclFromEnv()
   const projectionWorker = createProjectionWorker({
     store,
     acl,
@@ -131,6 +128,7 @@ export async function createServerFromEnv(): Promise<Server> {
       projectionWorker.stop()
       poolEndPromise ??= pool.end()
       await poolEndPromise
+      await closeAcl?.()
     },
   })
   return server

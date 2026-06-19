@@ -189,22 +189,31 @@ export async function softDeleteAtom(
   db: PgQueryable,
   actor: Actor,
   path: string,
+  expectedRevision?: string,
 ) {
   WorkspacePath.parse(path);
-  const result = await db.query<Pick<AtomRow, "id">>(
+  // Lock the live row so the revision check and delete are atomic; without it a
+  // stale delete from one machine could erase another machine's newer content.
+  const current = await db.query<Pick<AtomRow, "id" | "revision">>(
     `
-      update atoms
-      set deleted_at = now(),
-          updated_at = now()
+      select id, revision
+      from atoms
       where workspace_id = $1
         and path = $2
         and deleted_at is null
-      returning id
+      for update
     `,
     [actor.workspaceId, path],
   );
-  const row = result.rows[0];
+  const row = current.rows[0];
   if (!row) throw new WorkspaceError("not_found", "Atom not found");
+  if (expectedRevision !== undefined && String(row.revision) !== expectedRevision) {
+    throw new WorkspaceError("conflict", "Expected revision is stale");
+  }
+  await db.query(
+    `update atoms set deleted_at = now(), updated_at = now() where id = $1 and workspace_id = $2`,
+    [row.id, actor.workspaceId],
+  );
   return row.id;
 }
 
