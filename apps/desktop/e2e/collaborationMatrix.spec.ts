@@ -3,9 +3,9 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ElectronApplication } from "playwright";
+import { nativeTmpdir } from "../src/workspaces/testTemp";
 import { launchApp, openInTree, stopChildProcess, tsxChildEnv } from "./launch";
 
 // Multi-user collaboration matrix over the real desktop app, workspace-api,
@@ -149,8 +149,8 @@ async function seedSharedClient(
   workspaceId: string,
   files: Record<string, string>,
 ): Promise<SeededClient> {
-  const home = await mkdtemp(join(tmpdir(), "dohc-collab-home-"));
-  const root = join(await mkdtemp(join(tmpdir(), "dohc-collab-ws-")), "workspace");
+  const home = await mkdtemp(join(nativeTmpdir(), "dohc-collab-home-"));
+  const root = join(await mkdtemp(join(nativeTmpdir(), "dohc-collab-ws-")), "workspace");
   await mkdir(join(root, ".dohc"), { recursive: true });
   await writeFile(
     join(root, ".dohc", "manifest.json"),

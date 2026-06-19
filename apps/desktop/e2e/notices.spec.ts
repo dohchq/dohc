@@ -98,6 +98,7 @@ test("notice center collects update-ready notices and preserves validated event 
   );
   await page.getByTestId("notice-center").click();
   await expect(page.getByTestId("notice-center")).toBeVisible();
+  // Click outside the upper-right notice center to exercise backdrop close.
   await page.mouse.click(120, 120);
   await expect(page.getByTestId("notice-center")).toHaveCount(0);
   await page.getByTestId("notice-center-toggle").click();

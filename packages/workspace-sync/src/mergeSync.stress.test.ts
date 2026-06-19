@@ -215,7 +215,7 @@ async function assertConverged(
   expect(localB, failureDetails()).toEqual(remote);
   await dohcSurvived(rootA);
   await dohcSurvived(rootB);
-  expect(Object.keys(remote).some((path) => path.endsWith(".conflict"))).toBe(false);
+  expect([...server.files.keys()].some((path) => path.endsWith(".conflict"))).toBe(false);
   for (const body of Object.values(remote)) {
     expect(body).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
   }

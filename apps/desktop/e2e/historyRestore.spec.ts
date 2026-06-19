@@ -1,9 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ElectronApplication } from "playwright";
+import { nativeTmpdir } from "../src/workspaces/testTemp";
 import { launchApp } from "./launch";
 
 type HistoryRecord = {
@@ -45,8 +45,8 @@ async function seedWorkspace(
   workspaceId: string,
   files: Record<string, string>,
 ): Promise<{ home: string; root: string }> {
-  const home = await mkdtemp(join(tmpdir(), "dohc-history-restore-home-"));
-  const root = join(await mkdtemp(join(tmpdir(), "dohc-history-restore-")), "workspace");
+  const home = await mkdtemp(join(nativeTmpdir(), "dohc-history-restore-home-"));
+  const root = join(await mkdtemp(join(nativeTmpdir(), "dohc-history-restore-")), "workspace");
   await mkdir(join(root, ".dohc"), { recursive: true });
   await writeFile(
     join(root, ".dohc", "manifest.json"),
