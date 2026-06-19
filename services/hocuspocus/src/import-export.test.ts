@@ -7,6 +7,25 @@ import {
   plainTextToYDoc,
 } from './import-export.js'
 
+type ExpectedMarkdownFragment = string | RegExp
+
+function expectStableMarkdownRoundTrip(
+  input: string,
+  expectedFragments: ExpectedMarkdownFragment[],
+): string {
+  const once = yDocToMarkdown(markdownToYDoc(input))
+  const twice = yDocToMarkdown(markdownToYDoc(once))
+  expect(twice).toBe(once)
+  for (const fragment of expectedFragments) {
+    if (typeof fragment === 'string') {
+      expect(once).toContain(fragment)
+    } else {
+      expect(once).toMatch(fragment)
+    }
+  }
+  return once
+}
+
 describe('hocuspocus markdown import/export', () => {
   it('keeps malformed frontmatter visible instead of dropping it', () => {
     const input = [
@@ -92,5 +111,134 @@ describe('hocuspocus markdown import/export', () => {
     expect(output).toContain('- [ ] migrate rich collab')
     expect(output).toContain('- [x] keep checked state')
     expect(yDocToMarkdown(markdownToYDoc(output))).toBe(output)
+  })
+
+  it('covers CommonMark block and inline constructs without semantic loss', () => {
+    const input = [
+      '# ATX heading',
+      '',
+      'Setext heading',
+      '--------------',
+      '',
+      '---',
+      '',
+      '> Quote level one',
+      '>',
+      '> - quoted bullet',
+      '',
+      '1. ordered',
+      '2. ordered again',
+      '   - nested bullet',
+      '',
+      'A paragraph with **bold**, *emphasis*, ***both***, `code`,',
+      '[a link](https://example.com), and ![diagram](assets/diagram.png "Architecture").',
+      '',
+      '```ts',
+      'const answer = 42',
+      '```',
+    ].join('\n')
+
+    expectStableMarkdownRoundTrip(input, [
+      '# ATX heading',
+      '## Setext heading',
+      '---',
+      '> Quote level one',
+      '> - quoted bullet',
+      '1. ordered',
+      '2. ordered again',
+      '- nested bullet',
+      '**bold**',
+      '*emphasis*',
+      '***both***',
+      '`code`',
+      '[a link](https://example.com)',
+      '![diagram](assets/diagram.png "Architecture")',
+      '```ts\nconst answer = 42\n```',
+    ])
+  })
+
+  it('preserves CommonMark escaped punctuation instead of dropping literal characters', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '\\# not a heading',
+        '1\\. not an ordered list',
+        '\\* not a bullet',
+        'literal \\*not emphasis* and \\[not a link](/somewhere)',
+        '\\`not code`',
+      ].join('\n'),
+      [
+        '\\# not a heading',
+        '1\\. not an ordered list',
+        '\\* not a bullet',
+        'literal \\*not emphasis*',
+        '\\[not a link](/somewhere)',
+        '\\`not code`',
+      ],
+    )
+  })
+
+  it('covers GFM tables, task lists, and strikethrough', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '| Metric | Value |',
+        '| --- | ---: |',
+        '| apples | 10 |',
+        '| oranges | 2 |',
+        '',
+        '- [ ] write the migration',
+        '- [x] keep completed work visible',
+        '',
+        '~~obsolete note~~',
+      ].join('\n'),
+      [
+        '| Metric  | Value |',
+        '| ------- | -----: |',
+        '| apples  | 10    |',
+        '| oranges | 2     |',
+        '- [ ] write the migration',
+        '- [x] keep completed work visible',
+        '~~obsolete note~~',
+      ],
+    )
+  })
+
+  it('keeps Obsidian-style power-user syntax stable as text or custom nodes', () => {
+    expectStableMarkdownRoundTrip(
+      [
+        '---',
+        'tags:',
+        '  - alpha/beta',
+        'aliases:',
+        '  - Today',
+        '---',
+        '',
+        '# Daily note',
+        '',
+        'See [[Projects/dohc#Graph view|graph plan]] and [[Notes/Ideas#^block-ref]].',
+        'Embed stays visible: ![[assets/chart.png]].',
+        '',
+        '> [!note]+ Launch callout',
+        '> Body with #work/deep and ==highlighted text==.',
+        '',
+        '%% private drafting note %%',
+        '',
+        'Footnote ref[^1].',
+        '',
+        '[^1]: Footnote body.',
+      ].join('\n'),
+      [
+        'aliases:\n  - Today',
+        'tags:\n  - alpha/beta',
+        '[[Projects/dohc#Graph view|graph plan]]',
+        '[[Notes/Ideas#^block-ref]]',
+        '![[assets/chart.png]]',
+        '> [!note]+ Launch callout',
+        '#work/deep',
+        '==highlighted text==',
+        '%% private drafting note %%',
+        'Footnote ref[^1].',
+        '[^1]: Footnote body.',
+      ],
+    )
   })
 })

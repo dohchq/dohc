@@ -100,6 +100,18 @@ describe("shouldIgnoreWatchPath", () => {
 
 const update = (path: string): WatcherEvent => ({ path, operation: "update" });
 
+async function mkWatchRoot(): Promise<string> {
+  const { existsSync } = await import("node:fs");
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  // In WSL, os.tmpdir() can inherit Windows TEMP/TMP and land under /mnt/c,
+  // where chokidar may not receive inotify events. Watcher tests need a native
+  // Linux filesystem so a red test means watcher behavior, not DrvFs plumbing.
+  const base = process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
+  return mkdtemp(join(base, "dohc-watch-"));
+}
+
 describe("collapseSqliteSidecars", () => {
   it("collapses a sidecar event into a single update for its base db", () => {
     // SQLite writes hit wallet.db-wal first; the base wallet.db may not emit an
@@ -197,10 +209,8 @@ describe("watchWorkspaceEvents", () => {
   it("returns a stop function that is idempotent and respects a pre-aborted signal", async () => {
     // Pure timing is covered by desktop E2E; here we just prove the wrapper
     // constructs against a real (empty) temp dir and the stop fn is safe.
-    const { mkdtemp, rm } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const root = await mkdtemp(join(tmpdir(), "dohc-watch-"));
+    const { rm } = await import("node:fs/promises");
+    const root = await mkWatchRoot();
     try {
       const controller = new AbortController();
       controller.abort();
@@ -225,10 +235,9 @@ describe("watchWorkspaceEvents", () => {
   });
 
   it("ignores .dohc writes but reports user files (chokidar passes absolute paths to ignored)", async () => {
-    const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
+    const { mkdir, rm, writeFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const root = await mkdtemp(join(tmpdir(), "dohc-watch-"));
+    const root = await mkWatchRoot();
     try {
       const batches: string[][] = [];
       const watcher = watchWorkspaceEvents({ rootDir: root, settleMs: 80 }, (paths) =>
@@ -281,10 +290,9 @@ describe("rule unification with workspace-core", () => {
 
 describe("settle max-window cap", () => {
   it("flushes a batch under continuous writes instead of starving forever", async () => {
-    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
+    const { rm, writeFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const root = await mkdtemp(join(tmpdir(), "dohc-watch-"));
+    const root = await mkWatchRoot();
     try {
       const batches: string[][] = [];
       const watcher = watchWorkspaceEvents(

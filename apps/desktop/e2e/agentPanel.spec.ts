@@ -51,7 +51,13 @@ test("agent panel runs fake Codex and ACP sessions with permissions and attribut
   await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
 
   await page.getByTestId("activity-agent").click();
-  await expect(page.getByTestId("agent-panel")).toBeVisible();
+  // The activity item is a toggle when Agent is already the active view.
+  // Converge on an open panel without toggling during lazy-load.
+  await page.waitForTimeout(100);
+  if ((await page.getByTestId("side-panel").count()) === 0) {
+    await page.getByTestId("activity-agent").click();
+  }
+  await expect(page.getByTestId("agent-panel")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("agent-panel-status")).toHaveAttribute(
     "data-state",
     "stopped",

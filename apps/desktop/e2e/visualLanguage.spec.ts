@@ -151,7 +151,11 @@ test("graphite-minimal tokens in a real window, light and dark, no warm hexes", 
   const nameInput = page.getByRole("textbox", { name: /file name/i });
   await nameInput.fill("notes/today.md");
   await nameInput.press("Enter");
-  await expect(page.getByTestId("file-tree").getByText("today.md")).toBeVisible();
+  await expect(
+    page
+      .getByTestId("file-tree")
+      .locator('[data-testid="tree-row"][data-path="notes/today.md"]'),
+  ).toBeVisible();
   await shotAtSizes(page, "shell");
 
   // --- Markdown open: 15px document type ---

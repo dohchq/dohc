@@ -243,7 +243,7 @@ test("window state: bounds persist and restore across relaunch", async () => {
   await page.getByRole("button", { name: /create workspace/i }).click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-  const bounds = { x: 24, y: 16, width: 1180, height: 760 };
+  const bounds = { x: 120, y: 96, width: 1180, height: 760 };
   await app.evaluate(({ BrowserWindow }, next) => {
     BrowserWindow.getAllWindows()[0]?.setBounds(next);
   }, bounds);

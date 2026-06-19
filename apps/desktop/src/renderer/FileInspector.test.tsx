@@ -347,7 +347,7 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "data/empty.csv",
-      text: "column\n",
+      text: 'column\n""',
     });
   });
 

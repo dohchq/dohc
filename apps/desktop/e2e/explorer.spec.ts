@@ -90,6 +90,8 @@ async function setSavePath(app: ElectronApplication, path: string): Promise<void
 }
 
 const tree = (page: Page) => page.getByTestId("file-tree");
+const explorerButton = (page: Page, name: string) =>
+  page.getByTestId("side-panel").getByRole("button", { name, exact: true });
 // tree-row scoped: a PINNED row carries the same data-path as its tree row.
 const row = (page: Page, path: string) =>
   tree(page).locator(`[data-testid="tree-row"][data-path="${path}"]`);
@@ -156,7 +158,7 @@ test("create (inline file/folder incl. nested), rename (F2 + context menu), dele
   const timeline = page.getByTestId("history-timeline");
 
   // --- Inline create: header action, root level ---
-  await page.getByTestId("explorer-new-file").click();
+  await explorerButton(page, "New file").click();
   const editbox = page.getByTestId("tree-edit-input");
   await expect(editbox).toBeVisible();
   await editbox.fill("alpha.md");
@@ -169,15 +171,19 @@ test("create (inline file/folder incl. nested), rename (F2 + context menu), dele
   await expectChangeSet(page, 1, "alpha.md");
 
   // --- Inline create with a typed NESTED path: folders materialize ---
-  await page.getByTestId("explorer-new-file").click();
+  await explorerButton(page, "New file").click();
   await editbox.fill("deep/nested/file.md");
   await editbox.press("Enter");
   await expect(row(page, "deep/nested/file.md")).toBeVisible(); // auto-expanded
   expect(existsSync(join(root, "deep", "nested", "file.md"))).toBe(true);
   await expectChangeSet(page, 2, "deep/nested/file.md");
 
+  // Toolbar creates are focus-aware (VS Code-style). Focus a root-level file
+  // before this one so the folder lands at the workspace root.
+  await row(page, "alpha.md").click();
+
   // --- Inline create FOLDER: an empty folder is a visible tree row ---
-  await page.getByTestId("explorer-new-folder").click();
+  await explorerButton(page, "New folder").click();
   await editbox.fill("docs");
   await editbox.press("Enter");
   await expect(row(page, "docs")).toBeVisible();
@@ -278,7 +284,8 @@ test("create (inline file/folder incl. nested), rename (F2 + context menu), dele
   // Screenshots: the tree with an EXPANDED folder (notes: FolderOpen icon +
   // rotated chevron + children), a COLLAPSED one (papers), and an EMPTY one
   // (assets) all in frame — light + dark.
-  await page.getByTestId("explorer-new-folder").click();
+  await row(page, "alpha.md").click();
+  await explorerButton(page, "New folder").click();
   await editbox.fill("assets");
   await editbox.press("Enter");
   await expect(row(page, "assets")).toBeVisible();
@@ -319,9 +326,13 @@ test("drag-move into a folder (drop target + planDrop rules) and multi-select de
   // Leaving the tree clears the highlight (no stuck drop state).
   await tree(page).dispatchEvent("dragleave");
   await expect.poll(rowBg).toBe("rgba(0, 0, 0, 0)");
+  await row(page, "a.md").dispatchEvent("dragend", { dataTransfer });
 
   // Drag a.md onto the target folder row → move INTO it (planDrop rule).
-  await row(page, "a.md").dragTo(row(page, "target"));
+  const moveTransfer = await page.evaluateHandle(() => new DataTransfer());
+  await row(page, "a.md").dispatchEvent("dragstart", { dataTransfer: moveTransfer });
+  await targetRow.dispatchEvent("dragover", { dataTransfer: moveTransfer });
+  await targetRow.dispatchEvent("drop", { dataTransfer: moveTransfer });
   await openInTree(page, "target/a.md", { click: false });
   await expect(row(page, "a.md")).toHaveCount(0);
   expect(existsSync(join(root, "target", "a.md"))).toBe(true);

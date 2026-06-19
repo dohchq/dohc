@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { launchApp } from "./launch";
 
-// Phase E5 graph gate: local-first workspace graph from markdown links.
+// Phase E5 graph gate: local-first workspace graph from workspace links.
 // It proves wikilinks, relative markdown links, unresolved-link notice, and
 // click-to-open through the same tab path as Explorer/Search.
 
@@ -52,7 +52,7 @@ test("graph view builds a local markdown link map and opens documents", async ()
     "data-state",
     "ready",
   );
-  await expect(page.getByTestId("graph-doc-count")).toHaveText("3 docs");
+  await expect(page.getByTestId("graph-doc-count")).toHaveText("4 docs");
   await expect(page.getByTestId("graph-link-count")).toHaveText("3 links");
   await expect(page.getByTestId("graph-unresolved-count")).toContainText(
     "1 unresolved",
@@ -64,14 +64,25 @@ test("graph view builds a local markdown link map and opens documents", async ()
     path: `${SCREENSHOT_DIR}/graph-view--1280x800--light.png`,
   });
 
-  await page
-    .locator('[data-testid="graph-file-row"][data-path="archive/decision.md"]')
+  await page.getByTestId("graph-open-tab").click();
+  await expect(page.getByTestId("tab-dohc://graph")).toHaveAttribute(
+    "data-active",
+    "true",
+  );
+  const pageGraph = page.locator('[data-testid="graph-view"][data-variant="page"]');
+  await expect(pageGraph).toHaveAttribute("data-state", "ready");
+  await expect(pageGraph.getByTestId("graph-doc-count")).toHaveText("4 docs");
+
+  await pageGraph
+    .locator('[data-testid="graph-node"][data-path="archive/decision.md"]')
     .click();
   await expect(page.getByTestId("tab-archive/decision.md")).toHaveAttribute(
     "data-active",
     "true",
   );
-  await expect(page.getByText("Decision").first()).toBeVisible();
+  await expect(page.getByTestId("view-markdown").locator("h1")).toHaveText(
+    "Decision",
+  );
 
   await app.close();
 });

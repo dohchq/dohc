@@ -14,6 +14,8 @@ export type DohcV2ConstructName =
   | 'blockquote'
   | 'horizontalRule'
   | 'table'
+  | 'image'
+  | 'escapedPunctuation'
   | 'wikilink'
   | 'inlineAtom'
   | 'formula'
@@ -232,6 +234,38 @@ export const DOHC_V2_CONSTRUCTS = [
     note: 'GFM table semantics must survive, while alignment formatting may normalize.',
   },
   {
+    name: 'image',
+    kind: 'inline',
+    canonical: 'tiptap-node',
+    yjsField: 'body',
+    editableBodyNode: true,
+    markdown: {
+      parse: 'commonmark',
+      render: 'commonmark',
+      lossless: true,
+      fixtureRequired: true,
+    },
+    requiresPaidTiptap: false,
+    phase1Scope: 'required',
+    note: 'CommonMark images must not degrade to alt text during rich markdown round-trips.',
+  },
+  {
+    name: 'escapedPunctuation',
+    kind: 'inline',
+    canonical: 'tiptap-node',
+    yjsField: 'body',
+    editableBodyNode: true,
+    markdown: {
+      parse: 'commonmark',
+      render: 'commonmark',
+      lossless: true,
+      fixtureRequired: true,
+    },
+    requiresPaidTiptap: false,
+    phase1Scope: 'required',
+    note: 'Backslash-escaped punctuation is represented explicitly so source meaning survives the editor model.',
+  },
+  {
     name: 'wikilink',
     kind: 'inline',
     canonical: 'tiptap-node',
@@ -355,6 +389,8 @@ const REQUIRED_CONSTRUCTS: readonly DohcV2ConstructName[] = [
   'blockquote',
   'horizontalRule',
   'table',
+  'image',
+  'escapedPunctuation',
   'wikilink',
   'inlineAtom',
   'formula',

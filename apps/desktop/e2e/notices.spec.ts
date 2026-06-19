@@ -96,6 +96,14 @@ test("notice center collects update-ready notices and preserves validated event 
   await expect(page.getByTestId("notice-update-ready")).toContainText(
     "Update 1.2.3 is ready",
   );
+  await page.getByTestId("notice-center").click();
+  await expect(page.getByTestId("notice-center")).toBeVisible();
+  await page.mouse.click(120, 120);
+  await expect(page.getByTestId("notice-center")).toHaveCount(0);
+  await page.getByTestId("notice-center-toggle").click();
+  await expect(page.getByTestId("notice-update-ready")).toContainText(
+    "Update 1.2.3 is ready",
+  );
   for (const size of [
     { width: 1280, height: 800 },
     { width: 1536, height: 960 },

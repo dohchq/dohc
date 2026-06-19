@@ -14,6 +14,17 @@ const migrationUrls = [
   (name) =>
     new URL(`../packages/workspace-postgres/src/db/migrations/${name}`, import.meta.url),
 );
+const hocuspocusTables = [
+  "hocuspocus_projection_jobs",
+  "hocuspocus_semantic_operations",
+  "hocuspocus_ydoc_counters",
+  "hocuspocus_ydoc_snapshots",
+  "hocuspocus_ydoc_updates",
+];
+
+function quoteIdentifier(identifier) {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
 
 const client = new pg.Client({ connectionString: url });
 await client.connect();
@@ -26,7 +37,9 @@ try {
     )
   `);
   for (const migrationUrl of migrationUrls) {
-    const migrationId = migrationUrl.pathname.split("/").at(-1)!.replace(/\.sql$/, "");
+    const fileName = migrationUrl.pathname.split("/").at(-1);
+    if (!fileName) throw new Error(`Invalid migration URL: ${migrationUrl.href}`);
+    const migrationId = fileName.replace(/\.sql$/, "");
     const applied = await client.query(
       "select 1 from dohc_migrations where id = $1",
       [migrationId],
@@ -62,6 +75,24 @@ try {
       users
     restart identity cascade
   `);
+  const existingHocuspocusTables = await client.query(
+    `
+      select table_name
+      from information_schema.tables
+      where table_schema = 'public'
+        and table_name = any($1::text[])
+    `,
+    [hocuspocusTables],
+  );
+  if (existingHocuspocusTables.rowCount > 0) {
+    await client.query(`
+      truncate table
+        ${existingHocuspocusTables.rows
+          .map((row) => quoteIdentifier(row.table_name))
+          .join(",\n        ")}
+      restart identity cascade
+    `);
+  }
 } finally {
   await client.end();
 }

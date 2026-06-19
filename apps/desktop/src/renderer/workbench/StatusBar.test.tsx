@@ -155,6 +155,20 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
+  it("keeps the notice center open when dismissing the update toast", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
+
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+  });
+
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
     renderBar({
       syncStatus: {

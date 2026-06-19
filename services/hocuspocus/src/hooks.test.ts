@@ -462,6 +462,43 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
+  it('does not persist live writes after write access is revoked', async () => {
+    let canWrite = true
+    const { acl, backend, hooks } = makeHooks({ canRead: true, canWrite: true })
+    acl.canWriteAtom.mockImplementation(async () => canWrite)
+    const token = await mintCollabToken(
+      {
+        sub: 'user_1',
+        ws: 'workspace_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+      secret,
+    )
+    const connection = { readOnly: false, socketId: 'socket_1' }
+    const context = await hooks.onAuthenticate({
+      documentName,
+      token,
+      connection,
+    } as never)
+    expect(connection.readOnly).toBe(false)
+
+    canWrite = false
+    const doc = new Y.Doc()
+    doc.getText('body').insert(0, 'revoked user edit')
+
+    await expect(
+      hooks.beforeSync({
+        documentName,
+        type: messageYjsUpdate,
+        payload: Y.encodeStateAsUpdate(doc),
+        connection,
+        context,
+      } as never),
+    ).rejects.toThrow(/write access/)
+    expect(backend.updatesFor(documentName)).toHaveLength(0)
+  })
+
   it('rechecks read ACL before replying to initial sync requests', async () => {
     const { hooks } = makeHooks({ canRead: false, canWrite: true })
 

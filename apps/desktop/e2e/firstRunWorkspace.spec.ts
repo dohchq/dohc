@@ -87,7 +87,9 @@ test("first run creates a real workspace folder and lands in a native shell", as
   await nameInput.fill("notes/today.md");
   await nameInput.press("Enter");
   await expect(
-    page.getByTestId("file-tree").getByText("today.md"),
+    page
+      .getByTestId("file-tree")
+      .locator('[data-testid="tree-row"][data-path="notes/today.md"]'),
   ).toBeVisible();
   expect(existsSync(join(workspaceRoot, "notes", "today.md"))).toBe(true);
 
@@ -115,11 +117,13 @@ test("first run creates a real workspace folder and lands in a native shell", as
   const palette = page.getByTestId("command-palette");
   await expect(palette).toBeVisible();
   // The full registry: new-file, new-folder, quick-open, open-workspace,
-  // import/export, export-workspace, toggle-sidebar, close-tab, toggle-history, the six
-  // workbench view commands (show-explorer … show-history), connect-cloud,
-  // manage-workspace, settings, toggle-theme.
-  await expect(palette.getByRole("option")).toHaveCount(19);
-  await expect(palette).toContainText(/import \/ export workspace/i);
+  // data-fragments, import-files, export-workspace, toggle-sidebar,
+  // close-tab, toggle-history, the six workbench view commands
+  // (show-explorer … show-history), connect-cloud, manage-workspace,
+  // settings, toggle-theme.
+  await expect(palette.getByRole("option")).toHaveCount(20);
+  await expect(palette).toContainText(/data fragments/i);
+  await expect(palette).toContainText(/import files/i);
   await expect(palette).toContainText(/export workspace as zip/i);
   await expect(palette).toContainText(/connect dohc cloud/i);
   await expect(palette).toContainText(/manage workspace members/i);

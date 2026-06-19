@@ -473,8 +473,13 @@ function GraphMap(props: {
     const shouldOpen = !drag.moved;
     releaseNode(drag.path);
     dragRef.current = null;
-    if (svgRef.current?.hasPointerCapture(event.pointerId)) {
-      svgRef.current.releasePointerCapture(event.pointerId);
+    const svg = svgRef.current;
+    if (
+      typeof svg?.hasPointerCapture === "function" &&
+      typeof svg.releasePointerCapture === "function" &&
+      svg.hasPointerCapture(event.pointerId)
+    ) {
+      svg.releasePointerCapture(event.pointerId);
     }
     if (shouldOpen) props.onOpenPath(drag.path);
   }
@@ -549,7 +554,9 @@ function GraphMap(props: {
                 moved: false,
               };
               setNodePosition(node.path, point.x, point.y, true);
-              svgRef.current?.setPointerCapture(event.pointerId);
+              if (typeof svgRef.current?.setPointerCapture === "function") {
+                svgRef.current.setPointerCapture(event.pointerId);
+              }
             }}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {

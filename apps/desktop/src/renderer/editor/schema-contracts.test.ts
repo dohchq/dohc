@@ -25,6 +25,8 @@ describe('dohc v2 schema contracts', () => {
       'blockquote',
       'horizontalRule',
       'table',
+      'image',
+      'escapedPunctuation',
       'wikilink',
       'inlineAtom',
       'formula',

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,8 +29,12 @@ const credentials: CloudCredentials = {
 
 let dir: string;
 
+function nativeTmpdir(): string {
+  return process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
+}
+
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "dohc-cloud-"));
+  dir = await mkdtemp(join(nativeTmpdir(), "dohc-cloud-"));
 });
 
 function credentialFile(): string {

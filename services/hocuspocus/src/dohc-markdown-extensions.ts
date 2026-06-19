@@ -48,6 +48,95 @@ function splitWikilinkInner(inner: string): [string, string | null] {
   return [inner, null]
 }
 
+function renderMarkdownImage(attrs: {
+  alt?: unknown
+  src?: unknown
+  title?: unknown
+}): string {
+  const alt = String(attrs.alt ?? '').replaceAll(']', '\\]')
+  const src = String(attrs.src ?? '').replaceAll(')', '\\)')
+  const title = typeof attrs.title === 'string' && attrs.title.length > 0
+    ? ` "${attrs.title.replaceAll('"', '\\"')}"`
+    : ''
+  return `![${alt}](${src}${title})`
+}
+
+const DohcImage = Node.create({
+  name: 'image',
+  inline: true,
+  group: 'inline',
+  atom: true,
+  draggable: true,
+
+  addAttributes() {
+    return {
+      src: { default: '' },
+      alt: { default: '' },
+      title: { default: null },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'img[src]' }]
+  },
+
+  renderHTML({ node }) {
+    const attrs: Record<string, string> = {
+      src: String(node.attrs.src ?? ''),
+      alt: String(node.attrs.alt ?? ''),
+    }
+    if (typeof node.attrs.title === 'string' && node.attrs.title.length > 0) {
+      attrs.title = node.attrs.title
+    }
+    return ['img', attrs]
+  },
+
+  markdownTokenName: 'image',
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('image', {
+      src: token.href ?? '',
+      alt: token.text ?? '',
+      title: token.title ?? null,
+    }),
+
+  renderMarkdown: (node) => renderMarkdownImage(node.attrs ?? {}),
+})
+
+const DohcEscapedPunctuation = Node.create({
+  name: 'escapedPunctuation',
+  inline: true,
+  group: 'inline',
+  atom: true,
+
+  addAttributes() {
+    return {
+      value: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [{ tag: 'span[data-dohc-escaped-punctuation]' }]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'span',
+      { 'data-dohc-escaped-punctuation': node.attrs.value },
+      String(node.attrs.value ?? ''),
+    ]
+  },
+
+  markdownTokenName: 'escape',
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('escapedPunctuation', {
+      value: token.text ?? String(token.raw ?? '').replace(/^\\/, ''),
+    }),
+
+  renderMarkdown: (node) => `\\${String(node.attrs?.value ?? '')}`,
+})
+
 const DohcWikilink = Node.create({
   name: 'wikilink',
   priority: 1000,
@@ -270,6 +359,8 @@ const DohcQueryBlock = Node.create({
 })
 
 export const dohcMarkdownExtensions = [
+  DohcImage,
+  DohcEscapedPunctuation,
   DohcWikilink,
   DohcInlineAtom,
   DohcFormula,

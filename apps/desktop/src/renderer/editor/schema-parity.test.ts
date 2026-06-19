@@ -14,6 +14,8 @@ describe('desktop editor schema parity with hocuspocus', () => {
   it('the assembled schema carries the dohc custom nodes and checklist nodes', () => {
     const schema = getDohcProseMirrorSchema()
     for (const node of [
+      'image',
+      'escapedPunctuation',
       'wikilink',
       'inlineAtom',
       'formula',

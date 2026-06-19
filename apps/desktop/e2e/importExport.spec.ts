@@ -57,6 +57,25 @@ async function setSavePath(app: ElectronApplication, path: string): Promise<void
   }, path);
 }
 
+async function setExplorerMenuChoice(
+  app: ElectronApplication,
+  choice: string | null,
+): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    if (value === null) delete process.env.DOHC_TEST_EXPLORER_MENU_CHOICE;
+    else process.env.DOHC_TEST_EXPLORER_MENU_CHOICE = value;
+  }, choice);
+}
+
+async function runCommand(page: Page, label: string): Promise<void> {
+  await page.keyboard.press("ControlOrMeta+k");
+  const palette = page.getByTestId("command-palette");
+  await expect(palette).toBeVisible();
+  await page.keyboard.type(label);
+  await palette.getByRole("button", { name: label, exact: true }).click();
+  await expect(palette).toHaveCount(0);
+}
+
 async function setTheme(page: Page, scheme: "light" | "dark") {
   await page.emulateMedia({ colorScheme: scheme });
   await expect
@@ -92,7 +111,7 @@ function listZip(zip: Buffer): string[] {
   return names;
 }
 
-test("import/export panel imports files and exports current file plus workspace archives", async () => {
+test("data fragments stay distinct from file import and zip export", async () => {
   test.setTimeout(120_000);
   const { home, root, source } = await seedWorkspace();
   const { app, page } = await openSeeded(home, root);
@@ -103,13 +122,25 @@ test("import/export panel imports files and exports current file plus workspace 
   await page.getByTestId("import-export-open").click();
   const dialog = page.getByTestId("import-export-dialog");
   await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Data fragments");
+  await expect(dialog).toContainText("Cloud data fragment");
   await expect(dialog).toContainText("notes/plan.md");
+  await expect(dialog.getByTestId("fragment-cloud-status")).toContainText(
+    "Sign in to dohc Cloud",
+  );
+  await expect(dialog.getByTestId("fragment-text")).toBeVisible();
+  await expect(dialog.getByTestId("fragment-recipient-email")).toBeVisible();
+  await expect(dialog.getByTestId("shared-fragment-select")).toBeDisabled();
+  await expect(dialog.getByTestId("export-fragment-action")).toBeDisabled();
+  await expect(dialog.getByTestId("import-fragment-action")).toBeDisabled();
+  await expect(dialog.getByTestId("import-files-action")).toHaveCount(0);
+  await expect(dialog.getByTestId("export-current-action")).toHaveCount(0);
+  await expect(dialog.getByTestId("export-workspace-action")).toHaveCount(0);
+  await page.getByRole("button", { name: /close data fragments dialog/i }).click();
+  await expect(dialog).toHaveCount(0);
 
   await setImportPaths(app, [source]);
-  await dialog.getByTestId("import-files-action").click();
-  await expect(dialog.getByTestId("import-export-status")).toContainText(
-    "Imported 1 file.",
-  );
+  await runCommand(page, "Import files");
   await openInTree(page, "receipt.md", { click: false });
   expect(readFileSync(join(root, "receipt.md"), "utf8")).toBe("# Receipt\n");
   await expect(page.getByTestId("history-timeline")).toContainText("receipt.md", {
@@ -118,13 +149,19 @@ test("import/export panel imports files and exports current file plus workspace 
 
   const fileZip = join(outDir, "plan.zip");
   await setSavePath(app, fileZip);
-  await dialog.getByTestId("export-current-action").click();
+  await setExplorerMenuChoice(app, "export-zip");
+  await openInTree(page, "notes/plan.md", { click: false });
+  await page
+    .getByTestId("file-tree")
+    .locator('[data-testid="tree-row"][data-path="notes/plan.md"]')
+    .click({ button: "right" });
   await expect.poll(() => existsSync(fileZip), { timeout: 10_000 }).toBe(true);
   expect(listZip(readFileSync(fileZip))).toEqual(["plan.md"]);
+  await setExplorerMenuChoice(app, null);
 
   const workspaceZip = join(outDir, "workspace.zip");
   await setSavePath(app, workspaceZip);
-  await dialog.getByTestId("export-workspace-action").click();
+  await runCommand(page, "Export workspace as zip");
   await expect.poll(() => existsSync(workspaceZip), { timeout: 10_000 }).toBe(true);
   const entries = listZip(readFileSync(workspaceZip)).sort();
   expect(entries).toEqual(["notes/plan.md", "readme.md", "receipt.md"]);

@@ -65,6 +65,12 @@ async function sidebarWidth(page: Page): Promise<number> {
     .evaluate((el) => el.getBoundingClientRect().width);
 }
 
+async function historyWidth(page: Page): Promise<number> {
+  return page
+    .getByTestId("history-timeline")
+    .evaluate((el) => el.getBoundingClientRect().width);
+}
+
 // Drives a main→renderer update event exactly the way electronUpdater's
 // onState wiring does (webContents.send on the update channel) — the preload
 // boundary validation is part of what this exercises.
@@ -119,13 +125,14 @@ test("activity bar: view switching with designed empty states, panel collapse on
   await expect(page.getByTestId("graph-doc-count")).toHaveText("1 doc");
   await expect(page.getByTestId("file-tree")).toHaveCount(0);
 
-  // Apps remains a designed empty state until its activity panel lands.
+  // Apps graduated to its real workspace app inventory panel.
   await page.getByTestId("activity-apps").click();
   await expect(page.getByTestId("activity-apps")).toHaveAttribute(
     "aria-current",
     "page",
   );
-  await expect(page.getByTestId("view-empty-state")).toContainText(/apps/i);
+  await expect(page.getByTestId("apps-view")).toBeVisible();
+  await expect(page.getByTestId("apps-count")).toHaveText("0 apps");
   await expect(page.getByTestId("file-tree")).toHaveCount(0);
 
   // Agent graduated to its real panel in E6.
@@ -322,11 +329,108 @@ test("editor tabs: open/switch, drag reorder, overflow menu, dirty dot, Ctrl+W, 
   await expect(page.getByTestId("tab-c.md")).toHaveAttribute("data-active", "true");
 
   // The close button clears the last tab → the editor empty state returns.
-  await page.getByRole("button", { name: /close c\.md/i }).click();
+  await page
+    .getByTestId("tab-c.md")
+    .getByRole("button", { name: /close c\.md/i })
+    .click();
   await expect(page.getByTestId("editor-tabs")).toHaveCount(0);
   await expect(page.getByText(/select a file, or create one/i)).toBeVisible();
 
   await app.close();
+});
+
+test("open editors and file sections: rows, collapse state, untitled create, close all", async () => {
+  const { home, root } = await seedWorkspace("e2-open-editors", {
+    "a.md": "# Alpha\n",
+    "b.md": "# Beta\n",
+  });
+  const { app, page } = await openSeeded(home, root);
+
+  await openInTree(page, "a.md");
+  await openInTree(page, "b.md");
+  await expect(page.getByTestId("editor-tabs").getByRole("tab")).toHaveCount(2);
+
+  const openEditors = page.getByTestId("open-editors-section");
+  await expect(openEditors.locator('[data-testid="open-editor-row"]')).toHaveCount(2);
+  await expect(
+    openEditors.locator('[data-testid="open-editor-row"][data-path="b.md"]'),
+  ).toHaveAttribute("data-active", "true");
+
+  await openEditors
+    .locator('[data-testid="open-editor-row"][data-path="a.md"] button')
+    .first()
+    .click();
+  await expect(page.getByTestId("tab-a.md")).toHaveAttribute("data-active", "true");
+
+  await page.getByTestId("open-editors-toggle").click();
+  await expect(openEditors.locator('[data-testid="open-editor-row"]')).toHaveCount(0);
+  await page.getByTestId("open-editors-toggle").click();
+  await expect(openEditors.locator('[data-testid="open-editor-row"]')).toHaveCount(2);
+
+  await page.getByRole("button", { name: "New untitled text file" }).click();
+  await expect(page.getByTestId("tab-Untitled.txt")).toHaveAttribute(
+    "data-active",
+    "true",
+  );
+  await expect
+    .poll(() => existsSync(join(root, "Untitled.txt")), { timeout: 5000 })
+    .toBe(true);
+  await expect(openEditors.locator('[data-testid="open-editor-row"]')).toHaveCount(3);
+
+  await page.getByTestId("explorer-files-toggle").click();
+  await expect(page.locator('[data-testid="tree-row"][data-path="a.md"]')).toHaveCount(0);
+  await page.getByTestId("explorer-files-toggle").click();
+  await expect(page.locator('[data-testid="tree-row"][data-path="a.md"]')).toBeVisible();
+
+  await page.getByRole("button", { name: "Close all editors" }).click();
+  await expect(page.getByTestId("editor-tabs")).toHaveCount(0);
+  await expect(openEditors).toContainText("No open editors");
+
+  await app.close();
+});
+
+test("history rail: drag resize persists and does not create history noise", async () => {
+  const { home, root } = await seedWorkspace("e2-history-resize", {
+    "a.md": "# Alpha\n",
+  });
+  const { app, page } = await openSeeded(home, root);
+
+  expect(Math.round(await historyWidth(page))).toBe(280);
+  const handle = page.getByTestId("history-resize");
+  const box = await handle.boundingBox();
+  expect(box).not.toBeNull();
+  const startX = box!.x + box!.width / 2;
+  const startY = box!.y + box!.height / 2;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX - 160, startY, { steps: 8 });
+  await page.mouse.up();
+
+  const draggedWidth = Math.round(await historyWidth(page));
+  expect(Math.abs(draggedWidth - 440)).toBeLessThanOrEqual(1);
+
+  const uiStatePath = join(root, ".dohc", "ui-state.json");
+  await expect.poll(() => existsSync(uiStatePath), { timeout: 5000 }).toBe(true);
+  await expect
+    .poll(
+      () => JSON.parse(readFileSync(uiStatePath, "utf8")) as { historyWidth?: number },
+      { timeout: 5000 },
+    )
+    .toMatchObject({ version: 1, historyWidth: draggedWidth });
+
+  await writeFile(join(root, "b.md"), "# Beta\n");
+  await expect(page.getByTestId("history-timeline")).toContainText(/b\.md/i, {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("history-timeline")).not.toContainText(".dohc");
+
+  await app.close();
+
+  const second = await relaunch(home);
+  await expect
+    .poll(async () => Math.round(await historyWidth(second.page)))
+    .toBe(draggedWidth);
+  await second.app.close();
 });
 
 test("native workbench context menus route tab and status bar actions", async () => {

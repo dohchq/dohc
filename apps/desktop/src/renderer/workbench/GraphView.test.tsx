@@ -45,15 +45,15 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
       "1 unresolved",
     );
+    const graphNodes = await screen.findAllByTestId("graph-node");
     expect(
-      screen
-        .getAllByTestId("graph-node")
+      graphNodes
         .find((node) => node.dataset.path === "beta.md")
         ?.getAttribute("aria-label"),
     ).toBe("Open or focus beta.md");
 
     await userEvent.click(
-      screen.getAllByTestId("graph-node").find((node) => node.dataset.path === "beta.md")!,
+      graphNodes.find((node) => node.dataset.path === "beta.md")!,
     );
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
   });

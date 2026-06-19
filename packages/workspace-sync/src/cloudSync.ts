@@ -73,6 +73,7 @@ import {
   MAX_INLINE_FILE_SIZE,
   readManifest,
   resolveWorkspacePath,
+  mediaTypeForPath,
   sha256,
   scanWorkspaceFiles,
   scanWorkspaceDiff,
@@ -495,7 +496,7 @@ function baselineEntry(file: RemoteFile, revision: string, sha: string): Workspa
 function mediaTypeFor(path: string): string {
   // Re-derive on the create half of a decomposed rename; enrichOperation maps
   // it to the proper atom/asset kind.
-  return path.toLowerCase().endsWith(".md") ? "text/markdown" : "application/octet-stream";
+  return mediaTypeForPath(path);
 }
 
 async function writeWorkspaceFile(rootDir: string, path: string, bytes: Buffer): Promise<void> {

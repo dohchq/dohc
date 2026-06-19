@@ -41,6 +41,7 @@ export function NoticeCenter(props: {
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
+  const toastRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(
     () =>
@@ -58,6 +59,7 @@ export function NoticeCenter(props: {
       if (!(target instanceof Node)) return;
       if (centerRef.current?.contains(target)) return;
       if (toggleRef.current?.contains(target)) return;
+      if (toastRef.current?.contains(target)) return;
       setOpen(false);
     };
 
@@ -128,6 +130,7 @@ export function NoticeCenter(props: {
     <>
       {updateMessage ? (
         <div
+          ref={toastRef}
           data-testid="update-toast"
           role="status"
           className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"

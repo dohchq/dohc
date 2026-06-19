@@ -23,14 +23,18 @@ import {
 
 let root: string;
 
+function nativeTmpdir(): string {
+  return process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
+}
+
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "dohc-files-"));
+  root = await mkdtemp(join(nativeTmpdir(), "dohc-files-"));
 });
 
 // One probe instead of process.platform: whether THIS filesystem treats
 // case variants as the same file decides which move semantics apply.
 async function caseInsensitiveFs(): Promise<boolean> {
-  const dir = await mkdtemp(join(tmpdir(), "dohc-case-"));
+  const dir = await mkdtemp(join(nativeTmpdir(), "dohc-case-"));
   await writeFile(join(dir, "probe.md"), "");
   return existsSync(join(dir, "PROBE.md"));
 }
@@ -58,7 +62,7 @@ describe("createFile", () => {
   });
 
   it("refuses to write through a symlinked directory that escapes the workspace", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await symlink(outside, join(root, "link"), "dir");
     await expect(createFile(root, "link/evil.md")).rejects.toThrow(/escapes workspace/);
     expect(existsSync(join(outside, "evil.md"))).toBe(false);
@@ -88,7 +92,7 @@ describe("listFiles", () => {
   });
 
   it("does not follow symlinks (file or directory) out of the workspace", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "secret.md"), "leak");
     await mkdir(join(outside, "sub"), { recursive: true });
     await writeFile(join(outside, "sub", "deep.md"), "leak");
@@ -118,7 +122,7 @@ describe("createFolder", () => {
   });
 
   it("refuses to create through a symlinked ancestor that escapes the workspace", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await symlink(outside, join(root, "link"), "dir");
     await expect(createFolder(root, "link/evil")).rejects.toThrow(/escapes workspace/);
     expect(existsSync(join(outside, "evil"))).toBe(false);
@@ -218,7 +222,7 @@ describe("movePath", () => {
   });
 
   it("refuses a symlink source and a symlinked-ancestor escape", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "real.md"), "outside");
     await symlink(join(outside, "real.md"), join(root, "link.md"), "file");
     await expect(movePath(root, "link.md", "stolen.md")).rejects.toThrow(/symlink/);
@@ -298,7 +302,7 @@ describe("deletePath", () => {
     // The resolveWorkspaceMetadataDir threat one level deeper: a REAL .dohc
     // carrying `trash -> <outside>`. mkdir{recursive} no-ops on the existing
     // symlink-to-dir, so only the post-mkdir lstat check can catch it.
-    const outside = await mkdtemp(join(tmpdir(), "dohc-attacker-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-attacker-"));
     await mkdir(join(root, ".dohc"), { recursive: true });
     await symlink(outside, join(root, ".dohc", "trash"), "dir");
     await writeFile(join(root, "secret-notes.md"), "private");
@@ -319,7 +323,7 @@ describe("deletePath", () => {
     // A regular file reached THROUGH a symlinked ancestor still escapes: lstat
     // follows the ancestor link, realpath of the leaf resolves outside the
     // root, and containment refuses it.
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "victim.md"), "keep");
     await symlink(outside, join(root, "linkdir"), "dir");
     await expect(deletePath(root, "linkdir/victim.md", rejectingTrash)).rejects.toThrow(
@@ -333,7 +337,7 @@ describe("deletePath", () => {
     // whatever it pointed at. lstat-first trashes the LINK itself; the external
     // target is untouched. (The tree never lists symlinks, so this only fires
     // via a direct/forged IPC — but it must never delete an outside file.)
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "victim.md"), "keep");
     await symlink(join(outside, "victim.md"), join(root, "link.md"), "file");
     const result = await deletePath(root, "link.md", rejectingTrash);
@@ -371,7 +375,7 @@ describe("collectZipEntries", () => {
     await mkdir(join(root, "notes"), { recursive: true });
     await writeFile(join(root, "notes", "a.md"), "alpha");
     await writeFile(join(root, "b.md"), "beta");
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "secret.md"), "leak");
     await symlink(join(outside, "secret.md"), join(root, "leak.md"), "file");
 
@@ -401,7 +405,7 @@ describe("collectZipEntries", () => {
   it("rejects traversal/reserved paths and symlink escapes", async () => {
     await expect(collectZipEntries(root, "../x")).rejects.toThrow(/traversal/);
     await expect(collectZipEntries(root, ".dohc")).rejects.toThrow(/reserved/);
-    const outside = await mkdtemp(join(tmpdir(), "dohc-outside-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await symlink(outside, join(root, "linkdir"), "dir");
     await expect(collectZipEntries(root, "linkdir")).rejects.toThrow(
       /escapes workspace/,
@@ -423,7 +427,7 @@ describe("collectZipEntries", () => {
 
 describe("copyIntoWorkspace", () => {
   it("copies external files into the workspace root by basename", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-import-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
     await writeFile(join(outside, "receipt.png"), "png-bytes");
     const imported = await copyIntoWorkspace(root, [join(outside, "receipt.png")]);
     expect(imported).toEqual(["receipt.png"]);
@@ -431,7 +435,7 @@ describe("copyIntoWorkspace", () => {
   });
 
   it("skips files that already exist instead of overwriting", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-import-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-import-"));
     await writeFile(join(outside, "notes.md"), "incoming");
     await writeFile(join(root, "notes.md"), "existing");
     const imported = await copyIntoWorkspace(root, [join(outside, "notes.md")]);
@@ -442,7 +446,7 @@ describe("copyIntoWorkspace", () => {
 
 describe("importDroppedPaths", () => {
   it("imports regular files and skips directories, symlinks, and relative paths", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-drop-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-drop-"));
     await writeFile(join(outside, "doc.md"), "dropped");
     await mkdir(join(outside, "folder"), { recursive: true });
     await writeFile(join(outside, "target.md"), "via-link");
@@ -468,9 +472,9 @@ describe("importDroppedPaths", () => {
     // secret and rely on realpath-then-isFile to copy the SECRET's bytes into
     // the (possibly cloud-synced) workspace. lstat-ing the ORIGINAL source
     // refuses the link before it ever resolves to the target.
-    const secrets = await mkdtemp(join(tmpdir(), "dohc-secrets-"));
+    const secrets = await mkdtemp(join(nativeTmpdir(), "dohc-secrets-"));
     await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
-    const stage = await mkdtemp(join(tmpdir(), "dohc-stage-"));
+    const stage = await mkdtemp(join(nativeTmpdir(), "dohc-stage-"));
     await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
     const imported = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
     expect(imported).toEqual([]);
@@ -480,7 +484,7 @@ describe("importDroppedPaths", () => {
   });
 
   it("caps the dropped-path count at the handler, not just the schema", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "dohc-many-"));
+    const outside = await mkdtemp(join(nativeTmpdir(), "dohc-many-"));
     const paths = await Promise.all(
       Array.from({ length: 101 }, async (_, i) => {
         const p = join(outside, `f-${i}.md`);
@@ -492,7 +496,7 @@ describe("importDroppedPaths", () => {
   });
 
   it("refuses sources inside any registered workspace's .dohc", async () => {
-    const otherRoot = await mkdtemp(join(tmpdir(), "dohc-other-"));
+    const otherRoot = await mkdtemp(join(nativeTmpdir(), "dohc-other-"));
     await mkdir(join(otherRoot, ".dohc"), { recursive: true });
     await writeFile(join(otherRoot, ".dohc", "credentials.json"), "secret");
     const imported = await importDroppedPaths(
@@ -509,10 +513,10 @@ describe("importDroppedPaths", () => {
     // imports) must NOT defeat the one location gate we DO enforce: the .dohc
     // refusal runs on realpath(source), so an ancestor alias to another
     // workspace's metadata is still canonicalized and refused.
-    const otherRoot = await mkdtemp(join(tmpdir(), "dohc-other-"));
+    const otherRoot = await mkdtemp(join(nativeTmpdir(), "dohc-other-"));
     await mkdir(join(otherRoot, ".dohc"), { recursive: true });
     await writeFile(join(otherRoot, ".dohc", "credentials.json"), "secret");
-    const stage = await mkdtemp(join(tmpdir(), "dohc-stage-"));
+    const stage = await mkdtemp(join(nativeTmpdir(), "dohc-stage-"));
     await symlink(join(otherRoot, ".dohc"), join(stage, "alias"), "dir");
     const imported = await importDroppedPaths(
       root,
