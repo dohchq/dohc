@@ -24,7 +24,6 @@ import {
 } from "react";
 import type {
   ChangeSetDetailRecord,
-  ChangeSetFilePreview,
   ChangeSetFileRecord,
   ChangeSetRecord,
   FileChangeSnapshot,
@@ -428,12 +427,6 @@ function fileOperationLabel(
   return "Changed";
 }
 
-function historyFilePreviewTone(operation: ChangeSetFileRecord["operation"]): string {
-  if (operation === "delete") return "border-danger/30 bg-danger/5 text-danger";
-  if (operation === "rename") return "border-accent/30 bg-accent/5 text-ink";
-  return "border-line bg-bg text-muted";
-}
-
 function historyLineStatsText(stats: ChangeSetRecord["lineStats"]): string | null {
   if (!stats) return null;
   const parts: string[] = [];
@@ -580,64 +573,6 @@ function formatHistoryDay(recordedAtMs: number): {
     }),
     dateTime: historyDayKey(recordedAtMs),
   };
-}
-
-function HistoryLineStats({
-  stats,
-}: {
-  stats: NonNullable<ChangeSetRecord["lineStats"]>;
-}) {
-  const hasKnownLines =
-    stats.added > 0 || stats.removed > 0 || stats.changedFileCount > 0;
-  return (
-    <span
-      data-testid="history-line-stats"
-      className="font-mono"
-    >
-      {hasKnownLines ? (
-        <>
-          <span data-testid="history-line-stats-added" className="text-success">
-            +{stats.added}
-          </span>
-          {" "}
-          <span data-testid="history-line-stats-removed" className="text-danger">
-            -{stats.removed}
-          </span>
-        </>
-      ) : null}
-      {stats.unavailableFileCount > 0 ? (
-        <>
-          {hasKnownLines ? <span className="text-subtle"> · </span> : null}
-          <span className="text-subtle">
-            {stats.unavailableFileCount} not diffed
-          </span>
-        </>
-      ) : null}
-    </span>
-  );
-}
-
-function HistoryFilePreviewPill({
-  file,
-}: {
-  file: ChangeSetFilePreview;
-}) {
-  return (
-    <span
-      data-testid="history-file-preview-entry"
-      className={`flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded border px-1.5 text-left text-[10px] leading-none ${historyFilePreviewTone(
-        file.operation,
-      )}`}
-    >
-      <FileText size={11} aria-hidden className="shrink-0 opacity-70" />
-      <span className="min-w-0 truncate">{file.path}</span>
-      {file.operation !== "write" ? (
-        <span className="shrink-0 uppercase tracking-wide">
-          {fileOperationLabel(file)}
-        </span>
-      ) : null}
-    </span>
-  );
 }
 
 function HistoryDiffPage({
@@ -854,11 +789,8 @@ function HistoryList({
         {changeSets.map((change, index) => {
           const recordedAt = formatHistoryRecordedAt(change.recordedAtMs);
           const day = formatHistoryDay(change.recordedAtMs);
-          const lineStatsLabel = historyLineStatsText(change.lineStats);
           const boundaryLabels = historyBoundaryLabels(change.boundaryCrossingPreview);
           const primaryFile = change.filePreview?.[0] ?? null;
-          const shouldShowFilePreview =
-            Boolean(change.filePreview?.length) && change.fileCount > 1;
           const previousDayKey =
             index > 0 ? historyDayKey(changeSets[index - 1].recordedAtMs) : null;
           const showDayHeading = previousDayKey !== day.dateTime;
@@ -904,31 +836,7 @@ function HistoryList({
                   </time>
                   {" · "}
                   {change.fileCount} file{change.fileCount === 1 ? "" : "s"}
-                  {lineStatsLabel && change.lineStats ? (
-                    <>
-                      {" · "}
-                      <HistoryLineStats stats={change.lineStats} />
-                    </>
-                  ) : null}
                 </span>
-                {shouldShowFilePreview && change.filePreview ? (
-                  <span
-                    data-testid="history-file-preview"
-                    className="mt-1 flex min-w-0 flex-wrap gap-1"
-                  >
-                    {change.filePreview.map((file) => (
-                      <HistoryFilePreviewPill
-                        key={`${file.operation}:${file.path}`}
-                        file={file}
-                      />
-                    ))}
-                    {change.fileCount > change.filePreview.length ? (
-                      <span className="rounded border border-line bg-bg px-1.5 py-0.5 text-[10px] leading-none text-subtle">
-                        +{change.fileCount - change.filePreview.length}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : null}
               </span>
             </span>
           );

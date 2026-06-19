@@ -1144,7 +1144,7 @@ describe("history details", () => {
     ).toBeNull();
   });
 
-  it("shows bounded touched-file preview labels and colored line stats", async () => {
+  it("keeps history rows minimal without file previews or per-row line stats", async () => {
     const bridge = makeBridge(Promise.resolve(null), [
       {
         ...changeSet("many-files", 2000, "ice edited project files"),
@@ -1166,25 +1166,18 @@ describe("history details", () => {
     renderShell(bridge);
 
     const historyRail = within(await screen.findByTestId("history-timeline"));
-    const preview = await historyRail.findByTestId("history-file-preview");
+    const row = await historyRail.findByTestId("change-set");
 
-    expect(preview.textContent).toContain("notes/one.md");
-    expect(preview.textContent).toContain("data/old.csv");
-    expect(preview.textContent).toContain("docs/renamed.md");
-    expect(preview.textContent).toContain("+1");
-    expect(within(preview).getAllByTestId("history-file-preview-entry")).toHaveLength(
-      4,
+    expect(row.textContent).toContain("ice edited project files");
+    expect(historyRail.getByTestId("history-recorded-at").getAttribute("dateTime")).toBe(
+      new Date(2000).toISOString(),
     );
-    expect(within(preview).queryAllByRole("button")).toHaveLength(0);
-    expect(historyRail.getByTestId("history-line-stats").textContent).toBe(
-      "+12 -5 · 1 not diffed",
-    );
-    expect(historyRail.getByTestId("history-line-stats-added").className).toContain(
-      "text-success",
-    );
-    expect(historyRail.getByTestId("history-line-stats-removed").className).toContain(
-      "text-danger",
-    );
+    expect(row.textContent).toContain("5 files");
+    expect(historyRail.queryByTestId("history-file-preview")).toBeNull();
+    expect(historyRail.queryByTestId("history-file-preview-entry")).toBeNull();
+    expect(historyRail.queryByTestId("history-line-stats")).toBeNull();
+    expect(row.textContent).not.toContain("+12 -5");
+    expect(row.textContent).not.toContain("notes/one.md");
   });
 
   it("opens the whole history row as a unified diff tab", async () => {
