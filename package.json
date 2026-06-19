@@ -9,6 +9,12 @@
   "scripts": {
     "dev": "pnpm --filter @dohc/web --if-present run dev",
     "dev:app": "pnpm --filter @dohc/web --if-present run dev",
+    "dev:desktop": "pnpm --filter @dohc/desktop dev",
+    "build:desktop": "pnpm --filter @dohc/desktop build",
+    "test:desktop": "pnpm --filter @dohc/desktop test",
+    "smoke:desktop": "node apps/desktop/scripts/smoke-test.mjs",
+    "smoke:package:desktop": "node apps/desktop/scripts/package-smoke.mjs",
+    "smoke:fuses:desktop": "pnpm --filter @dohc/desktop smoke:fuses",
     "dev:hocuspocus": "pnpm --filter @dohc/hocuspocus --if-present run dev",
     "dev:workspace-api": "pnpm --filter @dohc/workspace-api dev",
     "dev:postgres": "docker compose -f docker-compose.dev.yml up -d postgres minio",
