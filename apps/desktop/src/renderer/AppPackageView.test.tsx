@@ -172,4 +172,85 @@ describe("AppPackageView runtime frame", () => {
       ),
     );
   });
+
+  it("ignores runtime messages from the wrong origin or source", async () => {
+    render(<AppPackageView workspaceId="ws-apps" path="finance/.apps/ledger/app.json" />);
+
+    const iframe = (await screen.findByTestId("app-runtime-frame")) as HTMLIFrameElement;
+    const frameWindow = iframe.contentWindow;
+    expect(frameWindow).toBeTruthy();
+    const postMessage = vi
+      .spyOn(frameWindow as Window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: frameWindow,
+        origin: "http://evil.invalid",
+        data: {
+          type: "dohc:runtime-rpc",
+          token: "runtime-token",
+          id: "rpc-wrong-origin",
+          op: "collection.list",
+          args: { name: "transactions" },
+        },
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: "http://127.0.0.1:4477",
+        data: {
+          type: "dohc:runtime-rpc",
+          token: "runtime-token",
+          id: "rpc-wrong-source",
+          op: "collection.list",
+          args: { name: "transactions" },
+        },
+      }),
+    );
+
+    expect(bridgeMock.runAppRuntimeRpc).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("shares the app package root instead of the inspected child path", async () => {
+    const onSharePath = vi.fn();
+    render(
+      <AppPackageView
+        workspaceId="ws-apps"
+        path="finance/.apps/ledger/src/App.tsx"
+        onSharePath={onSharePath}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("file-share"));
+
+    expect(onSharePath).toHaveBeenCalledWith("finance/.apps/ledger");
+  });
+
+  it("reports AppTester and trust failures", async () => {
+    bridgeMock.runAppTester.mockRejectedValueOnce(new Error("Tester exploded"));
+    render(<AppPackageView workspaceId="ws-apps" path="finance/.apps/ledger/app.json" />);
+
+    fireEvent.click(await screen.findByTestId("run-app-tester"));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-action-error").textContent).toBe("Tester exploded"),
+    );
+
+    cleanup();
+    bridgeMock.getAppPackage.mockResolvedValueOnce({
+      ...readyInfo,
+      trusted: false,
+      requiresTrust: true,
+      readiness: "ready",
+    });
+    bridgeMock.grantAppTrust.mockRejectedValueOnce(new Error("Trust failed"));
+    render(<AppPackageView workspaceId="ws-apps" path="finance/.apps/ledger/app.json" />);
+
+    fireEvent.click(await screen.findByTestId("trust-app"));
+    await waitFor(() =>
+      expect(screen.getByTestId("app-action-error").textContent).toBe("Trust failed"),
+    );
+  });
 });

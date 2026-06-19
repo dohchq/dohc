@@ -6,7 +6,7 @@ import { TITLEBAR_HEIGHT_PX } from "./tokens";
 // Exported: the status bar shows the same name (one derivation, two surfaces).
 export function workspaceName(workspace: WorkspaceSummary): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
-  return workspace.rootPath.split(/[\\/]/).pop() ?? "workspace";
+  return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
 }
 
 // Custom titlebar: a drag strip under the hidden OS titlebar, sized by the
@@ -27,6 +27,7 @@ export function Titlebar(props: {
   // createMainWindow) — lay out around them with fixed insets there, and
   // around the OS window-controls overlay via env() everywhere else.
   const isMac = window.dohcDesktop?.platform === "darwin";
+  const quickOpenShortcut = isMac ? "⌘P" : "Ctrl P";
 
   return (
     <header
@@ -111,7 +112,7 @@ export function Titlebar(props: {
         >
           <Search size={12} aria-hidden />
           <span className="truncate">Search files…</span>
-          <kbd className="ml-auto font-mono text-[10px]">Ctrl P</kbd>
+          <kbd className="ml-auto font-mono text-[10px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}
 

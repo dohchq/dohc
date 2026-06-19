@@ -89,6 +89,16 @@ interface ManagedSession extends AgentSessionSnapshot {
 const MAX_SNAPSHOT_MESSAGES = 200;
 const MAX_SNAPSHOT_ITEMS = 200;
 const MAX_SNAPSHOT_PERMISSIONS = 20;
+const AGENT_PROBE_ENV_KEYS = [
+  "PATH",
+  "Path",
+  "HOME",
+  "USERPROFILE",
+  "LOCALAPPDATA",
+  "APPDATA",
+  "SystemRoot",
+  "WINDIR",
+] as const;
 
 function bounded(value: string | undefined, max = 500): string | undefined {
   if (!value) return undefined;
@@ -149,10 +159,37 @@ function terminalRunStatus(state: ManagedSession): "complete" | "failed" {
   return state.status === "failed" ? "failed" : "complete";
 }
 
+function agentProbeEnvironment(env: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  const probeEnv: Record<string, string | undefined> = {};
+  for (const key of AGENT_PROBE_ENV_KEYS) {
+    if (env[key] !== undefined) probeEnv[key] = env[key];
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if (key.startsWith("DOHC_AGENT_")) probeEnv[key] = value;
+  }
+  return probeEnv;
+}
+
 export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const now = options.now ?? (() => Date.now());
   const sessions = new Map<string, ManagedSession>();
+  const finalizedRuns = new Set<string>();
   let cachedDrivers: AgentDriverProbeSummary[] | null = null;
+
+  async function finalizeRun(
+    workspaceId: string,
+    runId: string,
+    status: "complete" | "failed",
+  ): Promise<void> {
+    const key = `${workspaceId}\0${runId}`;
+    if (finalizedRuns.has(key)) return;
+    finalizedRuns.add(key);
+    try {
+      await options.integration.endAgentRun(workspaceId, runId, status);
+    } catch (error) {
+      console.error("[desktop] failed to finalize agent run", error);
+    }
+  }
 
   function endRunAfterSettle(
     workspaceId: string,
@@ -160,13 +197,13 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     status: "complete" | "failed",
   ): void {
     const timer = setTimeout(() => {
-      void options.integration.endAgentRun(workspaceId, runId, status);
+      void finalizeRun(workspaceId, runId, status);
     }, 750);
     timer.unref?.();
   }
 
   async function probeDrivers(): Promise<AgentDriverProbeSummary[]> {
-    const probes = await options.registry.probeAll(process.env);
+    const probes = await options.registry.probeAll(agentProbeEnvironment(process.env));
     cachedDrivers = probes.map(({ driver, probe }) => summarizeProbe(driver.id, driver.displayName, probe));
     return cachedDrivers;
   }
@@ -202,7 +239,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
         state.status = "failed";
         state.pendingPermissions = [];
         if (state.runId) {
-          void options.integration.endAgentRun(workspaceId, state.runId, "failed");
+          void finalizeRun(workspaceId, state.runId, "failed");
         }
       }
       return;
@@ -277,7 +314,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
         state.pendingPermissions = [];
         void state.session?.dispose().catch(() => undefined);
         if (state.runId) {
-          void options.integration.endAgentRun(workspaceId, state.runId, "failed");
+          void finalizeRun(workspaceId, state.runId, "failed");
         }
       }
       return;
@@ -351,9 +388,11 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
       state.endedAt = now();
       state.lastError = bounded(error instanceof Error ? error.message : "Agent session failed.");
       if (state.runId) {
-        await options.integration.endAgentRun(input.workspaceId, state.runId, "failed");
+        await finalizeRun(input.workspaceId, state.runId, "failed");
       }
-      await state.session?.dispose();
+      await state.session?.dispose().catch((disposeError) => {
+        console.error("[desktop] failed to dispose failed agent session", disposeError);
+      });
     }
     return panelSnapshot(input.workspaceId);
   }
@@ -361,16 +400,17 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   async function stopSession(workspaceId: string): Promise<AgentPanelSnapshot> {
     const state = sessions.get(workspaceId);
     if (!state) return panelSnapshot(workspaceId);
+    const finalStatus = terminalRunStatus(state);
     state.ended = true;
     state.endedAt = now();
-    state.status = "stopped";
+    if (state.status !== "failed") state.status = "stopped";
     state.pendingPermissions = [];
     if (state.session) {
       await state.session.stop().catch(() => undefined);
       await state.session.dispose().catch(() => undefined);
     }
     if (state.runId) {
-      await options.integration.endAgentRun(workspaceId, state.runId, "complete");
+      await finalizeRun(workspaceId, state.runId, finalStatus);
     }
     return panelSnapshot(workspaceId);
   }
@@ -386,13 +426,26 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     return panelSnapshot(input.workspaceId);
   }
 
-  function stopAll(): void {
+  async function stopAll(): Promise<void> {
+    const cleanup: Array<Promise<unknown>> = [];
     for (const [workspaceId, state] of sessions) {
-      state.session?.dispose().catch(() => undefined);
+      const finalStatus = terminalRunStatus(state);
+      state.ended = true;
+      state.endedAt ??= now();
+      if (state.status !== "failed" && state.status !== "completed") state.status = "stopped";
+      state.pendingPermissions = [];
+      if (state.session) {
+        cleanup.push(
+          state.session.dispose().catch((error) => {
+            console.error("[desktop] failed to dispose agent session during shutdown", error);
+          }),
+        );
+      }
       if (state.runId) {
-        void options.integration.endAgentRun(workspaceId, state.runId, "complete");
+        cleanup.push(finalizeRun(workspaceId, state.runId, finalStatus));
       }
     }
+    await Promise.all(cleanup);
     sessions.clear();
   }
 

@@ -22,13 +22,24 @@ export function CloudLogin(props: {
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRef = useRef(0);
+
+  function clearPollTimer() {
+    if (pollTimer.current) {
+      clearTimeout(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }
 
   useEffect(() => {
-    let cancelled = false;
+    const session = sessionRef.current + 1;
+    sessionRef.current = session;
+    clearPollTimer();
+    setPhase({ kind: "loading" });
     void bridge()
       .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
-        if (cancelled) return;
+        if (session !== sessionRef.current) return;
         setWorkspaceSynced(status.workspaceSynced ?? false);
         setPhase(
           status.connected
@@ -36,10 +47,12 @@ export function CloudLogin(props: {
             : { kind: "disconnected" },
         );
       })
-      .catch(() => !cancelled && setPhase({ kind: "disconnected" }));
+      .catch(() => {
+        if (session === sessionRef.current) setPhase({ kind: "disconnected" });
+      });
     return () => {
-      cancelled = true;
-      if (pollTimer.current) clearTimeout(pollTimer.current);
+      if (sessionRef.current === session) sessionRef.current += 1;
+      clearPollTimer();
     };
   }, [props.workspaceId]);
 
@@ -58,12 +71,13 @@ export function CloudLogin(props: {
     }
   }
 
-  function pollUntilDone() {
+  function pollUntilDone(session: number) {
     pollTimer.current = setTimeout(() => {
       void bridge()
         .cloudLoginPoll()
         .then((result) => {
-          if (result.status === "pending") return pollUntilDone();
+          if (session !== sessionRef.current) return;
+          if (result.status === "pending") return pollUntilDone(session);
           if (result.status === "complete") {
             setPhase({ kind: "connected", email: result.email ?? "" });
           } else {
@@ -76,27 +90,46 @@ export function CloudLogin(props: {
             });
           }
         })
-        .catch(() => setPhase({ kind: "failed", reason: "Couldn't reach the server." }));
+        .catch(() => {
+          if (session === sessionRef.current) {
+            setPhase({ kind: "failed", reason: "Couldn't reach the server." });
+          }
+        });
     }, 3000);
   }
 
   async function connect() {
+    const session = sessionRef.current + 1;
+    sessionRef.current = session;
+    clearPollTimer();
     setPhase({ kind: "loading" });
     try {
       const started = await bridge().cloudLoginStart({});
+      if (session !== sessionRef.current) return;
       setPhase({ kind: "code", ...started });
-      pollUntilDone();
+      pollUntilDone(session);
     } catch {
-      setPhase({
-        kind: "failed",
-        reason: "Couldn't reach the server. Is dohc Cloud (or your self-host) running?",
-      });
+      if (session === sessionRef.current) {
+        setPhase({
+          kind: "failed",
+          reason: "Couldn't reach the server. Is dohc Cloud (or your self-host) running?",
+        });
+      }
     }
   }
 
   async function disconnect() {
-    await bridge().cloudLogout();
-    setPhase({ kind: "disconnected" });
+    const session = sessionRef.current + 1;
+    sessionRef.current = session;
+    clearPollTimer();
+    try {
+      await bridge().cloudLogout();
+      if (session === sessionRef.current) setPhase({ kind: "disconnected" });
+    } catch {
+      if (session === sessionRef.current) {
+        setPhase({ kind: "failed", reason: "Couldn't disconnect from dohc Cloud." });
+      }
+    }
   }
 
   return (

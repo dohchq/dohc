@@ -153,6 +153,32 @@ describe("ImportExportDialog", () => {
     expect(onImported).toHaveBeenCalledOnce();
   });
 
+  it("refuses to import into a truncated active file", async () => {
+    const onImported = vi.fn();
+    bridge.readWorkspaceText.mockResolvedValueOnce({
+      text: "partial",
+      truncated: true,
+    });
+    render(
+      <ImportExportDialog
+        workspaceId="ws-import-export"
+        activePath="notes/large.md"
+        selectedText=""
+        onImported={onImported}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Apple count");
+    await userEvent.click(screen.getByTestId("import-fragment-action"));
+
+    const status = await screen.findByTestId("import-export-status");
+    expect(status.textContent).toContain("too large to import into safely");
+    expect(bridge.readDataFragment).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(onImported).not.toHaveBeenCalled();
+  });
+
   it("shows a clear Cloud-required state when the workspace is not synced", async () => {
     bridge.cloudStatus.mockResolvedValueOnce({
       connected: true,

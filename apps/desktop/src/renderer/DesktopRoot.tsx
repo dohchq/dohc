@@ -13,8 +13,16 @@ export function DesktopRoot() {
     void bridge()
       .getWorkspaceRegistry()
       .then((registry) => {
-        setWorkspaces(registry.workspaces);
-        setWorkspace(registry.workspaces[0] ?? null);
+        setWorkspaces((known) => {
+          const next = [...registry.workspaces];
+          for (const workspace of known) {
+            if (!next.some((entry) => entry.workspaceId === workspace.workspaceId)) {
+              next.push(workspace);
+            }
+          }
+          return next;
+        });
+        setWorkspace((current) => current ?? registry.workspaces[0] ?? null);
         setLoaded(true);
       })
       // The registry deliberately refuses corrupt/newer-version files instead

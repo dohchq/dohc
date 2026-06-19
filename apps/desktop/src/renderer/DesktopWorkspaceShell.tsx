@@ -479,6 +479,12 @@ function isEditableShortcutTarget(target: EventTarget | null) {
   );
 }
 
+const BLOCKING_MODAL_SELECTOR = "[role='dialog'], [data-dohc-modal='true']";
+
+function hasBlockingModal() {
+  return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;
+}
+
 type ActiveUndoHandler = {
   run: () => Promise<void>;
   acceptsEvent: (event: KeyboardEvent) => boolean;
@@ -742,9 +748,7 @@ function HistoryDiffPage({
           return false;
         }
 
-        return ![...document.querySelectorAll("[role='dialog']")].some(
-          (dialog) => !page?.contains(dialog),
-        );
+        return !hasBlockingModal();
       },
     });
 
@@ -1435,6 +1439,7 @@ export function DesktopWorkspaceShell(props: {
   const [importExportPath, setImportExportPath] = useState<string | null>(null);
   const [importExportSelectionText, setImportExportSelectionText] = useState("");
   const [workspaceManagementOpen, setWorkspaceManagementOpen] = useState(false);
+  const [shellError, setShellError] = useState<string | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -1478,6 +1483,9 @@ export function DesktopWorkspaceShell(props: {
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
+  useEffect(() => {
+    setShellError(null);
+  }, [workspaceId]);
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
@@ -1622,10 +1630,16 @@ export function DesktopWorkspaceShell(props: {
     setFolders(result.folders ?? []);
   }, [workspaceId]);
 
+  const reportShellError = useCallback((fallback: string, error: unknown) => {
+    setShellError(error instanceof Error ? error.message : fallback);
+  }, []);
+
   const refreshApps = useCallback(() => {
     setAppsRefreshKey((key) => key + 1);
-    void refreshFiles();
-  }, [refreshFiles]);
+    void refreshFiles().catch((error) =>
+      reportShellError("Could not refresh workspace files.", error),
+    );
+  }, [refreshFiles, reportShellError]);
 
   const refreshHistory = useCallback(async () => {
     const [history, status, agent] = await Promise.all([
@@ -1643,13 +1657,17 @@ export function DesktopWorkspaceShell(props: {
   // ImportWorkspaceFilesPayload).
   const importFiles = useCallback(
     async (droppedPaths?: string[]) => {
-      await bridge().importWorkspaceFiles({
-        workspaceId,
-        ...(droppedPaths ? { droppedPaths } : {}),
-      });
-      await refreshFiles();
+      try {
+        await bridge().importWorkspaceFiles({
+          workspaceId,
+          ...(droppedPaths ? { droppedPaths } : {}),
+        });
+        await refreshFiles();
+      } catch (error) {
+        reportShellError("Could not import files.", error);
+      }
     },
-    [workspaceId, refreshFiles],
+    [workspaceId, refreshFiles, reportShellError],
   );
 
   // THE one way a file opens (tree click, quick-open, tab activation): marks
@@ -1681,20 +1699,28 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
   const openHistoryDiffTab = useCallback(
     (changeSetId: string, filePath: string) => {
-      void flushActiveDraft().finally(() => {
-        mutateWb((state) =>
-          openTab(state, historyDiffTabPath(changeSetId, filePath)),
-        );
-      });
+      void flushActiveDraft()
+        .catch((error) => {
+          reportShellError("Could not save the active draft before opening history.", error);
+        })
+        .finally(() => {
+          mutateWb((state) =>
+            openTab(state, historyDiffTabPath(changeSetId, filePath)),
+          );
+        });
     },
-    [flushActiveDraft, mutateWb],
+    [flushActiveDraft, mutateWb, reportShellError],
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {
-      void refreshFiles();
-      void refreshHistory();
+      void refreshFiles().catch((error) =>
+        reportShellError("Could not refresh workspace files.", error),
+      );
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
     },
-    [refreshFiles, refreshHistory],
+    [refreshFiles, refreshHistory, reportShellError],
   );
   const activateEditorTab = useCallback(
     (path: string) => {
@@ -1851,13 +1877,17 @@ export function DesktopWorkspaceShell(props: {
     );
   }, [mutateWb]);
   const createUntitledTextFile = useCallback(async () => {
-    const result = await bridge().createWorkspaceFile({
-      workspaceId,
-      relativePath: uniqueUntitledTextPath(files, folders),
-    });
-    await refreshFiles();
-    openFile(result.path);
-  }, [files, folders, openFile, refreshFiles, workspaceId]);
+    try {
+      const result = await bridge().createWorkspaceFile({
+        workspaceId,
+        relativePath: uniqueUntitledTextPath(files, folders),
+      });
+      await refreshFiles();
+      openFile(result.path);
+    } catch (error) {
+      reportShellError("Could not create an untitled text file.", error);
+    }
+  }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -1918,14 +1948,18 @@ export function DesktopWorkspaceShell(props: {
 
   const showWorkbenchMenu = useCallback(
     async (context: "tab" | "editor" | "status", path?: string) => {
-      const command = await bridge().showWorkbenchMenu({
-        workspaceId,
-        context,
-        ...(path ? { path } : {}),
-      });
-      if (command) runWorkbenchMenuCommand(command, path);
+      try {
+        const command = await bridge().showWorkbenchMenu({
+          workspaceId,
+          context,
+          ...(path ? { path } : {}),
+        });
+        if (command) runWorkbenchMenuCommand(command, path);
+      } catch (error) {
+        reportShellError("Could not open the workbench menu.", error);
+      }
     },
-    [runWorkbenchMenuCommand, workspaceId],
+    [reportShellError, runWorkbenchMenuCommand, workspaceId],
   );
 
   // Performance marks (post-commit, so the rendered surface is included):
@@ -1948,20 +1982,28 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const status = await bridge().openWorkspace({ workspaceId });
-      if (!cancelled) setSyncStatus(status);
-      await refreshFiles();
-      await refreshHistory();
+      try {
+        const status = await bridge().openWorkspace({ workspaceId });
+        if (!cancelled) setSyncStatus(status);
+        await refreshFiles();
+        await refreshHistory();
+      } catch (error) {
+        if (!cancelled) reportShellError("Could not open this workspace.", error);
+      }
     })();
     const unsubscribe = bridge().onWorkspaceActivity(() => {
-      void refreshFiles();
-      void refreshHistory();
+      void refreshFiles().catch((error) =>
+        reportShellError("Could not refresh workspace files.", error),
+      );
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [workspaceId, refreshFiles, refreshHistory]);
+  }, [workspaceId, refreshFiles, refreshHistory, reportShellError]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1975,7 +2017,9 @@ export function DesktopWorkspaceShell(props: {
         const activeUndo = activeUndoRef.current;
         if (activeUndo?.acceptsEvent(event)) {
           event.preventDefault();
-          void activeUndo.run();
+          void activeUndo.run().catch((error) =>
+            reportShellError("Could not undo the last history restore.", error),
+          );
         }
         return;
       }
@@ -2003,14 +2047,18 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, mutateWb]);
+  }, [closeActiveTab, mutateWb, reportShellError]);
 
   const openWorkspaceFolder = useCallback(async () => {
-    const picked = await bridge().pickWorkspaceRoot();
-    if (!picked) return;
-    const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
-    props.onSwitchWorkspace(attached);
-  }, [props.onSwitchWorkspace]);
+    try {
+      const picked = await bridge().pickWorkspaceRoot();
+      if (!picked) return;
+      const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
+      props.onSwitchWorkspace(attached);
+    } catch (error) {
+      reportShellError("Could not open that workspace folder.", error);
+    }
+  }, [props.onSwitchWorkspace, reportShellError]);
 
   // THE command registry: the palette renders it and the application menu
   // routes through it (onMenuCommand below) — one definition per action.
@@ -2049,7 +2097,10 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "export-workspace",
         label: "Export workspace as zip",
-        run: () => void bridge().exportWorkspaceZip({ workspaceId }),
+        run: () =>
+          void bridge().exportWorkspaceZip({ workspaceId }).catch((error) =>
+            reportShellError("Could not export this workspace.", error),
+          ),
       },
       {
         id: "toggle-sidebar",
@@ -2099,6 +2150,7 @@ export function DesktopWorkspaceShell(props: {
       mutateWb,
       requestExplorerCreate,
       openImportExportDialog,
+      reportShellError,
       workspaceId,
     ],
   );
@@ -2135,7 +2187,11 @@ export function DesktopWorkspaceShell(props: {
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={(droppedPaths) => void importFiles(droppedPaths)}
         onImportExport={openImportExportDialog}
-        onRefresh={() => void refreshFiles()}
+        onRefresh={() =>
+          void refreshFiles().catch((error) =>
+            reportShellError("Could not refresh workspace files.", error),
+          )
+        }
         onNewFileDialog={() => setNewFileOpen(true)}
       />
 
@@ -2175,6 +2231,22 @@ export function DesktopWorkspaceShell(props: {
         onSwitchWorkspace={props.onSwitchWorkspace}
         onQuickOpen={() => setQuickOpenOpen(true)}
       />
+      {shellError ? (
+        <div
+          data-testid="workspace-shell-error"
+          className="flex min-h-8 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
+        >
+          <span className="min-w-0 flex-1 truncate">{shellError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss workspace error"
+            onClick={() => setShellError(null)}
+            className="grid size-6 shrink-0 place-items-center rounded hover:bg-line/50"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      ) : null}
       <div className="flex min-h-0 flex-1">
         <ActivityBar
           activeView={wb.activeView}
@@ -2484,7 +2556,9 @@ export function DesktopWorkspaceShell(props: {
               ),
             );
             openFile(path);
-            void refreshFiles();
+            void refreshFiles().catch((error) =>
+              reportShellError("Could not refresh workspace files.", error),
+            );
           }}
         />
       ) : null}
@@ -2539,7 +2613,11 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               activePath={importExportPath}
               selectedText={importExportSelectionText}
-              onImported={() => void refreshFiles()}
+              onImported={() =>
+                void refreshFiles().catch((error) =>
+                  reportShellError("Could not refresh workspace files.", error),
+                )
+              }
               onClose={() => setImportExportOpen(false)}
             />
           </Suspense>

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -89,6 +89,42 @@ describe("AgentIntegration", () => {
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
         mcpEnabled: true,
         activeRun: { id: b.id },
+      });
+    });
+  });
+
+  it("ignores malformed persisted run records while keeping valid history", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"), { recursive: true });
+      await writeFile(
+        join(root, ".dohc/agent-runs.json"),
+        JSON.stringify([
+          { id: "bad-start", startedAt: "yesterday", status: "complete" },
+          {
+            id: "run-valid",
+            startedAt: 1,
+            endedAt: 2,
+            agentId: "dohc-mcp",
+            onBehalfOf: "local",
+            status: "failed",
+          },
+          {
+            id: "bad-status",
+            startedAt: 3,
+            agentId: "dohc-mcp",
+            onBehalfOf: "local",
+            status: "done",
+          },
+        ]),
+      );
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, run) => setSlot(run),
+      });
+
+      await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+        activeRun: null,
+        lastRun: { id: "run-valid", status: "failed" },
       });
     });
   });

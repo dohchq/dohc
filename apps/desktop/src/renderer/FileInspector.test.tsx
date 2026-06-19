@@ -222,16 +222,23 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("does not expose properties editing for truncated markdown reads", async () => {
+    const user = userEvent.setup();
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "---\nid: note-1\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n",
       truncated: true,
     });
-    render(<FileInspector workspaceId="ws-1" path="large.md" />);
+    const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
 
     await screen.findByTestId("view-markdown");
 
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
     expect(screen.queryByTestId("markdown-properties-toggle")).toBeNull();
+    const editToggle = screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement;
+    expect(editToggle.disabled).toBe(true);
+    await user.click(editToggle);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    view.unmount();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridgeMock.collabToken).not.toHaveBeenCalled();
   });
 

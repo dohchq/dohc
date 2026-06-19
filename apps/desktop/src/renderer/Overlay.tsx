@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 export function Overlay(props: { onClose: () => void; children: ReactNode }) {
   return (
     <div
+      data-dohc-modal="true"
       className="fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-black/20 p-4 pt-24"
       onClick={props.onClose}
     >

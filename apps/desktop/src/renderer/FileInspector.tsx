@@ -457,7 +457,9 @@ function MarkdownView(props: {
   onPendingUndoConsumed?: (token: number) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
-    props.body.length <= WYSIWYG_MARKDOWN_THRESHOLD_BYTES ? "wysiwyg" : "read",
+    props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+      ? "read"
+      : "wysiwyg",
   );
   const [draft, setDraft] = useState(props.body);
   const [savedBody, setSavedBody] = useState(props.body);
@@ -559,6 +561,13 @@ function MarkdownView(props: {
     onDiskText: props.body,
     enabled: !props.truncated,
   });
+  const readOnly = props.truncated && !collab.enabled;
+
+  useEffect(() => {
+    if (!readOnly) return;
+    setMode("read");
+    setPropertiesOpen(false);
+  }, [readOnly]);
 
   useEffect(() => {
     if (props.truncated && !collab.enabled) setPropertiesOpen(false);
@@ -585,6 +594,7 @@ function MarkdownView(props: {
   }, [props.body, editing]);
 
   async function saveNow(): Promise<void> {
+    if (readOnly) return;
     const text = serializeDraftRef.current();
     latestDraft.current = text;
     unsavedDraft.current = false;
@@ -607,12 +617,14 @@ function MarkdownView(props: {
   }
 
   function onDraft(next: string) {
+    if (readOnly) return;
     setDraft(next);
     latestDraft.current = next;
     scheduleSave();
   }
 
   function onPropertiesDraft(next: string) {
+    if (readOnly) return;
     setDraft(next);
     latestDraft.current = next;
     if (mode === "read") setSavedBody(next);
@@ -620,6 +632,7 @@ function MarkdownView(props: {
   }
 
   function scheduleSave() {
+    if (readOnly) return;
     unsavedDraft.current = true;
     setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -627,6 +640,7 @@ function MarkdownView(props: {
   }
 
   function switchMode(next: "read" | "wysiwyg" | "source") {
+    if (readOnly && next !== "read") return;
     const current =
       mode === "wysiwyg" && !unsavedDraft.current
         ? latestDraft.current
@@ -640,6 +654,7 @@ function MarkdownView(props: {
   }
 
   function toggleEditorMode() {
+    if (readOnly) return;
     if (mode === "read") {
       switchMode("wysiwyg");
       return;
@@ -664,6 +679,7 @@ function MarkdownView(props: {
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
       event.preventDefault();
+      if (readOnly) return;
       toggleEditorMode();
     }
     window.addEventListener("keydown", onKeyDown);
@@ -689,7 +705,7 @@ function MarkdownView(props: {
   useEffect(() => {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      if (!unsavedDraft.current) return;
+      if (!unsavedDraft.current || readOnly) return;
       unsavedDraft.current = false;
       const text = serializeDraftRef.current();
       void bridge()
@@ -700,7 +716,7 @@ function MarkdownView(props: {
         })
         .catch(() => undefined);
     };
-  }, [workspaceId, path]);
+  }, [workspaceId, path, readOnly]);
 
   // Imperative flush seam: the shell awaits this BEFORE an explorer op that
   // moves/deletes paths. A rename of the open file remounts the keyed
@@ -711,7 +727,7 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush(async () => {
-      if (!unsavedDraft.current) return;
+      if (!unsavedDraft.current || readOnly) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       await saveNow();
     });
@@ -719,7 +735,7 @@ function MarkdownView(props: {
     // saveNow reads refs (latestDraft) + per-mount-stable props only, so the
     // first render's closure stays correct for the whole mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [registerDraftFlush]);
+  }, [registerDraftFlush, readOnly]);
 
   // Materialization of the converged CRDT back to the file lives inside
   // useCollabDoc, gated on sync and routed through the canonical-state model
@@ -847,14 +863,16 @@ function MarkdownView(props: {
             <button
               type="button"
               data-testid="markdown-edit-toggle"
+              disabled={readOnly}
               onClick={() => {
+                if (readOnly) return;
                 if (mode === "source" && saveTimer.current) {
                   clearTimeout(saveTimer.current);
                   void saveNow();
                 }
                 toggleEditorMode();
               }}
-              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink"
+              className="rounded border border-line px-2 py-0.5 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               {mode === "read" ? "Edit" : mode === "wysiwyg" ? "Source" : "WYSIWYG"}
             </button>
@@ -876,6 +894,7 @@ function MarkdownView(props: {
           ref={editorRef}
           autoFocus
           value={draft}
+          readOnly={readOnly}
           onChange={(e) => onDraft(e.target.value)}
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "s") {
@@ -1049,7 +1068,7 @@ function CsvView({
   }
 
   async function importToSqlite() {
-    if (importing) return;
+    if (importing || truncated) return;
     setImporting(true);
     setImportError(null);
     try {
@@ -1118,7 +1137,7 @@ function CsvView({
           <button
             type="button"
             onClick={() => void importToSqlite()}
-            disabled={importing}
+            disabled={importing || truncated}
             className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink disabled:opacity-50"
             data-testid="csv-import-sqlite"
           >

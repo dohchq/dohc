@@ -251,8 +251,8 @@ export interface WorkspaceActivatedEvent {
   mode: "local-first" | "cloud-first-local-copy" | "cloud-only";
 }
 
-const WORKSPACE_KINDS = ["personal", "shared", "cloud-only"] as const;
-const WORKSPACE_MODES = ["local-first", "cloud-first-local-copy", "cloud-only"] as const;
+export const WORKSPACE_KINDS = ["personal", "shared", "cloud-only"] as const;
+export const WORKSPACE_MODES = ["local-first", "cloud-first-local-copy", "cloud-only"] as const;
 
 function isWorkspaceKind(value: unknown): value is WorkspaceActivatedEvent["kind"] {
   return (

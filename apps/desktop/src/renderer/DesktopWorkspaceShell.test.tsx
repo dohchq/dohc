@@ -352,6 +352,19 @@ describe("ui-state merge-on-load", () => {
   });
 });
 
+describe("workspace shell errors", () => {
+  it("reports openWorkspace failures instead of leaving an unhandled rejection", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
+
+    renderShell(bridge);
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Watcher failed",
+    );
+  });
+});
+
 // Spurious file-open-start marks (codex P2): a no-op click on the already-
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
@@ -1527,6 +1540,33 @@ describe("history details", () => {
     input.focus();
     await user.keyboard("{Control>}z{/Control}");
     input.remove();
+
+    expect(bridge.undoHistoryFileRestore).not.toHaveBeenCalled();
+  });
+
+  it("does not route Ctrl+Z to history undo while a blocking overlay is open", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert-overlay", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+    await diffPage.findByTestId("history-diff-undo-restore");
+    bridge.undoHistoryFileRestore.mockClear();
+
+    const overlay = document.createElement("div");
+    overlay.setAttribute("data-dohc-modal", "true");
+    document.body.appendChild(overlay);
+    await user.keyboard("{Control>}z{/Control}");
+    overlay.remove();
 
     expect(bridge.undoHistoryFileRestore).not.toHaveBeenCalled();
   });

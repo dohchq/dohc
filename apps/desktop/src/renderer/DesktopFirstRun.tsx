@@ -15,7 +15,12 @@ export function DesktopFirstRun(props: {
   const [cloudNote, setCloudNote] = useState(false);
 
   useEffect(() => {
-    void bridge().getDefaultWorkspaceRoot().then(setRoot);
+    void bridge()
+      .getDefaultWorkspaceRoot()
+      .then(setRoot)
+      .catch((cause) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
   }, []);
 
   async function chooseFolder() {

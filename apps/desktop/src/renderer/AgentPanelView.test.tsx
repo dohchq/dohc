@@ -45,6 +45,16 @@ function snapshot(): AgentPanelSnapshotResult {
   return { drivers, session };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 const bridge = {
   getMcpConfig: vi.fn(async () => config),
   getAgentRunStatus: vi.fn(async () => ({
@@ -301,5 +311,91 @@ describe("AgentPanelView", () => {
     expect(screen.getByTestId("agent-panel-message").textContent).toBe(
       "Clipboard unavailable.",
     );
+  });
+
+  it("reports clipboard write failures", async () => {
+    const user = userEvent.setup();
+    writeText.mockRejectedValueOnce(new Error("Clipboard denied"));
+    stubClipboard();
+    render(<AgentPanelView workspaceId="ws-1" />);
+
+    await screen.findByTestId("agent-mcp-config");
+    await user.click(screen.getByTestId("agent-copy-mcp"));
+
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"'));
+    expect(screen.getByTestId("agent-panel-message").textContent).toBe(
+      "Clipboard denied",
+    );
+  });
+
+  it("ignores stale initial responses after switching workspaces", async () => {
+    const oldRunStatus = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
+    const oldConfig = deferred<Awaited<ReturnType<typeof bridge.getMcpConfig>>>();
+    const oldPanel = deferred<AgentPanelSnapshotResult>();
+    bridge.getAgentRunStatus
+      .mockImplementationOnce(() => oldRunStatus.promise)
+      .mockResolvedValueOnce({ mcpEnabled: false, activeRun: null, lastRun: null });
+    bridge.getMcpConfig
+      .mockImplementationOnce(() => oldConfig.promise)
+      .mockResolvedValueOnce({
+        ...config,
+        args: ["--workspace", "/new"],
+        workspacePath: "/new",
+      });
+    bridge.probeAgentDrivers
+      .mockImplementationOnce(() => oldPanel.promise)
+      .mockResolvedValueOnce({
+        drivers,
+        session: {
+          driverId: "generic-acp",
+          driverName: "Generic ACP",
+          status: "running",
+          startedAt: 1,
+          runId: "new-run",
+          messages: [{ id: "new", role: "assistant", text: "new workspace" }],
+          items: [],
+          pendingPermissions: [],
+          authNotices: [],
+        },
+      });
+
+    const { rerender } = render(<AgentPanelView workspaceId="old-workspace" />);
+    rerender(<AgentPanelView workspaceId="new-workspace" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-mcp-config").textContent).toContain("/new"),
+    );
+    oldRunStatus.resolve({
+      mcpEnabled: true,
+      activeRun: {
+        id: "old-run",
+        startedAt: 1,
+        agentId: "dohc-mcp",
+        onBehalfOf: "local",
+        status: "running",
+      },
+      lastRun: null,
+    });
+    oldConfig.resolve({ ...config, args: ["--workspace", "/old"], workspacePath: "/old" });
+    oldPanel.resolve({
+      drivers,
+      session: {
+        driverId: "codex-app-server",
+        driverName: "Codex",
+        status: "waiting-permission",
+        startedAt: 1,
+        runId: "old-run",
+        messages: [{ id: "old", role: "assistant", text: "old workspace" }],
+        items: [],
+        pendingPermissions: [],
+        authNotices: [],
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-mcp-config").textContent).toContain("/new"),
+    );
+    expect(screen.getByTestId("agent-stream").textContent).toContain("new workspace");
+    expect(screen.getByTestId("agent-stream").textContent).not.toContain("old workspace");
   });
 });

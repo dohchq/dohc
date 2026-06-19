@@ -39,6 +39,14 @@ function notify(method, params) {
   send({ method, params });
 }
 
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasMessageId(message) {
+  return isRecord(message) && Object.hasOwn(message, "id");
+}
+
 async function writeWorkspaceFile(relativePath, content) {
   const path = join(process.cwd(), relativePath);
   await mkdir(dirname(path), { recursive: true });
@@ -85,7 +93,9 @@ async function runAcpPrompt(id, params) {
       { optionId: "fake-reject-always", name: "Reject for session", kind: "reject_always" },
     ],
   });
-  if (permission?.outcome?.outcome === "selected") {
+  const selectedOptionId =
+    permission?.outcome?.outcome === "selected" ? permission.outcome.optionId : null;
+  if (selectedOptionId === "fake-allow-once" || selectedOptionId === "fake-allow-always") {
     await writeWorkspaceFile(
       "notes/agent-output.md",
       "# Agent output\n\nFake ACP wrote this through the agent harness.\n",
@@ -194,7 +204,8 @@ input.on("line", (line) => {
       console.error(error instanceof Error ? error.message : String(error));
       return;
     }
-    if ("id" in message && !message.method) {
+    if (!isRecord(message)) return;
+    if (hasMessageId(message) && !message.method) {
       const waiter = pending.get(message.id);
       if (!waiter) return;
       pending.delete(message.id);
@@ -224,14 +235,14 @@ input.on("line", (line) => {
           sessionId: message.params?.sessionId,
           update: { sessionUpdate: { type: "agent_message_chunk", content: "Cancelled.\n" } },
         });
-      } else if (message.id) {
+      } else if (hasMessageId(message)) {
         respond(message.id, {});
       }
       return;
     }
     if (protocolMode === "acp-fail-init") {
       if (message.method === "initialize") respondError(message.id, "fake ACP init failed");
-      else if (message.id) respond(message.id, {});
+      else if (hasMessageId(message)) respond(message.id, {});
       return;
     }
     if (message.method === "initialize") {
@@ -277,7 +288,7 @@ input.on("line", (line) => {
         return;
       }
       respond(message.id, {});
-    } else if (message.id) {
+    } else if (hasMessageId(message)) {
       respond(message.id, {});
     }
   })().catch((error) => {

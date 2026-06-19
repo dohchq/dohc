@@ -48,6 +48,7 @@ export function AppPackageView(props: {
   // state — it must render guidance, never an eternal "Loading…".
   const [missing, setMissing] = useState(false);
   const [running, setRunning] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -57,6 +58,7 @@ export function AppPackageView(props: {
       });
       setInfo(result);
       setMissing(result === null);
+      setActionError(null);
     } catch {
       setInfo(null);
       setMissing(true);
@@ -79,8 +81,9 @@ export function AppPackageView(props: {
     }
   }, [info]);
 
+  const sharePath = info?.root ?? props.path;
   const onShare = props.onSharePath
-    ? () => props.onSharePath?.(props.path)
+    ? () => props.onSharePath?.(sharePath)
     : undefined;
 
   if (missing) {
@@ -104,9 +107,12 @@ export function AppPackageView(props: {
   async function runTester() {
     if (!info || running) return;
     setRunning(true);
+    setActionError(null);
     try {
       await bridge().runAppTester({ workspaceId: props.workspaceId, appRoot: info.root });
       await reload();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "AppTester failed.");
     } finally {
       setRunning(false);
     }
@@ -114,8 +120,13 @@ export function AppPackageView(props: {
 
   async function trust() {
     if (!info) return;
-    await bridge().grantAppTrust({ workspaceId: props.workspaceId, appRoot: info.root });
-    await reload();
+    setActionError(null);
+    try {
+      await bridge().grantAppTrust({ workspaceId: props.workspaceId, appRoot: info.root });
+      await reload();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not trust this app.");
+    }
   }
 
   if (!info) {
@@ -204,6 +215,11 @@ export function AppPackageView(props: {
             </button>
           ) : null}
         </div>
+        {actionError ? (
+          <div data-testid="app-action-error" className="mt-2 text-[12px] text-danger">
+            {actionError}
+          </div>
+        ) : null}
 
         {info.readiness === "ready" && (!info.requiresTrust || info.trusted) ? (
           <AppRuntimeFrame

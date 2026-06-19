@@ -1,0 +1,118 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CloudLogin } from "./CloudLogin";
+
+const bridgeMock = {
+  cloudStatus: vi.fn(),
+  cloudEnableSync: vi.fn(),
+  cloudLoginStart: vi.fn(),
+  cloudLoginPoll: vi.fn(),
+  cloudLogout: vi.fn(),
+  openExternalUrl: vi.fn(),
+};
+
+vi.mock("./bridge", () => ({
+  bridge: () => bridgeMock,
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+beforeEach(() => {
+  vi.useRealTimers();
+  vi.resetAllMocks();
+  bridgeMock.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
+  bridgeMock.cloudEnableSync.mockResolvedValue(undefined);
+  bridgeMock.cloudLoginStart.mockResolvedValue({
+    userCode: "ABCD",
+    verificationUri: "https://cloud.dohc.dev/device",
+  });
+  bridgeMock.cloudLogout.mockResolvedValue(undefined);
+  bridgeMock.openExternalUrl.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe("CloudLogin", () => {
+  it("ignores stale status responses after switching workspaces", async () => {
+    const oldStatus = deferred<{
+      connected: boolean;
+      email?: string;
+      workspaceSynced?: boolean;
+    }>();
+    bridgeMock.cloudStatus.mockImplementation((payload?: { workspaceId?: string }) =>
+      payload?.workspaceId === "old"
+        ? oldStatus.promise
+        : Promise.resolve({
+            connected: true,
+            email: "new@dohc.dev",
+            workspaceSynced: true,
+          }),
+    );
+
+    const { rerender } = render(<CloudLogin workspaceId="old" />);
+    rerender(<CloudLogin workspaceId="new" />);
+
+    await screen.findByTestId("cloud-connected-email");
+    await act(async () => {
+      oldStatus.resolve({ connected: true, email: "old@dohc.dev", workspaceSynced: false });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cloud-connected-email").textContent).toBe("new@dohc.dev"),
+    );
+  });
+
+  it("ignores stale login poll completions after the workspace changes", async () => {
+    vi.useFakeTimers();
+    const poll = deferred<{ status: "complete"; email: string }>();
+    bridgeMock.cloudLoginPoll.mockImplementationOnce(() => poll.promise);
+
+    const { rerender } = render(<CloudLogin workspaceId="old" />);
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    expect(screen.getByTestId("cloud-login-pending")).toBeTruthy();
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    await act(async () => {
+      rerender(<CloudLogin workspaceId="new" />);
+    });
+    await act(async () => {
+      poll.resolve({ status: "complete", email: "old@dohc.dev" });
+    });
+
+    expect(screen.getByTestId("cloud-connect-start")).toBeTruthy();
+    expect(screen.queryByText("old@dohc.dev")).toBeNull();
+  });
+
+  it("reports logout failures", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+    });
+    bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline"));
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-disconnect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cloud-login-error").textContent).toContain(
+        "Couldn't disconnect",
+      ),
+    );
+  });
+});

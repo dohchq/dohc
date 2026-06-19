@@ -193,6 +193,20 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+function trustedDohcFileCorsOrigin(request: Request): string | null {
+  const origin = request.headers.get("origin");
+  if (!origin) return null;
+  const devRendererUrl = process.env.ELECTRON_RENDERER_URL;
+  if (devRendererUrl) {
+    try {
+      return new URL(devRendererUrl).origin === origin ? origin : null;
+    } catch {
+      return null;
+    }
+  }
+  return origin === "file://" || origin === "null" ? origin : null;
+}
+
 function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
@@ -585,10 +599,10 @@ app.on("will-quit", (event) => {
   quitting = true;
   event.preventDefault();
   searchRegistry.killAll();
-  cachedAgentSessions?.stopAll();
+  const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   agentIntegration.stopAll();
   void Promise.race([
-    activity.stopAll(),
+    Promise.all([agentSessionStop, activity.stopAll()]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
   ]).finally(() => app.exit(0));
 });
@@ -1537,7 +1551,7 @@ function registerIpcHandlers(): void {
         restoreOfPath,
         restoreDirection,
       },
-      expectedEvents: [expectedHistoryRestoreEvent(file, "restore")],
+      expectedEvents: [expectedHistoryRestoreEvent(file, restoreDirection)],
     });
     try {
       return RestoreHistoryFileResult.parse(
@@ -1827,15 +1841,19 @@ if (!app.requestSingleInstanceLock()) {
           bytes.byteOffset,
           bytes.byteLength,
         ) as Uint8Array<ArrayBuffer>;
+        const allowOrigin = trustedDohcFileCorsOrigin(request);
+        const headers = new Headers({
+          "content-type": mediaType,
+          // Never let served workspace bytes be sniffed into active content.
+          "x-content-type-options": "nosniff",
+        });
+        if (allowOrigin) {
+          // The renderer fetch()es text files from this scheme; a custom
+          // scheme is a distinct origin, so only allow the trusted renderer.
+          headers.set("access-control-allow-origin", allowOrigin);
+        }
         return new Response(body, {
-          headers: {
-            "content-type": mediaType,
-            // The renderer fetch()es text files from this scheme; a custom
-            // scheme is a distinct origin, so allow the cross-origin read.
-            "access-control-allow-origin": "*",
-            // Never let served workspace bytes be sniffed into active content.
-            "x-content-type-options": "nosniff",
-          },
+          headers,
         });
       } catch {
         return new Response("Not found", { status: 404 });

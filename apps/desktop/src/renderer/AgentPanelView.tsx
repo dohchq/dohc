@@ -1,5 +1,5 @@
 import { Bot, Check, Copy, Play, ShieldAlert, Square, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentPanelSnapshotResult,
   AgentPermissionDecision,
@@ -57,6 +57,7 @@ export function AgentPanelView(props: {
   const [prompt, setPrompt] = useState("Summarize this workspace and create a short next-step note.");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const requestEpochRef = useRef(0);
   const session = panel?.session ?? null;
   const activeSession = isActiveSession(session);
   const runActive = runStatus?.activeRun !== null;
@@ -86,12 +87,13 @@ export function AgentPanelView(props: {
     [onAgentActiveChange],
   );
 
-  const refresh = useCallback(async (): Promise<AgentPanelSnapshotResult> => {
+  const refresh = useCallback(async (epoch = requestEpochRef.current): Promise<AgentPanelSnapshotResult | null> => {
     const [nextRunStatus, nextConfig, nextPanel] = await Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),
       bridge().getAgentSessionState({ workspaceId }),
     ]);
+    if (epoch !== requestEpochRef.current) return null;
     setRunStatus(nextRunStatus);
     setConfig(nextConfig);
     applyPanel(nextPanel, nextRunStatus.activeRun !== null);
@@ -99,31 +101,43 @@ export function AgentPanelView(props: {
   }, [applyPanel, workspaceId]);
 
   useEffect(() => {
-    let cancelled = false;
+    const epoch = requestEpochRef.current + 1;
+    requestEpochRef.current = epoch;
+    setRunStatus(null);
+    setConfig(null);
+    setPanel(null);
+    setBusy(false);
+    setMessage(null);
+    onAgentActiveChange?.(false);
     Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),
       bridge().probeAgentDrivers({ workspaceId }),
     ])
       .then(([nextRunStatus, nextConfig, nextPanel]) => {
-        if (cancelled) return;
+        if (epoch !== requestEpochRef.current) return;
         setRunStatus(nextRunStatus);
         setConfig(nextConfig);
         applyPanel(nextPanel, nextRunStatus.activeRun !== null);
       })
       .catch((error) => {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : "Agent panel failed.");
+        if (epoch === requestEpochRef.current) {
+          setMessage(error instanceof Error ? error.message : "Agent panel failed.");
+        }
       });
     return () => {
-      cancelled = true;
+      if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
     };
-  }, [workspaceId, refreshKey, applyPanel]);
+  }, [workspaceId, refreshKey, applyPanel, onAgentActiveChange]);
 
   useEffect(() => {
     if (!activeSession && !runActive) return;
+    const epoch = requestEpochRef.current;
     const timer = window.setInterval(() => {
-      void refresh().catch((error) => {
-        setMessage(error instanceof Error ? error.message : "Agent refresh failed.");
+      void refresh(epoch).catch((error) => {
+        if (epoch === requestEpochRef.current) {
+          setMessage(error instanceof Error ? error.message : "Agent refresh failed.");
+        }
       });
     }, AGENT_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
@@ -133,32 +147,40 @@ export function AgentPanelView(props: {
     if (!selectedDriver || !prompt.trim()) return;
     setBusy(true);
     setMessage(null);
+    const epoch = requestEpochRef.current;
     try {
       const nextPanel = await bridge().startAgentSession({
         workspaceId,
         driverId: selectedDriver,
         prompt: prompt.trim(),
       });
+      if (epoch !== requestEpochRef.current) return;
       applyPanel(nextPanel, runActive);
-      await refresh();
+      await refresh(epoch);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Agent session failed.");
+      if (epoch === requestEpochRef.current) {
+        setMessage(error instanceof Error ? error.message : "Agent session failed.");
+      }
     } finally {
-      setBusy(false);
+      if (epoch === requestEpochRef.current) setBusy(false);
     }
   }
 
   async function stopSession() {
     setBusy(true);
     setMessage(null);
+    const epoch = requestEpochRef.current;
     try {
       const nextPanel = await bridge().stopAgentSession({ workspaceId });
+      if (epoch !== requestEpochRef.current) return;
       applyPanel(nextPanel, false);
-      await refresh();
+      await refresh(epoch);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Agent stop failed.");
+      if (epoch === requestEpochRef.current) {
+        setMessage(error instanceof Error ? error.message : "Agent stop failed.");
+      }
     } finally {
-      setBusy(false);
+      if (epoch === requestEpochRef.current) setBusy(false);
     }
   }
 
@@ -166,27 +188,34 @@ export function AgentPanelView(props: {
     if (!externalRun) return;
     setBusy(true);
     setMessage(null);
+    const epoch = requestEpochRef.current;
     try {
       await bridge().endAgentRun({ workspaceId, runId: externalRun.id });
-      await refresh();
+      await refresh(epoch);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Agent stop failed.");
+      if (epoch === requestEpochRef.current) {
+        setMessage(error instanceof Error ? error.message : "Agent stop failed.");
+      }
     } finally {
-      setBusy(false);
+      if (epoch === requestEpochRef.current) setBusy(false);
     }
   }
 
   async function answerPermission(requestId: string, decision: AgentPermissionDecision) {
     setBusy(true);
     setMessage(null);
+    const epoch = requestEpochRef.current;
     try {
       const nextPanel = await bridge().answerAgentPermission({ workspaceId, requestId, decision });
+      if (epoch !== requestEpochRef.current) return;
       applyPanel(nextPanel, runActive);
-      await refresh();
+      await refresh(epoch);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Permission response failed.");
+      if (epoch === requestEpochRef.current) {
+        setMessage(error instanceof Error ? error.message : "Permission response failed.");
+      }
     } finally {
-      setBusy(false);
+      if (epoch === requestEpochRef.current) setBusy(false);
     }
   }
 
@@ -196,8 +225,12 @@ export function AgentPanelView(props: {
       setMessage("Clipboard unavailable.");
       return;
     }
-    await navigator.clipboard.writeText(configText);
-    setMessage("Copied MCP config.");
+    try {
+      await navigator.clipboard.writeText(configText);
+      setMessage("Copied MCP config.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Clipboard copy failed.");
+    }
   }
 
   return (

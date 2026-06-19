@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import {
+  WORKSPACE_KINDS as CORE_WORKSPACE_KINDS,
+  WORKSPACE_MODES as CORE_WORKSPACE_MODES,
+  type WorkspaceKind,
+  type WorkspaceMode,
+} from "@dohc/workspace-core";
 import type { UpdateState } from "../updates/updateMachine";
 import {
   EXPLORER_MENU_COMMANDS,
@@ -12,7 +18,22 @@ import {
   parseWorkspaceActivatedEvent,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
+  WORKSPACE_KINDS,
+  WORKSPACE_MODES,
 } from "./channels";
+
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+type Assert<T extends true> = T;
+
+const workspaceKindDriftGuard: Assert<
+  Equal<(typeof WORKSPACE_KINDS)[number], WorkspaceKind>
+> = true;
+const workspaceModeDriftGuard: Assert<
+  Equal<(typeof WORKSPACE_MODES)[number], WorkspaceMode>
+> = true;
 
 // The preload boundary for main→renderer menu events. These cases are the
 // codex-review attack set: the check must accept ONLY exact primitive members
@@ -96,6 +117,13 @@ describe("isWorkbenchMenuCommand (preload boundary)", () => {
 });
 
 describe("parseWorkspaceActivatedEvent (preload boundary)", () => {
+  it("keeps workspace kind and mode tuples in sync with workspace-core", () => {
+    expect(workspaceKindDriftGuard).toBe(true);
+    expect(workspaceModeDriftGuard).toBe(true);
+    expect(WORKSPACE_KINDS).toEqual(CORE_WORKSPACE_KINDS);
+    expect(WORKSPACE_MODES).toEqual(CORE_WORKSPACE_MODES);
+  });
+
   it("accepts a workspace summary and strips extra fields", () => {
     expect(
       parseWorkspaceActivatedEvent({

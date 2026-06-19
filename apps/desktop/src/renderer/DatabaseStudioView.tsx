@@ -37,9 +37,13 @@ function rowLabelOf(table: Table, row: Row, index: number): string {
 }
 
 interface EditingCell {
-  rowLabel: string;
+  rowKey: string;
   column: string;
   key: { pkColumn: string; rowId: string | number };
+}
+
+function editIdentity(key: EditingCell["key"]): string {
+  return `${key.pkColumn}\0${String(key.rowId)}`;
 }
 
 function cellText(value: unknown): string {
@@ -85,7 +89,7 @@ export function DatabaseStudioView(props: {
   const [error, setError] = useState(false);
 
   const { workspaceId, path, refreshKey } = props;
-  const currentPathRef = useRef(path);
+  const currentSnapshotRef = useRef({ workspaceId, path, loadId: 0 });
   const onShare = props.onSharePath
     ? () => props.onSharePath?.(path)
     : undefined;
@@ -96,9 +100,12 @@ export function DatabaseStudioView(props: {
   // (re)load also clears the snapshot for the same reason. The cancelled flag
   // drops slow responses that arrive after another switch.
   useEffect(() => {
-    let cancelled = false;
-    if (currentPathRef.current !== path) {
-      currentPathRef.current = path;
+    const switched =
+      currentSnapshotRef.current.workspaceId !== workspaceId ||
+      currentSnapshotRef.current.path !== path;
+    const loadId = currentSnapshotRef.current.loadId + 1;
+    currentSnapshotRef.current = { workspaceId, path, loadId };
+    if (switched) {
       setSnapshot(null);
       setError(false);
       setActiveName(null);
@@ -109,18 +116,29 @@ export function DatabaseStudioView(props: {
     bridge()
       .readWorkspaceDatabase({ workspaceId, relativePath: path })
       .then((result) => {
-        if (cancelled) return;
+        const current = currentSnapshotRef.current;
+        if (
+          current.workspaceId !== workspaceId ||
+          current.path !== path ||
+          current.loadId !== loadId
+        ) {
+          return;
+        }
         setSnapshot(result);
         setError(false);
       })
       .catch(() => {
-        if (cancelled) return;
+        const current = currentSnapshotRef.current;
+        if (
+          current.workspaceId !== workspaceId ||
+          current.path !== path ||
+          current.loadId !== loadId
+        ) {
+          return;
+        }
         setSnapshot(null);
         setError(true);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [workspaceId, path, refreshKey]);
 
   // Performance measure (post-commit, snapshot rendered): click → read-only
@@ -194,11 +212,13 @@ export function DatabaseStudioView(props: {
   async function commitEdit(table: Table) {
     if (!editing) return;
     const current = editing;
+    const targetWorkspaceId = workspaceId;
+    const targetPath = path;
     setEditing(null);
     try {
       const result = await bridge().applyDatabaseEdit({
-        workspaceId,
-        relativePath: path,
+        workspaceId: targetWorkspaceId,
+        relativePath: targetPath,
         edit: {
           table: table.name,
           op: "update",
@@ -208,9 +228,21 @@ export function DatabaseStudioView(props: {
         },
       });
       // Drop the response if the user switched databases mid-flight.
-      if (currentPathRef.current === path) setSnapshot(result);
+      const currentSnapshot = currentSnapshotRef.current;
+      if (
+        currentSnapshot.workspaceId === targetWorkspaceId &&
+        currentSnapshot.path === targetPath
+      ) {
+        setSnapshot(result);
+      }
     } catch {
-      if (currentPathRef.current === path) setError(true);
+      const currentSnapshot = currentSnapshotRef.current;
+      if (
+        currentSnapshot.workspaceId === targetWorkspaceId &&
+        currentSnapshot.path === targetPath
+      ) {
+        setError(true);
+      }
     }
   }
 
@@ -501,6 +533,7 @@ function DatabaseGrid(props: {
           {props.rows.map(({ row, sourceIndex }, visibleIndex) => {
             const rowLabel = rowLabelOf(table, row, sourceIndex);
             const editKey = editKeyFor(table, row);
+            const rowEditKey = editKey ? editIdentity(editKey) : null;
             return (
               <tr
                 key={String(row.__dohc_rowid ?? `${rowLabel}-${sourceIndex}`)}
@@ -512,7 +545,7 @@ function DatabaseGrid(props: {
                 </td>
                 {table.columns.map((column) => {
                   const isEditing =
-                    props.editing?.rowLabel === rowLabel &&
+                    props.editing?.rowKey === rowEditKey &&
                     props.editing.column === column.name;
                   // Editable only with a unique key; the key column itself
                   // stays read-only (when it's a real column, not rowid).
@@ -522,16 +555,20 @@ function DatabaseGrid(props: {
                     <td
                       key={column.name}
                       data-testid={`db-cell-${column.name}-${rowLabel}`}
-                      onClick={() =>
-                        editable &&
+                      onClick={() => {
+                        if (!editable || !editKey) return;
                         props.onBeginEdit(
-                          { rowLabel, column: column.name, key: editKey },
+                          {
+                            rowKey: editIdentity(editKey),
+                            column: column.name,
+                            key: editKey,
+                          },
                           row[column.name] === null ||
                             row[column.name] === undefined
                             ? ""
                             : String(row[column.name]),
-                        )
-                      }
+                        );
+                      }}
                       className={`max-w-[280px] border-b border-line px-2 py-1 align-top ${
                         numeric.has(column.name)
                           ? "text-right tabular-nums"

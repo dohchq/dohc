@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -41,6 +42,16 @@ const baseSnapshot: DatabaseSnapshotResult = {
 
 function cloneSnapshot(snapshot = baseSnapshot): DatabaseSnapshotResult {
   return JSON.parse(JSON.stringify(snapshot)) as DatabaseSnapshotResult;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
 }
 
 const bridgeMock = {
@@ -151,5 +162,83 @@ describe("DatabaseStudioView", () => {
       });
     });
     expect(await screen.findByText("Groceries")).toBeTruthy();
+  });
+
+  it("clears and ignores stale snapshots after switching workspaces", async () => {
+    const oldRead = deferred<DatabaseSnapshotResult>();
+    const newSnapshot = cloneSnapshot({
+      path: "imports/new.sqlite",
+      tables: [
+        {
+          name: "new_wallet",
+          columns: [
+            { name: "id", type: "TEXT", primaryKey: true, nullable: false },
+            { name: "category", type: "TEXT" },
+          ],
+          rows: [{ id: "new_001", category: "New workspace" }],
+        },
+      ],
+    });
+    bridgeMock.readWorkspaceDatabase
+      .mockImplementationOnce(() => oldRead.promise)
+      .mockResolvedValueOnce(newSnapshot);
+
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="old" path="imports/old.sqlite" />,
+    );
+    rerender(<DatabaseStudioView workspaceId="new" path="imports/new.sqlite" />);
+
+    expect(await screen.findByText("New workspace")).toBeTruthy();
+    await act(async () => {
+      oldRead.resolve(cloneSnapshot());
+    });
+
+    await waitFor(() => expect(screen.getByText("New workspace")).toBeTruthy());
+    expect(screen.queryByText("Food")).toBeNull();
+  });
+
+  it("uses the unique row key instead of duplicate visible labels while editing", async () => {
+    const user = userEvent.setup();
+    const duplicateLabelSnapshot = cloneSnapshot({
+      path: "imports/duplicates.sqlite",
+      tables: [
+        {
+          name: "wallet",
+          columns: [
+            { name: "id", type: "TEXT" },
+            { name: "category", type: "TEXT" },
+          ],
+          rows: [
+            { __dohc_rowid: 101, id: "dup", category: "First" },
+            { __dohc_rowid: 102, id: "dup", category: "Second" },
+          ],
+        },
+      ],
+    });
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(duplicateLabelSnapshot);
+
+    render(<DatabaseStudioView workspaceId="ws-1" path="imports/duplicates.sqlite" />);
+    const duplicateCells = await screen.findAllByTestId("db-cell-category-dup");
+    await user.click(duplicateCells[0]!);
+
+    expect(screen.getAllByTestId("db-cell-input")).toHaveLength(1);
+    fireEvent.change(screen.getByTestId("db-cell-input"), {
+      target: { value: "First updated" },
+    });
+    await user.keyboard("{Enter}");
+
+    await waitFor(() =>
+      expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "imports/duplicates.sqlite",
+        edit: {
+          table: "wallet",
+          op: "update",
+          pkColumn: "rowid",
+          rowId: 101,
+          payload: { category: "First updated" },
+        },
+      }),
+    );
   });
 });

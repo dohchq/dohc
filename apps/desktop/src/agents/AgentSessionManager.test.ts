@@ -26,6 +26,7 @@ class FakeSession implements AgentSession {
 function harness(
   options: {
     startSession?: (input: AgentSessionStartInput) => Promise<AgentSession>;
+    probe?: AgentDriver["probe"];
     mcpFor?: (rootPath: string) => AgentSessionStartInput["mcp"];
   } = {},
 ) {
@@ -34,7 +35,8 @@ function harness(
   const driver: AgentDriver = {
     id: "fake-driver",
     displayName: "Fake",
-    async probe() {
+    async probe(env) {
+      if (options.probe) return options.probe(env);
       return { installed: true, auth: { status: "unknown" }, models: [] };
     },
     async startSession(input: AgentSessionStartInput) {
@@ -107,6 +109,32 @@ describe("AgentSessionManager", () => {
     });
   });
 
+  it("passes only agent probe allowlist env through to drivers", async () => {
+    const captured: Array<Record<string, string | undefined> | undefined> = [];
+    const previousSecret = process.env.DOHC_TEST_SECRET_TOKEN;
+    const previousAgentCommand = process.env.DOHC_AGENT_FAKE_COMMAND;
+    process.env.DOHC_TEST_SECRET_TOKEN = "do-not-leak";
+    process.env.DOHC_AGENT_FAKE_COMMAND = "fake-agent";
+    try {
+      const { manager } = harness({
+        async probe(env) {
+          captured.push(env);
+          return { installed: true, auth: { status: "unknown" }, models: [] };
+        },
+      });
+
+      await manager.probeDrivers();
+
+      expect(captured[0]).toMatchObject({ DOHC_AGENT_FAKE_COMMAND: "fake-agent" });
+      expect(captured[0]).not.toHaveProperty("DOHC_TEST_SECRET_TOKEN");
+    } finally {
+      if (previousSecret === undefined) delete process.env.DOHC_TEST_SECRET_TOKEN;
+      else process.env.DOHC_TEST_SECRET_TOKEN = previousSecret;
+      if (previousAgentCommand === undefined) delete process.env.DOHC_AGENT_FAKE_COMMAND;
+      else process.env.DOHC_AGENT_FAKE_COMMAND = previousAgentCommand;
+    }
+  });
+
   it("ends attribution as failed when the provider closes before turn completion", async () => {
     const { manager, endAgentRun, emit } = harness();
     await manager.startSession({
@@ -175,6 +203,22 @@ describe("AgentSessionManager", () => {
     expect(endAgentRun).toHaveBeenCalledWith("ws-1", "run-1", "failed");
     expect(session?.status).toBe("failed");
     expect(session?.pendingPermissions).toHaveLength(0);
+  });
+
+  it("does not downgrade failed attribution to complete when stopped later", async () => {
+    const { manager, endAgentRun, emit } = harness();
+    await manager.startSession({
+      workspaceId: "ws-1",
+      driverId: "fake-driver",
+      prompt: "go",
+    });
+
+    emit({ kind: "error", message: "provider died", fatal: true });
+    endAgentRun.mockClear();
+    await manager.stopSession("ws-1");
+
+    expect(endAgentRun).not.toHaveBeenCalled();
+    expect(manager.panelSnapshot("ws-1").session?.status).toBe("failed");
   });
 
   it("ignores late terminal events after explicit stop", async () => {

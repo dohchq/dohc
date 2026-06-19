@@ -58,6 +58,23 @@ export interface AgentIntegrationOptions {
 const RUNS_FILE = "agent-runs.json";
 const DEFAULT_AGENT_ID = "dohc-mcp";
 
+function isAgentRunRecord(value: unknown): value is AgentRunRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as AgentRunRecord;
+  return (
+    typeof record.id === "string" &&
+    record.id.length > 0 &&
+    typeof record.startedAt === "number" &&
+    Number.isFinite(record.startedAt) &&
+    (record.endedAt === undefined || (typeof record.endedAt === "number" && Number.isFinite(record.endedAt))) &&
+    typeof record.agentId === "string" &&
+    record.agentId.length > 0 &&
+    typeof record.onBehalfOf === "string" &&
+    record.onBehalfOf.length > 0 &&
+    (record.status === "running" || record.status === "complete" || record.status === "failed")
+  );
+}
+
 // Both paths resolve .dohc through resolveWorkspaceMetadataDir — a symlinked
 // .dohc (malicious attached workspace) is refused, never followed, so the run
 // log can't be planted outside the workspace boundary.
@@ -65,7 +82,7 @@ async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
   try {
     const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
     const parsed = JSON.parse(await readFile(path, "utf8"));
-    return Array.isArray(parsed) ? (parsed as AgentRunRecord[]) : [];
+    return Array.isArray(parsed) ? parsed.filter(isAgentRunRecord) : [];
   } catch {
     return [];
   }

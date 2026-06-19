@@ -53,13 +53,27 @@ child.stdout.on("data", (chunk) => {
 
 const SMOKE_DURATION_MS = 8000;
 let sentTerm = false;
+let hardKillTimer = null;
 
-setTimeout(() => {
+const termTimer = setTimeout(() => {
   sentTerm = true;
   child.kill("SIGTERM");
+  hardKillTimer = setTimeout(() => {
+    child.kill("SIGKILL");
+  }, SMOKE_DURATION_MS);
 }, SMOKE_DURATION_MS);
 
+child.once("error", (error) => {
+  clearTimeout(termTimer);
+  if (hardKillTimer) clearTimeout(hardKillTimer);
+  console.error("Desktop smoke FAILED.");
+  console.error(`  failed to spawn Electron: ${error.message}`);
+  process.exit(1);
+});
+
 child.on("exit", (code, signal) => {
+  clearTimeout(termTimer);
+  if (hardKillTimer) clearTimeout(hardKillTimer);
   const fatal = FATAL_PATTERNS.filter((pattern) => pattern.test(stderr));
   // Surviving until OUR SIGTERM is part of the contract: an app that quits or
   // crashes early (single-instance lock, segfault, clean process.exit) must

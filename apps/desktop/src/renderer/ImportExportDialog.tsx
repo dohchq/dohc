@@ -126,13 +126,20 @@ export function ImportExportDialog(props: {
     }
     try {
       setStatus({ kind: "busy", label: "Importing shared data..." });
-      const fragment = await bridge().readDataFragment({
-        workspaceId: props.workspaceId,
-        fragmentId: selectedFragmentId,
-      });
       const current = await bridge().readWorkspaceText({
         workspaceId: props.workspaceId,
         relativePath: props.activePath,
+      });
+      if (current.truncated) {
+        setStatus({
+          kind: "error",
+          message: "This file is too large to import into safely.",
+        });
+        return;
+      }
+      const fragment = await bridge().readDataFragment({
+        workspaceId: props.workspaceId,
+        fragmentId: selectedFragmentId,
       });
       const separator =
         current.text.length === 0 || current.text.endsWith("\n") ? "" : "\n";

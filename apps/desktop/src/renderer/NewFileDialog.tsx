@@ -9,6 +9,8 @@ export function NewFileDialog(props: {
 }) {
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -16,15 +18,22 @@ export function NewFileDialog(props: {
   }, []);
 
   async function create() {
-    if (!name.trim()) return;
+    const relativePath = name.trim();
+    if (!relativePath || pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    setError(null);
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId: props.workspaceId,
-        relativePath: name.trim(),
+        relativePath,
       });
       props.onCreated(result.path);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
     }
   }
 
@@ -36,6 +45,7 @@ export function NewFileDialog(props: {
           type="text"
           aria-label="File name"
           placeholder="notes/today.md"
+          disabled={pending}
           value={name}
           onChange={(event) => setName(event.target.value)}
           onKeyDown={(event) => {

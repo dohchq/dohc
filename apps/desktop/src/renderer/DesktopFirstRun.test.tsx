@@ -59,11 +59,22 @@ describe("first run", () => {
       await screen.findByRole("button", { name: /create workspace/i }),
     );
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "personal" }),
+      expect.objectContaining({
+        kind: "personal",
+        rootPath: "/home/ice/dohc/personal",
+      }),
     );
     expect(onReady).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "ws-1" }),
     );
+  });
+
+  it("reports default workspace root failures", async () => {
+    bridge.getDefaultWorkspaceRoot.mockRejectedValueOnce(new Error("No home dir"));
+
+    render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
+
+    expect(await screen.findByText("No home dir")).toBeTruthy();
   });
 
   it("attaches an existing folder as a workspace", async () => {
