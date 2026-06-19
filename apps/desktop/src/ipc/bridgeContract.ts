@@ -455,6 +455,18 @@ export const ReadChangeSetResult = z.object({
 });
 export type ReadChangeSetResult = z.infer<typeof ReadChangeSetResult>;
 
+export const RestoreHistoryFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  changeSetId: z.string().min(1).max(500),
+  relativePath: PATH_STRING,
+});
+export type RestoreHistoryFilePayload = z.infer<typeof RestoreHistoryFilePayload>;
+
+export const RestoreHistoryFileResult = z.object({
+  restored: z.enum(["text", "deleted"]),
+});
+export type RestoreHistoryFileResult = z.infer<typeof RestoreHistoryFileResult>;
+
 const AppCheck = z.object({
   name: z.string(),
   status: z.string(),
@@ -1257,6 +1269,9 @@ export interface DohcDesktopBridge {
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListChangeSetsResult>;
   readChangeSet(payload: ReadChangeSetPayload): Promise<ReadChangeSetResult>;
+  restoreHistoryFile(
+    payload: RestoreHistoryFilePayload,
+  ): Promise<RestoreHistoryFileResult>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;

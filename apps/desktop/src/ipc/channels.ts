@@ -345,6 +345,7 @@ export const CHANNELS = {
   openWorkspace: "desktop:open-workspace",
   listChangeSets: "desktop:list-change-sets",
   readChangeSet: "desktop:read-change-set",
+  restoreHistoryFile: "desktop:restore-history-file",
   getSyncStatus: "desktop:get-sync-status",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",

@@ -1,7 +1,8 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { open, readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
+import { existingAncestor } from "./workspaceFiles";
 
 // Media types served to the renderer for binary assets. Kept small and
 // explicit — only types a view actually renders (image/audio src, pdf);
@@ -104,6 +105,34 @@ export async function writeWorkspaceText(
   const temp = `${realTarget}.tmp.${process.pid}-${Date.now()}`;
   await writeFile(temp, text, "utf8");
   await rename(temp, realTarget);
+}
+
+export async function restoreWorkspaceText(
+  rootPath: string,
+  relativePath: string,
+  text: string,
+): Promise<void> {
+  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
+    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
+  }
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(`Invalid restore path (${validated.reason}): ${relativePath}`);
+  }
+  const realRoot = await realpath(rootPath);
+  const absolute = join(rootPath, validated.normalized);
+  const parent = dirname(absolute);
+  if (!isInside(realRoot, await existingAncestor(parent))) {
+    throw new Error(`Restore path escapes workspace: ${relativePath}`);
+  }
+  await mkdir(parent, { recursive: true });
+  if (!isInside(realRoot, await realpath(parent))) {
+    throw new Error(`Restore path escapes workspace: ${relativePath}`);
+  }
+  const { rename, writeFile } = await import("node:fs/promises");
+  const temp = `${absolute}.tmp.${process.pid}-${Date.now()}`;
+  await writeFile(temp, text, "utf8");
+  await rename(temp, absolute);
 }
 
 export async function readWorkspaceText(

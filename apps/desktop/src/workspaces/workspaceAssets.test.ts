@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,6 +14,7 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
+  restoreWorkspaceText,
   writeWorkspaceText,
 } from "./workspaceAssets";
 
@@ -81,6 +89,36 @@ describe("writeWorkspaceText atomicity + round trip", () => {
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Edited\n");
     const back = await readWorkspaceText(root, "notes/a.md");
     expect(back).toEqual({ text: "# Edited\n", truncated: false });
+  });
+});
+
+describe("restoreWorkspaceText", () => {
+  it("recreates a missing nested file from a history snapshot", async () => {
+    const root = await makeWorkspace();
+
+    await restoreWorkspaceText(root, "archive/2026/note.md", "# Restored\n");
+
+    expect(await readFile(join(root, "archive", "2026", "note.md"), "utf8")).toBe(
+      "# Restored\n",
+    );
+  });
+
+  it("overwrites an existing file with the exact snapshot text", async () => {
+    const root = await makeWorkspace();
+
+    await restoreWorkspaceText(root, "notes/a.md", "# Before\n");
+
+    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Before\n");
+  });
+
+  it("refuses to restore through a symlinked ancestor outside the workspace", async () => {
+    const root = await makeWorkspace();
+    const outside = await mkdtemp(join(tmpdir(), "dohc-assets-outside-"));
+    await symlink(outside, join(root, "notes", "outside"));
+
+    await expect(
+      restoreWorkspaceText(root, "notes/outside/secret.md", "nope"),
+    ).rejects.toThrow(/escapes workspace/);
   });
 });
 

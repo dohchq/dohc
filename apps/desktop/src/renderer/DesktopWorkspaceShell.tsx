@@ -8,6 +8,7 @@ import {
   PanelRight,
   RefreshCw,
   Search,
+  Undo2,
   User,
   X,
 } from "lucide-react";
@@ -568,10 +569,12 @@ function HistoryDiffPage({
   workspaceId,
   tabPath,
   onOpenFile,
+  onRestored,
 }: {
   workspaceId: string;
   tabPath: string;
   onOpenFile: (path: string) => void;
+  onRestored: () => void;
 }) {
   const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -579,6 +582,12 @@ function HistoryDiffPage({
     | { status: "ready"; changeSet: ChangeSetDetailRecord | null }
     | { status: "error" }
   >({ status: "loading" });
+  const [restoreState, setRestoreState] = useState<
+    | { status: "idle" }
+    | { status: "restoring" }
+    | { status: "restored"; restored: "text" | "deleted"; message: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
 
   useEffect(() => {
     let cancelled = false;
@@ -601,6 +610,9 @@ function HistoryDiffPage({
       cancelled = true;
     };
   }, [parsed, workspaceId]);
+  useEffect(() => {
+    setRestoreState({ status: "idle" });
+  }, [tabPath]);
 
   if (!parsed || state.status === "error") {
     return (
@@ -629,6 +641,15 @@ function HistoryDiffPage({
     before === undefined && after === undefined
       ? snapshotUnavailable(file.before) ?? snapshotUnavailable(file.after)
       : null;
+  const canOpenFile =
+    restoreState.status === "restored" && restoreState.restored === "deleted"
+      ? false
+      : file.operation !== "delete" ||
+        (restoreState.status === "restored" && restoreState.restored === "text");
+  const canRestore =
+    typeof file.before?.text === "string" ||
+    file.before === null ||
+    file.before?.unavailableReason === "missing";
   const diffLines: UnifiedDiffLine[] = unavailable
     ? [
         {
@@ -639,6 +660,34 @@ function HistoryDiffPage({
         },
       ]
     : buildUnifiedDiffLines(before, after, 800);
+  const restoreFile = async () => {
+    if (!parsed || !canRestore || restoreState.status === "restoring") return;
+    setRestoreState({ status: "restoring" });
+    try {
+      const result = await bridge().restoreHistoryFile({
+        workspaceId,
+        changeSetId: parsed.changeSetId,
+        relativePath: file.path,
+      });
+      setRestoreState({
+        status: "restored",
+        restored: result.restored,
+        message:
+          result.restored === "deleted"
+            ? "Reverted by moving the created file out of the workspace."
+            : "Reverted this file to the previous text.",
+      });
+      onRestored();
+    } catch (error) {
+      setRestoreState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not revert this history change.",
+      });
+    }
+  };
 
   return (
     <section
@@ -654,7 +703,19 @@ function HistoryDiffPage({
             id="history-diff-title"
             className="mb-0 mt-0.5 truncate text-[15px] font-semibold text-ink"
           >
-            {file.path}
+            {canOpenFile ? (
+              <button
+                type="button"
+                data-testid="history-diff-title-open-file"
+                onClick={() => onOpenFile(file.path)}
+                className="max-w-full cursor-pointer truncate rounded text-left hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={`Open ${file.path}`}
+              >
+                {file.path}
+              </button>
+            ) : (
+              file.path
+            )}
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
             <span>{fileOperationLabel(file)}</span>
@@ -668,13 +729,38 @@ function HistoryDiffPage({
           <p className="mb-0 mt-1 truncate text-[11px] text-subtle">
             {state.changeSet.humanSummary}
           </p>
+          {restoreState.status === "restored" || restoreState.status === "error" ? (
+            <p
+              data-testid="history-diff-restore-status"
+              className={`mb-0 mt-1 text-[11px] ${
+                restoreState.status === "error" ? "text-danger" : "text-success"
+              }`}
+            >
+              {restoreState.message}
+            </p>
+          ) : null}
         </div>
-        {file.operation !== "delete" ? (
+        <button
+          type="button"
+          data-testid="history-diff-revert-file"
+          onClick={() => void restoreFile()}
+          disabled={!canRestore || restoreState.status === "restoring"}
+          title={
+            canRestore
+              ? "Revert this file to its state before this change"
+              : "This history entry has no restorable text snapshot"
+          }
+          className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Undo2 size={12} aria-hidden />
+          {restoreState.status === "restoring" ? "Reverting..." : "Revert"}
+        </button>
+        {canOpenFile ? (
           <button
             type="button"
             data-testid="history-diff-open-file"
             onClick={() => onOpenFile(file.path)}
-            className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
           >
             <ExternalLink size={12} aria-hidden />
             Open file
@@ -685,9 +771,21 @@ function HistoryDiffPage({
         <section className="overflow-hidden rounded border border-line bg-bg shadow-sm">
           <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
             <FileText size={13} aria-hidden className="shrink-0 text-subtle" />
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
-              {file.path}
-            </span>
+            {canOpenFile ? (
+              <button
+                type="button"
+                data-testid="history-diff-file-title-open-file"
+                onClick={() => onOpenFile(file.path)}
+                className="min-w-0 flex-1 cursor-pointer truncate rounded text-left font-mono text-[12px] text-ink hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={`Open ${file.path}`}
+              >
+                {file.path}
+              </button>
+            ) : (
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+                {file.path}
+              </span>
+            )}
             {counts ? (
               <span className="shrink-0 font-mono text-[11px] text-subtle">
                 +{counts.added} -{counts.removed}
@@ -1354,6 +1452,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
+  const refreshAfterHistoryRestore = useCallback(() => {
+    void refreshFiles();
+    void refreshHistory();
+  }, [refreshFiles, refreshHistory]);
   const activateEditorTab = useCallback(
     (path: string) => {
       if (isVirtualTabPath(path)) {
@@ -1975,6 +2077,7 @@ export function DesktopWorkspaceShell(props: {
                 workspaceId={workspaceId}
                 tabPath={wb.activeTab ?? ""}
                 onOpenFile={openFile}
+                onRestored={refreshAfterHistoryRestore}
               />
             ) : wb.activeTab ? (
               <FileInspector

@@ -135,6 +135,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listChangeSets, payload),
   readChangeSet: (payload) =>
     ipcRenderer.invoke(CHANNELS.readChangeSet, payload),
+  restoreHistoryFile: (payload) =>
+    ipcRenderer.invoke(CHANNELS.restoreHistoryFile, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
   startAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.startAgentRun, payload),
   endAgentRun: (payload) => ipcRenderer.invoke(CHANNELS.endAgentRun, payload),

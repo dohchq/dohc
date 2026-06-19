@@ -166,6 +166,7 @@ function makeBridge(
       session: null,
     })),
     readWorkspaceText: vi.fn(async () => ({ text: "# Doc\n", truncated: false })),
+    restoreHistoryFile: vi.fn(async () => ({ restored: "text" as const })),
     readWorkspaceGraph: vi.fn(async () => ({
       nodes: [
         { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
@@ -1300,6 +1301,53 @@ describe("history details", () => {
     expect((await screen.findByTestId("tab-notes/today.md")).dataset.active).toBe(
       "true",
     );
+  });
+
+  it("opens the live file when clicking the filename above the history diff", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-title-open", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-file-title-open-file"));
+
+    expect((await screen.findByTestId("tab-notes/today.md")).dataset.active).toBe(
+      "true",
+    );
+  });
+
+  it("reverts a history diff file back to its previous text snapshot", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-revert-file"));
+
+    await waitFor(() =>
+      expect(bridge.restoreHistoryFile).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "change-revert",
+        relativePath: "notes/today.md",
+      }),
+    );
+    expect(
+      (await diffPage.findByTestId("history-diff-restore-status")).textContent,
+    ).toBe("Reverted this file to the previous text.");
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.listChangeSets).toHaveBeenCalledTimes(2));
   });
 
 });

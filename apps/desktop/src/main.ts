@@ -74,6 +74,8 @@ import {
   ListWorkspaceInvitesResult,
   ReadChangeSetPayload,
   ReadChangeSetResult,
+  RestoreHistoryFilePayload,
+  RestoreHistoryFileResult,
   ListChangeSetsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -150,6 +152,7 @@ import {
   readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
+  restoreWorkspaceText,
   writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
@@ -1494,6 +1497,39 @@ function registerIpcHandlers(): void {
     return ReadChangeSetResult.parse(
       await activity.readChangeSet(workspace, input.changeSetId),
     );
+  });
+
+  ipcMain.handle(CHANNELS.restoreHistoryFile, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RestoreHistoryFilePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const result = await activity.readChangeSet(workspace, input.changeSetId);
+    const file = result.changeSet?.files.find(
+      (entry) => entry.path === input.relativePath,
+    );
+    if (!file) {
+      throw new Error(`Changed file not found in history: ${input.relativePath}`);
+    }
+    if (typeof file.before?.text === "string") {
+      await restoreWorkspaceText(
+        workspace.rootPath,
+        input.relativePath,
+        file.before.text,
+      );
+      return RestoreHistoryFileResult.parse({ restored: "text" });
+    }
+    if (file.before === null || file.before?.unavailableReason === "missing") {
+      try {
+        await deletePath(workspace.rootPath, input.relativePath, (p) =>
+          shell.trashItem(p),
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+      return RestoreHistoryFileResult.parse({ restored: "deleted" });
+    }
+    throw new Error("This history entry has no restorable text snapshot.");
   });
 
   ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {
