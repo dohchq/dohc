@@ -174,8 +174,10 @@ export function createPostgresAcl({ pool }: { pool: pg.Pool }): HocuspocusAcl {
       }
 
       const atomId = randomUUID()
+      const client = await pool.connect()
       try {
-        await pool.query(
+        await client.query('begin')
+        await client.query(
           `insert into atoms (id, workspace_id, path, kind, body, revision)
            values ($1, $2, $3, $4, $5, 1)`,
           [
@@ -186,7 +188,7 @@ export function createPostgresAcl({ pool }: { pool: pg.Pool }): HocuspocusAcl {
             input.content,
           ],
         )
-        await pool.query(INSERT_REVISION_SQL, [
+        await client.query(INSERT_REVISION_SQL, [
           randomUUID(),
           input.workspaceId,
           atomId,
@@ -194,12 +196,16 @@ export function createPostgresAcl({ pool }: { pool: pg.Pool }): HocuspocusAcl {
           input.content,
           input.userId,
         ])
+        await client.query('commit')
         return { ok: true, atomId, markdown: input.content }
       } catch (error) {
+        await client.query('rollback').catch(() => undefined)
         if ((error as { code?: string }).code === '23505') {
           return { ok: false, reason: 'already-exists' }
         }
         throw error
+      } finally {
+        client.release()
       }
     },
   }

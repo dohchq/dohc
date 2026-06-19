@@ -20,6 +20,9 @@ create table if not exists data_fragments (
 create index if not exists data_fragments_workspace_created_idx
   on data_fragments(workspace_id, created_at);
 
+create unique index if not exists data_fragments_id_workspace_unique
+  on data_fragments(id, workspace_id);
+
 create table if not exists data_fragment_shares (
   id text primary key,
   fragment_id text not null,
@@ -35,6 +38,19 @@ create table if not exists data_fragment_shares (
 create unique index if not exists data_fragment_shares_audience_unique
   on data_fragment_shares(fragment_id, recipient_user_id)
   where deleted_at is null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'data_fragment_shares_fragment_workspace_fk'
+  ) then
+    alter table data_fragment_shares
+      add constraint data_fragment_shares_fragment_workspace_fk
+      foreign key (fragment_id, workspace_id)
+      references data_fragments(id, workspace_id)
+      on delete cascade;
+  end if;
+end $$;
 
 create index if not exists data_fragment_shares_recipient_created_idx
   on data_fragment_shares(recipient_user_id, created_at);

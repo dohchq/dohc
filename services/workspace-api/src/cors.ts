@@ -25,10 +25,23 @@ export function withCors(
     if (!allowed) return response;
     const headers = new Headers(response.headers);
     for (const [name, value] of Object.entries(corsHeaders(webOrigin))) {
-      headers.set(name, value);
+      if (name === "vary") {
+        headers.set("vary", mergeVary(headers.get("vary"), value));
+      } else {
+        headers.set(name, value);
+      }
     }
     return new Response(response.body, { status: response.status, headers });
   };
+}
+
+function mergeVary(existing: string | null, added: string): string {
+  const values = new Map<string, string>();
+  for (const value of `${existing ?? ""},${added}`.split(",")) {
+    const trimmed = value.trim();
+    if (trimmed) values.set(trimmed.toLowerCase(), trimmed);
+  }
+  return [...values.values()].join(", ");
 }
 
 function corsHeaders(webOrigin: string): Record<string, string> {

@@ -89,11 +89,36 @@ export function parseMeasurements(text: string): MeasurementsFile {
     if (typeof file.ratchets !== "object" || file.ratchets === null) fail("ratchets is not an object");
     for (const [name, record] of Object.entries(file.ratchets as Record<string, unknown>)) {
       const r = record as Record<string, unknown> | null;
-      if (typeof r !== "object" || r === null || typeof r.value !== "number" || !Number.isFinite(r.value)) {
-        fail(`ratchet "${name}" has no finite value`);
+      if (
+        typeof r !== "object" ||
+        r === null ||
+        typeof r.value !== "number" ||
+        !Number.isFinite(r.value) ||
+        r.value < 0
+      ) {
+        fail(`ratchet "${name}" has no finite non-negative value`);
       }
-      if (r.baseline !== undefined && (typeof r.baseline !== "number" || !Number.isFinite(r.baseline))) {
-        fail(`ratchet "${name}" baseline is not a finite number`);
+      if (
+        r.baseline !== undefined &&
+        (typeof r.baseline !== "number" || !Number.isFinite(r.baseline) || r.baseline <= 0)
+      ) {
+        fail(`ratchet "${name}" baseline is not a finite positive number`);
+      }
+    }
+  }
+  if (file.multiplierJustifications !== undefined) {
+    if (
+      typeof file.multiplierJustifications !== "object" ||
+      file.multiplierJustifications === null ||
+      Array.isArray(file.multiplierJustifications)
+    ) {
+      fail("multiplierJustifications is not an object");
+    }
+    for (const [name, justification] of Object.entries(
+      file.multiplierJustifications as Record<string, unknown>,
+    )) {
+      if (typeof justification !== "string") {
+        fail(`multiplier justification "${name}" is not a string`);
       }
     }
   }

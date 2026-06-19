@@ -722,6 +722,26 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("rolls back move/delete mutations if the history record cannot be written", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
+      await rm(join(ctx.root, ".dohc", "history", "index.json"), { force: true });
+      await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
+
+      const moved = await moveWorkspacePath(ctx, {
+        fromPath: "drafts/todo.txt",
+        toPath: "archive/todo.txt",
+      });
+      expect(moved).toMatchObject({ ok: false });
+      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe("ship\n");
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toThrow();
+
+      const deleted = await deleteWorkspacePath(ctx, { path: "drafts/todo.txt" });
+      expect(deleted).toMatchObject({ ok: false });
+      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe("ship\n");
+    });
+  });
+
   it("create_app scaffolds app.json + src/App.tsx and never marks trust", async () => {
     await withWorkspace(async (ctx) => {
       const result = await createApp(ctx, { area: "finance", name: "ledger", title: "Ledger" });
@@ -737,6 +757,19 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("create_app rejects traversal names and escapes TSX-significant app names", async () => {
+    await withWorkspace(async (ctx) => {
+      await expect(createApp(ctx, { area: "", name: "../evil" })).resolves.toMatchObject({
+        ok: false,
+      });
+
+      const result = await createApp(ctx, { area: "", name: "bad {name}" });
+      expect(result).toMatchObject({ ok: true, trusted: false });
+      const source = await readFile(join(ctx.root, ".apps/bad {name}/src/App.tsx"), "utf8");
+      expect(source).toContain('<div>{"bad {name}"}</div>');
+    });
+  });
+
   it("test_app runs the static checker over contained app source", async () => {
     await withWorkspace(async (ctx) => {
       await createApp(ctx, { area: "", name: "todo" });
@@ -746,6 +779,24 @@ describe("mcp tools operate on allowed paths", () => {
       });
       // The scaffold imports @dohc/app, so the static SDK-import check passes.
       expect(result).toMatchObject({ ok: true });
+    });
+  });
+
+  it("test_app reports missing or directory source paths as tool-safe failures", async () => {
+    await withWorkspace(async (ctx) => {
+      await createApp(ctx, { area: "", name: "todo" });
+      await expect(
+        testApp(ctx, {
+          appRoot: ".apps/todo",
+          sourcePaths: [".apps/todo/src/Missing.tsx"],
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringMatching(/Missing\.tsx|no such/i) });
+      await expect(
+        testApp(ctx, {
+          appRoot: ".apps/todo",
+          sourcePaths: [".apps/todo/src"],
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });
     });
   });
 

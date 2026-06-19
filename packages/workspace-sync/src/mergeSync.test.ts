@@ -409,6 +409,25 @@ describe("merge pull", () => {
 });
 
 describe("manifest server binding", () => {
+  it("persists the server binding even when a legacy manifest has no local ops", async () => {
+    const server = fakeServer();
+    await writeFile(
+      join(root, ".dohc", "sync-manifest.json"),
+      JSON.stringify({ version: 1, workspaceId: "ws-1", backend: "postgres", files: {} }),
+    );
+    const sync = engine(server, "http://server-a.test");
+
+    expect(await sync.push()).toMatchObject({ pushed: 0 });
+
+    const manifest = JSON.parse(
+      await readFile(join(root, ".dohc", "sync-manifest.json"), "utf8"),
+    );
+    expect(manifest).toMatchObject({
+      serverUrl: "http://server-a.test",
+      remoteWorkspaceId: "ws-1",
+    });
+  });
+
   it("refuses to sync (no deletes) when the manifest is bound to a different server", async () => {
     const server = fakeServer();
     await writeFile(join(root, "keep.md"), "important");

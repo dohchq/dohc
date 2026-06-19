@@ -89,6 +89,14 @@ describe("changeSetStore persistence", () => {
     expect(await store.get("nope")).toBeNull();
   });
 
+  it("rejects unsafe history ids before they can become filenames", async () => {
+    const store = createChangeSetStore(root);
+    await expect(
+      store.record(userEdit(), { id: "../escape", recordedAtMs: 1000 }),
+    ).rejects.toThrow(/invalid history record id/i);
+    await expect(store.get("../escape")).rejects.toThrow(/invalid history record id/i);
+  });
+
   it("lists the timeline newest first", async () => {
     const store = createChangeSetStore(root);
     await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });

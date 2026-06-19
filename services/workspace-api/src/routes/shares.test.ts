@@ -4,6 +4,7 @@ import { defaultPostgresUrl } from "@dohc/workspace-postgres";
 import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceApiHandler } from "../server";
+import { createShare } from "./shares";
 
 // Live-pg share lifecycle (plan Phase E5 server lane): members/owners create
 // shares by recipient email, re-sharing upserts capability, revocation soft-
@@ -164,6 +165,43 @@ describe("share lifecycle routes (live pg)", () => {
       ok: true,
       share: { shareId: share.shareId, capability: "edit" },
     });
+  });
+
+  it("keeps capability-update authz atomic when a share appears between check and upsert", async () => {
+    let injected = false;
+    const racePool = {
+      query: async (text: string, params?: unknown[]) => {
+        if (
+          !injected &&
+          text.includes("from shares s") &&
+          text.includes("s.recipient_user_id")
+        ) {
+          const result = await pool.query(text, params);
+          injected = true;
+          await pool.query(
+            `insert into shares (id, workspace_id, target_kind, target_id,
+               recipient_user_id, recipient_email, capability, created_by)
+             values ('e5-shares-race', $1, 'atom', $2, $3, $4, 'view', $5)`,
+            [workspaceId, atomId, recipientId, recipientEmail, memberId],
+          );
+          return result;
+        }
+        return await pool.query(text, params);
+      },
+    } as unknown as pg.Pool;
+
+    await expect(
+      createShare(
+        { pool: racePool },
+        { userId: otherMemberId, workspaceId },
+        async () => ({ atomId, recipientEmail, capability: "edit" }),
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+
+    const after = await pool.query(
+      "select capability, created_by from shares where id = 'e5-shares-race'",
+    );
+    expect(after.rows).toEqual([{ capability: "view", created_by: memberId }]);
   });
 
   it("rejects unknown recipient emails (invitation flow, not a share row) and bad bodies", async () => {

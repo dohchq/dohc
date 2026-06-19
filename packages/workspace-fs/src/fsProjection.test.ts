@@ -128,8 +128,13 @@ function memoryBackend(initial: MemoryFile[]) {
       files.set(toPath, file);
       return file;
     },
-    async deleteFile(_actor, path) {
-      calls.push({ method: "deleteFile", input: path });
+    async deleteFile(_actor, path, expectedRevision) {
+      calls.push({ method: "deleteFile", input: { path, expectedRevision } });
+      const file = files.get(path);
+      if (!file) throw new Error("not found");
+      if (expectedRevision !== undefined && file.revision !== expectedRevision) {
+        throw new Error("stale revision");
+      }
       files.delete(path);
     },
   };
@@ -279,6 +284,23 @@ describe("workspace filesystem projection", () => {
           diff: { operations: [{ op: "create", path: "../escape.txt", mediaType: "text/plain" }] },
         }),
       ).rejects.toThrow(/path traversal|invalid path/i);
+    });
+  });
+
+  it("passes the manifest revision when deleting so stale deletes cannot erase newer content", async () => {
+    await withTempDir(async (dir) => {
+      const { backend, calls } = memoryBackend([
+        textFile("notes/old.md", "# Old\n", "rev-old"),
+      ]);
+      await materializeWorkspace({ backend, actor, targetDir: dir, backendMode: "postgres" });
+      await rm(join(dir, "notes/old.md"));
+
+      await applyFsDiff({ backend, actor, rootDir: dir, diff: await scanWorkspaceDiff(dir) });
+
+      expect(calls).toContainEqual({
+        method: "deleteFile",
+        input: { path: "notes/old.md", expectedRevision: "rev-old" },
+      });
     });
   });
 

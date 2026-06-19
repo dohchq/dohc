@@ -50,7 +50,11 @@ export function mergeMarkdown(input: {
   // ranges don't overlap; any overlap is contested.
   for (const l of localHunks) {
     for (const r of remoteHunks) {
-      if (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd) {
+      const bothInsertAtSameOffset =
+        l.baseStart === l.baseEnd &&
+        r.baseStart === r.baseEnd &&
+        l.baseStart === r.baseStart;
+      if (bothInsertAtSameOffset || (l.baseStart < r.baseEnd && r.baseStart < l.baseEnd)) {
         return { kind: "conflict" };
       }
     }

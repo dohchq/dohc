@@ -183,5 +183,29 @@ describe("parseMeasurements", () => {
         JSON.stringify({ ...valid, metrics: { warmAppOpenMs: { skipped: true } } }),
       ),
     ).toThrow(/reason/);
+    expect(() =>
+      parseMeasurements(
+        JSON.stringify({
+          ...valid,
+          multiplierJustifications: { warmLaunchToShellMs: null },
+        }),
+      ),
+    ).toThrow(/multiplier justification.*warmLaunchToShellMs/);
+    expect(() =>
+      parseMeasurements(
+        JSON.stringify({
+          ...valid,
+          ratchets: { workspaceMemoryWorkingSetMb: { value: -1 } },
+        }),
+      ),
+    ).toThrow(/ratchet.*workspaceMemoryWorkingSetMb.*non-negative/);
+    expect(() =>
+      parseMeasurements(
+        JSON.stringify({
+          ...valid,
+          ratchets: { workspaceMemoryWorkingSetMb: { value: 250, baseline: 0 } },
+        }),
+      ),
+    ).toThrow(/ratchet.*workspaceMemoryWorkingSetMb.*positive/);
   });
 });

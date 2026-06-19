@@ -21,6 +21,10 @@ create table if not exists "invitation" ("id" text not null primary key, "organi
 
 create table if not exists "deviceCode" ("id" text not null primary key, "deviceCode" text not null, "userCode" text not null, "userId" text, "expiresAt" timestamptz not null, "status" text not null, "lastPolledAt" timestamptz, "pollingInterval" integer, "clientId" text, "scope" text);
 
+create unique index if not exists "deviceCode_deviceCode_uidx" on "deviceCode" ("deviceCode");
+
+create unique index if not exists "deviceCode_userCode_uidx" on "deviceCode" ("userCode");
+
 create index if not exists "session_userId_idx" on "session" ("userId");
 
 create index if not exists "account_userId_idx" on "account" ("userId");

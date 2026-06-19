@@ -3,11 +3,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "dohc-mcp": "./src/server.ts"
-  },
-  "exports": {
-    ".": "./src/server.ts",
-    "./tools": "./src/tools.ts"
+    "dohc-mcp": "./bin/dohc-mcp.js"
   },
   "scripts": {
     "dev": "tsx src/server.ts",

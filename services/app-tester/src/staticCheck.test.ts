@@ -29,6 +29,35 @@ describe('runStaticAppCheck', () => {
     expect(r.failures[0]?.code).toBe('missing-app-sdk')
   })
 
+  it('does not accept @dohc/app in comments or strings without a real import', () => {
+    const r = runStaticAppCheck(
+      file("// import '@dohc/app'\nconst sdk = '@dohc/app'\nexport default function App(){ return null }"),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.failures[0]?.code).toBe('missing-app-sdk')
+  })
+
+  it('does not reject @dohc/view text in comments or strings', () => {
+    const r = runStaticAppCheck(
+      file("import { dohc } from '@dohc/app'\nconst legacy = '@dohc/view'\n// @dohc/view\nexport default function App(){ return null }"),
+    )
+    expect(r.ok).toBe(true)
+  })
+
+  it('compiles code files independently so valid multi-file apps pass', () => {
+    const r = runStaticAppCheck([
+      {
+        relativePath: 'src/App.tsx',
+        body: "import { dohc } from '@dohc/app'\nexport default function App(){ return null }",
+      },
+      {
+        relativePath: 'src/Widget.tsx',
+        body: 'export default function Widget(){ return null }',
+      },
+    ])
+    expect(r.ok).toBe(true)
+  })
+
   it('rejects syntactically broken source that still imports @dohc/app', () => {
     const r = runStaticAppCheck(file("import { dohc } from '@dohc/app'\nconst x = ;"))
     expect(r.ok).toBe(false)

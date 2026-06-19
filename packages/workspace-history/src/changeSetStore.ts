@@ -53,8 +53,17 @@ export interface ChangeSetStore {
 
 // Each record lives in its own file so history is inspectable: open
 // .dohc/history/<recordedAtMs>-<id>.json and read what changed and why.
+const HISTORY_ID_RE = /^[A-Za-z0-9._-]+$/;
+
+function assertSafeHistoryId(id: string): string {
+  if (!HISTORY_ID_RE.test(id)) {
+    throw new Error(`Invalid history record id: ${id}`);
+  }
+  return id;
+}
+
 function recordFileName(opts: { id: string; recordedAtMs: number }): string {
-  return `${opts.recordedAtMs}-${opts.id}.json`;
+  return `${opts.recordedAtMs}-${assertSafeHistoryId(opts.id)}.json`;
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
@@ -201,6 +210,7 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
     },
 
     async get(id) {
+      assertSafeHistoryId(id);
       const index = await readIndex();
       const entry = index.find((e) => e.id === id);
       if (!entry) return null;

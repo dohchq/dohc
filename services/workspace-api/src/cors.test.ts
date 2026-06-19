@@ -55,4 +55,15 @@ describe("withCors (DOHC_WEB_ORIGIN gate)", () => {
     expect(preflight.headers.get("access-control-allow-methods")).toContain("GET");
     expect(preflight.headers.get("access-control-allow-headers")).toBe("content-type");
   });
+
+  it("preserves existing Vary values when adding Origin", async () => {
+    const handler = withCors(
+      async () => new Response("ok", { headers: { vary: "Accept-Encoding" } }),
+      WEB,
+    );
+    const response = await handler(
+      new Request("http://api.test/x", { headers: { origin: WEB } }),
+    );
+    expect(response.headers.get("vary")).toBe("Accept-Encoding, Origin");
+  });
 });

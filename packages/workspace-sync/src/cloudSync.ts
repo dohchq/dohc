@@ -263,6 +263,7 @@ export function createMergeSync({
       });
 
       if (candidate.length === 0) {
+        await writeManifest(rootDir, withBinding(manifest));
         return { ...EMPTY_RESULT, skipped };
       }
 

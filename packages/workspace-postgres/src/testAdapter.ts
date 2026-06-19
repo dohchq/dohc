@@ -14,7 +14,11 @@ let currentPool: pg.Pool | null = null;
 // (0003) are present — without them delete-then-recreate wedges (see phase-09).
 const migrationUrls = [
   new URL("./db/migrations/0001_initial.sql", import.meta.url),
+  new URL("./db/migrations/0002_better_auth.sql", import.meta.url),
   new URL("./db/migrations/0003_partial_path_unique.sql", import.meta.url),
+  new URL("./db/migrations/0004_invitations.sql", import.meta.url),
+  new URL("./db/migrations/0005_share_audience_unique.sql", import.meta.url),
+  new URL("./db/migrations/0006_data_fragments.sql", import.meta.url),
 ];
 
 export const postgresTestAdapter: WorkspaceBackendTestAdapter = {

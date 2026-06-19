@@ -186,6 +186,7 @@ export function watchWorkspaceEvents(
   };
 
   const onEvent = (relativePath: string): void => {
+    if (stopped) return;
     // chokidar's cwd-relative path is already separator-normalized for our
     // matcher; track it and (re)arm the quiet window. The deadline timer is
     // armed once per burst and never reset — under continuous writes it
@@ -197,8 +198,9 @@ export function watchWorkspaceEvents(
     if (deadline === undefined) deadline = setTimeout(flush, maxWindowMs);
   };
 
-  const ready = new Promise<void>((resolve) => {
+  const ready = new Promise<void>((resolve, reject) => {
     watcher.on("ready", () => resolve());
+    watcher.on("error", reject);
   });
 
   watcher.on("add", onEvent);

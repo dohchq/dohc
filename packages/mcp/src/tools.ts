@@ -32,7 +32,17 @@ import {
 import { runStaticAppCheck } from "@dohc/app-tester/static";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
 export interface ToolContext {
@@ -105,6 +115,44 @@ function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function readFileWindowWithDigest(
+  absolute: string,
+  offsetBytes: number,
+  maxBytes: number,
+): Promise<{ bytes: number; window: Buffer; sha256: string; offsetBytes: number; truncated: boolean }> {
+  const file = await open(absolute, "r");
+  try {
+    const { size } = await file.stat();
+    const offset = Math.min(size, offsetBytes);
+    const windowLength = Math.min(maxBytes, size - offset);
+    const window = Buffer.alloc(windowLength);
+    if (windowLength > 0) {
+      await file.read(window, 0, windowLength, offset);
+    }
+
+    const hash = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < size) {
+      const length = Math.min(chunk.byteLength, size - position);
+      const { bytesRead } = await file.read(chunk, 0, length, position);
+      if (bytesRead === 0) break;
+      hash.update(chunk.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+
+    return {
+      bytes: size,
+      window,
+      sha256: hash.digest("hex"),
+      offsetBytes: offset,
+      truncated: offset + windowLength < size,
+    };
+  } finally {
+    await file.close();
+  }
+}
+
 async function recordChange(
   ctx: ToolContext,
   input: {
@@ -167,6 +215,15 @@ async function safeTrashDir(ctx: ToolContext): Promise<string> {
     throw new Error("workspace trash directory escapes workspace");
   }
   return dir;
+}
+
+async function bestEffortRename(from: string, to: string): Promise<void> {
+  try {
+    await rename(from, to);
+  } catch {
+    // Preserve the original failure. The caller returns a conservative error
+    // rather than claiming success for an unrecorded workspace mutation.
+  }
 }
 
 const requireFromHere = createRequire(import.meta.url);
@@ -290,29 +347,27 @@ export async function readWorkspaceFile(
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   try {
-    const body = await readFile(resolved.absolute);
     const maxBytes = Math.min(
       HARD_READ_MAX_BYTES,
       Math.max(1, Math.floor(args.maxBytes ?? DEFAULT_READ_MAX_BYTES)),
     );
-    const offsetBytes = Math.min(
-      body.byteLength,
+    const read = await readFileWindowWithDigest(
+      resolved.absolute,
       Math.max(0, Math.floor(args.offsetBytes ?? 0)),
+      maxBytes,
     );
-    const end = Math.min(body.byteLength, offsetBytes + maxBytes);
-    const truncated = end < body.byteLength;
-    const view = body.subarray(offsetBytes, end);
     const encoding = args.encoding ?? "utf8";
     return {
       ok: true as const,
       path: resolved.normalized,
       mediaType: mediaTypeForPath(resolved.normalized) ?? "application/octet-stream",
       encoding,
-      bytes: body.byteLength,
-      offsetBytes,
-      sha256: sha256(body),
-      truncated,
-      content: encoding === "base64" ? view.toString("base64") : view.toString("utf8"),
+      bytes: read.bytes,
+      offsetBytes: read.offsetBytes,
+      sha256: read.sha256,
+      truncated: read.truncated,
+      content:
+        encoding === "base64" ? read.window.toString("base64") : read.window.toString("utf8"),
     };
   } catch (error) {
     return {
@@ -640,21 +695,36 @@ export async function moveWorkspacePath(
     return { ok: false as const, reason: `destination already exists: ${args.toPath}` };
   }
   await mkdir(dirname(to.absolute), { recursive: true });
-  await rename(from.absolute, to.absolute);
-  const record = await recordChange(ctx, {
-    files: [
-      { path: from.normalized, operation: "delete" },
-      { path: to.normalized, operation: "write" },
-    ],
-    summary: args.summary ?? `MCP moved ${from.normalized} to ${to.normalized}`,
-  });
-  return {
-    ok: true as const,
-    fromPath: from.normalized,
-    toPath: to.normalized,
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
-  };
+  try {
+    await rename(from.absolute, to.absolute);
+    try {
+      const record = await recordChange(ctx, {
+        files: [
+          { path: from.normalized, operation: "delete" },
+          { path: to.normalized, operation: "write" },
+        ],
+        summary: args.summary ?? `MCP moved ${from.normalized} to ${to.normalized}`,
+      });
+      return {
+        ok: true as const,
+        fromPath: from.normalized,
+        toPath: to.normalized,
+        changeSetId: record.id,
+        recordedAtMs: record.recordedAtMs,
+      };
+    } catch (error) {
+      await bestEffortRename(to.absolute, from.absolute);
+      return {
+        ok: false as const,
+        reason: failureReason(error, `failed to record move: ${args.fromPath}`),
+      };
+    }
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: failureReason(error, `failed to move: ${args.fromPath}`),
+    };
+  }
 }
 
 export async function deleteWorkspacePath(
@@ -663,6 +733,8 @@ export async function deleteWorkspacePath(
 ) {
   const resolved = await safeResolve(ctx, args.path);
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const recordable = await ensureRecordable(ctx);
+  if (recordable) return recordable;
   try {
     await lstat(resolved.absolute);
     const trashDir = await safeTrashDir(ctx);
@@ -671,17 +743,25 @@ export async function deleteWorkspacePath(
       `${Date.now()}-${randomUUID()}-${basename(resolved.normalized)}`,
     );
     await rename(resolved.absolute, trashedTo);
-    const record = await recordChange(ctx, {
-      files: [{ path: resolved.normalized, operation: "delete" }],
-      summary: args.summary ?? `MCP deleted ${resolved.normalized}`,
-    });
-    return {
-      ok: true as const,
-      path: resolved.normalized,
-      trashed: true,
-      changeSetId: record.id,
-      recordedAtMs: record.recordedAtMs,
-    };
+    try {
+      const record = await recordChange(ctx, {
+        files: [{ path: resolved.normalized, operation: "delete" }],
+        summary: args.summary ?? `MCP deleted ${resolved.normalized}`,
+      });
+      return {
+        ok: true as const,
+        path: resolved.normalized,
+        trashed: true,
+        changeSetId: record.id,
+        recordedAtMs: record.recordedAtMs,
+      };
+    } catch (error) {
+      await bestEffortRename(trashedTo, resolved.absolute);
+      return {
+        ok: false as const,
+        reason: failureReason(error, `failed to record delete: ${args.path}`),
+      };
+    }
   } catch (error) {
     return {
       ok: false as const,
@@ -1135,7 +1215,8 @@ export async function createApp(
     write: [] as string[],
     network: false as const,
   };
-  const source = `import { App } from "@dohc/app";\n\nexport default App(() => <div>${args.name}</div>);\n`;
+  const safeName = JSON.stringify(args.name);
+  const source = `import { App } from "@dohc/app";\n\nexport default App(() => <div>{${safeName}}</div>);\n`;
 
   await mkdir(dirname(manifest.absolute), { recursive: true });
   await writeFile(manifest.absolute, `${JSON.stringify(appJson, null, 2)}\n`, { flag: "wx" });
@@ -1188,7 +1269,15 @@ export async function testApp(
     ) {
       return { ok: false as const, reason: `not inside app: ${rel}` };
     }
-    const body = await readFile(resolved.absolute, "utf8");
+    let body: string;
+    try {
+      body = await readFile(resolved.absolute, "utf8");
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason: failureReason(error, `failed to read source: ${rel}`),
+      };
+    }
     totalBytes += Buffer.byteLength(body, "utf8");
     if (totalBytes > MAX_TEST_APP_BYTES) {
       return { ok: false as const, reason: "app source too large to test (>2MB)" };

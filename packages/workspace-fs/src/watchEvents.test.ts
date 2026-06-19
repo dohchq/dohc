@@ -252,6 +252,24 @@ describe("watchWorkspaceEvents", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("does not emit a new batch for writes that happen after stop", async () => {
+    const { rm, writeFile } = await import("node:fs/promises");
+    const root = await mkWatchRoot();
+    try {
+      const batches: string[][] = [];
+      const watcher = watchWorkspaceEvents({ rootDir: root, settleMs: 20 }, (paths) =>
+        batches.push(paths),
+      );
+      await watcher.ready;
+      watcher.stop();
+      await writeFile(join(root, "after-stop.md"), "ignored");
+      await new Promise((r) => setTimeout(r, 120));
+      expect(batches).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("rule unification with workspace-core", () => {

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
@@ -42,16 +42,26 @@ export async function readManifest(rootDir: string): Promise<WorkspaceManifest> 
   // become CorruptManifestError and must NEVER be silently reset to empty —
   // that would re-create/conflict-spam every previously-synced file.
   const raw = await readFile(join(rootDir, MANIFEST_PATH), "utf8");
-  let parsed: WorkspaceManifest;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as WorkspaceManifest;
+    parsed = JSON.parse(raw);
   } catch {
     throw new CorruptManifestError("dohc sync manifest is not valid JSON.");
   }
-  if (parsed.version !== 1 || !parsed.workspaceId || !parsed.backend) {
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as WorkspaceManifest).version !== 1 ||
+    typeof (parsed as WorkspaceManifest).workspaceId !== "string" ||
+    (parsed as WorkspaceManifest).workspaceId.trim() === "" ||
+    (parsed as WorkspaceManifest).backend !== "postgres" ||
+    typeof (parsed as WorkspaceManifest).files !== "object" ||
+    (parsed as WorkspaceManifest).files === null ||
+    Array.isArray((parsed as WorkspaceManifest).files)
+  ) {
     throw new CorruptManifestError("dohc sync manifest is malformed.");
   }
-  return parsed;
+  return parsed as WorkspaceManifest;
 }
 
 export async function writeManifest(rootDir: string, manifest: WorkspaceManifest) {
@@ -59,7 +69,7 @@ export async function writeManifest(rootDir: string, manifest: WorkspaceManifest
   await mkdir(dirname(path), { recursive: true });
   // Atomic: temp + rename so a crash or the quit-path hard-exit never truncates
   // the baseline mid-write (a truncated manifest would wedge sync).
-  const tmp = `${path}.tmp-${process.pid}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(tmp, `${JSON.stringify(manifest, null, 2)}\n`);
   await rename(tmp, path);
 }

@@ -114,6 +114,11 @@ export async function createShare(
      on conflict (workspace_id, target_kind, target_id, recipient_user_id)
        where deleted_at is null
      do update set capability = excluded.capability, updated_at = now()
+       where shares.created_by = excluded.created_by
+          or exists(select 1 from workspaces w
+            where w.workspace_id = shares.workspace_id
+              and w.owner_user_id = excluded.created_by
+              and w.deleted_at is null)
      returning ${SHARE_RETURNING}`,
     [
       randomUUID(),
@@ -125,6 +130,9 @@ export async function createShare(
       actor.userId,
     ],
   );
+  if (!rows[0]) {
+    throw coded("forbidden", "only the original sharer or the workspace owner may change this share");
+  }
   return { ok: true, share: { ...toShare(rows[0]), atomPath: atom.rows[0].path } };
 }
 

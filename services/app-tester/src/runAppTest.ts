@@ -1,6 +1,6 @@
 import { type AppTestSeed, type SdkCall } from './appTestSdk'
 import {
-  checkCompile,
+  checkCompileFiles,
   runStaticAppCheck,
   source,
   type AppTestCheck,
@@ -889,7 +889,7 @@ function checkManifestTests(
 
 export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResult> {
   const code = source(input.files)
-  const compileCheck = checkCompile(code)
+  const compileCheck = checkCompileFiles(input.files)
   // Static mode is the Playwright-free quick gate: compile the app and confirm
   // it targets the @dohc/app SDK. That catches legacy imports and broken builds
   // without launching a browser. Render / source-data / persistence / manifest

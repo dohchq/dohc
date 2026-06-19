@@ -36,14 +36,20 @@ describe("mergeMarkdown (safe auto-merge)", () => {
     expect(result.kind).toBe("conflict");
   });
 
-  it("never inserts Git conflict markers", () => {
-    const local = BASE.replace("Old numbers.", "LOCAL.");
-    const remote = BASE.replace("Old numbers.", "REMOTE.");
+  it("never inserts Git conflict markers in an automatic merge", () => {
+    const local = BASE.replace("Intro paragraph.", "LOCAL intro.");
+    const remote = BASE.replace("Old numbers.", "REMOTE numbers.");
     const merged = mergeMarkdown({ base: BASE, local, remote });
+    expect(merged.kind).toBe("merged");
     if (merged.kind === "merged") {
       expect(merged.content).not.toMatch(/<<<<<<<|>>>>>>>|=======/);
     }
-    // And the conflict record path preserves both sides verbatim instead.
+  });
+
+  it("declares same-offset insertions a conflict instead of inventing an order", () => {
+    const local = BASE.replace("## Costs", "LOCAL insert\n## Costs");
+    const remote = BASE.replace("## Costs", "REMOTE insert\n## Costs");
+    expect(mergeMarkdown({ base: BASE, local, remote })).toEqual({ kind: "conflict" });
   });
 });
 

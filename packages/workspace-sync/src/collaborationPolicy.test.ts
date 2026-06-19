@@ -42,6 +42,14 @@ describe("liberal collaboration policy", () => {
     expect(reasonOf(decision)).toMatch(/protected/i);
   });
 
+  it("treats protected paths with trailing slashes as protected", () => {
+    const decision = decideCollaboration({
+      set: set({ files: [{ path: "finance/ledger.md", operation: "write" }] }),
+      protectedPaths: ["finance/"],
+    });
+    expect(decision.action).toBe("propose");
+  });
+
   it("does not treat sibling paths as protected (finance-notes is not finance/)", () => {
     const decision = decideCollaboration({
       set: set({ files: [{ path: "finance-notes/x.md", operation: "write" }] }),

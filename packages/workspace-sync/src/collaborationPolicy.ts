@@ -22,7 +22,12 @@ export interface CollaborationInput {
 }
 
 function isUnder(path: string, prefix: string): boolean {
-  return path === prefix || path.startsWith(`${prefix}/`);
+  const normalizedPrefix = prefix
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  if (!normalizedPrefix) return false;
+  return path === normalizedPrefix || path.startsWith(`${normalizedPrefix}/`);
 }
 
 export function decideCollaboration(input: CollaborationInput): CollaborationDecision {

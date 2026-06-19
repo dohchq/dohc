@@ -35,8 +35,43 @@ export function source(files: AppTestFile[]): string {
   return files.filter(isCodeFile).map((file) => stripDohcFrontmatter(file.body)).join('\n')
 }
 
-export function checkCompile(code: string): AppTestCheck {
-  if (/@dohc\/view/.test(code) || /\.views\//.test(code)) {
+function codeFiles(files: AppTestFile[]): AppTestFile[] {
+  return files
+    .filter(isCodeFile)
+    .map((file) => ({ ...file, body: stripDohcFrontmatter(file.body) }))
+}
+
+function importSpecifiers(file: AppTestFile): string[] {
+  const sourceFile = ts.createSourceFile(
+    file.relativePath,
+    file.body,
+    ts.ScriptTarget.ES2022,
+    true,
+    ts.ScriptKind.TSX,
+  )
+  const specifiers: string[] = []
+  const visit = (node: ts.Node) => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      specifiers.push(node.moduleSpecifier.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return specifiers
+}
+
+function isLegacyImport(specifier: string): boolean {
+  return specifier === '@dohc/view' || specifier.startsWith('@dohc/view/') || /\.views(?:\/|$)/.test(specifier)
+}
+
+export function checkCompileFiles(files: AppTestFile[]): AppTestCheck {
+  const filesToCompile = codeFiles(files)
+  const specifiers = filesToCompile.flatMap(importSpecifiers)
+  if (specifiers.some(isLegacyImport)) {
     return {
       name: 'compile',
       status: 'failed',
@@ -44,7 +79,7 @@ export function checkCompile(code: string): AppTestCheck {
       message: 'App must use .apps and @dohc/app, not legacy view APIs.',
     }
   }
-  if (!/@dohc\/app/.test(code)) {
+  if (!specifiers.includes('@dohc/app')) {
     return {
       name: 'compile',
       status: 'failed',
@@ -52,28 +87,34 @@ export function checkCompile(code: string): AppTestCheck {
       message: 'App must import @dohc/app.',
     }
   }
-  const compiled = ts.transpileModule(code, {
-    fileName: 'App.tsx',
-    reportDiagnostics: true,
-    compilerOptions: {
-      jsx: ts.JsxEmit.ReactJSX,
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-      isolatedModules: true,
-    },
-  })
-  const diagnostic = compiled.diagnostics?.find(
-    (item) => item.category === ts.DiagnosticCategory.Error,
-  )
-  if (diagnostic) {
-    return {
-      name: 'compile',
-      status: 'failed',
-      code: 'compile-error',
-      message: ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+  for (const file of filesToCompile) {
+    const compiled = ts.transpileModule(file.body, {
+      fileName: file.relativePath,
+      reportDiagnostics: true,
+      compilerOptions: {
+        jsx: ts.JsxEmit.ReactJSX,
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        isolatedModules: true,
+      },
+    })
+    const diagnostic = compiled.diagnostics?.find(
+      (item) => item.category === ts.DiagnosticCategory.Error,
+    )
+    if (diagnostic) {
+      return {
+        name: 'compile',
+        status: 'failed',
+        code: 'compile-error',
+        message: `${file.relativePath}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')}`,
+      }
     }
   }
   return { name: 'compile', status: 'ok' }
+}
+
+export function checkCompile(code: string): AppTestCheck {
+  return checkCompileFiles([{ relativePath: 'App.tsx', body: code }])
 }
 
 export type StaticCheckResult = {
@@ -85,7 +126,7 @@ export type StaticCheckResult = {
 // Compile-only gate. Mirrors runAppTest's static mode, but importable on its
 // own so callers that never render apps (the desktop) stay browser-free.
 export function runStaticAppCheck(files: AppTestFile[]): StaticCheckResult {
-  const compile = checkCompile(source(files))
+  const compile = checkCompileFiles(files)
   const failures = compile.status === 'failed' ? [compile] : []
   return { ok: failures.length === 0, checks: [compile], failures }
 }
