@@ -115,4 +115,57 @@ describe("CloudLogin", () => {
       ),
     );
   });
+
+  it("clears stale sync errors when switching workspaces", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+    });
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(
+      new Error("already claimed by another workspace"),
+    );
+
+    const { rerender } = render(<CloudLogin workspaceId="old" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+    await screen.findByTestId("cloud-sync-error");
+
+    rerender(<CloudLogin workspaceId="new" />);
+
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-error")).toBeNull());
+    expect(
+      (screen.getByTestId("cloud-enable-sync") as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("does not let a stale enable-sync result mark the next workspace as synced", async () => {
+    const oldEnable = deferred<void>();
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+    });
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(oldEnable.promise);
+
+    const { rerender } = render(<CloudLogin workspaceId="old" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+    await waitFor(() =>
+      expect(screen.getByTestId("cloud-enable-sync").textContent).toBe(
+        "Enabling sync…",
+      ),
+    );
+
+    rerender(<CloudLogin workspaceId="new" />);
+
+    await waitFor(() => {
+      const button = screen.getByTestId("cloud-enable-sync") as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toBe("Sync this workspace");
+    });
+    await act(async () => {
+      oldEnable.resolve();
+    });
+
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+  });
 });

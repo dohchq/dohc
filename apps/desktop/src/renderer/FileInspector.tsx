@@ -369,7 +369,7 @@ function useAutosavedTextDraft(props: {
     setSaveState("saved");
   }, [props.body, props.path]);
 
-  async function saveNow(): Promise<void> {
+  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
     if (props.disabled) return;
     const text = latestDraft.current;
     unsavedDraft.current = false;
@@ -382,10 +382,15 @@ function useAutosavedTextDraft(props: {
       });
       setDraft(text);
       setSaveState("saved");
-    } catch {
+    } catch (error) {
       unsavedDraft.current = true;
       setSaveState("error");
+      if (options.rejectOnError) throw error;
     }
+  }
+
+  async function saveNow(): Promise<void> {
+    await writeDraftNow();
   }
 
   function scheduleSave(next: string) {
@@ -419,10 +424,10 @@ function useAutosavedTextDraft(props: {
     registerDraftFlush(async () => {
       if (!unsavedDraft.current || props.disabled) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      await saveNow();
+      await writeDraftNow({ rejectOnError: true });
     });
     return () => registerDraftFlush(null);
-    // saveNow uses refs for the draft; workspace/path are stable per keyed inspector.
+    // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush, props.disabled]);
 
@@ -593,7 +598,7 @@ function MarkdownView(props: {
     }
   }, [props.body, editing]);
 
-  async function saveNow(): Promise<void> {
+  async function writeDraftNow(options: { rejectOnError?: boolean } = {}): Promise<void> {
     if (readOnly) return;
     const text = serializeDraftRef.current();
     latestDraft.current = text;
@@ -608,12 +613,17 @@ function MarkdownView(props: {
       setDraft(text);
       setSavedBody(text);
       setSaveState("saved");
-    } catch {
+    } catch (error) {
       // The write failed: the draft is still unsaved, so the unmount flush
       // gets another shot at landing it.
       unsavedDraft.current = true;
       setSaveState("error");
+      if (options.rejectOnError) throw error;
     }
+  }
+
+  async function saveNow(): Promise<void> {
+    await writeDraftNow();
   }
 
   function onDraft(next: string) {
@@ -729,10 +739,10 @@ function MarkdownView(props: {
     registerDraftFlush(async () => {
       if (!unsavedDraft.current || readOnly) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      await saveNow();
+      await writeDraftNow({ rejectOnError: true });
     });
     return () => registerDraftFlush(null);
-    // saveNow reads refs (latestDraft) + per-mount-stable props only, so the
+    // writeDraftNow reads refs (latestDraft) + per-mount-stable props only, so the
     // first render's closure stays correct for the whole mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush, readOnly]);

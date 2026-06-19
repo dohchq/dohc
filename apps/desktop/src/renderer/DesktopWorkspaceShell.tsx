@@ -1662,9 +1662,14 @@ export function DesktopWorkspaceShell(props: {
           workspaceId,
           ...(droppedPaths ? { droppedPaths } : {}),
         });
-        await refreshFiles();
       } catch (error) {
         reportShellError("Could not import files.", error);
+        return;
+      }
+      try {
+        await refreshFiles();
+      } catch (error) {
+        reportShellError("Files imported, but the explorer could not refresh.", error);
       }
     },
     [workspaceId, refreshFiles, reportShellError],
@@ -1700,13 +1705,13 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryDiffTab = useCallback(
     (changeSetId: string, filePath: string) => {
       void flushActiveDraft()
-        .catch((error) => {
-          reportShellError("Could not save the active draft before opening history.", error);
-        })
-        .finally(() => {
+        .then(() => {
           mutateWb((state) =>
             openTab(state, historyDiffTabPath(changeSetId, filePath)),
           );
+        })
+        .catch((error) => {
+          reportShellError("Could not save the active draft before opening history.", error);
         });
     },
     [flushActiveDraft, mutateWb, reportShellError],

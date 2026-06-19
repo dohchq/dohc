@@ -36,6 +36,8 @@ export function CloudLogin(props: {
     sessionRef.current = session;
     clearPollTimer();
     setPhase({ kind: "loading" });
+    setSyncBusy(false);
+    setSyncError(null);
     void bridge()
       .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
@@ -58,16 +60,18 @@ export function CloudLogin(props: {
 
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
+    const session = sessionRef.current;
     setSyncBusy(true);
     setSyncError(null);
     try {
       await bridge().cloudEnableSync({ workspaceId: props.workspaceId });
-      setWorkspaceSynced(true);
+      if (session === sessionRef.current) setWorkspaceSynced(true);
     } catch (cause) {
+      if (session !== sessionRef.current) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
     } finally {
-      setSyncBusy(false);
+      if (session === sessionRef.current) setSyncBusy(false);
     }
   }
 

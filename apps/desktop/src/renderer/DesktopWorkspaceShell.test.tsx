@@ -363,6 +363,25 @@ describe("workspace shell errors", () => {
       "Watcher failed",
     );
   });
+
+  it("reports refresh failures after a successful file import without retrying import", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalled());
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Refresh failed"));
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+
+    await waitFor(() => {
+      expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "Refresh failed",
+      );
+    });
+  });
 });
 
 // Spurious file-open-start marks (codex P2): a no-op click on the already-
@@ -1296,6 +1315,36 @@ describe("history details", () => {
       "Before",
     );
     expect(diff.querySelector('[data-kind="added"]')?.textContent).toContain("After");
+  });
+
+  it("does not open a history diff tab when the active draft flush fails", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-blocked", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await user.click(await screen.findByTestId("markdown-properties-toggle"));
+    const editor = await screen.findByTestId("markdown-editor");
+    bridge.writeWorkspaceText.mockRejectedValueOnce(new Error("Disk is full"));
+    fireEvent.change(editor, { target: { value: "# Doc\nunsaved\n" } });
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "Disk is full",
+      ),
+    );
+    expect(
+      screen.queryByTestId(
+        `tab-${historyDiffTabPath("change-blocked", "notes/today.md")}`,
+      ),
+    ).toBeNull();
+    expect(bridge.readChangeSet).not.toHaveBeenCalled();
   });
 
   it("opens the live file from the history diff tab", async () => {
