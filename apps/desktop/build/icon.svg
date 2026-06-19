@@ -1,8 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="dohc">
   <title>dohc</title>
   <!-- dohc app icon: transparent canvas with an oversized drop-lobe mark.
+       The warm underlay keeps the graphite mark legible on dark OS chrome.
        Rendered to icon.png by scripts/render-icon.mjs. -->
   <g transform="translate(26 6) scale(4.8)">
+    <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+      fill="none" stroke="#f7f6f1" stroke-width="12" stroke-linejoin="round"/>
+    <circle cx="38" cy="58" r="13" fill="#f7f6f1"/>
     <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
       fill="none" stroke="#2d342e" stroke-width="8" stroke-linejoin="round"/>
     <circle cx="38" cy="58" r="9" fill="#2d342e"/>
