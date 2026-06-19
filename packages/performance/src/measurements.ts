@@ -117,8 +117,8 @@ export function parseMeasurements(text: string): MeasurementsFile {
     for (const [name, justification] of Object.entries(
       file.multiplierJustifications as Record<string, unknown>,
     )) {
-      if (typeof justification !== "string") {
-        fail(`multiplier justification "${name}" is not a string`);
+      if (typeof justification !== "string" || justification.trim() === "") {
+        fail(`multiplier justification "${name}" must be a non-empty string`);
       }
     }
   }
