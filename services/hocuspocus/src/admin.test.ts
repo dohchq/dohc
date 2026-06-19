@@ -56,7 +56,7 @@ describe('hocuspocus admin handler', () => {
     })
   })
 
-  it('reports whether this server can bootstrap atoms from Convex', async () => {
+  it('reports whether this server can bootstrap atoms from the workspace backend', async () => {
     const handler = createAdminHandler({
       adminToken: 'admin-token',
       revocations: new RevocationRegistry(),

@@ -15,6 +15,7 @@ import {
   readAssetMetadata,
   renameAsset,
   softDeleteAsset,
+  updateAsset,
 } from "../repositories/assets";
 import {
   atomRowToWorkspaceFile,
@@ -134,6 +135,37 @@ export function createPostgresWorkspaceBackend(
         return assetRowToWorkspaceFile(row);
       });
     },
+    async updateAsset(actor, input) {
+      return withTransaction(pool, async (client) => {
+        await assertAuthorized(client, actor);
+        const stored = await blobStore.put(input.bytes);
+        const row = await updateAsset(
+          client,
+          actor,
+          {
+            path: input.path,
+            expectedRevision: input.expectedRevision,
+            mediaType: input.mediaType,
+            kind: input.kind,
+          },
+          stored,
+        );
+        await insertWorkspaceEvent(client, {
+          actor,
+          kind: "asset_saved",
+          targetKind: "asset",
+          targetId: row.id,
+          payload: {
+            path: input.path,
+            mediaType: input.mediaType,
+            size: stored.size,
+            sha256: stored.sha256,
+            revision: row.revision,
+          },
+        });
+        return assetRowToWorkspaceFile(row);
+      });
+    },
     async renameFile(actor, input: RenameFileInput) {
       return withTransaction(pool, async (client) => {
         await assertAuthorized(client, actor);
@@ -156,10 +188,10 @@ export function createPostgresWorkspaceBackend(
         return renamed;
       });
     },
-    async deleteFile(actor, path) {
+    async deleteFile(actor, path, expectedRevision) {
       await withTransaction(pool, async (client) => {
         await assertAuthorized(client, actor);
-        const deleted = await softDeleteAnyFile(client, actor, path);
+        const deleted = await softDeleteAnyFile(client, actor, path, expectedRevision);
         await insertWorkspaceEvent(client, {
           actor,
           kind: "file_deleted",
@@ -185,20 +217,31 @@ async function renameAnyFile(
   return assetRowToWorkspaceFile(await renameAsset(db, actor, input));
 }
 
-async function softDeleteAnyFile(db: PgQueryable, actor: Actor, path: string) {
+async function softDeleteAnyFile(
+  db: PgQueryable,
+  actor: Actor,
+  path: string,
+  expectedRevision?: string,
+) {
   try {
-    return { kind: "atom" as const, id: await softDeleteAtom(db, actor, path) };
+    return {
+      kind: "atom" as const,
+      id: await softDeleteAtom(db, actor, path, expectedRevision),
+    };
   } catch (error) {
     if (!isNotFound(error)) throw error;
   }
-  return { kind: "asset" as const, id: await softDeleteAsset(db, actor, path) };
+  return {
+    kind: "asset" as const,
+    id: await softDeleteAsset(db, actor, path, expectedRevision),
+  };
 }
 
 function isNotFound(error: unknown) {
   return error instanceof WorkspaceError && error.code === "not_found";
 }
 
-async function withTransaction<T>(
+export async function withTransaction<T>(
   pool: pg.Pool,
   fn: (client: pg.PoolClient) => Promise<T>,
 ) {

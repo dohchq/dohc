@@ -19,7 +19,7 @@ export type UploadAssetRequest = {
   bytesBase64: string;
 };
 
-export const MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_ASSET_SIZE_BYTES = 10 * 1024 * 1024;
 
 export async function listWorkspaceFiles(backend: WorkspaceBackend, actor: Actor) {
   return {
@@ -113,7 +113,7 @@ async function requireWorkspaceFile(
   return file;
 }
 
-export function decodedBase64Size(value: string) {
+function decodedBase64Size(value: string) {
   const clean = value.trim();
   const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
   return Math.floor((clean.length * 3) / 4) - padding;

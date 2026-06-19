@@ -287,10 +287,10 @@ describe('Y.Doc persistence', () => {
     const store = new PostgresYDocStore(backend)
     const job = await store.enqueueProjectionJob(projectionJob())
 
-    await store.markProjectionJobFailed(job.id, 'Convex unavailable')
+    await store.markProjectionJobFailed(job.id, 'backend unavailable')
 
     await expect(store.listRetryableProjectionJobs()).resolves.toMatchObject([
-      { id: job.id, status: 'failed', attempts: 1, lastError: 'Convex unavailable' },
+      { id: job.id, status: 'failed', attempts: 1, lastError: 'backend unavailable' },
     ])
 
     await store.markProjectionJobSucceeded(job.id)

@@ -1,9 +1,15 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assetKindForMediaType,
+  CorruptManifestError,
   isSqliteMediaType,
   isTextMediaType,
+  MANIFEST_PATH,
   mediaTypeForPath,
+  readManifest,
 } from "./metadata";
 
 describe("workspace filesystem metadata", () => {
@@ -20,5 +26,47 @@ describe("workspace filesystem metadata", () => {
     expect(isSqliteMediaType("text/plain", "plans/use-sqlite.txt")).toBe(false);
     expect(isTextMediaType("text/markdown", "notes/sqlite-migration.md")).toBe(true);
     expect(assetKindForMediaType("text/plain", "plans/use-sqlite.txt")).toBe("file");
+  });
+
+  it("rejects malformed sync manifests with an explicit corrupt-manifest error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-manifest-"));
+    try {
+      await mkdir(join(root, ".dohc"));
+      await writeFile(join(root, MANIFEST_PATH), JSON.stringify({ version: 1, workspaceId: "ws", backend: "postgres", files: null }));
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+      await writeFile(join(root, MANIFEST_PATH), "null");
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+      await writeFile(
+        join(root, MANIFEST_PATH),
+        JSON.stringify({
+          version: 1,
+          workspaceId: "ws",
+          backend: "postgres",
+          files: {
+            "note.md": { id: "atom-1", kind: "atom", contentType: "text/markdown", revision: 42 },
+          },
+        }),
+      );
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+      await writeFile(
+        join(root, MANIFEST_PATH),
+        JSON.stringify({
+          version: 1,
+          workspaceId: "ws",
+          backend: "postgres",
+          files: {
+            "../note.md": {
+              id: "atom-1",
+              kind: "atom",
+              contentType: "text/markdown",
+              revision: "rev-1",
+            },
+          },
+        }),
+      );
+      await expect(readManifest(root)).rejects.toBeInstanceOf(CorruptManifestError);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -1,22 +1,19 @@
 import { type AppTestSeed, type SdkCall } from './appTestSdk'
+import {
+  checkCompileFiles,
+  runStaticAppCheck,
+  source,
+  type AppTestCheck,
+  type AppTestFile,
+} from './staticCheck'
 import ts from 'typescript'
 
-export type AppTestFile = {
-  relativePath: string
-  body: string
-}
-
-export type AppTestCheck = {
-  name: string
-  status: 'ok' | 'failed'
-  code?: string
-  message?: string
-}
+export type { AppTestCheck, AppTestFile } from './staticCheck'
 
 export type RunAppTestInput = {
   packageRoot: string
   files: AppTestFile[]
-  backend?: 'convex' | 'postgres'
+  backend?: 'postgres'
   manifest?: {
     collections?: Record<string, unknown>
     databases?: Record<string, unknown>
@@ -29,7 +26,7 @@ export type RunAppTestInput = {
 export type RunAppTestResult = {
   ok: boolean
   packageRoot: string
-  backend: 'convex' | 'postgres'
+  backend: 'postgres'
   checks: AppTestCheck[]
   failures: AppTestCheck[]
   artifacts?: {
@@ -42,19 +39,6 @@ export type RunAppTestResult = {
   }
 }
 
-function isCodeFile(file: AppTestFile): boolean {
-  return /\.(?:[cm]?[jt]sx?)$/i.test(file.relativePath)
-}
-
-function stripDohcFrontmatter(body: string): string {
-  if (!body.startsWith('---\n') && !body.startsWith('---\r\n')) return body
-  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(body)
-  return match ? body.slice(match[0].length) : body
-}
-
-function source(input: RunAppTestInput): string {
-  return input.files.filter(isCodeFile).map((file) => stripDohcFrontmatter(file.body)).join('\n')
-}
 
 function hasRealRows(seed: AppTestSeed | undefined): boolean {
   return Object.values(seed?.collections ?? {}).some((rows) => rows.length > 0) ||
@@ -728,46 +712,6 @@ async function runRenderedApp(input: RunAppTestInput, code: string): Promise<Run
   }
 }
 
-function checkCompile(code: string): AppTestCheck {
-  if (/@dohc\/view/.test(code) || /\.views\//.test(code)) {
-    return {
-      name: 'compile',
-      status: 'failed',
-      code: 'legacy-view-import',
-      message: 'App must use .apps and @dohc/app, not legacy view APIs.',
-    }
-  }
-  if (!/@dohc\/app/.test(code)) {
-    return {
-      name: 'compile',
-      status: 'failed',
-      code: 'missing-app-sdk',
-      message: 'App must import @dohc/app.',
-    }
-  }
-  const compiled = ts.transpileModule(code, {
-    fileName: 'App.tsx',
-    reportDiagnostics: true,
-    compilerOptions: {
-      jsx: ts.JsxEmit.ReactJSX,
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-      isolatedModules: true,
-    },
-  })
-  const diagnostic = compiled.diagnostics?.find(
-    (item) => item.category === ts.DiagnosticCategory.Error,
-  )
-  if (diagnostic) {
-    return {
-      name: 'compile',
-      status: 'failed',
-      code: 'compile-error',
-      message: ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
-    }
-  }
-  return { name: 'compile', status: 'ok' }
-}
 
 function checkRender(runtime: RuntimeResult): AppTestCheck {
   if (!runtime.ok) {
@@ -944,8 +888,16 @@ function checkManifestTests(
 }
 
 export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResult> {
-  const code = source(input)
-  const compileCheck = checkCompile(code)
+  const code = source(input.files)
+  const compileCheck = checkCompileFiles(input.files)
+  // Static mode is the Playwright-free quick gate: compile the app and confirm
+  // it targets the @dohc/app SDK. That catches legacy imports and broken builds
+  // without launching a browser. Render / source-data / persistence / manifest
+  // checks need the live runtime and only run in browser or integration mode.
+  if (input.mode === 'static') {
+    const { ok, checks, failures } = runStaticAppCheck(input.files)
+    return { ok, packageRoot: input.packageRoot, backend: input.backend ?? 'postgres', checks, failures }
+  }
   const runtime = compileCheck.status === 'ok'
     ? await runRenderedApp(input, code)
     : ({
@@ -963,13 +915,13 @@ export async function runAppTest(input: RunAppTestInput): Promise<RunAppTestResu
   ]
   const failures = checks.filter((check) => check.status === 'failed')
   const renderFailure = failures.find((check) => check.name === 'browser render')
-  const artifacts = renderFailure && input.mode !== 'static'
+  const artifacts = renderFailure
     ? { screenshots: [await screenshotArtifact(runtime.html, renderFailure.code ?? 'browser-render-failed')] }
     : undefined
   return {
     ok: failures.length === 0,
     packageRoot: input.packageRoot,
-    backend: input.backend ?? 'convex',
+    backend: input.backend ?? 'postgres',
     checks,
     failures,
     ...(artifacts === undefined ? {} : { artifacts }),

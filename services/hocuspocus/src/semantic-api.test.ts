@@ -406,7 +406,7 @@ describe('semantic apply API', () => {
     ).resolves.toMatch(/# Intro\s+Inserted note\.\s+Old body\./)
   })
 
-  it('creates a Convex atom and initializes its canonical Y.Doc snapshot', async () => {
+  it('creates a backend atom and initializes its canonical Y.Doc snapshot', async () => {
     const { acl, handler, store } = makeHandler()
 
     const response = await handler(
@@ -474,7 +474,7 @@ describe('semantic apply API', () => {
         body: JSON.stringify({
           operationId: 'op_create_view_source',
           workspaceId: 'workspace_1',
-          path: '.views/workspace/src/App.tsx',
+          path: '.apps/workspace/src/App.tsx',
           content: source,
           actor: {
             userId: 'agent_1',

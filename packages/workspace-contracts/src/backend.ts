@@ -34,6 +34,15 @@ export type SaveAssetInput = {
   bytes: Uint8Array;
 };
 
+export type UpdateAssetInput = {
+  path: string;
+  /** Optimistic-concurrency guard against the live asset's current revision. */
+  expectedRevision: string;
+  kind: AssetKind;
+  mediaType: string;
+  bytes: Uint8Array;
+};
+
 export type ReadAssetOutput = {
   mediaType: string;
   kind: AssetKind;
@@ -62,6 +71,13 @@ export type WorkspaceBackend = {
   createAtom(actor: Actor, input: CreateAtomInput): Promise<WorkspaceFile>;
   writeAtom(actor: Actor, input: WriteAtomInput): Promise<WorkspaceFile>;
   saveAsset(actor: Actor, input: SaveAssetInput): Promise<WorkspaceFile>;
+  // Update an existing binary asset under optimistic concurrency. saveAsset is
+  // create-only; sync routes binary updates here so a stale expectedRevision is
+  // rejected instead of silently last-writer-wins.
+  updateAsset(actor: Actor, input: UpdateAssetInput): Promise<WorkspaceFile>;
   renameFile(actor: Actor, input: RenameFileInput): Promise<WorkspaceFile>;
-  deleteFile(actor: Actor, path: string): Promise<void>;
+  // expectedRevision (when supplied) guards the delete: a stale revision is
+  // rejected with a conflict, so one machine's stale delete can't destroy
+  // another machine's newer content.
+  deleteFile(actor: Actor, path: string, expectedRevision?: string): Promise<void>;
 };

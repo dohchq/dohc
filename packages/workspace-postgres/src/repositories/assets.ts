@@ -95,6 +95,67 @@ export async function insertAsset(
   }
 }
 
+// Create-only insertAsset has a sibling here: updateAsset swaps the stored
+// blob of an EXISTING live asset under optimistic concurrency (mirrors
+// updateAtom). Sync routes update-with-bytes here, never to insertAsset.
+export async function updateAsset(
+  db: PgQueryable,
+  actor: Actor,
+  input: {
+    path: string;
+    expectedRevision: string;
+    mediaType: string;
+    kind: AssetKind;
+  },
+  stored: { objectKey: string; sha256: string; size: number },
+) {
+  WorkspacePath.parse(input.path);
+  const current = await db.query<AssetRow>(
+    `
+      select id, workspace_id, path, kind, media_type, size, sha256, object_key, revision, updated_at
+      from assets
+      where workspace_id = $1
+        and path = $2
+        and deleted_at is null
+      for update
+    `,
+    [actor.workspaceId, input.path],
+  );
+  const row = current.rows[0];
+  if (!row) throw new WorkspaceError("not_found", "Asset not found");
+  if (String(row.revision) !== input.expectedRevision) {
+    throw new WorkspaceError("conflict", "Expected revision is stale");
+  }
+
+  const nextRevision = row.revision + 1;
+  const updated = await db.query<AssetRow>(
+    `
+      update assets
+      set kind = $3,
+          media_type = $4,
+          size = $5,
+          sha256 = $6,
+          object_key = $7,
+          revision = $8,
+          updated_at = now()
+      where id = $1
+        and workspace_id = $2
+      returning id, workspace_id, path, kind, media_type, size, sha256, object_key, revision, updated_at
+    `,
+    [
+      row.id,
+      actor.workspaceId,
+      input.kind,
+      input.mediaType,
+      stored.size,
+      stored.sha256,
+      stored.objectKey,
+      nextRevision,
+    ],
+  );
+  return updated.rows[0];
+}
+
 export async function readAssetMetadata(
   db: PgQueryable,
   actor: Actor,
@@ -172,22 +233,31 @@ export async function softDeleteAsset(
   db: PgQueryable,
   actor: Actor,
   path: string,
+  expectedRevision?: string,
 ) {
   WorkspacePath.parse(path);
-  const result = await db.query<Pick<AssetRow, "id">>(
+  // Lock the live row so the revision check and delete are atomic; without it a
+  // stale delete from one machine could erase another machine's newer content.
+  const current = await db.query<Pick<AssetRow, "id" | "revision">>(
     `
-      update assets
-      set deleted_at = now(),
-          updated_at = now()
+      select id, revision
+      from assets
       where workspace_id = $1
         and path = $2
         and deleted_at is null
-      returning id
+      for update
     `,
     [actor.workspaceId, path],
   );
-  const row = result.rows[0];
+  const row = current.rows[0];
   if (!row) throw new WorkspaceError("not_found", "Asset not found");
+  if (expectedRevision !== undefined && String(row.revision) !== expectedRevision) {
+    throw new WorkspaceError("conflict", "Expected revision is stale");
+  }
+  await db.query(
+    `update assets set deleted_at = now(), updated_at = now() where id = $1 and workspace_id = $2`,
+    [row.id, actor.workspaceId],
+  );
   return row.id;
 }
 

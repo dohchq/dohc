@@ -7,7 +7,9 @@ import { createHocuspocusHooks } from './hooks.js'
 import {
   getDohcYDocFrontmatter,
   getDohcYDocMeta,
+  getDohcYDocPlainText,
   markdownToYDoc,
+  plainTextToYDoc,
   yDocToMarkdown,
 } from './import-export.js'
 import { MemoryYDocPersistenceBackend, PostgresYDocStore } from './persistence.js'
@@ -147,8 +149,7 @@ describe('hocuspocus hook factory', () => {
 
   it('loads Y.Docs from the persistence store', async () => {
     const { hooks, store } = makeHooks({ canRead: true, canWrite: true })
-    const doc = new Y.Doc()
-    doc.getText('body').insert(0, 'persisted')
+    const doc = markdownToYDoc('persisted')
     await store.appendUpdate({
       documentName,
       update: Y.encodeStateAsUpdate(doc),
@@ -167,10 +168,10 @@ describe('hocuspocus hook factory', () => {
       },
     } as never)
 
-    expect(loaded.getText('body').toString()).toBe('persisted')
+    expect(yDocToMarkdown(loaded)).toBe('persisted')
   })
 
-  it('bootstraps missing Y.Docs from Convex markdown and stores a sequence-zero snapshot', async () => {
+  it('bootstraps missing Y.Docs from backend markdown and stores a sequence-zero snapshot', async () => {
     const markdown = '---\nid: atom_1\ntitle: Boot\n---\n# Bootstrapped\n\nBody'
     const { acl, backend, hooks } = makeHooks({
       canRead: true,
@@ -220,7 +221,7 @@ describe('hocuspocus hook factory', () => {
       canRead: true,
       canWrite: true,
       bootstrapMarkdown: source,
-      bootstrapPath: '.views/workspace/src/App.tsx',
+      bootstrapPath: '.apps/workspace/src/App.tsx',
     })
 
     const loaded = await hooks.onLoadDocument({
@@ -233,14 +234,13 @@ describe('hocuspocus hook factory', () => {
   })
 
   it('loads persisted state when concurrent writes win the bootstrap race', async () => {
-    const markdown = '---\nid: atom_1\n---\n# From Convex'
+    const markdown = '---\nid: atom_1\n---\n# From the backend'
     const { hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
       bootstrapMarkdown: markdown,
     })
-    const persisted = new Y.Doc()
-    persisted.getText('body').insert(0, 'concurrent persisted')
+    const persisted = markdownToYDoc('concurrent persisted')
     await store.storeSnapshot(documentName, persisted, { lastSeq: 0 })
     vi.spyOn(store, 'hasDocumentState').mockResolvedValueOnce(false)
     vi.spyOn(store, 'storeSnapshotIfMissing').mockResolvedValueOnce(null)
@@ -256,7 +256,7 @@ describe('hocuspocus hook factory', () => {
       },
     } as never)
 
-    expect(loaded.getText('body').toString()).toBe('concurrent persisted')
+    expect(yDocToMarkdown(loaded)).toBe('concurrent persisted')
   })
 
   it('re-authenticates refreshed tokens and can downgrade live sockets to read-only', async () => {
@@ -325,10 +325,9 @@ describe('hocuspocus hook factory', () => {
     const { acl, hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
-      bootstrapMarkdown: '---\nid: atom_1\n---\n# From Convex',
+      bootstrapMarkdown: '---\nid: atom_1\n---\n# From the backend',
     })
-    const persisted = new Y.Doc()
-    persisted.getText('body').insert(0, 'already persisted')
+    const persisted = markdownToYDoc('already persisted')
     await store.storeSnapshot(documentName, persisted, { lastSeq: 0 })
 
     const loaded = await hooks.onLoadDocument({
@@ -343,11 +342,11 @@ describe('hocuspocus hook factory', () => {
     } as never)
 
     expect(acl.loadAtomBootstrap).not.toHaveBeenCalled()
-    expect(loaded.getText('body').toString()).toBe('already persisted')
+    expect(yDocToMarkdown(loaded)).toBe('already persisted')
   })
 
-  it('repairs an uninitialized persisted Y.Doc from the Convex markdown cache', async () => {
-    const markdown = '---\nid: atom_1\n---\n# From Convex\n\nAgent output'
+  it('repairs an uninitialized persisted Y.Doc from the backend markdown cache', async () => {
+    const markdown = '---\nid: atom_1\n---\n# From the backend\n\nAgent output'
     const { acl, hooks, store } = makeHooks({
       canRead: true,
       canWrite: true,
@@ -371,6 +370,41 @@ describe('hocuspocus hook factory', () => {
     expect(yDocToMarkdown(loaded)).toContain('Agent output')
     await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toContain(
       'Agent output',
+    )
+  })
+
+  it('migrates persisted plainText markdown docs to rich body without losing live plainText edits', async () => {
+    const plain = plainTextToYDoc('# Draft\n\nBefore projection\n')
+    const plainText = getDohcYDocPlainText(plain)
+    plainText?.insert(plainText.length, '\nUnprojected live edit')
+    const expectedMarkdown = yDocToMarkdown(plain)
+    const { acl, hooks, store } = makeHooks({
+      canRead: true,
+      canWrite: true,
+      // Stale body cache on purpose: migration must read the persisted live
+      // plainText field, not the SQL atom body cache.
+      bootstrapMarkdown: '# Draft\n\nBefore projection\n',
+      bootstrapPath: 'notes/draft.md',
+    })
+    await store.storeSnapshot(documentName, plain, { lastSeq: 4 })
+
+    const loaded = await hooks.onLoadDocument({
+      documentName,
+      context: baseContext,
+    } as never)
+
+    expect(acl.loadAtomBootstrap).toHaveBeenCalledWith({
+      workspaceId: 'workspace_1',
+      atomId: 'atom_1',
+      userId: 'user_1',
+      actorKind: 'user',
+      authzVersion: 1,
+    })
+    expect(getDohcYDocMeta(loaded).contentKind).toBeUndefined()
+    expect(getDohcYDocPlainText(loaded)).toBeNull()
+    expect(yDocToMarkdown(loaded)).toBe(expectedMarkdown)
+    await expect(store.loadDocument(documentName).then(yDocToMarkdown)).resolves.toBe(
+      expectedMarkdown,
     )
   })
 
@@ -426,6 +460,43 @@ describe('hocuspocus hook factory', () => {
       actorId: 'user_1',
       socketId: 'socket_1',
     })
+  })
+
+  it('does not persist live writes after write access is revoked', async () => {
+    let canWrite = true
+    const { acl, backend, hooks } = makeHooks({ canRead: true, canWrite: true })
+    acl.canWriteAtom.mockImplementation(async () => canWrite)
+    const token = await mintCollabToken(
+      {
+        sub: 'user_1',
+        ws: 'workspace_1',
+        actorKind: 'user',
+        authzVersion: 1,
+      },
+      secret,
+    )
+    const connection = { readOnly: false, socketId: 'socket_1' }
+    const context = await hooks.onAuthenticate({
+      documentName,
+      token,
+      connection,
+    } as never)
+    expect(connection.readOnly).toBe(false)
+
+    canWrite = false
+    const doc = new Y.Doc()
+    doc.getText('body').insert(0, 'revoked user edit')
+
+    await expect(
+      hooks.beforeSync({
+        documentName,
+        type: messageYjsUpdate,
+        payload: Y.encodeStateAsUpdate(doc),
+        connection,
+        context,
+      } as never),
+    ).rejects.toThrow(/write access/)
+    expect(backend.updatesFor(documentName)).toHaveLength(0)
   })
 
   it('rechecks read ACL before replying to initial sync requests', async () => {
@@ -659,7 +730,7 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
-  it('debounces Y.Doc projection jobs and writes the body cache through Convex', async () => {
+  it('debounces Y.Doc projection jobs and writes the body cache through the backend', async () => {
     vi.useFakeTimers()
     const setAtomBodyCache = vi.fn(async () => ({ ok: true as const }))
     const { backend, hooks } = makeHooks({
@@ -711,10 +782,10 @@ describe('hocuspocus hook factory', () => {
     )
   })
 
-  it('keeps projection jobs retryable when Convex cache writes fail', async () => {
+  it('keeps projection jobs retryable when backend cache writes fail', async () => {
     vi.useFakeTimers()
     const setAtomBodyCache = vi.fn(async () => {
-      throw new Error('Convex unavailable')
+      throw new Error('backend unavailable')
     })
     const { backend, hooks } = makeHooks({
       canRead: true,
@@ -737,7 +808,7 @@ describe('hocuspocus hook factory', () => {
       {
         status: 'failed',
         attempts: 1,
-        lastError: 'Convex unavailable',
+        lastError: 'backend unavailable',
       },
     ])
   })

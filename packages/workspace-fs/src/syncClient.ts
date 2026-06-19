@@ -7,6 +7,7 @@ import type {
   CreateAtomInput,
   RenameFileInput,
   SaveAssetInput,
+  UpdateAssetInput,
   WorkspaceBackend,
   WorkspaceFile,
   WriteAtomInput,
@@ -20,7 +21,10 @@ import {
   isTextMediaType,
   mediaTypeForPath,
   resolveWorkspacePath,
+  writeManifest,
+  type WorkspaceManifest,
 } from "./metadata";
+import type { ScannedWorkspaceFile } from "./scan";
 import { watchWorkspace, type WatchWorkspaceOptions } from "./watch";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -69,7 +73,7 @@ export type LocalSyncClient = {
   watch(options?: Partial<Omit<WatchWorkspaceOptions, "rootDir" | "onChange">>): () => void;
 };
 
-type ApiSyncOperation =
+export type ApiSyncOperation =
   | {
       op: "create";
       path: string;
@@ -126,7 +130,8 @@ export function createLocalSyncClient({
       };
     },
     async syncLocalChanges() {
-      const local = await localOperations(rootDir);
+      const diff = await scanWorkspaceDiff(rootDir);
+      const local = diff.operations.filter((operation) => !isConflictOperation(operation));
       if (local.length === 0) return emptyResult();
 
       const conflicts = await detectRevisionConflicts(rootDir, backend, actor, local);
@@ -142,11 +147,31 @@ export function createLocalSyncClient({
 
       const operations = await Promise.all(local.map((operation) => enrichOperation(rootDir, operation)));
       try {
-        const result = await postJson<{ ok: true; applied: number }>(
-          fetchImpl,
-          workspaceUrl(baseUrl, workspaceId, "sync/apply"),
-          { operations },
-        );
+        // sync/apply is per-op (non-fail-fast): a 200 can still carry failed
+        // ops in results[]. Approval-required failures surface as
+        // approvalRequests; any other per-op failure is a real error we raise.
+        const result = await postJson<{
+          ok: true;
+          applied: number;
+          results?: Array<{ path: string; ok: boolean; error?: string; file?: WorkspaceFile | null }>;
+        }>(fetchImpl, workspaceUrl(baseUrl, workspaceId, "sync/apply"), { operations });
+        const failures = (result.results ?? []).filter((entry) => !entry.ok);
+        const approvals = failures.filter((entry) => /approval/i.test(entry.error ?? ""));
+        const hardFailure = failures.find((entry) => !/approval/i.test(entry.error ?? ""));
+        if (hardFailure) {
+          throw new Error(hardFailure.error ?? "sync apply failed");
+        }
+        if (approvals.length > 0) {
+          await writeSuccessfulSyncBaseline(rootDir, diff.manifest, diff.scanned, local, result.results ?? []);
+          return {
+            applied: result.applied,
+            conflicts: [],
+            approvalRequests: approvals.map((entry) => ({
+              path: entry.path,
+              reason: entry.error ?? "approval required",
+            })),
+          };
+        }
         await materialize();
         return {
           applied: result.applied,
@@ -154,6 +179,8 @@ export function createLocalSyncClient({
           approvalRequests: [],
         };
       } catch (error) {
+        // Fallback for a server that still THROWS an approval error instead of
+        // returning a per-op failure (older deployments).
         if (isApprovalError(error)) {
           return {
             applied: 0,
@@ -256,6 +283,31 @@ export function createHttpWorkspaceBackend({
       );
       return data.file;
     },
+    async updateAsset(_actor, input: UpdateAssetInput) {
+      // Binary update rides the sync/apply update op so the server's
+      // updateAsset arbitrates on expectedRevision.
+      const data = await postJson<{ ok: true; files: WorkspaceFile[]; results?: Array<{ ok: boolean; error?: string }> }>(
+        fetchImpl,
+        workspaceUrl(baseUrl, workspaceId, "sync/apply"),
+        {
+          operations: [
+            {
+              op: "update",
+              path: input.path,
+              expectedRevision: input.expectedRevision,
+              kind: input.kind,
+              mediaType: input.mediaType,
+              bytesBase64: Buffer.from(input.bytes).toString("base64"),
+            },
+          ],
+        },
+      );
+      const failed = data.results?.find((result) => !result.ok);
+      if (failed) throw new Error(failed.error ?? `update failed: ${input.path}`);
+      const file = data.files[0];
+      if (!file) throw new Error(`update did not return a file: ${input.path}`);
+      return file;
+    },
     async renameFile(_actor, input: RenameFileInput) {
       const fromFolder = input.fromPath.includes("/") ? input.fromPath.slice(0, input.fromPath.lastIndexOf("/")) : "";
       const toPath = fromFolder ? `${fromFolder}/${input.toName}` : input.toName;
@@ -277,12 +329,56 @@ export function createHttpWorkspaceBackend({
       if (!file) throw new Error(`rename did not return a file: ${input.fromPath}`);
       return file;
     },
-    async deleteFile(_actor, path) {
-      await postJson<{ ok: true }>(fetchImpl, workspaceUrl(baseUrl, workspaceId, "sync/apply"), {
-        operations: [{ op: "delete", path }],
-      });
+    async deleteFile(_actor, path, expectedRevision) {
+      const data = await postJson<{ ok: true; results?: Array<{ ok: boolean; error?: string }> }>(
+        fetchImpl,
+        workspaceUrl(baseUrl, workspaceId, "sync/apply"),
+        {
+          operations: [{ op: "delete", path, expectedRevision }],
+        },
+      );
+      const failed = data.results?.find((result) => !result.ok);
+      if (failed) throw new Error(failed.error ?? `delete failed: ${path}`);
     },
   };
+}
+
+async function writeSuccessfulSyncBaseline(
+  rootDir: string,
+  manifest: WorkspaceManifest,
+  scanned: ScannedWorkspaceFile[],
+  operations: FsDiffOperation[],
+  results: Array<{ path: string; ok: boolean; file?: WorkspaceFile | null }>,
+) {
+  const scannedByPath = new Map(scanned.map((file) => [file.path, file]));
+  const okByPath = new Map(results.filter((result) => result.ok).map((result) => [result.path, result]));
+  const files = { ...manifest.files };
+
+  for (const operation of operations) {
+    const path = operation.op === "rename" ? operation.toPath : operation.path;
+    const result = okByPath.get(path);
+    if (!result) continue;
+
+    if (operation.op === "rename") {
+      delete files[operation.fromPath];
+    }
+    if (operation.op === "delete") {
+      delete files[operation.path];
+      continue;
+    }
+    if (!result.file) continue;
+    const scannedFile = scannedByPath.get(path);
+    if (!scannedFile) continue;
+    files[path] = {
+      id: result.file.id,
+      kind: result.file.kind,
+      contentType: result.file.contentType,
+      revision: result.file.revision,
+      sha256: scannedFile.sha256,
+    };
+  }
+
+  await writeManifest(rootDir, { ...manifest, files });
 }
 
 async function localOperations(rootDir: string): Promise<FsDiffOperation[]> {
@@ -290,7 +386,9 @@ async function localOperations(rootDir: string): Promise<FsDiffOperation[]> {
   return diff.operations.filter((operation) => !isConflictOperation(operation));
 }
 
-function isConflictOperation(operation: FsDiffOperation) {
+// Conflict markers (<path>.conflict) are LOCAL working artifacts only — never
+// upload them, or they propagate to every machine and cascade.
+export function isConflictOperation(operation: FsDiffOperation) {
   if (operation.op === "rename") {
     return operation.fromPath.endsWith(".conflict") || operation.toPath.endsWith(".conflict");
   }
@@ -382,7 +480,7 @@ async function readLocalConflictBody(rootDir: string, path: string) {
   return new TextDecoder().decode(bytes);
 }
 
-async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
+export async function enrichOperation(rootDir: string, operation: FsDiffOperation): Promise<ApiSyncOperation> {
   if (operation.op === "delete" || operation.op === "rename") return operation;
 
   const path = assertSafeWorkspacePath(operation.path);

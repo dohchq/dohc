@@ -52,15 +52,21 @@ function memoryBackend() {
     async saveAsset() {
       throw new Error("not used");
     },
+    async updateAsset() {
+      throw new Error("not used");
+    },
     async renameFile() {
       throw new Error("not used");
     },
-    async deleteFile(_actor, path) {
+    async deleteFile(_actor, path, expectedRevision) {
       const row = text.get(path);
       if (row?.locked) {
         const error = new Error("approval required for locked/shared file");
         (error as Error & { code?: string }).code = "approval-required";
         throw error;
+      }
+      if (row && expectedRevision !== undefined && row.revision !== expectedRevision) {
+        throw new Error("stale revision");
       }
       text.delete(path);
     },
@@ -132,6 +138,7 @@ describe("local filesystem sync mode", () => {
         ],
       });
       expect(fixture.text.has("shared/locked.md")).toBe(true);
+      await expect(readFile(join(dir, "shared/locked.md"), "utf8")).rejects.toThrow();
     });
   });
 });

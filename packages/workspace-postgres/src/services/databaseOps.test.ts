@@ -236,6 +236,78 @@ describe("Postgres database services", () => {
     });
   });
 
+  it("treats a reused operation id as idempotent ONLY for the identical operation", async () => {
+    const databases = createPostgresDatabaseServices(pool, {
+      blobStore: createMemoryBlobStore(),
+    });
+    await databases.createFromSnapshot(actor, {
+      path: "finance/ledger.sqlite",
+      snapshot: ledgerSnapshot,
+    });
+
+    const operation = {
+      path: "finance/ledger.sqlite",
+      operationId: "op-retry",
+      expectedVersion: 1,
+      op: "insert" as const,
+      table: "transactions",
+      payload: {
+        id: "txn_002",
+        merchant: "Bookstore",
+        amount: 900,
+        category: "Books",
+        reviewed: "No",
+      },
+    };
+    await expect(databases.apply(actor, operation)).resolves.toMatchObject({
+      ok: true,
+      version: 2,
+    });
+
+    // A true retry (identical op/payload; jsonb may reorder keys) replays the
+    // recorded success without re-applying.
+    await expect(
+      databases.apply(actor, { ...operation, payload: { ...operation.payload } }),
+    ).resolves.toMatchObject({ ok: true, version: 2, idempotent: true });
+
+    // The same id with a DIFFERENT payload is rejected, not silently "ok".
+    await expect(
+      databases.apply(actor, {
+        ...operation,
+        payload: { ...operation.payload, amount: 1 },
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "operation-id-conflict" });
+    // ...and a different op kind under the same id is rejected too.
+    await expect(
+      databases.apply(actor, {
+        ...operation,
+        op: "delete",
+        rowId: "txn_002",
+        payload: {},
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "operation-id-conflict" });
+
+    // Neither conflict mutated anything: the version is still 2 and the row
+    // kept its original amount.
+    await expect(
+      databases.query(actor, {
+        path: "finance/ledger.sqlite",
+        sql: "select amount from transactions where id = ?",
+        params: ["txn_002"],
+      }),
+    ).resolves.toMatchObject({ ok: true, rows: [{ amount: 900 }] });
+    await expect(
+      databases.apply(actor, {
+        ...operation,
+        operationId: "op-after-conflicts",
+        expectedVersion: 2,
+        op: "update",
+        rowId: "txn_002",
+        payload: { reviewed: "Yes" },
+      }),
+    ).resolves.toMatchObject({ ok: true, version: 3 });
+  });
+
   it("isolates database files and rows by workspace", async () => {
     await seedWorkspace(pool, otherActor.workspaceId, otherActor.userId);
     const databases = createPostgresDatabaseServices(pool, {

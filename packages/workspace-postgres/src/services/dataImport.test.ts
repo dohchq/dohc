@@ -67,6 +67,9 @@ function fakeBackend() {
       assets.set(input.path, { mediaType: input.mediaType, bytes: input.bytes });
       return workspaceFile(input.path, "asset");
     },
+    async updateAsset() {
+      throw new Error("not used");
+    },
     async renameFile() {
       throw new Error("not used");
     },

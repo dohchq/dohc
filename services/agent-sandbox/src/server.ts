@@ -1,6 +1,6 @@
 import type { Actor, WorkspaceBackend } from "@dohc/workspace-contracts";
 import { runWorkspaceShellCommand } from "./sandbox/commands";
-import { createSandboxSession, type SandboxBackendMode, type SandboxSession } from "./sandbox/session";
+import { createSandboxSession, type SandboxSession } from "./sandbox/session";
 import { mountWorkspaceFolder } from "./workspaceMount";
 import {
   applyWorkspaceShellDiff,
@@ -19,7 +19,6 @@ export type { SandboxSession };
 export type StartWorkspaceShellSessionOptions = {
   backend: WorkspaceBackend;
   actor: Actor;
-  backendMode: SandboxBackendMode;
   rootDir?: string;
   sessionId?: string;
 };
@@ -27,21 +26,18 @@ export type StartWorkspaceShellSessionOptions = {
 export async function startWorkspaceShellSession({
   backend,
   actor,
-  backendMode,
   rootDir,
   sessionId,
 }: StartWorkspaceShellSessionOptions): Promise<SandboxSession> {
   const mount = await mountWorkspaceFolder({
     backend,
     actor,
-    backendMode,
     rootDir,
   });
   return createSandboxSession({
     id: sessionId,
     workspaceId: actor.workspaceId,
     userId: actor.userId,
-    backendMode,
     mountPath: mount.mountPath,
     cleanupDir: mount.cleanupDir,
   });

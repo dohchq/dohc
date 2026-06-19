@@ -221,4 +221,102 @@ describe.sequential('live Hocuspocus provider persistence', () => {
       await server.destroy()
     }
   })
+
+  it('converges five live providers through interleaved edits, reconnect, and restart', async () => {
+    const workspaceId = uniqueId('workspace')
+    const documentName = encodeDocName({
+      workspaceId,
+      atomId: uniqueId('atom'),
+    })
+    documentNames.push(documentName)
+    await cleanupDocument(pool, documentName)
+
+    let server = await startServer()
+    const providers: HocuspocusProvider[] = []
+    const docs: Y.Doc[] = []
+
+    async function connectClient(index: number): Promise<void> {
+      const doc = new Y.Doc()
+      const provider = createProvider({
+        server,
+        documentName,
+        token: await tokenFor(workspaceId, `user_${index}`),
+        doc,
+      })
+      providers.push(provider)
+      docs.push(doc)
+      await waitForProviderSynced(provider)
+    }
+
+    function body(index: number): Y.Text {
+      return docs[index]!.getText('body')
+    }
+
+    async function waitUntilEveryDocContains(token: string): Promise<void> {
+      await waitForCondition(
+        `all providers contain ${token}`,
+        () => docs.every((doc) => doc.getText('body').toString().includes(token)),
+        10_000,
+      )
+    }
+
+    try {
+      for (let i = 0; i < 5; i++) {
+        await connectClient(i)
+      }
+
+      for (let step = 0; step < 12; step++) {
+        const index = (step * 7) % docs.length
+        const token = `[u${index}-s${step}]`
+        const text = body(index)
+        if (step % 2 === 0) text.insert(0, token)
+        else text.insert(text.length, token)
+        await waitUntilEveryDocContains(token)
+      }
+
+      body(0).insert(0, '[burst-front]')
+      body(1).insert(body(1).length, '[burst-tail]')
+      await waitUntilEveryDocContains('[burst-front]')
+      await waitUntilEveryDocContains('[burst-tail]')
+
+      const away = providers.pop()
+      const awayDoc = docs.pop()
+      away?.destroy()
+      awayDoc?.destroy()
+
+      body(0).insert(0, '[while-one-client-away]')
+      await waitUntilEveryDocContains('[while-one-client-away]')
+
+      await connectClient(99)
+      await waitUntilEveryDocContains('[while-one-client-away]')
+      await waitForCondition(
+        'all live providers converge to one text',
+        () => {
+          const reference = docs[0]!.getText('body').toString()
+          return docs.every((doc) => doc.getText('body').toString() === reference)
+        },
+        10_000,
+      )
+      const convergedText = docs[0]!.getText('body').toString()
+      expect(await countUpdates(pool, documentName)).toBeGreaterThan(0)
+
+      for (const provider of providers.splice(0)) provider.destroy()
+      for (const doc of docs.splice(0)) doc.destroy()
+      await server.destroy()
+      server = await startServer()
+
+      for (let i = 0; i < 5; i++) {
+        await connectClient(i + 100)
+      }
+      await waitForCondition(
+        'restarted server replays the converged document',
+        () => docs.every((doc) => doc.getText('body').toString() === convergedText),
+        10_000,
+      )
+    } finally {
+      for (const provider of providers.splice(0)) provider.destroy()
+      for (const doc of docs.splice(0)) doc.destroy()
+      await server.destroy().catch(() => undefined)
+    }
+  })
 })

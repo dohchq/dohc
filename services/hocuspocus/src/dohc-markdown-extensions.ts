@@ -48,7 +48,179 @@ function splitWikilinkInner(inner: string): [string, string | null] {
   return [inner, null]
 }
 
-export const DohcWikilink = Node.create({
+function renderMarkdownImage(attrs: {
+  alt?: unknown
+  src?: unknown
+  title?: unknown
+}): string {
+  const alt = escapeMarkdownLineBreaks(
+    String(attrs.alt ?? '')
+      .replaceAll('\\', '\\\\')
+      .replaceAll('[', '\\[')
+      .replaceAll(']', '\\]'),
+  )
+  const src = escapeMarkdownLineBreaks(
+    sanitizeImageSrc(String(attrs.src ?? ''))
+      .replaceAll('\\', '\\\\')
+      .replaceAll('(', '\\(')
+      .replaceAll(')', '\\)'),
+  )
+  const title = typeof attrs.title === 'string' && attrs.title.length > 0
+    ? ` "${escapeMarkdownLineBreaks(
+        attrs.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"'),
+      )}"`
+    : ''
+  return `![${alt}](${src}${title})`
+}
+
+function escapeMarkdownLineBreaks(value: string): string {
+  return value
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '\\r')
+}
+
+function sanitizeImageSrc(src: string): string {
+  const trimmed = src.trim()
+  if (trimmed.length === 0) return ''
+  const compactProtocol = /^[a-z][a-z\d+.-]*:/i.exec(
+    trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, ''),
+  )?.[0]
+  if (!compactProtocol) return trimmed
+  const protocol = compactProtocol.slice(0, -1).toLowerCase()
+  return protocol === 'http' || protocol === 'https' ? trimmed : ''
+}
+
+function escapedPunctuationValue(token: {
+  content?: unknown
+  text?: unknown
+  markup?: unknown
+  raw?: unknown
+}): string {
+  const content = token.content ?? token.text
+  if (content != null) return String(content)
+  return String(token.markup ?? token.raw ?? '').replace(/^\\/, '')
+}
+
+function imageAltText(token: {
+  content?: unknown
+  text?: unknown
+  tokens?: Array<{ text?: unknown }>
+}): string {
+  if (Array.isArray(token.tokens)) {
+    return token.tokens.map((child) => String(child.text ?? '')).join('')
+  }
+  return String(token.content ?? token.text ?? '')
+}
+
+function imageTokenAttr(
+  token: unknown,
+  name: string,
+  fallback: unknown,
+): string {
+  const attrGet = (token as { attrGet?: (name: string) => unknown }).attrGet
+  const value = typeof attrGet === 'function' ? attrGet(name) : fallback
+  return String(value ?? '')
+}
+
+const DohcImage = Node.create({
+  name: 'image',
+  inline: true,
+  group: 'inline',
+  atom: true,
+  draggable: true,
+
+  addAttributes() {
+    return {
+      src: { default: '' },
+      alt: { default: '' },
+      title: { default: null },
+    }
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: 'img[src]',
+        getAttrs: (dom) => {
+          if (typeof dom === 'string') return false
+          return {
+            src: sanitizeImageSrc(dom.getAttribute('src') || ''),
+            alt: dom.getAttribute('alt') || '',
+            title: dom.getAttribute('title') || null,
+          }
+        },
+      },
+    ]
+  },
+
+  renderHTML({ node }) {
+    const attrs: Record<string, string> = {
+      src: sanitizeImageSrc(String(node.attrs.src ?? '')),
+      alt: String(node.attrs.alt ?? ''),
+    }
+    if (typeof node.attrs.title === 'string' && node.attrs.title.length > 0) {
+      attrs.title = node.attrs.title
+    }
+    return ['img', attrs]
+  },
+
+  markdownTokenName: 'image',
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('image', {
+      src: sanitizeImageSrc(imageTokenAttr(token, 'src', token.href)),
+      alt: imageAltText(token),
+      title: imageTokenAttr(token, 'title', token.title) || null,
+    }),
+
+  renderMarkdown: (node) => renderMarkdownImage(node.attrs ?? {}),
+})
+
+const DohcEscapedPunctuation = Node.create({
+  name: 'escapedPunctuation',
+  inline: true,
+  group: 'inline',
+  atom: true,
+
+  addAttributes() {
+    return {
+      value: { default: '' },
+    }
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: 'span[data-dohc-escaped-punctuation]',
+        getAttrs: (dom) => {
+          if (typeof dom === 'string') return false
+          const value = dom.getAttribute('data-dohc-escaped-punctuation')
+          return value != null ? { value } : false
+        },
+      },
+    ]
+  },
+
+  renderHTML({ node }) {
+    return [
+      'span',
+      { 'data-dohc-escaped-punctuation': node.attrs.value },
+      String(node.attrs.value ?? ''),
+    ]
+  },
+
+  markdownTokenName: 'escape',
+
+  parseMarkdown: (token, helpers) =>
+    helpers.createNode('escapedPunctuation', {
+      value: escapedPunctuationValue(token),
+    }),
+
+  renderMarkdown: (node) =>
+    `\\${escapeMarkdownLineBreaks(String(node.attrs?.value ?? ''))}`,
+})
+
+const DohcWikilink = Node.create({
   name: 'wikilink',
   priority: 1000,
   inline: true,
@@ -109,7 +281,7 @@ export const DohcWikilink = Node.create({
   },
 })
 
-export const DohcInlineAtom = Node.create({
+const DohcInlineAtom = Node.create({
   name: 'inlineAtom',
   priority: 1000,
   inline: true,
@@ -168,7 +340,7 @@ export const DohcInlineAtom = Node.create({
     `{{${node.attrs?.source || `atom:${node.attrs?.atomId ?? ''}`}}}`,
 })
 
-export const DohcFormula = Node.create({
+const DohcFormula = Node.create({
   name: 'formula',
   priority: 1000,
   inline: true,
@@ -221,7 +393,7 @@ export const DohcFormula = Node.create({
     `{{${node.attrs?.source || `formula:${node.attrs?.expression ?? ''}`}}}`,
 })
 
-export const DohcQueryBlock = Node.create({
+const DohcQueryBlock = Node.create({
   name: 'queryBlock',
   priority: 1000,
   group: 'block',
@@ -270,6 +442,8 @@ export const DohcQueryBlock = Node.create({
 })
 
 export const dohcMarkdownExtensions = [
+  DohcImage,
+  DohcEscapedPunctuation,
   DohcWikilink,
   DohcInlineAtom,
   DohcFormula,
