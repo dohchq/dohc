@@ -208,6 +208,79 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1)(lightningcss@1.32.0)
 
+  apps/web:
+    dependencies:
+      '@dohc/brand':
+        specifier: workspace:*
+        version: link:../../packages/brand
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../../packages/workspace-core
+      '@fontsource/ibm-plex-mono':
+        specifier: ^5.2.7
+        version: 5.2.7
+      '@tailwindcss/vite':
+        specifier: ^4.2.4
+        version: 4.3.0(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
+      '@tanstack/react-router':
+        specifier: ^1.169.0
+        version: 1.170.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      '@tanstack/react-start':
+        specifier: ^1.167.53
+        version: 1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
+      esbuild:
+        specifier: ^0.28.0
+        version: 0.28.0
+      lucide-react:
+        specifier: ^1.14.0
+        version: 1.16.0(react@19.2.6)
+      nitro:
+        specifier: 3.0.260429-beta
+        version: 3.0.260429-beta(chokidar@5.0.0)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.21.0))(jiti@2.7.0)(lru-cache@11.5.0)(rollup@4.60.4)(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
+      react:
+        specifier: ^19.2.5
+        version: 19.2.6
+      react-dom:
+        specifier: ^19.2.5
+        version: 19.2.6(react@19.2.6)
+      react-markdown:
+        specifier: ^9.0.1
+        version: 9.1.0(@types/react@19.2.15)(react@19.2.6)
+      remark-gfm:
+        specifier: ^4.0.0
+        version: 4.0.1
+      tailwindcss:
+        specifier: ^4.2.4
+        version: 4.3.0
+    devDependencies:
+      '@types/jsdom':
+        specifier: 28.0.3
+        version: 28.0.3
+      '@types/node':
+        specifier: ^22.13.10
+        version: 22.19.19
+      '@types/react':
+        specifier: ^19.2.14
+        version: 19.2.15
+      '@types/react-dom':
+        specifier: ^19.2.0
+        version: 19.2.3(@types/react@19.2.15)
+      '@vitejs/plugin-react':
+        specifier: ^6.0.1
+        version: 6.0.2(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
+      jsdom:
+        specifier: ^29.1.1
+        version: 29.1.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vite:
+        specifier: ^8.0.10
+        version: 8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3)
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1)(lightningcss@1.32.0)
+
   packages/brand:
     devDependencies:
       '@types/react':

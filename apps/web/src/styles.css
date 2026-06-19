@@ -1,0 +1,2695 @@
+/* dohc — logo-native design system. Warm paper + graphite in light,
+ * green-black + warm ink in dark. Brand tokens are the source of truth
+ * (see packages/brand/src/tokens.css and dohc-brand-bible.html); the
+ * --color-* layer below resolves from them so Tailwind utilities
+ * (bg-page, text-ink, border-rule, …) swap with data-theme.
+ *
+ * Type: system serif (Iowan Old Style) for brand moments, system sans
+ * (Aptos) for daily UI, IBM Plex Mono for metadata/source/state. Only
+ * the mono is shipped as a webfont — sans and serif use system stacks
+ * (no heavy webfont, per the brand bible). */
+
+@import 'tailwindcss';
+
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/ibm-plex-mono/600.css';
+@import '@fontsource/ibm-plex-mono/700.css';
+
+/* Make `dark:` Tailwind variant respect the manually-set `data-theme=dark`
+ * attribute on <html> (our existing theme toggle writes this), instead of
+ * Tailwind's default of just listening to prefers-color-scheme. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* ---------- DESIGN TOKENS ----------
+ * dohc brand tokens (--dohc-*) are the source of truth. Surface tokens
+ * (--color-*) resolve from them with neutral names so existing Tailwind
+ * utilities keep working. The palette is almost monochrome: warm paper
+ * + graphite. Color exists to separate surface, hierarchy, and state —
+ * never as decoration. */
+:root {
+  /* Brand tokens — light (warm paper). */
+  --dohc-bg: #f7f6f1;
+  --dohc-panel: #fffefa;
+  --dohc-panel-2: #ece9e1;
+  --dohc-ink: #151515;
+  --dohc-muted: #66635d;
+  --dohc-subtle: #8b867b;
+  --dohc-accent: #2d342e;
+  --dohc-line: rgba(21, 21, 21, 0.12);
+  --dohc-grid: rgba(21, 21, 21, 0.026);
+  --dohc-success: #4f7666;
+  --dohc-warning: #a77a35;
+  --dohc-danger: #b64b37;
+  --dohc-info: #3868a6;
+
+  /* Surfaces. */
+  --color-page: var(--dohc-bg);
+  --color-surface: var(--dohc-panel);
+  --color-elevated: var(--dohc-panel);
+  --color-panel: var(--dohc-panel-2);
+  --color-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
+  --color-pressed: color-mix(in srgb, var(--dohc-ink) 8%, transparent);
+
+  /* Ink. */
+  --color-ink: var(--dohc-ink);
+  --color-ink-strong: #0a0a0a;
+  --color-ink-dim: var(--dohc-muted);
+  --color-ink-faint: var(--dohc-subtle);
+  --color-ink-ghost: #cdc8bd;
+
+  /* Borders. */
+  --color-rule: var(--dohc-line);
+  --color-rule-strong: rgba(21, 21, 21, 0.22);
+
+  /* Accent — graphite. Almost monochrome; the mark owns recognition. */
+  --color-accent: var(--dohc-accent);
+  --color-accent-hover: #1c211d;
+  --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 10%, transparent);
+  --color-accent-foreground: var(--dohc-panel);
+
+  /* Secondary accent — kept in the muted family (no second hue). */
+  --color-accent-2: var(--dohc-muted);
+  --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 12%, transparent);
+
+  /* file-org-v1 §4.3 / D4.5 — folder color tokens. These are an opt-in
+   * USER feature (a person tags a folder a color), not brand chrome, so
+   * the chromatic set stays — toned to sit calmly on warm paper. */
+  --color-folder-red: #b64b37;
+  --color-folder-orange: #b3702f;
+  --color-folder-yellow: #a77a35;
+  --color-folder-green: #4f7666;
+  --color-folder-blue: #3868a6;
+  --color-folder-purple: #5f5a86;
+  --color-folder-pink: #9c5478;
+
+  /* Status colors — muted, functional, used only for state. */
+  --color-success: var(--dohc-success);
+  --color-warning: var(--dohc-warning);
+  --color-danger: var(--dohc-danger);
+  --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 12%, transparent);
+
+  --color-selection: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+  --color-backdrop: rgba(21, 21, 21, 0.34);
+  --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 6%, var(--dohc-panel));
+  --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 12%, var(--dohc-panel));
+
+  /* Depth scale — subtle, for major surfaces only (brand bible §05). */
+  --shadow-xs: 0 1px 2px rgba(21, 21, 21, 0.04);
+  --shadow-sm: 0 1px 2px rgba(21, 21, 21, 0.04), 0 2px 6px rgba(21, 21, 21, 0.05);
+  --shadow-md: 0 2px 6px rgba(21, 21, 21, 0.05), 0 8px 20px rgba(21, 21, 21, 0.07);
+  --shadow-lg: 0 8px 16px rgba(21, 21, 21, 0.06), 0 18px 54px rgba(21, 21, 21, 0.08);
+  --shadow-modal: 0 18px 32px rgba(21, 21, 21, 0.10), 0 30px 90px rgba(21, 21, 21, 0.12);
+
+  /* Radii — 8px controls, 12px cards, 18px panels (brand bible §05). */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  /* Motion — ease out, no bounce (brand bible §05). */
+  --t-fast: 140ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-base: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-slow: 260ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Typography — system serif + sans, IBM Plex Mono webfont. */
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, serif;
+  --font-sans: 'Aptos', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+/* Dark — warm ink, never pure black/white (brand bible §10). The mark's
+ * graphite accent lifts to warm bone. Background is a neutral charcoal;
+ * the card surface keeps a faint green-black cast; side panels are a
+ * darker neutral charcoal (product preference). */
+[data-theme='dark'] {
+  --dohc-bg: #100f0e;
+  --dohc-panel: #191c1a;
+  /* side nav / panels: a darker neutral charcoal (recessed below the
+   * canvas), per product preference. */
+  --dohc-panel-2: #0e0e0d;
+  --dohc-ink: #f4f1ea;
+  --dohc-muted: #aaa69c;
+  --dohc-subtle: #78746d;
+  --dohc-accent: #d7d0c0;
+  --dohc-line: rgba(244, 241, 234, 0.14);
+  --dohc-grid: rgba(244, 241, 234, 0.035);
+  --dohc-success: #7faf9a;
+  --dohc-warning: #c89a4a;
+  --dohc-danger: #d6745f;
+  --dohc-info: #7196c8;
+
+  --color-page: var(--dohc-bg);
+  --color-surface: var(--dohc-panel);
+  --color-elevated: var(--dohc-panel);
+  --color-panel: var(--dohc-panel-2);
+  --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
+  --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
+
+  --color-ink: var(--dohc-ink);
+  --color-ink-strong: #fbf9f3;
+  --color-ink-dim: var(--dohc-muted);
+  --color-ink-faint: var(--dohc-subtle);
+  --color-ink-ghost: #3a3f38;
+
+  --color-rule: var(--dohc-line);
+  --color-rule-strong: rgba(244, 241, 234, 0.24);
+
+  --color-accent: var(--dohc-accent);
+  --color-accent-hover: #e8e2d4;
+  --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+  --color-accent-foreground: var(--dohc-bg);
+
+  --color-accent-2: var(--dohc-muted);
+  --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 16%, transparent);
+
+  /* file-org-v1 D4.5 — dark folder colors lifted to read on green-black. */
+  --color-folder-red: #e07a64;
+  --color-folder-orange: #d3914a;
+  --color-folder-yellow: #d8b04e;
+  --color-folder-green: #79b099;
+  --color-folder-blue: #7196c8;
+  --color-folder-purple: #9a93c0;
+  --color-folder-pink: #c0879f;
+
+  --color-success: var(--dohc-success);
+  --color-warning: var(--dohc-warning);
+  --color-danger: var(--dohc-danger);
+  --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 16%, transparent);
+
+  --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
+  --color-backdrop: rgba(4, 6, 5, 0.74);
+  --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 8%, var(--dohc-panel));
+  --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 15%, var(--dohc-panel));
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 18px 54px rgba(0, 0, 0, 0.6);
+  --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 30px 90px rgba(0, 0, 0, 0.7);
+}
+/* Auto-dark when the user hasn't explicitly picked a theme. Mirrors the
+ * [data-theme='dark'] dohc tokens exactly. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark']) {
+    --dohc-bg: #100f0e;
+    --dohc-panel: #191c1a;
+    --dohc-panel-2: #0e0e0d;
+    --dohc-ink: #f4f1ea;
+    --dohc-muted: #aaa69c;
+    --dohc-subtle: #78746d;
+    --dohc-accent: #d7d0c0;
+    --dohc-line: rgba(244, 241, 234, 0.14);
+    --dohc-grid: rgba(244, 241, 234, 0.035);
+    --dohc-success: #7faf9a;
+    --dohc-warning: #c89a4a;
+    --dohc-danger: #d6745f;
+    --dohc-info: #7196c8;
+
+    --color-page: var(--dohc-bg);
+    --color-surface: var(--dohc-panel);
+    --color-elevated: var(--dohc-panel);
+    --color-panel: var(--dohc-panel-2);
+    --color-hover: color-mix(in srgb, var(--dohc-ink) 6%, transparent);
+    --color-pressed: color-mix(in srgb, var(--dohc-ink) 10%, transparent);
+
+    --color-ink: var(--dohc-ink);
+    --color-ink-strong: #fbf9f3;
+    --color-ink-dim: var(--dohc-muted);
+    --color-ink-faint: var(--dohc-subtle);
+    --color-ink-ghost: #3a3f38;
+
+    --color-rule: var(--dohc-line);
+    --color-rule-strong: rgba(244, 241, 234, 0.24);
+
+    --color-accent: var(--dohc-accent);
+    --color-accent-hover: #e8e2d4;
+    --color-accent-soft: color-mix(in srgb, var(--dohc-accent) 14%, transparent);
+    --color-accent-foreground: var(--dohc-bg);
+
+    --color-accent-2: var(--dohc-muted);
+    --color-accent-2-soft: color-mix(in srgb, var(--dohc-muted) 16%, transparent);
+
+    --color-folder-red: #e07a64;
+    --color-folder-orange: #d3914a;
+    --color-folder-yellow: #d8b04e;
+    --color-folder-green: #79b099;
+    --color-folder-blue: #7196c8;
+    --color-folder-purple: #9a93c0;
+    --color-folder-pink: #c0879f;
+
+    --color-success: var(--dohc-success);
+    --color-warning: var(--dohc-warning);
+    --color-danger: var(--dohc-danger);
+    --color-danger-soft: color-mix(in srgb, var(--dohc-danger) 16%, transparent);
+
+    --color-selection: color-mix(in srgb, var(--dohc-ink) 16%, transparent);
+    --color-backdrop: rgba(4, 6, 5, 0.74);
+    --dohc-skeleton-base: color-mix(in srgb, var(--dohc-ink) 8%, var(--dohc-panel));
+    --dohc-skeleton-sheen: color-mix(in srgb, var(--dohc-ink) 15%, var(--dohc-panel));
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.45), 0 18px 54px rgba(0, 0, 0, 0.6);
+    --shadow-modal: 0 18px 32px rgba(0, 0, 0, 0.55), 0 30px 90px rgba(0, 0, 0, 0.7);
+  }
+}
+
+/* Expose tokens to Tailwind so `bg-page`, `text-ink`, `border-rule`,
+ * `bg-accent`, `font-serif`, `shadow-md`, `rounded-lg` etc. all generate
+ * utilities that resolve from the live CSS variables (i.e. swap with
+ * data-theme). */
+@theme inline {
+  --color-page: var(--color-page);
+  --color-surface: var(--color-surface);
+  --color-elevated: var(--color-elevated);
+  --color-panel: var(--color-panel);
+  --color-hover: var(--color-hover);
+  --color-pressed: var(--color-pressed);
+  --color-ink: var(--color-ink);
+  --color-ink-strong: var(--color-ink-strong);
+  --color-ink-dim: var(--color-ink-dim);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-ink-ghost: var(--color-ink-ghost);
+  --color-rule: var(--color-rule);
+  --color-rule-strong: var(--color-rule-strong);
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-soft: var(--color-accent-soft);
+  --color-accent-foreground: var(--color-accent-foreground);
+  --color-accent-2: var(--color-accent-2);
+  --color-accent-2-soft: var(--color-accent-2-soft);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+  --color-danger-soft: var(--color-danger-soft);
+  --color-selection: var(--color-selection);
+  --color-backdrop: var(--color-backdrop);
+
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-modal: var(--shadow-modal);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+
+  --font-serif: var(--font-serif);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* Aliases so existing component CSS that still uses --bg / --ink / etc.
+ * keeps working until each module is migrated. Same values, old names. */
+:root {
+  --bg: var(--color-page);
+  --bg-panel: var(--color-panel);
+  --bg-elevated: var(--color-elevated);
+  --bg-hover: var(--color-hover);
+  --ink: var(--color-ink);
+  --ink-strong: var(--color-ink-strong);
+  --ink-dim: var(--color-ink-dim);
+  --ink-faint: var(--color-ink-faint);
+  --rule: var(--color-rule);
+  --rule-strong: var(--color-rule-strong);
+  --accent: var(--color-accent);
+  --accent-soft: var(--color-accent-soft);
+  --selection: var(--color-selection);
+  --backdrop: var(--color-backdrop);
+  --signal-on: var(--color-success);
+  --signal-warn: var(--color-danger);
+  --signal-warn-bg: var(--color-danger-soft);
+}
+
+/* All base-element styles live in @layer base so utility classes from
+ * Tailwind always win on equal specificity. */
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: var(--color-page);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Monospace strictly for code, data, and ASCII content. */
+  code, pre, kbd, samp,
+  .atom-editor,
+  .query-source code {
+    font-family: var(--font-mono);
+    font-feature-settings: 'zero', 'ss01';
+  }
+
+  ::selection { background: var(--color-selection); color: var(--color-ink-strong); }
+
+  /* Focus rings — warm-ink halo. Always visible on keyboard focus
+   * (brand bible accessibility rule). */
+  :focus { outline: none; }
+  button:focus-visible, a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+  input:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: -1px;
+  }
+
+  /* Buttons inherit font; visual styling comes from utility classes or
+   * component-specific CSS. No global background/border so Tailwind
+   * utilities don't have to fight a base style. */
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  button:disabled { cursor: not-allowed; }
+
+  /* Custom thin scrollbars — match the page's neutral palette, hover
+   * brings them up gently. Hidden in panels via component-level CSS. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+    transition: background var(--t-fast);
+  }
+  *:hover > ::-webkit-scrollbar-thumb,
+  :hover::-webkit-scrollbar-thumb {
+    background: var(--color-ink-ghost);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-faint);
+    background-clip: padding-box;
+  }
+}
+
+/* Inputs / textareas inherit the page font; styling is via utilities or
+ * component CSS. Resets only — no opinionated frame. */
+@layer base {
+  textarea, input {
+    font-family: inherit;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    outline: none;
+    resize: none;
+  }
+  textarea::placeholder, input::placeholder { color: var(--color-ink-faint); }
+
+  /* Links keep their accent color but no underline by default. */
+  a { color: var(--color-accent); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 2px; }
+}
+
+@keyframes dohc-skeleton-shimmer {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+
+.dohc-skeleton {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background-color: var(--dohc-skeleton-base);
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 34%,
+    var(--dohc-skeleton-sheen) 48%,
+    transparent 62%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation: dohc-skeleton-shimmer 1.55s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dohc-skeleton {
+    animation: none;
+    background-image: none;
+  }
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+    animation: none;
+    background-image: none;
+  }
+}
+
+/* Generic pane primitive — scrollable column, full viewport height. Used
+ * for the main editor pane (other panes have moved to Tailwind utilities). */
+.pane {
+  height: 100vh;
+  overflow: auto;
+  position: relative;
+}
+
+/* Pane chrome (header, breadcrumbs, file tree) all live in Tailwind now —
+ * see FileTree.tsx / AtomView.tsx. */
+
+/* doc — Notion / AppFlowy-style rhythm.
+ *
+ * Body: 16px / 1.5 line-height for comfortable reading.
+ * Blocks use padding (not margin) so adjacent paragraphs sit ~6px
+ * apart and headings can hug the next block (3px below) while still
+ * having generous breathing space above (28-36px depending on level).
+ * Headings scale: 30 / 24 / 20 / 17 / 15 / 15. h5/h6 reuse the ink
+ * scale instead of going smaller — Notion keeps them readable. */
+.doc {
+  padding: 36px 48px 120px;
+  max-width: 760px;
+  margin: 0 auto;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.doc h1, .doc h2, .doc h3, .doc h4, .doc h5, .doc h6 {
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--ink-strong);
+  line-height: 1.25;
+  margin: 0;
+  padding: 0;
+}
+.doc h1 { font-size: 30px; padding: 28px 0 4px; }
+.doc h2 { font-size: 24px; padding: 24px 0 3px; }
+.doc h3 { font-size: 20px; padding: 20px 0 2px; font-weight: 600; }
+.doc h4 { font-size: 17px; padding: 16px 0 2px; font-weight: 600; }
+.doc h5 { font-size: 15px; padding: 14px 0 2px; font-weight: 600; }
+.doc h6 {
+  font-size: 13px;
+  padding: 12px 0 2px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.doc p { margin: 0; padding: 3px 0; }
+.doc ul, .doc ol { margin: 0; padding: 2px 0 2px 1.6em; }
+.doc li { padding: 1px 0; margin: 0; }
+.doc li > p { padding: 0; }
+.doc strong { font-weight: 600; color: var(--ink-strong); }
+.doc em { font-style: italic; }
+.doc blockquote {
+  border-left: 3px solid var(--rule-strong);
+  padding: 4px 0 4px 16px;
+  margin: 6px 0;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.doc hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 24px 0;
+}
+.doc pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 10px 0;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+}
+.doc code {
+  background: var(--bg-panel);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.doc pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* D4.8b — wikilink Notion-style pill rendering. The wikilinkPlugin
+ * (see src/components/wikilinkPlugin.ts) emits TWO decorations per
+ * `[[path]]` (or `\[\[path]]`):
+ *   1. A widget at the start position whose DOM is the pill.
+ *   2. An inline decoration over the literal text with class
+ *      `dohc-wikilink-hidden` that collapses the source text
+ *      via `font-size:0`. Text stays in the document for the
+ *      cursor/serializer; just renders invisibly.
+ * The pill widget has `contentEditable=false` so PM treats it as
+ * an atom (clicks land on it; the cursor skips past). */
+.dohc-wikilink-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--color-accent-2) 11%, transparent);
+  color: var(--color-accent-2);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  font-size: 0.95em;
+  line-height: 1.4;
+  vertical-align: baseline;
+  white-space: nowrap;
+  transition: background var(--t-fast);
+}
+.dohc-wikilink-pill:hover {
+  background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
+}
+.dohc-wikilink-pill__icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.72;
+}
+.dohc-wikilink-pill__icon svg {
+  display: block;
+}
+.dohc-wikilink-pill--broken {
+  background: transparent;
+  color: var(--color-ink-faint);
+  border: 1px dashed var(--color-ink-faint);
+  padding: 0 5px 0 4px;
+}
+.dohc-wikilink-hidden {
+  font-size: 0 !important;
+  line-height: 0 !important;
+  letter-spacing: 0 !important;
+}
+
+/* D4.8c — wikilink "source mode" (cursor INSIDE the range). Renders
+ * the raw `[[path]]` text styled lightly so the user can see +
+ * edit it. The pill (preview mode) re-renders the moment the
+ * cursor moves out of the range — Obsidian's live-preview pattern. */
+.dohc-wikilink-source {
+  color: var(--color-accent-2);
+  background: color-mix(in oklab, var(--color-accent-2) 7%, transparent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* D4.8h — unified pill rendering for ALL `{}` atoms (value /
+ * liveTotal / formula). Minimal: the pill is just the rendered
+ * value, with the full source on hover. Cursor INSIDE the range
+ * toggles to source mode (raw text + value chip at the end for
+ * non-value kinds). Three subtle color variants by kind. */
+.dohc-atom-pill {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  color: var(--color-accent);
+  cursor: text;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background var(--t-fast);
+}
+.dohc-atom-pill:hover {
+  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+}
+/* value = author-typed truth (graphite accent). */
+.dohc-atom-pill--value {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  color: var(--color-accent);
+}
+.dohc-atom-pill--value:hover {
+  background: color-mix(in oklab, var(--color-accent) 16%, transparent);
+}
+/* liveTotal + formula = computed projections (accent-2 violet). */
+.dohc-atom-pill--liveTotal,
+.dohc-atom-pill--formula {
+  background: color-mix(in oklab, var(--color-accent-2) 10%, transparent);
+  color: var(--color-accent-2);
+}
+.dohc-atom-pill--liveTotal:hover,
+.dohc-atom-pill--formula:hover {
+  background: color-mix(in oklab, var(--color-accent-2) 20%, transparent);
+}
+.dohc-atom-pill--broken {
+  color: var(--color-ink-faint);
+  background: transparent;
+  border: 1px dashed var(--color-ink-faint);
+  padding: 0 3px;
+  opacity: 0.75;
+}
+.dohc-atom-hidden {
+  font-size: 0 !important;
+  line-height: 0 !important;
+  letter-spacing: 0 !important;
+}
+
+/* D4.8b — autocomplete picker (the popover that appears when the
+ * user types `[[`). Positioned by viewport-aware floating menu math
+ * in the React component. */
+.dohc-wikilink-picker {
+  background: var(--color-elevated);
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  box-sizing: border-box;
+  padding: 4px 0;
+  width: min(360px, calc(100vw - 24px));
+  max-height: 260px;
+  overflow-y: auto;
+  box-shadow: var(--shadow-md);
+}
+.dohc-wikilink-picker__empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-ink-faint);
+}
+.dohc-wikilink-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  transition: background var(--t-fast);
+}
+.dohc-wikilink-picker__item.is-active,
+.dohc-wikilink-picker__item:hover {
+  background: var(--color-hover);
+}
+.dohc-wikilink-picker__item-title {
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.dohc-wikilink-picker__item-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-ink-faint);
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+
+/* keep the doc table left-aligned & narrow for live queries, etc.
+   pre-existing rule unchanged below */
+.query-block {
+  border: 1px solid var(--rule);
+  background: var(--bg-panel);
+  margin: 0.6em 0;
+  padding: 0;
+}
+.query-source {
+  font-size: 11px;
+  color: var(--ink-faint);
+  padding: 6px 10px;
+  border-bottom: 1px dashed var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.query-source code { background: transparent; padding: 0; color: var(--ink-dim); }
+.query-result {
+  padding: 10px 12px;
+}
+.query-result ul { margin: 0; padding-left: 1em; }
+.query-result li { margin: 0.15em 0; }
+
+/* action header, empty state, chat, sign-in are now styled
+ * inline via Tailwind utilities. */
+
+/* ---------- live query chrome ---------- */
+
+.query-badge {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+.query-refresh-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+.query-refresh-row button { font-size: 11px; padding: 2px 8px; }
+
+/* File-tree styling moved to Tailwind utilities in FileTree.tsx. */
+
+/* Breadcrumbs, subpages, pane-header, primary/danger button variants
+ * have all moved to Tailwind utilities. */
+
+/* Hide ONLY the horizontal scrollbar on the pane — wide ascii sketches use
+ * middle-mouse-drag instead of a bar at the bottom. Firefox shows both. */
+.pane::-webkit-scrollbar:horizontal {
+  height: 0;
+  display: none;
+}
+/* Middle-mouse-drag pan mode set from JS — applies a grab cursor and
+ * disables text selection so the drag bypasses CodeMirror selection. */
+.pane.pane-panning,
+.pane.pane-panning * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.doc {
+  cursor: text;
+}
+.dohc-html-shell {
+  position: relative;
+  height: calc(100vh - 44px);
+  min-width: 0;
+  overflow: hidden;
+}
+.doc-editing {
+  cursor: text;
+}
+
+/* Tiptap editor — strip the default frame chrome so it inherits the
+ * doc column (.doc max-width + padding) and matches our font stack. */
+.doc-editing .dohc-tiptap-editor {
+  background: transparent;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+  position: relative;
+  /* Tiptap applies its own --tiptap-font-* vars (Noto Sans / Noto Serif /
+   * Space Mono) inside the editor, which would otherwise override our
+   * cascade. Map them to our chosen pair so headings, paragraphs, and
+   * code in the markdown match the rest of the app. */
+  --tiptap-font-default: var(--font-sans);
+  --tiptap-font-title: var(--font-sans);
+  --tiptap-font-code: var(--font-mono);
+  /* Tiptap's frame theme hardcodes a LIGHT palette on `.tiptap`
+   * (surface #f7f7f7, background #fff, …), so code/live queries and
+   * the editor chrome rendered as a glaring white box in dark mode.
+   * Map every Tiptap design token to our theme-aware --color-* tokens
+   * (they already flip light/dark) — ONE source, so the whole editor
+   * follows the palette in both modes. Neutral mappings (ink/panel/
+   * rule) keep contrast safe; accent only where Tiptap means accent. */
+  --tiptap-color-background: var(--color-page);
+  --tiptap-color-on-background: var(--color-ink);
+  --tiptap-color-surface: var(--color-panel);
+  --tiptap-color-surface-low: color-mix(
+    in srgb,
+    var(--color-ink) 7%,
+    var(--color-panel)
+  );
+  --tiptap-color-on-surface: var(--color-ink);
+  --tiptap-color-on-surface-variant: var(--color-ink-dim);
+  --tiptap-color-outline: var(--color-rule-strong);
+  --tiptap-color-primary: var(--color-ink-strong);
+  --tiptap-color-secondary: var(--color-rule);
+  --tiptap-color-on-secondary: var(--color-ink);
+  --tiptap-color-inverse: var(--color-ink-strong);
+  --tiptap-color-on-inverse: var(--color-surface);
+  --tiptap-color-inline-code: var(--color-accent);
+  --tiptap-color-error: var(--color-danger);
+  --tiptap-color-hover: color-mix(
+    in srgb,
+    var(--color-ink) 8%,
+    transparent
+  );
+  --tiptap-color-selected: color-mix(
+    in srgb,
+    var(--color-accent) 18%,
+    transparent
+  );
+  --tiptap-color-inline-area: var(--color-rule);
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: -2px 0 12px;
+  min-height: 28px;
+  pointer-events: none;
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence-dot {
+  background: var(--color-success);
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 16%, transparent);
+  height: 6px;
+  width: 6px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-editor-presence-text {
+  letter-spacing: 0.01em;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatars {
+  display: inline-flex;
+  margin-left: 2px;
+  pointer-events: auto;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar {
+  align-items: center;
+  background: var(--dohc-collab-color, var(--color-accent));
+  border: 2px solid var(--color-page);
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  height: 24px;
+  justify-content: center;
+  line-height: 1;
+  margin-left: -6px;
+  min-width: 24px;
+  padding: 0 6px;
+  position: relative;
+  text-transform: uppercase;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar:first-child {
+  margin-left: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar.is-local {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dohc-collab-color, var(--color-accent)) 55%, transparent);
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-avatar.is-count {
+  background: var(--color-panel);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-caret,
+.doc-editing .dohc-tiptap-editor .collaboration-carets__caret,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-cursor {
+  border-left: 2px solid var(--dohc-collab-color, var(--color-info, #1a73e8));
+  border-right: none;
+  box-sizing: border-box;
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+  z-index: 20;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-label,
+.doc-editing .dohc-tiptap-editor .collaboration-carets__label,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-cursor > div {
+  background: var(--dohc-collab-color, #1a73e8);
+  border-radius: 4px;
+  bottom: calc(100% + 2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+  color: #fff;
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  left: -2px;
+  line-height: 1;
+  max-width: 160px;
+  overflow: hidden;
+  padding: 4px 6px;
+  position: absolute;
+  text-overflow: ellipsis;
+  transform: translateY(-1px);
+  white-space: nowrap;
+}
+.doc-editing .dohc-tiptap-editor .dohc-collab-selection,
+.doc-editing .dohc-tiptap-editor .ProseMirror-yjs-selection {
+  border-bottom: 1px solid var(--dohc-collab-color, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Editor block rhythm — Notion/AppFlowy-style. Tiptap ships much larger
+ * defaults (h1 = 42px / mt 32px, etc.) so we override every heading,
+ * paragraph, list, and blockquote rule with a 2-class selector to win
+ * on specificity. Padding is the spacing primitive (not margin) so
+ * adjacent blocks sit ~6px apart and headings can have generous top
+ * breathing space while hugging the next block below them. */
+.doc-editing .dohc-tiptap-editor h1 {
+  font-size: 28px;
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 16px 0 4px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+/* D4.19 — page properties panel (Notion-style frontmatter editor).
+ * Sits above the editor; quiet by default, fills the role of the
+ * frontmatter `id:` zone. */
+.dohc-props {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+.dohc-props__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.dohc-props__key {
+  width: 140px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-size: 12.5px;
+  font-weight: 500;
+  outline: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.dohc-props__key:not([readonly]):hover,
+.dohc-props__key:focus {
+  background: var(--color-hover, var(--bg-panel));
+}
+.dohc-props__value {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-ink, var(--ink));
+  font-size: 13px;
+  outline: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.dohc-props__value:not([readonly]):hover,
+.dohc-props__value:focus {
+  background: var(--color-hover, var(--bg-panel));
+}
+.dohc-props__value[readonly],
+.dohc-props__key[readonly] {
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: default;
+}
+/* D4.23 — a user property keyed `id`/`title` is reserved + not saved. */
+.dohc-props__key.is-reserved {
+  color: var(--color-amber, #b45309);
+}
+.dohc-props__reserved {
+  flex: 1;
+  font-size: 11.5px;
+  color: var(--color-amber, #b45309);
+  opacity: 0.85;
+  padding: 2px 6px;
+  user-select: none;
+}
+.dohc-props__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--color-ink-faint, var(--ink-faint));
+  opacity: 0;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+.dohc-props__row:hover .dohc-props__remove {
+  opacity: 1;
+}
+.dohc-props__remove:hover {
+  background: var(--color-hover, var(--bg-panel));
+  color: var(--color-ink, var(--ink));
+}
+.dohc-props__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-ink-faint, var(--ink-faint));
+  opacity: 0.7;
+  transition: opacity var(--t-fast), background var(--t-fast);
+}
+.dohc-props__add:hover {
+  opacity: 1;
+  background: var(--color-hover, var(--bg-panel));
+  color: var(--color-ink-dim, var(--ink-dim));
+}
+
+/* D4.20 — Notion-style page TITLE field (separate input above the
+ * properties + editor). Backed by the leading `# H1`. Big, borderless,
+ * reads as the page title. (Supersedes D4.18's in-editor first-H1
+ * boost — the title is now its own field, so a content H1 inside the
+ * editor styles as a normal heading.) */
+.dohc-title-field {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  /* Clearly larger than a content `# H1` (30px) so the hierarchy
+   * reads: this is THE page title, headings inside are sections. */
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.15;
+  color: var(--ink-strong);
+  padding: 6px 0 8px;
+  margin: 0;
+}
+.dohc-title-field::placeholder {
+  color: var(--ink-faint);
+  opacity: 0.5;
+}
+
+/* D4.34 — syntax-highlighted raw `⟨⟩ source` editor
+ * (react-simple-code-editor + Prism). Token colours use the app's
+ * theme-aware palette so they adapt to light/dark. The editable
+ * textarea is transparent over the highlighted <pre>; keep its caret
+ * visible. */
+.dohc-source {
+  width: 100%;
+  color: var(--color-ink-strong, var(--ink-strong));
+  caret-color: var(--color-accent, var(--accent));
+}
+.dohc-source textarea {
+  outline: none;
+}
+.dohc-source textarea::selection {
+  background: var(--color-selection);
+}
+.dohc-source .token.comment,
+.dohc-source .token.prolog,
+.dohc-source .token.doctype,
+.dohc-source .token.cdata,
+.dohc-source .token.blockquote {
+  color: var(--color-ink-faint, var(--ink-faint));
+  font-style: italic;
+}
+.dohc-source .token.punctuation {
+  color: var(--color-ink-dim, var(--ink-dim));
+}
+.dohc-source .token.tag,
+.dohc-source .token.keyword,
+.dohc-source .token.title {
+  color: var(--color-folder-purple);
+  font-weight: 600;
+}
+.dohc-source .token.attr-name,
+.dohc-source .token.key,
+.dohc-source .token.selector,
+.dohc-source .token.namespace {
+  color: var(--color-folder-blue);
+}
+.dohc-source .token.attr-value,
+.dohc-source .token.string,
+.dohc-source .token.url,
+.dohc-source .token.entity {
+  color: var(--color-folder-green);
+}
+.dohc-source .token.code,
+.dohc-source .token.code-snippet {
+  color: var(--color-accent-2);
+}
+.dohc-source .token.list.punctuation,
+.dohc-source .token.hr,
+.dohc-source .token.number {
+  color: var(--color-accent);
+}
+.dohc-source .token.bold {
+  font-weight: 700;
+}
+.dohc-source .token.italic {
+  font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor h2 {
+  font-size: 23px;
+  line-height: 1.3;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 14px 0 3px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor h3 {
+  font-size: 19px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: 0;
+  padding: 12px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor h4 {
+  font-size: 17px;
+  line-height: 1.35;
+  font-weight: 600;
+  padding: 10px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor h5 {
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 600;
+  padding: 8px 0 2px;
+  margin: 0;
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor h6 {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 600;
+  padding: 8px 0 2px;
+  margin: 0;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.doc-editing .dohc-tiptap-editor p {
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 3px 0;
+  margin: 0;
+}
+.doc-editing .dohc-tiptap-editor ul,
+.doc-editing .dohc-tiptap-editor ol {
+  margin: 0;
+  padding: 2px 0 2px 1.45em;
+}
+.doc-editing .dohc-tiptap-editor ul {
+  list-style-position: outside;
+  list-style-type: disc;
+}
+.doc-editing .dohc-tiptap-editor ol {
+  list-style-position: outside;
+  list-style-type: decimal;
+}
+.doc-editing .dohc-tiptap-editor li {
+  margin: 0;
+  padding: 1px 0 1px 0.15em;
+  font-size: 16px;
+  line-height: 1.5;
+}
+.doc-editing .dohc-tiptap-editor li::marker {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.doc-editing .dohc-tiptap-editor li p {
+  padding: 0;
+}
+.doc-editing .dohc-tiptap-editor blockquote {
+  border-left: 3px solid var(--rule-strong);
+  padding: 4px 0 4px 16px;
+  margin: 6px 0;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor blockquote p {
+  padding: 0;
+}
+.doc-editing .dohc-tiptap-editor hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 16px 0;
+}
+.doc-editing .dohc-tiptap-editor code {
+  background: var(--bg-panel);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.doc-editing .dohc-tiptap-editor pre {
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0.7em 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+}
+.doc-editing .dohc-tiptap-editor pre code {
+  background: transparent;
+  border-radius: 0;
+  color: inherit;
+  display: block;
+  font-size: inherit;
+  padding: 0;
+  white-space: pre;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-keyword,
+.doc-editing .dohc-tiptap-editor pre code .hljs-selector-tag,
+.doc-editing .dohc-tiptap-editor pre code .hljs-built_in {
+  color: #c792ea;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-string,
+.doc-editing .dohc-tiptap-editor pre code .hljs-attr,
+.doc-editing .dohc-tiptap-editor pre code .hljs-symbol {
+  color: #a8cc8c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-number,
+.doc-editing .dohc-tiptap-editor pre code .hljs-literal {
+  color: #f78c6c;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-title,
+.doc-editing .dohc-tiptap-editor pre code .hljs-function {
+  color: #82aaff;
+}
+.doc-editing .dohc-tiptap-editor pre code .hljs-comment {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-code-block {
+  background: color-mix(in srgb, var(--color-page) 88%, var(--color-ink) 3%);
+  border-top-color: color-mix(in srgb, var(--rule) 72%, transparent);
+  border-radius: 0 0 7px 7px;
+  margin: 0 0 0.85em;
+  padding: 12px 14px 13px;
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-code-block + .dohc-code-block-toolbar {
+  margin-top: 0.45em;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 34px;
+  margin: 0.85em 0 0;
+  padding: 5px 7px 5px 9px;
+  background: color-mix(in srgb, var(--color-page) 76%, var(--color-ink) 6%);
+  border: 1px solid var(--rule);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  box-shadow: 0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset;
+  color: var(--ink-faint);
+  position: relative;
+  z-index: 6;
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-toolbar-left {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+  min-width: 0;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-dot {
+  background: color-mix(in srgb, var(--color-accent) 58%, var(--ink-faint));
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 12%, transparent);
+  flex: 0 0 auto;
+  height: 6px;
+  width: 6px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select {
+  appearance: none;
+  background-color: var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink-dim);
+  color-scheme: light;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  height: 24px;
+  line-height: 1;
+  max-width: 136px;
+  min-width: 94px;
+  outline: none;
+  padding: 0 23px 0 8px;
+  pointer-events: auto;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option {
+  background-color: var(--color-surface);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select option:checked {
+  background-color: var(--color-panel);
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:focus {
+  background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 10px,
+    calc(100% - 8px) 10px;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  height: 24px;
+  line-height: 1;
+  padding: 0 8px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:hover,
+.doc-editing .dohc-tiptap-editor .dohc-code-copy-btn:focus-visible {
+  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-language-select:hover {
+  background-color: color-mix(in srgb, var(--color-page) 80%, var(--color-ink) 4%);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+[data-theme='dark'] .doc-editing .dohc-tiptap-editor .dohc-code-language-select {
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark'])
+    .doc-editing
+    .dohc-tiptap-editor
+    .dohc-code-language-select {
+    color-scheme: dark;
+  }
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation {
+  align-items: center;
+  display: flex;
+  height: 22px;
+  margin: -10px 0 7px;
+  pointer-events: auto;
+  position: relative;
+  user-select: none;
+  width: 100%;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation::after {
+  background: color-mix(in srgb, var(--color-ink) 18%, transparent);
+  content: '';
+  flex: 1;
+  height: 1px;
+  opacity: 0.35;
+  transform: scaleX(0.98);
+  transition:
+    opacity var(--t-fast),
+    transform var(--t-fast);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation:hover::after,
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continuation:focus-within::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 400;
+  height: 22px;
+  justify-content: center;
+  line-height: 1;
+  margin-left: -31px;
+  margin-right: 9px;
+  opacity: 0.62;
+  padding: 0 0 1px;
+  pointer-events: auto;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    opacity var(--t-fast),
+    transform var(--t-fast);
+  width: 23px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:hover,
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:focus-visible {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--ink-dim);
+  opacity: 1;
+  outline: none;
+  transform: scale(1.02);
+}
+.doc-editing .dohc-tiptap-editor .dohc-code-block-continue-btn:disabled {
+  cursor: default;
+  opacity: 0;
+}
+.doc-editing .dohc-tiptap-editor table {
+  border-collapse: collapse;
+  font-size: 14px;
+  margin: 0.8em 0;
+  table-layout: fixed;
+  width: 100%;
+}
+.doc-editing .dohc-tiptap-editor th,
+.doc-editing .dohc-tiptap-editor td {
+  border: 1px solid var(--rule);
+  min-width: 92px;
+  padding: 6px 8px;
+  position: relative;
+  vertical-align: top;
+}
+.doc-editing .dohc-tiptap-editor th {
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+.doc-editing .dohc-tiptap-editor td {
+  color: var(--ink);
+}
+.doc-editing .dohc-tiptap-editor .selectedCell::after {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 1;
+}
+.doc-editing .dohc-tiptap-editor .column-resize-handle {
+  background: var(--color-accent);
+  bottom: -1px;
+  pointer-events: none;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 3px;
+}
+/* Tiptap's "Please enter..." placeholder uses `color-mix(--tiptap-color-on-background, transparent 60%)`
+ * which lands near-black on dark backgrounds and is basically invisible.
+ * Force it to our theme's dim ink so it stays readable in both modes. */
+.doc-editing .dohc-tiptap-editor .tiptap-placeholder::before {
+  color: var(--ink-faint) !important;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror {
+  outline: none;
+  padding: 0;
+  background: transparent;
+  font-family: var(--font-sans);
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  min-height: 48vh;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+  margin-left: -42px;
+  padding-left: 42px !important;
+}
+.doc-editing .dohc-tiptap-editor .tiptap {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror:focus {
+  outline: none;
+}
+.doc-editing .dohc-tiptap-editor .ProseMirror .is-empty::before {
+  color: var(--ink-faint);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  opacity: 0.58;
+  pointer-events: none;
+}
+.doc-editing .dohc-tiptap-editor th .is-empty::before,
+.doc-editing .dohc-tiptap-editor td .is-empty::before {
+  content: '' !important;
+}
+
+.doc-editing .dohc-tiptap-editor .dohc-block-node {
+  position: relative;
+  --dohc-block-control-top: 3px;
+}
+.doc-editing .dohc-tiptap-editor h1.dohc-block-node {
+  --dohc-block-control-top: 21px;
+}
+.doc-editing .dohc-tiptap-editor h2.dohc-block-node {
+  --dohc-block-control-top: 16px;
+}
+.doc-editing .dohc-tiptap-editor h3.dohc-block-node {
+  --dohc-block-control-top: 12px;
+}
+.doc-editing .dohc-tiptap-editor h4.dohc-block-node {
+  --dohc-block-control-top: 9px;
+}
+.doc-editing .dohc-tiptap-editor h5.dohc-block-node {
+  --dohc-block-control-top: 6px;
+}
+.doc-editing .dohc-tiptap-editor h6.dohc-block-node {
+  --dohc-block-control-top: 5px;
+}
+.doc-editing .dohc-tiptap-editor blockquote.dohc-block-node {
+  --dohc-block-control-top: 4px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  height: 28px;
+  justify-content: flex-end;
+  left: -50px;
+  padding-right: 3px;
+  pointer-events: auto;
+  position: absolute;
+  top: calc(var(--dohc-block-control-top) - 2px);
+  user-select: none;
+  width: 48px;
+  z-index: 5;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  flex: 0 0 23px;
+  display: inline-flex;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  height: 24px;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+  padding: 0;
+  pointer-events: auto;
+  position: relative;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    opacity var(--t-fast),
+    transform var(--t-fast);
+  transform: scale(0.96);
+  width: 23px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus {
+  font-size: 18px;
+  font-weight: 400;
+  padding-bottom: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-plus::before {
+  content: '+';
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle {
+  cursor: grab;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-handle::before {
+  background-image: radial-gradient(
+    circle,
+    currentColor 1.15px,
+    transparent 1.25px
+  );
+  background-position: 0 0;
+  background-size: 5px 5px;
+  content: '';
+  display: block;
+  height: 15px;
+  opacity: 0.8;
+  width: 10px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:hover {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--ink-dim);
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:focus-visible {
+  color: var(--ink-strong);
+  outline: 1px solid var(--rule-strong);
+  outline-offset: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn:active {
+  cursor: grabbing;
+  transform: scale(0.92);
+}
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-affordance:focus-within .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node:hover .dohc-block-gutter-btn,
+.doc-editing .dohc-tiptap-editor .dohc-block-node.ProseMirror-selectednode .dohc-block-gutter-btn {
+  color: var(--ink-dim);
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+.doc-editing .dohc-tiptap-editor pre.dohc-block-node .dohc-block-affordance {
+  top: 5px;
+}
+.doc-editing .dohc-tiptap-editor pre.ascii-sketch-block.dohc-block-node .dohc-block-affordance {
+  top: -6px;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-block.dohc-block-node .dohc-block-affordance {
+  top: 2px;
+}
+
+@media (max-width: 720px) {
+  .doc-editing .dohc-tiptap-editor .ProseMirror.dohc-notion-editor {
+    margin-left: -36px;
+    padding-left: 36px !important;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-affordance {
+    gap: 0;
+    left: -40px;
+    width: 38px;
+  }
+  .doc-editing .dohc-tiptap-editor .dohc-block-gutter-btn {
+    flex-basis: 19px;
+    width: 19px;
+  }
+}
+
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu {
+  position: fixed;
+  z-index: 30;
+  width: min(320px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+  background: color-mix(in srgb, var(--color-surface) 94%, var(--color-ink) 6%);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  box-shadow:
+    0 18px 45px color-mix(in srgb, #000 30%, transparent),
+    0 1px 0 color-mix(in srgb, #fff 7%, transparent) inset;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  color: var(--ink);
+  text-align: left;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item:hover,
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__item.is-selected {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-page) 84%, var(--color-ink) 5%);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__label {
+  color: var(--ink-strong);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__hint {
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+.doc-editing .dohc-tiptap-editor .dohc-slash-menu__empty {
+  padding: 10px 12px;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.dohc-editor-sync-state {
+  align-items: center;
+  color: var(--ink-faint);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+.dohc-editor-sync-state::before {
+  background: currentColor;
+  border-radius: 999px;
+  content: '';
+  height: 6px;
+  opacity: 0.55;
+  width: 6px;
+}
+
+/* Tiptap's default list layout pads the marker to a fixed 32px / 24px box
+ * (height + padding tuned for their default body size). At our 15px /
+ * 1.7 line-height the marker box is taller than the content paragraph
+ * and `align-items: flex-start` pushes the marker above the text
+ * baseline. Strip the fixed sizing and switch to baseline alignment so
+ * marker and text share the same line. */
+.doc-editing .dohc-tiptap-editor .tiptap-list-item > .list-item {
+  align-items: baseline;
+  gap: 0.5em;
+}
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper {
+  height: auto;
+  width: auto;
+  min-width: 1.4em;
+  padding: 0;
+  line-height: inherit;
+}
+.doc-editing .dohc-tiptap-editor .tiptap-list-item .label-wrapper .label {
+  height: auto;
+  width: auto;
+  min-width: 1.4em;
+  padding: 0;
+  line-height: inherit;
+  text-align: right;
+}
+
+/* ---------- inline ASCII sketches ----------
+ * A code-block decoration (.ascii-sketch-block) tags any `language: ascii`
+ * fence; strip the Tiptap code-block chrome so the art reads as a piece of
+ * the page rather than a syntax-highlighter widget. Click anywhere on the
+ * block to re-open the sketcher with that content. */
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block {
+  background: transparent;
+  border: none;
+  overflow: visible;
+  padding: 0;
+  margin: 0.6em 0;
+  cursor: text;
+  position: relative;
+  /* Block sizes itself to its content. .doc caps the page column at 760px,
+   * but we explicitly let ascii blocks extend past that — a wide sketch
+   * should feel like art the page makes room for, not something stuffed
+   * into a scroll widget. */
+  width: max-content;
+  max-width: none;
+}
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .language-picker {
+  display: none;
+}
+/* The block's `.tools` row holds the language picker + a `.tools-button-group`
+ * with the copy/preview-toggle buttons. The copy icon was overlapping with
+ * the "click to edit" hint we add below — hide the whole row since none of
+ * those affordances make sense for a sketch. */
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .tools-button-group {
+  display: none !important;
+}
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block code {
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  /* Tiptap ships a CodeMirror theme that paints code text in a soft
+   * mid-grey — fine for syntax-highlighted code, way too low-contrast for
+   * plain ascii art. Force the page's primary ink color (and override the
+   * inner spans Tiptap colors via cm-line :where()). */
+  color: var(--ink);
+  /* Editor sizes to the longest line — no fixed width box, no scrollbar.
+   * The block's parent (.ascii-sketch-block) decides whether to overflow
+   * the page column. */
+  width: max-content;
+  max-width: none;
+}
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block .ascii-sketch-metadata-line {
+  display: none;
+}
+/* Same idea for ProseMirror's "this code block is the selected node"
+ * background tint when the user clicks the block. */
+.doc-editing .dohc-tiptap-editor .ascii-sketch-block.ProseMirror-selectednode {
+  background: transparent !important;
+  outline: none !important;
+}
+/* ── Live query block (query fence underneath) ─────────────────────
+ * A `language: query` fence is the repeating live-data primitive. The
+ * product surface is "Live query"; the DSL remains as a quiet editable
+ * source strip for agents/power users. */
+.doc-editing .dohc-tiptap-editor .query-atom-block {
+  background: color-mix(in srgb, var(--color-accent) 3%, var(--color-surface));
+  border: 1px solid var(--rule);
+  border-top: none;
+  border-radius: 0;
+  padding: 4px 12px 6px;
+  margin: 0;
+  position: relative;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-block code {
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--ink-faint);
+}
+.doc-editing .dohc-tiptap-editor .query-atom-block.ProseMirror-selectednode {
+  outline: none !important;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0.9em 0 0;
+  padding: 10px 12px 9px;
+  border: 1px solid var(--rule);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-surface));
+  font-size: 12px;
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 18%, transparent);
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: baseline;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-live {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-success);
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-label {
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-subtitle {
+  grid-column: 2;
+  min-width: 0;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-caption .query-atom-source {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-strong);
+  margin: 0 0 0.8em;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--rule);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent) 3%, var(--color-surface));
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading,
+.doc-editing .dohc-tiptap-editor .query-atom-result--empty,
+.doc-editing .dohc-tiptap-editor .query-atom-result--unavailable,
+.doc-editing .dohc-tiptap-editor .query-atom-result--error {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading {
+  min-height: 54px;
+  color: transparent;
+  font-style: normal;
+  position: relative;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+  content: '';
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background-color: var(--dohc-skeleton-base);
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 34%,
+    var(--dohc-skeleton-sheen) 48%,
+    transparent 62%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation: dohc-skeleton-shimmer 1.55s ease-in-out infinite;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::before {
+  width: 78%;
+  margin-top: 2px;
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+  width: 54%;
+  margin-top: 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::before,
+  .doc-editing .dohc-tiptap-editor .query-atom-result--loading::after {
+    animation: none;
+    background-image: none;
+  }
+}
+.doc-editing .dohc-tiptap-editor .query-atom-result--error {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface));
+}
+/* Edit-button widget. Rendered as a zero-size span placed just before the
+ * ascii block by the ProseMirror plugin; CSS positions the actual button
+ * absolutely so it floats over the block's top-left corner. The widget
+ * itself doesn't take layout space — the block above flows as normal. */
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 0;
+  /* Don't add the widget to text-selection — clicking the button shouldn't
+   * select the preceding paragraph. */
+  user-select: none;
+}
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn {
+  position: absolute;
+  /* Sit just inside the top-left corner of the block that follows. The
+   * widget is at the block's start position so (0, 0) of the button =
+   * top-left of the block. */
+  top: 4px;
+  left: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+  z-index: 1;
+  white-space: nowrap;
+}
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+/* Reveal the button when the user hovers EITHER the button itself OR the
+ * ascii block immediately following the affordance widget. :has lets us
+ * react to hover on the sibling. */
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:hover .ascii-sketch-edit-btn,
+.doc-editing .dohc-tiptap-editor .ascii-sketch-edit-affordance:has(+ .ascii-sketch-block:hover) .ascii-sketch-edit-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------- pinned sidebar entries ---------- */
+
+.tree-row-pinned { color: var(--accent); }
+.tree-row-pinned:hover { background: var(--bg-panel); }
+.tree-row-pinned .indent { color: var(--accent); }
+
+.tree-footer-hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.tree-user-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.tree-user-dot {
+  color: var(--signal-on);
+  font-size: 9px;
+}
+.tree-user-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-user-signout {
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  text-decoration: none;
+}
+.tree-user-signout:hover {
+  color: var(--accent);
+}
+.surface-render { border-color: var(--rule-strong); color: var(--ink-dim); }
+.surface-command { border-color: var(--rule-strong); color: var(--ink-dim); }
+.surface-overlay { border-color: var(--ink); color: var(--ink); }
+
+/* Command palette is fully Tailwind-styled in CommandPalette.tsx. */
+
+/* ---------- import modal ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.modal {
+  width: 640px;
+  max-width: 92vw;
+  background: var(--bg-elevated);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+.modal-hint { padding: 12px 16px 0; color: var(--ink-dim); font-size: 12.5px; margin: 0; }
+.modal-textarea {
+  flex: 1;
+  margin: 12px 16px;
+  min-height: 280px;
+  border: 1px solid var(--rule);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--bg-panel);
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+.modal-err {
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  background: var(--signal-warn-bg);
+  border: 1px solid var(--signal-warn);
+  color: var(--signal-warn);
+  font-size: 12px;
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--rule);
+}
+.modal-foot button.primary {
+  background: var(--ink);
+  color: var(--bg-elevated);
+  border-color: var(--ink);
+}
+
+/* Theme toggle styling moved to FileTree.tsx ThemeToggleButton. */
+
+/* ---------- Sketch modal (Excalidraw) ---------- */
+
+.sketch-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+.sketch-backdrop-fullscreen {
+  padding: 0;
+}
+
+.sketch-modal {
+  width: min(96vw, 1400px);
+  height: min(94vh, 900px);
+  max-width: 96vw;
+  max-height: 94vh;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width var(--t-fast), height var(--t-fast), border-radius var(--t-fast);
+}
+.sketch-modal.sketch-modal-fullscreen {
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0;
+  border: none;
+}
+.sketch-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sketch-modal-fullscreen-toggle {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.sketch-modal-fullscreen-toggle:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.sketch-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--rule);
+  flex: 0 0 auto;
+}
+.sketch-modal-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+.sketch-modal-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.sketch-modal-close:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+
+/* The retained-mode ASCII sketcher fills the modal body. */
+.ascii-sketcher {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  outline: none;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+/* Stage = relative-positioned container hosting the canvas underneath
+ * plus the floating Excalidraw-style top toolbar and left panel on top. */
+.ascii-sketcher-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.ascii-sketcher-top-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.ascii-sketcher-left-panel {
+  position: absolute;
+  top: 80px;
+  left: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 14px;
+  width: 180px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.ascii-sketcher-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ascii-sketcher-panel-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+.ascii-sketcher-layer-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.ascii-sketcher-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ascii-sketcher-tools,
+.ascii-sketcher-fills {
+  display: flex;
+  gap: 2px;
+}
+.ascii-sketcher-tool,
+.ascii-sketcher-fill,
+.ascii-sketcher-action {
+  width: 32px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.ascii-sketcher-tool:hover,
+.ascii-sketcher-fill:hover,
+.ascii-sketcher-action:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.ascii-sketcher-tool.active,
+.ascii-sketcher-fill.active {
+  color: var(--ink-strong);
+  background: var(--bg-panel);
+  border-color: var(--ink);
+}
+.ascii-sketcher-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* Text-label variant of the action button — auto width + horizontal padding
+ * so labels like "clear all" don't get clipped by the icon-sized 32px box. */
+.ascii-sketcher-action-text {
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+.ascii-sketcher-fill-glyph {
+  font-family: var(--font-mono);
+}
+.ascii-sketcher-size-glyph {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.ascii-sketcher-line-type-icon,
+.ascii-sketcher-line-type-icon svg {
+  display: block;
+}
+.ascii-sketcher-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--rule);
+  margin: 0 4px;
+  flex: 0 0 auto;
+}
+.ascii-sketcher-canvas-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* No scroll — panning is handled by translating the pan-viewport via
+   * CSS transform. The wrap just clips. */
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  width: 100%;
+}
+/* The pan-viewport hosts the canvas + all overlays. CSS transform moves
+ * this one element; the wrap clips whatever runs off the visible area.
+ * Using transform (not scroll) lets pan go in any direction — including
+ * past the top-left origin — with no hard wall. */
+.ascii-sketcher-pan-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.ascii-sketcher-canvas {
+  position: relative;
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--ink);
+  user-select: none;
+  padding: 8px;
+  touch-action: none;
+  /* Faint graph-paper grid, one square per character cell. Aligned to
+   * the content box (rows start there); background-size is set inline
+   * from the measured cell px. Lines are subtle on light + dark. */
+  background-image:
+    linear-gradient(to right, rgba(128, 128, 128, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(128, 128, 128, 0.1) 1px, transparent 1px);
+  background-origin: content-box;
+  background-clip: content-box;
+}
+.ascii-sketcher-canvas.tool-select { cursor: default; }
+/* Inline SVG eraser as the cursor. White fill + dark stroke so it stays
+ * legible on both light and dark canvas backgrounds. Hotspot is the
+ * bottom-left tip of the eraser (where the rubber would touch). */
+.ascii-sketcher-canvas.tool-erase {
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23fff' stroke='%23111' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'><path d='M16.24 3.56L21.19 8.51c.78.78.78 2.05 0 2.83L12 20.53H5.59a2 2 0 0 1-1.41-.58L2.81 18.6a2 2 0 0 1 0-2.83L13.41 5.17a2 2 0 0 1 2.83-1.61z'/><path d='M8.5 9.5l6 6'/><path d='M22 21H7'/></svg>") 3 21, crosshair;
+}
+.ascii-sketcher-canvas:not(.tool-select):not(.tool-erase) { cursor: crosshair; }
+/* Pan mode — space held OR middle-mouse drag OR empty-space drag in
+ * select mode. `space-held` and `panning` are toggled from JS. */
+.ascii-sketcher-canvas.space-held { cursor: grab; }
+.ascii-sketcher-canvas.panning,
+.ascii-sketcher-canvas.space-held.panning { cursor: grabbing; }
+.ascii-sketcher-row {
+  display: block;
+  white-space: pre;
+}
+.ascii-sketcher-cell {
+  width: 1ch;
+  min-width: 1ch;
+  display: inline-block;
+  text-align: center;
+}
+.ascii-sketcher-measure-cell {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  visibility: hidden;
+  pointer-events: none;
+}
+.ascii-sketcher-selection {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed var(--ink);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.04);
+}
+/* snap indicator — highlights the grid cell the cursor will draw into */
+.ascii-sketcher-hover-cell {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+  background: rgba(128, 128, 128, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.4);
+}
+.ascii-sketcher-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--bg);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  z-index: 3;
+  pointer-events: auto;
+  touch-action: none;
+  transition: background var(--t-fast), transform var(--t-fast);
+}
+.ascii-sketcher-handle:hover {
+  background: var(--ink);
+  transform: scale(1.1);
+}
+.ascii-sketcher-handle.handle-tl,
+.ascii-sketcher-handle.handle-br {
+  cursor: nwse-resize;
+}
+.ascii-sketcher-handle.handle-tr,
+.ascii-sketcher-handle.handle-bl {
+  cursor: nesw-resize;
+}
+.ascii-sketcher-handle.handle-point {
+  cursor: move;
+  border-radius: 50%;
+}
+.ascii-sketcher-textinput {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--ink-strong);
+  background: var(--bg-hover);
+  padding: 0 1px;
+  white-space: pre;
+  overflow: visible;
+}
+/* CSS-sized text overlay drawn on top of the grid. The grid is rasterized
+ * with skipText, so this is the sole visual source for text shapes and
+ * shape labels. Font-size is set inline (cellPx × per-size scale) so the
+ * letters grow with the canvas zoom AND with the chosen TextSize. */
+.ascii-sketcher-text-overlay {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  color: var(--ink-strong);
+  white-space: nowrap;
+  overflow: visible;
+  display: flex;
+  align-items: center;
+}
+.ascii-sketcher-text-overlay.align-left {
+  justify-content: flex-start;
+}
+.ascii-sketcher-text-overlay.align-center {
+  justify-content: center;
+  text-align: center;
+}
+.ascii-sketcher-textinput.attached {
+  background: var(--bg-panel);
+}
+.ascii-sketcher-textinput-caret {
+  display: inline-block;
+  width: 1ch;
+  height: 1em;
+  background: var(--ink);
+  animation: ascii-sketcher-blink 1s steps(2) infinite;
+}
+@keyframes ascii-sketcher-blink {
+  50% { opacity: 0; }
+}
+
+.ascii-sketcher-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.ascii-sketcher-spacer { flex: 1; }
+.ascii-sketcher-hint {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  font-family: var(--font-sans);
+}
+.ascii-sketcher-actions button {
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-family: var(--font-sans);
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.ascii-sketcher-actions button:hover {
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+.ascii-sketcher-actions button.primary {
+  color: var(--bg);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.ascii-sketcher-actions button.primary:hover {
+  background: var(--ink-strong);
+  border-color: var(--ink-strong);
+}
+.ascii-sketcher-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ================================================================
+ * dohc inline-atom decorations — applied via className from JSX.
+ * The brand is gradient-free; decorative gradient/glow/animation motifs
+ * have been removed. Color here is a budget, not decoration.
+ * ================================================================ */
+
+/* ── Phase 1b: inline atoms (flag-gated; see inlineAtomPlugin.ts) ──
+   Decoration only — the markdown text is unchanged. Restrained: a
+   quiet pill, color as a budget. value = author-typed truth (accent);
+   liveTotal = a computed projection, non-authoritative (violet, dashed
+   underline to read as "derived, not typed"). */
+.dohc-atom {
+  border-radius: 5px;
+  padding: 0.5px 5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+.dohc-atom-value {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.dohc-atom-liveTotal {
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  text-decoration: underline dashed 1px;
+  text-underline-offset: 3px;
+}
+/* atom-address-v1 §3 — a `{= … }` formula token. Same violet
+   computed-family as a live-total (it IS a computed projection); the
+   resolved value renders right after it via .live-total-value. */
+.dohc-atom-formula {
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  text-decoration: underline dashed 1px;
+  text-underline-offset: 3px;
+}
+/* The resolved value rendered just AFTER a {identifier} live-total
+   or `{= … }` formula in SOURCE mode (cursor inside the range).
+   D4.8h: dropped the `→` prefix per user feedback — the chip is
+   adjacent to the source, the relationship is visually obvious. */
+.live-total-value {
+  margin-left: 6px;
+  padding: 0.5px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.92em;
+  background: var(--color-accent-2-soft);
+  color: var(--color-accent-2);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.live-total-empty {
+  margin-left: 6px;
+  padding: 0.5px 6px;
+  border-radius: 4px;
+  font-size: 0.92em;
+  color: var(--color-ink-faint);
+  border: 1px dashed var(--color-ink-faint);
+  user-select: none;
+}
