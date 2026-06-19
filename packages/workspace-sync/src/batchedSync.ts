@@ -43,7 +43,14 @@ function defaultSummary(
   provenance?: ChangeProvenance,
 ): string {
   const noun = count === 1 ? "file" : "files";
-  const verb = provenance?.source === "import" ? "Imported" : "Edited";
+  const verb =
+    provenance?.source === "import"
+      ? "Imported"
+      : provenance?.source === "history-restore"
+        ? provenance.restoreDirection === "undo"
+          ? "Undid restore for"
+          : "Restored"
+        : "Edited";
   return `${verb} ${count} ${noun}`;
 }
 

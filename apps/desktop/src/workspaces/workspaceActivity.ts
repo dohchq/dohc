@@ -10,8 +10,10 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createChangeSetStore,
   humanSummary,
+  activeLocalOperationMatchesBatch,
   startWorkspaceWatch,
   type ActiveAgentRun,
+  type ActiveLocalOperation,
   type WorkspaceWatchHandle,
 } from "./workspaceWatcher";
 
@@ -24,6 +26,11 @@ interface WatchedWorkspace {
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
+  pendingLocalOperations: PendingLocalOperation[];
+}
+
+interface PendingLocalOperation extends ActiveLocalOperation {
+  expiresAtMs: number;
 }
 
 const HISTORY_FILE_PREVIEW_LIMIT = 4;
@@ -160,12 +167,25 @@ export function createWorkspaceActivity(
         handle: { stop: async () => {}, ready: Promise.resolve() },
         engine: null,
         agentRun: null,
+        pendingLocalOperations: [],
       };
       watched.set(workspace.workspaceId, entry);
       entry.handle = startWorkspaceWatch(workspace, {
         // Read live at settle time so a batch is attributed to whatever run is
         // active then — the slot may flip between batches within one open.
         activeAgentRun: () => entry.agentRun,
+        activeLocalOperation: ({ paths, events }) => {
+          const now = Date.now();
+          entry.pendingLocalOperations = entry.pendingLocalOperations.filter(
+            (operation) => operation.expiresAtMs > now,
+          );
+          const index = entry.pendingLocalOperations.findIndex((operation) =>
+            activeLocalOperationMatchesBatch(operation, { paths, events }),
+          );
+          if (index < 0) return null;
+          const [operation] = entry.pendingLocalOperations.splice(index, 1);
+          return operation ?? null;
+        },
         onRecorded: () => {
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
@@ -309,6 +329,24 @@ export function createWorkspaceActivity(
     entry.agentRun = run;
   }
 
+  function beginLocalOperation(
+    workspaceId: string,
+    operation: ActiveLocalOperation,
+  ): () => void {
+    const entry = watched.get(workspaceId);
+    if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    const pending: PendingLocalOperation = {
+      ...operation,
+      expiresAtMs: Date.now() + 10_000,
+    };
+    entry.pendingLocalOperations.push(pending);
+    return () => {
+      entry.pendingLocalOperations = entry.pendingLocalOperations.filter(
+        (candidate) => candidate !== pending,
+      );
+    };
+  }
+
   // Resolves once every watcher has flushed AND its in-flight records are
   // written — the quit path awaits this so the last save is never dropped.
   async function stopAll(): Promise<void> {
@@ -329,6 +367,7 @@ export function createWorkspaceActivity(
     readChangeSet,
     getStatus,
     setAgentRun,
+    beginLocalOperation,
     stopAll,
   };
 }

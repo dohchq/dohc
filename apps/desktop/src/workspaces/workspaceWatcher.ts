@@ -35,6 +35,60 @@ export interface ActiveAgentRun {
   agentRunId: string;
 }
 
+export interface ActiveLocalOperation {
+  paths: readonly string[];
+  summary: string;
+  provenance: ChangeProvenance;
+  expectedEvents?: readonly ActiveLocalOperationExpectedEvent[];
+}
+
+export interface ActiveLocalOperationExpectedEvent {
+  path: string;
+  operation?: WatcherEvent["operation"];
+  sha256?: string;
+}
+
+export interface ActiveLocalOperationBatch {
+  paths: readonly string[];
+  events: readonly WatcherEvent[];
+}
+
+function expectedEventMatches(
+  expected: NonNullable<ActiveLocalOperation["expectedEvents"]>[number],
+  event: WatcherEvent,
+): boolean {
+  return (
+    expected.path === event.path &&
+    (!expected.operation || expected.operation === event.operation) &&
+    (!expected.sha256 || expected.sha256 === event.sha256)
+  );
+}
+
+export function activeLocalOperationMatchesBatch(
+  operation: ActiveLocalOperation,
+  batch: ActiveLocalOperationBatch,
+): boolean {
+  const operationPaths = new Set(operation.paths);
+  if (
+    batch.paths.length === 0 ||
+    !batch.paths.every((path) => operationPaths.has(path))
+  ) {
+    return false;
+  }
+  if (!operation.expectedEvents) return true;
+  if (batch.events.length !== operation.expectedEvents.length) return false;
+  return (
+    operation.expectedEvents.every((expected) =>
+      batch.events.some((event) => expectedEventMatches(expected, event)),
+    ) &&
+    batch.events.every((event) =>
+      operation.expectedEvents?.some((expected) =>
+        expectedEventMatches(expected, event),
+      ),
+    )
+  );
+}
+
 async function sha256OrUndefined(absolute: string): Promise<string | undefined> {
   try {
     return createHash("sha256").update(await readFile(absolute)).digest("hex");
@@ -213,6 +267,13 @@ export function startWorkspaceWatch(
     // Read at the moment a batch settles: a non-null run attributes the batch
     // to that agent (kind:"agent") with agent-run provenance, else local user.
     activeAgentRun?: () => ActiveAgentRun | null;
+    // Short-lived user operations that need provenance beyond "edited" (for
+    // example restoring a history snapshot). The watcher only consumes one
+    // when every settled user path belongs to the operation and, when supplied,
+    // the concrete filesystem events match its expected result.
+    activeLocalOperation?: (
+      batch: ActiveLocalOperationBatch,
+    ) => ActiveLocalOperation | null;
   } = {},
 ): WorkspaceWatchHandle {
   const store = createChangeSetStore(workspace.rootPath);
@@ -242,17 +303,29 @@ export function startWorkspaceWatch(
     // settles, else to the local user. The agent-run provenance both sets
     // kind:"agent-run" (via batchToChangeSet) and keeps agentRunId locally
     // meaningful (the .dohc/agent-runs.json record AgentIntegration persists).
-    const run = options.activeAgentRun?.() ?? null;
+    const localOperationBatch = { paths: userPaths, events };
+    const localOperationCandidate =
+      options.activeLocalOperation?.(localOperationBatch) ?? null;
+    const localOperation =
+      localOperationCandidate &&
+      activeLocalOperationMatchesBatch(localOperationCandidate, localOperationBatch)
+        ? localOperationCandidate
+        : null;
+    const run = localOperation ? null : (options.activeAgentRun?.() ?? null);
     const author: ChangeAuthor = run
       ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf }
       : LOCAL_USER;
-    const provenance: ChangeProvenance | undefined = run
-      ? { source: "agent-run", agentRunId: run.agentRunId }
-      : undefined;
+    const provenance: ChangeProvenance | undefined =
+      localOperation?.provenance ??
+      (run ? { source: "agent-run", agentRunId: run.agentRunId } : undefined);
     const changeSet = await attachHistorySnapshots(
       workspace.rootPath,
       snapshotCache,
-      batchToChangeSet(batch, { author, ...(provenance ? { provenance } : {}) }),
+      batchToChangeSet(batch, {
+        author,
+        ...(localOperation?.summary ? { summary: localOperation.summary } : {}),
+        ...(provenance ? { provenance } : {}),
+      }),
     );
     await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
     desktopMarks.measureSince("sync-batch", "sync-batch-start");

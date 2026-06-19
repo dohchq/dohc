@@ -3,7 +3,8 @@ export type ChangeSetKind =
   | "agent-run"
   | "import"
   | "sync"
-  | "app-build";
+  | "app-build"
+  | "history-restore";
 
 export type BoundaryCrossing =
   | "public-share"
@@ -37,10 +38,19 @@ export interface FileChangeSnapshot {
 // Where a change came from — a prompt, an import source, an agent run — so
 // history can answer "why did this change?" not just "what changed?".
 export interface ChangeProvenance {
-  source: "user-edit" | "agent-run" | "import" | "sync" | "app-build";
+  source:
+    | "user-edit"
+    | "agent-run"
+    | "import"
+    | "sync"
+    | "app-build"
+    | "history-restore";
   prompt?: string;
   agentRunId?: string;
   importPath?: string;
+  restoreOfChangeSetId?: string;
+  restoreOfPath?: string;
+  restoreDirection?: "restore" | "undo";
 }
 
 export interface ChangeSet {

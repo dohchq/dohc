@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +32,10 @@ const STATE = {
   activeTab: "notes/a.md",
   historyVisible: true,
 };
+
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
 
 describe("ui-state file store", () => {
   it("round-trips state through .dohc/ui-state.json", async () => {
@@ -160,5 +165,107 @@ describe("workspace watcher history snapshots", () => {
       before: { text: "# Notes\nBefore\n", truncated: false },
       after: { text: "# Notes\nAfter\n", truncated: false },
     });
+  });
+
+  it("records matching local restore operations with history provenance", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "notes.md"), "after\n");
+    const workspace = {
+      workspaceId: "ws-history-restore-operation-test",
+      rootPath: root,
+      kind: "personal",
+      mode: "local-first",
+    } as CreatedWorkspace;
+
+    let resolveFirst: (() => void) | null = null;
+    const firstRecord = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const handle = startWorkspaceWatch(workspace, {
+      settleMs: 60,
+      activeLocalOperation: () => ({
+        paths: ["notes.md"],
+        summary: "Restored notes.md from history",
+        provenance: {
+          source: "history-restore",
+          restoreOfChangeSetId: "change-before",
+          restoreOfPath: "notes.md",
+          restoreDirection: "restore",
+        },
+        expectedEvents: [
+          {
+            path: "notes.md",
+            operation: "update",
+            sha256: sha256Text("before\n"),
+          },
+        ],
+      }),
+      onRecorded: () => resolveFirst?.(),
+    });
+    await handle.ready;
+
+    await writeFile(join(root, "notes.md"), "before\n");
+    await firstRecord;
+    await handle.stop();
+
+    const records = await createChangeSetStore(root).list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      kind: "history-restore",
+      summary: "Restored notes.md from history",
+      provenance: {
+        source: "history-restore",
+        restoreOfChangeSetId: "change-before",
+        restoreOfPath: "notes.md",
+        restoreDirection: "restore",
+      },
+    });
+  });
+
+  it("does not consume a local restore operation when the settled event mismatches", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "notes.md"), "after\n");
+    const workspace = {
+      workspaceId: "ws-history-restore-mismatch-test",
+      rootPath: root,
+      kind: "personal",
+      mode: "local-first",
+    } as CreatedWorkspace;
+
+    let resolveFirst: (() => void) | null = null;
+    const firstRecord = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const handle = startWorkspaceWatch(workspace, {
+      settleMs: 60,
+      activeLocalOperation: () => ({
+        paths: ["notes.md"],
+        summary: "Restored notes.md from history",
+        provenance: {
+          source: "history-restore",
+          restoreOfChangeSetId: "change-before",
+          restoreOfPath: "notes.md",
+          restoreDirection: "restore",
+        },
+        expectedEvents: [
+          {
+            path: "notes.md",
+            operation: "update",
+            sha256: sha256Text("before\n"),
+          },
+        ],
+      }),
+      onRecorded: () => resolveFirst?.(),
+    });
+    await handle.ready;
+
+    await writeFile(join(root, "notes.md"), "manual edit\n");
+    await firstRecord;
+    await handle.stop();
+
+    const records = await createChangeSetStore(root).list();
+    expect(records).toHaveLength(1);
+    expect(records[0].kind).toBe("user-edit");
+    expect(records[0].provenance).toBeUndefined();
   });
 });

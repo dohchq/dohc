@@ -180,6 +180,52 @@ describe("humanSummary", () => {
     expect(line).not.toContain("agent");
   });
 
+  it("summarizes history restore provenance as restore or undo", async () => {
+    const restored = addFileChanges(
+      createChangeSet({
+        kind: "history-restore",
+        author: userAuthor,
+        summary: "Restored notes/today.md from history",
+        provenance: {
+          source: "history-restore",
+          restoreOfChangeSetId: "change-1",
+          restoreOfPath: "notes/today.md",
+          restoreDirection: "restore",
+        },
+      }),
+      [{ path: "notes/today.md", operation: "write" }],
+    );
+    const undone = addFileChanges(
+      createChangeSet({
+        kind: "history-restore",
+        author: userAuthor,
+        summary: "Undid restore for notes/today.md",
+        provenance: {
+          source: "history-restore",
+          restoreOfChangeSetId: "change-1",
+          restoreOfPath: "notes/today.md",
+          restoreDirection: "undo",
+        },
+      }),
+      [{ path: "notes/today.md", operation: "write" }],
+    );
+
+    const store = createChangeSetStore(root);
+    const restoredRecord = await store.record(restored, {
+      id: "restore",
+      recordedAtMs: 1000,
+    });
+    const undoneRecord = await store.record(undone, {
+      id: "undo",
+      recordedAtMs: 2000,
+    });
+
+    expect(humanSummary(restoredRecord)).toBe("You restored notes/today.md");
+    expect(humanSummary(undoneRecord)).toBe(
+      "You undid restore for notes/today.md",
+    );
+  });
+
   it("produces different attributed summaries for a user edit vs an agent run", async () => {
     const store = createChangeSetStore(root);
     const userRec = await store.record(userEdit(), {

@@ -109,6 +109,41 @@ describe("batchToChangeSet", () => {
     expect(set.summary).toBe("Imported 18 files");
   });
 
+  it("derives history-restore kind and summary from restore provenance", () => {
+    const provenance: ChangeProvenance = {
+      source: "history-restore",
+      restoreOfChangeSetId: "change-1",
+      restoreOfPath: "notes/today.md",
+      restoreDirection: "restore",
+    };
+    const set = batchToChangeSet(
+      batch([{ path: "notes/today.md", operation: "update", sha256: "a" }]),
+      { author: userAuthor, provenance },
+    );
+
+    expect(set.kind).toBe("history-restore");
+    expect(set.provenance).toEqual(provenance);
+    expect(set.summary).toBe("Restored 1 file");
+  });
+
+  it("derives undo restore summaries from history provenance", () => {
+    const set = batchToChangeSet(
+      batch([{ path: "notes/today.md", operation: "update", sha256: "a" }]),
+      {
+        author: userAuthor,
+        provenance: {
+          source: "history-restore",
+          restoreOfChangeSetId: "change-1",
+          restoreOfPath: "notes/today.md",
+          restoreDirection: "undo",
+        },
+      },
+    );
+
+    expect(set.kind).toBe("history-restore");
+    expect(set.summary).toBe("Undid restore for 1 file");
+  });
+
   it("singularizes the default summary for a single file", () => {
     const set = batchToChangeSet(
       batch([{ path: "a.md", operation: "update", sha256: "a" }]),

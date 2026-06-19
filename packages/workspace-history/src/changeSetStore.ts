@@ -217,6 +217,13 @@ export function humanSummary(record: HistoryRecord): string {
   const noun = count === 1 ? "file" : "files";
   const verb = verbForKind(record.kind);
 
+  if (record.provenance?.source === "history-restore") {
+    const path = record.provenance.restoreOfPath ?? record.files[0]?.path;
+    const action =
+      record.provenance.restoreDirection === "undo" ? "undid restore for" : "restored";
+    return path ? `You ${action} ${path}` : `You ${action} ${count} ${noun}`;
+  }
+
   if (record.author.kind === "agent") {
     // Attribute to the person the agent acted for, e.g. "Maya's agent".
     return `${record.author.onBehalfOf}'s agent ${verb} ${count} ${noun}`;
@@ -239,6 +246,8 @@ export function verbForKind(kind: ChangeSetKind): string {
       return "synced";
     case "app-build":
       return "built";
+    case "history-restore":
+      return "restored";
     case "user-edit":
     default:
       return "edited";

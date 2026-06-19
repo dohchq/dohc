@@ -155,6 +155,7 @@ import {
   writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
+  expectedHistoryRestoreEvent,
   restoreHistoryFileSnapshot,
   undoHistoryFileRestoreSnapshot,
 } from "./workspaces/historyRestore";
@@ -1507,19 +1508,49 @@ function registerIpcHandlers(): void {
     const input = RestoreHistoryFilePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const result = await activity.readChangeSet(workspace, input.changeSetId);
-    const file = result.changeSet?.files.find(
+    const changeSet = result.changeSet;
+    const file = changeSet?.files.find(
       (entry) => entry.path === input.relativePath,
     );
-    if (!file) {
+    if (!changeSet || !file) {
       throw new Error(`Changed file not found in history: ${input.relativePath}`);
     }
-    return RestoreHistoryFileResult.parse(
-      await restoreHistoryFileSnapshot({
-        rootPath: workspace.rootPath,
-        file,
-        trashItem: (p) => shell.trashItem(p),
-      }),
-    );
+    const targetRestoreProvenance =
+      changeSet.provenance?.source === "history-restore"
+        ? changeSet.provenance
+        : null;
+    const restoreDirection =
+      targetRestoreProvenance?.restoreDirection === "restore"
+        ? "undo"
+        : "restore";
+    const restoreOfPath = targetRestoreProvenance?.restoreOfPath ?? file.path;
+    const cancelLocalOperation = activity.beginLocalOperation(workspace.workspaceId, {
+      paths: [file.path],
+      summary:
+        restoreDirection === "undo"
+          ? `Undid restore for ${restoreOfPath}`
+          : `Restored ${restoreOfPath} from history`,
+      provenance: {
+        source: "history-restore",
+        restoreOfChangeSetId:
+          targetRestoreProvenance?.restoreOfChangeSetId ?? input.changeSetId,
+        restoreOfPath,
+        restoreDirection,
+      },
+      expectedEvents: [expectedHistoryRestoreEvent(file, "restore")],
+    });
+    try {
+      return RestoreHistoryFileResult.parse(
+        await restoreHistoryFileSnapshot({
+          rootPath: workspace.rootPath,
+          file,
+          trashItem: (p) => shell.trashItem(p),
+        }),
+      );
+    } catch (error) {
+      cancelLocalOperation();
+      throw error;
+    }
   });
 
   ipcMain.handle(CHANNELS.undoHistoryFileRestore, async (event, payload) => {
@@ -1533,13 +1564,29 @@ function registerIpcHandlers(): void {
     if (!file) {
       throw new Error(`Changed file not found in history: ${input.relativePath}`);
     }
-    return RestoreHistoryFileResult.parse(
-      await undoHistoryFileRestoreSnapshot({
-        rootPath: workspace.rootPath,
-        file,
-        trashItem: (p) => shell.trashItem(p),
-      }),
-    );
+    const cancelLocalOperation = activity.beginLocalOperation(workspace.workspaceId, {
+      paths: [file.path],
+      summary: `Undid restore for ${file.path}`,
+      provenance: {
+        source: "history-restore",
+        restoreOfChangeSetId: input.changeSetId,
+        restoreOfPath: file.path,
+        restoreDirection: "undo",
+      },
+      expectedEvents: [expectedHistoryRestoreEvent(file, "undo")],
+    });
+    try {
+      return RestoreHistoryFileResult.parse(
+        await undoHistoryFileRestoreSnapshot({
+          rootPath: workspace.rootPath,
+          file,
+          trashItem: (p) => shell.trashItem(p),
+        }),
+      );
+    } catch (error) {
+      cancelLocalOperation();
+      throw error;
+    }
   });
 
   ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {

@@ -3,6 +3,7 @@ import type {
   FileChangeSnapshot,
   RestoreHistoryFileResult,
 } from "../ipc/bridgeContract";
+import { createHash } from "node:crypto";
 import { readWorkspaceText, restoreWorkspaceText } from "./workspaceAssets";
 import { deletePath } from "./workspaceFiles";
 
@@ -14,6 +15,12 @@ type CurrentTextState =
 
 type RestoreDirection = "restore" | "undo";
 
+export interface HistoryRestoreExpectedEvent {
+  path: string;
+  operation: "update" | "delete";
+  sha256?: string;
+}
+
 type RestoreAction =
   | {
       kind: "write";
@@ -24,6 +31,10 @@ type RestoreAction =
 
 function snapshotText(snapshot: FileChangeSnapshot | null | undefined) {
   return typeof snapshot?.text === "string" ? snapshot.text : undefined;
+}
+
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 function snapshotMissing(snapshot: FileChangeSnapshot | null | undefined) {
@@ -232,4 +243,14 @@ export async function undoHistoryFileRestoreSnapshot(input: {
   trashItem: (absolutePath: string) => Promise<void>;
 }): Promise<RestoreHistoryFileResult> {
   return applyAction({ ...input, direction: "undo" });
+}
+
+export function expectedHistoryRestoreEvent(
+  file: ChangeSetFileRecord,
+  direction: RestoreDirection,
+): HistoryRestoreExpectedEvent {
+  const action = buildAction(file, direction);
+  return action.kind === "write"
+    ? { path: file.path, operation: "update", sha256: sha256Text(action.text) }
+    : { path: file.path, operation: "delete" };
 }

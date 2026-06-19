@@ -1339,7 +1339,7 @@ describe("history details", () => {
     expect(bridge.restoreHistoryFile).not.toHaveBeenCalled();
 
     const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
-    expect(confirm.getByText(/only restores this one file/i)).toBeTruthy();
+    expect(confirm.getByText(/only changes this one file/i)).toBeTruthy();
     await user.click(confirm.getByTestId("history-diff-confirm-restore"));
 
     await waitFor(() =>
@@ -1365,6 +1365,170 @@ describe("history details", () => {
     ).toBe("Undid the restore.");
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(bridge.listChangeSets).toHaveBeenCalledTimes(3));
+  });
+
+  it("routes Ctrl+Z in the active history diff tab to guarded undo restore", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert-keyboard", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+    await diffPage.findByTestId("history-diff-undo-restore");
+
+    await user.keyboard("{Control>}z{/Control}");
+
+    await waitFor(() =>
+      expect(bridge.undoHistoryFileRestore).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "change-revert-keyboard",
+        relativePath: "notes/today.md",
+      }),
+    );
+    expect(
+      (await diffPage.findByTestId("history-diff-restore-status")).textContent,
+    ).toBe("Undid the restore.");
+  });
+
+  it("offers durable undo when opened on a history restore entry", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("restore-entry", 2200, "You restored notes/today.md")],
+      {
+        "restore-entry": [
+          {
+            path: "notes/today.md",
+            operation: "write",
+            mediaType: "text/markdown",
+            before: { text: "# Today\nAfter\n", truncated: false },
+            after: { text: "# Today\nBefore\n", truncated: false },
+          },
+        ],
+      },
+      {
+        "restore-entry": {
+          provenance: {
+            source: "history-restore",
+            restoreOfChangeSetId: "change-revert",
+            restoreOfPath: "notes/today.md",
+            restoreDirection: "restore",
+          },
+        },
+      },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    expect(diffPage.getByTestId("history-diff-restore-file").textContent).toBe(
+      "Undo restore...",
+    );
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    expect(confirm.getByText(/undo this restore/i)).toBeTruthy();
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+
+    await waitFor(() =>
+      expect(bridge.restoreHistoryFile).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "restore-entry",
+        relativePath: "notes/today.md",
+      }),
+    );
+    expect(bridge.undoHistoryFileRestore).not.toHaveBeenCalled();
+    expect(
+      (await diffPage.findByTestId("history-diff-restore-status")).textContent,
+    ).toBe("Undid the restore. This was recorded in history.");
+  });
+
+  it("routes Cmd+Z in the active history diff tab to guarded undo restore", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert-command-z", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+    await diffPage.findByTestId("history-diff-undo-restore");
+
+    await user.keyboard("{Meta>}z{/Meta}");
+
+    await waitFor(() =>
+      expect(bridge.undoHistoryFileRestore).toHaveBeenCalledWith({
+        workspaceId: "ws-shell-test",
+        changeSetId: "change-revert-command-z",
+        relativePath: "notes/today.md",
+      }),
+    );
+  });
+
+  it("does not route Ctrl+Z to history undo when focus is outside the diff tab", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert-outside", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+    await diffPage.findByTestId("history-diff-undo-restore");
+    bridge.undoHistoryFileRestore.mockClear();
+
+    await user.click(await historyRail.findByTestId("history-change-open"));
+    await user.keyboard("{Control>}z{/Control}");
+
+    expect(bridge.undoHistoryFileRestore).not.toHaveBeenCalled();
+  });
+
+  it("does not route Ctrl+Z to history undo from editable focus", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(null),
+      [changeSet("change-revert-input", 2000, "ice edited notes/today.md")],
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const historyRail = within(await screen.findByTestId("history-timeline"));
+    await user.click(await historyRail.findByTestId("history-change-open"));
+
+    const diffPage = within(await screen.findByTestId("history-diff-page"));
+    await user.click(diffPage.getByTestId("history-diff-restore-file"));
+    const confirm = within(await screen.findByTestId("history-diff-restore-confirm"));
+    await user.click(confirm.getByTestId("history-diff-confirm-restore"));
+    await diffPage.findByTestId("history-diff-undo-restore");
+    bridge.undoHistoryFileRestore.mockClear();
+
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    await user.keyboard("{Control>}z{/Control}");
+    input.remove();
+
+    expect(bridge.undoHistoryFileRestore).not.toHaveBeenCalled();
   });
 
   it("shows a safe refusal when history restore detects a stale live file", async () => {

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ChangeSetFileRecord } from "../ipc/bridgeContract";
 import {
+  expectedHistoryRestoreEvent,
   restoreHistoryFileSnapshot,
   undoHistoryFileRestoreSnapshot,
 } from "./historyRestore";
@@ -44,6 +45,24 @@ describe("history restore", () => {
       undoHistoryFileRestoreSnapshot({ rootPath: root, file, trashItem }),
     ).resolves.toEqual({ restored: "text" });
     expect(await readFile(path, "utf8")).toBe("after\n");
+  });
+
+  it("predicts the filesystem event produced by restore and undo", () => {
+    const file = changedFile("notes/today.md");
+
+    expect(expectedHistoryRestoreEvent(file, "restore")).toMatchObject({
+      path: "notes/today.md",
+      operation: "update",
+    });
+    expect(expectedHistoryRestoreEvent(file, "restore").sha256).toHaveLength(64);
+    expect(expectedHistoryRestoreEvent(file, "undo")).toMatchObject({
+      path: "notes/today.md",
+      operation: "update",
+    });
+    expect(expectedHistoryRestoreEvent(file, "undo").sha256).toHaveLength(64);
+    expect(expectedHistoryRestoreEvent(file, "restore").sha256).not.toBe(
+      expectedHistoryRestoreEvent(file, "undo").sha256,
+    );
   });
 
   it("refuses to restore when the live file changed after the history item", async () => {

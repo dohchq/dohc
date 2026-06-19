@@ -462,6 +462,28 @@ function historyFileCanRestore(file: ChangeSetFileRecord) {
   return snapshotIsMissing(file.before) && afterText;
 }
 
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  ) {
+    return true;
+  }
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return (
+    target.closest(
+      "[contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']",
+    ) !== null
+  );
+}
+
+type ActiveUndoHandler = {
+  run: () => Promise<void>;
+  acceptsEvent: (event: KeyboardEvent) => boolean;
+};
+
 function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
   if (author.kind === "agent") return `${author.agentId} for ${author.onBehalfOf}`;
   return author.userId;
@@ -583,12 +605,14 @@ function HistoryDiffPage({
   tabPath,
   onBeforeRestore,
   onOpenFile,
+  registerActiveUndo,
   onRestored,
 }: {
   workspaceId: string;
   tabPath: string;
   onBeforeRestore: () => Promise<void>;
   onOpenFile: (path: string) => void;
+  registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
 }) {
   const parsed = useMemo(() => parseHistoryDiffTabPath(tabPath), [tabPath]);
@@ -606,6 +630,8 @@ function HistoryDiffPage({
   >({ status: "idle" });
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
   const [restoreCanUndo, setRestoreCanUndo] = useState(false);
+  const pageRef = useRef<HTMLElement | null>(null);
+  const restoreOperationInFlight = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -634,92 +660,24 @@ function HistoryDiffPage({
     setRestoreCanUndo(false);
   }, [tabPath]);
 
-  if (!parsed || state.status === "error") {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
-        Could not load this history diff.
-      </div>
-    );
-  }
-  if (state.status === "loading") {
-    return <PanelLoading label="history diff" />;
-  }
   const file =
-    state.changeSet?.files.find((entry) => entry.path === parsed.filePath) ?? null;
-  if (!state.changeSet || !file) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
-        This changed file is no longer in the history record.
-      </div>
-    );
-  }
-
-  const before = file.before?.text;
-  const after = file.after?.text;
-  const counts = changedLineCounts(before, after);
-  const unavailable =
-    before === undefined && after === undefined
-      ? snapshotUnavailable(file.before) ?? snapshotUnavailable(file.after)
+    state.status === "ready"
+      ? state.changeSet?.files.find((entry) => entry.path === parsed?.filePath) ?? null
       : null;
-  const canOpenFile =
-    restoreState.status === "restored" && restoreState.restored === "deleted"
-      ? false
-      : file.operation !== "delete" ||
-        (restoreState.status === "restored" && restoreState.restored === "text");
-  const canRestore =
-    historyFileCanRestore(file);
+  const canRestore = file ? historyFileCanRestore(file) : false;
   const restoreBusy =
     restoreState.status === "restoring" || restoreState.status === "undoing";
-  const restoreDetail =
-    typeof file.before?.text === "string" && snapshotIsMissing(file.after)
-      ? "The missing file will be recreated from this snapshot."
-      : snapshotIsMissing(file.before) && typeof file.after?.text === "string"
-        ? "The current created file will be moved to trash if it still matches this diff."
-        : "The live file will be returned to the version before this history item.";
-  const diffLines: UnifiedDiffLine[] = unavailable
-    ? [
-        {
-          kind: "note",
-          text: unavailable,
-          oldLineNumber: null,
-          newLineNumber: null,
-        },
-      ]
-    : buildUnifiedDiffLines(before, after, 800);
-  const restoreFile = async () => {
-    if (!parsed || !canRestore || restoreBusy) return;
-    setConfirmRestoreOpen(false);
-    setRestoreState({ status: "restoring" });
-    setRestoreCanUndo(false);
-    try {
-      await onBeforeRestore();
-      const result = await bridge().restoreHistoryFile({
-        workspaceId,
-        changeSetId: parsed.changeSetId,
-        relativePath: file.path,
-      });
-      setRestoreState({
-        status: "restored",
-        restored: result.restored,
-        message:
-          result.restored === "deleted"
-            ? "Moved the created file to trash. Undo restore is available here."
-            : "Restored the previous snapshot. Undo restore is available here.",
-      });
-      setRestoreCanUndo(true);
-      onRestored();
-    } catch (error) {
-      setRestoreState({
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Could not restore this history snapshot.",
-      });
+  const undoRestore = useCallback(async () => {
+    if (
+      !parsed ||
+      !file ||
+      !restoreCanUndo ||
+      restoreBusy ||
+      restoreOperationInFlight.current
+    ) {
+      return;
     }
-  };
-  const undoRestore = async () => {
-    if (!parsed || !restoreCanUndo || restoreBusy) return;
+    restoreOperationInFlight.current = true;
     setRestoreState({ status: "undoing" });
     try {
       await onBeforeRestore();
@@ -746,11 +704,155 @@ function HistoryDiffPage({
             ? error.message
             : "Could not undo this restore.",
       });
+    } finally {
+      restoreOperationInFlight.current = false;
+    }
+  }, [
+    file,
+    onBeforeRestore,
+    onRestored,
+    parsed,
+    restoreBusy,
+    restoreCanUndo,
+    workspaceId,
+  ]);
+
+  useEffect(() => {
+    if (!restoreCanUndo || restoreBusy) {
+      registerActiveUndo(null);
+      return;
+    }
+
+    registerActiveUndo({
+      run: undoRestore,
+      acceptsEvent: (event) => {
+        if (isEditableShortcutTarget(event.target)) return false;
+        const page = pageRef.current;
+        const target = event.target instanceof Element ? event.target : null;
+        const active =
+          document.activeElement instanceof Element ? document.activeElement : null;
+        const focusOwner = target ?? active;
+        if (
+          page &&
+          focusOwner &&
+          focusOwner !== document.body &&
+          focusOwner !== document.documentElement &&
+          !page.contains(focusOwner)
+        ) {
+          return false;
+        }
+
+        return ![...document.querySelectorAll("[role='dialog']")].some(
+          (dialog) => !page?.contains(dialog),
+        );
+      },
+    });
+
+    return () => registerActiveUndo(null);
+  }, [registerActiveUndo, restoreBusy, restoreCanUndo, undoRestore]);
+
+  if (!parsed || state.status === "error") {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-danger">
+        Could not load this history diff.
+      </div>
+    );
+  }
+  if (state.status === "loading") {
+    return <PanelLoading label="history diff" />;
+  }
+  if (!state.changeSet || !file) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle">
+        This changed file is no longer in the history record.
+      </div>
+    );
+  }
+
+  const before = file.before?.text;
+  const after = file.after?.text;
+  const counts = changedLineCounts(before, after);
+  const restoreProvenance =
+    state.changeSet.provenance?.source === "history-restore"
+      ? state.changeSet.provenance
+      : null;
+  const restoreAction =
+    restoreProvenance?.restoreDirection === "restore" ? "undo-restore" : "restore";
+  const restoreActionLabel =
+    restoreAction === "undo-restore" ? "Undo restore" : "Restore";
+  const unavailable =
+    before === undefined && after === undefined
+      ? snapshotUnavailable(file.before) ?? snapshotUnavailable(file.after)
+      : null;
+  const canOpenFile =
+    restoreState.status === "restored" && restoreState.restored === "deleted"
+      ? false
+      : file.operation !== "delete" ||
+        (restoreState.status === "restored" && restoreState.restored === "text");
+  const restoreDetail =
+    restoreAction === "undo-restore"
+      ? "The live file will be returned to the version before this restore."
+      : typeof file.before?.text === "string" && snapshotIsMissing(file.after)
+        ? "The missing file will be recreated from this snapshot."
+        : snapshotIsMissing(file.before) && typeof file.after?.text === "string"
+          ? "The current created file will be moved to trash if it still matches this diff."
+          : "The live file will be returned to the version before this history item.";
+  const diffLines: UnifiedDiffLine[] = unavailable
+    ? [
+        {
+          kind: "note",
+          text: unavailable,
+          oldLineNumber: null,
+          newLineNumber: null,
+        },
+      ]
+    : buildUnifiedDiffLines(before, after, 800);
+  const restoreFile = async () => {
+    if (!parsed || !canRestore || restoreBusy || restoreOperationInFlight.current) {
+      return;
+    }
+    restoreOperationInFlight.current = true;
+    setConfirmRestoreOpen(false);
+    setRestoreState({ status: "restoring" });
+    setRestoreCanUndo(false);
+    try {
+      await onBeforeRestore();
+      const result = await bridge().restoreHistoryFile({
+        workspaceId,
+        changeSetId: parsed.changeSetId,
+        relativePath: file.path,
+      });
+      const message =
+        restoreAction === "undo-restore"
+          ? result.restored === "deleted"
+            ? "Undid the restore by moving the file to trash. This was recorded in history."
+            : "Undid the restore. This was recorded in history."
+          : result.restored === "deleted"
+            ? "Moved the created file to trash. Undo restore is available here."
+            : "Restored the previous snapshot. Undo restore is available here.";
+      setRestoreState({
+        status: "restored",
+        restored: result.restored,
+        message,
+      });
+      setRestoreCanUndo(true);
+      onRestored();
+    } catch (error) {
+      setRestoreState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not restore this history snapshot.",
+      });
+    } finally {
+      restoreOperationInFlight.current = false;
     }
   };
 
   return (
     <section
+      ref={pageRef}
       data-testid="history-diff-page"
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
@@ -807,15 +909,21 @@ function HistoryDiffPage({
           disabled={!canRestore || restoreBusy || restoreCanUndo}
           title={
             restoreCanUndo
-              ? "This snapshot is already restored"
+              ? "This history action has already been applied"
               : canRestore
-                ? "Restore this file to its state before this change"
+                ? restoreAction === "undo-restore"
+                  ? "Undo this restore by returning the file to its prior state"
+                  : "Restore this file to its state before this change"
                 : "Only small text history snapshots can be restored safely"
           }
           className="flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Undo2 size={12} aria-hidden />
-          {restoreState.status === "restoring" ? "Restoring..." : "Restore..."}
+          {restoreState.status === "restoring"
+            ? restoreAction === "undo-restore"
+              ? "Undoing..."
+              : "Restoring..."
+            : `${restoreActionLabel}...`}
         </button>
         {restoreCanUndo ? (
           <button
@@ -928,10 +1036,12 @@ function HistoryDiffPage({
               id="history-diff-restore-confirm-title"
               className="m-0 text-sm font-semibold text-ink"
             >
-              Restore previous snapshot?
+              {restoreAction === "undo-restore"
+                ? "Undo this restore?"
+                : "Restore previous snapshot?"}
             </h3>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              This only restores this one file and records a new history entry.
+              This only changes this one file and records a new history entry.
               dohc will stop if the live file no longer matches this diff.
             </p>
             <p className="mb-0 mt-2 text-xs leading-5 text-muted">
@@ -954,7 +1064,7 @@ function HistoryDiffPage({
                 onClick={() => void restoreFile()}
                 className="h-8 cursor-pointer rounded bg-ink px-3 text-xs font-semibold text-bg hover:opacity-90"
               >
-                Restore snapshot
+                {restoreAction === "undo-restore" ? "Undo restore" : "Restore snapshot"}
               </button>
             </div>
           </div>
@@ -1361,6 +1471,10 @@ export function DesktopWorkspaceShell(props: {
   );
   const flushActiveDraft = useCallback(async () => {
     await draftFlushRef.current?.();
+  }, []);
+  const activeUndoRef = useRef<ActiveUndoHandler | null>(null);
+  const registerActiveUndo = useCallback((handler: ActiveUndoHandler | null) => {
+    activeUndoRef.current = handler;
   }, []);
 
   const workspaceId = props.workspace.workspaceId;
@@ -1853,6 +1967,18 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
+      if (
+        event.key.toLowerCase() === "z" &&
+        !event.shiftKey &&
+        !event.altKey
+      ) {
+        const activeUndo = activeUndoRef.current;
+        if (activeUndo?.acceptsEvent(event)) {
+          event.preventDefault();
+          void activeUndo.run();
+        }
+        return;
+      }
       // The application menu DISPLAYS these accelerators but does not
       // register them (registerAccelerator: false) — this handler is the one
       // owner of the keystrokes. Shift+P is "P" (uppercase) in event.key.
@@ -2204,6 +2330,7 @@ export function DesktopWorkspaceShell(props: {
                 tabPath={wb.activeTab ?? ""}
                 onBeforeRestore={flushActiveDraft}
                 onOpenFile={openFile}
+                registerActiveUndo={registerActiveUndo}
                 onRestored={refreshAfterHistoryRestore}
               />
             ) : wb.activeTab ? (

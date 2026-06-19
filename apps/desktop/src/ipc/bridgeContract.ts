@@ -392,7 +392,14 @@ export type BoundaryCrossingRecord = z.infer<typeof BoundaryCrossingSchema>;
 export const ChangeSetRecord = z.object({
   id: z.string().min(1),
   recordedAtMs: z.number(),
-  kind: z.enum(["user-edit", "agent-run", "import", "sync", "app-build"]),
+  kind: z.enum([
+    "user-edit",
+    "agent-run",
+    "import",
+    "sync",
+    "app-build",
+    "history-restore",
+  ]),
   author: ChangeAuthorSchema,
   summary: z.string(),
   humanSummary: z.string(),
@@ -429,10 +436,20 @@ export const ChangeSetDetailRecord = ChangeSetRecord.extend({
   files: z.array(ChangeSetFileRecord),
   provenance: z
     .object({
-      source: z.enum(["user-edit", "agent-run", "import", "sync", "app-build"]),
+      source: z.enum([
+        "user-edit",
+        "agent-run",
+        "import",
+        "sync",
+        "app-build",
+        "history-restore",
+      ]),
       prompt: z.string().optional(),
       agentRunId: z.string().optional(),
       importPath: z.string().optional(),
+      restoreOfChangeSetId: z.string().optional(),
+      restoreOfPath: z.string().optional(),
+      restoreDirection: z.enum(["restore", "undo"]).optional(),
     })
     .optional(),
   boundaryCrossings: z.array(BoundaryCrossingSchema),
