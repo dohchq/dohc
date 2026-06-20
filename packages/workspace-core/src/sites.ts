@@ -555,14 +555,9 @@ export function packageManagerFromFiles(
 }
 
 export function detectSitePackageManager(
-  paths: readonly string[],
-  root: string,
+  names: ReadonlySet<string>,
   pkg?: PackageJson,
 ): SitePackageManager | undefined {
-  const names = new Set<string>();
-  for (const path of paths) {
-    if (parentPath(path) === root) names.add(fileName(path));
-  }
   return packageManagerFromFiles(names, pkg);
 }
 
@@ -648,12 +643,17 @@ function sourceBody(source: string | WorkspaceSiteSource): string | undefined {
 export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]): WorkspaceSite[] {
   const candidates = new Map<string, Candidate>();
   const normalizedPaths: string[] = [];
+  const fileNamesByRoot = new Map<string, Set<string>>();
   const normalizedSources: Array<{ path: string; body?: string }> = [];
 
   for (const source of sources) {
     const path = normalizeWorkspacePath(sourcePath(source));
     if (!path || hasIgnoredSiteSegment(path)) continue;
     normalizedPaths.push(path);
+    const root = parentPath(path);
+    const names = fileNamesByRoot.get(root) ?? new Set<string>();
+    names.add(fileName(path));
+    fileNamesByRoot.set(root, names);
     const body = sourceBody(source);
     normalizedSources.push({ path, ...(body !== undefined ? { body } : {}) });
   }
@@ -717,8 +717,7 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
 
   for (const candidate of candidates.values()) {
     candidate.packageManager = detectSitePackageManager(
-      normalizedPaths,
-      candidate.root,
+      fileNamesByRoot.get(candidate.root) ?? new Set<string>(),
       candidate.packageJson,
     );
     if (candidate.dohcConfig?.build?.output) candidate.hasBuildOutputSignal = true;

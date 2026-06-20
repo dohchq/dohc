@@ -162,12 +162,12 @@ describe("buildSite", () => {
       siteRoot: "site",
       command: process.execPath,
       args: ["-e", "setInterval(() => {}, 1000)"],
-      timeoutMs: 25,
+      timeoutMs: 100,
     });
 
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBeNull();
-    expect(result.logs.some((entry) => entry.text.includes("Build timed out after 25ms."))).toBe(
+    expect(result.logs.some((entry) => entry.text.includes("Build timed out after 100ms."))).toBe(
       true,
     );
   });

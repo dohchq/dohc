@@ -7,8 +7,13 @@ export function normalizeLoopbackHostname(hostname: string): string {
 }
 
 export function isLoopbackHostname(hostname: string): boolean {
-  const normalized = normalizeLoopbackHostname(hostname);
-  return normalized === "localhost" || normalized === "::1" || isIpv4Loopback(normalized);
+  const normalized = normalizeLoopbackHostname(hostname).toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    isIpv4Loopback(normalized) ||
+    (normalized.startsWith("::ffff:") && isIpv4Loopback(normalized.slice("::ffff:".length)))
+  );
 }
 
 function isIpv4Loopback(hostname: string): boolean {

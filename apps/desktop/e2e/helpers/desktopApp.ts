@@ -59,6 +59,8 @@ function launchEnv(input: {
     ...input.env,
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string");
   const env = Object.fromEntries(entries);
+  // Force Electron to launch the desktop UI instead of inheriting a parent test
+  // env that makes it behave like plain Node.js.
   delete env.ELECTRON_RUN_AS_NODE;
   return env;
 }

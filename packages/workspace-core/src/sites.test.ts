@@ -270,9 +270,9 @@ describe("parseDohcSiteConfig", () => {
 describe("package helpers", () => {
   it("detects package managers from lockfiles before package metadata", () => {
     expect(
-      detectSitePackageManager(["site/yarn.lock"], "site", { packageManager: "npm@10.0.0" }),
+      detectSitePackageManager(new Set(["yarn.lock"]), { packageManager: "npm@10.0.0" }),
     ).toBe("yarn");
-    expect(detectSitePackageManager([], "site", { packageManager: "pnpm@10.0.0" })).toBe("pnpm");
+    expect(detectSitePackageManager(new Set(), { packageManager: "pnpm@10.0.0" })).toBe("pnpm");
   });
 
   it("infers site scripts and lets dohc.json commands override package defaults", () => {
