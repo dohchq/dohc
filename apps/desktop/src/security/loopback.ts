@@ -12,7 +12,23 @@ export function isLoopbackHostname(hostname: string): boolean {
     normalized === "localhost" ||
     normalized === "::1" ||
     isIpv4Loopback(normalized) ||
-    (normalized.startsWith("::ffff:") && isIpv4Loopback(normalized.slice("::ffff:".length)))
+    (normalized.startsWith("::ffff:") && isIpv4MappedLoopback(normalized.slice("::ffff:".length)))
+  );
+}
+
+function isIpv4MappedLoopback(suffix: string): boolean {
+  if (isIpv4Loopback(suffix)) return true;
+  const hextets = suffix.split(":");
+  if (
+    hextets.length !== 2 ||
+    !hextets.every((part) => /^[0-9a-f]{1,4}$/i.test(part))
+  ) {
+    return false;
+  }
+  const high = Number.parseInt(hextets[0], 16);
+  const low = Number.parseInt(hextets[1], 16);
+  return isIpv4Loopback(
+    [high >> 8, high & 0xff, low >> 8, low & 0xff].join("."),
   );
 }
 

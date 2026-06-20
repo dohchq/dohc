@@ -265,6 +265,57 @@ describe("changeSetStore persistence", () => {
       consoleError.mockRestore();
     }
   });
+
+  it("rejects unknown persisted boundary crossings even when the kind is valid", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "bad-boundary",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt boundary",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-bad-boundary.json"),
+      `${JSON.stringify(
+        {
+          id: "bad-boundary",
+          recordedAtMs: 1000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Corrupt boundary",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: ["also-made-up"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("bad-boundary")).rejects.toThrow(/unknown history boundary crossing/i);
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record bad-boundary:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });
 
 describe("humanSummary", () => {

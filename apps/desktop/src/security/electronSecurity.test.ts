@@ -104,6 +104,7 @@ describe("loopback hostname validation", () => {
     expect(isLoopbackHostname("127.255.255.255")).toBe(true);
     expect(isLoopbackHostname("[::ffff:127.0.0.1]")).toBe(true);
     expect(isLoopbackHostname("::ffff:127.0.0.1")).toBe(true);
+    expect(isLoopbackHostname("::ffff:7f00:1")).toBe(true);
 
     expect(isLoopbackHostname("127.0.0.1.evil.com")).toBe(false);
     expect(isLoopbackHostname("::ffff:127.0.0.1.evil.com")).toBe(false);

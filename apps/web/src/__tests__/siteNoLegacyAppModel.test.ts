@@ -1,10 +1,15 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const ROOT = process.cwd()
-const REPO = join(ROOT, '..', '..')
+const TEST_DIR = dirname(fileURLToPath(import.meta.url))
+const ROOT = join(TEST_DIR, '..', '..')
+const REPO = join(TEST_DIR, '..', '..', '..', '..')
 
+// docs/superpowers is intentionally outside this active-source scan. It holds
+// migration plans and execution logs that must be able to discuss old app-model
+// terms without making shipping code fail the gate.
 const SCAN_ROOTS = [
   join(REPO, 'apps'),
   join(REPO, 'packages'),

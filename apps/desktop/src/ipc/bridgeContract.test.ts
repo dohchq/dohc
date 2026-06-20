@@ -163,6 +163,14 @@ describe("site IPC contract", () => {
       StartSitePreviewResult.safeParse({
         siteRoot: "site",
         mode: "static",
+        url: "http://[::ffff:127.0.0.1]:43210/",
+        logs: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
         url: "http://127.0.0.1/",
         logs: [],
       }).success,
