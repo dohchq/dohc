@@ -367,9 +367,11 @@ export function SitePreviewPage(props: {
                   <ExternalLink size={12} aria-hidden />
                 </button>
               </div>
-              {/* allow-same-origin + allow-scripts is required for ordinary
-                  localhost app previews. Message handling is still constrained
-                  to the active loopback preview origin before SDK requests run. */}
+              {/* allow-same-origin keeps localhost previews on their loopback
+                  origin; without it sandboxed frames send "null" origins and
+                  the SDK bridge cannot enforce exact active-preview matching.
+                  Main registers loopback preview origins, SDK reads compare
+                  event.origin to the active URL, and the frame uses no-referrer. */}
               <iframe
                 ref={iframeRef}
                 key={preview.url}

@@ -37,7 +37,8 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 // `shared-with-me` is intentionally visible: accepted shares materialize there
 // for read/preview by local sites. Publishing or re-sharing those files remains
-// gated by the site-publish-required approval mechanism.
+// gated by publishSite in packages/mcp/src/tools.ts and by the
+// site-publish-required handling in packages/workspace-fs/src/syncClient.ts.
 const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
 
 // True iff `child` is the same as or nested under `parent` (both real paths).

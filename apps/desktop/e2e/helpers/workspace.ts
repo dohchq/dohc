@@ -64,6 +64,7 @@ function assertSafeRelativePath(path: string): void {
   if (
     !path ||
     isAbsolute(path) ||
+    isAbsolute(decoded) ||
     path.includes("\0") ||
     path.includes("\\") ||
     decoded.includes("\0") ||

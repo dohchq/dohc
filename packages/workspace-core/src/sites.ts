@@ -475,16 +475,31 @@ export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
   return false;
 }
 
-const WEB_SCRIPT_PATTERNS = WEB_SCRIPT_TOKENS.map((token) => {
-  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[\\s:/@._-])${escaped}($|[\\s:/@._-])`);
-});
+const WEB_SCRIPT_BOUNDARY_CHARS = " \t\n\r:/@._-";
+
+function isWebScriptBoundary(char: string | undefined): boolean {
+  return char === undefined || WEB_SCRIPT_BOUNDARY_CHARS.includes(char);
+}
+
+function includesWebScriptToken(haystack: string, token: string): boolean {
+  let index = haystack.indexOf(token);
+  while (index !== -1) {
+    if (
+      isWebScriptBoundary(haystack[index - 1]) &&
+      isWebScriptBoundary(haystack[index + token.length])
+    ) {
+      return true;
+    }
+    index = haystack.indexOf(token, index + token.length);
+  }
+  return false;
+}
 
 function hasWebScript(pkg: PackageJson | undefined): boolean {
   const scripts = packageScripts(pkg);
   return Object.entries(scripts).some(([name, value]) => {
     const haystack = `${name} ${value}`.toLowerCase();
-    return WEB_SCRIPT_PATTERNS.some((pattern) => pattern.test(haystack));
+    return WEB_SCRIPT_TOKENS.some((token) => includesWebScriptToken(haystack, token));
   });
 }
 
