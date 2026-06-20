@@ -108,9 +108,12 @@ export async function launchDesktopApp(input: {
     close: async () => {
       const abort = new AbortController();
       try {
-        if (app.windows().length === 0) return;
         await Promise.race([
-          app.close().finally(() => abort.abort()),
+          (async () => {
+            if (app.windows().length > 0) {
+              await app.close();
+            }
+          })().finally(() => abort.abort()),
           forceCloseAfterTimeout(processHandle, abort.signal),
         ]);
       } finally {
@@ -165,9 +168,9 @@ async function forceCloseAfterTimeout(
   });
   if (signal.aborted) return;
   if (!processIsRunning(processHandle)) return;
-  processHandle.kill("SIGTERM");
+  if (processIsRunning(processHandle)) processHandle.kill("SIGTERM");
   if (!(await waitForProcessExit(processHandle, 1_000)) && processIsRunning(processHandle)) {
-    processHandle.kill("SIGKILL");
+    if (processIsRunning(processHandle)) processHandle.kill("SIGKILL");
     await waitForProcessExit(processHandle, 1_000);
   }
 }

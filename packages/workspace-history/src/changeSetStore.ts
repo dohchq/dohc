@@ -76,6 +76,37 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
+function normalizeKind(kind: unknown): ChangeSetKind {
+  return kind === "app-build" ? "site-build" : (kind as ChangeSetKind);
+}
+
+function normalizeBoundaryCrossing(value: unknown): BoundaryCrossing {
+  return value === "app-trust" ? "site-publish" : (value as BoundaryCrossing);
+}
+
+function normalizeHistoryRecord(record: HistoryRecord): HistoryRecord {
+  return {
+    ...record,
+    kind: normalizeKind(record.kind),
+    boundaryCrossings: record.boundaryCrossings.map(normalizeBoundaryCrossing),
+    ...(record.provenance
+      ? {
+          provenance: {
+            ...record.provenance,
+            source: normalizeKind(record.provenance.source),
+          },
+        }
+      : {}),
+  };
+}
+
+function normalizeIndexEntry(entry: IndexEntry): IndexEntry {
+  return {
+    ...entry,
+    kind: normalizeKind(entry.kind),
+  };
+}
+
 // Atomic write: serialize to a temp file then rename over the target so a
 // concurrent reader never sees a half-written index, and a crash can't leave
 // a truncated file.
@@ -91,7 +122,7 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
   const indexPath = join(historyDir, "index.json");
 
   async function readIndex(): Promise<IndexEntry[]> {
-    return (await readJson<IndexEntry[]>(indexPath)) ?? [];
+    return ((await readJson<IndexEntry[]>(indexPath)) ?? []).map(normalizeIndexEntry);
   }
 
   // Serialize record() within this store instance: the index is a
@@ -169,7 +200,9 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
           const record = await readJson<HistoryRecord>(
             join(historyDir, recordFileName(item.entry)),
           );
-          if (record) records.push({ index: item.index, record });
+          if (record) {
+            records.push({ index: item.index, record: normalizeHistoryRecord(record) });
+          }
         } catch (error) {
           console.error(
             `[workspace-history] skipping unreadable record ${item.entry.id}:`,
@@ -198,7 +231,7 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
           const record = await readJson<HistoryRecord>(
             join(historyDir, recordFileName(entry)),
           );
-          if (record) records.push(record);
+          if (record) records.push(normalizeHistoryRecord(record));
         } catch (error) {
           console.error(
             `[workspace-history] skipping unreadable record ${entry.id}:`,
@@ -214,7 +247,8 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       const index = await readIndex();
       const entry = index.find((e) => e.id === id);
       if (!entry) return null;
-      return readJson<HistoryRecord>(join(historyDir, recordFileName(entry)));
+      const record = await readJson<HistoryRecord>(join(historyDir, recordFileName(entry)));
+      return record ? normalizeHistoryRecord(record) : null;
     },
   };
 }

@@ -37,12 +37,21 @@ export async function createTempWorkspace(): Promise<TempWorkspace> {
 }
 
 function assertSafeRelativePath(path: string): void {
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    throw new Error(`Unsafe workspace-relative test path: ${path}`);
+  }
   if (
     !path ||
     isAbsolute(path) ||
     path.includes("\0") ||
     path.includes("\\") ||
-    path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    decoded.includes("\0") ||
+    decoded.includes("\\") ||
+    path.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+    decoded.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
   ) {
     throw new Error(`Unsafe workspace-relative test path: ${path}`);
   }
@@ -65,6 +74,7 @@ function cssString(value: string): string {
     .replace(/\\/g, "\\\\")
     .replace(/\n/g, "\\a ")
     .replace(/\r/g, "\\d ")
+    .replace(/\t/g, "\\9 ")
     .replace(/\f/g, "\\c ")
     .replace(/"/g, '\\"')}"`;
 }

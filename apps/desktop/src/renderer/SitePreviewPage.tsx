@@ -78,6 +78,17 @@ function sdkErrorResponse(
   };
 }
 
+function isSafeWorkspaceRelativePath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    !path.includes("\0") &&
+    !path.includes("\\") &&
+    !path.startsWith("/") &&
+    !/^[A-Za-z]:/.test(path) &&
+    path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
+  );
+}
+
 function siteFrameUrl(url: string): string {
   const framed = new URL(url);
   framed.searchParams.set("dohcHostOrigin", window.location.origin);
@@ -149,11 +160,11 @@ export function SitePreviewPage(props: {
           };
         } else if (request.method === "files.read") {
           const params = request.params as { path?: unknown } | undefined;
-          if (typeof params?.path !== "string" || params.path.length === 0) {
+          if (typeof params?.path !== "string" || !isSafeWorkspaceRelativePath(params.path)) {
             response = sdkErrorResponse(
               request.id,
               "DOHC_BAD_REQUEST",
-              "files.read requires a non-empty path.",
+              "files.read requires a safe workspace-relative path.",
             );
           } else {
             const result = await bridge().readWorkspaceText({
@@ -187,7 +198,7 @@ export function SitePreviewPage(props: {
 
     window.addEventListener("message", handleSdkRequest);
     return () => window.removeEventListener("message", handleSdkRequest);
-  }, [props.workspaceId]);
+  }, [props.workspaceId, props.siteRoot]);
 
   const modes = useMemo(
     () => (load.status === "ready" ? availableModes(load.site) : []),

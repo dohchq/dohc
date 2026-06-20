@@ -5,7 +5,7 @@ import {
   FileCode2,
   Globe2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { siteTabPath } from "./workbenchState";
@@ -44,10 +44,6 @@ function staticSiteFromFiles(files: WorkspaceFileEntry[]): SitePackageInfo[] {
 }
 
 function useSites(workspaceId: string, files: WorkspaceFileEntry[], refreshKey = 0): SitesLoadState {
-  const fallbackKey = useMemo(
-    () => files.map((file) => file.path).join("\0"),
-    [files],
-  );
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
 
   useEffect(() => {
@@ -69,7 +65,7 @@ function useSites(workspaceId: string, files: WorkspaceFileEntry[], refreshKey =
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, refreshKey, fallbackKey]);
+  }, [workspaceId, refreshKey]);
 
   if (state.status === "loading" && files.length > 0) {
     return { status: "ready", sites: staticSiteFromFiles(files) };

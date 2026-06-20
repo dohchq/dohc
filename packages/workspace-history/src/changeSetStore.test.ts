@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -161,6 +161,58 @@ describe("changeSetStore persistence", () => {
 
     const got = await store.get("x");
     expect(got!.boundaryCrossings).toContain("external-export");
+  });
+
+  it("normalizes legacy app history names while reading persisted records", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "legacy",
+            recordedAtMs: 1000,
+            kind: "app-build",
+            author: userAuthor,
+            summary: "Built legacy app",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-legacy.json"),
+      `${JSON.stringify(
+        {
+          id: "legacy",
+          recordedAtMs: 1000,
+          kind: "app-build",
+          author: userAuthor,
+          summary: "Built legacy app",
+          files: [{ path: "sites/ledger/index.html", operation: "write" }],
+          provenance: { source: "app-build" },
+          boundaryCrossings: ["app-trust"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    await expect(store.get("legacy")).resolves.toMatchObject({
+      kind: "site-build",
+      provenance: { source: "site-build" },
+      boundaryCrossings: ["site-publish"],
+    });
+    await expect(store.list()).resolves.toMatchObject([
+      {
+        kind: "site-build",
+        boundaryCrossings: ["site-publish"],
+      },
+    ]);
   });
 });
 

@@ -82,7 +82,7 @@ function isLoopbackHttpUrl(targetUrl: string): boolean {
     const url = new URL(targetUrl);
     return (
       url.protocol === "http:" &&
-      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1")
+      ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)
     );
   } catch {
     return false;

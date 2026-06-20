@@ -1,4 +1,11 @@
 export const DOHC_SDK_PROTOCOL = "dohc:sdk:v1";
+export const DohcSdkErrorCodes = {
+  hostUnavailable: "DOHC_HOST_UNAVAILABLE",
+  hostTimeout: "DOHC_HOST_TIMEOUT",
+  badResponse: "DOHC_BAD_RESPONSE",
+} as const;
+export type DohcSdkErrorCode =
+  (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
 
 export type DohcCapabilityMap = {
   files: { read: boolean; write: boolean };
@@ -40,9 +47,9 @@ export type CreateDohcClientOptions = {
 };
 
 export class DohcSdkError extends Error {
-  readonly code: string;
+  readonly code: DohcSdkErrorCode;
 
-  constructor(code: string, message: string) {
+  constructor(code: DohcSdkErrorCode, message: string) {
     super(message);
     this.name = "DohcSdkError";
     this.code = code;
@@ -116,7 +123,7 @@ export function createPostMessageTransport(
       if (!currentWindow) {
         return Promise.reject(
           new DohcSdkError(
-            "DOHC_HOST_UNAVAILABLE",
+            DohcSdkErrorCodes.hostUnavailable,
             "dohc SDK is not running in a browser window.",
           ),
         );
@@ -126,7 +133,7 @@ export function createPostMessageTransport(
       if (!targetOrigin) {
         return Promise.reject(
           new DohcSdkError(
-            "DOHC_HOST_UNAVAILABLE",
+            DohcSdkErrorCodes.hostUnavailable,
             "No dohc host origin is available for this site.",
           ),
         );
@@ -141,7 +148,7 @@ export function createPostMessageTransport(
       if (!targetWindow) {
         return Promise.reject(
           new DohcSdkError(
-            "DOHC_HOST_UNAVAILABLE",
+            DohcSdkErrorCodes.hostUnavailable,
             "No dohc host window is available for this site.",
           ),
         );
@@ -160,7 +167,7 @@ export function createPostMessageTransport(
           windowRef.removeEventListener("message", onMessage);
           reject(
             new DohcSdkError(
-              "DOHC_HOST_TIMEOUT",
+              DohcSdkErrorCodes.hostTimeout,
               `dohc host did not answer ${method}.`,
             ),
           );
@@ -236,10 +243,10 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     capabilities: async () => {
       const result = await transport.request("capabilities");
       if (!isCapabilityMap(result)) {
-        throw new DohcSdkError(
-          "DOHC_BAD_RESPONSE",
-          "dohc host returned an invalid capabilities response.",
-        );
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.badResponse,
+            "dohc host returned an invalid capabilities response.",
+          );
       }
       return result;
     },
@@ -250,7 +257,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         };
         if (typeof result?.text !== "string") {
           throw new DohcSdkError(
-            "DOHC_BAD_RESPONSE",
+            DohcSdkErrorCodes.badResponse,
             "dohc host returned an invalid file read response.",
           );
         }
@@ -263,13 +270,13 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
           const result = await transport.request("collections.list", { name });
           if (!Array.isArray(result)) {
             throw new DohcSdkError(
-              "DOHC_BAD_RESPONSE",
+              DohcSdkErrorCodes.badResponse,
               "dohc host returned an invalid collection response.",
             );
           }
           if (!result.every(isPlainRecord)) {
             throw new DohcSdkError(
-              "DOHC_BAD_RESPONSE",
+              DohcSdkErrorCodes.badResponse,
               "dohc host returned invalid collection item shapes.",
             );
           }

@@ -7,7 +7,120 @@ import {
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
+  type WorkspaceFileWrite,
 } from "./helpers/workspace";
+
+function siteWorkspaceFixtures(viteBin: string, sdkEntry: string): WorkspaceFileWrite[] {
+  return [
+    {
+      path: "notes/today.md",
+      contents: "Local data from dohc",
+    },
+    {
+      path: "sdk-site/package.json",
+      contents: JSON.stringify(
+        {
+          private: true,
+          type: "module",
+          scripts: {
+            dev: `node ${JSON.stringify(viteBin)}`,
+          },
+          dependencies: {
+            "@dohc/sdk": "workspace:*",
+          },
+          devDependencies: {
+            vite: "0.0.0",
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "sdk-site/vite.config.mjs",
+      contents: `export default { resolve: { alias: { "@dohc/sdk": ${JSON.stringify(sdkEntry)} } } };\n`,
+    },
+    {
+      path: "sdk-site/dohc.json",
+      contents: JSON.stringify(
+        {
+          type: "site",
+          title: "SDK Site",
+          preview: {
+            mode: "dev",
+            command: `node ${JSON.stringify(viteBin)} --host 127.0.0.1`,
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "sdk-site/index.html",
+      contents:
+        '<!doctype html><html><body><h1>SDK Site</h1><p id="sdk-output">Loading</p><script type="module" src="/src/main.ts"></script></body></html>',
+    },
+    {
+      path: "sdk-site/src/main.ts",
+      contents: [
+        'import { dohc } from "@dohc/sdk";',
+        'const output = document.getElementById("sdk-output");',
+        "try {",
+        '  const text = await dohc.files.read("notes/today.md");',
+        '  if (output) output.textContent = `SDK says: ${text}`;',
+        "} catch (error) {",
+        '  if (output) output.textContent = `SDK error: ${error instanceof Error ? error.message : String(error)}`;',
+        "}",
+      ].join("\n"),
+    },
+    {
+      path: "static-report/index.html",
+      contents: "<!doctype html><html><body><h1>Static Report</h1></body></html>",
+    },
+    {
+      path: "agent-site/package.json",
+      contents: JSON.stringify(
+        {
+          private: true,
+          type: "module",
+          scripts: {
+            dev: "node dev-server.mjs",
+            build: "node build.mjs",
+          },
+          devDependencies: { vite: "0.0.0" },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "agent-site/dev-server.mjs",
+      contents: [
+        "import http from 'node:http';",
+        "const html = '<!doctype html><html><body><h1>Dev Preview</h1></body></html>';",
+        "const server = http.createServer((_req, res) => {",
+        "  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });",
+        "  res.end(html);",
+        "});",
+        "server.listen(0, '127.0.0.1', () => {",
+        "  const address = server.address();",
+        "  if (!address || typeof address === 'string') throw new Error('server did not bind');",
+        "  const { port } = address;",
+        "  console.log(`Local: http://127.0.0.1:${port}/`);",
+        "});",
+      ].join("\n"),
+    },
+    {
+      path: "agent-site/build.mjs",
+      contents: [
+        "import { mkdir, writeFile } from 'node:fs/promises';",
+        "await mkdir('dist', { recursive: true });",
+        "await writeFile('dist/index.html', '<!doctype html><html><body><h1>Built Preview</h1></body></html>');",
+        "console.log('built');",
+      ].join("\n"),
+    },
+  ];
+}
 
 test("@sites detects agent-created websites and previews static, dev, and build modes", async () => {
   const temp = await createTempWorkspace();
@@ -22,115 +135,7 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
 
-    await writeWorkspaceFiles(temp, [
-      {
-        path: "notes/today.md",
-        contents: "Local data from dohc",
-      },
-      {
-        path: "sdk-site/package.json",
-        contents: JSON.stringify(
-          {
-            private: true,
-            type: "module",
-            scripts: {
-              dev: `node ${JSON.stringify(viteBin)}`,
-            },
-            dependencies: {
-              "@dohc/sdk": "workspace:*",
-            },
-            devDependencies: {
-              vite: "0.0.0",
-            },
-          },
-          null,
-          2,
-        ),
-      },
-      {
-        path: "sdk-site/vite.config.mjs",
-        contents: `export default { resolve: { alias: { "@dohc/sdk": ${JSON.stringify(sdkEntry)} } } };\n`,
-      },
-      {
-        path: "sdk-site/dohc.json",
-        contents: JSON.stringify(
-          {
-            type: "site",
-            title: "SDK Site",
-            preview: {
-              mode: "dev",
-              command: `node ${JSON.stringify(viteBin)} --host 127.0.0.1`,
-            },
-          },
-          null,
-          2,
-        ),
-      },
-      {
-        path: "sdk-site/index.html",
-        contents:
-          '<!doctype html><html><body><h1>SDK Site</h1><p id="sdk-output">Loading</p><script type="module" src="/src/main.ts"></script></body></html>',
-      },
-      {
-        path: "sdk-site/src/main.ts",
-        contents: [
-          'import { dohc } from "@dohc/sdk";',
-          'const output = document.getElementById("sdk-output");',
-          "try {",
-          '  const text = await dohc.files.read("notes/today.md");',
-          '  if (output) output.textContent = `SDK says: ${text}`;',
-          "} catch (error) {",
-          '  if (output) output.textContent = `SDK error: ${error instanceof Error ? error.message : String(error)}`;',
-          "}",
-        ].join("\n"),
-      },
-      {
-        path: "static-report/index.html",
-        contents: "<!doctype html><html><body><h1>Static Report</h1></body></html>",
-      },
-      {
-        path: "agent-site/package.json",
-        contents: JSON.stringify(
-          {
-            private: true,
-            type: "module",
-            scripts: {
-              dev: "node dev-server.mjs",
-              build: "node build.mjs",
-            },
-            devDependencies: { vite: "0.0.0" },
-          },
-          null,
-          2,
-        ),
-      },
-      {
-        path: "agent-site/dev-server.mjs",
-        contents: [
-          "import http from 'node:http';",
-          "const html = '<!doctype html><html><body><h1>Dev Preview</h1></body></html>';",
-          "const server = http.createServer((_req, res) => {",
-          "  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });",
-          "  res.end(html);",
-          "});",
-          "server.listen(0, '127.0.0.1', () => {",
-          "  const address = server.address();",
-          "  if (!address || typeof address === 'string') throw new Error('server did not bind');",
-          "  const { port } = address;",
-          "  console.log(`Local: http://127.0.0.1:${port}/`);",
-          "});",
-        ].join("\n"),
-      },
-      {
-        path: "agent-site/build.mjs",
-        contents: [
-          "import { mkdir, writeFile } from 'node:fs/promises';",
-          "await mkdir('dist', { recursive: true });",
-          "await writeFile('dist/index.html', '<!doctype html><html><body><h1>Built Preview</h1></body></html>');",
-          "console.log('built');",
-        ].join("\n"),
-      },
-    ]);
+    await writeWorkspaceFiles(temp, siteWorkspaceFixtures(viteBin, sdkEntry));
 
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "agent-site/package.json");
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "sdk-site/package.json");

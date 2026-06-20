@@ -564,7 +564,7 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
   const port = Number(url.port);
   if (
     url.protocol !== "http:" ||
-    (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") ||
+    !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) ||
     url.username ||
     url.password ||
     !Number.isInteger(port) ||
