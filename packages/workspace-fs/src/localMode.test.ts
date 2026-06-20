@@ -21,9 +21,16 @@ function workspaceFile(path: string, revision: string): WorkspaceFile {
 }
 
 function memoryBackend() {
-  const text = new Map<string, { body: string; revision: string; locked?: boolean }>([
+  const text = new Map<
+    string,
+    { body: string; revision: string; locked?: boolean; trustRequired?: boolean }
+  >([
     ["notes/day.md", { body: "# Day\n", revision: "rev-1" }],
     ["shared/locked.md", { body: "# Locked\n", revision: "rev-locked", locked: true }],
+    [
+      "sites/review/app.tsx",
+      { body: "export default {}\n", revision: "rev-site", trustRequired: true },
+    ],
   ]);
   const backend: WorkspaceBackend = {
     async listFiles() {
@@ -44,6 +51,11 @@ function memoryBackend() {
     async writeAtom(_actor, input) {
       const row = text.get(input.path);
       if (!row) throw new Error("not found");
+      if (row.trustRequired) {
+        const error = new Error("site publish approval required before writing site source");
+        (error as Error & { code?: string }).code = "site-publish-required";
+        throw error;
+      }
       if (row.revision !== input.expectedRevision) throw new Error("stale revision");
       row.body = input.body;
       row.revision = `rev-${Date.now()}`;
@@ -52,7 +64,13 @@ function memoryBackend() {
     async saveAsset() {
       throw new Error("not used");
     },
-    async updateAsset() {
+    async updateAsset(_actor, input) {
+      const row = text.get(input.path);
+      if (row?.trustRequired) {
+        const error = new Error("site publish approval required before writing site source");
+        (error as Error & { code?: string }).code = "site-publish-required";
+        throw error;
+      }
       throw new Error("not used");
     },
     async renameFile() {
@@ -139,6 +157,38 @@ describe("local filesystem sync mode", () => {
       });
       expect(fixture.text.has("shared/locked.md")).toBe(true);
       await expect(readFile(join(dir, "shared/locked.md"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it("surfaces site publish approval requirements for local site edits", async () => {
+    await withTempDir(async (dir) => {
+      const fixture = memoryBackend();
+      const handler = createWorkspaceApiHandler({
+        backend: fixture.backend,
+        resolveActor: async (_request, workspaceId) => ({ ...actor, workspaceId }),
+      });
+      const client = createLocalSyncClient({
+        rootDir: dir,
+        workspaceId: actor.workspaceId,
+        baseUrl: "http://workspace-api.test",
+        fetch: async (input, init) =>
+          handler(new Request(input instanceof Request ? input.url : String(input), init)),
+      });
+
+      await client.materialize();
+      await writeFile(join(dir, "sites/review/app.tsx"), "export default { changed: true }\n");
+
+      await expect(client.syncLocalChanges()).resolves.toMatchObject({
+        applied: 0,
+        conflicts: [],
+        approvalRequests: [
+          expect.objectContaining({
+            path: "sites/review/app.tsx",
+            reason: expect.stringMatching(/site publish/i),
+          }),
+        ],
+      });
+      expect(fixture.text.get("sites/review/app.tsx")?.body).toBe("export default {}\n");
     });
   });
 });

@@ -262,6 +262,12 @@ function errorResponse(error: unknown) {
   );
 }
 
+const APPROVAL_ERROR_REASONS = new Set([
+  "approval required",
+  "approval-required",
+  "site-publish-required",
+]);
+
 function statusForError(message: string, code?: string) {
   switch (normalizeErrorCode(code)) {
     case "unauthorized":
@@ -280,13 +286,7 @@ function statusForError(message: string, code?: string) {
     case "invalid_manifest":
       return 400;
   }
-  if (
-    code === "approval-required" ||
-    code === "site-publish-required" ||
-    message === "approval required" ||
-    message === "approval-required" ||
-    message === "site-publish-required"
-  ) {
+  if ((code && APPROVAL_ERROR_REASONS.has(code)) || APPROVAL_ERROR_REASONS.has(message)) {
     return 403;
   }
   if (/stale|revision|conflict/i.test(message)) return 409;

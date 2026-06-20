@@ -1232,6 +1232,7 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
+// Keep in sync with packages/sdk/package.json whenever @dohc/sdk changes.
 const DOHC_SDK_VERSION = "^0.1.0";
 const LEGACY_APP_IMPORT_RE =
   /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;
@@ -1643,9 +1644,12 @@ p {
           private: true,
           type: "module",
           scripts: {
+            // Scaffolded dev previews use python3's static server; common on
+            // macOS/Linux, but not guaranteed on every system.
             dev: "python3 -m http.server 4173 --bind 127.0.0.1",
             build:
               "node -e \"(async()=>{const fs=await import('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);})()\"",
+            // Built preview uses the same python3 dependency as dev.
             preview: "python3 -m http.server 4173 --bind 127.0.0.1 -d dist",
           },
         },
