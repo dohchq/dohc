@@ -1237,9 +1237,37 @@ const LEGACY_APP_IMPORT_RE =
 function stripSourceComments(body: string): string {
   let output = "";
   let quote: "'" | "\"" | "`" | null = null;
+  let regexLiteral = false;
+  let regexCharClass = false;
   let escaped = false;
   let lineComment = false;
   let blockComment = false;
+  let currentWord = "";
+  let previousToken = "";
+
+  function rememberToken(char: string) {
+    if (/[\w$]/.test(char)) {
+      currentWord += char;
+      return;
+    }
+    if (currentWord) {
+      previousToken = currentWord;
+      currentWord = "";
+    }
+    if (!/\s/.test(char)) previousToken = char;
+  }
+
+  function canStartRegexLiteral() {
+    if (currentWord) {
+      previousToken = currentWord;
+      currentWord = "";
+    }
+    return (
+      previousToken === "" ||
+      ["return", "throw", "case", "yield", "await", "typeof", "void", "delete"].includes(previousToken) ||
+      "([{,;:=!?&|+-*~^<>".includes(previousToken)
+    );
+  }
 
   for (let index = 0; index < body.length; index += 1) {
     const char = body[index] ?? "";
@@ -1262,6 +1290,23 @@ function stripSourceComments(body: string): string {
       continue;
     }
 
+    if (regexLiteral) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (regexCharClass) {
+        if (char === "]") regexCharClass = false;
+      } else if (char === "[") {
+        regexCharClass = true;
+      } else if (char === "/") {
+        regexLiteral = false;
+        previousToken = "literal";
+      }
+      continue;
+    }
+
     if (quote) {
       output += char;
       if (escaped) {
@@ -1270,6 +1315,7 @@ function stripSourceComments(body: string): string {
         escaped = true;
       } else if (char === quote) {
         quote = null;
+        previousToken = "literal";
       }
       continue;
     }
@@ -1292,7 +1338,15 @@ function stripSourceComments(body: string): string {
       continue;
     }
 
+    if (char === "/" && canStartRegexLiteral()) {
+      regexLiteral = true;
+      regexCharClass = false;
+      output += char;
+      continue;
+    }
+
     output += char;
+    rememberToken(char);
   }
 
   return output;
