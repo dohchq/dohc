@@ -1,3 +1,5 @@
+import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain";
+
 export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;
 }
@@ -44,13 +46,18 @@ export function isReservedPath(relativePath: string): boolean {
 // file tree and never recorded into history. One predicate shared by the
 // tree walker and the watcher so the two views of "what exists" cannot drift.
 const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
-
 export function hasIgnoredSegment(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
     .some((segment) => IGNORED_SEGMENTS.has(stripWindowsAliasSuffix(segment)));
+}
+
+export function isSiteSourcePath(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  return segments.includes("sites") && SITE_SOURCE_CODE_EXT_RE.test(normalized);
 }
 
 export type WritePathValidation =

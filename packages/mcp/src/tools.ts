@@ -1551,8 +1551,8 @@ export async function createSite(
     {
       path: relativeJoin(root.normalized, "styles.css"),
       content: `:root {
-  color: #211f1b;
-  background: #f7f1e8;
+  color: #151515;
+  background: #f7f6f1;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -1569,7 +1569,7 @@ main {
 
 .eyebrow {
   margin: 0 0 12px;
-  color: #6d645a;
+  color: #66635d;
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0;

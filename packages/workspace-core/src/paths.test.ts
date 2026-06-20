@@ -8,6 +8,7 @@ import {
   validateWorkspaceRootChoice,
   validateUserWritePath,
   hasIgnoredSegment,
+  isSiteSourcePath,
 } from "./paths";
 
 describe("workspace roots", () => {
@@ -223,6 +224,24 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
     expect(hasIgnoredSegment(".dohcrc")).toBe(false);
     expect(hasIgnoredSegment("notes/git/readme.md")).toBe(false);
     expect(hasIgnoredSegment("my-node_modules-notes.md")).toBe(false);
+  });
+});
+
+describe("isSiteSourcePath", () => {
+  it("treats source files under a sites path segment as site source", () => {
+    expect(isSiteSourcePath("sites/workspace/src/App.tsx")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/index.html")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/index.htm")).toBe(true);
+    expect(isSiteSourcePath("finance/sites/ledger/styles.css")).toBe(true);
+    expect(isSiteSourcePath("finance\\sites\\ledger\\config.json")).toBe(true);
+  });
+
+  it("does not classify arbitrary source-looking files or lookalike folders", () => {
+    expect(isSiteSourcePath("src/App.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/config.json")).toBe(false);
+    expect(isSiteSourcePath("notes/my-sites/idea.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/workspace-sites/app.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/sites-backup/index.html")).toBe(false);
   });
 });
 

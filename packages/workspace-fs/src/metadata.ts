@@ -2,12 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
-  SITE_SOURCE_CODE_EXT_RE,
   type AssetKind,
   type AtomKind,
   type WorkspaceFile,
 } from "@dohc/workspace-contracts";
-import { mediaTypeForPath as coreMediaTypeForPath } from "@dohc/workspace-core";
+import {
+  isSiteSourcePath,
+  mediaTypeForPath as coreMediaTypeForPath,
+} from "@dohc/workspace-core";
 
 export type WorkspaceBackendMode = "postgres";
 
@@ -134,14 +136,6 @@ export function mediaTypeForPath(path: string): string {
   return (
     coreMediaTypeForPath(path) ??
     (isSiteSourcePath(path) ? "text/plain" : "application/octet-stream")
-  );
-}
-
-function isSiteSourcePath(path: string) {
-  const normalized = path.replaceAll("\\", "/");
-  return (
-    normalized.split("/").includes("sites") &&
-    SITE_SOURCE_CODE_EXT_RE.test(normalized)
   );
 }
 
