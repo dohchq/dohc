@@ -454,7 +454,7 @@ describe('semantic apply API', () => {
     ).resolves.toContain('Created body.')
   })
 
-  it('creates website source atoms as plain-text Y.Docs so source code survives', async () => {
+  it('creates site source atoms as plain-text Y.Docs so source code survives', async () => {
     const { handler, store } = makeHandler()
     const source = [
       'import React from "react"',

@@ -1,6 +1,7 @@
 export declare const DOHC_SDK_PROTOCOL = "dohc:sdk:v1";
 export declare const DohcSdkErrorCodes: {
     readonly hostUnavailable: "DOHC_HOST_UNAVAILABLE";
+    readonly hostMissingOrigin: "DOHC_HOST_MISSING_ORIGIN";
     readonly hostTimeout: "DOHC_HOST_TIMEOUT";
     readonly badResponse: "DOHC_BAD_RESPONSE";
 };

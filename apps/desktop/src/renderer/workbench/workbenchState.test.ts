@@ -104,6 +104,11 @@ describe("tabs", () => {
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseSiteTabPath(path)).toBe("clients/acme website");
     expect(parseSiteTabPath("dohc://site/")).toBeNull();
+    expect(parseSiteTabPath(null)).toBeNull();
+    expect(parseSiteTabPath("not-a-site-path")).toBeNull();
+
+    const reservedRoot = "clients/site/nested?view=main#summary";
+    expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
   });
 
   it("activateTab only activates an OPEN tab", () => {

@@ -1,6 +1,7 @@
 export const DOHC_SDK_PROTOCOL = "dohc:sdk:v1";
 export const DohcSdkErrorCodes = {
     hostUnavailable: "DOHC_HOST_UNAVAILABLE",
+    hostMissingOrigin: "DOHC_HOST_MISSING_ORIGIN",
     hostTimeout: "DOHC_HOST_TIMEOUT",
     badResponse: "DOHC_BAD_RESPONSE",
 };
@@ -77,7 +78,7 @@ export function createPostMessageTransport(options = {}) {
             const windowRef = currentWindow;
             const targetOrigin = options.targetOrigin ?? targetOriginFromLocation(windowRef);
             if (!targetOrigin) {
-                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "No dohc host origin is available for this site."));
+                return Promise.reject(new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this site."));
             }
             const resolvedTargetOrigin = targetOrigin;
             const targetWindow = options.targetWindow ??

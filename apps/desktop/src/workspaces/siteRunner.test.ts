@@ -155,6 +155,23 @@ describe("buildSite", () => {
     expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
   });
 
+  it("reports build timeouts with the resolved timeout", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const result = await buildSite({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      timeoutMs: 25,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBeNull();
+    expect(result.logs.some((entry) => entry.text.includes("Build timed out after 25ms."))).toBe(
+      true,
+    );
+  });
+
   it("detects configured and conventional build outputs", async () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));

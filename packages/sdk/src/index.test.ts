@@ -222,6 +222,26 @@ describe("@dohc/sdk", () => {
     await expect(pending).resolves.toBe("file-host");
   });
 
+  it("rejects postMessage requests when no dohc host origin is available", async () => {
+    const harness = createWindowHarness();
+    const currentWindow = {
+      ...harness.currentWindow,
+      location: { href: "http://site.test/" },
+    } as unknown as Window;
+    const transport = createPostMessageTransport({
+      currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    await expect(transport.request("capabilities")).rejects.toMatchObject({
+      code: "DOHC_HOST_MISSING_ORIGIN",
+      message: "No dohc host origin is available for this site.",
+    });
+    expect(harness.messages).toEqual([]);
+    expect(harness.listeners.size).toBe(0);
+  });
+
   it("validates client method responses", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({

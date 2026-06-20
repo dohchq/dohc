@@ -37,6 +37,8 @@ export interface BuildSiteResult {
 export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
 const MAX_LOG_ENTRIES = 500;
+const BUILD_TIMEOUT_MS = 120000;
+const BUILD_HARD_KILL_GRACE_MS = 5000;
 const DEV_URL_RE = /(https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?)/i;
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -381,6 +383,7 @@ export async function buildSite(input: {
 }): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
+  const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
   await mkdir(cwd, { recursive: true });
   const child = spawn(input.command, args, {
@@ -390,21 +393,35 @@ export async function buildSite(input: {
   });
 
   const exitCode = await new Promise<number | null>((resolve) => {
-    const timer = setTimeout(() => {
-      pushLog(logs, "system", `Build timed out after ${input.timeoutMs ?? 120000}ms.`);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let hardKillTimer: ReturnType<typeof setTimeout> | null = null;
+    function finish(code: number | null) {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
+      resolve(code);
+    }
+
+    timer = setTimeout(() => {
+      pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
       child.kill("SIGTERM");
-      resolve(null);
-    }, input.timeoutMs ?? 120000);
+      hardKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+        finish(null);
+      }, BUILD_HARD_KILL_GRACE_MS);
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => pushLog(logs, "stdout", String(chunk)));
     child.stderr.on("data", (chunk) => pushLog(logs, "stderr", String(chunk)));
     child.once("error", (error) => {
-      clearTimeout(timer);
       pushLog(logs, "system", error.message);
-      resolve(null);
+      finish(null);
     });
     child.once("exit", (code) => {
-      clearTimeout(timer);
-      resolve(code);
+      finish(code);
     });
   });
 
