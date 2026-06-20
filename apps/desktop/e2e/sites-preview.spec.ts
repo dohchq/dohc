@@ -310,9 +310,7 @@ test("@sites SDK respects workspace boundaries", async () => {
     await desktop.page.getByTestId("site-preview-dev").click();
 
     const output = desktop.page.frameLocator('[data-testid="site-preview-frame"]').locator("#sdk-output");
-    await expect(output).toContainText(
-      /SDK denied: .*?(outside workspace|escapes workspace|not allowed|permission denied)/i,
-    );
+    await expect(output).toContainText(/SDK denied: .*?escapes workspace/i);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -335,14 +333,13 @@ test("@sites surfaces dev and build preview failures", async () => {
     await brokenRow.click();
 
     await desktop.page.getByTestId("site-preview-dev").click();
-    await expect(desktop.page.getByTestId("site-preview-error")).toContainText(
-      "exited before it was ready",
-    );
+    const previewError = desktop.page.getByTestId("site-preview-error");
+    await expect(previewError).toContainText("exited before it was ready");
+    await expect(previewError).toContainText("code=2");
 
     await desktop.page.getByTestId("site-preview-build").click();
-    await expect(desktop.page.getByTestId("site-preview-error")).toContainText(
-      "Site build failed",
-    );
+    await expect(previewError).toContainText("Site build failed");
+    await expect(previewError).toContainText("build failed intentionally");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

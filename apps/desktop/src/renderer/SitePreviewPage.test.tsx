@@ -59,6 +59,7 @@ describe("SitePreviewPage", () => {
     expect(sandbox).toContain("allow-scripts");
     expect(sandbox).not.toContain("allow-popups");
     expect(sandbox).not.toContain("allow-modals");
+    expect(sandbox).not.toContain("allow-top-navigation");
     const frameUrl = new URL(frame.getAttribute("src") ?? "");
     expect(frameUrl.origin).toBe("http://127.0.0.1:49152");
     expect(frameUrl.searchParams.get("dohcHostOrigin")).toBe(window.location.origin);
@@ -161,6 +162,10 @@ describe("SitePreviewPage", () => {
       "notes/../../../secret.md",
       "notes\\secret.md",
       "C:\\Users\\ice\\secret.md",
+      "%2e%2e%2fsecret.md",
+      "secret.md\0",
+      "notes/..\\secret.md",
+      "%252e%252e%252fsecret.md",
     ];
 
     for (const [index, path] of unsafePaths.entries()) {

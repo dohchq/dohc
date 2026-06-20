@@ -86,18 +86,28 @@ function sdkErrorResponse(
 }
 
 function isSafeWorkspaceRelativePath(path: string): boolean {
+  let decoded = path;
+  try {
+    for (;;) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    }
+  } catch {
+    return false;
+  }
+  const safe = (value: string) =>
+    value.length > 0 &&
+    !value.includes("\0") &&
+    !value.includes("\\") &&
+    !value.startsWith("/") &&
+    !/^[A-Za-z]:/.test(value) &&
+    value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
   // `files.read` is intentionally workspace-relative, not site-root-relative:
   // dohc sites are workspace-native and may read files such as notes/today.md.
   // Main-process IPC still enforces the registered workspace boundary and
   // filesystem containment before any bytes are read.
-  return (
-    path.length > 0 &&
-    !path.includes("\0") &&
-    !path.includes("\\") &&
-    !path.startsWith("/") &&
-    !/^[A-Za-z]:/.test(path) &&
-    path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
-  );
+  return safe(path) && safe(decoded);
 }
 
 function siteFrameUrl(url: string): string {

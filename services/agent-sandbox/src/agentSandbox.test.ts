@@ -29,7 +29,7 @@ function memoryBackend() {
   const text = new Map<string, { body: string; revision: string; locked?: boolean; trustRequired?: boolean }>([
     ["notes/day.md", { body: "# Day\n", revision: "rev-1" }],
     ["shared/locked.md", { body: "# Locked\n", revision: "rev-locked", locked: true }],
-    ["apps/tracker.js", { body: "export default {}\n", revision: "rev-app", trustRequired: true }],
+    ["sites/tracker.js", { body: "export default {}\n", revision: "rev-site", trustRequired: true }],
   ]);
   const assets = new Map<string, { bytes: Uint8Array; mediaType: string; revision: string }>();
   const backend: WorkspaceBackend = {
@@ -178,21 +178,22 @@ describe("agent workspace shell sandbox", () => {
           [
             "const fs = require('fs')",
             "fs.writeFileSync('shared/locked.md', '# Locked\\nchanged\\n')",
-            "fs.writeFileSync('apps/tracker.js', 'export default {changed:true}\\n')",
+            "fs.writeFileSync('sites/tracker.js', 'export default {changed:true}\\n')",
           ].join(";"),
         ],
       });
       const diff = await captureWorkspaceShellDiff(session);
-      await expect(applyWorkspaceShellDiff(session, { backend: fixture.backend, actor, diff }))
-        .resolves.toMatchObject({
-          applied: 0,
-          approvalRequests: [
-            expect.objectContaining({ path: "apps/tracker.js", reason: expect.stringMatching(/site publish/i) }),
-            expect.objectContaining({ path: "shared/locked.md", reason: expect.stringMatching(/approval|lock/i) }),
-          ],
-        });
+      const result = await applyWorkspaceShellDiff(session, { backend: fixture.backend, actor, diff });
+      expect(result).toMatchObject({ applied: 0 });
+      expect(result.approvalRequests).toHaveLength(2);
+      expect(result.approvalRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: "sites/tracker.js", reason: expect.stringMatching(/site publish/i) }),
+          expect.objectContaining({ path: "shared/locked.md", reason: expect.stringMatching(/approval|lock/i) }),
+        ]),
+      );
       expect(fixture.text.get("shared/locked.md")?.body).toBe("# Locked\n");
-      expect(fixture.text.get("apps/tracker.js")?.body).toBe("export default {}\n");
+      expect(fixture.text.get("sites/tracker.js")?.body).toBe("export default {}\n");
     });
   });
 

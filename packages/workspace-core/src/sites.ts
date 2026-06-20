@@ -1,5 +1,3 @@
-import { hasIgnoredSegment } from "./paths";
-
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
 export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
@@ -146,11 +144,14 @@ const CONFIG_PATTERNS = [
 const IGNORED_SITE_SEGMENTS = new Set([
   ".bun",
   ".cache",
+  ".dohc",
+  ".git",
   ".npm",
   ".parcel-cache",
   ".pnpm-store",
   ".turbo",
   ".yarn",
+  "node_modules",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -197,11 +198,14 @@ function sitePath(root: string, child: string): string {
   return root === "" ? child : `${root}/${child}`;
 }
 
+function stripSiteIgnoredAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/, "");
+}
+
 function hasIgnoredSiteSegment(path: string): boolean {
-  if (hasIgnoredSegment(path)) return true;
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
   return segments.some((segment, index) => {
-    if (IGNORED_SITE_SEGMENTS.has(segment)) return true;
+    if (IGNORED_SITE_SEGMENTS.has(stripSiteIgnoredAliasSuffix(segment))) return true;
     return segment === ".next" && segments[index + 1] === "cache";
   });
 }
