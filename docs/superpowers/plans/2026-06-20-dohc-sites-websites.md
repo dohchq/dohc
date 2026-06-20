@@ -759,6 +759,11 @@ Tasks:
 
 - Add loopback static file server.
 - Serve site roots with path containment.
+- Add unit tests for path containment, encoded traversal, dot segments,
+  symlink escapes where applicable, and attempts to fetch files outside the
+  selected static root.
+- Add Electron E2E coverage proving the loopback static preview server refuses
+  directory traversal while still serving normal relative assets.
 - Add preview frame.
 - Add reload.
 - Add diagnostics for missing entries.
@@ -766,6 +771,8 @@ Tasks:
 E2E gate:
 
 - Static site with CSS and JS renders and updates after disk edit.
+- Static preview cannot read sibling workspace files or parent directories via
+  URL traversal.
 
 ### Phase 4: dev-server runner
 
@@ -812,11 +819,17 @@ Tasks:
 - Remove `@dohc/app`.
 - Add local dohc service bridge for site previews.
 - Add minimal file/collection read.
+- Before shipping collection reads, explicitly review the authorization scope
+  against `docs/security/authz-boundaries.md`; collection reads must be bounded
+  by workspace permissions and the preview bridge, not by caller-provided
+  identity.
 - Add SDK docs and examples.
 
 E2E gate:
 
 - SDK site reads local dohc data.
+- Collection-read SDK tests document the allowed workspace scope and reject
+  out-of-scope data before collection reads are enabled for users.
 - Plain site still works without SDK.
 - Guard test fails on `@dohc/app` in active generated guidance.
 
@@ -860,14 +873,19 @@ Tasks:
 
 - Build publish file graph.
 - Detect shared-with-me inclusion.
+- Detect references to or bundled copies of `shared-with-me` data and show an
+  explicit warning that publishing crosses a cloud/share boundary.
 - Detect SDK use.
 - Detect static versus live publish mode.
 - Add review UI.
-- Add approval step.
+- Add approval step that must be accepted before publishing any site artifact
+  that includes local private data or accepted shared files.
 
 E2E gate:
 
 - Publish flow warns for shared/local private data and requires approval.
+- Publish flow blocks shared-with-me data until the user explicitly approves the
+  boundary crossing.
 
 ### Phase 10: hardening and removal
 
