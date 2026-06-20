@@ -129,6 +129,11 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
 }
 
 export function discoverSiteRoots(
+  rootPathOrFiles: WorkspaceFileEntry[],
+  folders?: string[],
+): string[];
+export function discoverSiteRoots(rootPathOrFiles: string): Promise<string[]>;
+export function discoverSiteRoots(
   rootPathOrFiles: string | WorkspaceFileEntry[],
   folders: string[] = [],
 ): Promise<string[]> | string[] {

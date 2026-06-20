@@ -569,6 +569,12 @@ const SiteLogEntry = z.object({
 });
 export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
 
+function normalizeLoopbackHostname(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
 const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) => {
   let url: URL;
   try {
@@ -581,7 +587,9 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
   const hasExplicitPort = url.port !== "";
   if (
     url.protocol !== "http:" ||
-    !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) ||
+    !["127.0.0.1", "localhost", "::1"].includes(
+      normalizeLoopbackHostname(url.hostname),
+    ) ||
     url.username ||
     url.password ||
     (hasExplicitPort && (!Number.isInteger(port) || port < 1 || port > 65535))

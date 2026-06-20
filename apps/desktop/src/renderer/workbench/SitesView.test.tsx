@@ -73,6 +73,19 @@ describe("SitesView", () => {
     expect(screen.getByTestId("sites-count").textContent).toContain("1 site");
   });
 
+  it("uses a default title for empty-root static detection", async () => {
+    bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[file("/index.html")]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("Workspace Site")).toBeTruthy());
+  });
+
   it("renders the IPC error state", async () => {
     bridgeMock.listSites.mockRejectedValueOnce(new Error("Site scan failed"));
     render(

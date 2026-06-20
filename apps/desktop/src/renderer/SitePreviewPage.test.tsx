@@ -74,6 +74,20 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("keeps the preview visible and reports stop failures", async () => {
+    bridgeMock.stopSitePreview.mockRejectedValueOnce(new Error("Could not stop dev server"));
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-stop"));
+
+    expect(await screen.findByText("Could not stop dev server")).toBeTruthy();
+    expect(screen.getByTestId("site-preview-frame")).toBeTruthy();
+  });
+
   it("answers SDK file reads from the active preview iframe", async () => {
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);

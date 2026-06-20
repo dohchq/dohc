@@ -1249,7 +1249,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function relativeJoin(prefix: string, name: string): string {
-  return prefix ? `${prefix}/${name}` : name;
+  return prefix && prefix !== "." ? `${prefix}/${name}` : name;
 }
 
 function hasLegacyAppsSegment(path: string): boolean {
@@ -1907,7 +1907,19 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   if (recordable) return recordable;
 
   const packagePath = join(root.absolute, "package.json");
-  const existing = await readJson<PackageJson>(packagePath);
+  const existingBytes = await readFile(packagePath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  const expectedPackageSha256 = sha256(existingBytes ?? new Uint8Array());
+  let existing: PackageJson | null = null;
+  if (existingBytes) {
+    try {
+      existing = JSON.parse(existingBytes.toString("utf8")) as PackageJson;
+    } catch {
+      existing = null;
+    }
+  }
   const packageJson = ensureObject(existing);
   packageJson.private = packageJson.private ?? true;
   packageJson.type = packageJson.type ?? "module";
@@ -1919,20 +1931,22 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   dependencies["@dohc/sdk"] = DOHC_SDK_VERSION;
   packageJson.dependencies = dependencies;
 
-  await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
   const normalizedPackagePath = relativeJoin(root.normalized, "package.json");
-  const record = await recordChange(ctx, {
-    files: [{ path: normalizedPackagePath, operation: "write" }],
+  const written = await writeWorkspaceFile(ctx, {
+    path: normalizedPackagePath,
+    content: `${JSON.stringify(packageJson, null, 2)}\n`,
+    expectedSha256: expectedPackageSha256,
     summary: `MCP added @dohc/sdk to ${root.normalized}`,
   });
+  if (!written.ok) return written;
 
   return {
     ok: true as const,
     siteRoot: root.normalized,
     packagePath: normalizedPackagePath,
     dependency: "@dohc/sdk",
-    changeSetId: record.id,
-    recordedAtMs: record.recordedAtMs,
+    changeSetId: written.changeSetId,
+    recordedAtMs: written.recordedAtMs,
     usage: `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
   };
 }

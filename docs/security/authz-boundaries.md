@@ -61,5 +61,8 @@ be weakened by rebrand or UI work.
 - `@dohc/sdk` access is separate from merely rendering a site. The first
   preview bridge supports bounded local file reads through the desktop
   `readWorkspaceText` IPC path; browser code cannot choose an identity or
-  widen the workspace. Writes, cloud access, sharing, and publishing must
-  continue through explicit workspace, share, lock, and review-gate checks.
+  widen the workspace. Collection reads such as
+  `dohc.collections.get(...).list()` are intentionally deferred beyond Phase 1
+  and must be bounded by the same preview bridge before shipping. Writes,
+  cloud access, sharing, and publishing must continue through explicit
+  workspace, share, lock, and review-gate checks.

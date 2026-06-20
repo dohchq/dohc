@@ -21,7 +21,7 @@ function staticSiteFromFiles(files: WorkspaceFileEntry[]): SitePackageInfo[] {
     .map((file) => {
       const root = file.path === "index.html" ? "." : file.path.slice(0, -"/index.html".length);
       const title =
-        root === "."
+        root === "." || root === ""
           ? "Workspace Site"
           : (root.split("/").at(-1) ?? root)
               .replace(/[-_]+/g, " ")

@@ -231,11 +231,16 @@ export function SitePreviewPage(props: {
   }
 
   async function stop() {
-    await bridge().stopSitePreview({
-      workspaceId: props.workspaceId,
-      siteRoot: props.siteRoot,
-    });
-    setPreview(null);
+    setActionError(null);
+    try {
+      await bridge().stopSitePreview({
+        workspaceId: props.workspaceId,
+        siteRoot: props.siteRoot,
+      });
+      setPreview(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not stop preview.");
+    }
   }
 
   const site = load.status === "ready" ? load.site : null;
