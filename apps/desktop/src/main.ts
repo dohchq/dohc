@@ -226,9 +226,33 @@ function requireWorkspace(workspaceId: string) {
 type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
 const sitePreviewHandles = new Map<string, SitePreviewHandle>();
+const sitePreviewStartLocks = new Map<string, Promise<void>>();
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
+}
+
+async function withSitePreviewStartLock<T>(
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = sitePreviewStartLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.catch(() => undefined).then(() => current);
+  sitePreviewStartLocks.set(key, queued);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (sitePreviewStartLocks.get(key) === queued) {
+      sitePreviewStartLocks.delete(key);
+    }
+  }
 }
 
 async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
@@ -277,6 +301,19 @@ async function startPreviewForSite(input: {
   site: SitePackageInfo;
   mode: "static" | "dev" | "build";
 }): Promise<StartSitePreviewResult> {
+  const key = sitePreviewKey(input.workspaceId, input.site.root);
+  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input, key));
+}
+
+async function startPreviewForSiteUnlocked(
+  input: {
+    workspaceId: string;
+    workspaceRoot: string;
+    site: SitePackageInfo;
+    mode: "static" | "dev" | "build";
+  },
+  key: string,
+): Promise<StartSitePreviewResult> {
   try {
     await stopSitePreviewHandle(input.workspaceId, input.site.root);
   } catch (error) {
@@ -287,7 +324,7 @@ async function startPreviewForSite(input: {
     const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
       entry: entryRelativeToSite(input.site) ?? undefined,
     });
-    sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+    sitePreviewHandles.set(key, handle);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -305,7 +342,7 @@ async function startPreviewForSite(input: {
       command: command.command,
       args: command.args,
     });
-    sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+    sitePreviewHandles.set(key, handle);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -355,7 +392,7 @@ async function startPreviewForSite(input: {
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
   );
-  sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+  sitePreviewHandles.set(key, handle);
   return {
     siteRoot: input.site.root,
     mode: input.mode,

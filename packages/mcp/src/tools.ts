@@ -1645,7 +1645,7 @@ p {
           scripts: {
             dev: "python3 -m http.server 4173 --bind 127.0.0.1",
             build:
-              "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);\"",
+              "node -e \"(async()=>{const fs=await import('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);})()\"",
             preview: "python3 -m http.server 4173 --bind 127.0.0.1 -d dist",
           },
         },

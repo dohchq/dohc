@@ -209,4 +209,36 @@ describe("SitePreviewPage", () => {
     expect(postMessage).not.toHaveBeenCalled();
     expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
+
+  it("ignores SDK file reads from different loopback ports", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "http://127.0.0.1:8080",
+        source,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-wrong-port",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+  });
 });

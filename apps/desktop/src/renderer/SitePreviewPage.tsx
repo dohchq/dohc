@@ -61,6 +61,15 @@ function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
+function isActivePreviewOrigin(origin: string, previewUrl: string): boolean {
+  if (!isLoopbackOrigin(origin)) return false;
+  try {
+    return new URL(origin).origin === new URL(previewUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 function isDohcSdkRequest(value: unknown): value is DohcSdkRequestMessage {
   if (!value || typeof value !== "object") return false;
   const request = value as Partial<DohcSdkRequestMessage>;
@@ -146,10 +155,11 @@ export function SitePreviewPage(props: {
 
   useEffect(() => {
     async function handleSdkRequest(event: MessageEvent) {
-      if (!previewRef.current) return;
+      const activePreview = previewRef.current;
+      if (!activePreview) return;
       const frameWindow = iframeRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow) return;
-      if (!isLoopbackOrigin(event.origin)) return;
+      if (!isActivePreviewOrigin(event.origin, activePreview.url)) return;
       if (!isDohcSdkRequest(event.data)) return;
 
       const request = event.data;
