@@ -58,6 +58,15 @@ function packagePathFor(root: string, sourceFiles: string[]): string | null {
   return sourceFiles.includes(packagePath) ? packagePath : null;
 }
 
+function entryPathFor(root: string, entry?: string): string | null {
+  if (!entry) return null;
+  const normalized = normalizeRoot(root);
+  if (normalized !== "." && (entry === normalized || entry.startsWith(`${normalized}/`))) {
+    return entry;
+  }
+  return joinSitePath(root, entry);
+}
+
 function mapWorkspaceSite(
   site: WorkspaceSite,
   files: WorkspaceFileEntry[],
@@ -68,7 +77,7 @@ function mapWorkspaceSite(
     .map((file) => file.path)
     .filter((path) => isUnder(root, path))
     .sort();
-  const entryPath = site.entry ? joinSitePath(root, site.entry) : null;
+  const entryPath = entryPathFor(root, site.entry);
   return {
     root,
     title: site.title,
@@ -135,7 +144,7 @@ export function discoverSiteRoots(
 export async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
   const listed = await listFiles(rootPath);
   const sources = await Promise.all(listed.files.map((file) => sourceForFile(rootPath, file.path)));
-  const folderSignals = (listed.folders ?? [])
+  const folderSignals = listed.folders
     .filter((folder) => ["dist", "build", "out"].includes(posix.basename(folder)))
     .map((folder) => `${folder}/index.html`);
   const sites = discoverSites([...sources, ...folderSignals]);

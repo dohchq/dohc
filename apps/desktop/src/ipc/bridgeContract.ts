@@ -488,7 +488,7 @@ const SiteDiagnostic = z.object({
   path: PATH_STRING.optional(),
   severity: z.enum(["warning", "error"]),
   code: z.string().min(1).max(100),
-  message: z.string().optional(),
+  message: z.string().max(10_000).optional(),
 });
 export type SiteDiagnostic = z.infer<typeof SiteDiagnostic>;
 
@@ -511,9 +511,9 @@ const SitePackageInfo = z.object({
   packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
   scripts: SiteScripts,
   configuredScripts: SiteScripts.optional(),
-  buildOutputs: z.array(PATH_STRING),
-  sourceFiles: z.array(PATH_STRING),
-  diagnostics: z.array(SiteDiagnostic),
+  buildOutputs: z.array(PATH_STRING).max(100),
+  sourceFiles: z.array(PATH_STRING).max(1000),
+  diagnostics: z.array(SiteDiagnostic).max(100),
 });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
 
@@ -523,7 +523,7 @@ export const ListSitesPayload = z.object({
 export type ListSitesPayload = z.infer<typeof ListSitesPayload>;
 
 export const ListSitesResult = z.object({
-  sites: z.array(SitePackageInfo),
+  sites: z.array(SitePackageInfo).max(100),
 });
 export type ListSitesResult = z.infer<typeof ListSitesResult>;
 
@@ -548,7 +548,7 @@ export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
 const SiteLogEntry = z.object({
   stream: z.enum(["stdout", "stderr", "system"]),
-  text: z.string(),
+  text: z.string().max(10_000),
   at: z.number(),
 });
 export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
@@ -582,7 +582,7 @@ export const StartSitePreviewResult = z.object({
   siteRoot: PATH_STRING,
   mode: SitePreviewMode,
   url: LoopbackPreviewUrl,
-  logs: z.array(SiteLogEntry),
+  logs: z.array(SiteLogEntry).max(500),
   build: z
     .object({
       ok: z.boolean(),

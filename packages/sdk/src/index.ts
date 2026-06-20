@@ -49,12 +49,38 @@ export class DohcSdkError extends Error {
   }
 }
 
+let requestCounter = 0;
+
 function createRequestId(): string {
   const random =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
+      : `fallback_${(++requestCounter).toString(36)}`;
   return `dohc_${Date.now().toString(36)}_${random}`;
+}
+
+function targetOriginFromLocation(currentWindow: Window): string | null {
+  try {
+    const href = currentWindow.location?.href;
+    if (!href) return null;
+    const url = new URL(href);
+    const origin = url.searchParams.get("dohcHostOrigin");
+    if (!origin) return null;
+    const parsed = new URL(origin);
+    if (parsed.protocol === "file:" && origin === "file://") return origin;
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.origin;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function postTargetOriginFor(targetOrigin: string): string {
+  return targetOrigin === "file://" ? "*" : targetOrigin;
+}
+
+function responseOriginMatches(eventOrigin: string, targetOrigin: string): boolean {
+  return eventOrigin === targetOrigin || (targetOrigin === "file://" && eventOrigin === "null");
 }
 
 function isDohcSdkResponse(
@@ -78,7 +104,6 @@ export function createPostMessageTransport(
   options: Omit<CreateDohcClientOptions, "transport"> = {},
 ): DohcTransport {
   const timeoutMs = options.timeoutMs ?? 10_000;
-  const targetOrigin = options.targetOrigin ?? "*";
 
   return {
     request(method, params) {
@@ -94,6 +119,16 @@ export function createPostMessageTransport(
         );
       }
       const windowRef = currentWindow;
+      const targetOrigin = options.targetOrigin ?? targetOriginFromLocation(windowRef);
+      if (!targetOrigin) {
+        return Promise.reject(
+          new DohcSdkError(
+            "DOHC_HOST_UNAVAILABLE",
+            "No dohc host origin is available for this site.",
+          ),
+        );
+      }
+      const resolvedTargetOrigin = targetOrigin;
 
       const targetWindow =
         options.targetWindow ??
@@ -137,7 +172,7 @@ export function createPostMessageTransport(
 
         function onMessage(event: MessageEvent) {
           if (event.source !== targetWindow) return;
-          if (targetOrigin !== "*" && event.origin !== targetOrigin) return;
+          if (!responseOriginMatches(event.origin, resolvedTargetOrigin)) return;
           if (!isDohcSdkResponse(event.data, id)) return;
           if (event.data.ok) finish(event.data.result);
           else {
@@ -149,10 +184,32 @@ export function createPostMessageTransport(
         }
 
         windowRef.addEventListener("message", onMessage);
-        targetWindow.postMessage(message, targetOrigin);
+        targetWindow.postMessage(message, postTargetOriginFor(resolvedTargetOrigin));
       });
     },
   };
+}
+
+function isBooleanRecord(value: unknown): value is Record<string, boolean> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.values(value).every((entry) => typeof entry === "boolean")
+  );
+}
+
+function isCapabilityMap(value: unknown): value is DohcCapabilityMap {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<DohcCapabilityMap>;
+  return (
+    isBooleanRecord(candidate.files) &&
+    typeof candidate.files.read === "boolean" &&
+    typeof candidate.files.write === "boolean" &&
+    isBooleanRecord(candidate.collections) &&
+    typeof candidate.collections.read === "boolean" &&
+    isBooleanRecord(candidate.provenance) &&
+    typeof candidate.provenance.record === "boolean"
+  );
 }
 
 export function createDohcClient(options: CreateDohcClientOptions = {}) {
@@ -166,8 +223,16 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     });
 
   return {
-    capabilities: async () =>
-      (await transport.request("capabilities")) as DohcCapabilityMap,
+    capabilities: async () => {
+      const result = await transport.request("capabilities");
+      if (!isCapabilityMap(result)) {
+        throw new DohcSdkError(
+          "DOHC_BAD_RESPONSE",
+          "dohc host returned an invalid capabilities response.",
+        );
+      }
+      return result;
+    },
     files: {
       read: async (path: string) => {
         const result = (await transport.request("files.read", { path })) as {
@@ -184,13 +249,22 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     },
     collections: {
       get: (name: string) => ({
-        list: async () =>
-          (await transport.request("collections.list", { name })) as unknown[],
+        list: async () => {
+          const result = await transport.request("collections.list", { name });
+          if (!Array.isArray(result)) {
+            throw new DohcSdkError(
+              "DOHC_BAD_RESPONSE",
+              "dohc host returned an invalid collection response.",
+            );
+          }
+          return result;
+        },
       }),
     },
     provenance: {
-      record: (summary: string) =>
-        transport.request("provenance.record", { summary }),
+      record: async (summary: string) => {
+        await transport.request("provenance.record", { summary });
+      },
     },
   };
 }

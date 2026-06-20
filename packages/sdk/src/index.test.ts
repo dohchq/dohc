@@ -11,6 +11,9 @@ function createWindowHarness() {
   const messages: unknown[] = [];
   const currentWindow = {
     parent: undefined,
+    location: {
+      href: "http://site.test/?dohcHostOrigin=https%3A%2F%2Fhost.dohc.test",
+    },
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
     addEventListener(_type: "message", listener: EventListener) {
@@ -92,6 +95,30 @@ describe("@dohc/sdk", () => {
     expect(harness.listeners.size).toBe(0);
   });
 
+  it("rejects host error responses", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    const pending = transport.request("capabilities");
+    const request = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: request.id,
+      ok: false,
+      error: { code: "DENIED", message: "No access" },
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      code: "DENIED",
+      message: "No access",
+    });
+    expect(harness.listeners.size).toBe(0);
+  });
+
   it("rejects with a timeout and removes listeners when the host never responds", async () => {
     const harness = createWindowHarness();
     const transport = createPostMessageTransport({
@@ -164,5 +191,89 @@ describe("@dohc/sdk", () => {
     });
 
     await expect(pending).resolves.toBe("ok");
+  });
+
+  it("accepts opaque browser origins for file-based dohc hosts", async () => {
+    const harness = createWindowHarness();
+    const currentWindow = {
+      ...harness.currentWindow,
+      location: {
+        href: "http://site.test/?dohcHostOrigin=file%3A%2F%2F",
+      },
+    } as unknown as Window;
+    const transport = createPostMessageTransport({
+      currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    const pending = transport.request("capabilities");
+    const request = harness.messages[0] as { id: string };
+    harness.dispatch(
+      {
+        protocol: DOHC_SDK_PROTOCOL,
+        id: request.id,
+        ok: true,
+        result: "file-host",
+      },
+      { origin: "null" },
+    );
+
+    await expect(pending).resolves.toBe("file-host");
+  });
+
+  it("validates client method responses", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: true },
+              provenance: { record: false },
+            };
+          }
+          if (method === "collections.list") return [{ id: 1 }];
+          if (method === "provenance.record") return { ok: true };
+          return { text: "ok" };
+        },
+      },
+    });
+
+    await expect(client.capabilities()).resolves.toMatchObject({
+      files: { read: true },
+    });
+    await expect(client.collections.get("tasks").list()).resolves.toEqual([{ id: 1 }]);
+    await expect(client.provenance.record("checked")).resolves.toBeUndefined();
+    expect(calls).toEqual([
+      { method: "capabilities", params: undefined },
+      { method: "collections.list", params: { name: "tasks" } },
+      { method: "provenance.record", params: { summary: "checked" } },
+    ]);
+  });
+
+  it("rejects invalid high-level client responses", async () => {
+    const filesClient = createDohcClient({
+      transport: { async request() { return {}; } },
+    });
+    await expect(filesClient.files.read("bad.md")).rejects.toMatchObject({
+      code: "DOHC_BAD_RESPONSE",
+    });
+
+    const capabilitiesClient = createDohcClient({
+      transport: { async request() { return { files: {} }; } },
+    });
+    await expect(capabilitiesClient.capabilities()).rejects.toMatchObject({
+      code: "DOHC_BAD_RESPONSE",
+    });
+
+    const collectionsClient = createDohcClient({
+      transport: { async request() { return { rows: [] }; } },
+    });
+    await expect(collectionsClient.collections.get("bad").list()).rejects.toMatchObject({
+      code: "DOHC_BAD_RESPONSE",
+    });
   });
 });

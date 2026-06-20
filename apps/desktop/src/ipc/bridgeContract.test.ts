@@ -4,6 +4,7 @@ import {
   ListSitesResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
+  StopSitePreviewPayload,
 } from "./bridgeContract";
 
 describe("site IPC contract", () => {
@@ -28,6 +29,27 @@ describe("site IPC contract", () => {
         ],
       }).sites[0]?.root,
     ).toBe("client-portal");
+    expect(ListSitesResult.parse({ sites: [] }).sites).toEqual([]);
+    expect(
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "static",
+            title: "Static",
+            kind: "static",
+            confidence: "medium",
+            entryPath: null,
+            configPath: null,
+            packagePath: null,
+            packageManager: null,
+            scripts: {},
+            buildOutputs: [],
+            sourceFiles: [],
+            diagnostics: [],
+          },
+        ],
+      }).sites[0]?.entryPath,
+    ).toBeNull();
   });
 
   it("accepts bounded preview start/result payloads", () => {
@@ -58,6 +80,20 @@ describe("site IPC contract", () => {
         },
       }).mode,
     ).toBe("build");
+    expect(
+      StartSitePreviewResult.parse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://localhost:4173/",
+        logs: [],
+      }).logs,
+    ).toEqual([]);
+    expect(
+      StopSitePreviewPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: "site",
+      }),
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: "site" });
   });
 
   it("rejects unknown preview modes and non-local preview URLs", () => {

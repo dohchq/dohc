@@ -131,6 +131,8 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     ]);
 
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "agent-site/package.json");
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "sdk-site/package.json");
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "static-report/index.html");
     await desktop.page.getByTestId("activity-sites").click();
 
     const staticRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Static Report" });

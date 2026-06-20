@@ -78,6 +78,12 @@ function sdkErrorResponse(
   };
 }
 
+function siteFrameUrl(url: string): string {
+  const framed = new URL(url);
+  framed.searchParams.set("dohcHostOrigin", window.location.origin);
+  return framed.href;
+}
+
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
@@ -328,7 +334,7 @@ export function SitePreviewPage(props: {
                 key={preview.url}
                 data-testid="site-preview-frame"
                 title={site.title}
-                src={preview.url}
+                src={siteFrameUrl(preview.url)}
                 sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
                 referrerPolicy="no-referrer"
                 className="min-h-0 flex-1 border-0 bg-white"

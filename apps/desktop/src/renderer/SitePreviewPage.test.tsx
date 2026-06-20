@@ -53,7 +53,9 @@ describe("SitePreviewPage", () => {
     await user.click(screen.getByTestId("site-preview-static"));
 
     const frame = await screen.findByTestId("site-preview-frame");
-    expect(frame.getAttribute("src")).toBe("http://127.0.0.1:49152/");
+    const frameUrl = new URL(frame.getAttribute("src") ?? "");
+    expect(frameUrl.origin).toBe("http://127.0.0.1:49152");
+    expect(frameUrl.searchParams.get("dohcHostOrigin")).toBe(window.location.origin);
     expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
       workspaceId: "ws-sites",
       siteRoot: "report",

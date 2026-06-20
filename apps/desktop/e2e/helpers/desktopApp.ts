@@ -106,10 +106,15 @@ export async function launchDesktopApp(input: {
     page,
     logs,
     close: async () => {
+      const abort = new AbortController();
       try {
         if (app.windows().length === 0) return;
-        await Promise.race([app.close(), forceCloseAfterTimeout(processHandle)]);
+        await Promise.race([
+          app.close().finally(() => abort.abort()),
+          forceCloseAfterTimeout(processHandle, abort.signal),
+        ]);
       } finally {
+        abort.abort();
         processHandle.stdout?.off("data", onStdoutData);
         processHandle.stderr?.off("data", onStderrData);
       }
@@ -141,8 +146,24 @@ async function waitForProcessExit(
 
 async function forceCloseAfterTimeout(
   processHandle: ReturnType<ElectronApplication["process"]>,
+  signal: AbortSignal,
 ): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, 5_000);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+  if (signal.aborted) return;
   if (!processIsRunning(processHandle)) return;
   processHandle.kill("SIGTERM");
   if (!(await waitForProcessExit(processHandle, 1_000)) && processIsRunning(processHandle)) {

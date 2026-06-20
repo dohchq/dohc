@@ -840,9 +840,30 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites ignores non-site dohc.json unless website signals conflict", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "workflow"), { recursive: true });
+      await writeFile(join(ctx.root, "workflow/dohc.json"), JSON.stringify({ type: "workflow" }));
+      await mkdir(join(ctx.root, "conflict"), { recursive: true });
+      await writeFile(join(ctx.root, "conflict/dohc.json"), JSON.stringify({ type: "workflow" }));
+      await writeFile(join(ctx.root, "conflict/index.html"), "<h1>Conflict</h1>");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.sites[0]).toMatchObject({
+        root: "conflict",
+        diagnostics: [expect.objectContaining({ code: "unexpected_dohc_type" })],
+      });
+    });
+  });
+
   it("test_site validates entries and refuses legacy app SDK imports", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo" });
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
+
+      await writeFile(join(ctx.root, "todo/script.js"), '// import "@dohc/app";\n');
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
 
       await writeFile(join(ctx.root, "todo/script.js"), 'import "@dohc/app";\n');

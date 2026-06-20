@@ -1258,6 +1258,17 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
+const DOHC_SDK_VERSION = "^0.1.0";
+const LEGACY_APP_IMPORT_RE =
+  /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;
+
+function stripSourceComments(body: string): string {
+  return body
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith("//"))
+    .join("\n");
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1402,14 +1413,6 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     const parsed = await readJsonDetailed<DohcSiteConfig>(join(ctx.root, configPath));
     if (parsed.ok) {
       config = parsed.value;
-      if (config.type !== undefined && config.type !== "site") {
-        diagnostics.push({
-          severity: "warning",
-          code: "unexpected_dohc_type",
-          path: configPath,
-          message: "dohc.json is present but its type is not \"site\".",
-        });
-      }
     } else {
       diagnostics.push({
         severity: "error",
@@ -1455,6 +1458,25 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     ...SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name)),
   ].filter((output): output is string => typeof output === "string" && output.length > 0);
   const uniqueBuildOutputs = [...new Set(buildOutputs)];
+  const explicitNonSite = config?.type !== undefined && config.type !== "site";
+
+  if (
+    explicitNonSite &&
+    !hasIndex &&
+    !hasPackageSignal &&
+    !frameworkConfig &&
+    uniqueBuildOutputs.length === 0
+  ) {
+    return null;
+  }
+  if (explicitNonSite) {
+    diagnostics.push({
+      severity: "warning",
+      code: "unexpected_dohc_type",
+      path: configPath,
+      message: "dohc.json has website signals but its type is not \"site\".",
+    });
+  }
 
   if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
     return null;
@@ -1475,7 +1497,7 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   for (const name of SITE_BUILD_OUTPUT_NAMES) {
     if (!directories.has(name)) continue;
     const candidate = join(absolute, name, "index.html");
-    if (await lstat(candidate).catch(() => null)) {
+    if (await stat(candidate).catch(() => null)) {
       builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
       break;
     }
@@ -1666,7 +1688,7 @@ p {
               {
                 type: "site",
                 title,
-                preview: { mode: "static", entry: "index.html" },
+                preview: { mode: "static", entry: relativeJoin(root.normalized, "index.html") },
                 build: { command: "npm run build", output: "dist" },
               },
               null,
@@ -1826,8 +1848,8 @@ async function findLegacyAppImport(
       if (totalBytes > MAX_SITE_TEST_BYTES) {
         return { path: rel, reason: "too-large" };
       }
-      const body = await readFile(child, "utf8");
-      if (body.includes("@dohc/app")) return { path: rel, reason: "legacy-import" };
+      const body = stripSourceComments(await readFile(child, "utf8"));
+      if (LEGACY_APP_IMPORT_RE.test(body)) return { path: rel, reason: "legacy-import" };
     }
     return null;
   }
@@ -1919,7 +1941,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
       ? packageJson.name
       : packageNameFromPath(root.normalized);
   const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = "^0.1.0";
+  dependencies["@dohc/sdk"] = DOHC_SDK_VERSION;
   packageJson.dependencies = dependencies;
 
   await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
