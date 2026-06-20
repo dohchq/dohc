@@ -353,6 +353,9 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "dev") {
+    if (!input.site.scripts.dev && !input.site.scripts.start) {
+      throw new Error(`Site has no dev or start script: ${input.site.root}`);
+    }
     const script = input.site.scripts.dev ? "dev" : "start";
     const command = commandForSiteScript(input.site, script);
     const handle = await startSiteDevServer({

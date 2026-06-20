@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { FetchLike } from "@dohc/workspace-sync";
 import {
@@ -920,7 +921,10 @@ describe("mcp tools operate on allowed paths", () => {
         dependency: "@dohc/sdk",
       });
       const sdkPackageJson = JSON.parse(
-        await readFile(join(process.cwd(), "../sdk/package.json"), "utf8"),
+        await readFile(
+          join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json"),
+          "utf8",
+        ),
       ) as { version: string };
       const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
       expect(packageJson.dependencies).toMatchObject({
