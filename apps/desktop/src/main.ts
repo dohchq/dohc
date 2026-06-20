@@ -116,6 +116,7 @@ import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
+  allowSitePreviewOrigin,
   navigationPolicy,
   rememberChromeTheme,
   titleBarOverlayOptions,
@@ -226,6 +227,7 @@ function requireWorkspace(workspaceId: string) {
 type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
 const sitePreviewHandles = new Map<string, SitePreviewHandle>();
+const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
@@ -258,8 +260,16 @@ async function withSitePreviewStartLock<T>(
 async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
   const key = sitePreviewKey(workspaceId, siteRoot);
   const handle = sitePreviewHandles.get(key);
+  sitePreviewOriginReleases.get(key)?.();
+  sitePreviewOriginReleases.delete(key);
   sitePreviewHandles.delete(key);
   await handle?.stop();
+}
+
+function rememberSitePreviewHandle(key: string, handle: SitePreviewHandle): void {
+  sitePreviewOriginReleases.get(key)?.();
+  sitePreviewHandles.set(key, handle);
+  sitePreviewOriginReleases.set(key, allowSitePreviewOrigin(handle.url));
 }
 
 function commandForSiteScript(
@@ -324,7 +334,7 @@ async function startPreviewForSiteUnlocked(
     const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
       entry: entryRelativeToSite(input.site) ?? undefined,
     });
-    sitePreviewHandles.set(key, handle);
+    rememberSitePreviewHandle(key, handle);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -342,7 +352,7 @@ async function startPreviewForSiteUnlocked(
       command: command.command,
       args: command.args,
     });
-    sitePreviewHandles.set(key, handle);
+    rememberSitePreviewHandle(key, handle);
     return {
       siteRoot: input.site.root,
       mode: input.mode,
@@ -392,7 +402,7 @@ async function startPreviewForSiteUnlocked(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
   );
-  sitePreviewHandles.set(key, handle);
+  rememberSitePreviewHandle(key, handle);
   return {
     siteRoot: input.site.root,
     mode: input.mode,
@@ -2002,6 +2012,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("before-quit", () => {
     for (const [key, handle] of sitePreviewHandles) {
+      sitePreviewOriginReleases.get(key)?.();
+      sitePreviewOriginReleases.delete(key);
       sitePreviewHandles.delete(key);
       void handle.stop().catch(() => undefined);
     }

@@ -473,6 +473,7 @@ function hasWebDependency(pkg: PackageJson | undefined): boolean {
   return false;
 }
 
+// ast-grep-ignore: WEB_SCRIPT_TOKENS is static and every token is escaped.
 const WEB_SCRIPT_PATTERNS = WEB_SCRIPT_TOKENS.map((token) => {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[\\s:/@._-])${escaped}($|[\\s:/@._-])`);

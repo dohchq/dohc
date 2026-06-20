@@ -73,28 +73,50 @@ function windowStateFile(): string {
   return join(stateDir(), WINDOW_STATE_FILE);
 }
 
-// Site previews may load loopback dev servers chosen by the user's local tools.
-// This assumes localhost services are trusted in the desktop threat model; random
-// preview ports, iframe sandboxing, origin checks, and CSP frame-src still limit
-// the exposed surface.
+const allowedSitePreviewOrigins = new Map<string, number>();
+
 function normalizeLoopbackHostname(hostname: string): string {
+  // Node's WHATWG URL implementation currently returns "[::1]" for hostname,
+  // so normalize both bracketed and unbracketed forms before comparison.
   return hostname.startsWith("[") && hostname.endsWith("]")
     ? hostname.slice(1, -1)
     : hostname;
 }
 
-function isLoopbackHttpUrl(targetUrl: string): boolean {
+function loopbackHttpOrigin(targetUrl: string): string | null {
   try {
     const url = new URL(targetUrl);
-    return (
-      url.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "::1"].includes(
+    if (
+      url.protocol !== "http:" ||
+      !["127.0.0.1", "localhost", "::1"].includes(
         normalizeLoopbackHostname(url.hostname),
       )
-    );
+    ) {
+      return null;
+    }
+    return url.origin;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function allowSitePreviewOrigin(previewUrl: string): () => void {
+  const origin = loopbackHttpOrigin(previewUrl);
+  if (!origin) return () => undefined;
+  allowedSitePreviewOrigins.set(
+    origin,
+    (allowedSitePreviewOrigins.get(origin) ?? 0) + 1,
+  );
+  return () => {
+    const count = allowedSitePreviewOrigins.get(origin) ?? 0;
+    if (count <= 1) allowedSitePreviewOrigins.delete(origin);
+    else allowedSitePreviewOrigins.set(origin, count - 1);
+  };
+}
+
+function isAllowedSitePreviewUrl(targetUrl: string): boolean {
+  const origin = loopbackHttpOrigin(targetUrl);
+  return origin !== null && allowedSitePreviewOrigins.has(origin);
 }
 
 function loadPlacement() {
@@ -187,7 +209,7 @@ export function createMainWindow(): BrowserWindow {
   window.webContents.on("will-navigate", denyDisallowed);
   window.webContents.on("will-redirect", denyDisallowed);
   window.webContents.on("will-frame-navigate", (event) => {
-    if (isLoopbackHttpUrl(event.url)) return;
+    if (isAllowedSitePreviewUrl(event.url)) return;
     denyDisallowed(event, event.url);
   });
 
