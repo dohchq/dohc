@@ -1,4 +1,4 @@
-const SITE_SOURCE_PLAIN_TEXT_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
+const SITE_SOURCE_PLAIN_TEXT_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 
 // Site source files collab as plain-text Y.Text docs, never as rich
 // markdown documents.

@@ -29,7 +29,7 @@ function siteWorkspaceFixtures(viteBin: string, sdkEntry: string): WorkspaceFile
             "@dohc/sdk": "workspace:*",
           },
           devDependencies: {
-            vite: "0.0.0",
+            vite: "*",
           },
         },
         null,
@@ -87,7 +87,7 @@ function siteWorkspaceFixtures(viteBin: string, sdkEntry: string): WorkspaceFile
             dev: "node dev-server.mjs",
             build: "node build.mjs",
           },
-          devDependencies: { vite: "0.0.0" },
+          devDependencies: { vite: "*" },
         },
         null,
         2,
@@ -118,6 +118,38 @@ function siteWorkspaceFixtures(viteBin: string, sdkEntry: string): WorkspaceFile
         "await writeFile('dist/index.html', '<!doctype html><html><body><h1>Built Preview</h1></body></html>');",
         "console.log('built');",
       ].join("\n"),
+    },
+  ];
+}
+
+function failingSiteFixtures(): WorkspaceFileWrite[] {
+  return [
+    {
+      path: "broken-site/package.json",
+      contents: JSON.stringify(
+        {
+          private: true,
+          type: "module",
+          scripts: {
+            dev: "node dev-server.mjs",
+            build: "node build.mjs",
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "broken-site/dohc.json",
+      contents: JSON.stringify({ type: "site", title: "Broken Site" }, null, 2),
+    },
+    {
+      path: "broken-site/dev-server.mjs",
+      contents: "console.error('dev failed intentionally'); process.exit(2);\n",
+    },
+    {
+      path: "broken-site/build.mjs",
+      contents: "console.error('build failed intentionally'); process.exit(3);\n",
     },
   ];
 }
@@ -170,7 +202,7 @@ test("@sites detects agent-created websites and previews static, dev, and build 
       }),
     ).toBeVisible();
 
-    const sdkRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Sdk Site" });
+    const sdkRow = desktop.page.getByTestId("sites-row").filter({ hasText: "SDK Site" });
     await expect(sdkRow).toBeVisible();
     await sdkRow.click();
     await desktop.page.getByTestId("site-preview-dev").click();
@@ -180,6 +212,37 @@ test("@sites detects agent-created websites and previews static, dev, and build 
 
     await desktop.page.getByTestId("site-preview-stop").click();
     await expect(desktop.page.getByTestId("site-preview-frame")).toHaveCount(0);
+  } finally {
+    await desktop?.close();
+    await temp.cleanup();
+  }
+});
+
+test("@sites surfaces dev and build preview failures", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    desktop = await launchDesktopApp({ workspace: temp });
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+
+    await writeWorkspaceFiles(temp, failingSiteFixtures());
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "broken-site/package.json");
+    await desktop.page.getByTestId("activity-sites").click();
+
+    const brokenRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Broken Site" });
+    await expect(brokenRow).toBeVisible();
+    await brokenRow.click();
+
+    await desktop.page.getByTestId("site-preview-dev").click();
+    await expect(desktop.page.getByTestId("site-preview-error")).toContainText(
+      "exited before it was ready",
+    );
+
+    await desktop.page.getByTestId("site-preview-build").click();
+    await expect(desktop.page.getByTestId("site-preview-error")).toContainText(
+      "Site build failed",
+    );
   } finally {
     await desktop?.close();
     await temp.cleanup();

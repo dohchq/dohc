@@ -243,10 +243,10 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     capabilities: async () => {
       const result = await transport.request("capabilities");
       if (!isCapabilityMap(result)) {
-          throw new DohcSdkError(
-            DohcSdkErrorCodes.badResponse,
-            "dohc host returned an invalid capabilities response.",
-          );
+        throw new DohcSdkError(
+          DohcSdkErrorCodes.badResponse,
+          "dohc host returned an invalid capabilities response.",
+        );
       }
       return result;
     },

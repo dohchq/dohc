@@ -1534,6 +1534,7 @@ export function DesktopWorkspaceShell(props: {
     [changeSets, files],
   );
   const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
+  const activeSiteRoot = useMemo(() => parseSiteTabPath(wb.activeTab), [wb.activeTab]);
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -2416,21 +2417,18 @@ export function DesktopWorkspaceShell(props: {
                 onRestored={refreshAfterHistoryRestore}
               />
             ) : isSiteTabPath(wb.activeTab) ? (
-              (() => {
-                const siteRoot = parseSiteTabPath(wb.activeTab);
-                return siteRoot ? (
-                  <Suspense fallback={<PanelLoading label="site" />}>
-                    <LazySitePreviewPage
-                      workspaceId={workspaceId}
-                      siteRoot={siteRoot}
-                    />
-                  </Suspense>
-                ) : (
-                  <div className="flex flex-1 items-center justify-center text-sm text-muted">
-                    Invalid site path
-                  </div>
-                );
-              })()
+              activeSiteRoot ? (
+                <Suspense fallback={<PanelLoading label="site" />}>
+                  <LazySitePreviewPage
+                    workspaceId={workspaceId}
+                    siteRoot={activeSiteRoot}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex flex-1 items-center justify-center text-sm text-muted">
+                  Invalid site path
+                </div>
+              )
             ) : wb.activeTab ? (
               <FileInspector
                 key={wb.activeTab}
