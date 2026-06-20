@@ -73,6 +73,10 @@ function windowStateFile(): string {
   return join(stateDir(), WINDOW_STATE_FILE);
 }
 
+// Site previews may load loopback dev servers chosen by the user's local tools.
+// This assumes localhost services are trusted in the desktop threat model; random
+// preview ports, iframe sandboxing, origin checks, and CSP frame-src still limit
+// the exposed surface.
 function isLoopbackHttpUrl(targetUrl: string): boolean {
   try {
     const url = new URL(targetUrl);

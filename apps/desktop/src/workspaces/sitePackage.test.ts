@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "./testTemp";
 import { discoverSiteRoots, getSitePackage, listSitePackages } from "./sitePackage";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
@@ -9,6 +9,10 @@ let root: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(nativeTmpdir(), "dohc-site-packages-"));
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
 });
 
 function file(path: string): WorkspaceFileEntry {

@@ -496,9 +496,7 @@ export function inferSiteScripts(
   }
 
   if (config?.preview?.command) {
-    if (config.preview.mode === "build") {
-      inferred.preview = config.preview.command;
-    } else if (config.preview.mode === "static") {
+    if (config.preview.mode === "build" || config.preview.mode === "static") {
       inferred.preview = config.preview.command;
     } else {
       inferred.dev = config.preview.command;

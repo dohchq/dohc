@@ -277,7 +277,11 @@ async function startPreviewForSite(input: {
   site: SitePackageInfo;
   mode: "static" | "dev" | "build";
 }): Promise<StartSitePreviewResult> {
-  await stopSitePreviewHandle(input.workspaceId, input.site.root);
+  try {
+    await stopSitePreviewHandle(input.workspaceId, input.site.root);
+  } catch (error) {
+    console.warn("[desktop] failed to stop previous site preview", error);
+  }
 
   if (input.mode === "static") {
     const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {

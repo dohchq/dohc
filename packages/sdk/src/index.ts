@@ -204,17 +204,21 @@ function isBooleanRecord(value: unknown): value is Record<string, boolean> {
   );
 }
 
+function hasBooleanEntry(value: Record<string, boolean>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function isCapabilityMap(value: unknown): value is DohcCapabilityMap {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DohcCapabilityMap>;
   return (
     isBooleanRecord(candidate.files) &&
-    typeof candidate.files.read === "boolean" &&
-    typeof candidate.files.write === "boolean" &&
+    hasBooleanEntry(candidate.files, "read") &&
+    hasBooleanEntry(candidate.files, "write") &&
     isBooleanRecord(candidate.collections) &&
-    typeof candidate.collections.read === "boolean" &&
+    hasBooleanEntry(candidate.collections, "read") &&
     isBooleanRecord(candidate.provenance) &&
-    typeof candidate.provenance.record === "boolean"
+    hasBooleanEntry(candidate.provenance, "record")
   );
 }
 

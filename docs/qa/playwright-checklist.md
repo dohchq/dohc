@@ -4,8 +4,8 @@ Run the app and capture screenshots across viewports and states. Paths
 are relative to `/home/ice/dev/dohc`.
 
 ```bash
-PATH=/home/ice/.local/share/nvm/v22.13.0/bin:$PATH pnpm --filter @dohc/desktop run build
-PATH=/home/ice/.local/share/nvm/v22.13.0/bin:$PATH pnpm --filter @dohc/desktop exec playwright test \
+pnpm --filter @dohc/desktop run build
+pnpm --filter @dohc/desktop exec playwright test \
   --config playwright.config.ts e2e/sites-preview.spec.ts
 ```
 

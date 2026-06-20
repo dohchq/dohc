@@ -196,7 +196,7 @@ function hasPersistedBodyContent(doc: Y.Doc): boolean {
 function bootstrapMarkdownToYDoc(bootstrap: AtomBootstrap): Y.Doc {
   // True when the atom is plain-text-canonical (one Y.Text in `plainText`)
   // rather than a rich ProseMirror `body` XmlFragment. Markdown atoms are rich;
-  // app/source files remain plain text by path so code is not parsed as prose.
+  // Site source files remain plain text by path so code is not parsed as prose.
   return isPlainTextBootstrap(bootstrap)
     ? plainTextToYDoc(bootstrap.markdown)
     : markdownToYDoc(bootstrap.markdown)

@@ -172,9 +172,9 @@ describe("workspace root choice", () => {
 });
 
 describe("path classification", () => {
-  it("does not give .apps paths any special core classification", () => {
-    expect(classifyPath("finance/.apps/ledger/app.json")).toEqual({ kind: "file" });
-    expect(classifyPath(".apps/tracker/src/App.tsx")).toEqual({ kind: "file" });
+  it("does not give sites paths any special core classification", () => {
+    expect(classifyPath("finance/sites/ledger/index.html")).toEqual({ kind: "file" });
+    expect(classifyPath("sites/tracker/src/App.tsx")).toEqual({ kind: "file" });
   });
 
   it("treats .sqlite, .sqlite3, and .db files as visible databases", () => {
