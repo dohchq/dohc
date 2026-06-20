@@ -1,3 +1,8 @@
+---
+id: dohc-sites-2026-06-20
+title: "dohc Sites: normal websites as first-class workspace artifacts"
+---
+
 # dohc Sites: normal websites as first-class workspace artifacts
 
 ## Product decision
@@ -176,7 +181,7 @@ Rules:
   as dev-server reads. File presence alone is not authorization: agents,
   workspace bridges, and services must still derive identity and workspace scope
   through the server-side or bridge-owned checks documented in
-  `docs/security/authz-boundaries.md`.
+  [[docs/security/authz-boundaries.md]].
 - Publishing a site that includes or references `shared-with-me` data must show
   an explicit review step.
 - Revocation can remove the managed projection, but dohc must not pretend it can
@@ -840,11 +845,11 @@ Tasks:
 - Add local dohc service bridge for site previews.
 - Add minimal file read.
 - Collection-read API enablement is blocked until the authorization review
-  against `docs/security/authz-boundaries.md` is complete and explicitly
+  against [[docs/security/authz-boundaries.md]] is complete and explicitly
   approved. Collection reads must be bounded by workspace permissions and the
   preview bridge, not by caller-provided identity.
 - Approval of collection reads must include a code comment at the collection-read
-  API implementation that references `docs/security/authz-boundaries.md` as the
+  API implementation that references [[docs/security/authz-boundaries.md]] as the
   authoritative boundary.
 - Add SDK docs and examples.
 

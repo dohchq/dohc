@@ -156,8 +156,8 @@ export function createLocalSyncClient({
           results?: Array<{ path: string; ok: boolean; error?: string; file?: WorkspaceFile | null }>;
         }>(fetchImpl, workspaceUrl(baseUrl, workspaceId, "sync/apply"), { operations });
         const failures = (result.results ?? []).filter((entry) => !entry.ok);
-        const approvals = failures.filter((entry) => /approval/i.test(entry.error ?? ""));
-        const hardFailure = failures.find((entry) => !/approval/i.test(entry.error ?? ""));
+        const approvals = failures.filter((entry) => isApprovalResultError(entry.error));
+        const hardFailure = failures.find((entry) => !isApprovalResultError(entry.error));
         if (hardFailure) {
           throw new Error(hardFailure.error ?? "sync apply failed");
         }
@@ -545,6 +545,10 @@ function isApprovalError(error: unknown): error is Error & { code?: string; path
       error.message === "approval-required" ||
       error.message === "site-publish-required")
   );
+}
+
+function isApprovalResultError(error: string | undefined): boolean {
+  return /approval|site-publish-required/i.test(error ?? "");
 }
 
 function firstOperationPath(operations: FsDiffOperation[]) {

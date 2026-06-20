@@ -1409,6 +1409,21 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
+function InvalidSitePathFallback({ activeTab }: { activeTab: string | null }) {
+  useEffect(() => {
+    console.error("[desktop] invalid site tab path", {
+      activeTab,
+      detail: "active tab matched site tab format but activeSiteRoot parsed to null",
+    });
+  }, [activeTab]);
+
+  return (
+    <div className="flex flex-1 items-center justify-center text-sm text-muted">
+      Invalid site path
+    </div>
+  );
+}
+
 function readSelectedText(): string {
   const active = document.activeElement;
   if (
@@ -2425,9 +2440,7 @@ export function DesktopWorkspaceShell(props: {
                   />
                 </Suspense>
               ) : (
-                <div className="flex flex-1 items-center justify-center text-sm text-muted">
-                  Invalid site path
-                </div>
+                <InvalidSitePathFallback activeTab={wb.activeTab} />
               )
             ) : wb.activeTab ? (
               <FileInspector
