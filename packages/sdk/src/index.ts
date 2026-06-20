@@ -207,7 +207,19 @@ export function createPostMessageTransport(
         }
 
         windowRef.addEventListener("message", onMessage);
-        targetWindow.postMessage(message, postTargetOriginFor(resolvedTargetOrigin));
+        try {
+          targetWindow.postMessage(message, postTargetOriginFor(resolvedTargetOrigin));
+        } catch (error) {
+          finish(
+            undefined,
+            new DohcSdkError(
+              DohcSdkErrorCodes.hostUnavailable,
+              `Failed to send dohc SDK request: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
       });
     },
   };

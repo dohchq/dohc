@@ -305,6 +305,15 @@ function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: st
   return workspaceRelativeOutput.slice(siteRoot.length + 1);
 }
 
+function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
+  const text = logs
+    .slice(-3)
+    .map((log) => log.text)
+    .join("")
+    .trim();
+  return text.length > 2000 ? text.slice(-2000) : text;
+}
+
 async function startPreviewForSite(input: {
   workspaceId: string;
   workspaceRoot: string;
@@ -390,7 +399,12 @@ async function startPreviewForSiteUnlocked(
       exitCode: result.exitCode,
     };
     if (!result.ok || !result.outputPath) {
-      throw new Error("Site build failed or did not produce a static output folder.");
+      const recentLogs = recentSiteBuildLogText(result.logs);
+      throw new Error(
+        `Site build failed or did not produce a static output folder.${
+          recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
+        }`,
+      );
     }
     outputRoot = buildOutputRelativeToSite(
       input.site.root,
@@ -1694,7 +1708,10 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = StopSitePreviewPayload.parse(payload);
     requireWorkspace(input.workspaceId);
-    await stopSitePreviewHandle(input.workspaceId, input.siteRoot);
+    await withSitePreviewStartLock(
+      sitePreviewKey(input.workspaceId, input.siteRoot),
+      () => stopSitePreviewHandle(input.workspaceId, input.siteRoot),
+    );
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {

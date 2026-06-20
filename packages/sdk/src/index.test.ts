@@ -242,6 +242,26 @@ describe("@dohc/sdk", () => {
     expect(harness.listeners.size).toBe(0);
   });
 
+  it("rejects immediately when postMessage cannot send the request", async () => {
+    const harness = createWindowHarness();
+    const targetWindow = {
+      postMessage: vi.fn(() => {
+        throw new Error("detached window");
+      }),
+    } as unknown as Window;
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow,
+      timeoutMs: 1000,
+    });
+
+    await expect(transport.request("capabilities")).rejects.toMatchObject({
+      code: "DOHC_HOST_UNAVAILABLE",
+      message: "Failed to send dohc SDK request: detached window",
+    });
+    expect(harness.listeners.size).toBe(0);
+  });
+
   it("validates client method responses", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
