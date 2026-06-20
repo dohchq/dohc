@@ -21,6 +21,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
   type SearchResultsEvent,
 } from "./channels";
+import { isLoopbackHostname } from "../security/loopback";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -569,12 +570,6 @@ const SiteLogEntry = z.object({
 });
 export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
 
-function normalizeLoopbackHostname(hostname: string): string {
-  return hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
-}
-
 const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) => {
   let url: URL;
   try {
@@ -587,9 +582,7 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
   const hasExplicitPort = url.port !== "";
   if (
     url.protocol !== "http:" ||
-    !["127.0.0.1", "localhost", "::1"].includes(
-      normalizeLoopbackHostname(url.hostname),
-    ) ||
+    !isLoopbackHostname(url.hostname) ||
     url.username ||
     url.password ||
     (hasExplicitPort && (!Number.isInteger(port) || port < 1 || port > 65535))

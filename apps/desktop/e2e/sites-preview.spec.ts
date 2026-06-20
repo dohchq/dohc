@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
+import { symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -123,6 +124,68 @@ function siteWorkspaceFixtures(viteBin: string, sdkEntry: string): WorkspaceFile
   ];
 }
 
+function sdkBoundaryFixtures(viteBin: string, sdkEntry: string): WorkspaceFileWrite[] {
+  return [
+    {
+      path: "boundary-site/package.json",
+      contents: JSON.stringify(
+        {
+          private: true,
+          type: "module",
+          scripts: {
+            dev: `node ${JSON.stringify(viteBin)}`,
+          },
+          dependencies: {
+            "@dohc/sdk": "workspace:*",
+          },
+          devDependencies: {
+            vite: "*",
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "boundary-site/vite.config.mjs",
+      contents: `export default { resolve: { alias: { "@dohc/sdk": ${JSON.stringify(sdkEntry)} } } };\n`,
+    },
+    {
+      path: "boundary-site/dohc.json",
+      contents: JSON.stringify(
+        {
+          type: "site",
+          title: "Boundary Site",
+          preview: {
+            mode: "dev",
+            command: `node ${JSON.stringify(viteBin)} --host 127.0.0.1`,
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      path: "boundary-site/index.html",
+      contents:
+        '<!doctype html><html><body><h1>Boundary Site</h1><p id="sdk-output">Loading</p><script type="module" src="/src/main.ts"></script></body></html>',
+    },
+    {
+      path: "boundary-site/src/main.ts",
+      contents: [
+        'import { dohc } from "@dohc/sdk";',
+        'const output = document.getElementById("sdk-output");',
+        "try {",
+        '  const text = await dohc.files.read("leak.md");',
+        '  if (output) output.textContent = `SDK leaked: ${text}`;',
+        "} catch (error) {",
+        '  if (output) output.textContent = `SDK denied: ${error instanceof Error ? error.message : String(error)}`;',
+        "}",
+      ].join("\n"),
+    },
+  ];
+}
+
 function failingSiteFixtures(): WorkspaceFileWrite[] {
   return [
     {
@@ -155,16 +218,21 @@ function failingSiteFixtures(): WorkspaceFileWrite[] {
   ];
 }
 
+function siteRuntimePaths(): { viteBin: string; sdkEntry: string } {
+  const repoRoot = resolve(desktopRoot, "../..");
+  const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
+  const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
+  if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
+  if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
+  return { viteBin, sdkEntry };
+}
+
 test("@sites detects agent-created websites and previews static, dev, and build modes", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    const repoRoot = resolve(desktopRoot, "../..");
-    const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
-    const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
-    if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
-    if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
+    const { viteBin, sdkEntry } = siteRuntimePaths();
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -214,6 +282,37 @@ test("@sites detects agent-created websites and previews static, dev, and build 
 
     await desktop.page.getByTestId("site-preview-stop").click();
     await expect(desktop.page.getByTestId("site-preview-frame")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("@sites SDK respects workspace boundaries", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    const { viteBin, sdkEntry } = siteRuntimePaths();
+    const outsideFile = resolve(temp.baseDir, "outside-secret.md");
+    await writeFile(outsideFile, "outside workspace secret");
+    await symlink(outsideFile, resolve(temp.rootPath, "leak.md"), "file");
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+
+    await writeWorkspaceFiles(temp, sdkBoundaryFixtures(viteBin, sdkEntry));
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "boundary-site/package.json");
+    await desktop.page.getByTestId("activity-sites").click();
+
+    const boundaryRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Boundary Site" });
+    await expect(boundaryRow).toBeVisible();
+    await boundaryRow.click();
+    await desktop.page.getByTestId("site-preview-dev").click();
+
+    const output = desktop.page.frameLocator('[data-testid="site-preview-frame"]').locator("#sdk-output");
+    await expect(output).toContainText(
+      /SDK denied: .*?(outside workspace|escapes workspace|not allowed|permission denied)/i,
+    );
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

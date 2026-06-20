@@ -19,6 +19,7 @@ import type {
   SitePreviewMode,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
+import { isLoopbackHostname } from "../security/loopback";
 import { bridge } from "./bridge";
 
 type LoadState =
@@ -41,21 +42,10 @@ function availableModes(site: SitePackageInfo): SitePreviewMode[] {
   return modes;
 }
 
-function normalizeLoopbackHostname(hostname: string): string {
-  return hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
-}
-
 function isLoopbackOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
-    return (
-      url.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "::1"].includes(
-        normalizeLoopbackHostname(url.hostname),
-      )
-    );
+    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
   } catch {
     return false;
   }

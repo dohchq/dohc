@@ -9,6 +9,7 @@ import {
   validateDevServerUrl,
   type NavigationPolicy,
 } from "../security/electronSecurity";
+import { isLoopbackHostname } from "../security/loopback";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import {
   createDebouncedSaver,
@@ -75,23 +76,10 @@ function windowStateFile(): string {
 
 const allowedSitePreviewOrigins = new Map<string, number>();
 
-function normalizeLoopbackHostname(hostname: string): string {
-  // Node's WHATWG URL implementation currently returns "[::1]" for hostname,
-  // so normalize both bracketed and unbracketed forms before comparison.
-  return hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
-}
-
 function loopbackHttpOrigin(targetUrl: string): string | null {
   try {
     const url = new URL(targetUrl);
-    if (
-      url.protocol !== "http:" ||
-      !["127.0.0.1", "localhost", "::1"].includes(
-        normalizeLoopbackHostname(url.hostname),
-      )
-    ) {
+    if (url.protocol !== "http:" || !isLoopbackHostname(url.hostname)) {
       return null;
     }
     return url.origin;
