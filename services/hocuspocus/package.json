@@ -16,6 +16,7 @@
     "lint": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@dohc/workspace-contracts": "workspace:*",
     "@hocuspocus/provider": "^4.1.0",
     "@hocuspocus/server": "^4.1.0",
     "@tiptap/core": "^3.23.6",

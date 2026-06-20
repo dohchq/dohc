@@ -195,6 +195,9 @@ importers:
       '@dohc/brand':
         specifier: workspace:*
         version: link:../../packages/brand
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../../packages/workspace-contracts
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core
@@ -458,6 +461,9 @@ importers:
 
   services/hocuspocus:
     dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../../packages/workspace-contracts
       '@hocuspocus/provider':
         specifier: ^4.1.0
         version: 4.1.0(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)

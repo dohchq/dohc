@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@dohc/brand": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@tailwindcss/vite": "^4.2.4",

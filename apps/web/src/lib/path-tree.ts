@@ -2,6 +2,8 @@
 // but the UI reads as a real recursive tree (Notion-style) — these
 // helpers bridge the two.
 
+import { SITE_SOURCE_CODE_EXT_RE } from '@dohc/workspace-contracts/domain'
+
 export type FileRow = {
   id: string
   path: string
@@ -72,10 +74,8 @@ export type FolderInput = string | {
   starred?: boolean
 }
 
-const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html?)$/i
-
 function isSourceCodeFilePath(path: string): boolean {
-  return SOURCE_CODE_EXT_RE.test(path)
+  return SITE_SOURCE_CODE_EXT_RE.test(path)
 }
 
 // Build a tree from atoms + explicit folder rows. Obsidian-style:

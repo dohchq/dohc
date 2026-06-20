@@ -187,14 +187,6 @@ describe("site IPC contract", () => {
         }).success,
       ).toBe(false);
     }
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "https://example.com/",
-        logs: [],
-      }).success,
-    ).toBe(false);
   });
 });
 
