@@ -43,11 +43,20 @@ import {
 export function parseArgs(argv: string[]): ToolContext {
   let root = process.cwd();
   let home = process.env.HOME ?? process.cwd();
+  let sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim() || undefined;
+  let sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim() || undefined;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = argv[++i];
     else if (argv[i] === "--home" && argv[i + 1]) home = argv[++i];
+    else if (argv[i] === "--sdk-package-json" && argv[i + 1]) sdkPackageJsonPath = argv[++i];
+    else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) sdkDependencyRange = argv[++i];
   }
-  return { root, home };
+  return {
+    root,
+    home,
+    ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
+    ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
+  };
 }
 
 function text(value: unknown) {

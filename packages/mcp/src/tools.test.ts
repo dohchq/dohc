@@ -34,6 +34,8 @@ import {
   type ToolContext,
 } from "./tools";
 
+const TEST_SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
+
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-test-"));
   const root = join(base, "ws");
@@ -41,7 +43,7 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   await mkdir(root, { recursive: true });
   await mkdir(home, { recursive: true });
   try {
-    return await fn({ root, home });
+    return await fn({ root, home, sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -932,10 +934,7 @@ describe("mcp tools operate on allowed paths", () => {
         dependency: "@dohc/sdk",
       });
       const sdkPackageJson = JSON.parse(
-        await readFile(
-          join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json"),
-          "utf8",
-        ),
+        await readFile(TEST_SDK_PACKAGE_JSON_PATH, "utf8"),
       ) as { version: string };
       const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
       expect(packageJson.dependencies).toMatchObject({

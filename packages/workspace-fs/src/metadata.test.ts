@@ -30,8 +30,10 @@ describe("workspace filesystem metadata", () => {
 
   it("treats source files under sites as text without changing ordinary source paths", () => {
     expect(mediaTypeForPath("sites/review/src/App.tsx")).toBe("text/plain");
+    expect(mediaTypeForPath("Sites/review/src/App.tsx")).toBe("application/octet-stream");
     expect(mediaTypeForPath("client/src/App.tsx")).toBe("application/octet-stream");
     expect(isTextMediaType("application/octet-stream", "sites/review/src/App.tsx")).toBe(true);
+    expect(isTextMediaType("application/octet-stream", "Sites/review/src/App.tsx")).toBe(false);
     expect(isTextMediaType("application/octet-stream", "client/src/App.tsx")).toBe(false);
   });
 

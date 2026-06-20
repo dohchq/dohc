@@ -53,7 +53,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { hasLegacyAppImport } from "./sourceScanner";
 
 export interface ToolContext {
@@ -62,6 +61,10 @@ export interface ToolContext {
   root: string;
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
+  // Desktop/package launcher-owned SDK metadata. add_sdk must not infer this
+  // from the MCP build output path because packaged layouts can differ.
+  sdkPackageJsonPath?: string;
+  sdkDependencyRange?: string;
 }
 
 const MCP_AUTHOR: ChangeAuthor = {
@@ -1230,8 +1233,7 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-const SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
-let cachedDohcSdkDependencyRange: string | null = null;
+const cachedDohcSdkDependencyRanges = new Map<string, string>();
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1306,15 +1308,28 @@ async function readJsonDetailed<T>(
   }
 }
 
-async function dohcSdkDependencyRange(): Promise<string> {
-  if (cachedDohcSdkDependencyRange) return cachedDohcSdkDependencyRange;
-  const pkg = await readJson<{ version?: unknown }>(SDK_PACKAGE_JSON_PATH);
+async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
+  const explicitRange = ctx.sdkDependencyRange?.trim();
+  if (explicitRange) return explicitRange;
+
+  const packageJsonPath = ctx.sdkPackageJsonPath?.trim();
+  if (!packageJsonPath) {
+    throw new Error(
+      "@dohc/sdk dependency range is not configured; pass --sdk-package-json or DOHC_SDK_PACKAGE_JSON",
+    );
+  }
+
+  const cached = cachedDohcSdkDependencyRanges.get(packageJsonPath);
+  if (cached) return cached;
+
+  const pkg = await readJson<{ version?: unknown }>(packageJsonPath);
   const version = typeof pkg?.version === "string" ? pkg.version.trim() : "";
   if (!version) {
-    throw new Error(`Unable to read @dohc/sdk version from ${SDK_PACKAGE_JSON_PATH}`);
+    throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
   }
-  cachedDohcSdkDependencyRange = `^${version}`;
-  return cachedDohcSdkDependencyRange;
+  const range = `^${version}`;
+  cachedDohcSdkDependencyRanges.set(packageJsonPath, range);
+  return range;
 }
 
 async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
@@ -1881,8 +1896,17 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     typeof packageJson.name === "string" && packageJson.name.trim()
       ? packageJson.name
       : packageNameFromPath(root.normalized);
+  let sdkRange: string;
+  try {
+    sdkRange = await dohcSdkDependencyRange(ctx);
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: failureReason(error, "unable to resolve @dohc/sdk dependency range"),
+    };
+  }
   const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = await dohcSdkDependencyRange();
+  dependencies["@dohc/sdk"] = sdkRange;
   packageJson.dependencies = dependencies;
 
   const normalizedPackagePath = relativeJoin(root.normalized, "package.json");

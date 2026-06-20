@@ -108,8 +108,11 @@ capabilities.
 }
 ```
 
-Invalid `dohc.json` must produce repairable diagnostics. It must not hide the
-site forever or render a blank pane.
+Invalid `dohc.json` must produce actionable diagnostics. It must not hide the
+site forever or render a blank pane. The UI should show the config path, the
+offending JSON line or field when available, the validation error, and a valid
+schema example. The user must be able to open the file for editing, ignore the
+invalid config and fall back to auto-detection, or remove the config.
 
 ### `@dohc/sdk`
 
@@ -169,8 +172,11 @@ Rules:
 - Unaccepted shares remain cloud references.
 - Accepted shares sync locally into `shared-with-me`.
 - Sites inside `shared-with-me` are detected and previewable.
-- Local agents and local sites can use accepted shared files because they are
-  now present locally.
+- Accepted shared files materialize locally, enabling local access patterns such
+  as dev-server reads. File presence alone is not authorization: agents,
+  workspace bridges, and services must still derive identity and workspace scope
+  through the server-side or bridge-owned checks documented in
+  `docs/security/authz-boundaries.md`.
 - Publishing a site that includes or references `shared-with-me` data must show
   an explicit review step.
 - Revocation can remove the managed projection, but dohc must not pretend it can
@@ -833,14 +839,13 @@ Tasks:
 - Remove `@dohc/app`.
 - Add local dohc service bridge for site previews.
 - Add minimal file read.
-- Document collection read as a later capability until the auth review below
-  lands.
-- Before shipping collection reads, explicitly review the authorization scope
-  against `docs/security/authz-boundaries.md`; collection reads must be bounded
-  by workspace permissions and the preview bridge, not by caller-provided
-  identity.
-- Add a code comment at the collection-read API implementation that references
-  `docs/security/authz-boundaries.md` as the authoritative boundary.
+- Collection-read API enablement is blocked until the authorization review
+  against `docs/security/authz-boundaries.md` is complete and explicitly
+  approved. Collection reads must be bounded by workspace permissions and the
+  preview bridge, not by caller-provided identity.
+- Approval of collection reads must include a code comment at the collection-read
+  API implementation that references `docs/security/authz-boundaries.md` as the
+  authoritative boundary.
 - Add SDK docs and examples.
 
 E2E gate:

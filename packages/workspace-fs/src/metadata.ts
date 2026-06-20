@@ -140,7 +140,7 @@ export function mediaTypeForPath(path: string): string {
 function isSiteSourcePath(path: string) {
   const normalized = path.replaceAll("\\", "/");
   return (
-    normalized.toLowerCase().split("/").includes("sites") &&
+    normalized.split("/").includes("sites") &&
     SITE_SOURCE_CODE_EXT_RE.test(normalized)
   );
 }

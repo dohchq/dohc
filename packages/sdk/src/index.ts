@@ -325,6 +325,13 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     },
     provenance: {
       record: async (summary: string) => {
+        const capabilities = await readCapabilities();
+        if (!capabilities.provenance.record) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.capabilityDisabled,
+            "dohc provenance.record capability is disabled by this host.",
+          );
+        }
         await transport.request("provenance.record", { summary });
       },
     },

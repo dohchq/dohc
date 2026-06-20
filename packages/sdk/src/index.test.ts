@@ -272,7 +272,7 @@ describe("@dohc/sdk", () => {
             return {
               files: { read: true, write: false },
               collections: { read: true },
-              provenance: { record: false },
+              provenance: { record: true },
             };
           }
           if (method === "collections.list") return [{ id: 1 }];
@@ -291,6 +291,7 @@ describe("@dohc/sdk", () => {
       { method: "capabilities", params: undefined },
       { method: "capabilities", params: undefined },
       { method: "collections.list", params: { name: "tasks" } },
+      { method: "capabilities", params: undefined },
       { method: "provenance.record", params: { summary: "checked" } },
     ]);
   });
@@ -340,6 +341,28 @@ describe("@dohc/sdk", () => {
     await expect(client.collections.get("tasks").list()).rejects.toMatchObject({
       code: "DOHC_CAPABILITY_DISABLED",
       message: expect.stringMatching(/collections\.read.*disabled/i),
+    });
+    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+  });
+
+  it("reports disabled provenance recording before sending provenance data", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: true, write: false },
+            collections: { read: false },
+            provenance: { record: false },
+          };
+        },
+      },
+    });
+
+    await expect(client.provenance.record("checked")).rejects.toMatchObject({
+      code: "DOHC_CAPABILITY_DISABLED",
+      message: expect.stringMatching(/provenance\.record.*disabled/i),
     });
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });

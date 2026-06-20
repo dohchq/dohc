@@ -712,9 +712,14 @@ function mcpConfigFor(rootPath: string): {
 } {
   const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
   const home = stateDir();
+  const sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
+  const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
+  const args = ["--workspace", rootPath, "--home", home];
+  if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
+  if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
     command,
-    args: ["--workspace", rootPath, "--home", home],
+    args,
     workspacePath: rootPath,
     home,
   };

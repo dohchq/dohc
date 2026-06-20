@@ -181,6 +181,7 @@ describe("discoverSites", () => {
         ".git/worktrees/site/index.html",
         "pkg/.yarn/cache/example/index.html",
         "pkg/.next/cache/index.html",
+        "pkg/.next. /cache. /index.html",
       ]),
     ).toEqual([]);
   });
@@ -241,6 +242,27 @@ describe("parseDohcSiteConfig", () => {
       "invalid-preview-command",
       "invalid-preview-entry",
       "invalid-build-output",
+    ]);
+  });
+
+  it("explains config paths that normalize to the current directory", () => {
+    const parsed = parseDohcSiteConfig(
+      JSON.stringify({
+        preview: { entry: "." },
+        build: { output: "./" },
+      }),
+      "site/dohc.json",
+    );
+
+    expect(parsed.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "invalid-preview-entry",
+        message: expect.stringContaining("not '.', './', or an empty path"),
+      }),
+      expect.objectContaining({
+        code: "invalid-build-output",
+        message: expect.stringContaining("not '.', './', or an empty path"),
+      }),
     ]);
   });
 });

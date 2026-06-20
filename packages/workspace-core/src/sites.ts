@@ -205,8 +205,13 @@ function stripSiteIgnoredAliasSuffix(segment: string): string {
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
   return segments.some((segment, index) => {
-    if (IGNORED_SITE_SEGMENTS.has(stripSiteIgnoredAliasSuffix(segment))) return true;
-    return segment === ".next" && segments[index + 1] === "cache";
+    const stripped = stripSiteIgnoredAliasSuffix(segment);
+    const nextStripped =
+      segments[index + 1] === undefined
+        ? undefined
+        : stripSiteIgnoredAliasSuffix(segments[index + 1]!);
+    if (IGNORED_SITE_SEGMENTS.has(stripped)) return true;
+    return stripped === ".next" && nextStripped === "cache";
   });
 }
 
@@ -293,7 +298,7 @@ function parsePreview(
             path,
             "warning",
             "invalid-preview-entry",
-            "dohc.json preview.entry must be a relative workspace path.",
+            "dohc.json preview.entry must be a relative workspace path, not '.', './', or an empty path.",
           ),
         );
       }
@@ -350,7 +355,7 @@ function parseBuild(
             path,
             "warning",
             "invalid-build-output",
-            "dohc.json build.output must be a relative workspace path.",
+            "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
           ),
         );
       }

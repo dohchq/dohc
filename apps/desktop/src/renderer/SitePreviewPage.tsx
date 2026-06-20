@@ -370,8 +370,10 @@ export function SitePreviewPage(props: {
               {/* allow-same-origin keeps localhost previews on their loopback
                   origin; without it sandboxed frames send "null" origins and
                   the SDK bridge cannot enforce exact active-preview matching.
-                  Main registers loopback preview origins, SDK reads compare
-                  event.origin to the active URL, and the frame uses no-referrer. */}
+                  The frame src is restricted to loopback URLs by isLoopbackOrigin,
+                  message handling rejects origins that do not match the active
+                  preview URL, and preview servers are dohc-controlled local
+                  infrastructure rather than arbitrary remote content. */}
               <iframe
                 ref={iframeRef}
                 key={preview.url}

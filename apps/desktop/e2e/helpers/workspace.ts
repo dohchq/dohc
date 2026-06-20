@@ -54,6 +54,13 @@ export async function cleanupDesktopWorkspace(
   if (rejected) throw rejected.reason;
 }
 
+/**
+ * Validates workspace-relative test paths before writing fixture files.
+ * Both raw and decoded forms are checked so encoded traversal cannot bypass the
+ * guard. This rejects absolute paths, parent/current directory references,
+ * empty segments, null bytes, and backslashes before a test can escape the
+ * temporary workspace root.
+ */
 function assertSafeRelativePath(path: string): void {
   let decoded = path;
   try {
