@@ -1608,13 +1608,12 @@ p {
           private: true,
           type: "module",
           scripts: {
-            // Scaffolded dev previews use python3's static server; common on
-            // macOS/Linux, but not guaranteed on every system.
-            dev: "python3 -m http.server 4173 --bind 127.0.0.1",
+            // Scaffolded previews use Node's package runner so they work in
+            // the same runtime agents already use for generated web projects.
+            dev: "npx --yes serve . --listen 127.0.0.1:4173",
             build:
               "node -e \"(async()=>{const fs=await import('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);})()\"",
-            // Built preview uses the same python3 dependency as dev.
-            preview: "python3 -m http.server 4173 --bind 127.0.0.1 -d dist",
+            preview: "npx --yes serve dist --listen 127.0.0.1:4173",
           },
         },
         null,
@@ -1787,10 +1786,10 @@ async function findLegacyAppImport(
       }
       if (!dirent.isFile() || !SITE_SOURCE_EXTENSIONS.has(fileExtension(dirent.name))) continue;
       const info = await stat(child);
-      totalBytes += info.size;
-      if (totalBytes > MAX_SITE_TEST_BYTES) {
+      if (totalBytes + info.size > MAX_SITE_TEST_BYTES) {
         return { path: rel, reason: "too-large" };
       }
+      totalBytes += info.size;
       if (hasLegacyAppImport(await readFile(child, "utf8"))) {
         return { path: rel, reason: "legacy-import" };
       }

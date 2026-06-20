@@ -1409,7 +1409,13 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
-function InvalidSitePathFallback({ activeTab }: { activeTab: string | null }) {
+function InvalidSitePathFallback({
+  activeTab,
+  onClose,
+}: {
+  activeTab: string | null;
+  onClose: () => void;
+}) {
   useEffect(() => {
     console.error("[desktop] invalid site tab path", {
       activeTab,
@@ -1418,8 +1424,18 @@ function InvalidSitePathFallback({ activeTab }: { activeTab: string | null }) {
   }, [activeTab]);
 
   return (
-    <div className="flex flex-1 items-center justify-center text-sm text-muted">
-      Invalid site path
+    <div
+      role="alert"
+      className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-danger"
+    >
+      <span>Invalid site path</span>
+      <button
+        type="button"
+        onClick={onClose}
+        className="rounded border border-danger/30 px-2 py-1 text-[11px] font-medium text-danger hover:bg-danger/10"
+      >
+        Close tab
+      </button>
     </div>
   );
 }
@@ -2440,7 +2456,10 @@ export function DesktopWorkspaceShell(props: {
                   />
                 </Suspense>
               ) : (
-                <InvalidSitePathFallback activeTab={wb.activeTab} />
+                <InvalidSitePathFallback
+                  activeTab={wb.activeTab}
+                  onClose={closeActiveTab}
+                />
               )
             ) : wb.activeTab ? (
               <FileInspector

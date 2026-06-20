@@ -776,7 +776,14 @@ describe("mcp tools operate on allowed paths", () => {
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
       expect(html).not.toContain("@dohc/app");
-      expect(packageJson).toMatchObject({ private: true, type: "module" });
+      expect(packageJson).toMatchObject({
+        private: true,
+        type: "module",
+        scripts: {
+          dev: "npx --yes serve . --listen 127.0.0.1:4173",
+          preview: "npx --yes serve dist --listen 127.0.0.1:4173",
+        },
+      });
       expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
       const changes = await listChanges(ctx, { includeFiles: true });
       expect(changes.changes[0]).toMatchObject({
@@ -888,6 +895,18 @@ describe("mcp tools operate on allowed paths", () => {
         ok: false,
         checks: expect.arrayContaining([
           expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
+        ]),
+      });
+
+      await writeFile(join(ctx.root, "todo/script.js"), "x".repeat(2 * 1024 * 1024 + 1));
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: false,
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            name: "no-legacy-sdk-import",
+            ok: false,
+            message: "Site source is too large for MCP static validation.",
+          }),
         ]),
       });
     });
