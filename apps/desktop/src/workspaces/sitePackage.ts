@@ -93,6 +93,14 @@ function mapWorkspaceSite(
 
 async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): Promise<SiteScripts> {
   if (!site.configPath || !site.configPath.endsWith("dohc.json")) return {};
+  if (
+    site.configPath.includes("..") ||
+    site.configPath.startsWith("/") ||
+    site.configPath.startsWith("\\") ||
+    /^[A-Za-z]:[\\/]/.test(site.configPath)
+  ) {
+    return {};
+  }
   try {
     const parsed = parseDohcSiteConfig(
       await readFile(join(rootPath, site.configPath), "utf8"),

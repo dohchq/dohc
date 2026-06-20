@@ -54,6 +54,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hasLegacyAppImport } from "./sourceScanner";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -1231,127 +1232,6 @@ const SITE_SOURCE_EXTENSIONS = new Set([
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
 const SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
 let cachedDohcSdkDependencyRange: string | null = null;
-const LEGACY_APP_IMPORT_RE =
-  /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;
-
-function stripSourceComments(body: string): string {
-  let output = "";
-  let quote: "'" | "\"" | "`" | null = null;
-  let regexLiteral = false;
-  let regexCharClass = false;
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
-  let currentWord = "";
-  let previousToken = "";
-
-  function rememberToken(char: string) {
-    if (/[\w$]/.test(char)) {
-      currentWord += char;
-      return;
-    }
-    if (currentWord) {
-      previousToken = currentWord;
-      currentWord = "";
-    }
-    if (!/\s/.test(char)) previousToken = char;
-  }
-
-  function canStartRegexLiteral() {
-    if (currentWord) {
-      previousToken = currentWord;
-      currentWord = "";
-    }
-    return (
-      previousToken === "" ||
-      ["return", "throw", "case", "yield", "await", "typeof", "void", "delete"].includes(previousToken) ||
-      "([{,;:=!?&|+-*~^<>".includes(previousToken)
-    );
-  }
-
-  for (let index = 0; index < body.length; index += 1) {
-    const char = body[index] ?? "";
-    const next = body[index + 1] ?? "";
-
-    if (lineComment) {
-      if (char === "\n" || char === "\r") {
-        lineComment = false;
-        output += char;
-      }
-      continue;
-    }
-
-    if (blockComment) {
-      if (char === "\n" || char === "\r") output += char;
-      if (char === "*" && next === "/") {
-        blockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-
-    if (regexLiteral) {
-      output += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (regexCharClass) {
-        if (char === "]") regexCharClass = false;
-      } else if (char === "[") {
-        regexCharClass = true;
-      } else if (char === "/") {
-        regexLiteral = false;
-        previousToken = "literal";
-      }
-      continue;
-    }
-
-    if (quote) {
-      output += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = null;
-        previousToken = "literal";
-      }
-      continue;
-    }
-
-    if (char === "'" || char === "\"" || char === "`") {
-      quote = char;
-      output += char;
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      lineComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (char === "/" && next === "*") {
-      blockComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (char === "/" && canStartRegexLiteral()) {
-      regexLiteral = true;
-      regexCharClass = false;
-      output += char;
-      continue;
-    }
-
-    output += char;
-    rememberToken(char);
-  }
-
-  return output;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1896,8 +1776,9 @@ async function findLegacyAppImport(
       if (totalBytes > MAX_SITE_TEST_BYTES) {
         return { path: rel, reason: "too-large" };
       }
-      const body = stripSourceComments(await readFile(child, "utf8"));
-      if (LEGACY_APP_IMPORT_RE.test(body)) return { path: rel, reason: "legacy-import" };
+      if (hasLegacyAppImport(await readFile(child, "utf8"))) {
+        return { path: rel, reason: "legacy-import" };
+      }
     }
     return null;
   }
