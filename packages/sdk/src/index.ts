@@ -76,6 +76,9 @@ function targetOriginFromLocation(currentWindow: Window): string | null {
 }
 
 function postTargetOriginFor(targetOrigin: string): string {
+  // Browser APIs require "*" for file:// postMessage targets. The paired source
+  // and response-origin checks below still guard replies, but request visibility
+  // is an inherent file:// limitation.
   return targetOrigin === "file://" ? "*" : targetOrigin;
 }
 
@@ -190,10 +193,13 @@ export function createPostMessageTransport(
   };
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isBooleanRecord(value: unknown): value is Record<string, boolean> {
   return (
-    typeof value === "object" &&
-    value !== null &&
+    isPlainRecord(value) &&
     Object.values(value).every((entry) => typeof entry === "boolean")
   );
 }
@@ -255,6 +261,12 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
             throw new DohcSdkError(
               "DOHC_BAD_RESPONSE",
               "dohc host returned an invalid collection response.",
+            );
+          }
+          if (!result.every(isPlainRecord)) {
+            throw new DohcSdkError(
+              "DOHC_BAD_RESPONSE",
+              "dohc host returned invalid collection item shapes.",
             );
           }
           return result;

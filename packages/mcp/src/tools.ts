@@ -15,7 +15,13 @@ import {
   type ChangeAuthor,
   type ChangeProvenance,
   type ChangeSetKind,
+  type DohcSiteConfig,
   type FileChange,
+  type SiteConfidence,
+  type SiteDiagnostic,
+  type SiteKind,
+  type SiteScripts,
+  type WorkspaceSite,
 } from "@dohc/workspace-core";
 import {
   createChangeSetStore,
@@ -1187,34 +1193,6 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
 
 // --- dohc site tools --------------------------------------------------------
 
-type SiteKind = "static" | "package" | "configured";
-type SiteConfidence = "high" | "medium" | "low";
-type SiteDiagnosticSeverity = "info" | "warning" | "error";
-type SiteDiagnostic = {
-  severity: SiteDiagnosticSeverity;
-  code: string;
-  message: string;
-  path?: string;
-};
-type SiteScripts = {
-  dev?: string;
-  start?: string;
-  build?: string;
-  preview?: string;
-};
-type WorkspaceSite = {
-  root: string;
-  title: string;
-  kind: SiteKind;
-  confidence: SiteConfidence;
-  entry?: string;
-  packageManager?: "pnpm" | "npm" | "yarn" | "bun";
-  scripts: SiteScripts;
-  buildOutputs: string[];
-  configPath?: string;
-  diagnostics: SiteDiagnostic[];
-};
-
 type PackageJson = {
   name?: unknown;
   packageManager?: unknown;
@@ -1223,12 +1201,8 @@ type PackageJson = {
   devDependencies?: unknown;
 };
 
-type DohcSiteConfig = {
-  type?: unknown;
-  title?: unknown;
-  preview?: unknown;
-  build?: unknown;
-};
+type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
+  Record<string, unknown>;
 
 type SiteCheck = { name: string; ok: boolean; message?: string; path?: string };
 
@@ -1408,9 +1382,9 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   const allNames = new Set([...files, ...directories]);
   const diagnostics: SiteDiagnostic[] = [];
   const configPath = files.has("dohc.json") ? relativeJoin(root, "dohc.json") : undefined;
-  let config: DohcSiteConfig | null = null;
+  let config: RawDohcSiteConfig | null = null;
   if (configPath) {
-    const parsed = await readJsonDetailed<DohcSiteConfig>(join(ctx.root, configPath));
+    const parsed = await readJsonDetailed<RawDohcSiteConfig>(join(ctx.root, configPath));
     if (parsed.ok) {
       config = parsed.value;
     } else {
@@ -1470,12 +1444,12 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     return null;
   }
   if (explicitNonSite) {
-    diagnostics.push({
-      severity: "warning",
-      code: "unexpected_dohc_type",
-      path: configPath,
-      message: "dohc.json has website signals but its type is not \"site\".",
-    });
+      diagnostics.push({
+        severity: "warning",
+        code: "unexpected_dohc_type",
+        path: configPath ?? relativeJoin(root, "dohc.json"),
+        message: "dohc.json has website signals but its type is not \"site\".",
+      });
   }
 
   if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {

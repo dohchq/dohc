@@ -275,5 +275,12 @@ describe("@dohc/sdk", () => {
     await expect(collectionsClient.collections.get("bad").list()).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
     });
+
+    const collectionItemsClient = createDohcClient({
+      transport: { async request() { return [{ id: 1 }, null]; } },
+    });
+    await expect(collectionItemsClient.collections.get("bad").list()).rejects.toMatchObject({
+      code: "DOHC_BAD_RESPONSE",
+    });
   });
 });
