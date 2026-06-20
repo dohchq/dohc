@@ -63,6 +63,10 @@ be weakened by rebrand or UI work.
   `readWorkspaceText` IPC path; browser code cannot choose an identity or
   widen the workspace. Collection reads such as
   `dohc.collections.get(...).list()` are intentionally deferred beyond Phase 1
-  and must be bounded by the same preview bridge before shipping. Writes,
-  cloud access, sharing, and publishing must continue through explicit
-  workspace, share, lock, and review-gate checks.
+  and must use server-side ACL checks as the actual authorization boundary
+  before shipping. The preview bridge controls when browser code can call the
+  feature, but it is not the trust boundary: callers cannot bypass server-side
+  identity, workspace-scope, share, lock, or review-gate enforcement by
+  manipulating browser state. Writes, cloud access, sharing, and publishing
+  must continue through explicit workspace, share, lock, and review-gate
+  checks.

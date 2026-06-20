@@ -322,8 +322,13 @@ First useful SDK shape:
 import { dohc } from "@dohc/sdk"
 
 const text = await dohc.files.read("notes/today.md")
-const rows = await dohc.collections.get("transactions").list()
 await dohc.provenance.record("Updated dashboard")
+```
+
+Later collection-read shape, after the server-side authorization review:
+
+```ts
+const rows = await dohc.collections.get("transactions").list()
 ```
 
 Rename all generated guidance and tests away from `@dohc/app`.
@@ -818,7 +823,9 @@ Tasks:
 - Create/rename SDK package to `@dohc/sdk`.
 - Remove `@dohc/app`.
 - Add local dohc service bridge for site previews.
-- Add minimal file/collection read.
+- Add minimal file read.
+- Document collection read as a later capability until the auth review below
+  lands.
 - Before shipping collection reads, explicitly review the authorization scope
   against `docs/security/authz-boundaries.md`; collection reads must be bounded
   by workspace permissions and the preview bridge, not by caller-provided
