@@ -48,8 +48,11 @@ export function parseArgs(argv: string[]): ToolContext {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = argv[++i];
     else if (argv[i] === "--home" && argv[i + 1]) home = argv[++i];
-    else if (argv[i] === "--sdk-package-json" && argv[i + 1]) sdkPackageJsonPath = argv[++i];
-    else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) sdkDependencyRange = argv[++i];
+    else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
+      sdkPackageJsonPath = argv[++i].trim() || undefined;
+    } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
+      sdkDependencyRange = argv[++i].trim() || undefined;
+    }
   }
   return {
     root,

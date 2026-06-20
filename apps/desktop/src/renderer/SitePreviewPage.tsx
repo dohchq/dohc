@@ -88,6 +88,8 @@ function sdkErrorResponse(
 function isSafeWorkspaceRelativePath(path: string): boolean {
   let decoded = path;
   try {
+    // Decode repeatedly so double-encoded traversal such as
+    // "%252e%252e%252fsecret.md" cannot hide a later "../" segment.
     for (;;) {
       const next = decodeURIComponent(decoded);
       if (next === decoded) break;

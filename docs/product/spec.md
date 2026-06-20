@@ -30,7 +30,7 @@ lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
 - **SQLite database files** — first-class workspace files stored outside
   markdown atoms. Raw SQLite bytes are never CRDT-synced.
 - **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, shown through live queries and apps.
+  user-declared types, shown through live queries and sites.
 - **Folders** — organize atoms; support icons, colors, stars, and
   drag-and-drop move with wikilink-rewrite cascade.
 

@@ -61,10 +61,15 @@ export class DohcSdkError extends Error {
 let requestCounter = 0;
 
 function createRequestId(): string {
-  const random =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `fallback_${(++requestCounter).toString(36)}`;
+  let random: string;
+  try {
+    random =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `fallback_${(++requestCounter).toString(36)}`;
+  } catch {
+    random = `fallback_${(++requestCounter).toString(36)}`;
+  }
   return `dohc_${Date.now().toString(36)}_${random}`;
 }
 
