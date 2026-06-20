@@ -866,6 +866,9 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "todo/script.js"), '// import "@dohc/app";\n');
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
 
+      await writeFile(join(ctx.root, "todo/script.js"), 'const marker = "/* @dohc/app */";\n');
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
+
       await writeFile(join(ctx.root, "todo/script.js"), 'import "@dohc/app";\n');
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
         ok: false,

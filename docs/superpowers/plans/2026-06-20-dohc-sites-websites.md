@@ -823,6 +823,8 @@ Tasks:
   against `docs/security/authz-boundaries.md`; collection reads must be bounded
   by workspace permissions and the preview bridge, not by caller-provided
   identity.
+- Add a code comment at the collection-read API implementation that references
+  `docs/security/authz-boundaries.md` as the authoritative boundary.
 - Add SDK docs and examples.
 
 E2E gate:

@@ -1350,6 +1350,9 @@ function registerIpcHandlers(): void {
     );
   });
 
+  // Site preview SDK reads use the combined helper to make the server-side
+  // workspace authorization boundary explicit. Older workspace handlers keep
+  // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
     const input = ReadWorkspaceTextPayload.parse(payload);
     const workspace = requireAuthorizedWorkspace(event, input.workspaceId);
@@ -2021,7 +2024,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("before-quit", () => {
-    for (const [key, handle] of sitePreviewHandles) {
+    for (const [key, handle] of [...sitePreviewHandles]) {
       sitePreviewOriginReleases.get(key)?.();
       sitePreviewOriginReleases.delete(key);
       sitePreviewHandles.delete(key);

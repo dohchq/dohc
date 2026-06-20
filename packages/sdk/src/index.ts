@@ -67,6 +67,11 @@ function createRequestId(): string {
   return `dohc_${Date.now().toString(36)}_${random}`;
 }
 
+/**
+ * Reads the dohc host origin injected into preview URLs. `file://` is accepted
+ * only as the exact opaque host marker dohc emits; arbitrary file origins are
+ * not normalized into broader trust.
+ */
 function targetOriginFromLocation(currentWindow: Window): string | null {
   try {
     const href = currentWindow.location?.href;
@@ -83,13 +88,20 @@ function targetOriginFromLocation(currentWindow: Window): string | null {
   return null;
 }
 
+/**
+ * Browser APIs require "*" for file:// postMessage targets. Source and
+ * response-origin checks still guard replies, but request visibility is an
+ * inherent file:// limitation.
+ */
 function postTargetOriginFor(targetOrigin: string): string {
-  // Browser APIs require "*" for file:// postMessage targets. The paired source
-  // and response-origin checks below still guard replies, but request visibility
-  // is an inherent file:// limitation.
   return targetOrigin === "file://" ? "*" : targetOrigin;
 }
 
+/**
+ * Browser file:// frames report response origins as "null"; map that back to
+ * the exact dohc file host marker while still rejecting spoofed responses from
+ * other origins/sources.
+ */
 function responseOriginMatches(eventOrigin: string, targetOrigin: string): boolean {
   return eventOrigin === targetOrigin || (targetOrigin === "file://" && eventOrigin === "null");
 }
