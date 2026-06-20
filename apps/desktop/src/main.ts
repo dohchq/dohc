@@ -960,6 +960,17 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   }
 }
 
+function requireAuthorizedWorkspace(
+  event: IpcMainInvokeEvent,
+  workspaceId: string,
+) {
+  assertTrustedSender(event);
+  // Desktop authorization is main-process owned: the renderer may name a
+  // workspace, but only registered workspaces in this local profile resolve,
+  // and workspaceAssets re-checks filesystem containment before reading.
+  return requireWorkspace(workspaceId);
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
     assertTrustedSender(event);
@@ -1340,9 +1351,8 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ReadWorkspaceTextPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
+    const workspace = requireAuthorizedWorkspace(event, input.workspaceId);
     return ReadWorkspaceTextResult.parse(
       await readWorkspaceText(workspace.rootPath, input.relativePath),
     );

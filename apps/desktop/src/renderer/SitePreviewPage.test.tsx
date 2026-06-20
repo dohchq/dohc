@@ -53,6 +53,12 @@ describe("SitePreviewPage", () => {
     await user.click(screen.getByTestId("site-preview-static"));
 
     const frame = await screen.findByTestId("site-preview-frame");
+    const sandbox = frame.getAttribute("sandbox") ?? "";
+    expect(sandbox).toContain("allow-forms");
+    expect(sandbox).toContain("allow-same-origin");
+    expect(sandbox).toContain("allow-scripts");
+    expect(sandbox).not.toContain("allow-popups");
+    expect(sandbox).not.toContain("allow-modals");
     const frameUrl = new URL(frame.getAttribute("src") ?? "");
     expect(frameUrl.origin).toBe("http://127.0.0.1:49152");
     expect(frameUrl.searchParams.get("dohcHostOrigin")).toBe(window.location.origin);
@@ -148,33 +154,45 @@ describe("SitePreviewPage", () => {
       value: source,
     });
 
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        origin: "http://127.0.0.1:49152",
-        source,
-        data: {
-          protocol: DOHC_SDK_PROTOCOL,
-          id: "read-bad",
-          method: "files.read",
-          params: { path: "../secret.md" },
-        },
-      }),
-    );
+    const unsafePaths = [
+      "../secret.md",
+      "/etc/passwd",
+      "../../secret.md",
+      "notes/../../../secret.md",
+      "notes\\secret.md",
+      "C:\\Users\\ice\\secret.md",
+    ];
 
-    await vi.waitFor(() => {
-      expect(postMessage).toHaveBeenCalledWith(
-        {
-          protocol: DOHC_SDK_PROTOCOL,
-          id: "read-bad",
-          ok: false,
-          error: {
-            code: "DOHC_BAD_REQUEST",
-            message: "files.read requires a safe workspace-relative path.",
+    for (const [index, path] of unsafePaths.entries()) {
+      const id = `read-bad-${index}`;
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "http://127.0.0.1:49152",
+          source,
+          data: {
+            protocol: DOHC_SDK_PROTOCOL,
+            id,
+            method: "files.read",
+            params: { path },
           },
-        },
-        "http://127.0.0.1:49152",
+        }),
       );
-    });
+
+      await vi.waitFor(() => {
+        expect(postMessage).toHaveBeenCalledWith(
+          {
+            protocol: DOHC_SDK_PROTOCOL,
+            id,
+            ok: false,
+            error: {
+              code: "DOHC_BAD_REQUEST",
+              message: "files.read requires a safe workspace-relative path.",
+            },
+          },
+          "http://127.0.0.1:49152",
+        );
+      });
+    }
     expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
@@ -232,6 +250,30 @@ describe("SitePreviewPage", () => {
         data: {
           protocol: DOHC_SDK_PROTOCOL,
           id: "read-wrong-port",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("ignores SDK messages when no preview is active", async () => {
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "http://127.0.0.1:49152",
+        source,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-no-preview",
           method: "files.read",
           params: { path: "notes/q1.md" },
         },

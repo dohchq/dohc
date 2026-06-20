@@ -96,6 +96,10 @@ function sdkErrorResponse(
 }
 
 function isSafeWorkspaceRelativePath(path: string): boolean {
+  // `files.read` is intentionally workspace-relative, not site-root-relative:
+  // dohc sites are workspace-native and may read files such as notes/today.md.
+  // Main-process IPC still enforces the registered workspace boundary and
+  // filesystem containment before any bytes are read.
   return (
     path.length > 0 &&
     !path.includes("\0") &&
@@ -363,13 +367,16 @@ export function SitePreviewPage(props: {
                   <ExternalLink size={12} aria-hidden />
                 </button>
               </div>
+              {/* allow-same-origin + allow-scripts is required for ordinary
+                  localhost app previews. Message handling is still constrained
+                  to the active loopback preview origin before SDK requests run. */}
               <iframe
                 ref={iframeRef}
                 key={preview.url}
                 data-testid="site-preview-frame"
                 title={site.title}
                 src={siteFrameUrl(preview.url)}
-                sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                sandbox="allow-forms allow-same-origin allow-scripts"
                 referrerPolicy="no-referrer"
                 className="min-h-0 flex-1 border-0 bg-white"
               />

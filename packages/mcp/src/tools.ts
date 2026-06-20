@@ -1232,7 +1232,7 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-// Keep in sync with packages/sdk/package.json whenever @dohc/sdk changes.
+// Semver range for @dohc/sdk; base version should match packages/sdk/package.json.
 const DOHC_SDK_VERSION = "^0.1.0";
 const LEGACY_APP_IMPORT_RE =
   /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;

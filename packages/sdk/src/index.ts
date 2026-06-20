@@ -295,4 +295,6 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
 
 export type DohcClient = ReturnType<typeof createDohcClient>;
 
+// Browser-only convenience client. In SSR or Node.js, import createDohcClient
+// and provide an explicit transport/currentWindow instead.
 export const dohc = createDohcClient();
