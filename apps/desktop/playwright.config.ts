@@ -16,9 +16,17 @@ if (platform() !== "win32" && !process.env.TMPDIR && existsSync("/tmp")) {
 // The root playwright.config.ts stays untouched for `pnpm test:e2e` (web).
 export default defineConfig({
   testDir: "./e2e",
+  testMatch: "**/*.spec.ts",
   workers: 1,
   timeout: 60_000,
+  expect: {
+    timeout: 10_000,
+  },
   retries: 0,
   reporter: [["list"]],
+  use: {
+    screenshot: "only-on-failure",
+    trace: "retain-on-failure",
+  },
   outputDir: "../../test-results/desktop-e2e",
 });

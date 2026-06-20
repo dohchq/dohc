@@ -57,7 +57,7 @@ beforeEach(async () => {
     `insert into atoms (id, workspace_id, path, kind, body, revision, deleted_at)
      values
        ($2, $1, 'notes/hello.md', 'markdown', '# Hello', 1, null),
-       ($3, $1, '.apps/workspace/src/App.tsx', 'text', 'export default 1', 1, null),
+       ($3, $1, 'sites/workspace/src/App.tsx', 'text', 'export default 1', 1, null),
        ($4, $1, 'data/live.csv', 'csv', 'id,name\n1,Ice', 1, null),
        ($5, $1, 'notes/gone.md', 'markdown', '# Gone', 1, now()),
        ($6, $1, 'notes/locked.md', 'markdown', '# Locked', 1, null)`,
@@ -133,7 +133,7 @@ describe('Postgres ACL', () => {
     })
     await expect(acl().loadAtomBootstrap?.(input(memberId, sourceAtomId))).resolves.toEqual({
       markdown: 'export default 1',
-      path: '.apps/workspace/src/App.tsx',
+      path: 'sites/workspace/src/App.tsx',
       plainText: true,
     })
     await expect(acl().loadAtomBootstrap?.(input(memberId, csvAtomId))).resolves.toEqual({

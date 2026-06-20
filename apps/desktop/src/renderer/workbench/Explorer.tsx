@@ -7,6 +7,7 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  Globe2,
   LayoutGrid,
   Pin,
   RefreshCw,
@@ -39,8 +40,10 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isSiteTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
+  parseSiteTabPath,
 } from "./workbenchState";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
@@ -132,7 +135,6 @@ function resolveTypedPath(value: string, contextDir: string): string {
 
 function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   if (kind === "database") return <Database size={13} aria-hidden className="shrink-0" />;
-  if (kind === "app-source") return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   return <FileText size={13} aria-hidden className="shrink-0" />;
 }
 
@@ -143,11 +145,15 @@ function editorTitle(path: string): string {
     const parsed = parseHistoryDiffTabPath(path);
     return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
   }
+  if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   return leafOf(path);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
   if (isVirtualTabPath(props.path)) {
+    if (isSiteTabPath(props.path)) {
+      return <Globe2 size={13} aria-hidden className="shrink-0" />;
+    }
     return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   }
   return <FileKindIcon kind={props.kind ?? "file"} />;

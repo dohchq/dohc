@@ -100,12 +100,10 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  getAppPackage: (payload) => ipcRenderer.invoke(CHANNELS.getAppPackage, payload),
-  runAppTester: (payload) => ipcRenderer.invoke(CHANNELS.runAppTester, payload),
-  grantAppTrust: (payload) => ipcRenderer.invoke(CHANNELS.grantAppTrust, payload),
-  getAppRuntime: (payload) => ipcRenderer.invoke(CHANNELS.getAppRuntime, payload),
-  runAppRuntimeRpc: (payload) =>
-    ipcRenderer.invoke(CHANNELS.runAppRuntimeRpc, payload),
+  listSites: (payload) => ipcRenderer.invoke(CHANNELS.listSites, payload),
+  getSitePackage: (payload) => ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
+  startSitePreview: (payload) => ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
+  stopSitePreview: (payload) => ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

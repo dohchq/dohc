@@ -172,15 +172,9 @@ describe("workspace root choice", () => {
 });
 
 describe("path classification", () => {
-  it("treats .apps/<name>/app.json as visible app source", () => {
-    expect(classifyPath("finance/.apps/ledger/app.json")).toEqual({
-      kind: "app-source",
-      appName: "ledger",
-    });
-    expect(classifyPath(".apps/tracker/src/App.tsx")).toEqual({
-      kind: "app-source",
-      appName: "tracker",
-    });
+  it("does not give .apps paths any special core classification", () => {
+    expect(classifyPath("finance/.apps/ledger/app.json")).toEqual({ kind: "file" });
+    expect(classifyPath(".apps/tracker/src/App.tsx")).toEqual({ kind: "file" });
   });
 
   it("treats .sqlite, .sqlite3, and .db files as visible databases", () => {

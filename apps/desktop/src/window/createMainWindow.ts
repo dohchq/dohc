@@ -3,7 +3,6 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { palette, TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
-import { isAppRuntimeFrameUrl } from "../workspaces/appRuntimeRegistry";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
@@ -72,6 +71,18 @@ export function navigationPolicy(): NavigationPolicy {
 
 function windowStateFile(): string {
   return join(stateDir(), WINDOW_STATE_FILE);
+}
+
+function isLoopbackHttpUrl(targetUrl: string): boolean {
+  try {
+    const url = new URL(targetUrl);
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+    );
+  } catch {
+    return false;
+  }
 }
 
 function loadPlacement() {
@@ -164,7 +175,7 @@ export function createMainWindow(): BrowserWindow {
   window.webContents.on("will-navigate", denyDisallowed);
   window.webContents.on("will-redirect", denyDisallowed);
   window.webContents.on("will-frame-navigate", (event) => {
-    if (isAppRuntimeFrameUrl(event.url)) return;
+    if (isLoopbackHttpUrl(event.url)) return;
     denyDisallowed(event, event.url);
   });
 

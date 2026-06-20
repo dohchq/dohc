@@ -1,103 +1,79 @@
 import { describe, expect, it } from "vitest";
-import { AppRuntimeRpcPayload, CreateDataFragmentPayload } from "./bridgeContract";
+import {
+  CreateDataFragmentPayload,
+  ListSitesResult,
+  StartSitePreviewPayload,
+  StartSitePreviewResult,
+} from "./bridgeContract";
 
-describe("AppRuntimeRpcPayload", () => {
-  const base = { workspaceId: "ws-apps", appRoot: "finance/.apps/ledger" };
-
-  it("accepts bounded collection list and insert requests", () => {
+describe("site IPC contract", () => {
+  it("accepts detected normal website metadata", () => {
     expect(
-      AppRuntimeRpcPayload.parse({
-        ...base,
-        request: {
-          id: "1",
-          op: "collection.list",
-          args: { name: "transactions" },
-        },
-      }).request,
-    ).toEqual({
-      id: "1",
-      op: "collection.list",
-      args: { name: "transactions" },
-    });
-    expect(
-      AppRuntimeRpcPayload.parse({
-        ...base,
-        request: {
-          id: "2",
-          op: "collection.insert",
-          args: { name: "transactions", record: { id: "x", amount: 42 } },
-        },
-      }).request,
-    ).toEqual({
-      id: "2",
-      op: "collection.insert",
-      args: { name: "transactions", record: { id: "x", amount: 42 } },
-    });
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "client-portal",
+            title: "Client Portal",
+            kind: "package",
+            confidence: "high",
+            entryPath: "client-portal/index.html",
+            configPath: "client-portal/vite.config.ts",
+            packagePath: "client-portal/package.json",
+            packageManager: "pnpm",
+            scripts: { dev: "vite", build: "vite build" },
+            buildOutputs: ["dist"],
+            sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+            diagnostics: [],
+          },
+        ],
+      }).sites[0]?.root,
+    ).toBe("client-portal");
   });
 
-  it("rejects malformed operations, missing insert records, and oversized payloads", () => {
-    const tooDeep: Record<string, unknown> = {};
-    let cursor = tooDeep;
-    for (let index = 0; index < 9; index += 1) {
-      const next: Record<string, unknown> = {};
-      cursor.next = next;
-      cursor = next;
-    }
+  it("accepts bounded preview start/result payloads", () => {
+    expect(
+      StartSitePreviewPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+        mode: "static",
+      }),
+    ).toEqual({
+      workspaceId: "ws-sites",
+      siteRoot: ".",
+      mode: "static",
+    });
 
     expect(
-      AppRuntimeRpcPayload.safeParse({
-        ...base,
-        request: {
-          id: "1",
-          op: "collection.delete",
-          args: { name: "transactions", record: { id: "x" } },
+      StartSitePreviewResult.parse({
+        siteRoot: ".",
+        mode: "build",
+        url: "http://127.0.0.1:4173/",
+        logs: [{ stream: "stdout", text: "built", at: 1 }],
+        build: {
+          ok: true,
+          command: "pnpm",
+          args: ["build"],
+          outputPath: "/tmp/workspace/dist",
+          exitCode: 0,
         },
+      }).mode,
+    ).toBe("build");
+  });
+
+  it("rejects unknown preview modes and non-local preview URLs", () => {
+    expect(
+      StartSitePreviewPayload.safeParse({
+        workspaceId: "ws-sites",
+        siteRoot: "site",
+        mode: "native",
       }).success,
     ).toBe(false);
     expect(
-      AppRuntimeRpcPayload.safeParse({
-        ...base,
-        request: {
-          id: "2",
-          op: "collection.insert",
-          args: { name: "transactions" },
-        },
-      }).success,
-    ).toBe(false);
-    expect(
-      AppRuntimeRpcPayload.safeParse({
-        ...base,
-        request: {
-          id: "3",
-          op: "collection.insert",
-          args: {
-            name: "transactions",
-            record: { id: "x", body: "x".repeat(300 * 1024) },
-          },
-        },
-      }).success,
-    ).toBe(false);
-    expect(
-      AppRuntimeRpcPayload.safeParse({
-        ...base,
-        request: {
-          id: "4",
-          op: "collection.insert",
-          args: { name: "transactions", record: tooDeep },
-        },
-      }).success,
-    ).toBe(false);
-    expect(
-      AppRuntimeRpcPayload.safeParse({
-        ...base,
-        request: {
-          id: "5",
-          op: "collection.insert",
-          args: {
-            name: "transactions",
-            record: { id: "x", values: Array.from({ length: 501 }, () => 0) },
-          },
-        },
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "https://example.com/",
+        logs: [],
       }).success,
     ).toBe(false);
   });

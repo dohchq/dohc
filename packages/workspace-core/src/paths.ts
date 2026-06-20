@@ -158,17 +158,12 @@ export function validateWorkspaceRootChoice(
 }
 
 export type PathClassification =
-  | { kind: "app-source"; appName: string }
   | { kind: "database" }
   | { kind: "file" };
 
 const DATABASE_EXTENSIONS = [".sqlite", ".sqlite3", ".db"];
 
 export function classifyPath(relativePath: string): PathClassification {
-  const segments = relativePath.split("/");
-  const appsIndex = segments.indexOf(".apps");
-  const appName = appsIndex === -1 ? undefined : segments[appsIndex + 1];
-  if (appName) return { kind: "app-source", appName };
   const lower = relativePath.toLowerCase();
   if (DATABASE_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
     return { kind: "database" };

@@ -29,8 +29,6 @@ function contentTypeForAtomKind(kind: AtomKind) {
       return "text/html";
     case "text":
       return "text/plain";
-    case "app-source":
-      return "text/plain";
     case "markdown":
       return "text/markdown";
   }

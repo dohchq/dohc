@@ -208,7 +208,7 @@ describe('hocuspocus hook factory', () => {
     })
   })
 
-  it('bootstraps view source files as plain text so TSX survives projection', async () => {
+  it('bootstraps website source files as plain text so TSX survives projection', async () => {
     const source = [
       '---',
       'id: views.workspace.src.app',
@@ -221,7 +221,7 @@ describe('hocuspocus hook factory', () => {
       canRead: true,
       canWrite: true,
       bootstrapMarkdown: source,
-      bootstrapPath: '.apps/workspace/src/App.tsx',
+      bootstrapPath: 'sites/workspace/src/App.tsx',
     })
 
     const loaded = await hooks.onLoadDocument({

@@ -12,10 +12,12 @@ import {
   HISTORY_TAB_PATH,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isSiteTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
   parseHistoryDiffTabPath,
+  parseSiteTabPath,
   parseUiState,
   serializeUiState,
   setSidebarWidth,
@@ -33,6 +35,7 @@ import {
   recordRecentFile,
   remapWorkbenchPaths,
   setFolderExpanded,
+  siteTabPath,
   toggleFolderExpanded,
   togglePinned,
   type WorkbenchState,
@@ -93,6 +96,14 @@ describe("tabs", () => {
     });
     expect(parseHistoryDiffTabPath("dohc://history-diff/change-only")).toBeNull();
     expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
+  });
+
+  it("recognizes site previews as virtual tabs with encoded site roots", () => {
+    const path = siteTabPath("clients/acme website");
+    expect(isSiteTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseSiteTabPath(path)).toBe("clients/acme website");
+    expect(parseSiteTabPath("dohc://site/")).toBeNull();
   });
 
   it("activateTab only activates an OPEN tab", () => {

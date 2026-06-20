@@ -13,14 +13,19 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
   createWorkspaceDirectory,
-  createApp,
+  addSiteSdk,
+  buildSite,
+  createSite,
   deleteWorkspacePath,
+  detectSites,
   importData,
   listWorkspaceFiles,
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
   openInDohc,
+  previewSite,
+  publishSite,
   queryDatabase,
   readChange,
   readWorkspaceFile,
@@ -29,7 +34,7 @@ import {
   share,
   syncCloud,
   syncNow,
-  testApp,
+  testSite,
   writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
@@ -207,28 +212,90 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_create_app",
+    "dohc_detect_sites",
     {
-      description: "Scaffold a new app at <area>/.apps/<name>. Never trusts the app — the user grants trust in dohc.",
+      description:
+        "Detect normal browser-viewable website folders in the workspace using index.html, package.json, dohc.json, and common web configs.",
       inputSchema: {
-        area: z.string().max(4096).default(""),
-        name: z.string().min(1).max(200),
-        title: z.string().max(200).optional(),
+        path: z.string().max(4096).optional(),
+        maxDepth: z.number().int().nonnegative().max(12).optional(),
       },
     },
-    async (args) => text(await createApp(ctx, args)),
+    async (args) => text(await detectSites(ctx, args)),
   );
 
   server.registerTool(
-    "dohc_test_app",
+    "dohc_create_site",
     {
-      description: "Run the static AppTester (compile + SDK import check) over an app's source files.",
+      description:
+        "Scaffold a normal website folder with index.html, package.json, and optional dohc.json. Records history; does not create hidden app folders.",
       inputSchema: {
-        appRoot: z.string().min(1).max(4096),
-        sourcePaths: z.array(z.string().min(1).max(4096)).max(200),
+        path: z.string().min(1).max(4096),
+        title: z.string().max(200).optional(),
+        withDohcJson: z.boolean().optional(),
       },
     },
-    async (args) => text(await testApp(ctx, args)),
+    async (args) => text(await createSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_test_site",
+    {
+      description:
+        "Run bounded static validation for a normal website folder: detector diagnostics, entry presence, and no legacy app SDK import.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await testSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_build_site",
+    {
+      description:
+        "Return the detected build plan for a normal website folder. Command execution is not wired in this MCP stub yet.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await buildSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_preview_site",
+    {
+      description:
+        "Return the dohc preview modes available for a normal website folder: static, dev server, and built preview.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await previewSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_publish_site",
+    {
+      description:
+        "Prepare a site publish/share review. This refuses to publish until dohc Cloud publish is wired.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await publishSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_add_sdk",
+    {
+      description:
+        "Add the optional @dohc/sdk dependency to a normal website package so agents can enhance it with dohc-aware reads later.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await addSiteSdk(ctx, args)),
   );
 
   server.registerTool(

@@ -156,11 +156,6 @@ const LazyDatabaseStudioView = lazy(() =>
     default: mod.DatabaseStudioView,
   })),
 );
-const LazyAppPackageView = lazy(() =>
-  import("./AppPackageView").then((mod) => ({
-    default: mod.AppPackageView,
-  })),
-);
 const LazySourceCodeEditor = lazy(() =>
   import("./SourceCodeEditor").then((mod) => ({
     default: mod.SourceCodeEditor,
@@ -200,13 +195,11 @@ export type FileViewKind =
   | "audio"
   | "pdf"
   | "database"
-  | "app-source"
   | "binary";
 
 // Pure classifier: every file resolves to exactly one view kind. Exported so
 // the E2E and unit tests pin the dispatch table directly.
 export function classifyForView(path: string): FileViewKind {
-  if (path.includes("/.apps/") || path.startsWith(".apps/")) return "app-source";
   const ext = extensionOf(path);
   if (ext === "md" || ext === "markdown") return "markdown";
   if (TABLE_EXT.has(ext)) return "csv";
@@ -1766,28 +1759,6 @@ export function FileInspector(props: {
             workspaceId={props.workspaceId}
             path={props.path}
             refreshKey={props.refreshKey}
-            onSharePath={props.onSharePath}
-          />
-        </Suspense>
-      );
-    case "app-source":
-      return (
-        <Suspense
-          fallback={
-            <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-              <ViewHeader
-                icon={<FileText size={13} aria-hidden />}
-                path={props.path}
-                label="app"
-                onShare={onShareCurrentPath}
-              />
-              <Empty>Loading app…</Empty>
-            </div>
-          }
-        >
-          <LazyAppPackageView
-            workspaceId={props.workspaceId}
-            path={props.path}
             onSharePath={props.onSharePath}
           />
         </Suspense>

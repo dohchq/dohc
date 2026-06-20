@@ -72,25 +72,10 @@ export type FolderInput = string | {
   starred?: boolean
 }
 
-const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
-const APP_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
-
-// `.apps/<name>/…` holds app source folders (see workspace-core
-// classifyPath); source files there keep their extension in labels.
-function isAppSourcePath(path: string): boolean {
-  const parts = pathSegments(path)
-  const appsIndex = parts.indexOf('.apps')
-  return (
-    appsIndex >= 0 &&
-    appsIndex <= parts.length - 3 &&
-    Boolean(parts[appsIndex + 1])
-  )
-}
+const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html?)$/i
 
 function isSourceCodeFilePath(path: string): boolean {
-  return SOURCE_CODE_EXT_RE.test(path) || (
-    isAppSourcePath(path) && APP_SOURCE_EXT_RE.test(path)
-  )
+  return SOURCE_CODE_EXT_RE.test(path)
 }
 
 // Build a tree from atoms + explicit folder rows. Obsidian-style:

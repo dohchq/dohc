@@ -25,6 +25,8 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",
+    "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
+    "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "test:hocuspocus:integration": "pnpm --filter @dohc/hocuspocus run test:integration",
     "sync:local": "pnpm --filter @dohc/workspace-fs sync",
     "lint": "pnpm -r --if-present lint",

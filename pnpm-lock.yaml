@@ -38,12 +38,12 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.1
         version: 6.43.1
-      '@dohc/app-tester':
-        specifier: workspace:*
-        version: link:../../services/app-tester
       '@dohc/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@dohc/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
@@ -274,9 +274,6 @@ importers:
 
   packages/mcp:
     dependencies:
-      '@dohc/app-tester':
-        specifier: workspace:*
-        version: link:../../services/app-tester
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
@@ -320,6 +317,15 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
+
+  packages/sdk:
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@24.13.2)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
 
   packages/workspace-contracts:
     dependencies:
@@ -443,24 +449,6 @@ importers:
       '@types/node':
         specifier: ^22.19.19
         version: 22.19.19
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.9
-        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
-
-  services/app-tester:
-    devDependencies:
-      '@playwright/test':
-        specifier: ^1.60.0
-        version: 1.60.0
-      '@types/node':
-        specifier: ^22.19.19
-        version: 22.19.19
-      tsx:
-        specifier: ^4.22.3
-        version: 4.22.3
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

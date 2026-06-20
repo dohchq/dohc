@@ -65,8 +65,8 @@ function memoryBackend() {
         throw error;
       }
       if (row.trustRequired) {
-        const error = new Error("app trust required before writing app source");
-        (error as Error & { code?: string }).code = "app-trust-required";
+        const error = new Error("site publish approval required before writing site source");
+        (error as Error & { code?: string }).code = "site-publish-required";
         throw error;
       }
       if (row.revision !== input.expectedRevision) throw new Error("stale revision");
@@ -147,7 +147,7 @@ describe("agent workspace shell sandbox", () => {
     });
   });
 
-  it("blocks workspace escapes and turns lock/app-trust write attempts into approval requests", async () => {
+  it("blocks workspace escapes and turns lock/site-publish write attempts into approval requests", async () => {
     await withTempDir(async (rootDir) => {
       const fixture = memoryBackend();
       const session = await startWorkspaceShellSession({
@@ -187,7 +187,7 @@ describe("agent workspace shell sandbox", () => {
         .resolves.toMatchObject({
           applied: 0,
           approvalRequests: [
-            expect.objectContaining({ path: "apps/tracker.js", reason: expect.stringMatching(/trust/i) }),
+            expect.objectContaining({ path: "apps/tracker.js", reason: expect.stringMatching(/site publish/i) }),
             expect.objectContaining({ path: "shared/locked.md", reason: expect.stringMatching(/approval|lock/i) }),
           ],
         });

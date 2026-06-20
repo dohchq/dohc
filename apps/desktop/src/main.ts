@@ -34,12 +34,6 @@ import {
   type ExplorerMenuCommand,
   type WorkbenchMenuCommand,
   DefaultWorkspaceRootResult,
-  AppPackagePayload,
-  AppPackageResult,
-  AppRuntimePayload,
-  AppRuntimeResult,
-  AppRuntimeRpcPayload,
-  AppRuntimeRpcResult,
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
   CloudLoginPollResult,
@@ -57,7 +51,6 @@ import {
   CreateWorkspaceShareResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
-  GrantAppTrustPayload,
   ImportToDatabasePayload,
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
@@ -66,8 +59,13 @@ import {
   ListDataFragmentsResult,
   DesktopMarksResult,
   LaunchMarksResult,
-  RunAppTesterPayload,
-  RunAppTesterResult,
+  ListSitesPayload,
+  ListSitesResult,
+  SitePackagePayload,
+  SitePackageResult,
+  StartSitePreviewPayload,
+  StartSitePreviewResult,
+  StopSitePreviewPayload,
   ListWorkspaceSharesPayload,
   ListWorkspaceSharesResult,
   ListWorkspaceMembersResult,
@@ -144,10 +142,22 @@ import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import {
-  getAppPackage as getAppPackageInfo,
-  grantAppTrust as grantAppTrustState,
-  runAppTesterStatic,
-} from "./workspaces/appPackage";
+  buildOutputSiteRoot,
+  entryRelativeToSite,
+  getSitePackage,
+  listSitePackages,
+  type SitePackageInfo,
+} from "./workspaces/sitePackage";
+import {
+  buildSite,
+  packageManagerCommand,
+  splitCommandLine,
+  startSiteDevServer,
+  startStaticSitePreview,
+  type SiteLogEntry,
+  type SiteProcessHandle,
+  type StaticSitePreview,
+} from "./workspaces/siteRunner";
 import {
   readWorkspaceAsset,
   readWorkspaceText,
@@ -211,6 +221,133 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
+}
+
+type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
+
+const sitePreviewHandles = new Map<string, SitePreviewHandle>();
+
+function sitePreviewKey(workspaceId: string, siteRoot: string): string {
+  return `${workspaceId}\0${siteRoot}`;
+}
+
+async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
+  const key = sitePreviewKey(workspaceId, siteRoot);
+  const handle = sitePreviewHandles.get(key);
+  sitePreviewHandles.delete(key);
+  await handle?.stop();
+}
+
+function commandForSiteScript(
+  site: SitePackageInfo,
+  script: keyof SitePackageInfo["scripts"],
+): { command: string; args: string[] } {
+  const configuredCommand = site.configuredScripts?.[script];
+  if (configuredCommand) return splitCommandLine(configuredCommand);
+  const configured = site.scripts[script];
+  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
+  if (site.packagePath) {
+    return packageManagerCommand(site.packageManager ?? "npm", script);
+  }
+  return splitCommandLine(configured);
+}
+
+function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
+  const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
+  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
+    throw new Error(`Build output escaped the workspace: ${absolutePath}`);
+  }
+  return rel;
+}
+
+async function startPreviewForSite(input: {
+  workspaceId: string;
+  workspaceRoot: string;
+  site: SitePackageInfo;
+  mode: "static" | "dev" | "build";
+}): Promise<StartSitePreviewResult> {
+  await stopSitePreviewHandle(input.workspaceId, input.site.root);
+
+  if (input.mode === "static") {
+    const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
+      entry: entryRelativeToSite(input.site) ?? undefined,
+    });
+    sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+    return {
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: [],
+    };
+  }
+
+  if (input.mode === "dev") {
+    const script = input.site.scripts.dev ? "dev" : "start";
+    const command = commandForSiteScript(input.site, script);
+    const handle = await startSiteDevServer({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+    });
+    sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+    return {
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: handle.logs(),
+    };
+  }
+
+  let logs: SiteLogEntry[] = [];
+  let build:
+    | {
+        ok: boolean;
+        command: string;
+        args: string[];
+        outputPath: string | null;
+        exitCode: number | null;
+      }
+    | undefined;
+  let outputRoot = input.site.buildOutputs[0] ?? null;
+  if (input.site.scripts.build) {
+    const command = commandForSiteScript(input.site, "build");
+    const result = await buildSite({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+      output: outputRoot ?? undefined,
+    });
+    logs = result.logs;
+    build = {
+      ok: result.ok,
+      command: result.command,
+      args: result.args,
+      outputPath: result.outputPath,
+      exitCode: result.exitCode,
+    };
+    if (!result.ok || !result.outputPath) {
+      throw new Error("Site build failed or did not produce a static output folder.");
+    }
+    outputRoot = relativeWorkspacePath(input.workspaceRoot, result.outputPath);
+    if (input.site.root !== "." && outputRoot.startsWith(`${input.site.root}/`)) {
+      outputRoot = outputRoot.slice(input.site.root.length + 1);
+    }
+  }
+  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
+  const handle = await startStaticSitePreview(
+    input.workspaceRoot,
+    buildOutputSiteRoot(input.site, outputRoot),
+  );
+  sitePreviewHandles.set(sitePreviewKey(input.workspaceId, input.site.root), handle);
+  return {
+    siteRoot: input.site.root,
+    mode: input.mode,
+    url: handle.url,
+    logs,
+    ...(build ? { build } : {}),
+  };
 }
 
 function testImportPaths(): string[] | null {
@@ -1446,49 +1583,43 @@ function registerIpcHandlers(): void {
     );
   });
 
-  ipcMain.handle(CHANNELS.getAppPackage, async (event, payload) => {
+  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
     assertTrustedSender(event);
-    const input = AppPackagePayload.parse(payload);
+    const input = ListSitesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return AppPackageResult.parse(
-      await getAppPackageInfo(workspace.rootPath, input.path),
+    return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
+  });
+
+  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SitePackagePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return SitePackageResult.parse(
+      await getSitePackage(workspace.rootPath, input.path),
     );
   });
 
-  ipcMain.handle(CHANNELS.runAppTester, async (event, payload) => {
+  ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);
-    const input = RunAppTesterPayload.parse(payload);
+    const input = StartSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return RunAppTesterResult.parse(
-      await runAppTesterStatic(workspace.rootPath, input.appRoot),
+    const site = await getSitePackage(workspace.rootPath, input.siteRoot);
+    if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
+    return StartSitePreviewResult.parse(
+      await startPreviewForSite({
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace.rootPath,
+        site,
+        mode: input.mode,
+      }),
     );
   });
 
-  ipcMain.handle(CHANNELS.grantAppTrust, async (event, payload) => {
+  ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
     assertTrustedSender(event);
-    const input = GrantAppTrustPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    await grantAppTrustState(workspace.rootPath, input.appRoot);
-  });
-
-  ipcMain.handle(CHANNELS.getAppRuntime, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AppRuntimePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const { getAppRuntime } = await import("./workspaces/appRuntime");
-    return AppRuntimeResult.parse(
-      await getAppRuntime(workspace.rootPath, input.appRoot),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.runAppRuntimeRpc, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AppRuntimeRpcPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const { runAppRuntimeRpc } = await import("./workspaces/appRuntime");
-    return AppRuntimeRpcResult.parse({
-      value: await runAppRuntimeRpc(workspace.rootPath, input.appRoot, input.request),
-    });
+    const input = StopSitePreviewPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    await stopSitePreviewHandle(input.workspaceId, input.siteRoot);
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
@@ -1815,6 +1946,13 @@ if (!app.requestSingleInstanceLock()) {
       window.focus();
     }
     void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
+  });
+
+  app.on("before-quit", () => {
+    for (const [key, handle] of sitePreviewHandles) {
+      sitePreviewHandles.delete(key);
+      void handle.stop().catch(() => undefined);
+    }
   });
 
   void app.whenReady().then(async () => {

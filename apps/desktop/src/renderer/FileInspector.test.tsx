@@ -40,8 +40,8 @@ describe("classifyForView dispatch", () => {
     ["uploads/contract.pdf", "pdf"],
     ["finance/wallet.sqlite", "database"],
     ["archive/old.db", "database"],
-    ["finance/.apps/ledger/app.json", "app-source"],
-    ["finance/.apps/ledger/src/App.tsx", "app-source"],
+    ["finance/.apps/ledger/app.json", "json"],
+    ["finance/.apps/ledger/src/App.tsx", "text"],
     ["uploads/mystery.bin", "binary"],
   ];
 
@@ -51,9 +51,9 @@ describe("classifyForView dispatch", () => {
     });
   }
 
-  it("treats an app-source file as app even if it has a data extension", () => {
-    // .apps/<name>/app.json is app source, not a standalone JSON document.
-    expect(classifyForView("x/.apps/ledger/app.json")).toBe("app-source");
+  it("treats legacy .apps paths as ordinary files", () => {
+    expect(classifyForView("x/.apps/ledger/app.json")).toBe("json");
+    expect(classifyForView("x/.apps/ledger/src/App.tsx")).toBe("text");
   });
 });
 
@@ -122,7 +122,6 @@ describe("markdown editor unmount flush", () => {
     ),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    getAppPackage: vi.fn(async () => null),
     collabToken: vi.fn(async () => ({ available: false as const })),
   };
 
@@ -358,10 +357,10 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
-  it("routes database and app-source share actions to their active file paths", async () => {
+  it("routes database share actions to their active file paths", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();
-    const view = render(
+    render(
       <FileInspector
         workspaceId="ws-1"
         path="data.sqlite"
@@ -372,17 +371,6 @@ describe("markdown editor unmount flush", () => {
     await screen.findByTestId("view-database");
     await user.click(screen.getByTestId("file-share"));
     expect(onSharePath).toHaveBeenCalledWith("data.sqlite");
-
-    view.rerender(
-      <FileInspector
-        workspaceId="ws-1"
-        path=".apps/demo/app.json"
-        onSharePath={onSharePath}
-      />,
-    );
-    await screen.findByTestId("view-app");
-    await user.click(screen.getByTestId("file-share"));
-    expect(onSharePath).toHaveBeenCalledWith(".apps/demo/app.json");
   });
 
   it("closes local properties before returning to WYSIWYG", async () => {

@@ -22,7 +22,6 @@ export const AtomKind = z.enum([
   "csv",
   "json",
   "html",
-  "app-source",
 ]);
 export type AtomKind = z.infer<typeof AtomKind>;
 

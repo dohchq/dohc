@@ -10,7 +10,7 @@ export const VIEW_IDS = [
   "explorer",
   "search",
   "graph",
-  "apps",
+  "sites",
   "agent",
   "history",
 ] as const;
@@ -18,11 +18,16 @@ export type ViewId = (typeof VIEW_IDS)[number];
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
+export const SITE_TAB_PREFIX = "dohc://site/";
 
 export function historyDiffTabPath(changeSetId: string, filePath: string): string {
   return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
     changeSetId,
   )}?file=${encodeURIComponent(filePath)}`;
+}
+
+export function siteTabPath(siteRoot: string): string {
+  return `${SITE_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
 }
 
 export function isGraphTabPath(path: string | null): boolean {
@@ -35,6 +40,20 @@ export function isHistoryTabPath(path: string | null): boolean {
 
 export function isHistoryDiffTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
+}
+
+export function isSiteTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(SITE_TAB_PREFIX);
+}
+
+export function parseSiteTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isSiteTabPath(path)) return null;
+  try {
+    const siteRoot = decodeURIComponent(path.slice(SITE_TAB_PREFIX.length));
+    return siteRoot.length > 0 ? siteRoot : null;
+  } catch {
+    return null;
+  }
 }
 
 export function parseHistoryDiffTabPath(
@@ -58,7 +77,12 @@ export function parseHistoryDiffTabPath(
 }
 
 export function isVirtualTabPath(path: string | null): boolean {
-  return isGraphTabPath(path) || isHistoryTabPath(path) || isHistoryDiffTabPath(path);
+  return (
+    isGraphTabPath(path) ||
+    isHistoryTabPath(path) ||
+    isHistoryDiffTabPath(path) ||
+    isSiteTabPath(path)
+  );
 }
 
 export interface WorkbenchState {

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -26,6 +26,8 @@ describe("createWorkspaceFolder", () => {
     expect(await readFile(join(root, ".context", "me.md"), "utf8")).toContain(
       "About me",
     );
+    const sharedWithMe = await stat(join(root, "shared-with-me"));
+    expect(sharedWithMe.isDirectory()).toBe(true);
   });
 
   it("adopts an existing workspace instead of overwriting its identity", async () => {

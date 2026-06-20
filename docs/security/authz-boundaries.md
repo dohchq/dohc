@@ -44,29 +44,22 @@ be weakened by rebrand or UI work.
   `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
   `style-src 'unsafe-inline'; font-src data:` with no network fetches.
 
-## Apps
+## Sites
 
-- `.apps/` source atoms are interface code, not data sources. Inline
-  `{key: value}` examples inside app source are skipped by capture,
-  live values, and imports/exports scans. Legacy `.views/` source atoms
-  receive the same treatment during migration compatibility only.
-- App code runs in a sandboxed iframe with `sandbox="allow-scripts"` and
-  without `allow-same-origin`, forms, popups, or top-navigation powers.
-- The iframe receives no Convex URL, cookies, access token, workspace id
-  authority, or raw cross-workspace handles. It talks to dohc through the
-  small `@dohc/app` `postMessage` SDK.
-- The parent bridge validates message shape before dispatch and attaches
-  `packageRoot` plus the active workspace itself. Browser code cannot
-  choose an identity or widen its workspace.
-- Convex still derives identity server-side with `requireWorkspace`; atom
-  reads still go through atom/folder access checks.
-- Imports/exports windows remain the only cross-workspace field-sharing
-  path exposed to apps.
-- App manifests define maximum read/write scopes only. They do not grant
-  permission by themselves; every read/write still goes through server-side
-  workspace, share, lock, and review-gate checks.
-- App discovery, source reads, SDK rows, and bundles are capped. Oversized
-  apps fail with diagnostics instead of rendering.
-- Agent handoffs and proposed patches from app code are reviewed actions,
-  not direct document writes; the parent emits a lightweight local
-  `dohc:app-action` event for those operations.
+- Sites are normal website folders in the user's local workspace. dohc can
+  detect, serve, and preview them, but a site folder does not become a
+  privileged dohc integration merely by existing.
+- Static preview serves files from the selected site root through a loopback
+  server with path-containment checks. Dev and build previews run explicit
+  package scripts only when the user starts that mode.
+- Site preview iframes may render loopback preview URLs. Top-level desktop
+  navigation remains locked down; external sharing/publishing is a separate
+  dohc Cloud decision.
+- Source-like files (`.ts`, `.tsx`, `.js`, `.css`, `.json`, `.html`) collab
+  as plain text by extension. They are not hidden state and are not scanned
+  as inline atom prose.
+- `@dohc/sdk` access is separate from merely rendering a site. The first
+  preview bridge supports bounded local file reads through the desktop
+  `readWorkspaceText` IPC path; browser code cannot choose an identity or
+  widen the workspace. Writes, cloud access, sharing, and publishing must
+  continue through explicit workspace, share, lock, and review-gate checks.

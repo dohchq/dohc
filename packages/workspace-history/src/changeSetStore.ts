@@ -254,7 +254,7 @@ export function verbForKind(kind: ChangeSetKind): string {
       return "ran an agent over";
     case "sync":
       return "synced";
-    case "app-build":
+    case "site-build":
       return "built";
     case "history-restore":
       return "restored";

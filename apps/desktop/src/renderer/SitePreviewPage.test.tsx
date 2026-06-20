@@ -1,0 +1,119 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { DOHC_SDK_PROTOCOL } from "@dohc/sdk";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SitePackageInfo } from "../ipc/bridgeContract";
+import { SitePreviewPage } from "./SitePreviewPage";
+
+const site: SitePackageInfo = {
+  root: "report",
+  title: "Report",
+  kind: "static",
+  confidence: "high",
+  entryPath: "report/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  buildOutputs: [],
+  sourceFiles: ["report/index.html"],
+  diagnostics: [],
+};
+
+const bridgeMock = {
+  getSitePackage: vi.fn(async () => site),
+  startSitePreview: vi.fn(async () => ({
+    siteRoot: "report",
+    mode: "static" as const,
+    url: "http://127.0.0.1:49152/",
+    logs: [],
+  })),
+  stopSitePreview: vi.fn(async () => undefined),
+  openExternalUrl: vi.fn(async () => undefined),
+  readWorkspaceText: vi.fn(async () => ({ text: "Quarterly notes", truncated: false })),
+};
+
+describe("SitePreviewPage", () => {
+  beforeEach(() => {
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("starts static previews and embeds the local URL", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(frame.getAttribute("src")).toBe("http://127.0.0.1:49152/");
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      mode: "static",
+    });
+  });
+
+  it("stops the preview when the page unmounts", async () => {
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await screen.findByText("Report");
+    view.unmount();
+
+    expect(bridgeMock.stopSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+    });
+  });
+
+  it("answers SDK file reads from the active preview iframe", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "http://127.0.0.1:49152",
+        source,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-1",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-sites",
+        relativePath: "notes/q1.md",
+      });
+    });
+    expect(postMessage).toHaveBeenCalledWith(
+      {
+        protocol: DOHC_SDK_PROTOCOL,
+        id: "read-1",
+        ok: true,
+        result: { text: "Quarterly notes", truncated: false },
+      },
+      "http://127.0.0.1:49152",
+    );
+  });
+});

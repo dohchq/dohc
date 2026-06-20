@@ -19,10 +19,10 @@ describe("change set grouping", () => {
     const set = createChangeSet({
       kind: "agent-run",
       author: agentAuthor,
-      summary: "Imported transactions and built ledger app",
+      summary: "Imported transactions and built ledger site",
     });
     const files = Array.from({ length: 18 }, (_, i) => ({
-      path: `finance/.apps/ledger/src/file-${i}.tsx`,
+      path: `finance/sites/ledger/src/file-${i}.tsx`,
       operation: "write" as const,
     }));
     const grouped = addFileChanges(set, files);
@@ -50,7 +50,7 @@ describe("review requirements", () => {
     "external-export",
     "permission-change",
     "bulk-delete",
-    "app-trust",
+    "site-publish",
     "private-to-shared",
     "unmergeable-overwrite",
   ];

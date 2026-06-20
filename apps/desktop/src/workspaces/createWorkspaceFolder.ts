@@ -22,6 +22,8 @@ Tell your agents who you are and how you like to work.
 This file lives at .context/me.md inside your workspace folder.
 `;
 
+export const SHARED_WITH_ME_FOLDER = "shared-with-me";
+
 type ManifestState =
   | { kind: "absent" }
   | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] }
@@ -93,6 +95,7 @@ export async function createWorkspaceFolder(input: {
 
   await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
   await mkdir(join(input.rootPath, ".context"), { recursive: true });
+  await mkdir(join(input.rootPath, SHARED_WITH_ME_FOLDER), { recursive: true });
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
   // an unexpected file that appeared between the check and the write.
   await writeFile(

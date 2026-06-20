@@ -87,7 +87,7 @@ export type ListWorkspaceFilesPayload = z.infer<
 
 export const WorkspaceFileEntry = z.object({
   path: PATH_STRING,
-  kind: z.enum(["file", "database", "app-source"]),
+  kind: z.enum(["file", "database"]),
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
@@ -383,7 +383,7 @@ const BoundaryCrossingSchema = z.enum([
   "external-export",
   "permission-change",
   "bulk-delete",
-  "app-trust",
+  "site-publish",
   "private-to-shared",
   "unmergeable-overwrite",
 ]);
@@ -397,7 +397,7 @@ export const ChangeSetRecord = z.object({
     "agent-run",
     "import",
     "sync",
-    "app-build",
+    "site-build",
     "history-restore",
   ]),
   author: ChangeAuthorSchema,
@@ -441,7 +441,7 @@ export const ChangeSetDetailRecord = ChangeSetRecord.extend({
         "agent-run",
         "import",
         "sync",
-        "app-build",
+        "site-build",
         "history-restore",
       ]),
       prompt: z.string().optional(),
@@ -484,184 +484,97 @@ export const RestoreHistoryFileResult = z.object({
 });
 export type RestoreHistoryFileResult = z.infer<typeof RestoreHistoryFileResult>;
 
-const AppCheck = z.object({
-  name: z.string(),
-  status: z.string(),
+const SiteDiagnostic = z.object({
+  path: PATH_STRING.optional(),
+  severity: z.enum(["warning", "error"]),
+  code: z.string().min(1).max(100),
   message: z.string().optional(),
 });
+export type SiteDiagnostic = z.infer<typeof SiteDiagnostic>;
 
-export const AppPackagePayload = z.object({
+const SiteScripts = z.object({
+  dev: z.string().optional(),
+  start: z.string().optional(),
+  build: z.string().optional(),
+  preview: z.string().optional(),
+});
+export type SiteScripts = z.infer<typeof SiteScripts>;
+
+const SitePackageInfo = z.object({
+  root: PATH_STRING,
+  title: z.string().min(1).max(200),
+  kind: z.enum(["static", "package", "configured"]),
+  confidence: z.enum(["high", "medium", "low"]),
+  entryPath: PATH_STRING.nullable(),
+  configPath: PATH_STRING.nullable(),
+  packagePath: PATH_STRING.nullable(),
+  packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
+  scripts: SiteScripts,
+  configuredScripts: SiteScripts.optional(),
+  buildOutputs: z.array(PATH_STRING),
+  sourceFiles: z.array(PATH_STRING),
+  diagnostics: z.array(SiteDiagnostic),
+});
+export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
+
+export const ListSitesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListSitesPayload = z.infer<typeof ListSitesPayload>;
+
+export const ListSitesResult = z.object({
+  sites: z.array(SitePackageInfo),
+});
+export type ListSitesResult = z.infer<typeof ListSitesResult>;
+
+export const SitePackagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
 });
-export type AppPackagePayload = z.infer<typeof AppPackagePayload>;
+export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 
-export const AppPackageResult = z
-  .object({
-    name: z.string(),
-    root: z.string(),
-    manifest: z.object({
-      title: z.string().optional(),
-      entry: z.string(),
-      read: z.array(z.string()),
-      write: z.array(z.string()),
-      agent: z.enum(["run", "patch.propose"]).optional(),
-      network: z.literal(false),
-    }),
-    sourceFiles: z.array(z.string()),
-    requiresTrust: z.boolean(),
-    trusted: z.boolean(),
-    readiness: z.enum(["needs-testing", "failed", "ready"]),
-    lastTestChecks: z.array(AppCheck),
-  })
-  .nullable();
-export type AppPackageResult = z.infer<typeof AppPackageResult>;
+export const SitePackageResult = SitePackageInfo.nullable();
+export type SitePackageResult = z.infer<typeof SitePackageResult>;
 
-export const RunAppTesterPayload = z.object({
+export const SitePreviewMode = z.enum(["static", "dev", "build"]);
+export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
+
+export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  appRoot: PATH_STRING,
+  siteRoot: PATH_STRING,
+  mode: SitePreviewMode,
 });
-export type RunAppTesterPayload = z.infer<typeof RunAppTesterPayload>;
+export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
 
-export const RunAppTesterResult = z.object({
-  ok: z.boolean(),
-  checks: z.array(AppCheck),
+const SiteLogEntry = z.object({
+  stream: z.enum(["stdout", "stderr", "system"]),
+  text: z.string(),
+  at: z.number(),
 });
-export type RunAppTesterResult = z.infer<typeof RunAppTesterResult>;
+export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
 
-export const GrantAppTrustPayload = z.object({
+export const StartSitePreviewResult = z.object({
+  siteRoot: PATH_STRING,
+  mode: SitePreviewMode,
+  url: z.string().min(1).max(2048).regex(/^http:\/\/(?:127\.0\.0\.1|localhost):\d+\//),
+  logs: z.array(SiteLogEntry),
+  build: z
+    .object({
+      ok: z.boolean(),
+      command: z.string(),
+      args: z.array(z.string()),
+      outputPath: z.string().nullable(),
+      exitCode: z.number().nullable(),
+    })
+    .optional(),
+});
+export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  appRoot: PATH_STRING,
+  siteRoot: PATH_STRING,
 });
-export type GrantAppTrustPayload = z.infer<typeof GrantAppTrustPayload>;
-
-export const AppRuntimePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  appRoot: PATH_STRING,
-});
-export type AppRuntimePayload = z.infer<typeof AppRuntimePayload>;
-
-export const AppRuntimeResult = z.object({
-  root: z.string(),
-  title: z.string(),
-  src: z.string().min(1).max(512).regex(/^http:\/\/127\.0\.0\.1:\d+\//),
-  token: z.string().min(1).max(100),
-});
-export type AppRuntimeResult = z.infer<typeof AppRuntimeResult>;
-
-const APP_RUNTIME_COLLECTION = z
-  .string()
-  .min(1)
-  .max(80)
-  .regex(/^[a-zA-Z0-9_-]+$/);
-const MAX_APP_RUNTIME_JSON_BYTES = 256 * 1024;
-const MAX_APP_RUNTIME_JSON_DEPTH = 8;
-const MAX_APP_RUNTIME_JSON_KEYS = 100;
-const MAX_APP_RUNTIME_JSON_ARRAY_ITEMS = 500;
-const MAX_APP_RUNTIME_JSON_STRING_BYTES = 64 * 1024;
-const RUNTIME_JSON_TEXT_ENCODER = new TextEncoder();
-
-function runtimeUtf8Bytes(value: string): number {
-  return RUNTIME_JSON_TEXT_ENCODER.encode(value).length;
-}
-
-function runtimeJsonBytes(value: unknown): number | null {
-  try {
-    return runtimeUtf8Bytes(JSON.stringify(value));
-  } catch {
-    return null;
-  }
-}
-
-function validateRuntimeJson(value: unknown, ctx: z.RefinementCtx, depth = 0): void {
-  if (depth > MAX_APP_RUNTIME_JSON_DEPTH) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload is too deeply nested" });
-    return;
-  }
-  if (value === null) return;
-  if (typeof value === "string") {
-    if (runtimeUtf8Bytes(value) > MAX_APP_RUNTIME_JSON_STRING_BYTES) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload string is too large" });
-    }
-    return;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload number is invalid" });
-    }
-    return;
-  }
-  if (typeof value === "boolean") return;
-  if (Array.isArray(value)) {
-    if (value.length > MAX_APP_RUNTIME_JSON_ARRAY_ITEMS) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload array is too large" });
-      return;
-    }
-    for (const item of value) validateRuntimeJson(item, ctx, depth + 1);
-    return;
-  }
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length > MAX_APP_RUNTIME_JSON_KEYS) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload has too many keys" });
-      return;
-    }
-    for (const [key, item] of entries) {
-      if (key.length > 512) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload key is too large" });
-        return;
-      }
-      validateRuntimeJson(item, ctx, depth + 1);
-    }
-    return;
-  }
-  ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload must be JSON data" });
-}
-
-const AppRuntimeJsonRecord = z.record(z.unknown()).superRefine((value, ctx) => {
-  const bytes = runtimeJsonBytes(value);
-  if (bytes === null || bytes > MAX_APP_RUNTIME_JSON_BYTES) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "runtime payload is too large" });
-    return;
-  }
-  validateRuntimeJson(value, ctx);
-});
-
-export const AppRuntimeRpcRequest = z.discriminatedUnion("op", [
-  z.object({
-    id: z.string().min(1).max(100),
-    op: z.literal("collection.list"),
-    args: z
-      .object({
-        name: APP_RUNTIME_COLLECTION,
-        query: AppRuntimeJsonRecord.optional(),
-      })
-      .strict(),
-  }),
-  z.object({
-    id: z.string().min(1).max(100),
-    op: z.literal("collection.insert"),
-    args: z
-      .object({
-        name: APP_RUNTIME_COLLECTION,
-        record: AppRuntimeJsonRecord,
-      })
-      .strict(),
-  }),
-]);
-export type AppRuntimeRpcRequest = z.infer<typeof AppRuntimeRpcRequest>;
-
-export const AppRuntimeRpcPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  appRoot: PATH_STRING,
-  request: AppRuntimeRpcRequest,
-});
-export type AppRuntimeRpcPayload = z.infer<typeof AppRuntimeRpcPayload>;
-
-export const AppRuntimeRpcResult = z.object({
-  value: z.unknown(),
-});
-export type AppRuntimeRpcResult = z.infer<typeof AppRuntimeRpcResult>;
+export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -1250,13 +1163,10 @@ export interface DohcDesktopBridge {
   importToDatabase(
     payload: ImportToDatabasePayload,
   ): Promise<ImportToDatabaseResult>;
-  getAppPackage(payload: AppPackagePayload): Promise<AppPackageResult>;
-  runAppTester(payload: RunAppTesterPayload): Promise<RunAppTesterResult>;
-  grantAppTrust(payload: GrantAppTrustPayload): Promise<void>;
-  getAppRuntime(payload: AppRuntimePayload): Promise<AppRuntimeResult>;
-  runAppRuntimeRpc(
-    payload: AppRuntimeRpcPayload,
-  ): Promise<AppRuntimeRpcResult>;
+  listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
+  getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  stopSitePreview(payload: StopSitePreviewPayload): Promise<void>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
