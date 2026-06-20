@@ -278,10 +278,19 @@ export async function startSiteDevServer(input: {
   let stopped = false;
 
   return await new Promise<SiteProcessHandle>((resolve, reject) => {
+    let hardKillTimer: ReturnType<typeof setTimeout> | null = null;
+    function clearTimers() {
+      clearTimeout(failTimer);
+      if (hardKillTimer) clearTimeout(hardKillTimer);
+    }
+
     const failTimer = setTimeout(() => {
       if (resolved) return;
       stopped = true;
       child.kill("SIGTERM");
+      hardKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, BUILD_HARD_KILL_GRACE_MS);
       reject(new Error(`Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`));
     }, input.readyTimeoutMs ?? 15000);
 
@@ -289,7 +298,7 @@ export async function startSiteDevServer(input: {
       const url = detectDevUrl(chunk);
       if (!url || resolved) return;
       resolved = true;
-      clearTimeout(failTimer);
+      clearTimers();
       resolve({
         url,
         command: input.command,
@@ -313,11 +322,11 @@ export async function startSiteDevServer(input: {
       maybeResolve(text);
     });
     child.once("error", (error) => {
-      clearTimeout(failTimer);
+      clearTimers();
       if (!resolved) reject(error);
     });
     child.once("exit", (code, signal) => {
-      clearTimeout(failTimer);
+      clearTimers();
       if (!resolved && !stopped) {
         reject(new Error(`Site dev server exited before it was ready (code=${code}, signal=${signal}).`));
       }

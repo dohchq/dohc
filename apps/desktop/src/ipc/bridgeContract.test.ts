@@ -167,6 +167,14 @@ describe("site IPC contract", () => {
         logs: [],
       }).success,
     ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://127.42.0.7:43210/",
+        logs: [],
+      }).success,
+    ).toBe(true);
     for (const url of [
       "https://example.com/",
       "file:///tmp/site/index.html",

@@ -703,7 +703,16 @@ Tasks:
   `app-source`, and Apps UI reference.
 - Decide which files are deleted versus renamed.
 - Identify old docs that should be rewritten versus archived.
-- Add a no-old-app-model guard test for active source and docs.
+- Add the no-old-app-model guard test in Phase 0 before any later phase lands.
+  Target: `src/__tests__/siteNoLegacyAppModel.test.ts`, mirroring the existing
+  `src/__tests__/brandNoLegacy.test.ts` pattern.
+- The guard scans active source and shippable docs for legacy app-model terms:
+  `.apps`, `app.json`, `@dohc/app`, `AppPackage`, and `app-source`.
+- Scan scope: `apps`, `packages`, `services`, `src`, and `docs/security`,
+  `docs/product`, `docs/qa`, plus this active plan. Include `.ts`, `.tsx`,
+  `.js`, `.jsx`, `.mjs`, `.cjs`, `.json`, `.md`, and `.mdx`; exclude
+  `node_modules`, build outputs, lockfiles, archived execution logs, and the
+  guard test's own allowlist.
 
 Expected touched areas:
 

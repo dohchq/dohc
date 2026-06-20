@@ -7,7 +7,6 @@ export function normalizeLoopbackHostname(hostname: string): string {
 }
 
 export function isLoopbackHostname(hostname: string): boolean {
-  return ["127.0.0.1", "localhost", "::1"].includes(
-    normalizeLoopbackHostname(hostname),
-  );
+  const normalized = normalizeLoopbackHostname(hostname);
+  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
 }

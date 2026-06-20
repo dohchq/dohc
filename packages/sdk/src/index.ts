@@ -292,6 +292,10 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     collections: {
       get: (name: string) => ({
         list: async () => {
+          // Authorization boundary: docs/security/authz-boundaries.md. The SDK
+          // never accepts caller-supplied workspace/user identity here; the
+          // host transport decides whether collections.read is available and
+          // enforces workspace scope server-side before returning rows.
           const result = await transport.request("collections.list", { name });
           if (!Array.isArray(result)) {
             throw new DohcSdkError(

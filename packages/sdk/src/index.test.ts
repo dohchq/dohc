@@ -294,6 +294,23 @@ describe("@dohc/sdk", () => {
     ]);
   });
 
+  it("does not let collection reads provide workspace or identity scope", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "collections.list") return [];
+          return {};
+        },
+      },
+    });
+
+    await expect(client.collections.get("tasks").list()).resolves.toEqual([]);
+    expect(calls).toEqual([{ method: "collections.list", params: { name: "tasks" } }]);
+    expect(JSON.stringify(calls)).not.toMatch(/workspaceId|userId|onBehalfOf/);
+  });
+
   it("rejects invalid high-level client responses", async () => {
     const filesClient = createDohcClient({
       transport: { async request() { return {}; } },
