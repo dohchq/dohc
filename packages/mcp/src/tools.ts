@@ -53,6 +53,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -1228,8 +1229,8 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-// Semver range for @dohc/sdk; base version should match packages/sdk/package.json.
-const DOHC_SDK_VERSION = "^0.1.0";
+const SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
+let cachedDohcSdkDependencyRange: string | null = null;
 const LEGACY_APP_IMPORT_RE =
   /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;
 
@@ -1369,6 +1370,17 @@ async function readJsonDetailed<T>(
   } catch (error) {
     return { ok: false, reason: failureReason(error, "invalid JSON") };
   }
+}
+
+async function dohcSdkDependencyRange(): Promise<string> {
+  if (cachedDohcSdkDependencyRange) return cachedDohcSdkDependencyRange;
+  const pkg = await readJson<{ version?: unknown }>(SDK_PACKAGE_JSON_PATH);
+  const version = typeof pkg?.version === "string" ? pkg.version.trim() : "";
+  if (!version) {
+    throw new Error(`Unable to read @dohc/sdk version from ${SDK_PACKAGE_JSON_PATH}`);
+  }
+  cachedDohcSdkDependencyRange = `^${version}`;
+  return cachedDohcSdkDependencyRange;
 }
 
 async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
@@ -1935,7 +1947,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
       ? packageJson.name
       : packageNameFromPath(root.normalized);
   const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = DOHC_SDK_VERSION;
+  dependencies["@dohc/sdk"] = await dohcSdkDependencyRange();
   packageJson.dependencies = dependencies;
 
   const normalizedPackagePath = relativeJoin(root.normalized, "package.json");

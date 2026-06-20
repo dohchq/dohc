@@ -919,8 +919,13 @@ describe("mcp tools operate on allowed paths", () => {
         packagePath: "todo/package.json",
         dependency: "@dohc/sdk",
       });
+      const sdkPackageJson = JSON.parse(
+        await readFile(join(process.cwd(), "../sdk/package.json"), "utf8"),
+      ) as { version: string };
       const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^0.1.0" });
+      expect(packageJson.dependencies).toMatchObject({
+        "@dohc/sdk": `^${sdkPackageJson.version}`,
+      });
       expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
     });
   });
