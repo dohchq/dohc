@@ -462,9 +462,6 @@ importers:
 
   services/hocuspocus:
     dependencies:
-      '@dohc/workspace-contracts':
-        specifier: workspace:*
-        version: link:../../packages/workspace-contracts
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../../packages/workspace-core

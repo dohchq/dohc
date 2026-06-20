@@ -266,6 +266,31 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
   await handle?.stop();
 }
 
+async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
+  const prefix = `${workspaceId}\0`;
+  const siteRoots = new Set<string>();
+  for (const key of sitePreviewHandles.keys()) {
+    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
+  }
+  for (const key of sitePreviewOriginReleases.keys()) {
+    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
+  }
+  for (const key of sitePreviewStartLocks.keys()) {
+    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
+  }
+
+  await Promise.all(
+    [...siteRoots].map((siteRoot) =>
+      withSitePreviewStartLock(
+        sitePreviewKey(workspaceId, siteRoot),
+        () => stopSitePreviewHandle(workspaceId, siteRoot),
+      ).catch((error) => {
+        console.warn("[desktop] failed to stop site preview during workspace switch", error);
+      }),
+    ),
+  );
+}
+
 function rememberSitePreviewHandle(key: string, handle: SitePreviewHandle): void {
   sitePreviewOriginReleases.get(key)?.();
   sitePreviewHandles.set(key, handle);
@@ -311,7 +336,7 @@ function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
     .map((log) => log.text)
     .join("")
     .trim();
-  return text.length > 2000 ? text.slice(-2000) : text;
+  return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
 }
 
 async function startPreviewForSite(input: {
@@ -1726,6 +1751,11 @@ function registerIpcHandlers(): void {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    const previousWorkspaceId = preferredWorkspaceId;
+    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      await stopSitePreviewsForWorkspace(previousWorkspaceId);
+    }
+    preferredWorkspaceId = workspace.workspaceId;
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await activity.open(workspace));
   });

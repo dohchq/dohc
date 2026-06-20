@@ -1234,7 +1234,7 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-const cachedDohcSdkDependencyRanges = new Map<string, string>();
+let cachedDohcSdkDependencyRange: { packageJsonPath: string; range: string } | null = null;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1320,8 +1320,9 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
     );
   }
 
-  const cached = cachedDohcSdkDependencyRanges.get(packageJsonPath);
-  if (cached) return cached;
+  if (cachedDohcSdkDependencyRange?.packageJsonPath === packageJsonPath) {
+    return cachedDohcSdkDependencyRange.range;
+  }
 
   const pkg = await readJson<{ version?: unknown }>(packageJsonPath);
   const version = typeof pkg?.version === "string" ? pkg.version.trim() : "";
@@ -1329,7 +1330,7 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
     throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
   }
   const range = `^${version}`;
-  cachedDohcSdkDependencyRanges.set(packageJsonPath, range);
+  cachedDohcSdkDependencyRange = { packageJsonPath, range };
   return range;
 }
 

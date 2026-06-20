@@ -46,7 +46,8 @@ lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
   from the workspace folder; package sites can run a dev script; built sites
   can run build and serve `dist`, `build`, or `out`. Optional dohc SDK
   integration can enhance a site, starting with local file reads through the
-  preview bridge, but websites remain ordinary websites.
+  preview bridge, but websites remain ordinary websites. See
+  `docs/product/site-sdk.md`.
 - **Chat** — the dohc agent: find, draft, organize; shows sources and
   changes.
 - **Onboarding** — a short questionnaire seeds the agent's first turn,
