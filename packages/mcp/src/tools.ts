@@ -1444,12 +1444,12 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     return null;
   }
   if (explicitNonSite) {
-      diagnostics.push({
-        severity: "warning",
-        code: "unexpected_dohc_type",
-        path: configPath ?? relativeJoin(root, "dohc.json"),
-        message: "dohc.json has website signals but its type is not \"site\".",
-      });
+    diagnostics.push({
+      severity: "warning",
+      code: "unexpected_dohc_type",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json has website signals but its type is not \"site\".",
+    });
   }
 
   if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {

@@ -39,6 +39,22 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
+  if (
+    value.includes("\0") ||
+    value.includes("\\") ||
+    value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
+    value
+      .split("/")
+      .some((segment) => segment === "" || segment === ".." || (segment === "." && value !== "."))
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "site root must be a safe workspace-relative path",
+    });
+  }
+});
 
 // Enums derive from the workspace-core tuples (single source of truth) so a
 // new kind/mode cannot make the type and the runtime validator disagree.
@@ -541,7 +557,7 @@ export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
 
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  siteRoot: PATH_STRING,
+  siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
 });
 export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
@@ -562,14 +578,13 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
     return;
   }
   const port = Number(url.port);
+  const hasExplicitPort = url.port !== "";
   if (
     url.protocol !== "http:" ||
     !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) ||
     url.username ||
     url.password ||
-    !Number.isInteger(port) ||
-    port < 1 ||
-    port > 65535
+    (hasExplicitPort && (!Number.isInteger(port) || port < 1 || port > 65535))
   ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -579,7 +594,7 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
 });
 
 export const StartSitePreviewResult = z.object({
-  siteRoot: PATH_STRING,
+  siteRoot: SITE_ROOT_STRING,
   mode: SitePreviewMode,
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
@@ -597,7 +612,7 @@ export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
 
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  siteRoot: PATH_STRING,
+  siteRoot: SITE_ROOT_STRING,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 

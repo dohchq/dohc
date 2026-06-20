@@ -94,6 +94,36 @@ describe("site IPC contract", () => {
         siteRoot: "site",
       }),
     ).toEqual({ workspaceId: "ws-sites", siteRoot: "site" });
+    for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {
+      expect(
+        StartSitePreviewPayload.safeParse({
+          workspaceId,
+          siteRoot: "site",
+          mode: "static",
+        }).success,
+      ).toBe(false);
+      expect(
+        StopSitePreviewPayload.safeParse({
+          workspaceId,
+          siteRoot: "site",
+        }).success,
+      ).toBe(false);
+    }
+    for (const siteRoot of ["../escape", "site/../../escape", "/tmp/site", "C:/site", "site/./dist"]) {
+      expect(
+        StartSitePreviewPayload.safeParse({
+          workspaceId: "ws-sites",
+          siteRoot,
+          mode: "static",
+        }).success,
+      ).toBe(false);
+      expect(
+        StopSitePreviewPayload.safeParse({
+          workspaceId: "ws-sites",
+          siteRoot,
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("rejects unknown preview modes and non-local preview URLs", () => {
@@ -120,6 +150,14 @@ describe("site IPC contract", () => {
         logs: [],
       }).success,
     ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://127.0.0.1/",
+        logs: [],
+      }).success,
+    ).toBe(true);
     for (const url of [
       "https://example.com/",
       "file:///tmp/site/index.html",
@@ -127,7 +165,6 @@ describe("site IPC contract", () => {
       "data:text/html,<h1>x</h1>",
       "http://0.0.0.0:43210/",
       "http://user:pass@127.0.0.1:43210/",
-      "http://127.0.0.1/",
       "http://127.0.0.1:abc/",
       "http://127.0.0.1:0/",
       "http://127.0.0.1:70000/",

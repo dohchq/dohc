@@ -2,7 +2,11 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
+  ListSitesPayload,
   MenuCommand,
+  SitePackagePayload,
+  StartSitePreviewPayload,
+  StopSitePreviewPayload,
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import {
@@ -100,10 +104,13 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  listSites: (payload) => ipcRenderer.invoke(CHANNELS.listSites, payload),
-  getSitePackage: (payload) => ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
-  startSitePreview: (payload) => ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
-  stopSitePreview: (payload) => ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
+  listSites: (payload: ListSitesPayload) => ipcRenderer.invoke(CHANNELS.listSites, payload),
+  getSitePackage: (payload: SitePackagePayload) =>
+    ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
+  startSitePreview: (payload: StartSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
+  stopSitePreview: (payload: StopSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

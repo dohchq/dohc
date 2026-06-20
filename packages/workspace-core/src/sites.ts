@@ -612,7 +612,8 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     const path = normalizeWorkspacePath(sourcePath(source));
     if (!path || hasIgnoredSiteSegment(path)) continue;
     normalizedPaths.push(path);
-    normalizedSources.push({ path, ...(sourceBody(source) !== undefined ? { body: sourceBody(source) } : {}) });
+    const body = sourceBody(source);
+    normalizedSources.push({ path, ...(body !== undefined ? { body } : {}) });
   }
 
   for (const source of normalizedSources) {
