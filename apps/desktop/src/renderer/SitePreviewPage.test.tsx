@@ -70,6 +70,23 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("refuses to render non-loopback preview URLs", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "https://example.com/preview",
+      logs: [],
+    });
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
   it("stops the preview when the page unmounts", async () => {
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
     await screen.findByText("Report");

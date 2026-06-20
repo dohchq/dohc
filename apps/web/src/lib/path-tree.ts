@@ -75,7 +75,8 @@ export type FolderInput = string | {
 }
 
 function isSourceCodeFilePath(path: string): boolean {
-  return SITE_SOURCE_CODE_EXT_RE.test(path)
+  const segments = path.split('/').filter(Boolean)
+  return segments.includes('sites') && SITE_SOURCE_CODE_EXT_RE.test(path)
 }
 
 // Build a tree from atoms + explicit folder rows. Obsidian-style:

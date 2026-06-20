@@ -44,17 +44,28 @@ function createWindowHarness() {
 
 describe("@dohc/sdk", () => {
   it("reads files through the configured transport", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
       transport: {
         async request(method, params) {
-          expect(method).toBe("files.read");
-          expect(params).toEqual({ path: "notes/today.md" });
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
           return { text: "today" };
         },
       },
     });
 
     await expect(client.files.read("notes/today.md")).resolves.toBe("today");
+    expect(calls).toEqual([
+      { method: "capabilities", params: undefined },
+      { method: "files.read", params: { path: "notes/today.md" } },
+    ]);
   });
 
   it("surfaces host errors with stable codes", async () => {
@@ -369,7 +380,18 @@ describe("@dohc/sdk", () => {
 
   it("rejects invalid high-level client responses", async () => {
     const filesClient = createDohcClient({
-      transport: { async request() { return {}; } },
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
+          return {};
+        },
+      },
     });
     await expect(filesClient.files.read("bad.md")).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
@@ -417,5 +439,27 @@ describe("@dohc/sdk", () => {
     await expect(collectionItemsClient.collections.get("bad").list()).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
     });
+  });
+
+  it("reports disabled file reads before sending a file path", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: false, write: false },
+            collections: { read: false },
+            provenance: { record: false },
+          };
+        },
+      },
+    });
+
+    await expect(client.files.read("secret.md")).rejects.toMatchObject({
+      code: "DOHC_CAPABILITY_DISABLED",
+      message: expect.stringMatching(/files\.read.*disabled/i),
+    });
+    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });
 });

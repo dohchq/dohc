@@ -226,6 +226,7 @@ export function SitePreviewPage(props: {
     () => (load.status === "ready" ? availableModes(load.site) : []),
     [load],
   );
+  const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
   async function start(mode: SitePreviewMode) {
     setRunningMode(mode);
@@ -350,49 +351,55 @@ export function SitePreviewPage(props: {
           ) : null}
 
           {preview ? (
-            <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-panel-2 px-3">
-                <span data-testid="site-preview-mode" className="text-[11px] text-muted">
-                  {modeLabel(preview.mode)} preview
-                </span>
-                <span className="truncate font-mono text-[11px] text-subtle">{preview.url}</span>
-                <button
-                  type="button"
-                  data-testid="site-preview-open-external"
-                  aria-label="Open preview externally"
-                  title="Open preview externally"
-                  onClick={() => void bridge().openExternalUrl({ url: preview.url })}
-                  className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <ExternalLink size={12} aria-hidden />
-                </button>
+            !previewUrlAllowed ? (
+              <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
+                Preview URL must be an unauthenticated loopback HTTP URL.
               </div>
-              {/* allow-same-origin keeps localhost previews on their loopback
-                  origin; without it sandboxed frames send "null" origins and
-                  the SDK bridge cannot enforce exact active-preview matching.
-                  The frame src is restricted to loopback URLs by isLoopbackOrigin,
-                  message handling rejects origins that do not match the active
-                  preview URL, and preview servers are dohc-controlled local
-                  infrastructure rather than arbitrary remote content. */}
-              <iframe
-                ref={iframeRef}
-                key={preview.url}
-                data-testid="site-preview-frame"
-                title={site.title}
-                src={siteFrameUrl(preview.url)}
-                sandbox="allow-forms allow-same-origin allow-scripts"
-                referrerPolicy="no-referrer"
-                className="min-h-0 flex-1 border-0 bg-white"
-              />
-              {preview.logs.length > 0 ? (
-                <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
-                  <summary className="cursor-pointer text-muted">Logs</summary>
-                  <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                    {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
-                  </pre>
-                </details>
-              ) : null}
-            </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-panel-2 px-3">
+                  <span data-testid="site-preview-mode" className="text-[11px] text-muted">
+                    {modeLabel(preview.mode)} preview
+                  </span>
+                  <span className="truncate font-mono text-[11px] text-subtle">{preview.url}</span>
+                  <button
+                    type="button"
+                    data-testid="site-preview-open-external"
+                    aria-label="Open preview externally"
+                    title="Open preview externally"
+                    onClick={() => void bridge().openExternalUrl({ url: preview.url })}
+                    className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                  >
+                    <ExternalLink size={12} aria-hidden />
+                  </button>
+                </div>
+                {/* allow-same-origin keeps localhost previews on their loopback
+                    origin; without it sandboxed frames send "null" origins and
+                    the SDK bridge cannot enforce exact active-preview matching.
+                    The frame src is restricted to loopback URLs by isLoopbackOrigin,
+                    message handling rejects origins that do not match the active
+                    preview URL, and preview servers are dohc-controlled local
+                    infrastructure rather than arbitrary remote content. */}
+                <iframe
+                  ref={iframeRef}
+                  key={preview.url}
+                  data-testid="site-preview-frame"
+                  title={site.title}
+                  src={siteFrameUrl(preview.url)}
+                  sandbox="allow-forms allow-same-origin allow-scripts"
+                  referrerPolicy="no-referrer"
+                  className="min-h-0 flex-1 border-0 bg-white"
+                />
+                {preview.logs.length > 0 ? (
+                  <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
+                    <summary className="cursor-pointer text-muted">Logs</summary>
+                    <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
+                      {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+                    </pre>
+                  </details>
+                ) : null}
+              </div>
+            )
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />

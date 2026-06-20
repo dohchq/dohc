@@ -165,6 +165,7 @@ describe('nodeLabel — canonical .context files', () => {
         title: '<main>',
       }),
       row('home.html', { title: null }),
+      row('src/App.tsx', { title: 'Application source' }),
       row('notes/plan.md', { title: 'Plan' }),
     ])
     const clients = tree.children.find((c) => c.fullPath === 'clients')!
@@ -184,6 +185,8 @@ describe('nodeLabel — canonical .context files', () => {
       nodeLabel(overview.children.find((c) => c.fullPath.endsWith('index.html'))!),
     ).toBe('index.html')
     expect(nodeLabel(tree.children.find((c) => c.fullPath === 'home.html')!)).toBe('home.html')
+    const appSrc = tree.children.find((c) => c.fullPath === 'src')!
+    expect(nodeLabel(appSrc.children[0]!)).toBe('Application source')
     const notes = tree.children.find((c) => c.fullPath === 'notes')!
     expect(nodeLabel(notes.children[0]!)).toBe('Plan')
   })

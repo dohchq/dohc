@@ -280,6 +280,13 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     capabilities: readCapabilities,
     files: {
       read: async (path: string) => {
+        const capabilities = await readCapabilities();
+        if (!capabilities.files.read) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.capabilityDisabled,
+            "dohc files.read capability is disabled by this host.",
+          );
+        }
         const result = (await transport.request("files.read", { path })) as {
           text?: unknown;
         };
