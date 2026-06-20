@@ -13,4 +13,10 @@ describe('isPlainTextAtomPath', () => {
     expect(isPlainTextAtomPath('src/App.tsx')).toBe(false)
     expect(isPlainTextAtomPath('notes/config.json')).toBe(false)
   })
+
+  it('requires sites to be a complete path segment', () => {
+    expect(isPlainTextAtomPath('notes/my-sites/idea.tsx')).toBe(false)
+    expect(isPlainTextAtomPath('notes/workspace-sites/app.tsx')).toBe(false)
+    expect(isPlainTextAtomPath('notes/sites-backup/index.html')).toBe(false)
+  })
 })

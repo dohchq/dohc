@@ -280,7 +280,15 @@ function statusForError(message: string, code?: string) {
     case "invalid_manifest":
       return 400;
   }
-  if (code === "approval-required" || message === "approval required" || message === "approval-required") return 403;
+  if (
+    code === "approval-required" ||
+    code === "site-publish-required" ||
+    message === "approval required" ||
+    message === "approval-required" ||
+    message === "site-publish-required"
+  ) {
+    return 403;
+  }
   if (/stale|revision|conflict/i.test(message)) return 409;
   if (/not found|missing/i.test(message)) return 404;
   return 400;

@@ -539,9 +539,11 @@ function encodePath(path: string) {
 function isApprovalError(error: unknown): error is Error & { code?: string; path?: string } {
   return (
     error instanceof Error &&
-    (("code" in error && error.code === "approval-required") ||
+    (("code" in error &&
+      (error.code === "approval-required" || error.code === "site-publish-required")) ||
       error.message === "approval required" ||
-      error.message === "approval-required")
+      error.message === "approval-required" ||
+      error.message === "site-publish-required")
   );
 }
 

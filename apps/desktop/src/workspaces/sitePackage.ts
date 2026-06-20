@@ -1,6 +1,7 @@
 import {
   discoverSites,
   parseDohcSiteConfig,
+  type SiteDiagnostic,
   type SitePackageManager,
   type SiteScripts,
   type WorkspaceSite,
@@ -10,13 +11,6 @@ import { readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 import { listFiles } from "./workspaceFiles";
-
-export interface SiteDiagnostic {
-  path?: string;
-  severity: "warning" | "error";
-  code: string;
-  message: string;
-}
 
 export interface SitePackageInfo {
   root: string;
@@ -113,7 +107,11 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     }
     if (parsed.config?.build?.command) scripts.build = parsed.config.build.command;
     return scripts;
-  } catch {
+  } catch (error) {
+    console.warn("[desktop] failed to read configured site scripts", {
+      configPath: site.configPath,
+      error,
+    });
     return {};
   }
 }

@@ -4,8 +4,9 @@ const SITE_SOURCE_PLAIN_TEXT_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
 // markdown documents.
 export function isPlainTextAtomPath(path: string): boolean {
   const clean = path.replace(/\\/g, '/')
+  const segments = clean.split('/').filter(Boolean)
   return (
-    (clean.startsWith('sites/') || clean.includes('/sites/')) &&
+    segments.includes('sites') &&
     SITE_SOURCE_PLAIN_TEXT_EXT_RE.test(clean)
   )
 }

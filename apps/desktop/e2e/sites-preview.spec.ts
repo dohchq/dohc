@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
+  cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
   waitForWorkspaceFile,
@@ -157,13 +158,14 @@ function failingSiteFixtures(): WorkspaceFileWrite[] {
 test("@sites detects agent-created websites and previews static, dev, and build modes", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-  const repoRoot = resolve(desktopRoot, "../..");
-  const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
-  const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
-  if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
-  if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
 
   try {
+    const repoRoot = resolve(desktopRoot, "../..");
+    const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
+    const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
+    if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
+    if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
+
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
 
@@ -213,8 +215,7 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     await desktop.page.getByTestId("site-preview-stop").click();
     await expect(desktop.page.getByTestId("site-preview-frame")).toHaveCount(0);
   } finally {
-    await desktop?.close();
-    await temp.cleanup();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
@@ -244,7 +245,6 @@ test("@sites surfaces dev and build preview failures", async () => {
       "Site build failed",
     );
   } finally {
-    await desktop?.close();
-    await temp.cleanup();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });

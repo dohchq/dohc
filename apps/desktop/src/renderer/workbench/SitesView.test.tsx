@@ -73,12 +73,12 @@ describe("SitesView", () => {
     expect(screen.getByTestId("sites-count").textContent).toContain("1 site");
   });
 
-  it("uses a default title for empty-root static detection", async () => {
+  it("uses a default title for root-level static detection", async () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[file("/index.html")]}
+        files={[file("index.html")]}
         onOpenPath={vi.fn()}
       />,
     );

@@ -1,6 +1,7 @@
 import { test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
+  cleanupDesktopWorkspace,
   createTempWorkspace,
   expectVisibleContent,
   openWorkspaceFromFirstRun,
@@ -32,7 +33,6 @@ test("opens a temp workspace and shows direct disk file creation in the explorer
     await revealExplorerPath(desktop.page, "notes/outside-agent.md");
     await expectVisibleContent(desktop.page, "outside-agent.md");
   } finally {
-    await desktop?.close();
-    await temp.cleanup();
+    await cleanupDesktopWorkspace(desktop, temp);
   }
 });

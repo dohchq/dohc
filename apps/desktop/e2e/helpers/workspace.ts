@@ -10,6 +10,10 @@ export interface TempWorkspace {
   cleanup(): Promise<void>;
 }
 
+export interface CloseableDesktop {
+  close(): Promise<void>;
+}
+
 export interface WorkspaceFileWrite {
   path: string;
   contents: string | Uint8Array;
@@ -34,6 +38,20 @@ export async function createTempWorkspace(): Promise<TempWorkspace> {
     rootPath,
     cleanup: () => rm(baseDir, { recursive: true, force: true }),
   };
+}
+
+export async function cleanupDesktopWorkspace(
+  desktop: CloseableDesktop | null | undefined,
+  workspace: Pick<TempWorkspace, "cleanup">,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    desktop ? desktop.close() : Promise.resolve(),
+    workspace.cleanup(),
+  ]);
+  const rejected = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (rejected) throw rejected.reason;
 }
 
 function assertSafeRelativePath(path: string): void {
