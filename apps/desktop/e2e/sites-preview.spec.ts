@@ -295,7 +295,17 @@ test("@sites SDK respects workspace boundaries", async () => {
     const { viteBin, sdkEntry } = siteRuntimePaths();
     const outsideFile = resolve(temp.baseDir, "outside-secret.md");
     await writeFile(outsideFile, "outside workspace secret");
-    await symlink(outsideFile, resolve(temp.rootPath, "leak.md"), "file");
+    try {
+      await symlink(outsideFile, resolve(temp.rootPath, "leak.md"), "file");
+    } catch (error) {
+      test.skip(
+        true,
+        `symlink creation failed; this platform may require elevated privileges: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);

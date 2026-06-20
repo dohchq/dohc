@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { AssetKind, AtomKind, WorkspaceFile } from "@dohc/workspace-contracts";
+import {
+  SITE_SOURCE_CODE_EXT_RE,
+  type AssetKind,
+  type AtomKind,
+  type WorkspaceFile,
+} from "@dohc/workspace-contracts";
 import { mediaTypeForPath as coreMediaTypeForPath } from "@dohc/workspace-core";
 
 export type WorkspaceBackendMode = "postgres";
@@ -126,7 +131,18 @@ export function sha256(bytes: Uint8Array | string) {
 // sync metadata needs a concrete type, so unknown extensions become
 // octet-stream here.
 export function mediaTypeForPath(path: string): string {
-  return coreMediaTypeForPath(path) ?? "application/octet-stream";
+  return (
+    coreMediaTypeForPath(path) ??
+    (isSiteSourcePath(path) ? "text/plain" : "application/octet-stream")
+  );
+}
+
+function isSiteSourcePath(path: string) {
+  const normalized = path.replaceAll("\\", "/");
+  return (
+    normalized.toLowerCase().split("/").includes("sites") &&
+    SITE_SOURCE_CODE_EXT_RE.test(normalized)
+  );
 }
 
 export function isSqliteMediaType(mediaType: string, path = "") {
@@ -155,6 +171,7 @@ export function isTextMediaType(mediaType: string, path = "") {
     (lower.includes("text/") ||
       lower.includes("json") ||
       lower.includes("csv") ||
+      isSiteSourcePath(path) ||
       lower.endsWith(".md") ||
       lower.endsWith(".markdown") ||
       lower.endsWith(".txt"))

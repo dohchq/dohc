@@ -4,6 +4,7 @@ export const DohcSdkErrorCodes = {
   hostMissingOrigin: "DOHC_HOST_MISSING_ORIGIN",
   hostTimeout: "DOHC_HOST_TIMEOUT",
   badResponse: "DOHC_BAD_RESPONSE",
+  capabilityDisabled: "DOHC_CAPABILITY_DISABLED",
 } as const;
 export type DohcSdkErrorCode =
   (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
@@ -264,17 +265,19 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       targetWindow: options.targetWindow,
     });
 
+  const readCapabilities = async () => {
+    const result = await transport.request("capabilities");
+    if (!isCapabilityMap(result)) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.badResponse,
+        "dohc host returned an invalid capabilities response.",
+      );
+    }
+    return result;
+  };
+
   return {
-    capabilities: async () => {
-      const result = await transport.request("capabilities");
-      if (!isCapabilityMap(result)) {
-        throw new DohcSdkError(
-          DohcSdkErrorCodes.badResponse,
-          "dohc host returned an invalid capabilities response.",
-        );
-      }
-      return result;
-    },
+    capabilities: readCapabilities,
     files: {
       read: async (path: string) => {
         const result = (await transport.request("files.read", { path })) as {
@@ -296,6 +299,13 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
           // never accepts caller-supplied workspace/user identity here; the
           // host transport decides whether collections.read is available and
           // enforces workspace scope server-side before returning rows.
+          const capabilities = await readCapabilities();
+          if (!capabilities.collections.read) {
+            throw new DohcSdkError(
+              DohcSdkErrorCodes.capabilityDisabled,
+              "dohc collections.read capability is disabled by this host.",
+            );
+          }
           const result = await transport.request("collections.list", { name });
           if (!Array.isArray(result)) {
             throw new DohcSdkError(

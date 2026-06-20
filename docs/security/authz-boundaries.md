@@ -65,10 +65,13 @@ be weakened by rebrand or UI work.
   widen the workspace. The SDK client exposes
   `dohc.collections.get(...).list()` for explicit transports, but the Phase 1
   desktop preview host advertises `collections.read: false` and does not handle
-  `collections.list`. A future host may set that capability to true only after
-  server-side collection ACL checks are implemented as the authorization
-  boundary. The preview bridge controls when browser code can call a feature,
-  but it is not the trust boundary: callers cannot bypass server-side identity,
+  `collections.list`. The SDK checks that advertised capability before calling
+  `collections.list`; disabled collection reads raise `DOHC_CAPABILITY_DISABLED`,
+  while malformed capability or collection payloads remain `DOHC_BAD_RESPONSE`.
+  A future host may set that capability to true only after server-side
+  collection ACL checks are implemented as the authorization boundary. The
+  preview bridge controls when browser code can call a feature, but it is not
+  the trust boundary: callers cannot bypass server-side identity,
   workspace-scope, share, lock, or review-gate enforcement by manipulating
   browser state. Writes, cloud access, sharing, and publishing must continue
   through explicit workspace, share, lock, and review-gate checks.

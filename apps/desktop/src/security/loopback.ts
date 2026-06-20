@@ -8,5 +8,15 @@ export function normalizeLoopbackHostname(hostname: string): string {
 
 export function isLoopbackHostname(hostname: string): boolean {
   const normalized = normalizeLoopbackHostname(hostname);
-  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+  return normalized === "localhost" || normalized === "::1" || isIpv4Loopback(normalized);
+}
+
+function isIpv4Loopback(hostname: string): boolean {
+  const octets = hostname.split(".");
+  if (octets.length !== 4 || octets[0] !== "127") return false;
+  return octets.every((octet) => {
+    if (!/^\d{1,3}$/.test(octet)) return false;
+    const value = Number(octet);
+    return value >= 0 && value <= 255;
+  });
 }

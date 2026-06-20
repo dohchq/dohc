@@ -5,6 +5,7 @@ import {
   isSafeExternalUrl,
   validateDevServerUrl,
 } from "./electronSecurity";
+import { isLoopbackHostname } from "./loopback";
 
 describe("main window web preferences", () => {
   it("locks down the renderer: no node, isolated context, sandboxed", () => {
@@ -91,6 +92,21 @@ describe("dev server URL validation", () => {
     expect(validateDevServerUrl("http://evil.example.com:5173", false)).toBeNull();
     expect(validateDevServerUrl("file:///tmp/x", false)).toBeNull();
     expect(validateDevServerUrl("not a url", false)).toBeNull();
+  });
+});
+
+describe("loopback hostname validation", () => {
+  it("accepts only exact loopback hosts", () => {
+    expect(isLoopbackHostname("localhost")).toBe(true);
+    expect(isLoopbackHostname("[::1]")).toBe(true);
+    expect(isLoopbackHostname("::1")).toBe(true);
+    expect(isLoopbackHostname("127.0.0.1")).toBe(true);
+    expect(isLoopbackHostname("127.255.255.255")).toBe(true);
+
+    expect(isLoopbackHostname("127.0.0.1.evil.com")).toBe(false);
+    expect(isLoopbackHostname("127.0.0.256")).toBe(false);
+    expect(isLoopbackHostname("127.0.0")).toBe(false);
+    expect(isLoopbackHostname("0177.0.0.1")).toBe(false);
   });
 });
 

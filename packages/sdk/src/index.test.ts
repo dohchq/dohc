@@ -289,6 +289,7 @@ describe("@dohc/sdk", () => {
     await expect(client.provenance.record("checked")).resolves.toBeUndefined();
     expect(calls).toEqual([
       { method: "capabilities", params: undefined },
+      { method: "capabilities", params: undefined },
       { method: "collections.list", params: { name: "tasks" } },
       { method: "provenance.record", params: { summary: "checked" } },
     ]);
@@ -300,6 +301,13 @@ describe("@dohc/sdk", () => {
       transport: {
         async request(method, params) {
           calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: true },
+              provenance: { record: false },
+            };
+          }
           if (method === "collections.list") return [];
           return {};
         },
@@ -307,8 +315,33 @@ describe("@dohc/sdk", () => {
     });
 
     await expect(client.collections.get("tasks").list()).resolves.toEqual([]);
-    expect(calls).toEqual([{ method: "collections.list", params: { name: "tasks" } }]);
+    expect(calls).toEqual([
+      { method: "capabilities", params: undefined },
+      { method: "collections.list", params: { name: "tasks" } },
+    ]);
     expect(JSON.stringify(calls)).not.toMatch(/workspaceId|userId|onBehalfOf/);
+  });
+
+  it("reports disabled collection reads before requesting collection data", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: true, write: false },
+            collections: { read: false },
+            provenance: { record: false },
+          };
+        },
+      },
+    });
+
+    await expect(client.collections.get("tasks").list()).rejects.toMatchObject({
+      code: "DOHC_CAPABILITY_DISABLED",
+      message: expect.stringMatching(/collections\.read.*disabled/i),
+    });
+    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });
 
   it("rejects invalid high-level client responses", async () => {
@@ -327,14 +360,36 @@ describe("@dohc/sdk", () => {
     });
 
     const collectionsClient = createDohcClient({
-      transport: { async request() { return { rows: [] }; } },
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: true },
+              provenance: { record: false },
+            };
+          }
+          return { rows: [] };
+        },
+      },
     });
     await expect(collectionsClient.collections.get("bad").list()).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
     });
 
     const collectionItemsClient = createDohcClient({
-      transport: { async request() { return [{ id: 1 }, null]; } },
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: true },
+              provenance: { record: false },
+            };
+          }
+          return [{ id: 1 }, null];
+        },
+      },
     });
     await expect(collectionItemsClient.collections.get("bad").list()).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",

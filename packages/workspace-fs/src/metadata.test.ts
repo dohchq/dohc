@@ -28,6 +28,13 @@ describe("workspace filesystem metadata", () => {
     expect(assetKindForMediaType("text/plain", "plans/use-sqlite.txt")).toBe("file");
   });
 
+  it("treats source files under sites as text without changing ordinary source paths", () => {
+    expect(mediaTypeForPath("sites/review/src/App.tsx")).toBe("text/plain");
+    expect(mediaTypeForPath("client/src/App.tsx")).toBe("application/octet-stream");
+    expect(isTextMediaType("application/octet-stream", "sites/review/src/App.tsx")).toBe(true);
+    expect(isTextMediaType("application/octet-stream", "client/src/App.tsx")).toBe(false);
+  });
+
   it("rejects malformed sync manifests with an explicit corrupt-manifest error", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-manifest-"));
     try {
