@@ -260,6 +260,17 @@ function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): str
   return rel;
 }
 
+function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
+  if (siteRoot === ".") return workspaceRelativeOutput;
+  if (workspaceRelativeOutput === siteRoot) return ".";
+  if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
+    throw new Error(
+      `Build output must be within the site directory: ${workspaceRelativeOutput}`,
+    );
+  }
+  return workspaceRelativeOutput.slice(siteRoot.length + 1);
+}
+
 async function startPreviewForSite(input: {
   workspaceId: string;
   workspaceRoot: string;
@@ -330,10 +341,10 @@ async function startPreviewForSite(input: {
     if (!result.ok || !result.outputPath) {
       throw new Error("Site build failed or did not produce a static output folder.");
     }
-    outputRoot = relativeWorkspacePath(input.workspaceRoot, result.outputPath);
-    if (input.site.root !== "." && outputRoot.startsWith(`${input.site.root}/`)) {
-      outputRoot = outputRoot.slice(input.site.root.length + 1);
-    }
+    outputRoot = buildOutputRelativeToSite(
+      input.site.root,
+      relativeWorkspacePath(input.workspaceRoot, result.outputPath),
+    );
   }
   if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
   const handle = await startStaticSitePreview(

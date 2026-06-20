@@ -1662,7 +1662,7 @@ p {
               {
                 type: "site",
                 title,
-                preview: { mode: "static", entry: relativeJoin(root.normalized, "index.html") },
+                preview: { mode: "static", entry: "index.html" },
                 build: { command: "npm run build", output: "dist" },
               },
               null,

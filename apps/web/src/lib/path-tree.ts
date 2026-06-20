@@ -199,8 +199,7 @@ export function nodeLabel(node: TreeNode): string {
   if (node.fullPath === '.commands') return 'Commands'
   if (node.page && isSourceCodeFilePath(node.page.path)) return node.segment
   if (node.page?.title) return node.page.title
-  // D4.16 — strip the rendering extension (.md OR .html) so a
-  // titleless file shows its clean name (e.g. `dashboard`, not
-  // `dashboard.html`).
-  return node.segment.replace(/\.(md|html)$/i, '')
+  // D4.16 — strip the rendering extension for titleless markdown files
+  // while source-like website files keep their full filenames above.
+  return node.segment.replace(/\.md$/i, '')
 }
