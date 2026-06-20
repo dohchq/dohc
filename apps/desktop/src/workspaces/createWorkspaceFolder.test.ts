@@ -51,6 +51,8 @@ describe("createWorkspaceFolder", () => {
       await readFile(join(root, ".dohc", "manifest.json"), "utf8"),
     );
     expect(manifest.workspaceId).toBe("ws-existing-identity");
+    const sharedWithMe = await stat(join(root, "shared-with-me"));
+    expect(sharedWithMe.isDirectory()).toBe(true);
   });
 
   it("rejects relative workspace roots", async () => {

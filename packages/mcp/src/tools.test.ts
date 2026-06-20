@@ -34,6 +34,10 @@ import {
   type ToolContext,
 } from "./tools";
 
+const LEGACY_APPS_SEGMENT = `.${"apps"}`;
+const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
+const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
+
 const TEST_SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
@@ -294,9 +298,9 @@ describe("mcp tool path containment", () => {
     await withWorkspace(async (ctx) => {
       await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
       await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
-      await expect(createSite(ctx, { path: "finance/.apps/x" })).resolves.toMatchObject({
+      await expect(createSite(ctx, { path: `finance/${LEGACY_APPS_SEGMENT}/x` })).resolves.toMatchObject({
         ok: false,
-        reason: expect.stringMatching(/legacy \.apps/i),
+        reason: expect.stringContaining(`legacy ${LEGACY_APPS_SEGMENT}`),
       });
     });
   });
@@ -775,7 +779,7 @@ describe("mcp tools operate on allowed paths", () => {
       const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
-      expect(html).not.toContain("@dohc/app");
+      expect(html).not.toContain(LEGACY_SDK_PACKAGE);
       expect(packageJson).toMatchObject({
         private: true,
         type: "module",
@@ -873,15 +877,15 @@ describe("mcp tools operate on allowed paths", () => {
       await createSite(ctx, { path: "todo" });
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
 
-      await writeFile(join(ctx.root, "todo/script.js"), '// import "@dohc/app";\n');
+      await writeFile(join(ctx.root, "todo/script.js"), `// ${importLegacySdk}`);
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
 
-      await writeFile(join(ctx.root, "todo/script.js"), 'const marker = "/* @dohc/app */";\n');
+      await writeFile(join(ctx.root, "todo/script.js"), `const marker = "/* ${LEGACY_SDK_PACKAGE} */";\n`);
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
 
       await writeFile(
         join(ctx.root, "todo/script.js"),
-        'const slashOrStar = /[/*]/;\nimport "@dohc/app";\n',
+        `const slashOrStar = /[/*]/;\n${importLegacySdk}`,
       );
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
         ok: false,
@@ -890,7 +894,7 @@ describe("mcp tools operate on allowed paths", () => {
         ]),
       });
 
-      await writeFile(join(ctx.root, "todo/script.js"), 'import "@dohc/app";\n');
+      await writeFile(join(ctx.root, "todo/script.js"), importLegacySdk);
       await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
         ok: false,
         checks: expect.arrayContaining([

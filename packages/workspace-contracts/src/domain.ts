@@ -16,7 +16,7 @@ export const WorkspacePath = z
     "workspace paths cannot contain ..",
   );
 
-export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html?)$/i;
+export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|s?css|json|html?)$/i;
 
 export const AtomKind = z.enum([
   "markdown",

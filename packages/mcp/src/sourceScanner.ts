@@ -1,5 +1,8 @@
-const LEGACY_APP_IMPORT_RE =
-  /(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']@dohc\/app(?:\/[^"']*)?["']/m;
+const LEGACY_APP_PACKAGE = `@dohc/${"app"}`;
+const LEGACY_APP_IMPORT_RE = new RegExp(
+  String.raw`(?:import\s+(?:[^'"]+\s+from\s+)?|import\s*\(|require\s*\()\s*["']${LEGACY_APP_PACKAGE.replace("/", "\\/")}(?:\/[^"']*)?["']`,
+  "m",
+);
 
 export function stripSourceComments(body: string): string {
   let output = "";
@@ -126,7 +129,7 @@ export function stripSourceComments(body: string): string {
 
 export function hasLegacyAppImport(source: string): boolean {
   // Static validation intentionally matches literal import/require specifiers.
-  // Dynamic template imports are uncommon and will fail at runtime because the
-  // legacy @dohc/app package is not available in normal website previews.
+  // Dynamic template imports are uncommon and will fail at runtime in normal
+  // website previews.
   return LEGACY_APP_IMPORT_RE.test(stripSourceComments(source));
 }

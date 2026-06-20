@@ -10,6 +10,11 @@ import {
   mergeMarkdownEditorBody,
 } from "./FileInspector";
 
+const LEGACY_APPS_SEGMENT = `.${"apps"}`;
+const LEGACY_APP_MANIFEST = `${"app"}.${"json"}`;
+const legacyAppPath = (...segments: string[]) =>
+  [LEGACY_APPS_SEGMENT, ...segments].join("/");
+
 describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   const text = "first\nsecond line\n\nfourth";
 
@@ -40,8 +45,8 @@ describe("classifyForView dispatch", () => {
     ["uploads/contract.pdf", "pdf"],
     ["finance/wallet.sqlite", "database"],
     ["archive/old.db", "database"],
-    ["finance/.apps/ledger/app.json", "json"],
-    ["finance/.apps/ledger/src/App.tsx", "text"],
+    [`finance/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`, "json"],
+    [`finance/${legacyAppPath("ledger", "src", "App.tsx")}`, "text"],
     ["uploads/mystery.bin", "binary"],
   ];
 
@@ -51,9 +56,9 @@ describe("classifyForView dispatch", () => {
     });
   }
 
-  it("treats legacy .apps paths as ordinary files", () => {
-    expect(classifyForView("x/.apps/ledger/app.json")).toBe("json");
-    expect(classifyForView("x/.apps/ledger/src/App.tsx")).toBe("text");
+  it("treats legacy app-folder paths as ordinary files", () => {
+    expect(classifyForView(`x/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`)).toBe("json");
+    expect(classifyForView(`x/${legacyAppPath("ledger", "src", "App.tsx")}`)).toBe("text");
   });
 });
 

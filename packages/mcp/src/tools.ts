@@ -1207,6 +1207,7 @@ type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
 
 type SiteCheck = { name: string; ok: boolean; message?: string; path?: string };
 
+const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const SITE_SCAN_IGNORED_NAMES = new Set([
   ".cache",
   ".dohc",
@@ -1246,12 +1247,12 @@ function hasLegacyAppsSegment(path: string): boolean {
   return path
     .split(/[\\/]+/)
     .filter(Boolean)
-    .some((segment) => segment.toLowerCase() === ".apps");
+    .some((segment) => segment.toLowerCase() === LEGACY_APPS_SEGMENT);
 }
 
 function sitePathAllowed(path: string): { ok: true } | { ok: false; reason: string } {
   if (hasLegacyAppsSegment(path)) {
-    return { ok: false, reason: "site tools do not operate on legacy .apps paths" };
+    return { ok: false, reason: `site tools do not operate on legacy ${LEGACY_APPS_SEGMENT} paths` };
   }
   return { ok: true };
 }

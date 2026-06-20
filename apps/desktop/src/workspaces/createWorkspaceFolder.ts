@@ -77,6 +77,7 @@ export async function createWorkspaceFolder(input: {
   if (state.kind === "blocked") {
     throw new Error(state.reason);
   }
+  await mkdir(join(input.rootPath, SHARED_WITH_ME_FOLDER), { recursive: true });
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {
@@ -95,7 +96,6 @@ export async function createWorkspaceFolder(input: {
 
   await mkdir(join(input.rootPath, ".dohc"), { recursive: true });
   await mkdir(join(input.rootPath, ".context"), { recursive: true });
-  await mkdir(join(input.rootPath, SHARED_WITH_ME_FOLDER), { recursive: true });
   // wx: manifest is absent (inspectManifest returned "absent"); never clobber
   // an unexpected file that appeared between the check and the write.
   await writeFile(
