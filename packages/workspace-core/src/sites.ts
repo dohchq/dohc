@@ -473,14 +473,16 @@ function hasWebDependency(pkg: PackageJson | undefined): boolean {
   return false;
 }
 
+const WEB_SCRIPT_PATTERNS = WEB_SCRIPT_TOKENS.map((token) => {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[\\s:/@._-])${escaped}($|[\\s:/@._-])`);
+});
+
 function hasWebScript(pkg: PackageJson | undefined): boolean {
   const scripts = packageScripts(pkg);
   return Object.entries(scripts).some(([name, value]) => {
     const haystack = `${name} ${value}`.toLowerCase();
-    return WEB_SCRIPT_TOKENS.some((token) => {
-      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`(^|[\\s:/@._-])${escaped}($|[\\s:/@._-])`).test(haystack);
-    });
+    return WEB_SCRIPT_PATTERNS.some((pattern) => pattern.test(haystack));
   });
 }
 

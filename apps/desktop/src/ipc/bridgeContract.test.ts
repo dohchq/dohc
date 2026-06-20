@@ -91,9 +91,9 @@ describe("site IPC contract", () => {
     expect(
       StopSitePreviewPayload.parse({
         workspaceId: "ws-sites",
-        siteRoot: "site",
+        siteRoot: ".",
       }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "site" });
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
     for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {
       expect(
         StartSitePreviewPayload.safeParse({
@@ -109,7 +109,16 @@ describe("site IPC contract", () => {
         }).success,
       ).toBe(false);
     }
-    for (const siteRoot of ["../escape", "site/../../escape", "/tmp/site", "C:/site", "site/./dist"]) {
+    for (const siteRoot of [
+      "",
+      "../escape",
+      "site/../../escape",
+      "/tmp/site",
+      "C:/site",
+      "site/./dist",
+      "site\0/index.html",
+      "site\\index.html",
+    ]) {
       expect(
         StartSitePreviewPayload.safeParse({
           workspaceId: "ws-sites",

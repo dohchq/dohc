@@ -336,7 +336,7 @@ async function stopChild(
     const hardKill = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       resolve();
-    }, 5000);
+    }, BUILD_HARD_KILL_GRACE_MS);
     child.once("exit", () => {
       clearTimeout(hardKill);
       resolve();
