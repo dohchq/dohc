@@ -343,9 +343,17 @@ async function pathExists(path: string): Promise<boolean> {
 
 export async function detectBuildOutput(siteRoot: string, configured?: string): Promise<string | null> {
   const candidates = configured ? [configured] : ["dist", "build", "out"];
+  const realSiteRoot = await realpath(siteRoot);
   for (const candidate of candidates) {
+    try {
+      assertContainedFilePath(candidate, "build output");
+    } catch {
+      return null;
+    }
     const absolute = join(siteRoot, candidate);
     if (!(await pathExists(absolute))) continue;
+    const realOutput = await realpath(absolute);
+    if (!isInside(realSiteRoot, realOutput)) return null;
     const info = await stat(absolute);
     if (info.isDirectory()) return absolute;
   }

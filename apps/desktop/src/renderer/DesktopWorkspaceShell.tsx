@@ -2416,12 +2416,21 @@ export function DesktopWorkspaceShell(props: {
                 onRestored={refreshAfterHistoryRestore}
               />
             ) : isSiteTabPath(wb.activeTab) ? (
-              <Suspense fallback={<PanelLoading label="site" />}>
-                <LazySitePreviewPage
-                  workspaceId={workspaceId}
-                  siteRoot={parseSiteTabPath(wb.activeTab) ?? "."}
-                />
-              </Suspense>
+              (() => {
+                const siteRoot = parseSiteTabPath(wb.activeTab);
+                return siteRoot ? (
+                  <Suspense fallback={<PanelLoading label="site" />}>
+                    <LazySitePreviewPage
+                      workspaceId={workspaceId}
+                      siteRoot={siteRoot}
+                    />
+                  </Suspense>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center text-sm text-muted">
+                    Invalid site path
+                  </div>
+                );
+              })()
             ) : wb.activeTab ? (
               <FileInspector
                 key={wb.activeTab}

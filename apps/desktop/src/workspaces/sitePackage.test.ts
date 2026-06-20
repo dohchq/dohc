@@ -75,25 +75,34 @@ describe("listSitePackages", () => {
   });
 
   it("keeps dohc.json preview commands separate from package scripts", async () => {
-    await mkdir(join(root, "sdk-site"), { recursive: true });
-    await writeFile(
-      join(root, "sdk-site", "package.json"),
-      JSON.stringify({ scripts: { dev: "vite" } }),
-    );
-    await writeFile(
-      join(root, "sdk-site", "dohc.json"),
-      JSON.stringify({
-        type: "site",
-        title: "SDK Site",
-        preview: { mode: "dev", command: "node /tmp/vite.js --host 127.0.0.1" },
-      }),
-    );
+    const cases = [
+      ["dev-site", "dev", "dev"],
+      ["static-site", "static", "preview"],
+      ["build-site", "build", "preview"],
+    ] as const;
+    for (const [folder, mode, slot] of cases) {
+      await mkdir(join(root, folder), { recursive: true });
+      await writeFile(
+        join(root, folder, "package.json"),
+        JSON.stringify({ scripts: { dev: "vite" } }),
+      );
+      await writeFile(
+        join(root, folder, "dohc.json"),
+        JSON.stringify({
+          type: "site",
+          title: folder,
+          preview: { mode, command: `node /tmp/${folder}.js --host 127.0.0.1` },
+        }),
+      );
+    }
 
-    const site = (await listSitePackages(root)).find((entry) => entry.root === "sdk-site");
-    expect(site).toMatchObject({
-      scripts: { dev: "node /tmp/vite.js --host 127.0.0.1" },
-      configuredScripts: { dev: "node /tmp/vite.js --host 127.0.0.1" },
-    });
+    const sites = await listSitePackages(root);
+    for (const [folder, , slot] of cases) {
+      const site = sites.find((entry) => entry.root === folder);
+      expect(site?.configuredScripts).toMatchObject({
+        [slot]: `node /tmp/${folder}.js --host 127.0.0.1`,
+      });
+    }
   });
 
   it("finds the deepest containing site for a path", async () => {

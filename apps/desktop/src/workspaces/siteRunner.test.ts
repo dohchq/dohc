@@ -158,6 +158,8 @@ describe("buildSite", () => {
   it("detects configured and conventional build outputs", async () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
+    await mkdir(join(root, "outside"), { recursive: true });
+    expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();
     await mkdir(join(root, "site", "out"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"))).toBe(join(root, "site", "out"));

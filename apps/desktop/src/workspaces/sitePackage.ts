@@ -96,7 +96,7 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     const scripts: SiteScripts = {};
     const preview = parsed.config?.preview;
     if (preview?.command) {
-      if (preview.mode === "build") scripts.build = preview.command;
+      if (preview.mode === "build") scripts.preview = preview.command;
       else if (preview.mode === "static") scripts.preview = preview.command;
       else scripts.dev = preview.command;
     }

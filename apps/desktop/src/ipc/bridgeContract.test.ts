@@ -72,6 +72,34 @@ describe("site IPC contract", () => {
       StartSitePreviewResult.safeParse({
         siteRoot: "site",
         mode: "static",
+        url: "http://127.0.0.1:43210",
+        logs: [],
+      }).success,
+    ).toBe(true);
+    for (const url of [
+      "https://example.com/",
+      "file:///tmp/site/index.html",
+      "javascript:alert(1)",
+      "data:text/html,<h1>x</h1>",
+      "http://0.0.0.0:43210/",
+      "http://[::1]:43210/",
+      "http://user:pass@127.0.0.1:43210/",
+      "http://127.0.0.1:0/",
+      "http://127.0.0.1:70000/",
+    ]) {
+      expect(
+        StartSitePreviewResult.safeParse({
+          siteRoot: "site",
+          mode: "static",
+          url,
+          logs: [],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
         url: "https://example.com/",
         logs: [],
       }).success,

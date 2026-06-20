@@ -250,7 +250,11 @@ export function SitePreviewPage(props: {
                 data-testid="site-preview-reload"
                 aria-label="Reload preview"
                 title="Reload preview"
-                onClick={() => setPreview({ ...preview, url: `${preview.url}?t=${Date.now()}` })}
+                onClick={() => {
+                  const url = new URL(preview.url);
+                  url.searchParams.set("t", String(Date.now()));
+                  setPreview({ ...preview, url: url.href });
+                }}
                 className="grid size-7 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
               >
                 <RefreshCcw size={13} aria-hidden />

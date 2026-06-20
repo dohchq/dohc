@@ -57,13 +57,21 @@ function createRequestId(): string {
   return `dohc_${Date.now().toString(36)}_${random}`;
 }
 
-function isResponseFor(
+function isDohcSdkResponse(
   value: unknown,
   id: string,
 ): value is DohcSdkResponseMessage {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DohcSdkResponseMessage>;
-  return candidate.protocol === DOHC_SDK_PROTOCOL && candidate.id === id;
+  if (candidate.protocol !== DOHC_SDK_PROTOCOL || candidate.id !== id) return false;
+  if (candidate.ok === true) return "result" in candidate;
+  if (candidate.ok === false) {
+    const error = (candidate as { error?: unknown }).error;
+    if (!error || typeof error !== "object") return false;
+    const shaped = error as { code?: unknown; message?: unknown };
+    return typeof shaped.code === "string" && typeof shaped.message === "string";
+  }
+  return false;
 }
 
 export function createPostMessageTransport(
@@ -128,7 +136,9 @@ export function createPostMessageTransport(
         }
 
         function onMessage(event: MessageEvent) {
-          if (!isResponseFor(event.data, id)) return;
+          if (event.source !== targetWindow) return;
+          if (targetOrigin !== "*" && event.origin !== targetOrigin) return;
+          if (!isDohcSdkResponse(event.data, id)) return;
           if (event.data.ok) finish(event.data.result);
           else {
             finish(

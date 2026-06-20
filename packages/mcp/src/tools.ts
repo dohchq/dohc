@@ -1919,7 +1919,7 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
       ? packageJson.name
       : packageNameFromPath(root.normalized);
   const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = "latest";
+  dependencies["@dohc/sdk"] = "^0.1.0";
   packageJson.dependencies = dependencies;
 
   await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);

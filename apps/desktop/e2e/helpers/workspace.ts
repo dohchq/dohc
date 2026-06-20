@@ -61,7 +61,12 @@ export async function writeWorkspaceFiles(
 }
 
 function cssString(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `"${value
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\a ")
+    .replace(/\r/g, "\\d ")
+    .replace(/\f/g, "\\c ")
+    .replace(/"/g, '\\"')}"`;
 }
 
 export function explorerRow(page: Page, path: string) {

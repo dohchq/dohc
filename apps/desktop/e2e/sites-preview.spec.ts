@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -14,6 +15,8 @@ test("@sites detects agent-created websites and previews static, dev, and build 
   const repoRoot = resolve(desktopRoot, "../..");
   const viteBin = resolve(repoRoot, "node_modules/vite/bin/vite.js");
   const sdkEntry = resolve(repoRoot, "packages/sdk/src/index.ts");
+  if (!existsSync(viteBin)) throw new Error(`Vite binary not found: ${viteBin}`);
+  if (!existsSync(sdkEntry)) throw new Error(`SDK entry not found: ${sdkEntry}`);
 
   try {
     desktop = await launchDesktopApp({ workspace: temp });

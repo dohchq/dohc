@@ -76,12 +76,14 @@ export async function launchDesktopApp(input: {
   });
 
   const processHandle = app.process();
-  processHandle.stdout?.on("data", (chunk: Buffer) => {
+  const onStdoutData = (chunk: Buffer) => {
     logs.push({ source: "main", level: "stdout", text: chunk.toString() });
-  });
-  processHandle.stderr?.on("data", (chunk: Buffer) => {
+  };
+  const onStderrData = (chunk: Buffer) => {
     logs.push({ source: "main", level: "stderr", text: chunk.toString() });
-  });
+  };
+  processHandle.stdout?.on("data", onStdoutData);
+  processHandle.stderr?.on("data", onStderrData);
 
   const page = await app.firstWindow();
   page.on("console", (message) => {
@@ -104,16 +106,47 @@ export async function launchDesktopApp(input: {
     page,
     logs,
     close: async () => {
-      if (app.windows().length === 0) return;
-      await Promise.race([
-        app.close(),
-        new Promise<void>((resolve) => {
-          setTimeout(() => {
-            processHandle.kill();
-            resolve();
-          }, 5_000);
-        }),
-      ]);
+      try {
+        if (app.windows().length === 0) return;
+        await Promise.race([app.close(), forceCloseAfterTimeout(processHandle)]);
+      } finally {
+        processHandle.stdout?.off("data", onStdoutData);
+        processHandle.stderr?.off("data", onStderrData);
+      }
     },
   };
+}
+
+function processIsRunning(processHandle: ReturnType<ElectronApplication["process"]>): boolean {
+  return processHandle.exitCode === null && processHandle.signalCode === null;
+}
+
+async function waitForProcessExit(
+  processHandle: ReturnType<ElectronApplication["process"]>,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!processIsRunning(processHandle)) return true;
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      processHandle.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    function onExit() {
+      clearTimeout(timer);
+      resolve(true);
+    }
+    processHandle.once("exit", onExit);
+  });
+}
+
+async function forceCloseAfterTimeout(
+  processHandle: ReturnType<ElectronApplication["process"]>,
+): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  if (!processIsRunning(processHandle)) return;
+  processHandle.kill("SIGTERM");
+  if (!(await waitForProcessExit(processHandle, 1_000)) && processIsRunning(processHandle)) {
+    processHandle.kill("SIGKILL");
+    await waitForProcessExit(processHandle, 1_000);
+  }
 }

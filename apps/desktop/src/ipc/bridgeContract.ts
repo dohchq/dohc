@@ -553,10 +553,35 @@ const SiteLogEntry = z.object({
 });
 export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
 
+const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) => {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid URL" });
+    return;
+  }
+  const port = Number(url.port);
+  if (
+    url.protocol !== "http:" ||
+    (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") ||
+    url.username ||
+    url.password ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "preview URL must be an unauthenticated loopback HTTP URL",
+    });
+  }
+});
+
 export const StartSitePreviewResult = z.object({
   siteRoot: PATH_STRING,
   mode: SitePreviewMode,
-  url: z.string().min(1).max(2048).regex(/^http:\/\/(?:127\.0\.0\.1|localhost):\d+\//),
+  url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry),
   build: z
     .object({
