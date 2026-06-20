@@ -87,6 +87,18 @@ describe("listFiles", () => {
     expect(result.folders).toEqual(["empty", "empty/nested"]);
   });
 
+  it("keeps shared-with-me visible as local workspace data", async () => {
+    await mkdir(join(root, "shared-with-me", "alex"), { recursive: true });
+    await writeFile(join(root, "shared-with-me", "alex", "brief.md"), "shared");
+
+    const result = await listFiles(root);
+    expect(result.files).toContainEqual({
+      path: "shared-with-me/alex/brief.md",
+      kind: "file",
+    });
+    expect(result.folders).toEqual(["shared-with-me", "shared-with-me/alex"]);
+  });
+
   it("does not follow symlinks (file or directory) out of the workspace", async () => {
     const outside = await mkdtemp(join(nativeTmpdir(), "dohc-outside-"));
     await writeFile(join(outside, "secret.md"), "leak");

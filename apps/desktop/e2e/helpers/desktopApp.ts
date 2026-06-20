@@ -170,7 +170,7 @@ async function forceCloseAfterTimeout(
   if (!processIsRunning(processHandle)) return;
   if (processIsRunning(processHandle)) processHandle.kill("SIGTERM");
   if (!(await waitForProcessExit(processHandle, 1_000)) && processIsRunning(processHandle)) {
-    if (processIsRunning(processHandle)) processHandle.kill("SIGKILL");
+    processHandle.kill("SIGKILL");
     await waitForProcessExit(processHandle, 1_000);
   }
 }

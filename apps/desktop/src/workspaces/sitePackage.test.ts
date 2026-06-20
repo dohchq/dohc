@@ -28,12 +28,13 @@ describe("discoverSiteRoots", () => {
           file("dash/package.json"),
           file("dash/vite.config.ts"),
           file("portal/vite.config.ts"),
+          file("shared-with-me/alex/portal/index.html"),
           file("notes/today.md"),
           file("dohc.json"),
         ],
         ["built/dist", "plain"],
       ),
-    ).toEqual([".", "built", "dash", "portal", "report"]);
+    ).toEqual([".", "built", "dash", "portal", "report", "shared-with-me/alex/portal"]);
   });
 });
 

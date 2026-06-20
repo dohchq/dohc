@@ -163,4 +163,36 @@ describe("SitePreviewPage", () => {
     });
     expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
+
+  it("ignores SDK file reads from non-loopback origins", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://example.com",
+        source,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-untrusted",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+  });
 });

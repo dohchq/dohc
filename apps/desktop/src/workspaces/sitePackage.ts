@@ -49,6 +49,8 @@ function joinSitePath(root: string, relativePath: string): string {
 
 function isUnder(root: string, path: string): boolean {
   const normalized = normalizeRoot(root);
+  // `shared-with-me` is a real local folder, not hidden metadata; shared sites
+  // under it should be detected and previewed like any other local website.
   if (normalized === ".") return !path.startsWith(".dohc/");
   return path === normalized || path.startsWith(`${normalized}/`);
 }
