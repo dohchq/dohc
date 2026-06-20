@@ -233,7 +233,7 @@ describe("isSiteSourcePath", () => {
     expect(isSiteSourcePath("sites/workspace/index.html")).toBe(true);
     expect(isSiteSourcePath("sites/workspace/index.htm")).toBe(true);
     expect(isSiteSourcePath("finance/sites/ledger/styles.css")).toBe(true);
-    expect(isSiteSourcePath("finance/Sites/ledger/theme.scss")).toBe(true);
+    expect(isSiteSourcePath("finance/sites/ledger/theme.scss")).toBe(true);
     expect(isSiteSourcePath("finance\\sites\\ledger\\config.json")).toBe(true);
   });
 
@@ -243,6 +243,7 @@ describe("isSiteSourcePath", () => {
     expect(isSiteSourcePath("notes/my-sites/idea.tsx")).toBe(false);
     expect(isSiteSourcePath("notes/workspace-sites/app.tsx")).toBe(false);
     expect(isSiteSourcePath("notes/sites-backup/index.html")).toBe(false);
+    expect(isSiteSourcePath("finance/Sites/ledger/theme.scss")).toBe(false);
   });
 });
 

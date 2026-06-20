@@ -548,7 +548,7 @@ function isApprovalError(error: unknown): error is Error & { code?: string; path
 }
 
 function isApprovalResultError(error: string | undefined): boolean {
-  return /approval|site-publish-required/i.test(error ?? "");
+  return /\b(approval|site-publish-required)\b/i.test(error ?? "");
 }
 
 function firstOperationPath(operations: FsDiffOperation[]) {

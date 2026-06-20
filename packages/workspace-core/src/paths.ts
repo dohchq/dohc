@@ -57,10 +57,7 @@ export function hasIgnoredSegment(relativePath: string): boolean {
 export function isSiteSourcePath(relativePath: string): boolean {
   const normalized = relativePath.replaceAll("\\", "/");
   const segments = normalized.split("/").filter(Boolean);
-  return (
-    segments.some((segment) => segment.toLowerCase() === "sites") &&
-    SITE_SOURCE_CODE_EXT_RE.test(normalized)
-  );
+  return segments.includes("sites") && SITE_SOURCE_CODE_EXT_RE.test(normalized);
 }
 
 export type WritePathValidation =

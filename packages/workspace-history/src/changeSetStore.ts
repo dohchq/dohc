@@ -267,6 +267,9 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       return records;
     },
 
+    // Detail reads are fail-fast by design: an unknown persisted kind should
+    // surface to the caller, while listIndexed/listSince skip bad records so
+    // one corrupt entry cannot blank the whole timeline.
     async get(id) {
       assertSafeHistoryId(id);
       const index = await readIndex();

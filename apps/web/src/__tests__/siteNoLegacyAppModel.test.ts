@@ -29,11 +29,11 @@ const TEXT_EXT =
   /\.(ts|tsx|js|jsx|mjs|cjs|css|scss|json|md|mdx|svg|html|yml|yaml|txt)$/
 
 const FORBIDDEN: ReadonlyArray<{ name: string; token: string; caseSensitive?: boolean }> = [
-  { name: 'legacy hidden site folder', token: `.${'ap'}${'ps'}` },
-  { name: 'legacy manifest filename', token: `${'app'}.${'json'}` },
-  { name: 'legacy SDK package', token: `@dohc/${'app'}` },
-  { name: 'legacy package type', token: `${'App'}${'Package'}`, caseSensitive: true },
-  { name: 'legacy source marker', token: `${'app'}-${'source'}` },
+  { name: 'legacy hidden site folder', token: '.apps' },
+  { name: 'legacy manifest filename', token: 'app.json' },
+  { name: 'legacy SDK package', token: '@dohc/app' },
+  { name: 'legacy package type', token: 'AppPackage', caseSensitive: true },
+  { name: 'legacy source marker', token: 'app-source' },
 ]
 
 function isHistoricalPath(abs: string): boolean {
