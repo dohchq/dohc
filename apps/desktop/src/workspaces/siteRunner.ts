@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 
@@ -385,7 +385,6 @@ export async function buildSite(input: {
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
   const logs: SiteLogEntry[] = [];
-  await mkdir(cwd, { recursive: true });
   const child = spawn(input.command, args, {
     cwd,
     env: { ...process.env, ...(input.env ?? {}) },

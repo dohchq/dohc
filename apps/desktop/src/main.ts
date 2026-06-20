@@ -1350,7 +1350,7 @@ function registerIpcHandlers(): void {
     );
   });
 
-  // Site preview SDK reads use the combined helper to make the server-side
+  // Site preview SDK reads use the combined helper to make the main-process
   // workspace authorization boundary explicit. Older workspace handlers keep
   // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {

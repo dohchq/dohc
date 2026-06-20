@@ -54,6 +54,23 @@ export interface ChangeSetStore {
 // Each record lives in its own file so history is inspectable: open
 // .dohc/history/<recordedAtMs>-<id>.json and read what changed and why.
 const HISTORY_ID_RE = /^[A-Za-z0-9._-]+$/;
+const VALID_CHANGE_SET_KINDS = new Set<ChangeSetKind>([
+  "user-edit",
+  "agent-run",
+  "import",
+  "sync",
+  "site-build",
+  "history-restore",
+]);
+const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>([
+  "public-share",
+  "external-export",
+  "permission-change",
+  "bulk-delete",
+  "site-publish",
+  "private-to-shared",
+  "unmergeable-overwrite",
+]);
 
 function assertSafeHistoryId(id: string): string {
   if (!HISTORY_ID_RE.test(id)) {
@@ -77,11 +94,19 @@ async function readJson<T>(path: string): Promise<T | null> {
 }
 
 function normalizeKind(kind: unknown): ChangeSetKind {
-  return kind === "app-build" ? "site-build" : (kind as ChangeSetKind);
+  const normalized = kind === "app-build" ? "site-build" : kind;
+  if (!VALID_CHANGE_SET_KINDS.has(normalized as ChangeSetKind)) {
+    throw new Error(`Unknown history change set kind: ${String(kind)}`);
+  }
+  return normalized as ChangeSetKind;
 }
 
 function normalizeBoundaryCrossing(value: unknown): BoundaryCrossing {
-  return value === "app-trust" ? "site-publish" : (value as BoundaryCrossing);
+  const normalized = value === "app-trust" ? "site-publish" : value;
+  if (!VALID_BOUNDARY_CROSSINGS.has(normalized as BoundaryCrossing)) {
+    throw new Error(`Unknown history boundary crossing: ${String(value)}`);
+  }
+  return normalized as BoundaryCrossing;
 }
 
 function normalizeHistoryRecord(record: HistoryRecord): HistoryRecord {

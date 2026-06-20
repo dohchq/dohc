@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addBoundaryCrossing,
   addFileChanges,
@@ -213,6 +213,57 @@ describe("changeSetStore persistence", () => {
         boundaryCrossings: ["site-publish"],
       },
     ]);
+  });
+
+  it("rejects unknown persisted history enum values instead of type-casting them", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "corrupt",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt record",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-corrupt.json"),
+      `${JSON.stringify(
+        {
+          id: "corrupt",
+          recordedAtMs: 1000,
+          kind: "made-up-kind",
+          author: userAuthor,
+          summary: "Corrupt record",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: ["also-made-up"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("corrupt")).rejects.toThrow(/unknown history change set kind/i);
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record corrupt:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

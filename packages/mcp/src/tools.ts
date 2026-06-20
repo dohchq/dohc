@@ -9,14 +9,18 @@ import {
   addFileChanges,
   createChangeSet,
   databaseSyncStrategy,
+  frameworkConfigName,
   hasIgnoredSegment,
+  hasWebDependency,
   mediaTypeForPath,
+  packageManagerFromFiles,
   validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
   type ChangeSetKind,
   type DohcSiteConfig,
   type FileChange,
+  type PackageJson,
   type SiteConfidence,
   type SiteDiagnostic,
   type SiteKind,
@@ -1193,14 +1197,6 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
 
 // --- dohc site tools --------------------------------------------------------
 
-type PackageJson = {
-  name?: unknown;
-  packageManager?: unknown;
-  scripts?: unknown;
-  dependencies?: unknown;
-  devDependencies?: unknown;
-};
-
 type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
   Record<string, unknown>;
 
@@ -1357,55 +1353,6 @@ function readPackageScripts(pkg: PackageJson | null): SiteScripts {
     if (typeof value === "string" && value.trim()) scripts[key] = value;
   }
   return scripts;
-}
-
-function dependencyNames(pkg: PackageJson | null): Set<string> {
-  const names = new Set<string>();
-  for (const field of [pkg?.dependencies, pkg?.devDependencies]) {
-    if (!isRecord(field)) continue;
-    for (const name of Object.keys(field)) names.add(name);
-  }
-  return names;
-}
-
-function hasWebDependency(pkg: PackageJson | null): boolean {
-  const deps = dependencyNames(pkg);
-  return [
-    "@astrojs/react",
-    "@sveltejs/kit",
-    "@tanstack/react-start",
-    "@vitejs/plugin-react",
-    "astro",
-    "next",
-    "react",
-    "react-dom",
-    "svelte",
-    "vite",
-    "vue",
-  ].some((name) => deps.has(name));
-}
-
-function frameworkConfigName(names: Set<string>): string | undefined {
-  return [...names].find((name) =>
-    /^(vite|next|astro|svelte|tanstack|start)\.config\.(js|mjs|cjs|ts|mts|cts)$/.test(name),
-  );
-}
-
-function packageManagerFromPackage(pkg: PackageJson | null): "pnpm" | "npm" | "yarn" | "bun" | undefined {
-  const value = typeof pkg?.packageManager === "string" ? pkg.packageManager : "";
-  if (value.startsWith("pnpm@")) return "pnpm";
-  if (value.startsWith("npm@")) return "npm";
-  if (value.startsWith("yarn@")) return "yarn";
-  if (value.startsWith("bun@")) return "bun";
-  return undefined;
-}
-
-function packageManagerFromFiles(names: Set<string>, pkg: PackageJson | null) {
-  if (names.has("pnpm-lock.yaml")) return "pnpm" as const;
-  if (names.has("package-lock.json") || names.has("npm-shrinkwrap.json")) return "npm" as const;
-  if (names.has("yarn.lock")) return "yarn" as const;
-  if (names.has("bun.lock") || names.has("bun.lockb")) return "bun" as const;
-  return packageManagerFromPackage(pkg);
 }
 
 function configString(value: unknown, key: string): string | undefined {

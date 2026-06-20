@@ -55,7 +55,7 @@ export interface ParsedDohcSiteConfig {
   diagnostics: SiteDiagnostic[];
 }
 
-type PackageJson = {
+export type PackageJson = {
   name?: unknown;
   packageManager?: unknown;
   scripts?: unknown;
@@ -86,7 +86,7 @@ type Candidate = {
 const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build", "preview"] as const;
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 
-const WEB_DEPENDENCIES = new Set([
+export const WEB_DEPENDENCY_NAMES = [
   "@angular/cli",
   "@angular/core",
   "@astrojs/react",
@@ -115,7 +115,9 @@ const WEB_DEPENDENCIES = new Set([
   "vite",
   "vue",
   "webpack",
-]);
+] as const;
+
+export const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
 
 const WEB_SCRIPT_TOKENS = [
   "astro",
@@ -443,7 +445,7 @@ function objectKeys(value: unknown): string[] {
   return isRecord(value) ? Object.keys(value) : [];
 }
 
-function packageDependencyNames(pkg: PackageJson | undefined): Set<string> {
+function packageDependencyNames(pkg: PackageJson | null | undefined): Set<string> {
   const names = new Set<string>();
   if (!pkg) return names;
   for (const field of [
@@ -457,7 +459,7 @@ function packageDependencyNames(pkg: PackageJson | undefined): Set<string> {
   return names;
 }
 
-function packageScripts(pkg: PackageJson | undefined): Record<string, string> {
+function packageScripts(pkg: PackageJson | null | undefined): Record<string, string> {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: Record<string, string> = {};
   for (const [name, value] of Object.entries(pkg.scripts)) {
@@ -466,14 +468,13 @@ function packageScripts(pkg: PackageJson | undefined): Record<string, string> {
   return scripts;
 }
 
-function hasWebDependency(pkg: PackageJson | undefined): boolean {
+export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
   for (const name of packageDependencyNames(pkg)) {
     if (WEB_DEPENDENCIES.has(name)) return true;
   }
   return false;
 }
 
-// ast-grep-ignore: WEB_SCRIPT_TOKENS is static and every token is escaped.
 const WEB_SCRIPT_PATTERNS = WEB_SCRIPT_TOKENS.map((token) => {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[\\s:/@._-])${escaped}($|[\\s:/@._-])`);
@@ -518,21 +519,35 @@ function packageManagerFromString(value: unknown): SitePackageManager | undefine
   return undefined;
 }
 
+export function packageManagerFromFiles(
+  names: ReadonlySet<string>,
+  pkg?: PackageJson | null,
+): SitePackageManager | undefined {
+  if (names.has("pnpm-lock.yaml")) return "pnpm";
+  if (names.has("package-lock.json") || names.has("npm-shrinkwrap.json")) return "npm";
+  if (names.has("yarn.lock")) return "yarn";
+  if (names.has("bun.lock") || names.has("bun.lockb")) return "bun";
+  return packageManagerFromString(pkg?.packageManager);
+}
+
 export function detectSitePackageManager(
   paths: readonly string[],
   root: string,
   pkg?: PackageJson,
 ): SitePackageManager | undefined {
-  const has = (relativePath: string) => paths.includes(sitePath(root, relativePath));
-  if (has("pnpm-lock.yaml")) return "pnpm";
-  if (has("package-lock.json") || has("npm-shrinkwrap.json")) return "npm";
-  if (has("yarn.lock")) return "yarn";
-  if (has("bun.lock") || has("bun.lockb")) return "bun";
-  return packageManagerFromString(pkg?.packageManager);
+  const names = new Set<string>();
+  for (const path of paths) {
+    if (parentPath(path) === root) names.add(fileName(path));
+  }
+  return packageManagerFromFiles(names, pkg);
 }
 
 function isFrameworkConfig(name: string): boolean {
   return CONFIG_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+export function frameworkConfigName(names: ReadonlySet<string>): string | undefined {
+  return [...names].find(isFrameworkConfig);
 }
 
 function titleFromRoot(root: string): string {
