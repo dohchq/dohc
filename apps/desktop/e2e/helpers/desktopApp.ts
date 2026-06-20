@@ -22,6 +22,8 @@ export interface LaunchedDesktopApp {
   close(): Promise<void>;
 }
 
+type ElectronProcess = ReturnType<ElectronApplication["process"]>;
+
 const require = createRequire(import.meta.url);
 const helpersDir = dirname(fileURLToPath(import.meta.url));
 export const desktopRoot = resolve(helpersDir, "../..");
@@ -68,69 +70,83 @@ export async function launchDesktopApp(input: {
   requireBuiltDesktopApp();
 
   const logs: DesktopLogEntry[] = [];
-  const app = await electron.launch({
-    executablePath: electronExecutable,
-    args: electronArgs(),
-    cwd: desktopRoot,
-    env: launchEnv(input),
-  });
-
-  const processHandle = app.process();
   const onStdoutData = (chunk: Buffer) => {
     logs.push({ source: "main", level: "stdout", text: chunk.toString() });
   };
   const onStderrData = (chunk: Buffer) => {
     logs.push({ source: "main", level: "stderr", text: chunk.toString() });
   };
-  processHandle.stdout?.on("data", onStdoutData);
-  processHandle.stderr?.on("data", onStderrData);
 
-  const page = await app.firstWindow();
-  page.on("console", (message) => {
-    logs.push({
-      source: "renderer",
-      level: message.type(),
-      text: message.text(),
+  let app: ElectronApplication | null = null;
+  let processHandle: ElectronProcess | null = null;
+  try {
+    app = await electron.launch({
+      executablePath: electronExecutable,
+      args: electronArgs(),
+      cwd: desktopRoot,
+      env: launchEnv(input),
     });
-  });
-  page.on("pageerror", (error) => {
-    logs.push({
-      source: "renderer",
-      level: "pageerror",
-      text: error.message,
-    });
-  });
 
-  return {
-    app,
-    page,
-    logs,
-    close: async () => {
-      const abort = new AbortController();
-      try {
-        await Promise.race([
-          (async () => {
-            if (app.windows().length > 0) {
-              await app.close();
-            }
-          })().finally(() => abort.abort()),
-          forceCloseAfterTimeout(processHandle, abort.signal),
-        ]);
-      } finally {
-        abort.abort();
-        processHandle.stdout?.off("data", onStdoutData);
-        processHandle.stderr?.off("data", onStderrData);
-      }
-    },
-  };
+    processHandle = app.process();
+    processHandle.stdout?.on("data", onStdoutData);
+    processHandle.stderr?.on("data", onStderrData);
+
+    const page = await app.firstWindow();
+    page.on("console", (message) => {
+      logs.push({
+        source: "renderer",
+        level: message.type(),
+        text: message.text(),
+      });
+    });
+    page.on("pageerror", (error) => {
+      logs.push({
+        source: "renderer",
+        level: "pageerror",
+        text: error.message,
+      });
+    });
+
+    const launchedApp = app;
+    const launchedProcess = processHandle;
+    return {
+      app: launchedApp,
+      page,
+      logs,
+      close: async () => {
+        const abort = new AbortController();
+        try {
+          await Promise.race([
+            (async () => {
+              if (launchedApp.windows().length > 0) {
+                await launchedApp.close();
+              }
+            })().finally(() => abort.abort()),
+            forceCloseAfterTimeout(launchedProcess, abort.signal),
+          ]);
+        } finally {
+          abort.abort();
+          launchedProcess.stdout?.off("data", onStdoutData);
+          launchedProcess.stderr?.off("data", onStderrData);
+        }
+      },
+    };
+  } catch (error) {
+    processHandle?.stdout?.off("data", onStdoutData);
+    processHandle?.stderr?.off("data", onStderrData);
+    if (app) {
+      await app.close().catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
-function processIsRunning(processHandle: ReturnType<ElectronApplication["process"]>): boolean {
+function processIsRunning(processHandle: ElectronProcess): boolean {
   return processHandle.exitCode === null && processHandle.signalCode === null;
 }
 
 async function waitForProcessExit(
-  processHandle: ReturnType<ElectronApplication["process"]>,
+  processHandle: ElectronProcess,
   timeoutMs: number,
 ): Promise<boolean> {
   if (!processIsRunning(processHandle)) return true;
@@ -148,7 +164,7 @@ async function waitForProcessExit(
 }
 
 async function forceCloseAfterTimeout(
-  processHandle: ReturnType<ElectronApplication["process"]>,
+  processHandle: ElectronProcess,
   signal: AbortSignal,
 ): Promise<void> {
   await new Promise<void>((resolve) => {

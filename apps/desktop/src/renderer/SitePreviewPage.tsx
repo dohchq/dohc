@@ -41,12 +41,20 @@ function availableModes(site: SitePackageInfo): SitePreviewMode[] {
   return modes;
 }
 
+function normalizeLoopbackHostname(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
 function isLoopbackOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
     return (
       url.protocol === "http:" &&
-      (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+      ["127.0.0.1", "localhost", "::1"].includes(
+        normalizeLoopbackHostname(url.hostname),
+      )
     );
   } catch {
     return false;

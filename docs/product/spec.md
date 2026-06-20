@@ -1,3 +1,8 @@
+---
+id: product-spec
+title: dohc Product Spec
+---
+
 # dohc — product spec (overview)
 
 A working summary of what dohc does today. The desktop implementation

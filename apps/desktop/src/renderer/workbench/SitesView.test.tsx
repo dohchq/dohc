@@ -31,6 +31,8 @@ function file(path: string): WorkspaceFileEntry {
 
 describe("SitesView", () => {
   beforeEach(() => {
+    bridgeMock.listSites.mockReset();
+    bridgeMock.listSites.mockResolvedValue({ sites: [site] });
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -69,5 +71,82 @@ describe("SitesView", () => {
 
     await waitFor(() => expect(screen.getByText("Report")).toBeTruthy());
     expect(screen.getByTestId("sites-count").textContent).toContain("1 site");
+  });
+
+  it("renders the IPC error state", async () => {
+    bridgeMock.listSites.mockRejectedValueOnce(new Error("Site scan failed"));
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Site scan failed")).toBeTruthy();
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+  });
+
+  it("renders an empty state when no sites are detected", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("No sites")).toBeTruthy();
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+  });
+
+  it("surfaces site diagnostics", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({
+      sites: [
+        {
+          ...site,
+          diagnostics: [
+            {
+              path: "client-portal/dohc.json",
+              severity: "warning",
+              code: "invalid-config",
+              message: "dohc.json could not be parsed",
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    const message = "Warning: dohc.json could not be parsed (client-portal/dohc.json)";
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.getByTestId("sites-diagnostic-indicator").getAttribute("aria-label")).toBe(
+      message,
+    );
+  });
+
+  it("marks low-confidence site detections", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({
+      sites: [{ ...site, confidence: "low" }],
+    });
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Client Portal");
+    expect(screen.getByTestId("sites-low-confidence").getAttribute("aria-label")).toBe(
+      "Low confidence detection",
+    );
   });
 });

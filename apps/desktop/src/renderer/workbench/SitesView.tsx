@@ -81,6 +81,16 @@ function siteMeta(site: SitePackageInfo): string {
   return parts.join(" · ");
 }
 
+function siteDiagnosticLabel(site: SitePackageInfo): string | null {
+  const diagnostic =
+    site.diagnostics.find((entry) => entry.severity === "error") ??
+    site.diagnostics[0];
+  if (!diagnostic) return null;
+  const prefix = diagnostic.severity === "error" ? "Error" : "Warning";
+  const detail = diagnostic.message ?? diagnostic.code;
+  return diagnostic.path ? `${prefix}: ${detail} (${diagnostic.path})` : `${prefix}: ${detail}`;
+}
+
 export function SitesView(props: {
   workspaceId: string;
   files: WorkspaceFileEntry[];
@@ -116,7 +126,7 @@ export function SitesView(props: {
       ) : (
         <ul className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-0">
           {sites.map((site) => {
-            const hasError = site.diagnostics.some((diagnostic) => diagnostic.severity === "error");
+            const diagnosticLabel = siteDiagnosticLabel(site);
             return (
               <li key={site.root}>
                 <button
@@ -138,10 +148,24 @@ export function SitesView(props: {
                       <span className="truncate text-[13px] font-medium text-ink">
                         {site.title}
                       </span>
-                      {hasError ? (
-                        <AlertTriangle size={12} aria-hidden className="shrink-0 text-warning" />
+                      {diagnosticLabel ? (
+                        <span
+                          data-testid="sites-diagnostic-indicator"
+                          aria-label={diagnosticLabel}
+                          title={diagnosticLabel}
+                          className="shrink-0 text-warning"
+                        >
+                          <AlertTriangle size={12} aria-hidden />
+                        </span>
                       ) : site.confidence === "low" ? (
-                        <CircleDashed size={12} aria-hidden className="shrink-0 text-subtle" />
+                        <span
+                          data-testid="sites-low-confidence"
+                          aria-label="Low confidence detection"
+                          title="Low confidence detection"
+                          className="shrink-0 text-subtle"
+                        >
+                          <CircleDashed size={12} aria-hidden />
+                        </span>
                       ) : null}
                     </span>
                     <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">
@@ -150,6 +174,14 @@ export function SitesView(props: {
                     <span className="mt-1 block truncate text-[11px] text-muted">
                       {siteMeta(site)}
                     </span>
+                    {diagnosticLabel ? (
+                      <span
+                        data-testid="sites-diagnostic"
+                        className="mt-1 block truncate text-[11px] text-warning"
+                      >
+                        {diagnosticLabel}
+                      </span>
+                    ) : null}
                   </span>
                 </button>
               </li>

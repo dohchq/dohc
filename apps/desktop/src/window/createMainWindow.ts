@@ -77,12 +77,20 @@ function windowStateFile(): string {
 // This assumes localhost services are trusted in the desktop threat model; random
 // preview ports, iframe sandboxing, origin checks, and CSP frame-src still limit
 // the exposed surface.
+function normalizeLoopbackHostname(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
 function isLoopbackHttpUrl(targetUrl: string): boolean {
   try {
     const url = new URL(targetUrl);
     return (
       url.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)
+      ["127.0.0.1", "localhost", "::1"].includes(
+        normalizeLoopbackHostname(url.hostname),
+      )
     );
   } catch {
     return false;
