@@ -13,7 +13,13 @@ import type pg from "pg";
 import { createWorkspaceApiHandler } from "./server";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_api" };
-const SYNC_APPROVAL_REQUIRED_REASON = APPROVAL_ERROR_REASONS[1];
+const SYNC_APPROVAL_REQUIRED_REASON = approvalRequiredReason();
+
+function approvalRequiredReason(): string {
+  const reason = APPROVAL_ERROR_REASONS.find((candidate) => candidate === "approval-required");
+  if (!reason) throw new Error("approval-required must be a canonical approval reason");
+  return reason;
+}
 
 function file(path: string, kind: WorkspaceFile["kind"], contentType = "text/plain"): WorkspaceFile {
   return {

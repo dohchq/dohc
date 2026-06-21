@@ -1236,7 +1236,12 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".css",
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-let cachedDohcSdkDependencyRange: { packageJsonPath: string; range: string } | null = null;
+const MAX_SITE_SCAN_DEPTH = 100;
+let cachedDohcSdkDependencyRange: {
+  packageJsonPath: string;
+  mtimeMs: number;
+  range: string;
+} | null = null;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1322,7 +1327,11 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
     );
   }
 
-  if (cachedDohcSdkDependencyRange?.packageJsonPath === packageJsonPath) {
+  const packageStat = await stat(packageJsonPath);
+  if (
+    cachedDohcSdkDependencyRange?.packageJsonPath === packageJsonPath &&
+    cachedDohcSdkDependencyRange.mtimeMs === packageStat.mtimeMs
+  ) {
     return cachedDohcSdkDependencyRange.range;
   }
 
@@ -1332,7 +1341,7 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
     throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
   }
   const range = `^${version}`;
-  cachedDohcSdkDependencyRange = { packageJsonPath, range };
+  cachedDohcSdkDependencyRange = { packageJsonPath, mtimeMs: packageStat.mtimeMs, range };
   return range;
 }
 
@@ -1784,7 +1793,9 @@ async function findLegacyAppImport(
   async function walk(
     currentAbsolute: string,
     currentRoot: string,
+    depth: number,
   ): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
+    if (depth > MAX_SITE_SCAN_DEPTH) return null;
     if (isIgnoredSitePath(currentRoot)) return null;
     let dirents;
     try {
@@ -1797,7 +1808,7 @@ async function findLegacyAppImport(
       if (dirent.isSymbolicLink() || isIgnoredSitePath(rel)) continue;
       const child = join(currentAbsolute, dirent.name);
       if (dirent.isDirectory()) {
-        const found = await walk(child, rel);
+        const found = await walk(child, rel, depth + 1);
         if (found) return found;
         continue;
       }
@@ -1813,7 +1824,7 @@ async function findLegacyAppImport(
     }
     return null;
   }
-  return walk(absolute, root);
+  return walk(absolute, root, 0);
 }
 
 function fileExtension(path: string): string {

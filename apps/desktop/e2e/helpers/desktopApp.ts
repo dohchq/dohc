@@ -51,7 +51,7 @@ function launchEnv(input: {
 }): Record<string, string> {
   const entries = Object.entries({
     ...process.env,
-    CI: process.env.CI ?? "1",
+    CI: process.env.CI ?? "0",
     DOHC_DESKTOP_TEST: "1",
     DOHC_TEST_HOME: input.workspace.homeDir,
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,

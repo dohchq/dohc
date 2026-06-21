@@ -271,7 +271,32 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       targetWindow: options.targetWindow,
     });
 
+  let cachedCapabilities: DohcCapabilityMap | null = null;
+  let pendingCapabilities: Promise<DohcCapabilityMap> | null = null;
   const readCapabilities = async () => {
+    if (cachedCapabilities) return cachedCapabilities;
+    if (pendingCapabilities) return pendingCapabilities;
+    pendingCapabilities = (async () => {
+      const result = await transport.request("capabilities");
+      if (!isCapabilityMap(result)) {
+        throw new DohcSdkError(
+          DohcSdkErrorCodes.badResponse,
+          "dohc host returned an invalid capabilities response.",
+        );
+      }
+      cachedCapabilities = result;
+      return result;
+    })();
+    try {
+      return await pendingCapabilities;
+    } finally {
+      if (!cachedCapabilities) pendingCapabilities = null;
+    }
+  };
+
+  const refreshCapabilities = async () => {
+    cachedCapabilities = null;
+    pendingCapabilities = null;
     const result = await transport.request("capabilities");
     if (!isCapabilityMap(result)) {
       throw new DohcSdkError(
@@ -279,11 +304,12 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         "dohc host returned an invalid capabilities response.",
       );
     }
+    cachedCapabilities = result;
     return result;
   };
 
   return {
-    capabilities: readCapabilities,
+    capabilities: refreshCapabilities,
     files: {
       read: async (path: string) => {
         if (isAbsoluteWorkspacePath(path)) {

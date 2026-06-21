@@ -69,6 +69,33 @@ describe("@dohc/sdk", () => {
     ]);
   });
 
+  it("caches capabilities for repeated high-level operations", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: false },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
+          return { text: `read:${(params as { path: string }).path}` };
+        },
+      },
+    });
+
+    await expect(client.files.read("notes/one.md")).resolves.toBe("read:notes/one.md");
+    await expect(client.files.read("notes/two.md")).resolves.toBe("read:notes/two.md");
+    expect(calls).toEqual([
+      { method: "capabilities", params: undefined },
+      { method: "files.read", params: { path: "notes/one.md" } },
+      { method: "files.read", params: { path: "notes/two.md" } },
+    ]);
+  });
+
   it("rejects absolute file paths before contacting the host", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
@@ -336,9 +363,7 @@ describe("@dohc/sdk", () => {
     await expect(client.provenance.record("checked")).resolves.toBeUndefined();
     expect(calls).toEqual([
       { method: "capabilities", params: undefined },
-      { method: "capabilities", params: undefined },
       { method: "collections.list", params: { name: "tasks" } },
-      { method: "capabilities", params: undefined },
       { method: "provenance.record", params: { summary: "checked" } },
     ]);
   });

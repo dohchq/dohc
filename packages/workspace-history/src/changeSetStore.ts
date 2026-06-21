@@ -106,19 +106,17 @@ async function readJson<T>(path: string): Promise<T | null> {
 }
 
 function normalizeKind(kind: unknown): ChangeSetKind {
-  const normalized = kind === "app-build" ? "site-build" : kind;
-  if (!VALID_CHANGE_SET_KINDS.has(normalized as ChangeSetKind)) {
+  if (!VALID_CHANGE_SET_KINDS.has(kind as ChangeSetKind)) {
     throw new Error(`Unknown history change set kind: ${String(kind)}`);
   }
-  return normalized as ChangeSetKind;
+  return kind as ChangeSetKind;
 }
 
 function normalizeBoundaryCrossing(value: unknown): BoundaryCrossing {
-  const normalized = value === "app-trust" ? "site-publish" : value;
-  if (!VALID_BOUNDARY_CROSSINGS.has(normalized as BoundaryCrossing)) {
+  if (!VALID_BOUNDARY_CROSSINGS.has(value as BoundaryCrossing)) {
     throw new Error(`Unknown history boundary crossing: ${String(value)}`);
   }
-  return normalized as BoundaryCrossing;
+  return value as BoundaryCrossing;
 }
 
 function normalizeHistoryRecord(record: HistoryRecord): HistoryRecord {

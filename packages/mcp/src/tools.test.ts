@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -969,6 +969,28 @@ describe("mcp tools operate on allowed paths", () => {
         "@dohc/sdk": `^${sdkPackageJson.version}`,
       });
       expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
+    });
+  });
+
+  it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
+    await withWorkspace(async (ctx) => {
+      const sdkPackageJsonPath = join(ctx.home, "sdk-package.json");
+      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "1.0.0" })}\n`);
+      const customCtx = { ...ctx, sdkPackageJsonPath };
+      await createSite(customCtx, { path: "todo", title: "Todo" });
+
+      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: true,
+      });
+      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "2.0.0" })}\n`);
+      const bumped = new Date(Date.now() + 5000);
+      await utimes(sdkPackageJsonPath, bumped, bumped);
+
+      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: true,
+      });
+      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
+      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^2.0.0" });
     });
   });
 
