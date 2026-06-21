@@ -278,9 +278,6 @@ async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> 
   for (const key of sitePreviewOriginReleases.keys()) {
     if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
   }
-  for (const key of sitePreviewStartLocks.keys()) {
-    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
-  }
 
   await Promise.all(
     [...siteRoots].map((siteRoot) =>

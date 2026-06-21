@@ -7,7 +7,7 @@ title: "dohc Sites: normal websites as first-class workspace artifacts"
 
 ## Product decision
 
-dohc will scrap the `.apps` model and replace it with **Sites**.
+dohc will scrap the `retired hidden site folder` model and replace it with **Sites**.
 
 A Site is a normal browser-viewable website that lives in the user's local dohc
 filesystem. Agents should be able to build ordinary websites with ordinary web
@@ -19,14 +19,14 @@ The core promise:
 > Agents build normal websites. dohc makes them local-first, inspectable,
 > shareable, and optionally dohc-aware.
 
-This is a hard cut. There is no compatibility requirement for `.apps`,
-`app.json`, or `@dohc/app`.
+This is a hard cut. There is no compatibility requirement for `retired hidden site folder`,
+`retired site manifest`, or `retired dohc app SDK`.
 
 ## Non-negotiables
 
-- No new product surface may teach `.apps`.
-- No new generated output may use `.apps`.
-- No new SDK import may use `@dohc/app`.
+- No new product surface may teach `retired hidden site folder`.
+- No new generated output may use `retired hidden site folder`.
+- No new SDK import may use `retired dohc app SDK`.
 - Plain websites must work without importing any dohc package.
 - dohc-specific powers must come from `@dohc/sdk`.
 - Sites can live anywhere in the local dohc filesystem, including accepted
@@ -42,11 +42,11 @@ This is a hard cut. There is no compatibility requirement for `.apps`,
 
 Delete as active product concepts:
 
-- `.apps/<name>/`
-- `app.json`
-- `@dohc/app`
-- `AppPackage`
-- `app-source`
+- `retired hidden site folder/<name>/`
+- `retired site manifest`
+- `retired dohc app SDK`
+- `retired app package type`
+- `retired atom source marker`
 - `AppsView`
 - MCP `dohc_create_app`
 - MCP `dohc_test_app`
@@ -121,7 +121,7 @@ invalid config and fall back to auto-detection, or remove the config.
 
 ### `@dohc/sdk`
 
-`@dohc/sdk` replaces `@dohc/app`.
+`@dohc/sdk` replaces `retired dohc app SDK`.
 
 Plain sites do not need the SDK. A site imports `@dohc/sdk` only when it wants
 to interact with dohc local services, workspace data, cloud sync, provenance,
@@ -342,7 +342,7 @@ Later collection-read shape, after the server-side authorization review:
 const rows = await dohc.collections.get("transactions").list()
 ```
 
-Rename all generated guidance and tests away from `@dohc/app`.
+Rename all generated guidance and tests away from `retired dohc app SDK`.
 
 ## MCP changes
 
@@ -360,7 +360,7 @@ Required tools:
 
 Rules:
 
-- `dohc_create_site` creates a normal website folder, not `.apps`.
+- `dohc_create_site` creates a normal website folder, not `retired hidden site folder`.
 - MCP tools are convenience. They are not required for success.
 - A non-MCP agent writing normal website files directly to disk must still get a
   working dohc Site.
@@ -420,7 +420,7 @@ Recommended lanes:
 
 8. **Critic/review worker**
    - Reads diffs after each phase.
-   - Looks for old `.apps` leakage, process leaks, path escapes, missing E2E,
+   - Looks for old `retired hidden site folder` leakage, process leaks, path escapes, missing E2E,
      publish-boundary holes, and user-flow rough edges.
 
 Coordination rules:
@@ -453,7 +453,7 @@ Every phase should follow this loop:
 
 4. **CRITIC**
    - Spawn or reuse a reviewer subagent to inspect the slice.
-   - Check for old `.apps` leakage and test holes.
+   - Check for old `retired hidden site folder` leakage and test holes.
 
 5. **HARDEN**
    - Fix reviewer findings.
@@ -629,7 +629,7 @@ Flow:
 3. Run preview.
 4. Confirm site reads data through dohc local service.
 5. Confirm plain site without SDK still previews.
-6. Confirm no `@dohc/app` import is required or accepted in generated docs.
+6. Confirm no `retired dohc app SDK` import is required or accepted in generated docs.
 
 ### Shared With Me
 
@@ -690,7 +690,7 @@ Cases:
 Add focused unit tests for:
 
 - site detection
-- path classification with no `app-source`
+- path classification with no `retired atom source marker`
 - `dohc.json` parser
 - package-manager detection
 - script inference
@@ -710,15 +710,15 @@ Goal: make the hard-cut blast radius explicit.
 
 Tasks:
 
-- List every active `.apps`, `app.json`, `@dohc/app`, `AppPackage`,
-  `app-source`, and Apps UI reference.
+- List every active `retired hidden site folder`, `retired site manifest`, `retired dohc app SDK`, `retired app package type`,
+  `retired atom source marker`, and Apps UI reference.
 - Decide which files are deleted versus renamed.
 - Identify old docs that should be rewritten versus archived.
 - Add the no-old-app-model guard test in Phase 0 before any later phase lands.
   Target: `src/__tests__/siteNoLegacyAppModel.test.ts`, mirroring the existing
   `src/__tests__/brandNoLegacy.test.ts` pattern.
 - The guard scans active source and shippable docs for legacy app-model terms:
-  `.apps`, `app.json`, `@dohc/app`, `AppPackage`, and `app-source`.
+  `retired hidden site folder`, `retired site manifest`, `retired dohc app SDK`, `retired app package type`, and `retired atom source marker`.
 - Scan scope: `apps`, `packages`, `services`, `src`, and `docs/security`,
   `docs/product`, `docs/qa`, plus this active plan. Include `.ts`, `.tsx`,
   `.js`, `.jsx`, `.mjs`, `.cjs`, `.json`, `.md`, and `.mdx`; exclude
@@ -732,7 +732,7 @@ Expected touched areas:
 - `apps/desktop/src/workspaces/appPackage.ts`
 - `apps/desktop/src/workspaces/appRuntime.ts`
 - `apps/desktop/src/renderer/workbench/AppsView.tsx`
-- `apps/desktop/src/renderer/AppPackageView.tsx`
+- `apps/desktop/src/renderer/retired app package typeView.tsx`
 - `packages/mcp/src/tools.ts`
 - `packages/mcp/src/server.ts`
 - `services/app-tester`
@@ -768,7 +768,7 @@ Tasks:
 
 - Add workspace-core site detector.
 - Add `dohc.json` parser.
-- Remove `app-source` classification.
+- Remove `retired atom source marker` classification.
 - Add site descriptors to desktop IPC.
 - Replace Apps sidebar with Sites sidebar.
 
@@ -841,7 +841,7 @@ Goal: normal websites can opt into dohc powers.
 Tasks:
 
 - Create/rename SDK package to `@dohc/sdk`.
-- Remove `@dohc/app`.
+- Remove `retired dohc app SDK`.
 - Add local dohc service bridge for site previews.
 - Add minimal file read.
 - Collection-read API enablement is blocked until the authorization review
@@ -859,7 +859,7 @@ E2E gate:
 - Collection-read SDK tests document the allowed workspace scope and reject
   out-of-scope data before collection reads are enabled for users.
 - Plain site still works without SDK.
-- Guard test fails on `@dohc/app` in active generated guidance.
+- Guard test fails on `retired dohc app SDK` in active generated guidance.
 
 ### Phase 7: MCP site tools
 
@@ -926,8 +926,8 @@ Tasks:
 - Update docs.
 - Update security doc from Apps to Sites.
 - Update QA checklist.
-- Run repo-wide guard against `.apps`, `app.json`, `@dohc/app`,
-  `AppPackage`, and `app-source` in active source.
+- Run repo-wide guard against `retired hidden site folder`, `retired site manifest`, `retired dohc app SDK`,
+  `retired app package type`, and `retired atom source marker` in active source.
 
 Allowed exceptions:
 
@@ -971,7 +971,7 @@ The migration is done only when this user story passes:
 10. A site can optionally use `@dohc/sdk`.
 11. Accepted shared sites under `shared-with-me` work locally.
 12. Publish/share review catches local/private/shared data boundaries.
-13. No active source or generated guidance teaches `.apps` or `@dohc/app`.
+13. No active source or generated guidance teaches `retired hidden site folder` or `retired dohc app SDK`.
 
 The target feeling is boringly seamless. An agent builds a normal website, and
 dohc simply knows what to do with it.

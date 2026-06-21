@@ -7,13 +7,11 @@ const TEST_DIR = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(TEST_DIR, '..', '..')
 const REPO = join(TEST_DIR, '..', '..', '..', '..')
 
-// docs/superpowers is intentionally outside this active-source scan. It holds
-// migration plans and execution logs that must be able to discuss old app-model
-// terms without making shipping code fail the gate.
 const SCAN_ROOTS = [
   join(REPO, 'apps'),
   join(REPO, 'packages'),
   join(REPO, 'services'),
+  join(REPO, 'docs/superpowers'),
   join(REPO, 'docs/architecture'),
   join(REPO, 'docs/security'),
   join(REPO, 'docs/product'),
@@ -42,9 +40,14 @@ const FORBIDDEN: ReadonlyArray<{ name: string; token: string; caseSensitive?: bo
   { name: 'legacy source marker', token: 'app-source' },
 ]
 
+const ACTIVE_SUPERPOWERS_SCAN = new Set([
+  'docs/superpowers/plans/2026-06-20-dohc-sites-websites.md',
+])
+
 function isHistoricalPath(abs: string): boolean {
   const rel = relative(REPO, abs).replaceAll('\\', '/').toLowerCase()
   return (
+    (rel.startsWith('docs/superpowers/') && !ACTIVE_SUPERPOWERS_SCAN.has(rel)) ||
     rel.includes('/archive/') ||
     rel.includes('/archived/') ||
     rel.includes('execution-log')

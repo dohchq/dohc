@@ -1421,21 +1421,15 @@ function InvalidSitePathFallback({
       activeTab,
       detail: "active tab matched site tab format but activeSiteRoot parsed to null",
     });
-  }, [activeTab]);
+    onClose();
+  }, [activeTab, onClose]);
 
   return (
     <div
       role="alert"
-      className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-danger"
+      className="flex flex-1 items-center justify-center px-4 text-center text-sm text-danger"
     >
       <span>Invalid site path</span>
-      <button
-        type="button"
-        onClick={onClose}
-        className="rounded border border-danger/30 px-2 py-1 text-[11px] font-medium text-danger hover:bg-danger/10"
-      >
-        Close tab
-      </button>
     </div>
   );
 }
@@ -1565,7 +1559,7 @@ export function DesktopWorkspaceShell(props: {
     [changeSets, files],
   );
   const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
-  const activeSiteRoot = useMemo(() => parseSiteTabPath(wb.activeTab), [wb.activeTab]);
+  const activeSiteRoot = parseSiteTabPath(wb.activeTab);
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
