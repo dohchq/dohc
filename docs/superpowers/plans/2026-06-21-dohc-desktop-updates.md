@@ -242,15 +242,18 @@ Bridge-release runbook:
    `updates.dohc.com` feed into `app-update.yml` for subsequent releases.
 3. Verify the bridge release from an installed old-feed build on macOS,
    Windows, and Linux before changing DNS, redirects, or object-store routing.
-4. After the bridge release is live, configure the old feed to either serve the
+4. Check channel parity before and after the cutover: stable manifests must
+   still resolve to the stable update line, and nightly manifests must still
+   resolve to the nightly update line.
+5. After the bridge release is live, configure the old feed to either serve the
    bridge metadata directly or redirect channel metadata to an equivalent
    bridge manifest. Do not redirect artifact URLs unless the updater smoke test
    proves blockmaps and installers still resolve.
-5. Keep the old feed, bridge artifacts, and any old-feed manifests available for
+6. Keep the old feed, bridge artifacts, and any old-feed manifests available for
    at least one full dogfood release cycle plus a documented straggler window.
    Do not delete them until telemetry or manual audit shows old-feed clients are
    below the accepted threshold.
-6. Document rollback: restore the previous old-feed manifest first, then remove
+7. Document rollback: restore the previous old-feed manifest first, then remove
    redirects, then republish the last known-good new-feed manifest if needed.
 
 Recommended path:

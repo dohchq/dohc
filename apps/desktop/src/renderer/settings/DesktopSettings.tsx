@@ -65,10 +65,16 @@ export function DesktopSettings(props: {
     void bridge()
       .getUpdateState()
       .then((next) => {
-        if (!cancelled) setUpdateState(next);
+        if (!cancelled) {
+          setUpdateError(null);
+          setUpdateState(next);
+        }
       })
       .catch(() => undefined);
-    const unsubscribe = bridge().onUpdateState(setUpdateState);
+    const unsubscribe = bridge().onUpdateState((next) => {
+      setUpdateError(null);
+      setUpdateState(next);
+    });
     return () => {
       cancelled = true;
       unsubscribe();

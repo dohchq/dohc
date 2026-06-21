@@ -1939,14 +1939,27 @@ export function DesktopWorkspaceShell(props: {
   }, [activeDocumentPath]);
   const checkForDesktopUpdates = useCallback(async () => {
     try {
-      await bridge().checkForUpdates();
+      const result = await bridge().checkForUpdates();
+      if (!result.checked) {
+        reportShellError("No update check was started.", new Error(result.state.message));
+      }
     } catch (error) {
       reportShellError("Could not check for updates.", error);
     }
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      await bridge().installUpdate();
+      const result = await bridge().installUpdate();
+      if (!result.accepted) {
+        reportShellError(
+          "Could not install the update.",
+          new Error(
+            result.state.status === "error"
+              ? result.state.message
+              : "The restart request was not accepted.",
+          ),
+        );
+      }
     } catch (error) {
       reportShellError("Could not install the update.", error);
     }

@@ -227,7 +227,19 @@ describe("notice center", () => {
   });
 
   it("shows restart failures in the update notice and toast", async () => {
-    installUpdate.mockRejectedValueOnce(new Error("quit failed"));
+    installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      completed: false,
+      state: {
+        status: "ready",
+        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.3",
+      },
+    });
     renderBar();
     pushUpdate?.({
       status: "ready",

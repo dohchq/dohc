@@ -62,26 +62,28 @@ export async function createMockUpdateServer(options = {}) {
   const port = Number(options.port ?? process.env.DOHC_DESKTOP_MOCK_UPDATE_SERVER_PORT ?? 0);
 
   const server = createServer(async (request, response) => {
-    const filePath = await resolveServablePath(root, request.url ?? "/");
-    if (!filePath) {
-      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      response.end("Not Found");
-      return;
-    }
-    let bytes;
     try {
-      bytes = await readFile(filePath);
+      const filePath = await resolveServablePath(root, request.url ?? "/");
+      if (!filePath) {
+        response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Not Found");
+        return;
+      }
+      const bytes = await readFile(filePath);
+      response.writeHead(200, {
+        "content-type": contentTypeFor(filePath),
+        "content-length": String(bytes.byteLength),
+        "cache-control": "no-store",
+      });
+      response.end(bytes);
     } catch {
-      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      response.end("Not Found");
-      return;
+      if (!response.destroyed) {
+        if (!response.headersSent) {
+          response.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+        }
+        response.end("Internal Server Error");
+      }
     }
-    response.writeHead(200, {
-      "content-type": contentTypeFor(filePath),
-      "content-length": String(bytes.byteLength),
-      "cache-control": "no-store",
-    });
-    response.end(bytes);
   });
 
   await new Promise((resolveListen, rejectListen) => {

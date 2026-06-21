@@ -196,8 +196,6 @@ export async function startAutoUpdates(options: {
     options.onState?.(state, publicState());
   });
   autoUpdater.on("before-quit-for-update", () => {
-    // quitAndInstall callers may also run this callback immediately before
-    // calling Electron. Keep registered cleanup callbacks idempotent.
     options.onBeforeQuitForUpdate?.();
   });
   autoUpdater.on("error", (error) => {
@@ -242,7 +240,6 @@ export async function startAutoUpdates(options: {
     installInFlight = true;
     options.onState?.(state, publicState());
     try {
-      options.onBeforeQuitForUpdate?.();
       autoUpdater.quitAndInstall(false, true);
       return { accepted: true, completed: false, state: publicState() };
     } catch (error) {
@@ -251,7 +248,7 @@ export async function startAutoUpdates(options: {
         type: "error",
         message: error instanceof Error ? error.message : "quitAndInstall failed",
       });
-      return { accepted: true, completed: false, state: publicState() };
+      return { accepted: false, completed: false, state: publicState() };
     }
   };
 

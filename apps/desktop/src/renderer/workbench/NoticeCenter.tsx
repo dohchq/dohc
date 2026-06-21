@@ -86,7 +86,14 @@ export function NoticeCenter(props: {
     try {
       setInstallPending(true);
       setUpdateActionError(null);
-      await bridge().installUpdate();
+      const result = await bridge().installUpdate();
+      if (!result.accepted || result.state.status === "error") {
+        setUpdateActionError(
+          result.state.status === "error"
+            ? result.state.message
+            : "Could not restart into the update.",
+        );
+      }
     } catch {
       setUpdateActionError("Could not restart into the update.");
     } finally {

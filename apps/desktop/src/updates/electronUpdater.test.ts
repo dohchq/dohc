@@ -10,6 +10,16 @@ import { initialUpdateState, transition } from "./updateMachine";
 
 type Listener = (...args: unknown[]) => void;
 
+function deferred<T = unknown>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function fakeUpdater() {
   const listeners = new Map<string, Listener[]>();
   const updater = {
@@ -115,15 +125,23 @@ describe("electron updater configuration", () => {
 describe("electron updater actions", () => {
   it("coalesces repeated checks while one is active", async () => {
     const updater = fakeUpdater();
+    const check = deferred<undefined>();
+    updater.checkForUpdates.mockReturnValueOnce(check.promise);
     const controller = await startWith(updater);
     expect(controller).not.toBeNull();
 
-    const first = await controller!.checkForUpdates();
-    const second = await controller!.checkForUpdates();
+    const first = controller!.checkForUpdates();
+    updater.emit("checking-for-update");
+    const second = controller!.checkForUpdates();
 
-    expect(first.checked).toBe(true);
-    expect(second.checked).toBe(false);
+    await expect(second).resolves.toMatchObject({ checked: false });
     expect(updater.checkForUpdates).toHaveBeenCalledTimes(1);
+    updater.emit("update-not-available");
+    check.resolve(undefined);
+    await expect(first).resolves.toMatchObject({
+      checked: true,
+      state: { status: "up-to-date" },
+    });
   });
 
   it("installs only after update-downloaded and only once", async () => {
@@ -163,7 +181,7 @@ describe("electron updater actions", () => {
     });
   });
 
-  it("runs bounded quit cleanup before installing updates", async () => {
+  it("runs bounded quit cleanup when the updater begins installing", async () => {
     const updater = fakeUpdater();
     const onBeforeQuitForUpdate = vi.fn();
     const controller = await startWith(updater, { onBeforeQuitForUpdate });
@@ -173,8 +191,25 @@ describe("electron updater actions", () => {
     updater.emit("update-downloaded", { version: "1.2.4" });
     await controller!.installUpdate();
 
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(2);
+    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports quitAndInstall failures as rejected restart requests", async () => {
+    const updater = fakeUpdater();
+    updater.quitAndInstall.mockImplementationOnce(() => {
+      throw new Error("quit failed");
+    });
+    const controller = await startWith(updater);
+    expect(controller).not.toBeNull();
+
+    updater.emit("checking-for-update");
+    updater.emit("update-downloaded", { version: "1.2.4" });
+
+    await expect(controller!.installUpdate()).resolves.toMatchObject({
+      accepted: false,
+      state: { status: "ready", canInstall: true },
+    });
   });
 
   it("runs bounded quit cleanup for updater before-quit-for-update events", async () => {

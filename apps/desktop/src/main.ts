@@ -860,20 +860,26 @@ const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
 function fallbackUpdateState(): PublicUpdateState {
   const currentVersion = app.getVersion();
-  return publicUpdateState(initialUpdateState, {
+  const state = publicUpdateState(initialUpdateState, {
     currentVersion,
     channel: resolveUpdateChannel(currentVersion),
   });
+  return { ...state, canCheck: false, canInstall: false };
+}
+
+function parseUpdateStateForIpc(state: PublicUpdateState): UpdateStateEvent | null {
+  const parsed = UpdateStateEvent.safeParse(state);
+  return parsed.success ? parsed.data : null;
 }
 
 function currentUpdateState(): UpdateStateEvent {
-  return UpdateStateEvent.parse(
-    autoUpdateController?.publicState() ?? fallbackUpdateState(),
-  );
+  const fallback = fallbackUpdateState();
+  return parseUpdateStateForIpc(autoUpdateController?.publicState() ?? fallback) ?? fallback;
 }
 
 function broadcastUpdateState(state: PublicUpdateState): void {
-  const payload = UpdateStateEvent.parse(state);
+  const payload = parseUpdateStateForIpc(state);
+  if (!payload) return;
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.updateState, payload);
   }
