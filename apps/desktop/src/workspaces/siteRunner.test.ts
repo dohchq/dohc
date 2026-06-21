@@ -78,6 +78,7 @@ describe("package manager helpers", () => {
   it("extracts local dev server urls from common tool output", () => {
     expect(detectDevUrl("  Local:   http://localhost:5173/")).toBe("http://localhost:5173/");
     expect(detectDevUrl("ready on http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    // Normalize IPv6 loopback so downstream preview origin checks see one stable loopback form.
     expect(detectDevUrl("ready on http://[::1]:5173/app")).toBe("http://127.0.0.1:5173/app");
     expect(detectDevUrl("ready on https://localhost:5173")).toBeNull();
     expect(detectDevUrl("deployed at https://example.com")).toBeNull();

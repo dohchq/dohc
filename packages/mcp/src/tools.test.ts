@@ -34,6 +34,8 @@ import {
   type ToolContext,
 } from "./tools";
 
+// Keep these split so siteNoLegacyAppModel.test.ts does not flag this
+// compatibility regression fixture as active legacy guidance.
 const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
 const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;

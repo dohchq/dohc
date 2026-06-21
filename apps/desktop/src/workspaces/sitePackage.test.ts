@@ -129,6 +129,7 @@ describe("listSitePackages", () => {
         ["domain-dev", "dev", "next dev -H mysite.local", null],
         ["public-static", "static", "serve dist --host=0.0.0.0", null],
       ] as const;
+      const blockedCases = cases.filter((entry) => entry[3] === null);
 
       for (const [folder, mode, command] of cases) {
         await mkdir(join(root, folder), { recursive: true });
@@ -154,7 +155,19 @@ describe("listSitePackages", () => {
           expect(site?.configuredScripts).toEqual({});
         }
       }
-      expect(warn).toHaveBeenCalledTimes(4);
+      expect(warn).toHaveBeenCalledTimes(blockedCases.length);
+      for (const [folder, , command] of blockedCases) {
+        const warning = warn.mock.calls.find((call) => {
+          const detail = call[1] as { configPath?: string } | undefined;
+          return (
+            call[0] === "[desktop] ignoring configured site command" &&
+            detail?.configPath === `${folder}/dohc.json`
+          );
+        });
+        expect(warning, `missing warning for ${command}`).toBeDefined();
+        const detail = warning?.[1] as { error?: unknown } | undefined;
+        expect(String(detail?.error)).toContain(command);
+      }
     } finally {
       warn.mockRestore();
     }
