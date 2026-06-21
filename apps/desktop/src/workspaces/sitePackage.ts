@@ -179,9 +179,10 @@ export async function listSitePackages(rootPath: string): Promise<SitePackageInf
 export async function getSitePackage(
   rootPath: string,
   anyPath: string,
+  knownSites?: SitePackageInfo[],
 ): Promise<SitePackageInfo | null> {
   const root = denormalizeRoot(anyPath);
-  const sites = await listSitePackages(rootPath);
+  const sites = knownSites ?? await listSitePackages(rootPath);
   return (
     sites
       .filter((site) => anyPath === site.root || root === site.root || isUnder(site.root, anyPath))

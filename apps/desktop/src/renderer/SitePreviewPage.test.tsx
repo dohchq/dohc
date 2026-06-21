@@ -157,6 +157,51 @@ describe("SitePreviewPage", () => {
     );
   });
 
+  it("returns SDK host errors when workspace file reads fail", async () => {
+    bridgeMock.readWorkspaceText.mockRejectedValueOnce(new Error("Could not read notes/q1.md"));
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "http://127.0.0.1:49152",
+        source,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-error",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(
+        {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-error",
+          ok: false,
+          error: {
+            code: "DOHC_HOST_ERROR",
+            message: "Could not read notes/q1.md",
+          },
+        },
+        "http://127.0.0.1:49152",
+      );
+    });
+  });
+
   it("rejects SDK file reads with unsafe workspace paths", async () => {
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);

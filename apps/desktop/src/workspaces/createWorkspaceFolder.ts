@@ -6,7 +6,7 @@ import {
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CreatedWorkspace {
@@ -79,7 +79,13 @@ export async function createWorkspaceFolder(input: {
   }
   // Ensure shared-with-me exists in both new and adopted workspaces; existing
   // local workspaces created before sharing support need this migration path.
-  await mkdir(join(input.rootPath, SHARED_WITH_ME_FOLDER), { recursive: true });
+  const sharedWithMePath = join(input.rootPath, SHARED_WITH_ME_FOLDER);
+  await mkdir(sharedWithMePath, { recursive: true }).catch(async (error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = await stat(sharedWithMePath).catch(() => null);
+    if (existing?.isDirectory()) return;
+    throw new Error(`${SHARED_WITH_ME_FOLDER} exists but is not a folder`);
+  });
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {

@@ -55,6 +55,16 @@ describe("createWorkspaceFolder", () => {
     expect(sharedWithMe.isDirectory()).toBe(true);
   });
 
+  it("rejects a blocking shared-with-me file", async () => {
+    const root = join(base, "blocked-shared");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "shared-with-me"), "not a directory");
+
+    await expect(
+      createWorkspaceFolder({ rootPath: root, kind: "personal" }),
+    ).rejects.toThrow(/shared-with-me exists but is not a folder/);
+  });
+
   it("rejects relative workspace roots", async () => {
     await expect(
       createWorkspaceFolder({ rootPath: "relative/place", kind: "personal" }),

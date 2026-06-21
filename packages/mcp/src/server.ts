@@ -41,17 +41,23 @@ import {
 } from "./tools";
 
 export function parseArgs(argv: string[]): ToolContext {
-  let root = process.cwd();
-  let home = process.env.HOME ?? process.cwd();
-  let sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim() || undefined;
-  let sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim() || undefined;
+  let root = nonEmptyArg(process.cwd(), "workspace root");
+  let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
+  let sdkPackageJsonPath = optionalNonEmptyArg(
+    process.env.DOHC_SDK_PACKAGE_JSON,
+    "DOHC_SDK_PACKAGE_JSON",
+  );
+  let sdkDependencyRange = optionalNonEmptyArg(
+    process.env.DOHC_SDK_DEPENDENCY_RANGE,
+    "DOHC_SDK_DEPENDENCY_RANGE",
+  );
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--workspace" && argv[i + 1]) root = argv[++i];
-    else if (argv[i] === "--home" && argv[i + 1]) home = argv[++i];
+    if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
+    else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
     else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
-      sdkPackageJsonPath = argv[++i].trim() || undefined;
+      sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
     } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
-      sdkDependencyRange = argv[++i].trim() || undefined;
+      sdkDependencyRange = nonEmptyArg(argv[++i], "--sdk-dependency-range");
     }
   }
   return {
@@ -60,6 +66,16 @@ export function parseArgs(argv: string[]): ToolContext {
     ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
     ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
   };
+}
+
+function nonEmptyArg(value: string, name: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${name} requires a non-empty value`);
+  return trimmed;
+}
+
+function optionalNonEmptyArg(value: string | undefined, name: string): string | undefined {
+  return value === undefined ? undefined : nonEmptyArg(value, name);
 }
 
 function text(value: unknown) {

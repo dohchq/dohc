@@ -328,6 +328,60 @@ describe("changeSetStore persistence", () => {
       consoleError.mockRestore();
     }
   });
+
+  it("rejects unknown persisted provenance source values", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "bad-provenance",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt provenance",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-bad-provenance.json"),
+      `${JSON.stringify(
+        {
+          id: "bad-provenance",
+          recordedAtMs: 1000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Corrupt provenance",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          provenance: { source: "made-up-source" },
+          boundaryCrossings: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("bad-provenance")).rejects.toThrow(
+        /unknown history change set kind/i,
+      );
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record bad-provenance:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });
 
 describe("humanSummary", () => {

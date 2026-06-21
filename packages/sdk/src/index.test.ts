@@ -417,6 +417,28 @@ describe("@dohc/sdk", () => {
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });
 
+  it("rejects invalid collection names before requesting collection data", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: true, write: false },
+            collections: { read: true },
+            provenance: { record: false },
+          };
+        },
+      },
+    });
+
+    await expect(client.collections.get("bad\nname").list()).rejects.toMatchObject({
+      code: "DOHC_INVALID_INPUT",
+      message: expect.stringMatching(/collection name/i),
+    });
+    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+  });
+
   it("reports disabled provenance recording before sending provenance data", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
@@ -437,6 +459,28 @@ describe("@dohc/sdk", () => {
       message: expect.stringMatching(/provenance\.record.*disabled/i),
     });
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+  });
+
+  it("rejects invalid provenance summaries before contacting the host", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: true, write: false },
+            collections: { read: false },
+            provenance: { record: true },
+          };
+        },
+      },
+    });
+
+    await expect(client.provenance.record(" ")).rejects.toMatchObject({
+      code: "DOHC_INVALID_INPUT",
+      message: expect.stringMatching(/provenance summary/i),
+    });
+    expect(calls).toEqual([]);
   });
 
   it("rejects invalid high-level client responses", async () => {

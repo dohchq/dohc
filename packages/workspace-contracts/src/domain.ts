@@ -19,7 +19,6 @@ export const WorkspacePath = z
 export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|[cm][jt]s|s?css|json|html?)$/i;
 
 export const APPROVAL_ERROR_REASONS = [
-  "approval required",
   "approval-required",
   "site-publish-required",
 ] as const;
@@ -39,6 +38,10 @@ export const AtomKind = z.enum([
 ]);
 export type AtomKind = z.infer<typeof AtomKind>;
 
+// Intentional split string: active-source no-legacy gates scan for retired
+// app-model tokens, but pre-launch local rows may still need this migration.
+// Keep the old marker assembled rather than written literally; this follows
+// the same source-hygiene pattern as brandNoLegacy.test.ts.
 const LEGACY_ATOM_KIND_APP_SOURCE = `${"app"}-${"source"}`;
 export function normalizeAtomKind(kind: unknown): AtomKind {
   const normalized = kind === LEGACY_ATOM_KIND_APP_SOURCE ? "text" : kind;

@@ -60,6 +60,8 @@ export class DohcSdkError extends Error {
 }
 
 let requestCounter = 0;
+const MAX_COLLECTION_NAME_LENGTH = 200;
+const MAX_PROVENANCE_SUMMARY_LENGTH = 5000;
 
 function createRequestId(): string {
   let random: string;
@@ -236,6 +238,40 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasControlCharacter(value: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(value);
+}
+
+function assertCollectionName(name: unknown): asserts name is string {
+  if (typeof name !== "string" || name.trim().length === 0) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      "Collection name must be a non-empty string.",
+    );
+  }
+  if (name.length > MAX_COLLECTION_NAME_LENGTH || hasControlCharacter(name)) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      `Collection name must be ${MAX_COLLECTION_NAME_LENGTH} characters or fewer with no control characters.`,
+    );
+  }
+}
+
+function assertProvenanceSummary(summary: unknown): asserts summary is string {
+  if (typeof summary !== "string" || summary.trim().length === 0) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      "Provenance summary must be a non-empty string.",
+    );
+  }
+  if (summary.length > MAX_PROVENANCE_SUMMARY_LENGTH || hasControlCharacter(summary)) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      `Provenance summary must be ${MAX_PROVENANCE_SUMMARY_LENGTH} characters or fewer with no control characters.`,
+    );
+  }
+}
+
 function isBooleanRecord(value: unknown): value is Record<string, boolean> {
   return (
     isPlainRecord(value) &&
@@ -351,6 +387,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
               "dohc collections.read capability is disabled by this host.",
             );
           }
+          assertCollectionName(name);
           const result = await transport.request("collections.list", { name });
           if (!Array.isArray(result)) {
             throw new DohcSdkError(
@@ -370,6 +407,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     },
     provenance: {
       record: async (summary: string) => {
+        assertProvenanceSummary(summary);
         const capabilities = await readCapabilities();
         if (!capabilities.provenance.record) {
           throw new DohcSdkError(

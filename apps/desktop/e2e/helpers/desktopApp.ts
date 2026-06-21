@@ -162,6 +162,10 @@ async function waitForProcessExit(
       resolve(true);
     }
     processHandle.once("exit", onExit);
+    if (processHandle.exitCode !== null || processHandle.signalCode !== null) {
+      processHandle.off("exit", onExit);
+      onExit();
+    }
   });
 }
 

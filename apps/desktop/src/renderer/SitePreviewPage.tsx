@@ -149,7 +149,7 @@ export function SitePreviewPage(props: {
         message: error instanceof Error ? error.message : "Could not load this site.",
       });
     }
-  }, [props.workspaceId, props.siteRoot]);
+  }, [props.workspaceId]);
 
   useEffect(() => {
     void reloadSite();

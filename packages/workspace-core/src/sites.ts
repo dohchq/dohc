@@ -172,14 +172,14 @@ function diagnostic(
 
 function normalizeWorkspacePath(path: string): string | null {
   if (path.includes("\0")) return null;
-  const normalized = path
+  const segments = path
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")
     .split("/")
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
+    .filter((segment) => segment !== "" && segment !== ".");
+  if (segments.includes("..")) return null;
+  const normalized = segments.join("/");
   if (normalized === "") return null;
-  if (normalized.split("/").includes("..")) return null;
   return normalized;
 }
 
