@@ -1,4 +1,12 @@
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
@@ -107,11 +115,29 @@ describe("workspace settings file store", () => {
     await expect(
       writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS),
     ).rejects.toThrow(/\.dohc/);
+    await expect(readWorkspaceSettingsFile(root)).rejects.toThrow(/\.dohc/);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("refuses to read a symlinked settings file", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
+    const outsideSettings = join(outside, "settings.local.json");
+    await writeFile(
+      outsideSettings,
+      JSON.stringify({
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, mcpAutoStart: true },
+      }),
+    );
+    await unlink(join(root, ".dohc", WORKSPACE_SETTINGS_FILE));
+    await symlink(outsideSettings, join(root, ".dohc", WORKSPACE_SETTINGS_FILE));
+
     expect(await readWorkspaceSettingsFile(root)).toMatchObject({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
     });
-    expect(await readdir(outside)).toEqual([]);
   });
 });
 

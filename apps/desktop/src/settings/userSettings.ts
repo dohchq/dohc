@@ -99,21 +99,32 @@ export function mergeDesktopUserSettings(
   });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function settingsDeepEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    if (left.length !== right.length) return false;
+    return left.every((value, index) => settingsDeepEqual(value, right[index]));
+  }
+  if (isRecord(left) || isRecord(right)) {
+    if (!isRecord(left) || !isRecord(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every((key) =>
+      Object.prototype.hasOwnProperty.call(right, key) &&
+      settingsDeepEqual(left[key], right[key]),
+    );
+  }
+  return false;
+}
+
 export function userSettingsModified(settings: DesktopUserSettings): boolean {
-  return (
-    settings.version !== DEFAULT_USER_SETTINGS.version ||
-    settings.appearance.themeMode !== DEFAULT_USER_SETTINGS.appearance.themeMode ||
-    settings.appearance.density !== DEFAULT_USER_SETTINGS.appearance.density ||
-    settings.appearance.reduceMotion !== DEFAULT_USER_SETTINGS.appearance.reduceMotion ||
-    settings.general.launchBehavior !== DEFAULT_USER_SETTINGS.general.launchBehavior ||
-    settings.general.defaultWorkspaceRoot !==
-      DEFAULT_USER_SETTINGS.general.defaultWorkspaceRoot ||
-    settings.editor.fontSize !== DEFAULT_USER_SETTINGS.editor.fontSize ||
-    settings.editor.lineWrap !== DEFAULT_USER_SETTINGS.editor.lineWrap ||
-    settings.editor.spellcheck !== DEFAULT_USER_SETTINGS.editor.spellcheck ||
-    settings.notifications.updates !== DEFAULT_USER_SETTINGS.notifications.updates ||
-    settings.notifications.agentRuns !== DEFAULT_USER_SETTINGS.notifications.agentRuns
-  );
+  return !settingsDeepEqual(settings, DEFAULT_USER_SETTINGS);
 }
 
 export function effectiveThemeMode(

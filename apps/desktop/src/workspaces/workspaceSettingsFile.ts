@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -14,12 +14,18 @@ export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 export async function readWorkspaceSettingsFile(
   rootPath: string,
 ): Promise<WorkspaceSettingsResult> {
+  const dir = await resolveWorkspaceMetadataDir(rootPath);
   try {
-    const path = join(
-      await resolveWorkspaceMetadataDir(rootPath),
-      WORKSPACE_SETTINGS_FILE,
-    );
-    if ((await stat(path)).size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
+    const path = join(dir, WORKSPACE_SETTINGS_FILE);
+    const fileStats = await lstat(path);
+    if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
+      return {
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+        source: "recovered",
+        warning: "Workspace settings were not a regular file and were ignored.",
+      };
+    }
+    if (fileStats.size > MAX_WORKSPACE_SETTINGS_FILE_BYTES) {
       return {
         settings: DEFAULT_WORKSPACE_SETTINGS,
         source: "recovered",

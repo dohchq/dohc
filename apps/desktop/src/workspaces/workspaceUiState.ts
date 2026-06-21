@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -26,8 +26,10 @@ export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
   try {
     const path = join(await resolveWorkspaceMetadataDir(rootPath), UI_STATE_FILE);
-    // Stat-cap BEFORE reading: zod can only bound what already sits in memory.
-    if ((await stat(path)).size > MAX_UI_STATE_FILE_BYTES) return null;
+    // lstat-cap BEFORE reading: zod can only bound what already sits in memory.
+    const fileStats = await lstat(path);
+    if (fileStats.isSymbolicLink() || !fileStats.isFile()) return null;
+    if (fileStats.size > MAX_UI_STATE_FILE_BYTES) return null;
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
     return null;

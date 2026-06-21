@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { SETTINGS_READ_SOURCES } from "../settings/userSettings";
+import {
+  SETTINGS_READ_SOURCES,
+  settingsDeepEqual,
+} from "../settings/userSettings";
 
 export const WorkspaceSettings = z.object({
   version: z.literal(1),
@@ -65,15 +68,5 @@ export function mergeWorkspaceSettings(
 }
 
 export function workspaceSettingsModified(settings: WorkspaceSettings): boolean {
-  return (
-    settings.version !== DEFAULT_WORKSPACE_SETTINGS.version ||
-    settings.agents.mcpAutoStart !== DEFAULT_WORKSPACE_SETTINGS.agents.mcpAutoStart ||
-    settings.agents.defaultDriverId !==
-      DEFAULT_WORKSPACE_SETTINGS.agents.defaultDriverId ||
-    settings.agents.defaultModel !== DEFAULT_WORKSPACE_SETTINGS.agents.defaultModel ||
-    settings.sites.defaultPreviewMode !==
-      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode ||
-    settings.privacy.confirmExternalLinks !==
-      DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks
-  );
+  return !settingsDeepEqual(settings, DEFAULT_WORKSPACE_SETTINGS);
 }
