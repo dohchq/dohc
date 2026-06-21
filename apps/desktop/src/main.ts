@@ -281,6 +281,8 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
 }
 
 function stopSitePreviewsForQuit(): void {
+  // Idempotent by design: explicit update installs and Electron's own
+  // before-quit-for-update event can both ask for the same cleanup.
   for (const [key, handle] of [...sitePreviewHandles]) {
     sitePreviewOriginReleases.get(key)?.();
     sitePreviewOriginReleases.delete(key);

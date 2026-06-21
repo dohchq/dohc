@@ -92,3 +92,14 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - tightened manifest parser context reset behavior.
   - surfaced restart failures in the update toast/notice.
   - added restart failure and `canInstall: false` renderer tests.
+- Ran a second `coderabbit review --agent` pass and addressed the returned
+  follow-up findings:
+  - added updater controller `stop()` cleanup and lifecycle coverage.
+  - documented idempotent pre-update site-preview cleanup.
+  - set checkout `persist-credentials: false`.
+  - aligned zod/preload finite percent validation and boundary tests.
+  - rejected conflicting duplicate update-manifest file entries.
+  - handled mock-server read races.
+  - validated nightly dates as real calendar dates.
+  - made missing manifest `releaseDate` deterministic by omitting it.
+  - added Settings update failure and busy-state tests.

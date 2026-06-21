@@ -52,6 +52,19 @@ function validateReleaseInputs({ channel, date, runNumber, runAttempt, sha }) {
   if (channel === "nightly" && !DATE_PATTERN.test(date)) {
     throw new Error(`Invalid nightly date '${date}'. Expected YYYYMMDD.`);
   }
+  if (channel === "nightly") {
+    const year = Number(date.slice(0, 4));
+    const month = Number(date.slice(4, 6));
+    const day = Number(date.slice(6, 8));
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day
+    ) {
+      throw new Error(`Invalid nightly date '${date}'. Date does not exist.`);
+    }
+  }
   if (channel === "nightly" && (!Number.isInteger(runNumber) || runNumber < 1)) {
     throw new Error(`Invalid run number '${runNumber}'.`);
   }

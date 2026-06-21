@@ -35,6 +35,7 @@ export type AutoUpdateController = {
   publicState: () => PublicUpdateState;
   checkForUpdates: () => Promise<UpdateCheckResult>;
   installUpdate: () => Promise<UpdateActionResult>;
+  stop: () => void;
 };
 
 type AutoUpdaterLike = {
@@ -148,6 +149,7 @@ export async function startAutoUpdates(options: {
   let state = initialUpdateState;
   let checkInFlight = false;
   let installInFlight = false;
+  let stopped = false;
   const publicState = () =>
     publicUpdateState(state, {
       currentVersion,
@@ -194,6 +196,8 @@ export async function startAutoUpdates(options: {
     options.onState?.(state, publicState());
   });
   autoUpdater.on("before-quit-for-update", () => {
+    // quitAndInstall callers may also run this callback immediately before
+    // calling Electron. Keep registered cleanup callbacks idempotent.
     options.onBeforeQuitForUpdate?.();
   });
   autoUpdater.on("error", (error) => {
@@ -209,6 +213,7 @@ export async function startAutoUpdates(options: {
 
   const checkForUpdates = async (): Promise<UpdateCheckResult> => {
     if (
+      stopped ||
       checkInFlight ||
       installInFlight ||
       state.status === "checking" ||
@@ -231,7 +236,7 @@ export async function startAutoUpdates(options: {
   };
 
   const installUpdate = async (): Promise<UpdateActionResult> => {
-    if (installInFlight || state.status !== "ready") {
+    if (stopped || installInFlight || state.status !== "ready") {
       return { accepted: false, completed: false, state: publicState() };
     }
     installInFlight = true;
@@ -250,20 +255,27 @@ export async function startAutoUpdates(options: {
     }
   };
 
-  const scheduleCheck = (delayMs: number): void => {
+  const scheduleCheck = (delayMs: number): ReturnType<typeof setTimeout> => {
     const timeout = setTimeout(() => {
       void checkForUpdates();
     }, delayMs);
     timeout.unref?.();
+    return timeout;
   };
 
   const pollIntervalMs =
     options.pollIntervalMs ?? (channel === "nightly" ? 15 * 60_000 : 4 * 60 * 60_000);
-  scheduleCheck(options.startupDelayMs ?? 15_000);
+  const startupTimeout = scheduleCheck(options.startupDelayMs ?? 15_000);
   const interval = setInterval(() => {
     void checkForUpdates();
   }, pollIntervalMs);
   interval.unref?.();
 
-  return { state: () => state, publicState, checkForUpdates, installUpdate };
+  const stop = (): void => {
+    stopped = true;
+    clearTimeout(startupTimeout);
+    clearInterval(interval);
+  };
+
+  return { state: () => state, publicState, checkForUpdates, installUpdate, stop };
 }

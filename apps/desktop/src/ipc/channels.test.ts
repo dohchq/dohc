@@ -255,8 +255,14 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
     expect(parseUpdateStateEvent({ ...base, channel: "beta" })).toBeNull();
     expect(parseUpdateStateEvent({ ...base, canCheck: "true" })).toBeNull();
     expect(parseUpdateStateEvent({ ...base, canInstall: 1 })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, percent: 0 })).toEqual({
+      status: "ready",
+      message: "m",
+      percent: 0,
+    });
     expect(parseUpdateStateEvent({ ...base, percent: -1 })).toBeNull();
     expect(parseUpdateStateEvent({ ...base, percent: 101 })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, percent: Infinity })).toBeNull();
     expect(parseUpdateStateEvent({ ...base, percent: Number.NaN })).toBeNull();
   });
 

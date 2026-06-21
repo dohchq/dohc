@@ -1043,7 +1043,7 @@ export const UpdateStateEvent = z.object({
   canCheck: z.boolean().optional(),
   canInstall: z.boolean().optional(),
   version: z.string().min(1).max(200).optional(),
-  percent: z.number().min(0).max(100).optional(),
+  percent: z.number().finite().min(0).max(100).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 

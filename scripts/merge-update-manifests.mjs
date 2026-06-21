@@ -83,15 +83,20 @@ export function mergeUpdateManifests(primary, secondary, platform = "mac") {
   }
   const byUrl = new Map();
   for (const file of [...primary.files, ...secondary.files]) {
+    const existing = byUrl.get(file.url);
+    if (existing && (existing.sha512 !== file.sha512 || existing.size !== file.size)) {
+      throw new Error(`Conflicting entries for ${file.url}: sha512 or size mismatch.`);
+    }
     byUrl.set(file.url, { ...file });
   }
   const files = [...byUrl.values()].sort((a, b) => a.url.localeCompare(b.url));
   const firstFile = files[0];
+  const releaseDate = primary.releaseDate ?? secondary.releaseDate;
   return {
     ...primary,
     files,
     ...(firstFile ? { path: firstFile.url, sha512: firstFile.sha512 } : {}),
-    releaseDate: primary.releaseDate ?? secondary.releaseDate ?? new Date().toISOString(),
+    ...(releaseDate ? { releaseDate } : {}),
   };
 }
 

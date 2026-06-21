@@ -59,6 +59,14 @@ const bridge = {
 
 const writeText = vi.fn(async () => {});
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 function stubClipboard() {
   // navigator.clipboard is a getter-only property in jsdom; define it. Call
   // AFTER userEvent.setup() so our spy isn't shadowed by userEvent's own stub.
@@ -219,6 +227,50 @@ describe("DesktopSettings", () => {
     expect(bridge.checkForUpdates).toHaveBeenCalledOnce();
     expect(screen.getByTestId("install-update-button").hasAttribute("disabled")).toBe(
       false,
+    );
+  });
+
+  it("shows update check failures and re-enables checking", async () => {
+    bridge.checkForUpdates.mockRejectedValueOnce(new Error("offline"));
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await screen.findByTestId("desktop-updates-status");
+
+    await user.click(screen.getByTestId("check-updates-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
+        "Could not check for updates.",
+      ),
+    );
+    expect(screen.getByTestId("check-updates-button").hasAttribute("disabled")).toBe(
+      false,
+    );
+  });
+
+  it("disables update actions while an update check is pending", async () => {
+    const pending = deferred<{ checked: boolean; state: typeof readyUpdateState }>();
+    bridge.checkForUpdates.mockImplementationOnce(() => pending.promise);
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await screen.findByTestId("desktop-updates-status");
+
+    await user.click(screen.getByTestId("check-updates-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("check-updates-button").hasAttribute("disabled")).toBe(
+        true,
+      ),
+    );
+    expect(screen.getByTestId("install-update-button").hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    pending.resolve({ checked: true, state: readyUpdateState });
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
     );
   });
 

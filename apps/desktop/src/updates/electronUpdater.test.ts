@@ -186,6 +186,25 @@ describe("electron updater actions", () => {
 
     expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
   });
+
+  it("stops scheduled checks when the controller is stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      const updater = fakeUpdater();
+      const controller = await startWith(updater);
+      expect(controller).not.toBeNull();
+
+      controller!.stop();
+      vi.advanceTimersByTime(60 * 60_000);
+
+      expect(updater.checkForUpdates).not.toHaveBeenCalled();
+      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+        checked: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("publicUpdateState", () => {

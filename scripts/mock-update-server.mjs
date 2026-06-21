@@ -68,7 +68,14 @@ export async function createMockUpdateServer(options = {}) {
       response.end("Not Found");
       return;
     }
-    const bytes = await readFile(filePath);
+    let bytes;
+    try {
+      bytes = await readFile(filePath);
+    } catch {
+      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Not Found");
+      return;
+    }
     response.writeHead(200, {
       "content-type": contentTypeFor(filePath),
       "content-length": String(bytes.byteLength),

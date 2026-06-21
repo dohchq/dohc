@@ -78,6 +78,32 @@ test("release metadata requires a real commit sha", async () => {
   }
 });
 
+test("nightly release dates must be real calendar dates", async () => {
+  const root = await fixtureRoot("0.1.0");
+  await assert.rejects(
+    () =>
+      resolveDesktopRelease({
+        root,
+        channel: "nightly",
+        date: "20260230",
+        runNumber: 12,
+        runAttempt: 2,
+        sha: "0123456789abcdef",
+      }),
+    /Date does not exist/,
+  );
+  await assert.doesNotReject(() =>
+    resolveDesktopRelease({
+      root,
+      channel: "nightly",
+      date: "20260228",
+      runNumber: 12,
+      runAttempt: 2,
+      sha: "0123456789abcdef",
+    }),
+  );
+});
+
 test("updates apps/desktop/package.json version idempotently", async () => {
   const root = await fixtureRoot("0.1.0");
   const first = await updateDesktopPackageVersion("0.1.1-nightly.20260621.12.2", {
@@ -131,6 +157,18 @@ sha512: x64
         "mac",
       ),
     /different versions/,
+  );
+  assert.throws(
+    () =>
+      mergeUpdateManifests(
+        primary,
+        {
+          ...secondary,
+          files: [{ url: "dohc-0.1.0-mac-arm64.zip", sha512: "different", size: 12 }],
+        },
+        "mac",
+      ),
+    /Conflicting entries/,
   );
 });
 
