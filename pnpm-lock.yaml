@@ -150,6 +150,9 @@ importers:
       '@testing-library/user-event':
         specifier: ^14.6.1
         version: 14.6.1(@testing-library/dom@10.4.1)
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
       '@types/node':
         specifier: ^22.19.19
         version: 22.19.19
@@ -163,7 +166,7 @@ importers:
         specifier: ^6.0.2
         version: 6.0.2(vite@8.0.14(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.3))
       electron:
-        specifier: ^42.4.0
+        specifier: 42.4.1
         version: 42.4.1
       electron-builder:
         specifier: ^26.15.2
@@ -7831,7 +7834,7 @@ snapshots:
       es6-error: 4.1.1
       matcher: 3.0.0
       roarr: 2.15.4
-      semver: 7.7.4
+      semver: 7.8.4
       serialize-error: 7.0.1
     optional: true
 
@@ -8657,11 +8660,11 @@ snapshots:
 
   node-abi@4.31.0:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.4
 
   node-api-version@0.2.1:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.4
 
   node-gyp@12.4.0:
     dependencies:
@@ -8670,7 +8673,7 @@ snapshots:
       graceful-fs: 4.2.11
       nopt: 9.0.0
       proc-log: 6.1.0
-      semver: 7.7.4
+      semver: 7.8.4
       tar: 7.5.16
       tinyglobby: 0.2.16
       undici: 6.27.0
