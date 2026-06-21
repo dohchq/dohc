@@ -74,7 +74,10 @@ export function SettingsDialog(props: {
   onAgentActiveChange?: (active: boolean) => void;
   onOpenCloud?: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const userSaveRequestRef = useRef(0);
+  const workspaceSaveRequestRef = useRef(0);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
   );
@@ -110,6 +113,49 @@ export function SettingsDialog(props: {
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    const focusableSelector = [
+      "a[href]",
+      "button:not([disabled])",
+      "input:not([disabled])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "[tabindex]:not([tabindex='-1'])",
+    ].join(",");
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(focusableSelector),
+      ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first?.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [props.onClose]);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
 
@@ -155,6 +201,13 @@ export function SettingsDialog(props: {
   }, [activeSection, filteredSections, query]);
 
   const saveUserSettings = useCallback(async (settings: DesktopUserSettings) => {
+    if (!userResult) {
+      setError("User settings are still loading.");
+      return;
+    }
+    const requestId = userSaveRequestRef.current + 1;
+    userSaveRequestRef.current = requestId;
+    const previous = userResult;
     setUserResult((current) => ({
       settings,
       source: current?.source ?? "default",
@@ -165,16 +218,27 @@ export function SettingsDialog(props: {
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings });
+      if (userSaveRequestRef.current !== requestId) return;
       setUserResult(saved);
       markSaved();
     } catch (cause) {
+      if (userSaveRequestRef.current !== requestId) return;
+      setUserResult(previous);
+      applyAppearanceSettings(previous.settings.appearance);
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [markSaved, markSaving]);
+  }, [markSaved, markSaving, userResult]);
 
   const saveWorkspaceSettings = useCallback(
     async (settings: WorkspaceSettings) => {
+      if (!workspaceResult) {
+        setError("Workspace settings are still loading.");
+        return;
+      }
+      const requestId = workspaceSaveRequestRef.current + 1;
+      workspaceSaveRequestRef.current = requestId;
+      const previous = workspaceResult;
       setWorkspaceResult((current) => ({
         settings,
         source: current?.source ?? "default",
@@ -187,40 +251,51 @@ export function SettingsDialog(props: {
           workspaceId: props.workspaceId,
           settings,
         });
+        if (workspaceSaveRequestRef.current !== requestId) return;
         setWorkspaceResult(saved);
         markSaved();
       } catch (cause) {
+        if (workspaceSaveRequestRef.current !== requestId) return;
+        setWorkspaceResult(previous);
         setSaveState("error");
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [markSaved, markSaving, props.workspaceId],
+    [markSaved, markSaving, props.workspaceId, workspaceResult],
   );
 
   const resetUserSettings = useCallback(async () => {
+    const requestId = userSaveRequestRef.current + 1;
+    userSaveRequestRef.current = requestId;
     markSaving();
     setError(null);
     try {
       const next = await bridge().resetUserSettings();
+      if (userSaveRequestRef.current !== requestId) return;
       setUserResult(next);
       applyAppearanceSettings(next.settings.appearance);
       markSaved();
     } catch (cause) {
+      if (userSaveRequestRef.current !== requestId) return;
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [markSaved, markSaving]);
 
   const resetWorkspaceSettings = useCallback(async () => {
+    const requestId = workspaceSaveRequestRef.current + 1;
+    workspaceSaveRequestRef.current = requestId;
     markSaving();
     setError(null);
     try {
       const next = await bridge().resetWorkspaceSettings({
         workspaceId: props.workspaceId,
       });
+      if (workspaceSaveRequestRef.current !== requestId) return;
       setWorkspaceResult(next);
       markSaved();
     } catch (cause) {
+      if (workspaceSaveRequestRef.current !== requestId) return;
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -524,9 +599,11 @@ export function SettingsDialog(props: {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="settings-title"
+      tabIndex={-1}
       data-testid="settings-dialog"
       data-active-section={activeSection}
       className="flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-lg border border-line bg-bg shadow-2xl"

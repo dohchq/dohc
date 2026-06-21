@@ -30,7 +30,7 @@ export function AgentsMcpSettings(props: {
   workspacePath: string;
   onAgentActiveChange?: (active: boolean) => void;
 }) {
-  const { workspaceId, onAgentActiveChange } = props;
+  const { workspaceId, workspacePath, onAgentActiveChange } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -166,7 +166,7 @@ export function AgentsMcpSettings(props: {
         testId="settings-row-workspace-path"
       >
         <code className="max-w-sm truncate rounded bg-panel-2 px-2 py-1 text-xs text-ink">
-          {props.workspacePath}
+          {workspacePath}
         </code>
       </SettingRow>
 

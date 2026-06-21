@@ -55,7 +55,7 @@ describe("settings IPC contract", () => {
           ...DEFAULT_USER_SETTINGS,
           editor: {
             ...DEFAULT_USER_SETTINGS.editor,
-            fontSize: 200,
+            fontSize: 25,
           },
         },
       }).success,

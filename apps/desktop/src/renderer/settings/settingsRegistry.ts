@@ -7,6 +7,7 @@ import {
   Shield,
   SlidersHorizontal,
   Wrench,
+  type LucideIcon,
 } from "lucide-react";
 
 export type SettingsScope = "User" | "Workspace" | "Mixed";
@@ -16,7 +17,7 @@ type SettingsSection = {
   label: string;
   scope: SettingsScope;
   keywords: readonly string[];
-  Icon: typeof Settings;
+  Icon: LucideIcon;
 };
 
 export const SETTINGS_SECTIONS = [

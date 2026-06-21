@@ -112,6 +112,7 @@ body {
   }
 }
 
+[data-reduce-motion='true'],
 [data-reduce-motion='true'] *,
 [data-reduce-motion='true'] *::before,
 [data-reduce-motion='true'] *::after,

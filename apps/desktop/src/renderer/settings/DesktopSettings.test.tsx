@@ -144,6 +144,16 @@ describe("DesktopSettings", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
+  it("closes from Escape", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />);
+
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it("persists appearance changes and applies them immediately", async () => {
     const user = userEvent.setup();
     render(
@@ -163,6 +173,30 @@ describe("DesktopSettings", () => {
     });
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
+  });
+
+  it("rolls back optimistic appearance changes when save fails", async () => {
+    const user = userEvent.setup();
+    bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("radio", { name: "Dark" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
+        "error",
+      ),
+    );
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 
   it("supports arrow-key navigation inside segmented appearance controls", async () => {
