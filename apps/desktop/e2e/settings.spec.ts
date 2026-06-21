@@ -99,6 +99,8 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
       .toBe("dark");
 
     await desktop.close();
+    // Intentionally malformed JSON verifies tolerant recovery from a corrupt
+    // user settings file.
     await writeFile(join(temp.homeDir, "dohc-settings.json"), "{not json");
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
@@ -116,6 +118,8 @@ test("settings remains usable at desktop minimum size", async () => {
 
   try {
     desktop = await openWorkspace(temp);
+    // Cover comfortable desktop sizes down to the minimum supported shell
+    // dimensions so the modal stays usable at responsive breakpoints.
     for (const [width, height] of [
       [1040, 760],
       [920, 700],

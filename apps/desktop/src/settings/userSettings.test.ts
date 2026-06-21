@@ -24,6 +24,8 @@ import {
 } from "./userSettingsStore";
 
 const roots: string[] = [];
+// WSL can expose the Windows temp directory under /mnt, which is slower and
+// more permission-sensitive for symlink tests; use the Linux temp dir there.
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
 
 async function tempRoot(): Promise<string> {
