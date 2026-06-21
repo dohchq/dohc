@@ -12,6 +12,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
+import { APPROVAL_ERROR_REASONS, isApprovalErrorReason } from "@dohc/workspace-contracts";
 import { scanWorkspaceDiff, type FsDiffOperation } from "./diff";
 import { materializeWorkspace } from "./materialize";
 import {
@@ -168,7 +169,7 @@ export function createLocalSyncClient({
             conflicts: [],
             approvalRequests: approvals.map((entry) => ({
               path: entry.path,
-              reason: entry.error ?? "approval required",
+              reason: entry.error ?? APPROVAL_ERROR_REASONS[0],
             })),
           };
         }
@@ -540,19 +541,13 @@ function isApprovalError(error: unknown): error is Error & { code?: string; path
   return (
     error instanceof Error &&
     (("code" in error &&
-      (error.code === "approval-required" || error.code === "site-publish-required")) ||
-      error.message === "approval required" ||
-      error.message === "approval-required" ||
-      error.message === "site-publish-required")
+      isApprovalErrorReason((error as Error & { code?: string }).code)) ||
+      isApprovalErrorReason(error.message))
   );
 }
 
 function isApprovalResultError(error: string | undefined): boolean {
-  return (
-    error === "approval required" ||
-    error === "approval-required" ||
-    error === "site-publish-required"
-  );
+  return isApprovalErrorReason(error);
 }
 
 function firstOperationPath(operations: FsDiffOperation[]) {

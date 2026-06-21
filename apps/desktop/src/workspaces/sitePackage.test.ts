@@ -110,6 +110,23 @@ describe("listSitePackages", () => {
     }
   });
 
+  it("accepts dohc.json config paths with dot runs inside normal folder names", async () => {
+    await mkdir(join(root, "client..portal"), { recursive: true });
+    await writeFile(join(root, "client..portal", "index.html"), "");
+    await writeFile(
+      join(root, "client..portal", "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "dev", command: "npm run dev" },
+      }),
+    );
+
+    const sites = await listSitePackages(root);
+    expect(sites.find((site) => site.root === "client..portal")).toMatchObject({
+      configuredScripts: { dev: "npm run dev" },
+    });
+  });
+
   it("finds the deepest containing site for a path", async () => {
     await mkdir(join(root, "clients", "acme", "site", "src"), { recursive: true });
     await writeFile(

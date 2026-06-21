@@ -74,10 +74,6 @@ export type FolderInput = string | {
   starred?: boolean
 }
 
-function isSourceCodeFilePath(path: string): boolean {
-  return isSiteSourcePath(path)
-}
-
 // Build a tree from atoms + explicit folder rows. Obsidian-style:
 // folders are first-class containers (can sit empty), atoms are leaves.
 // Each atom is a leaf node at its full path — no folder-as-page
@@ -197,7 +193,7 @@ export function nodeLabel(node: TreeNode): string {
   if (node.fullPath === '.context/company.md') return 'Company'
   if (node.fullPath === '.skills') return 'Skills'
   if (node.fullPath === '.commands') return 'Commands'
-  if (node.page && isSourceCodeFilePath(node.page.path)) return node.segment
+  if (node.page && isSiteSourcePath(node.page.path)) return node.segment
   if (node.page?.title) return node.page.title
   // D4.16 — strip the rendering extension for titleless markdown files
   // while source-like website files keep their full filenames above.

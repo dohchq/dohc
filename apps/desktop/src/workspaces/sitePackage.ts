@@ -94,7 +94,7 @@ function mapWorkspaceSite(
 async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): Promise<SiteScripts> {
   if (!site.configPath || !site.configPath.endsWith("dohc.json")) return {};
   if (
-    site.configPath.includes("..") ||
+    hasTraversalSegment(site.configPath) ||
     site.configPath.startsWith("/") ||
     site.configPath.startsWith("\\") ||
     /^[A-Za-z]:[\\/]/.test(site.configPath)
@@ -121,6 +121,10 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     });
     return {};
   }
+}
+
+function hasTraversalSegment(relativePath: string): boolean {
+  return relativePath.replaceAll("\\", "/").split("/").includes("..");
 }
 
 async function sourceForFile(rootPath: string, path: string): Promise<string | WorkspaceSiteSource> {

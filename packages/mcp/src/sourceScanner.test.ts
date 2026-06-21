@@ -27,4 +27,10 @@ describe("sourceScanner", () => {
     expect(stripSourceComments(source)).toContain(importLegacySdk.trim());
     expect(hasLegacyAppImport(source)).toBe(true);
   });
+
+  it("tracks regex literals after control-flow parentheses", () => {
+    const source = `if (ready) /[/*]/.test(text);\n${importLegacySdk}`;
+    expect(stripSourceComments(source)).toContain(importLegacySdk.trim());
+    expect(hasLegacyAppImport(source)).toBe(true);
+  });
 });

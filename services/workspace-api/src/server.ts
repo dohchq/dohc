@@ -1,3 +1,4 @@
+import { isApprovalErrorReason } from "@dohc/workspace-contracts";
 import type { Actor, WorkspaceBackend, WorkspaceErrorCode } from "@dohc/workspace-contracts";
 import type { ResolveActor } from "./auth/session";
 import {
@@ -262,12 +263,6 @@ function errorResponse(error: unknown) {
   );
 }
 
-const APPROVAL_ERROR_REASONS = new Set([
-  "approval required",
-  "approval-required",
-  "site-publish-required",
-]);
-
 function statusForError(message: string, code?: string) {
   switch (normalizeErrorCode(code)) {
     case "unauthorized":
@@ -286,7 +281,7 @@ function statusForError(message: string, code?: string) {
     case "invalid_manifest":
       return 400;
   }
-  if ((code && APPROVAL_ERROR_REASONS.has(code)) || APPROVAL_ERROR_REASONS.has(message)) {
+  if (isApprovalErrorReason(code) || isApprovalErrorReason(message)) {
     return 403;
   }
   if (/stale|revision|conflict/i.test(message)) return 409;

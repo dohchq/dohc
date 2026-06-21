@@ -84,6 +84,9 @@ type Candidate = {
 const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build", "preview"] as const;
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 
+// Framework/package signals are intentionally limited to mainstream web stacks
+// with recognizable package dependencies or official CLI/build tooling. Refresh
+// this list periodically as npm usage and framework conventions move.
 export const WEB_DEPENDENCY_NAMES = [
   "@angular/cli",
   "@angular/core",

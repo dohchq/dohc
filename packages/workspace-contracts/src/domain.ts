@@ -18,6 +18,18 @@ export const WorkspacePath = z
 
 export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|s?css|json|html?)$/i;
 
+export const APPROVAL_ERROR_REASONS = [
+  "approval required",
+  "approval-required",
+  "site-publish-required",
+] as const;
+export type ApprovalErrorReason = (typeof APPROVAL_ERROR_REASONS)[number];
+
+const APPROVAL_ERROR_REASON_SET: ReadonlySet<string> = new Set(APPROVAL_ERROR_REASONS);
+export function isApprovalErrorReason(reason: string | undefined): reason is ApprovalErrorReason {
+  return reason !== undefined && APPROVAL_ERROR_REASON_SET.has(reason);
+}
+
 export const AtomKind = z.enum([
   "markdown",
   "text",

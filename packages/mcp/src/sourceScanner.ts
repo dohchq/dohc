@@ -35,7 +35,7 @@ export function stripSourceComments(body: string): string {
     return (
       previousToken === "" ||
       ["return", "throw", "case", "yield", "await", "typeof", "void", "delete"].includes(previousToken) ||
-      "([{,;:=!?&|+-*~^<>".includes(previousToken)
+      "([{,;:=!?&|+-*~^<>)".includes(previousToken)
     );
   }
 
