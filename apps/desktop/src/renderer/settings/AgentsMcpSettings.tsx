@@ -217,8 +217,9 @@ export function AgentsMcpSettings(props: {
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
           <button
             type="button"
+            disabled={!config}
             onClick={() => void copyConfig()}
-            className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-ink"
+            className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
             {copied ? "Copied" : "Copy"}
