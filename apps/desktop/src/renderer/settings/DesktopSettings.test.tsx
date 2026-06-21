@@ -187,13 +187,15 @@ describe("DesktopSettings", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("radio", { name: "Dark" }));
+    await screen.findByRole("radio", { name: "System" });
+    const initialTheme = document.documentElement.dataset.theme;
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
     await waitFor(() =>
       expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
         "error",
       ),
     );
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe(initialTheme);
     expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
       "true",
     );
