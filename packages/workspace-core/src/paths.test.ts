@@ -230,6 +230,10 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
 describe("isSiteSourcePath", () => {
   it("treats source files under a sites path segment as site source", () => {
     expect(isSiteSourcePath("sites/workspace/src/App.tsx")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.mjs")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.cjs")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.mts")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.cts")).toBe(true);
     expect(isSiteSourcePath("sites/workspace/index.html")).toBe(true);
     expect(isSiteSourcePath("sites/workspace/index.htm")).toBe(true);
     expect(isSiteSourcePath("finance/sites/ledger/styles.css")).toBe(true);

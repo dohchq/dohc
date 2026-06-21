@@ -16,7 +16,7 @@ export const WorkspacePath = z
     "workspace paths cannot contain ..",
   );
 
-export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|s?css|json|html?)$/i;
+export const SITE_SOURCE_CODE_EXT_RE = /\.(?:[cm]?[jt]sx?|s?css|json|html?)$/i;
 
 export const APPROVAL_ERROR_REASONS = [
   "approval required",

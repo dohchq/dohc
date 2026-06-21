@@ -240,7 +240,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_site",
     {
       description:
-        "Scaffold a normal website folder with index.html, package.json, and optional dohc.json. Records history; does not create hidden app folders. Generated dev/preview scripts use Node's package runner and serve.",
+        "Scaffold a normal website folder with index.html, package.json, pinned serve devDependency, and optional dohc.json. Records history; does not create hidden app folders.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         title: z.string().max(200).optional(),

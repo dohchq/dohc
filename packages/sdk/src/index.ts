@@ -5,6 +5,7 @@ export const DohcSdkErrorCodes = {
   hostTimeout: "DOHC_HOST_TIMEOUT",
   badResponse: "DOHC_BAD_RESPONSE",
   capabilityDisabled: "DOHC_CAPABILITY_DISABLED",
+  invalidInput: "DOHC_INVALID_INPUT",
 } as const;
 export type DohcSdkErrorCode =
   (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
@@ -287,7 +288,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       read: async (path: string) => {
         if (isAbsoluteWorkspacePath(path)) {
           throw new DohcSdkError(
-            DohcSdkErrorCodes.badResponse,
+            DohcSdkErrorCodes.invalidInput,
             "File paths must be workspace-relative. Absolute paths are not allowed.",
           );
         }

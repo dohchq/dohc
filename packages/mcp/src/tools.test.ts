@@ -771,6 +771,7 @@ describe("mcp tools operate on allowed paths", () => {
           "finance/ledger/index.html",
           "finance/ledger/styles.css",
           "finance/ledger/script.js",
+          "finance/ledger/scripts/build-static.mjs",
           "finance/ledger/package.json",
           "finance/ledger/dohc.json",
         ]),
@@ -784,8 +785,12 @@ describe("mcp tools operate on allowed paths", () => {
         private: true,
         type: "module",
         scripts: {
-          dev: "npx --yes serve . --listen 127.0.0.1:4173",
-          preview: "npx --yes serve dist --listen 127.0.0.1:4173",
+          dev: "serve . --listen 127.0.0.1:4173",
+          build: "node scripts/build-static.mjs",
+          preview: "serve dist --listen 127.0.0.1:4173",
+        },
+        devDependencies: {
+          serve: "14.2.5",
         },
       });
       expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });

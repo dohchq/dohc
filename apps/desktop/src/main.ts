@@ -260,10 +260,13 @@ async function withSitePreviewStartLock<T>(
 async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
   const key = sitePreviewKey(workspaceId, siteRoot);
   const handle = sitePreviewHandles.get(key);
-  sitePreviewOriginReleases.get(key)?.();
-  sitePreviewOriginReleases.delete(key);
   sitePreviewHandles.delete(key);
-  await handle?.stop();
+  try {
+    await handle?.stop();
+  } finally {
+    sitePreviewOriginReleases.get(key)?.();
+    sitePreviewOriginReleases.delete(key);
+  }
 }
 
 async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {

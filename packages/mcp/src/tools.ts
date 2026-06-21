@@ -1229,6 +1229,8 @@ const SITE_SOURCE_EXTENSIONS = new Set([
   ".jsx",
   ".mjs",
   ".cjs",
+  ".mts",
+  ".cts",
   ".ts",
   ".tsx",
   ".css",
@@ -1603,6 +1605,19 @@ p {
 `,
     },
     {
+      path: relativeJoin(root.normalized, "scripts/build-static.mjs"),
+      content: `import { existsSync } from "node:fs";
+import { copyFile, mkdir, rm } from "node:fs/promises";
+
+await rm("dist", { recursive: true, force: true });
+await mkdir("dist", { recursive: true });
+
+for (const file of ["index.html", "styles.css", "script.js"]) {
+  if (existsSync(file)) await copyFile(file, \`dist/\${file}\`);
+}
+`,
+    },
+    {
       path: relativeJoin(root.normalized, "package.json"),
       content: `${JSON.stringify(
         {
@@ -1610,14 +1625,12 @@ p {
           private: true,
           type: "module",
           scripts: {
-            // Scaffolded previews use Node's package runner so they work in
-            // the same runtime agents already use for generated web projects.
-            dev: "npx --yes serve . --listen 127.0.0.1:4173",
-            // Keep the static build self-contained and dependency-free instead
-            // of generating an extra build helper file.
-            build:
-              "node -e \"(async()=>{const fs=await import('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);})()\"",
-            preview: "npx --yes serve dist --listen 127.0.0.1:4173",
+            dev: "serve . --listen 127.0.0.1:4173",
+            build: "node scripts/build-static.mjs",
+            preview: "serve dist --listen 127.0.0.1:4173",
+          },
+          devDependencies: {
+            serve: "14.2.5",
           },
         },
         null,

@@ -83,13 +83,13 @@ describe("@dohc/sdk", () => {
     await expect(
       client.files.read("/Users/ice/private.md"),
     ).rejects.toMatchObject({
-      code: DohcSdkErrorCodes.badResponse,
+      code: DohcSdkErrorCodes.invalidInput,
       message: "File paths must be workspace-relative. Absolute paths are not allowed.",
     });
     await expect(
       client.files.read("C:\\Users\\ice\\private.md"),
     ).rejects.toMatchObject({
-      code: DohcSdkErrorCodes.badResponse,
+      code: DohcSdkErrorCodes.invalidInput,
     });
     expect(calls).toEqual([]);
   });
