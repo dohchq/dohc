@@ -1424,14 +1424,7 @@ function InvalidSitePathFallback({
     onClose();
   }, [activeTab, onClose]);
 
-  return (
-    <div
-      role="alert"
-      className="flex flex-1 items-center justify-center px-4 text-center text-sm text-danger"
-    >
-      <span>Invalid site path</span>
-    </div>
-  );
+  return null;
 }
 
 function readSelectedText(): string {

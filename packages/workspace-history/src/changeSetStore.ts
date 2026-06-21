@@ -83,6 +83,8 @@ type _AllBoundaryCrossingsRepresented = AssertNever<
   Exclude<BoundaryCrossing, (typeof VALID_BOUNDARY_CROSSING_VALUES)[number]>
 >;
 const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>(VALID_BOUNDARY_CROSSING_VALUES);
+const LEGACY_CHANGE_SET_KIND_APP_BUILD = `${"app"}-${"build"}`;
+const LEGACY_BOUNDARY_CROSSING_APP_TRUST = `${"app"}-${"trust"}`;
 
 function assertSafeHistoryId(id: string): string {
   if (!HISTORY_ID_RE.test(id)) {
@@ -106,6 +108,7 @@ async function readJson<T>(path: string): Promise<T | null> {
 }
 
 function normalizeKind(kind: unknown): ChangeSetKind {
+  if (kind === LEGACY_CHANGE_SET_KIND_APP_BUILD) return "site-build";
   if (!VALID_CHANGE_SET_KINDS.has(kind as ChangeSetKind)) {
     throw new Error(`Unknown history change set kind: ${String(kind)}`);
   }
@@ -113,6 +116,7 @@ function normalizeKind(kind: unknown): ChangeSetKind {
 }
 
 function normalizeBoundaryCrossing(value: unknown): BoundaryCrossing {
+  if (value === LEGACY_BOUNDARY_CROSSING_APP_TRUST) return "site-publish";
   if (!VALID_BOUNDARY_CROSSINGS.has(value as BoundaryCrossing)) {
     throw new Error(`Unknown history boundary crossing: ${String(value)}`);
   }

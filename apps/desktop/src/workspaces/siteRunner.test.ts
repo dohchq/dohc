@@ -135,9 +135,12 @@ describe("startSiteDevServer", () => {
       ],
       readyTimeoutMs: 5000,
     });
-    expect(handle.url).toBe("http://127.0.0.1:43210");
-    expect(handle.logs().some((entry) => entry.text.includes("Local:"))).toBe(true);
-    await handle.stop();
+    try {
+      expect(handle.url).toBe("http://127.0.0.1:43210");
+      expect(handle.logs().some((entry) => entry.text.includes("Local:"))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
   });
 
   it("fails when the child exits before reporting a URL", async () => {

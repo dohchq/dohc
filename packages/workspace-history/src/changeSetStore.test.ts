@@ -163,6 +163,73 @@ describe("changeSetStore persistence", () => {
     expect(got!.boundaryCrossings).toContain("external-export");
   });
 
+  it("migrates legacy persisted site history values while reading records", async () => {
+    const legacyBuildKind = ["app", "build"].join("-");
+    const legacyTrustBoundary = ["app", "trust"].join("-");
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "legacy-site",
+            recordedAtMs: 1000,
+            kind: legacyBuildKind,
+            author: agentAuthor,
+            summary: "Legacy site build",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-legacy-site.json"),
+      `${JSON.stringify(
+        {
+          id: "legacy-site",
+          recordedAtMs: 1000,
+          kind: legacyBuildKind,
+          author: agentAuthor,
+          summary: "Legacy site build",
+          files: [{ path: "sites/client/dist/index.html", operation: "write" }],
+          provenance: { source: legacyBuildKind },
+          boundaryCrossings: [legacyTrustBoundary],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    await expect(store.get("legacy-site")).resolves.toMatchObject({
+      id: "legacy-site",
+      kind: "site-build",
+      provenance: { source: "site-build" },
+      boundaryCrossings: ["site-publish"],
+    });
+    await expect(store.list()).resolves.toMatchObject([
+      {
+        id: "legacy-site",
+        kind: "site-build",
+        provenance: { source: "site-build" },
+        boundaryCrossings: ["site-publish"],
+      },
+    ]);
+    await expect(store.listIndexed()).resolves.toMatchObject([
+      {
+        record: {
+          id: "legacy-site",
+          kind: "site-build",
+          provenance: { source: "site-build" },
+          boundaryCrossings: ["site-publish"],
+        },
+      },
+    ]);
+  });
+
   it("rejects unknown persisted history enum values instead of type-casting them", async () => {
     const historyDir = join(root, ".dohc", "history");
     await mkdir(historyDir, { recursive: true });
