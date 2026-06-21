@@ -64,5 +64,15 @@ export function mergeWorkspaceSettings(
 }
 
 export function workspaceSettingsModified(settings: WorkspaceSettings): boolean {
-  return JSON.stringify(settings) !== JSON.stringify(DEFAULT_WORKSPACE_SETTINGS);
+  return (
+    settings.version !== DEFAULT_WORKSPACE_SETTINGS.version ||
+    settings.agents.mcpAutoStart !== DEFAULT_WORKSPACE_SETTINGS.agents.mcpAutoStart ||
+    settings.agents.defaultDriverId !==
+      DEFAULT_WORKSPACE_SETTINGS.agents.defaultDriverId ||
+    settings.agents.defaultModel !== DEFAULT_WORKSPACE_SETTINGS.agents.defaultModel ||
+    settings.sites.defaultPreviewMode !==
+      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode ||
+    settings.privacy.confirmExternalLinks !==
+      DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks
+  );
 }

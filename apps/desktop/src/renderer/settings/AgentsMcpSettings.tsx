@@ -53,7 +53,7 @@ export function AgentsMcpSettings(props: {
     [],
   );
 
-  const refresh = useCallback(async (version = requestVersionRef.current): Promise<AgentRunStatusResult> => {
+  const refresh = useCallback(async (version: number): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),

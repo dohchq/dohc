@@ -137,6 +137,12 @@ The first settings page should ship with the following sections. Some can be
 read-only or "coming next" placeholders only if they prevent a weird empty
 navigation model, but avoid fake controls that do nothing.
 
+Read-only or deferred rows must look intentionally non-interactive: use muted
+value text, disabled controls only when a control shape is useful, and a short
+explanation of where the real workflow lives or when it becomes editable. Do
+not render active-looking toggles, selects, or buttons for Keyboard, Privacy,
+or Sites placeholders unless clicking them performs a real action.
+
 ### General
 
 - Current workspace name/path.

@@ -99,7 +99,20 @@ export function mergeDesktopUserSettings(
 }
 
 export function userSettingsModified(settings: DesktopUserSettings): boolean {
-  return JSON.stringify(settings) !== JSON.stringify(DEFAULT_USER_SETTINGS);
+  return (
+    settings.version !== DEFAULT_USER_SETTINGS.version ||
+    settings.appearance.themeMode !== DEFAULT_USER_SETTINGS.appearance.themeMode ||
+    settings.appearance.density !== DEFAULT_USER_SETTINGS.appearance.density ||
+    settings.appearance.reduceMotion !== DEFAULT_USER_SETTINGS.appearance.reduceMotion ||
+    settings.general.launchBehavior !== DEFAULT_USER_SETTINGS.general.launchBehavior ||
+    settings.general.defaultWorkspaceRoot !==
+      DEFAULT_USER_SETTINGS.general.defaultWorkspaceRoot ||
+    settings.editor.fontSize !== DEFAULT_USER_SETTINGS.editor.fontSize ||
+    settings.editor.lineWrap !== DEFAULT_USER_SETTINGS.editor.lineWrap ||
+    settings.editor.spellcheck !== DEFAULT_USER_SETTINGS.editor.spellcheck ||
+    settings.notifications.updates !== DEFAULT_USER_SETTINGS.notifications.updates ||
+    settings.notifications.agentRuns !== DEFAULT_USER_SETTINGS.notifications.agentRuns
+  );
 }
 
 export function effectiveThemeMode(
