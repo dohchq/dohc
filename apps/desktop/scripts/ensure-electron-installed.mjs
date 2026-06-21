@@ -15,7 +15,6 @@ function fail(message, error) {
       "",
       "Try one of these repair commands, then rerun pnpm dev:desktop:",
       "  pnpm --filter @dohc/desktop rebuild electron",
-      "  pnpm --filter @dohc/desktop exec install-electron --no",
       "  pnpm install",
     ].join("\n"),
   );

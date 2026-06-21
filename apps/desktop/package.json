@@ -6,8 +6,8 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/ensure-electron-installed.mjs && electron-vite dev",
-    "build": "electron-vite build",
-    "package": "electron-vite build && electron-builder --publish never",
+    "build": "node scripts/ensure-electron-installed.mjs && electron-vite build",
+    "package": "node scripts/ensure-electron-installed.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:fuses": "node scripts/fuse-smoke.mjs",
     "test": "vitest run",
