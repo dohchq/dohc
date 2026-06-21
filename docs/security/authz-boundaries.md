@@ -56,9 +56,10 @@ be weakened by rebrand or UI work.
   navigation remains locked down; external sharing/publishing is a separate
   dohc Cloud decision.
 - Source-like files under a `sites/` path segment (`.ts`, `.tsx`, `.js`,
-  `.css`, `.json`, `.html`) collab as plain text. This is path-dependent:
-  `isPlainTextAtomPath()` requires both the `sites/` segment and the extension
-  match. Matching extensions elsewhere remain normal workspace files.
+  `.jsx`, `.css`, `.scss`, `.json`, `.htm`, `.html`) collab as plain text.
+  This is path-dependent: `isPlainTextAtomPath()` requires both the `sites/`
+  segment and the extension match. Matching extensions elsewhere remain normal
+  workspace files.
 - `@dohc/sdk` access is separate from merely rendering a site. The first
   preview bridge supports bounded local file reads through the desktop
   `readWorkspaceText` IPC path; browser code cannot choose an identity or

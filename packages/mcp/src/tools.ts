@@ -1613,6 +1613,8 @@ p {
             // Scaffolded previews use Node's package runner so they work in
             // the same runtime agents already use for generated web projects.
             dev: "npx --yes serve . --listen 127.0.0.1:4173",
+            // Keep the static build self-contained and dependency-free instead
+            // of generating an extra build helper file.
             build:
               "node -e \"(async()=>{const fs=await import('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true});for (const f of ['index.html','styles.css','script.js']) if (fs.existsSync(f)) fs.copyFileSync(f,'dist/'+f);})()\"",
             preview: "npx --yes serve dist --listen 127.0.0.1:4173",

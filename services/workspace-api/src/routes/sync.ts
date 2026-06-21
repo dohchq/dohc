@@ -54,6 +54,11 @@ export type SyncOpResult = {
 };
 
 const MAX_SYNC_ASSET_BYTES = 10 * 1024 * 1024;
+const APPROVAL_ERROR_REASONS = new Set([
+  "approval required",
+  "approval-required",
+  "site-publish-required",
+]);
 
 export async function applyWorkspaceSync(
   backend: WorkspaceBackend,
@@ -103,6 +108,10 @@ function operationPath(operation: WorkspaceSyncOperation): string {
 }
 
 function errorMessage(error: unknown): string {
+  if (typeof error === "object" && error && "code" in error) {
+    const code = String((error as { code?: unknown }).code);
+    if (APPROVAL_ERROR_REASONS.has(code)) return code;
+  }
   if (error instanceof Error) return error.message;
   return String(error);
 }

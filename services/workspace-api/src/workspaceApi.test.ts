@@ -107,6 +107,11 @@ function memoryBackend() {
     },
     async deleteFile(resolvedActor, path, expectedRevision) {
       calls.push({ method: "deleteFile", input: { path, expectedRevision }, actor: resolvedActor });
+      if (path === "shared/locked.md") {
+        const error = new Error("approval required for locked/shared file");
+        (error as Error & { code?: string }).code = "approval-required";
+        throw error;
+      }
       text.delete(path);
       assets.delete(path);
     },
@@ -424,6 +429,37 @@ describe("workspace API service", () => {
     // The failed op left the original atom untouched; the later op still landed.
     expect(fixture.text.get("notes/day.md")).toEqual({ body: "# Day\n", revision: "rev-1" });
     expect(fixture.text.get("notes/new.md")?.body).toBe("# New");
+  });
+
+  it("returns canonical approval codes for per-op sync approval failures", async () => {
+    const fixture = memoryBackend();
+    fixture.text.set("shared/locked.md", { body: "# Locked\n", revision: "rev-locked" });
+    const handler = createWorkspaceApiHandler({
+      backend: fixture.backend,
+      resolveActor: async (_request, workspaceId) => ({ userId: "server_user", workspaceId }),
+    });
+
+    const response = await handler(new Request("http://api.test/workspaces/ws_api/sync/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        operations: [
+          { op: "delete", path: "shared/locked.md", expectedRevision: "rev-locked" },
+        ],
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(json(response)).resolves.toMatchObject({
+      ok: true,
+      applied: 0,
+      results: [
+        {
+          path: "shared/locked.md",
+          ok: false,
+          error: "approval-required",
+        },
+      ],
+    });
   });
 
   it("routes a binary update through updateAsset, not saveAsset", async () => {
