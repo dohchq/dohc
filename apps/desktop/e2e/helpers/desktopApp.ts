@@ -93,7 +93,7 @@ export async function launchDesktopApp(input: {
     processHandle.stdout?.on("data", onStdoutData);
     processHandle.stderr?.on("data", onStderrData);
 
-    const page = await app.firstWindow();
+    const page = await app.firstWindow({ timeout: 10_000 });
     page.on("console", (message) => {
       logs.push({
         source: "renderer",

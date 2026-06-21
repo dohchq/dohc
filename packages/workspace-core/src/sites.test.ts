@@ -108,8 +108,8 @@ describe("discoverSites", () => {
         body: JSON.stringify({
           type: "site",
           title: "Research Portal",
-          preview: { mode: "dev", command: "pnpm dev", entry: "index.html" },
-          build: { command: "pnpm build", output: "public-dist" },
+          preview: { mode: "dev", command: "pnpm dev", entry: "./index.html" },
+          build: { command: "pnpm build", output: "public/./dist" },
         }),
       },
       {
@@ -133,7 +133,7 @@ describe("discoverSites", () => {
       packageManager: "bun",
       configPath: "research/site/dohc.json",
       scripts: { dev: "pnpm dev", build: "pnpm build" },
-      buildOutputs: ["public-dist"],
+      buildOutputs: ["public/dist"],
       diagnostics: [],
     });
   });

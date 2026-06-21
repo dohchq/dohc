@@ -237,15 +237,11 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
 }
 
 function safeRelativeConfigPath(value: string): string | undefined {
-  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\")) {
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
     return undefined;
   }
   const normalized = normalizeWorkspacePath(value);
-  if (!normalized || normalized !== value.replaceAll("\\", "/").replace(/^\/+/, "")) {
-    return undefined;
-  }
-  if (normalized.startsWith("../") || normalized === "..") return undefined;
-  return normalized === "" ? undefined : normalized;
+  return normalized ?? undefined;
 }
 
 function parsePreview(

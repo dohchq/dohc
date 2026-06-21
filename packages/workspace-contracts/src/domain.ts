@@ -44,7 +44,9 @@ export function normalizeAtomKind(kind: unknown): AtomKind {
   const normalized = kind === LEGACY_ATOM_KIND_APP_SOURCE ? "text" : kind;
   const parsed = AtomKind.safeParse(normalized);
   if (!parsed.success) {
-    throw new Error(`Unknown atom kind: ${String(kind)}`);
+    throw new Error(
+      `Unknown atom kind: ${String(kind)}. Valid kinds: ${AtomKind.options.join(", ")}`,
+    );
   }
   return parsed.data;
 }

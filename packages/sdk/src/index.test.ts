@@ -91,6 +91,16 @@ describe("@dohc/sdk", () => {
     ).rejects.toMatchObject({
       code: DohcSdkErrorCodes.invalidInput,
     });
+    await expect(
+      client.files.read("file:///Users/ice/private.md"),
+    ).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.invalidInput,
+    });
+    await expect(
+      client.files.read("https://example.com/private.md"),
+    ).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.invalidInput,
+    });
     expect(calls).toEqual([]);
   });
 

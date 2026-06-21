@@ -361,7 +361,8 @@ function isAbsoluteWorkspacePath(path: string): boolean {
   return (
     path.startsWith("/") ||
     path.startsWith("\\") ||
-    /^[A-Za-z]:[\\/]/.test(path)
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(path)
   );
 }
 
