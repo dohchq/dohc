@@ -2,8 +2,8 @@ import {
   Bot,
   Cloud,
   Files,
+  Globe2,
   History,
-  LayoutGrid,
   Search,
   Settings,
   Workflow,
@@ -20,7 +20,7 @@ const ICONS: Record<ViewId, typeof Files> = {
   explorer: Files,
   search: Search,
   graph: Workflow,
-  apps: LayoutGrid,
+  sites: Globe2,
   agent: Bot,
   history: History,
 };
@@ -29,7 +29,7 @@ const LABELS: Record<ViewId, string> = {
   explorer: "Explorer",
   search: "Search",
   graph: "Graph",
-  apps: "Apps",
+  sites: "Sites",
   agent: "Agent",
   history: "History",
 };

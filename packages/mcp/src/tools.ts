@@ -3,19 +3,29 @@
 // path argument is validated through validateUserWritePath before it touches
 // the filesystem — traversal (../, percent-encoded, the reserved .dohc dir)
 // is rejected here, the #1 security requirement. Writes are scoped to the root
-// and never auto-trust an app or auto-apply a boundary crossing.
+// and never auto-apply a boundary crossing.
 
 import {
   addFileChanges,
   createChangeSet,
   databaseSyncStrategy,
+  frameworkConfigName,
   hasIgnoredSegment,
+  hasWebDependency,
   mediaTypeForPath,
+  packageManagerFromFiles,
   validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
   type ChangeSetKind,
+  type DohcSiteConfig,
   type FileChange,
+  type PackageJson,
+  type SiteConfidence,
+  type SiteDiagnostic,
+  type SiteKind,
+  type SiteScripts,
+  type WorkspaceSite,
 } from "@dohc/workspace-core";
 import {
   createChangeSetStore,
@@ -29,7 +39,6 @@ import {
   type FetchLike,
   type MergeSyncResult,
 } from "@dohc/workspace-sync";
-import { runStaticAppCheck } from "@dohc/app-tester/static";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
@@ -44,6 +53,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
+import { hasLegacyAppImport } from "./sourceScanner";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -51,6 +61,10 @@ export interface ToolContext {
   root: string;
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
+  // Desktop/package launcher-owned SDK metadata. add_sdk must not infer this
+  // from the MCP build output path because packaged layouts can differ.
+  sdkPackageJsonPath?: string;
+  sdkDependencyRange?: string;
 }
 
 const MCP_AUTHOR: ChangeAuthor = {
@@ -1186,110 +1200,790 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
   return { ok: true as const, change: changeSummary(record, true) };
 }
 
-// --- dohc_create_app --------------------------------------------------------
+// --- dohc site tools --------------------------------------------------------
 
-// Scaffolds <area>/.apps/<name>/{app.json,src/App.tsx} through the safe write
-// path. NEVER marks the app trusted — trust is the user's explicit Phase 7
-// gate, granted only after AppTester passes in the desktop.
-export async function createApp(
+type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
+  Record<string, unknown>;
+
+type SiteCheck = {
+  name: string;
+  ok: boolean;
+  message?: string;
+  path?: string;
+};
+
+const LEGACY_APPS_SEGMENT = `.${"apps"}`;
+const SITE_SCAN_IGNORED_NAMES = new Set([
+  ".cache",
+  ".dohc",
+  ".git",
+  ".next",
+  ".nuxt",
+  ".pnpm-store",
+  ".svelte-kit",
+  ".turbo",
+  ".vite",
+  ".yarn",
+  "coverage",
+  "node_modules",
+]);
+const SITE_BUILD_OUTPUT_NAMES = ["dist", "build", "out"];
+const SITE_SOURCE_EXTENSIONS = new Set([
+  ".html",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".mts",
+  ".cts",
+  ".ts",
+  ".tsx",
+  ".css",
+]);
+const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
+const MAX_SITE_SCAN_DEPTH = 100;
+let cachedDohcSdkDependencyRange: {
+  packageJsonPath: string;
+  mtimeMs: number;
+  range: string;
+} | null = null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function relativeJoin(prefix: string, name: string): string {
+  return prefix && prefix !== "." ? `${prefix}/${name}` : name;
+}
+
+function hasLegacyAppsSegment(path: string): boolean {
+  return path
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .some((segment) => segment.toLowerCase() === LEGACY_APPS_SEGMENT);
+}
+
+function sitePathAllowed(path: string): { ok: true } | { ok: false; reason: string } {
+  if (hasLegacyAppsSegment(path)) {
+    return { ok: false, reason: `site tools do not operate on legacy ${LEGACY_APPS_SEGMENT} paths` };
+  }
+  return { ok: true };
+}
+
+function isIgnoredSitePath(path: string): boolean {
+  if (!path) return false;
+  if (hasIgnoredSegment(path) || hasLegacyAppsSegment(path)) return true;
+  return path
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => SITE_SCAN_IGNORED_NAMES.has(segment.toLowerCase()));
+}
+
+function siteTitleFromPath(root: string): string {
+  const name = basename(root) || "Site";
+  return name
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function packageNameFromPath(root: string): string {
+  const name = basename(root) || "site";
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "site";
+}
+
+function readPackageScripts(pkg: PackageJson | null): SiteScripts {
+  if (!pkg || !isRecord(pkg.scripts)) return {};
+  const scripts: SiteScripts = {};
+  for (const key of ["dev", "start", "build", "preview"] as const) {
+    const value = pkg.scripts[key];
+    if (typeof value === "string" && value.trim()) scripts[key] = value;
+  }
+  return scripts;
+}
+
+function configString(value: unknown, key: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const found = value[key];
+  return typeof found === "string" && found.trim() ? found : undefined;
+}
+
+async function readJsonDetailed<T>(
+  absolute: string,
+): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
+  try {
+    return { ok: true, value: JSON.parse(await readFile(absolute, "utf8")) as T };
+  } catch (error) {
+    return { ok: false, reason: failureReason(error, "invalid JSON") };
+  }
+}
+
+async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
+  const explicitRange = ctx.sdkDependencyRange?.trim();
+  if (explicitRange) return explicitRange;
+
+  const packageJsonPath = ctx.sdkPackageJsonPath?.trim();
+  if (!packageJsonPath) {
+    throw new Error(
+      "MCP server configuration is missing @dohc/sdk package metadata; launch with --sdk-package-json or set DOHC_SDK_PACKAGE_JSON",
+    );
+  }
+
+  const packageStat = await stat(packageJsonPath);
+  if (
+    cachedDohcSdkDependencyRange?.packageJsonPath === packageJsonPath &&
+    cachedDohcSdkDependencyRange.mtimeMs === packageStat.mtimeMs
+  ) {
+    return cachedDohcSdkDependencyRange.range;
+  }
+
+  const pkg = await readJson<{ version?: unknown }>(packageJsonPath);
+  const version = typeof pkg?.version === "string" ? pkg.version.trim() : "";
+  if (!version) {
+    throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
+  }
+  const range = `^${version}`;
+  cachedDohcSdkDependencyRange = { packageJsonPath, mtimeMs: packageStat.mtimeMs, range };
+  return range;
+}
+
+async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
+  let dirents;
+  try {
+    dirents = await readdir(absolute, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const files = new Set(dirents.filter((dirent) => dirent.isFile()).map((dirent) => dirent.name));
+  const directories = new Set(
+    dirents.filter((dirent) => dirent.isDirectory()).map((dirent) => dirent.name),
+  );
+  const allNames = new Set([...files, ...directories]);
+  const diagnostics: SiteDiagnostic[] = [];
+  const configPath = files.has("dohc.json") ? relativeJoin(root, "dohc.json") : undefined;
+  let config: RawDohcSiteConfig | null = null;
+  if (configPath) {
+    const parsed = await readJsonDetailed<RawDohcSiteConfig>(join(ctx.root, configPath));
+    if (parsed.ok) {
+      config = parsed.value;
+    } else {
+      diagnostics.push({
+        severity: "error",
+        code: "invalid_dohc_json",
+        path: configPath,
+        message: parsed.reason,
+      });
+    }
+  }
+
+  let pkg: PackageJson | null = null;
+  if (files.has("package.json")) {
+    const parsed = await readJsonDetailed<PackageJson>(join(absolute, "package.json"));
+    if (parsed.ok) {
+      pkg = parsed.value;
+    } else {
+      diagnostics.push({
+        severity: "error",
+        code: "invalid_package_json",
+        path: relativeJoin(root, "package.json"),
+        message: parsed.reason,
+      });
+    }
+  }
+
+  const scripts = readPackageScripts(pkg);
+  const configPreviewCommand = configString(config?.preview, "command");
+  const configPreviewMode = configString(config?.preview, "mode");
+  if (configPreviewCommand) {
+    if (configPreviewMode === "dev") scripts.dev = configPreviewCommand;
+    else scripts.preview = configPreviewCommand;
+  }
+  const configBuildCommand = configString(config?.build, "command");
+  if (configBuildCommand) scripts.build = configBuildCommand;
+
+  const frameworkConfig = frameworkConfigName(files);
+  const hasIndex = files.has("index.html");
+  const hasPackageSignal =
+    files.has("package.json") &&
+    (Object.keys(scripts).length > 0 || Boolean(frameworkConfig) || hasWebDependency(pkg));
+  const buildOutputs = [
+    configString(config?.build, "output"),
+    ...SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name)),
+  ].filter((output): output is string => typeof output === "string" && output.length > 0);
+  const uniqueBuildOutputs = [...new Set(buildOutputs)];
+  const explicitNonSite = config?.type !== undefined && config.type !== "site";
+
+  if (
+    explicitNonSite &&
+    !hasIndex &&
+    !hasPackageSignal &&
+    !frameworkConfig &&
+    uniqueBuildOutputs.length === 0
+  ) {
+    return null;
+  }
+  if (explicitNonSite) {
+    diagnostics.push({
+      severity: "warning",
+      code: "unexpected_dohc_type",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json has website signals but its type is not \"site\".",
+    });
+  }
+
+  if (!configPath && !hasIndex && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
+    return null;
+  }
+
+  const kind: SiteKind = configPath ? "configured" : hasPackageSignal || frameworkConfig ? "package" : "static";
+  const confidence: SiteConfidence =
+    configPath && diagnostics.every((diagnostic) => diagnostic.severity !== "error")
+      ? "high"
+      : hasIndex && (hasPackageSignal || frameworkConfig)
+        ? "high"
+        : hasIndex || hasPackageSignal || frameworkConfig
+          ? "medium"
+          : "low";
+  const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
+  const packageTitle = typeof pkg?.name === "string" && pkg.name.trim() ? pkg.name : undefined;
+  let builtEntry: string | undefined;
+  for (const name of SITE_BUILD_OUTPUT_NAMES) {
+    if (!directories.has(name)) continue;
+    const candidate = join(absolute, name, "index.html");
+    if (await stat(candidate).catch(() => null)) {
+      builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
+      break;
+    }
+  }
+  const entry = hasIndex ? relativeJoin(root, "index.html") : builtEntry;
+  const packageManager = packageManagerFromFiles(allNames, pkg);
+
+  return {
+    root,
+    title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
+    kind,
+    confidence,
+    ...(entry ? { entry } : {}),
+    ...(packageManager ? { packageManager } : {}),
+    scripts,
+    buildOutputs: uniqueBuildOutputs,
+    ...(configPath ? { configPath } : {}),
+    diagnostics,
+  };
+}
+
+export async function detectSites(
   ctx: ToolContext,
-  args: { area: string; name: string; title?: string },
-) {
-  const appRoot = args.area
-    ? `${args.area}/.apps/${args.name}`
-    : `.apps/${args.name}`;
-  const manifestPath = `${appRoot}/app.json`;
-  const entryPath = `${appRoot}/src/App.tsx`;
+  args: { path?: string; maxDepth?: number } = {},
+): Promise<{ ok: true; sites: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
+  const start =
+    args.path && args.path.trim().length > 0
+      ? await safeResolve(ctx, args.path)
+      : { ok: true as const, absolute: ctx.root, normalized: "" };
+  if (!start.ok) return { ok: false as const, reason: start.reason };
+  const allowed = sitePathAllowed(start.normalized);
+  if (!allowed.ok) return allowed;
 
-  const manifest = await safeResolve(ctx, manifestPath);
-  if (!manifest.ok) return { ok: false as const, reason: manifest.reason };
-  const entry = await safeResolve(ctx, entryPath);
-  if (!entry.ok) return { ok: false as const, reason: entry.reason };
+  const info = await lstat(start.absolute).catch(() => null);
+  if (!info) return { ok: false as const, reason: `path not found: ${args.path ?? "."}` };
+  if (!info.isDirectory()) return { ok: false as const, reason: `not a directory: ${args.path ?? "."}` };
+
+  const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
+  const sites: WorkspaceSite[] = [];
+  async function walk(absolute: string, root: string, depth: number): Promise<void> {
+    if (isIgnoredSitePath(root)) return;
+    const site = await detectSiteAt(ctx, absolute, root);
+    if (site) sites.push(site);
+    if (depth >= maxDepth) return;
+
+    let dirents;
+    try {
+      dirents = await readdir(absolute, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory() || dirent.isSymbolicLink()) continue;
+      const childRoot = relativeJoin(root, dirent.name);
+      if (isIgnoredSitePath(childRoot)) continue;
+      await walk(join(absolute, dirent.name), childRoot, depth + 1);
+    }
+  }
+
+  await walk(start.absolute, start.normalized, 0);
+  sites.sort((a, b) => a.root.localeCompare(b.root));
+  return { ok: true as const, sites, count: sites.length, detector: "mcp-local" };
+}
+
+export async function createSite(
+  ctx: ToolContext,
+  args: { path: string; title?: string; withDohcJson?: boolean },
+) {
+  const root = await safeResolve(ctx, args.path);
+  if (!root.ok) return { ok: false as const, reason: root.reason };
+  if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
+  const allowed = sitePathAllowed(root.normalized);
+  if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
-  const appJson = {
-    ...(args.title ? { title: args.title } : {}),
-    entry: "src/App.tsx",
-    read: ["."],
-    write: [] as string[],
-    network: false as const,
-  };
-  const safeName = JSON.stringify(args.name);
-  const source = `import { App } from "@dohc/app";\n\nexport default App(() => <div>{${safeName}}</div>);\n`;
+  const existing = await lstat(root.absolute).catch(() => null);
+  if (existing && !existing.isDirectory()) {
+    return { ok: false as const, reason: `site path is not a directory: ${root.normalized}` };
+  }
+  if (existing) {
+    const entries = await readdir(root.absolute);
+    if (entries.length > 0) {
+      return { ok: false as const, reason: `site folder already exists and is not empty: ${root.normalized}` };
+    }
+  }
 
-  await mkdir(dirname(manifest.absolute), { recursive: true });
-  await writeFile(manifest.absolute, `${JSON.stringify(appJson, null, 2)}\n`, { flag: "wx" });
-  await mkdir(dirname(entry.absolute), { recursive: true });
-  await writeFile(entry.absolute, source, { flag: "wx" });
+  const title = args.title?.trim() || siteTitleFromPath(root.normalized);
+  const packageName = packageNameFromPath(root.normalized);
+  const files = [
+    {
+      path: relativeJoin(root.normalized, "index.html"),
+      content: `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(title)}</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Fresh Site</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p>A clean local page, ready for the shape of the work.</p>
+    </main>
+    <script type="module" src="./script.js"></script>
+  </body>
+</html>
+`,
+    },
+    {
+      path: relativeJoin(root.normalized, "styles.css"),
+      content: `:root {
+  color: #151515;
+  background: #f7f6f1;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+main {
+  width: min(720px, calc(100vw - 48px));
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #66635d;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 4rem;
+  line-height: 0.96;
+}
+
+p {
+  max-width: 56ch;
+  font-size: 1.08rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  h1 {
+    font-size: 2.25rem;
+  }
+}
+`,
+    },
+    {
+      path: relativeJoin(root.normalized, "script.js"),
+      content: `document.documentElement.dataset.siteReady = "true";
+`,
+    },
+    {
+      path: relativeJoin(root.normalized, "scripts/build-static.mjs"),
+      content: `import { existsSync } from "node:fs";
+import { copyFile, mkdir, rm } from "node:fs/promises";
+
+await rm("dist", { recursive: true, force: true });
+await mkdir("dist", { recursive: true });
+
+for (const file of ["index.html", "styles.css", "script.js"]) {
+  if (existsSync(file)) await copyFile(file, \`dist/\${file}\`);
+}
+`,
+    },
+    {
+      path: relativeJoin(root.normalized, "package.json"),
+      content: `${JSON.stringify(
+        {
+          name: packageName,
+          private: true,
+          type: "module",
+          engines: {
+            node: ">=14.8.0",
+          },
+          scripts: {
+            dev: "serve . --listen 127.0.0.1:4173",
+            build: "node scripts/build-static.mjs",
+            preview: "serve dist --listen 127.0.0.1:4173",
+          },
+          devDependencies: {
+            serve: "14.2.6",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    },
+    ...(args.withDohcJson === false
+      ? []
+      : [
+          {
+            path: relativeJoin(root.normalized, "dohc.json"),
+            content: `${JSON.stringify(
+              {
+                type: "site",
+                title,
+                preview: { mode: "static", entry: "index.html" },
+                build: { command: "npm run build", output: "dist" },
+              },
+              null,
+              2,
+            )}\n`,
+          },
+        ]),
+  ];
+
+  const resolvedFiles = [];
+  for (const file of files) {
+    const resolved = await safeResolve(ctx, file.path);
+    if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+    const fileAllowed = sitePathAllowed(resolved.normalized);
+    if (!fileAllowed.ok) return fileAllowed;
+    if (
+      resolved.normalized !== root.normalized &&
+      !resolved.normalized.startsWith(`${root.normalized}/`)
+    ) {
+      return { ok: false as const, reason: `not inside site: ${file.path}` };
+    }
+    if (await lstat(resolved.absolute).catch(() => null)) {
+      return { ok: false as const, reason: `file already exists: ${resolved.normalized}` };
+    }
+    resolvedFiles.push({ ...file, ...resolved });
+  }
+
+  await mkdir(root.absolute, { recursive: true });
+  for (const file of resolvedFiles) {
+    await mkdir(dirname(file.absolute), { recursive: true });
+    await writeFile(file.absolute, file.content, { flag: "wx" });
+  }
   const record = await recordChange(ctx, {
-    files: [
-      { path: manifest.normalized, operation: "write" },
-      { path: entry.normalized, operation: "write" },
-    ],
-    summary: `MCP created app ${args.name}`,
+    files: resolvedFiles.map((file) => ({ path: file.normalized, operation: "write" })),
+    summary: `MCP created site ${root.normalized}`,
   });
 
   return {
     ok: true as const,
-    appRoot: manifest.normalized.slice(0, -"/app.json".length),
-    files: [manifest.normalized, entry.normalized],
-    // Explicit: scaffolding never confers trust. The desktop must test then the
-    // user must grant trust before this app can run trusted.
-    trusted: false,
+    siteRoot: root.normalized,
+    files: resolvedFiles.map((file) => file.normalized),
     changeSetId: record.id,
     recordedAtMs: record.recordedAtMs,
   };
 }
 
-// --- dohc_test_app ----------------------------------------------------------
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
-const MAX_TEST_APP_BYTES = 2 * 1024 * 1024;
+async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
+  const root = await safeResolve(ctx, siteRoot);
+  if (!root.ok) return root;
+  const allowed = sitePathAllowed(root.normalized);
+  if (!allowed.ok) return allowed;
+  const info = await lstat(root.absolute).catch(() => null);
+  if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
+  if (!info.isDirectory()) return { ok: false as const, reason: `site root is not a directory: ${siteRoot}` };
+  return root;
+}
 
-// Runs the Playwright-free static AppTester over an app's source files (the
-// caller supplies the relative source paths it wants checked, each contained).
-export async function testApp(
-  ctx: ToolContext,
-  args: { appRoot: string; sourcePaths: string[] },
-) {
-  const root = await safeResolve(ctx, args.appRoot);
-  if (!root.ok) return { ok: false as const, reason: root.reason };
+export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
+  const root = await resolveSiteRoot(ctx, args.siteRoot);
+  if (!root.ok) return root;
+  const site = await detectSiteAt(ctx, root.absolute, root.normalized);
+  if (!site) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
 
-  const files: Array<{ relativePath: string; body: string }> = [];
-  // Bound total source so an agent can't point the transpiler at huge files
-  // and burn memory/CPU. The static check is for app sources, not data dumps.
-  let totalBytes = 0;
-  for (const rel of args.sourcePaths) {
-    const resolved = await safeResolve(ctx, rel);
-    if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    // The path must live inside the app root — no smuggling foreign source.
-    if (
-      resolved.normalized !== root.normalized &&
-      !resolved.normalized.startsWith(`${root.normalized}/`)
-    ) {
-      return { ok: false as const, reason: `not inside app: ${rel}` };
-    }
-    let body: string;
-    try {
-      body = await readFile(resolved.absolute, "utf8");
-    } catch (error) {
-      return {
-        ok: false as const,
-        reason: failureReason(error, `failed to read source: ${rel}`),
-      };
-    }
-    totalBytes += Buffer.byteLength(body, "utf8");
-    if (totalBytes > MAX_TEST_APP_BYTES) {
-      return { ok: false as const, reason: "app source too large to test (>2MB)" };
-    }
-    files.push({
-      relativePath: resolved.normalized.slice(root.normalized.length + 1),
-      body,
+  const checks: SiteCheck[] = [];
+  checks.push({
+    name: "detected-site",
+    ok: true,
+    path: root.normalized,
+    message: `${site.kind} site detected with ${site.confidence} confidence.`,
+  });
+  for (const diagnostic of site.diagnostics) {
+    checks.push({
+      name: diagnostic.code,
+      ok: diagnostic.severity !== "error",
+      path: diagnostic.path,
+      message: diagnostic.message,
     });
   }
 
-  const result = runStaticAppCheck(files);
-  return { ok: result.ok, checks: result.checks };
+  if (site.entry) {
+    const entry = await safeResolve(ctx, site.entry);
+    const exists = entry.ok && Boolean(await lstat(entry.absolute).catch(() => null));
+    checks.push({
+      name: "entry-file",
+      ok: exists,
+      path: site.entry,
+      message: exists ? "Entry file exists." : "Entry file is missing.",
+    });
+  } else if (!site.scripts.dev && !site.scripts.start && !site.scripts.build) {
+    checks.push({
+      name: "entry-or-script",
+      ok: false,
+      path: root.normalized,
+      message: "Site needs an index.html entry or a package script.",
+    });
+  }
+
+  const legacyImport = await findLegacyAppImport(root.absolute, root.normalized);
+  checks.push(
+    legacyImport
+      ? {
+          name: "no-legacy-sdk-import",
+          ok: false,
+          path: legacyImport.path,
+          message:
+            legacyImport.reason === "too-large"
+              ? "Site source is too large for MCP static validation."
+              : "Sites must use normal web files or @dohc/sdk, not the legacy app SDK.",
+        }
+      : {
+          name: "no-legacy-sdk-import",
+          ok: true,
+          message: "No legacy app SDK import found in scanned site source.",
+        },
+  );
+
+  const ok = checks.every((check) => check.ok);
+  return { ok, site, checks };
+}
+
+async function findLegacyAppImport(
+  absolute: string,
+  root: string,
+): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
+  let totalBytes = 0;
+  async function walk(
+    currentAbsolute: string,
+    currentRoot: string,
+    depth: number,
+  ): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
+    if (depth > MAX_SITE_SCAN_DEPTH) return null;
+    if (isIgnoredSitePath(currentRoot)) return null;
+    let dirents;
+    try {
+      dirents = await readdir(currentAbsolute, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const dirent of dirents) {
+      const rel = relativeJoin(currentRoot, dirent.name);
+      if (dirent.isSymbolicLink() || isIgnoredSitePath(rel)) continue;
+      const child = join(currentAbsolute, dirent.name);
+      if (dirent.isDirectory()) {
+        const found = await walk(child, rel, depth + 1);
+        if (found) return found;
+        continue;
+      }
+      if (!dirent.isFile() || !SITE_SOURCE_EXTENSIONS.has(fileExtension(dirent.name))) continue;
+      const info = await stat(child);
+      if (totalBytes + info.size > MAX_SITE_TEST_BYTES) {
+        return { path: rel, reason: "too-large" };
+      }
+      totalBytes += info.size;
+      if (hasLegacyAppImport(await readFile(child, "utf8"))) {
+        return { path: rel, reason: "legacy-import" };
+      }
+    }
+    return null;
+  }
+  return walk(absolute, root, 0);
+}
+
+function fileExtension(path: string): string {
+  const index = path.lastIndexOf(".");
+  return index >= 0 ? path.slice(index).toLowerCase() : "";
+}
+
+export async function buildSite(ctx: ToolContext, args: { siteRoot: string }) {
+  const tested = await testSite(ctx, args);
+  if (!tested.ok) return tested;
+  const site = tested.site;
+  const command = site.scripts.build;
+  const output = site.buildOutputs[0] ?? (command ? "dist" : site.root);
+  return {
+    ok: true as const,
+    status: command ? "planned" : "static-ready",
+    siteRoot: site.root,
+    command,
+    output,
+    message: command
+      ? "Build command detected. MCP build execution is not wired yet; run this command in the site folder."
+      : "No build command detected; the site can be previewed directly as static files.",
+    checks: tested.checks,
+  };
+}
+
+function previewModesForSite(site: WorkspaceSite) {
+  const modes = [];
+  if (site.entry) {
+    modes.push({ mode: "static" as const, entry: site.entry });
+  }
+  if (site.scripts.dev || site.scripts.start) {
+    modes.push({
+      mode: "dev" as const,
+      command: site.scripts.dev ? "dev" : "start",
+      script: site.scripts.dev ?? site.scripts.start,
+      packageManager: site.packageManager ?? "npm",
+    });
+  }
+  if (site.scripts.build || site.buildOutputs.length > 0) {
+    modes.push({
+      mode: "build" as const,
+      command: site.scripts.build,
+      output: site.buildOutputs[0] ?? "dist",
+      packageManager: site.packageManager ?? "npm",
+    });
+  }
+  return modes;
+}
+
+export async function previewSite(ctx: ToolContext, args: { siteRoot: string }) {
+  const tested = await testSite(ctx, args);
+  if (!tested.ok) return tested;
+  const site = tested.site;
+  const modes = previewModesForSite(site);
+  return {
+    ok: true as const,
+    siteRoot: site.root,
+    modes,
+    message:
+      modes.length > 0
+        ? "Open this site in the dohc Sites panel to run the preview."
+        : "No preview mode is available yet.",
+    checks: tested.checks,
+  };
+}
+
+function ensureObject(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? { ...value } : {};
+}
+
+export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
+  const root = await resolveSiteRoot(ctx, args.siteRoot);
+  if (!root.ok) return root;
+  const recordable = await ensureRecordable(ctx);
+  if (recordable) return recordable;
+
+  const packagePath = join(root.absolute, "package.json");
+  const existingBytes = await readFile(packagePath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  const expectedPackageSha256 = sha256(existingBytes ?? new Uint8Array());
+  let existing: PackageJson | null = null;
+  if (existingBytes) {
+    try {
+      existing = JSON.parse(existingBytes.toString("utf8")) as PackageJson;
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason: `invalid package.json at ${relativeJoin(root.normalized, "package.json")}: ${failureReason(error, "invalid JSON")}`,
+      };
+    }
+  }
+  const packageJson = ensureObject(existing);
+  packageJson.private = packageJson.private ?? true;
+  packageJson.type = packageJson.type ?? "module";
+  packageJson.name =
+    typeof packageJson.name === "string" && packageJson.name.trim()
+      ? packageJson.name
+      : packageNameFromPath(root.normalized);
+  let sdkRange: string;
+  try {
+    sdkRange = await dohcSdkDependencyRange(ctx);
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: failureReason(error, "unable to resolve @dohc/sdk dependency range"),
+    };
+  }
+  const dependencies = ensureObject(packageJson.dependencies);
+  dependencies["@dohc/sdk"] = sdkRange;
+  packageJson.dependencies = dependencies;
+
+  const normalizedPackagePath = relativeJoin(root.normalized, "package.json");
+  const written = await writeWorkspaceFile(ctx, {
+    path: normalizedPackagePath,
+    content: `${JSON.stringify(packageJson, null, 2)}\n`,
+    expectedSha256: expectedPackageSha256,
+    summary: `MCP added @dohc/sdk to ${root.normalized}`,
+  });
+  if (!written.ok) return written;
+
+  return {
+    ok: true as const,
+    siteRoot: root.normalized,
+    packagePath: normalizedPackagePath,
+    dependency: "@dohc/sdk",
+    changeSetId: written.changeSetId,
+    recordedAtMs: written.recordedAtMs,
+    usage: `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
+  };
+}
+
+export async function publishSite(ctx: ToolContext, args: { siteRoot: string }) {
+  const tested = await testSite(ctx, args);
+  if (!tested.ok) return tested;
+  const site = tested.site;
+  return {
+    ok: false as const,
+    status: "review-required",
+    siteRoot: site.root,
+    reason:
+      "Site publish/share is a dohc Cloud boundary and is not wired in this local MCP tool yet.",
+    review: {
+      siteRoot: site.root,
+      modes: previewModesForSite(site),
+      includesSharedWithMe: site.root === "shared-with-me" || site.root.startsWith("shared-with-me/"),
+    },
+    checks: tested.checks,
+  };
 }
 
 // --- dohc_import_data -------------------------------------------------------

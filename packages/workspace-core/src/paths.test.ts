@@ -8,6 +8,7 @@ import {
   validateWorkspaceRootChoice,
   validateUserWritePath,
   hasIgnoredSegment,
+  isSiteSourcePath,
 } from "./paths";
 
 describe("workspace roots", () => {
@@ -55,6 +56,16 @@ describe("reserved paths", () => {
 
   it("rejects user writes into reserved space", () => {
     const result = validateUserWritePath(".dohc/manifest.json");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("reserved");
+  });
+
+  it("reserves the top-level shared-with-me sync folder", () => {
+    expect(isReservedPath("shared-with-me/alex/brief.md")).toBe(true);
+    expect(isReservedPath("Shared-With-Me./alex/brief.md")).toBe(true);
+    expect(isReservedPath("notes/shared-with-me/brief.md")).toBe(false);
+
+    const result = validateUserWritePath("shared-with-me/alex/brief.md");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("reserved");
   });
@@ -172,15 +183,9 @@ describe("workspace root choice", () => {
 });
 
 describe("path classification", () => {
-  it("treats .apps/<name>/app.json as visible app source", () => {
-    expect(classifyPath("finance/.apps/ledger/app.json")).toEqual({
-      kind: "app-source",
-      appName: "ledger",
-    });
-    expect(classifyPath(".apps/tracker/src/App.tsx")).toEqual({
-      kind: "app-source",
-      appName: "tracker",
-    });
+  it("does not give sites paths any special core classification", () => {
+    expect(classifyPath("finance/sites/ledger/index.html")).toEqual({ kind: "file" });
+    expect(classifyPath("sites/tracker/src/App.tsx")).toEqual({ kind: "file" });
   });
 
   it("treats .sqlite, .sqlite3, and .db files as visible databases", () => {
@@ -232,6 +237,37 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
   });
 });
 
+describe("isSiteSourcePath", () => {
+  it("treats source files under a sites path segment as site source", () => {
+    expect(isSiteSourcePath("sites/workspace/src/App.tsx")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.mjs")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.cjs")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.mts")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/src/main.cts")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/index.html")).toBe(true);
+    expect(isSiteSourcePath("sites/workspace/index.htm")).toBe(true);
+    expect(isSiteSourcePath("finance/sites/ledger/styles.css")).toBe(true);
+    expect(isSiteSourcePath("finance/sites/ledger/theme.scss")).toBe(true);
+    expect(isSiteSourcePath("finance\\sites\\ledger\\config.json")).toBe(true);
+  });
+
+  it("does not classify arbitrary source-looking files or lookalike folders", () => {
+    expect(isSiteSourcePath("src/App.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/config.json")).toBe(false);
+    expect(isSiteSourcePath("notes/my-sites/idea.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/workspace-sites/app.tsx")).toBe(false);
+    expect(isSiteSourcePath("notes/sites-backup/index.html")).toBe(false);
+    expect(isSiteSourcePath("sites/index.html")).toBe(false);
+    expect(isSiteSourcePath("finance/sites/styles.css")).toBe(false);
+    expect(isSiteSourcePath("sites/workspace/src/main.mjsx")).toBe(false);
+    expect(isSiteSourcePath("sites/workspace/src/main.ctsx")).toBe(false);
+  });
+
+  it("matches the sites path segment case-insensitively", () => {
+    expect(isSiteSourcePath("finance/Sites/ledger/theme.scss")).toBe(true);
+  });
+});
+
 describe("mediaTypeForPath (shared extension -> media-type table)", () => {
   it("maps the known workspace file extensions case-insensitively", () => {
     expect(mediaTypeForPath("notes/plan.md")).toBe("text/markdown");
@@ -242,6 +278,10 @@ describe("mediaTypeForPath (shared extension -> media-type table)", () => {
     expect(mediaTypeForPath("docs/spec.pdf")).toBe("application/pdf");
     expect(mediaTypeForPath("data/app.sqlite")).toBe("application/vnd.sqlite3");
     expect(mediaTypeForPath("data/app.db")).toBe("application/vnd.sqlite3");
+    expect(mediaTypeForPath("sites/portal/src/App.tsx")).toBe("application/typescript");
+    expect(mediaTypeForPath("sites/portal/src/main.mts")).toBe("application/typescript");
+    expect(mediaTypeForPath("sites/portal/script.cjs")).toBe("text/javascript");
+    expect(mediaTypeForPath("sites/portal/styles.scss")).toBe("text/css");
   });
 
   it("returns null for unknown or missing extensions (fallback is the caller's)", () => {

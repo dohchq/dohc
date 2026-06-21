@@ -44,29 +44,44 @@ be weakened by rebrand or UI work.
   `{= }` formulas (the walk skips STYLE/script ancestors). CSP:
   `style-src 'unsafe-inline'; font-src data:` with no network fetches.
 
-## Apps
+## Sites
 
-- `.apps/` source atoms are interface code, not data sources. Inline
-  `{key: value}` examples inside app source are skipped by capture,
-  live values, and imports/exports scans. Legacy `.views/` source atoms
-  receive the same treatment during migration compatibility only.
-- App code runs in a sandboxed iframe with `sandbox="allow-scripts"` and
-  without `allow-same-origin`, forms, popups, or top-navigation powers.
-- The iframe receives no Convex URL, cookies, access token, workspace id
-  authority, or raw cross-workspace handles. It talks to dohc through the
-  small `@dohc/app` `postMessage` SDK.
-- The parent bridge validates message shape before dispatch and attaches
-  `packageRoot` plus the active workspace itself. Browser code cannot
-  choose an identity or widen its workspace.
-- Convex still derives identity server-side with `requireWorkspace`; atom
-  reads still go through atom/folder access checks.
-- Imports/exports windows remain the only cross-workspace field-sharing
-  path exposed to apps.
-- App manifests define maximum read/write scopes only. They do not grant
-  permission by themselves; every read/write still goes through server-side
-  workspace, share, lock, and review-gate checks.
-- App discovery, source reads, SDK rows, and bundles are capped. Oversized
-  apps fail with diagnostics instead of rendering.
-- Agent handoffs and proposed patches from app code are reviewed actions,
-  not direct document writes; the parent emits a lightweight local
-  `dohc:app-action` event for those operations.
+- Sites are normal website folders in the user's local workspace. dohc can
+  detect, serve, and preview them, but a site folder does not become a
+  privileged dohc integration merely by existing.
+- Static preview serves files from the selected site root through a loopback
+  server with path-containment checks. Dev and build previews run explicit
+  package scripts only when the user starts that mode.
+- Site preview iframes may render loopback preview URLs. Top-level desktop
+  navigation remains locked down; external sharing/publishing is a separate
+  dohc Cloud decision.
+- Site detection is broader than the dedicated `sites/` namespace. Normal
+  website folders such as `report/`, `client-dashboard/`, and
+  `shared-with-me/alex/pricing-portal/` are detected by website signals
+  (`index.html`, package scripts, configs, and build outputs) in
+  `@dohc/workspace-core`, not by their folder name.
+- Source-like files under a `sites/` path segment (`.ts`, `.tsx`, `.mts`,
+  `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.css`, `.scss`, `.json`, `.htm`,
+  `.html`) collab as plain text. This helper is only the path-dependent rule
+  for that dedicated namespace: `isSiteSourcePath()` requires the `sites/`
+  segment, a site folder segment after it, and a matching file extension. For
+  example, `sites/workspace/index.html` and
+  `clients/acme/sites/portal/src/App.tsx` match, while `sites/index.html` and
+  `clients/acme/sites/styles.css` do not. Matching extensions elsewhere
+  remain normal workspace files.
+- `@dohc/sdk` access is separate from merely rendering a site. The first
+  preview bridge supports bounded local file reads through the desktop
+  `readWorkspaceText` IPC path; browser code cannot choose an identity or
+  widen the workspace. The SDK client exposes
+  `dohc.collections.get(...).list()` for explicit transports, but the Phase 1
+  desktop preview host advertises `collections.read: false` and does not handle
+  `collections.list`. The SDK checks that advertised capability before calling
+  `collections.list`; disabled collection reads raise `DOHC_CAPABILITY_DISABLED`,
+  while malformed capability or collection payloads remain `DOHC_BAD_RESPONSE`.
+  A future host may set that capability to true only after server-side
+  collection ACL checks are implemented as the authorization boundary. The
+  preview bridge controls when browser code can call a feature, but it is not
+  the trust boundary: callers cannot bypass server-side identity,
+  workspace-scope, share, lock, or review-gate enforcement by manipulating
+  browser state. Writes, cloud access, sharing, and publishing must continue
+  through explicit workspace, share, lock, and review-gate checks.

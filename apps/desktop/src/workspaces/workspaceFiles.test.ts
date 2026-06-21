@@ -19,6 +19,7 @@ import {
   listFiles,
   movePath,
 } from "./workspaceFiles";
+import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { nativeTmpdir } from "./testTemp";
 
 let root: string;
@@ -85,6 +86,18 @@ describe("listFiles", () => {
     const result = await listFiles(root);
     expect(result.files).toEqual([]);
     expect(result.folders).toEqual(["empty", "empty/nested"]);
+  });
+
+  it("keeps shared-with-me visible as local workspace data", async () => {
+    await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+    await writeFile(join(root, SHARED_WITH_ME_FOLDER, "alex", "brief.md"), "shared");
+
+    const result = await listFiles(root);
+    expect(result.files).toContainEqual({
+      path: `${SHARED_WITH_ME_FOLDER}/alex/brief.md`,
+      kind: "file",
+    });
+    expect(result.folders).toEqual([SHARED_WITH_ME_FOLDER, `${SHARED_WITH_ME_FOLDER}/alex`]);
   });
 
   it("does not follow symlinks (file or directory) out of the workspace", async () => {

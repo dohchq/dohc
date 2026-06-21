@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -26,6 +26,8 @@ describe("createWorkspaceFolder", () => {
     expect(await readFile(join(root, ".context", "me.md"), "utf8")).toContain(
       "About me",
     );
+    const sharedWithMe = await stat(join(root, "shared-with-me"));
+    expect(sharedWithMe.isDirectory()).toBe(true);
   });
 
   it("adopts an existing workspace instead of overwriting its identity", async () => {
@@ -49,6 +51,30 @@ describe("createWorkspaceFolder", () => {
       await readFile(join(root, ".dohc", "manifest.json"), "utf8"),
     );
     expect(manifest.workspaceId).toBe("ws-existing-identity");
+    const sharedWithMe = await stat(join(root, "shared-with-me"));
+    expect(sharedWithMe.isDirectory()).toBe(true);
+  });
+
+  it("rejects a blocking shared-with-me file", async () => {
+    const root = join(base, "blocked-shared");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "shared-with-me"), "not a directory");
+
+    await expect(
+      createWorkspaceFolder({ rootPath: root, kind: "personal" }),
+    ).rejects.toThrow(/shared-with-me exists but is not a folder/);
+  });
+
+  it("rejects a shared-with-me symlink before adopting a workspace", async () => {
+    const root = join(base, "symlink-shared");
+    const outside = join(base, "outside-shared-target");
+    await mkdir(root, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(root, "shared-with-me"), "dir");
+
+    await expect(
+      createWorkspaceFolder({ rootPath: root, kind: "personal" }),
+    ).rejects.toThrow(/shared-with-me must not be a symlink/);
   });
 
   it("rejects relative workspace roots", async () => {

@@ -26,10 +26,10 @@ function workspaceFile(path: string, revision: string): WorkspaceFile {
 }
 
 function memoryBackend() {
-  const text = new Map<string, { body: string; revision: string; locked?: boolean; trustRequired?: boolean }>([
+  const text = new Map<string, { body: string; revision: string; locked?: boolean }>([
     ["notes/day.md", { body: "# Day\n", revision: "rev-1" }],
     ["shared/locked.md", { body: "# Locked\n", revision: "rev-locked", locked: true }],
-    ["apps/tracker.js", { body: "export default {}\n", revision: "rev-app", trustRequired: true }],
+    ["sites/tracker.js", { body: "export default {}\n", revision: "rev-site" }],
   ]);
   const assets = new Map<string, { bytes: Uint8Array; mediaType: string; revision: string }>();
   const backend: WorkspaceBackend = {
@@ -62,11 +62,6 @@ function memoryBackend() {
       if (row.locked) {
         const error = new Error("approval required for locked file");
         (error as Error & { code?: string }).code = "approval-required";
-        throw error;
-      }
-      if (row.trustRequired) {
-        const error = new Error("app trust required before writing app source");
-        (error as Error & { code?: string }).code = "app-trust-required";
         throw error;
       }
       if (row.revision !== input.expectedRevision) throw new Error("stale revision");
@@ -147,7 +142,7 @@ describe("agent workspace shell sandbox", () => {
     });
   });
 
-  it("blocks workspace escapes and turns lock/app-trust write attempts into approval requests", async () => {
+  it("blocks workspace escapes, applies local site edits, and surfaces locked-file approvals", async () => {
     await withTempDir(async (rootDir) => {
       const fixture = memoryBackend();
       const session = await startWorkspaceShellSession({
@@ -178,21 +173,18 @@ describe("agent workspace shell sandbox", () => {
           [
             "const fs = require('fs')",
             "fs.writeFileSync('shared/locked.md', '# Locked\\nchanged\\n')",
-            "fs.writeFileSync('apps/tracker.js', 'export default {changed:true}\\n')",
+            "fs.writeFileSync('sites/tracker.js', 'export default {changed:true}\\n')",
           ].join(";"),
         ],
       });
       const diff = await captureWorkspaceShellDiff(session);
-      await expect(applyWorkspaceShellDiff(session, { backend: fixture.backend, actor, diff }))
-        .resolves.toMatchObject({
-          applied: 0,
-          approvalRequests: [
-            expect.objectContaining({ path: "apps/tracker.js", reason: expect.stringMatching(/trust/i) }),
-            expect.objectContaining({ path: "shared/locked.md", reason: expect.stringMatching(/approval|lock/i) }),
-          ],
-        });
+      const result = await applyWorkspaceShellDiff(session, { backend: fixture.backend, actor, diff });
+      expect(result).toMatchObject({ applied: 1 });
+      expect(result.approvalRequests).toEqual([
+        expect.objectContaining({ path: "shared/locked.md", reason: expect.stringMatching(/approval|lock/i) }),
+      ]);
       expect(fixture.text.get("shared/locked.md")?.body).toBe("# Locked\n");
-      expect(fixture.text.get("apps/tracker.js")?.body).toBe("export default {}\n");
+      expect(fixture.text.get("sites/tracker.js")?.body).toBe("export default {changed:true}\n");
     });
   });
 

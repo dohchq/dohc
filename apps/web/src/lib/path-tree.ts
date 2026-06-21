@@ -2,6 +2,8 @@
 // but the UI reads as a real recursive tree (Notion-style) — these
 // helpers bridge the two.
 
+import { isSiteSourcePath } from '@dohc/workspace-core/paths'
+
 export type FileRow = {
   id: string
   path: string
@@ -70,27 +72,6 @@ export type FolderInput = string | {
   icon?: string | null
   color?: string | null
   starred?: boolean
-}
-
-const SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|css|json)$/i
-const APP_SOURCE_EXT_RE = /\.(?:tsx?|jsx?|css|json|html)$/i
-
-// `.apps/<name>/…` holds app source folders (see workspace-core
-// classifyPath); source files there keep their extension in labels.
-function isAppSourcePath(path: string): boolean {
-  const parts = pathSegments(path)
-  const appsIndex = parts.indexOf('.apps')
-  return (
-    appsIndex >= 0 &&
-    appsIndex <= parts.length - 3 &&
-    Boolean(parts[appsIndex + 1])
-  )
-}
-
-function isSourceCodeFilePath(path: string): boolean {
-  return SOURCE_CODE_EXT_RE.test(path) || (
-    isAppSourcePath(path) && APP_SOURCE_EXT_RE.test(path)
-  )
 }
 
 // Build a tree from atoms + explicit folder rows. Obsidian-style:
@@ -212,10 +193,9 @@ export function nodeLabel(node: TreeNode): string {
   if (node.fullPath === '.context/company.md') return 'Company'
   if (node.fullPath === '.skills') return 'Skills'
   if (node.fullPath === '.commands') return 'Commands'
-  if (node.page && isSourceCodeFilePath(node.page.path)) return node.segment
+  if (node.page && isSiteSourcePath(node.page.path)) return node.segment
   if (node.page?.title) return node.page.title
-  // D4.16 — strip the rendering extension (.md OR .html) so a
-  // titleless file shows its clean name (e.g. `dashboard`, not
-  // `dashboard.html`).
-  return node.segment.replace(/\.(md|html)$/i, '')
+  // D4.16 — strip the rendering extension for titleless markdown files
+  // while source-like website files keep their full filenames above.
+  return node.segment.replace(/\.md$/i, '')
 }

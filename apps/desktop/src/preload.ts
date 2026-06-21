@@ -2,8 +2,18 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
+  ListSitesPayload,
   MenuCommand,
+  SitePackagePayload,
+  StartSitePreviewPayload,
+  StopSitePreviewPayload,
   WorkspaceSummary,
+} from "./ipc/bridgeContract";
+import {
+  ListSitesResult,
+  SitePackageResult,
+  StartSitePreviewResult,
+  StopSitePreviewResult,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -100,12 +110,22 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  getAppPackage: (payload) => ipcRenderer.invoke(CHANNELS.getAppPackage, payload),
-  runAppTester: (payload) => ipcRenderer.invoke(CHANNELS.runAppTester, payload),
-  grantAppTrust: (payload) => ipcRenderer.invoke(CHANNELS.grantAppTrust, payload),
-  getAppRuntime: (payload) => ipcRenderer.invoke(CHANNELS.getAppRuntime, payload),
-  runAppRuntimeRpc: (payload) =>
-    ipcRenderer.invoke(CHANNELS.runAppRuntimeRpc, payload),
+  listSites: async (payload: ListSitesPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.listSites, payload);
+    return ListSitesResult.parse(result);
+  },
+  getSitePackage: async (payload: SitePackagePayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.getSitePackage, payload);
+    return SitePackageResult.parse(result);
+  },
+  startSitePreview: async (payload: StartSitePreviewPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.startSitePreview, payload);
+    return StartSitePreviewResult.parse(result);
+  },
+  stopSitePreview: async (payload: StopSitePreviewPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.stopSitePreview, payload);
+    return StopSitePreviewResult.parse(result);
+  },
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

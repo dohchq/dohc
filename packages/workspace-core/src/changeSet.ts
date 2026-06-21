@@ -3,7 +3,7 @@ export type ChangeSetKind =
   | "agent-run"
   | "import"
   | "sync"
-  | "app-build"
+  | "site-build"
   | "history-restore";
 
 export type BoundaryCrossing =
@@ -11,7 +11,7 @@ export type BoundaryCrossing =
   | "external-export"
   | "permission-change"
   | "bulk-delete"
-  | "app-trust"
+  | "site-publish"
   | "private-to-shared"
   | "unmergeable-overwrite";
 

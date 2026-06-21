@@ -67,10 +67,12 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isSiteTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
   parseHistoryDiffTabPath,
+  parseSiteTabPath,
   parseUiState,
   recordRecentFile,
   remapWorkbenchPaths,
@@ -135,8 +137,11 @@ const LazySearchView = lazy(() =>
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
 );
-const LazyAppsView = lazy(() =>
-  import("./workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
+const LazySitesView = lazy(() =>
+  import("./workbench/SitesView").then((mod) => ({ default: mod.SitesView })),
+);
+const LazySitePreviewPage = lazy(() =>
+  import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
 );
 const LazyAgentPanelView = lazy(() =>
   import("./AgentPanelView").then((mod) => ({ default: mod.AgentPanelView })),
@@ -497,7 +502,7 @@ function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
 
 function historyKindLabel(kind: ChangeSetRecord["kind"]): string {
   if (kind === "agent-run") return "Agent run";
-  if (kind === "app-build") return "App build";
+  if (kind === "site-build") return "Site build";
   if (kind === "user-edit") return "User edit";
   return kind[0].toUpperCase() + kind.slice(1);
 }
@@ -509,7 +514,7 @@ function historyBoundaryLabel(
   if (boundary === "external-export") return "External export";
   if (boundary === "permission-change") return "Permission change";
   if (boundary === "bulk-delete") return "Bulk delete";
-  if (boundary === "app-trust") return "App trust";
+  if (boundary === "site-publish") return "Site publish";
   if (boundary === "private-to-shared") return "Private to shared";
   if (boundary === "unmergeable-overwrite") return "Overwrite conflict";
   return boundary;
@@ -1404,6 +1409,24 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
+function InvalidSitePathFallback({
+  activeTab,
+  onClose,
+}: {
+  activeTab: string | null;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    console.error("[desktop] invalid site tab path", {
+      activeTab,
+      detail: "active tab matched site tab format but activeSiteRoot parsed to null",
+    });
+    onClose();
+  }, [activeTab, onClose]);
+
+  return null;
+}
+
 function readSelectedText(): string {
   const active = document.activeElement;
   if (
@@ -1428,7 +1451,7 @@ export function DesktopWorkspaceShell(props: {
   const [syncStatus, setSyncStatus] = useState<SyncStatusResult | null>(null);
   const [agentActive, setAgentActive] = useState(false);
   const [agentPanelRefreshKey, setAgentPanelRefreshKey] = useState(0);
-  const [appsRefreshKey, setAppsRefreshKey] = useState(0);
+  const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1529,6 +1552,7 @@ export function DesktopWorkspaceShell(props: {
     [changeSets, files],
   );
   const activeDocumentPath = isVirtualTabPath(wb.activeTab) ? null : wb.activeTab;
+  const activeSiteRoot = parseSiteTabPath(wb.activeTab);
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
@@ -1634,8 +1658,8 @@ export function DesktopWorkspaceShell(props: {
     setShellError(error instanceof Error ? error.message : fallback);
   }, []);
 
-  const refreshApps = useCallback(() => {
-    setAppsRefreshKey((key) => key + 1);
+  const refreshSites = useCallback(() => {
+    setSitesRefreshKey((key) => key + 1);
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
@@ -2307,13 +2331,13 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
-              ) : wb.activeView === "apps" ? (
+              ) : wb.activeView === "sites" ? (
                 <button
                   type="button"
-                  data-testid="apps-refresh"
-                  aria-label="Refresh apps"
-                  title="Refresh apps"
-                  onClick={refreshApps}
+                  data-testid="sites-refresh"
+                  aria-label="Refresh sites"
+                  title="Refresh sites"
+                  onClick={refreshSites}
                   className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
                 >
                   <RefreshCw size={13} aria-hidden />
@@ -2337,12 +2361,12 @@ export function DesktopWorkspaceShell(props: {
                   variant="panel"
                 />
               </Suspense>
-            ) : wb.activeView === "apps" ? (
-              <Suspense fallback={<PanelLoading label="apps" />}>
-                <LazyAppsView
+            ) : wb.activeView === "sites" ? (
+              <Suspense fallback={<PanelLoading label="sites" />}>
+                <LazySitesView
                   workspaceId={workspaceId}
                   files={files}
-                  refreshKey={appsRefreshKey}
+                  refreshKey={sitesRefreshKey}
                   onOpenPath={openFile}
                 />
               </Suspense>
@@ -2410,6 +2434,20 @@ export function DesktopWorkspaceShell(props: {
                 registerActiveUndo={registerActiveUndo}
                 onRestored={refreshAfterHistoryRestore}
               />
+            ) : isSiteTabPath(wb.activeTab) ? (
+              activeSiteRoot ? (
+                <Suspense fallback={<PanelLoading label="site" />}>
+                  <LazySitePreviewPage
+                    workspaceId={workspaceId}
+                    siteRoot={activeSiteRoot}
+                  />
+                </Suspense>
+              ) : (
+                <InvalidSitePathFallback
+                  activeTab={wb.activeTab}
+                  onClose={closeActiveTab}
+                />
+              )
             ) : wb.activeTab ? (
               <FileInspector
                 key={wb.activeTab}

@@ -106,23 +106,6 @@ services:
     volumes:
       - .:/workspace
 
-  app-tester:
-    image: mcr.microsoft.com/playwright:v1.60.0-noble
-    working_dir: /workspace
-    environment:
-      APP_TESTER_ALLOW_INSECURE_LOCAL: ${APP_TESTER_ALLOW_INSECURE_LOCAL:-0}
-      APP_TESTER_PORT: "1788"
-      APP_TESTER_TOKEN: ${APP_TESTER_TOKEN}
-    command: >
-      sh -lc "corepack enable &&
-      corepack prepare pnpm@10.24.0 --activate &&
-      pnpm install --frozen-lockfile &&
-      pnpm --filter @dohc/app-tester dev"
-    ports:
-      - "${APP_TESTER_BIND:-127.0.0.1}:${APP_TESTER_PORT:-1788}:1788"
-    volumes:
-      - .:/workspace
-
   agent-sandbox:
     image: node:22-bookworm-slim
     working_dir: /workspace

@@ -95,7 +95,7 @@ describe('hocuspocus markdown import/export', () => {
     expect(output).toContain('```dohc-query theme="dark"')
   })
 
-  it('preserves view source files as plain text instead of markdown prose', () => {
+  it('preserves website source files as plain text instead of markdown prose', () => {
     const input = [
       '---',
       'id: views.workspace.src.app',

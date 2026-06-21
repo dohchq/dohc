@@ -3,13 +3,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { palette, TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
-import { isAppRuntimeFrameUrl } from "../workspaces/appRuntimeRegistry";
 import {
   createMainWindowWebPreferences,
   decideNavigation,
   validateDevServerUrl,
   type NavigationPolicy,
 } from "../security/electronSecurity";
+import { isLoopbackHostname } from "../security/loopback";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import {
   createDebouncedSaver,
@@ -72,6 +72,42 @@ export function navigationPolicy(): NavigationPolicy {
 
 function windowStateFile(): string {
   return join(stateDir(), WINDOW_STATE_FILE);
+}
+
+const allowedSitePreviewOrigins = new Map<string, number>();
+
+function loopbackHttpOrigin(targetUrl: string): string | null {
+  try {
+    const url = new URL(targetUrl);
+    if (url.protocol !== "http:" || !isLoopbackHostname(url.hostname)) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function allowSitePreviewOrigin(previewUrl: string): () => void {
+  const origin = loopbackHttpOrigin(previewUrl);
+  if (!origin) return () => undefined;
+  allowedSitePreviewOrigins.set(
+    origin,
+    (allowedSitePreviewOrigins.get(origin) ?? 0) + 1,
+  );
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    const count = allowedSitePreviewOrigins.get(origin) ?? 0;
+    if (count <= 1) allowedSitePreviewOrigins.delete(origin);
+    else allowedSitePreviewOrigins.set(origin, count - 1);
+  };
+}
+
+export function isAllowedSitePreviewUrl(targetUrl: string): boolean {
+  const origin = loopbackHttpOrigin(targetUrl);
+  return origin !== null && allowedSitePreviewOrigins.has(origin);
 }
 
 function loadPlacement() {
@@ -164,7 +200,7 @@ export function createMainWindow(): BrowserWindow {
   window.webContents.on("will-navigate", denyDisallowed);
   window.webContents.on("will-redirect", denyDisallowed);
   window.webContents.on("will-frame-navigate", (event) => {
-    if (isAppRuntimeFrameUrl(event.url)) return;
+    if (isAllowedSitePreviewUrl(event.url)) return;
     denyDisallowed(event, event.url);
   });
 

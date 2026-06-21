@@ -86,7 +86,7 @@ describe("shouldIgnoreWatchPath", () => {
     expect(shouldIgnoreWatchPath("notes/today.md")).toBe(false);
     expect(shouldIgnoreWatchPath("finance/wallet.sqlite")).toBe(false);
     expect(shouldIgnoreWatchPath("finance/wallet.db")).toBe(false);
-    expect(shouldIgnoreWatchPath("finance/.apps/ledger/app.json")).toBe(false);
+    expect(shouldIgnoreWatchPath("finance/sites/ledger/index.html")).toBe(false);
     // A file that merely mentions "tmp"/"swp"/"wal" in its name is fine.
     expect(shouldIgnoreWatchPath("notes/tmp-ideas.md")).toBe(false);
     expect(shouldIgnoreWatchPath("notes/swap-meet.md")).toBe(false);

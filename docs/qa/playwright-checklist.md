@@ -4,11 +4,9 @@ Run the app and capture screenshots across viewports and states. Paths
 are relative to `/home/ice/dev/dohc`.
 
 ```bash
-pnpm dev
-pnpm --filter @dohc/app exec playwright screenshot \
-  --viewport-size=1440,900 http://localhost:3000 /tmp/dohc-desktop.png
-pnpm --filter @dohc/app exec playwright screenshot \
-  --viewport-size=390,900 http://localhost:3000 /tmp/dohc-mobile.png
+pnpm --filter @dohc/desktop run build
+pnpm --filter @dohc/desktop exec playwright test \
+  --config playwright.config.ts e2e/sites-preview.spec.ts
 ```
 
 ## Viewports
@@ -20,32 +18,29 @@ pnpm --filter @dohc/app exec playwright screenshot \
 unauthenticated sign-in · signed-out route · loading · onboarding (new) ·
 onboarding (in-progress) · post-onboarding workspace · no file selected ·
 markdown document · source mode · HTML atom · graph view ·
-Apps activity · rendered folder app · `.apps` source file · app build
-diagnostic · chat open · chat closed · share dialog · properties panel ·
+Sites activity · static site preview · dev server preview · built site
+preview · build diagnostic · chat open · chat closed · share dialog · properties panel ·
 command palette · folder picker · dark mode · system-prefers-dark (no
 explicit theme).
 
-## Apps Manual QA
+## Sites Manual QA
 
-The automated Playwright coverage verifies the sandboxed runtime and SDK
-message loop. The authenticated workspace flow still needs manual QA until
-the e2e harness can seed logged-in Convex workspaces.
+The automated Electron coverage verifies direct disk creation, site
+detection, static preview, dev server preview, built preview, and a Vite site
+that imports `@dohc/sdk` to read a local workspace file through the preview
+bridge.
 
-1. Create `clients/acme/tasks.md` with `{status: active}` and
-   `{next_action: send proposal}`.
-2. Create `clients/acme/.apps/overview/src/App.tsx` with a small React
-   app that imports from `@dohc/app` and reads the source through
-   `useDoc` or `useCollection`.
-3. Open Apps, select `clients/acme / Overview`, and confirm the iframe
-   renders the two fields.
-4. Click `Open source` from the app header and confirm Files opens
-   `clients/acme/.apps/overview/src/App.tsx` in source mode.
-5. From the source atom, click `Open app` and confirm it returns to the
-   rendered app.
-6. Imports/exports check: grant an export from workspace A to workspace B,
-   confirm the withheld values, and verify a workspace B view using
-   `dohc.imports.list()` shows only granted values. Revoke the grant and
-   verify the import disappears.
+1. Create `clients/acme/site/index.html` directly on disk and confirm Sites
+   lists it without any dohc-specific manifest.
+2. Create `clients/acme/site/package.json` with `dev` and `build` scripts,
+   then confirm Dev and Build previews render in dohc.
+3. Confirm source files open as ordinary editable files from Explorer.
+4. Confirm a site using `@dohc/sdk` can read an intended local text file in
+   preview, while missing or disallowed paths surface an error instead of a
+   blank pane.
+5. Imports/exports check: accepted shares should materialize under
+   `shared-with-me`; publishing a site that references them must stay behind
+   an explicit review boundary.
 
 ## Checks
 

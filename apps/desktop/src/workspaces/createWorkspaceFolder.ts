@@ -6,7 +6,8 @@ import {
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CreatedWorkspace {
@@ -21,6 +22,8 @@ const FIRST_CONTEXT = `# About me
 Tell your agents who you are and how you like to work.
 This file lives at .context/me.md inside your workspace folder.
 `;
+
+export const SHARED_WITH_ME_FOLDER = "shared-with-me";
 
 type ManifestState =
   | { kind: "absent" }
@@ -62,6 +65,15 @@ async function inspectManifest(rootPath: string): Promise<ManifestState> {
   return { kind: "blocked", reason: `this folder has an invalid .dohc/manifest.json: ${reason}` };
 }
 
+function assertSharedWithMeFolder(existing: Stats): void {
+  if (existing.isSymbolicLink()) {
+    throw new Error(`${SHARED_WITH_ME_FOLDER} must not be a symlink`);
+  }
+  if (!existing.isDirectory()) {
+    throw new Error(`${SHARED_WITH_ME_FOLDER} exists but is not a folder`);
+  }
+}
+
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
@@ -74,6 +86,32 @@ export async function createWorkspaceFolder(input: {
   const state = await inspectManifest(input.rootPath);
   if (state.kind === "blocked") {
     throw new Error(state.reason);
+  }
+  // Ensure shared-with-me exists in both new and adopted workspaces; existing
+  // local workspaces created before sharing support need this migration path.
+  const sharedWithMePath = join(input.rootPath, SHARED_WITH_ME_FOLDER);
+  const existingSharedFolder = await lstat(sharedWithMePath).catch((statError: unknown) => {
+    if ((statError as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(
+      `Unable to verify ${SHARED_WITH_ME_FOLDER}: ${
+        statError instanceof Error ? statError.message : String(statError)
+      }`,
+    );
+  });
+  if (existingSharedFolder) {
+    assertSharedWithMeFolder(existingSharedFolder);
+  } else {
+    await mkdir(sharedWithMePath, { recursive: true }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+    const createdSharedFolder = await lstat(sharedWithMePath).catch((statError: unknown) => {
+      throw new Error(
+        `Unable to verify ${SHARED_WITH_ME_FOLDER}: ${
+          statError instanceof Error ? statError.message : String(statError)
+        }`,
+      );
+    });
+    assertSharedWithMeFolder(createdSharedFolder);
   }
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.

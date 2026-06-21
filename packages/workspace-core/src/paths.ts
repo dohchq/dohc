@@ -1,3 +1,5 @@
+import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain";
+
 export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;
 }
@@ -33,24 +35,38 @@ function stripWindowsAliasSuffix(segment: string): string {
 // one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
 // a user/agent write into one must be refused, not just the first segment.
 export function isReservedPath(relativePath: string): boolean {
-  return relativePath
+  const segments = relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
-    .some((segment) => stripWindowsAliasSuffix(segment) === ".dohc");
+    .map(stripWindowsAliasSuffix);
+  return (
+    segments.some((segment) => segment === ".dohc") ||
+    segments[0] === "shared-with-me"
+  );
 }
 
 // Path segments that are dohc/system internals at ANY depth — hidden from the
 // file tree and never recorded into history. One predicate shared by the
 // tree walker and the watcher so the two views of "what exists" cannot drift.
 const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
-
 export function hasIgnoredSegment(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
     .some((segment) => IGNORED_SEGMENTS.has(stripWindowsAliasSuffix(segment)));
+}
+
+export function isSiteSourcePath(relativePath: string): boolean {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  const siteSegmentIndex = segments.findIndex((segment) => segment.toLowerCase() === "sites");
+  return (
+    siteSegmentIndex >= 0 &&
+    siteSegmentIndex < segments.length - 2 &&
+    SITE_SOURCE_CODE_EXT_RE.test(normalized)
+  );
 }
 
 export type WritePathValidation =
@@ -158,17 +174,12 @@ export function validateWorkspaceRootChoice(
 }
 
 export type PathClassification =
-  | { kind: "app-source"; appName: string }
   | { kind: "database" }
   | { kind: "file" };
 
 const DATABASE_EXTENSIONS = [".sqlite", ".sqlite3", ".db"];
 
 export function classifyPath(relativePath: string): PathClassification {
-  const segments = relativePath.split("/");
-  const appsIndex = segments.indexOf(".apps");
-  const appName = appsIndex === -1 ? undefined : segments[appsIndex + 1];
-  if (appName) return { kind: "app-source", appName };
   const lower = relativePath.toLowerCase();
   if (DATABASE_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
     return { kind: "database" };
@@ -179,10 +190,15 @@ export function classifyPath(relativePath: string): PathClassification {
 // The ONE extension -> media-type table (check-architecture-debt single-owner
 // rule). Returns null for unknown extensions — each caller owns its fallback.
 const MEDIA_TYPES: Record<string, string> = {
+  cjs: "text/javascript",
+  cts: "application/typescript",
   csv: "text/csv",
+  css: "text/css",
   db: "application/vnd.sqlite3",
   htm: "text/html",
   html: "text/html",
+  js: "text/javascript",
+  jsx: "text/javascript",
   jpeg: "image/jpeg",
   jpg: "image/jpeg",
   json: "application/json",
@@ -190,12 +206,17 @@ const MEDIA_TYPES: Record<string, string> = {
   m4a: "audio/mp4",
   markdown: "text/markdown",
   md: "text/markdown",
+  mjs: "text/javascript",
+  mts: "application/typescript",
   ndjson: "application/x-ndjson",
   pdf: "application/pdf",
   png: "image/png",
+  scss: "text/css",
   sqlite: "application/vnd.sqlite3",
   sqlite3: "application/vnd.sqlite3",
   txt: "text/plain",
+  ts: "application/typescript",
+  tsx: "application/typescript",
 };
 
 export function mediaTypeForPath(path: string): string | null {

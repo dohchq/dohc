@@ -1,7 +1,7 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addBoundaryCrossing,
   addFileChanges,
@@ -161,6 +161,291 @@ describe("changeSetStore persistence", () => {
 
     const got = await store.get("x");
     expect(got!.boundaryCrossings).toContain("external-export");
+  });
+
+  it("migrates legacy persisted site history values while reading records", async () => {
+    const legacyBuildKind = ["app", "build"].join("-");
+    const legacyTrustBoundary = ["app", "trust"].join("-");
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "legacy-site",
+            recordedAtMs: 1000,
+            kind: legacyBuildKind,
+            author: agentAuthor,
+            summary: "Legacy site build",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-legacy-site.json"),
+      `${JSON.stringify(
+        {
+          id: "legacy-site",
+          recordedAtMs: 1000,
+          kind: legacyBuildKind,
+          author: agentAuthor,
+          summary: "Legacy site build",
+          files: [{ path: "sites/client/dist/index.html", operation: "write" }],
+          provenance: { source: legacyBuildKind },
+          boundaryCrossings: [legacyTrustBoundary],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    await expect(store.get("legacy-site")).resolves.toMatchObject({
+      id: "legacy-site",
+      kind: "site-build",
+      provenance: { source: "site-build" },
+      boundaryCrossings: ["site-publish"],
+    });
+    await expect(store.list()).resolves.toMatchObject([
+      {
+        id: "legacy-site",
+        kind: "site-build",
+        provenance: { source: "site-build" },
+        boundaryCrossings: ["site-publish"],
+      },
+    ]);
+    await expect(store.listIndexed()).resolves.toMatchObject([
+      {
+        record: {
+          id: "legacy-site",
+          kind: "site-build",
+          provenance: { source: "site-build" },
+          boundaryCrossings: ["site-publish"],
+        },
+      },
+    ]);
+  });
+
+  it("rejects unknown persisted history enum values instead of type-casting them", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "corrupt",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt record",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-corrupt.json"),
+      `${JSON.stringify(
+        {
+          id: "corrupt",
+          recordedAtMs: 1000,
+          kind: "made-up-kind",
+          author: userAuthor,
+          summary: "Corrupt record",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: ["also-made-up"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("corrupt")).resolves.toBeNull();
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record corrupt:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("skips corrupt index entries with unknown kinds", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "corrupt-index",
+            recordedAtMs: 1000,
+            kind: "made-up-kind",
+            author: userAuthor,
+            summary: "Corrupt index",
+            fileCount: 1,
+          },
+          {
+            id: "valid",
+            recordedAtMs: 2000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Valid record",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "2000-valid.json"),
+      `${JSON.stringify(
+        {
+          id: "valid",
+          recordedAtMs: 2000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Valid record",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("corrupt-index")).resolves.toBeNull();
+      await expect(store.list()).resolves.toMatchObject([{ id: "valid", kind: "user-edit" }]);
+      await expect(store.listSince(0)).resolves.toMatchObject([
+        { id: "valid", kind: "user-edit" },
+      ]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "[workspace-history] skipping unreadable index entry corrupt-index:",
+        ),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("rejects unknown persisted boundary crossings even when the kind is valid", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "bad-boundary",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt boundary",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-bad-boundary.json"),
+      `${JSON.stringify(
+        {
+          id: "bad-boundary",
+          recordedAtMs: 1000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Corrupt boundary",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: ["also-made-up"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("bad-boundary")).resolves.toBeNull();
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record bad-boundary:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("rejects unknown persisted provenance source values", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "bad-provenance",
+            recordedAtMs: 1000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt provenance",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "1000-bad-provenance.json"),
+      `${JSON.stringify(
+        {
+          id: "bad-provenance",
+          recordedAtMs: 1000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Corrupt provenance",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          provenance: { source: "made-up-source" },
+          boundaryCrossings: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("bad-provenance")).resolves.toBeNull();
+      await expect(store.list()).resolves.toEqual([]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("[workspace-history] skipping unreadable record bad-provenance:"),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

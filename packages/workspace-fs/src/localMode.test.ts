@@ -24,6 +24,7 @@ function memoryBackend() {
   const text = new Map<string, { body: string; revision: string; locked?: boolean }>([
     ["notes/day.md", { body: "# Day\n", revision: "rev-1" }],
     ["shared/locked.md", { body: "# Locked\n", revision: "rev-locked", locked: true }],
+    ["sites/review/app.tsx", { body: "export default {}\n", revision: "rev-site" }],
   ]);
   const backend: WorkspaceBackend = {
     async listFiles() {
@@ -139,6 +140,33 @@ describe("local filesystem sync mode", () => {
       });
       expect(fixture.text.has("shared/locked.md")).toBe(true);
       await expect(readFile(join(dir, "shared/locked.md"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it("syncs local site source edits without publish approval", async () => {
+    await withTempDir(async (dir) => {
+      const fixture = memoryBackend();
+      const handler = createWorkspaceApiHandler({
+        backend: fixture.backend,
+        resolveActor: async (_request, workspaceId) => ({ ...actor, workspaceId }),
+      });
+      const client = createLocalSyncClient({
+        rootDir: dir,
+        workspaceId: actor.workspaceId,
+        baseUrl: "http://workspace-api.test",
+        fetch: async (input, init) =>
+          handler(new Request(input instanceof Request ? input.url : String(input), init)),
+      });
+
+      await client.materialize();
+      await writeFile(join(dir, "sites/review/app.tsx"), "export default { changed: true }\n");
+
+      await expect(client.syncLocalChanges()).resolves.toMatchObject({
+        applied: 1,
+        conflicts: [],
+        approvalRequests: [],
+      });
+      expect(fixture.text.get("sites/review/app.tsx")?.body).toBe("export default { changed: true }\n");
     });
   });
 });

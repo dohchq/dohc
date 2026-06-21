@@ -34,12 +34,6 @@ import {
   type ExplorerMenuCommand,
   type WorkbenchMenuCommand,
   DefaultWorkspaceRootResult,
-  AppPackagePayload,
-  AppPackageResult,
-  AppRuntimePayload,
-  AppRuntimeResult,
-  AppRuntimeRpcPayload,
-  AppRuntimeRpcResult,
   ApplyDatabaseEditPayload,
   CloudEnableSyncPayload,
   CloudLoginPollResult,
@@ -57,7 +51,6 @@ import {
   CreateWorkspaceShareResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
-  GrantAppTrustPayload,
   ImportToDatabasePayload,
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
@@ -66,8 +59,13 @@ import {
   ListDataFragmentsResult,
   DesktopMarksResult,
   LaunchMarksResult,
-  RunAppTesterPayload,
-  RunAppTesterResult,
+  ListSitesPayload,
+  ListSitesResult,
+  SitePackagePayload,
+  SitePackageResult,
+  StartSitePreviewPayload,
+  StartSitePreviewResult,
+  StopSitePreviewPayload,
   ListWorkspaceSharesPayload,
   ListWorkspaceSharesResult,
   ListWorkspaceMembersResult,
@@ -118,6 +116,7 @@ import { startAutoUpdates } from "./updates/electronUpdater";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
+  allowSitePreviewOrigin,
   navigationPolicy,
   rememberChromeTheme,
   titleBarOverlayOptions,
@@ -144,10 +143,22 @@ import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import { createAgentIntegration } from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import {
-  getAppPackage as getAppPackageInfo,
-  grantAppTrust as grantAppTrustState,
-  runAppTesterStatic,
-} from "./workspaces/appPackage";
+  buildOutputSiteRoot,
+  entryRelativeToSite,
+  getSitePackage,
+  listSitePackages,
+  type SitePackageInfo,
+} from "./workspaces/sitePackage";
+import {
+  buildSite,
+  packageManagerCommand,
+  splitCommandLine,
+  startSiteDevServer,
+  startStaticSitePreview,
+  type SiteLogEntry,
+  type SiteProcessHandle,
+  type StaticSitePreview,
+} from "./workspaces/siteRunner";
 import {
   readWorkspaceAsset,
   readWorkspaceText,
@@ -211,6 +222,236 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
+}
+
+type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
+
+const sitePreviewHandles = new Map<string, SitePreviewHandle>();
+const sitePreviewOriginReleases = new Map<string, () => void>();
+const sitePreviewStartLocks = new Map<string, Promise<void>>();
+
+function sitePreviewKey(workspaceId: string, siteRoot: string): string {
+  return `${workspaceId}\0${siteRoot}`;
+}
+
+async function withSitePreviewStartLock<T>(
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = sitePreviewStartLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.catch(() => undefined).then(() => current);
+  sitePreviewStartLocks.set(key, queued);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (sitePreviewStartLocks.get(key) === queued) {
+      sitePreviewStartLocks.delete(key);
+    }
+  }
+}
+
+async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Promise<void> {
+  const key = sitePreviewKey(workspaceId, siteRoot);
+  const handle = sitePreviewHandles.get(key);
+  sitePreviewHandles.delete(key);
+  try {
+    await handle?.stop();
+  } finally {
+    sitePreviewOriginReleases.get(key)?.();
+    sitePreviewOriginReleases.delete(key);
+  }
+}
+
+async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
+  const prefix = `${workspaceId}\0`;
+  const siteRoots = new Set<string>();
+  for (const key of sitePreviewHandles.keys()) {
+    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
+  }
+  for (const key of sitePreviewOriginReleases.keys()) {
+    if (key.startsWith(prefix)) siteRoots.add(key.slice(prefix.length));
+  }
+
+  await Promise.all(
+    [...siteRoots].map((siteRoot) =>
+      withSitePreviewStartLock(
+        sitePreviewKey(workspaceId, siteRoot),
+        () => stopSitePreviewHandle(workspaceId, siteRoot),
+      ).catch((error) => {
+        console.warn("[desktop] failed to stop site preview during workspace switch", error);
+      }),
+    ),
+  );
+}
+
+function rememberSitePreviewHandle(key: string, handle: SitePreviewHandle): void {
+  sitePreviewOriginReleases.get(key)?.();
+  sitePreviewHandles.set(key, handle);
+  sitePreviewOriginReleases.set(key, allowSitePreviewOrigin(handle.url));
+}
+
+function commandForSiteScript(
+  site: SitePackageInfo,
+  script: keyof SitePackageInfo["scripts"],
+): { command: string; args: string[] } {
+  const configuredCommand = site.configuredScripts?.[script];
+  if (configuredCommand) return splitCommandLine(configuredCommand);
+  const configured = site.scripts[script];
+  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
+  if (site.packagePath) {
+    return packageManagerCommand(site.packageManager ?? "npm", script);
+  }
+  return splitCommandLine(configured);
+}
+
+function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
+  const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
+  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
+    throw new Error(`Build output escaped the workspace: ${absolutePath}`);
+  }
+  return rel;
+}
+
+function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
+  if (siteRoot === ".") return workspaceRelativeOutput;
+  if (workspaceRelativeOutput === siteRoot) return ".";
+  if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
+    throw new Error(
+      `Build output must be within the site directory: ${workspaceRelativeOutput}`,
+    );
+  }
+  return workspaceRelativeOutput.slice(siteRoot.length + 1);
+}
+
+function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
+  const text = logs
+    .slice(-3)
+    .map((log) => log.text)
+    .join("\n")
+    .trim();
+  return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
+}
+
+async function startPreviewForSite(input: {
+  workspaceId: string;
+  workspaceRoot: string;
+  site: SitePackageInfo;
+  mode: "static" | "dev" | "build";
+}): Promise<StartSitePreviewResult> {
+  const key = sitePreviewKey(input.workspaceId, input.site.root);
+  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input, key));
+}
+
+async function startPreviewForSiteUnlocked(
+  input: {
+    workspaceId: string;
+    workspaceRoot: string;
+    site: SitePackageInfo;
+    mode: "static" | "dev" | "build";
+  },
+  key: string,
+): Promise<StartSitePreviewResult> {
+  try {
+    await stopSitePreviewHandle(input.workspaceId, input.site.root);
+  } catch (error) {
+    console.warn("[desktop] failed to stop previous site preview", error);
+  }
+
+  if (input.mode === "static") {
+    const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
+      entry: entryRelativeToSite(input.site) ?? undefined,
+    });
+    rememberSitePreviewHandle(key, handle);
+    return {
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: [],
+    };
+  }
+
+  if (input.mode === "dev") {
+    if (!input.site.scripts.dev && !input.site.scripts.start) {
+      throw new Error(`Site has no dev or start script: ${input.site.root}`);
+    }
+    const script = input.site.scripts.dev ? "dev" : "start";
+    const command = commandForSiteScript(input.site, script);
+    const handle = await startSiteDevServer({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+    });
+    rememberSitePreviewHandle(key, handle);
+    return {
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: handle.logs(),
+    };
+  }
+
+  let logs: SiteLogEntry[] = [];
+  let build:
+    | {
+        ok: boolean;
+        command: string;
+        args: string[];
+        outputPath: string | null;
+        exitCode: number | null;
+      }
+    | undefined;
+  let outputRoot = input.site.buildOutputs[0] ?? null;
+  if (input.site.scripts.build) {
+    const command = commandForSiteScript(input.site, "build");
+    const result = await buildSite({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+      output: outputRoot ?? undefined,
+    });
+    logs = result.logs;
+    build = {
+      ok: result.ok,
+      command: result.command,
+      args: result.args,
+      outputPath: result.outputPath,
+      exitCode: result.exitCode,
+    };
+    if (!result.ok || !result.outputPath) {
+      const recentLogs = recentSiteBuildLogText(result.logs);
+      throw new Error(
+        `Site build failed or did not produce a static output folder.${
+          recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
+        }`,
+      );
+    }
+    outputRoot = buildOutputRelativeToSite(
+      input.site.root,
+      relativeWorkspacePath(input.workspaceRoot, result.outputPath),
+    );
+  }
+  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
+  const handle = await startStaticSitePreview(
+    input.workspaceRoot,
+    buildOutputSiteRoot(input.site, outputRoot),
+  );
+  rememberSitePreviewHandle(key, handle);
+  return {
+    siteRoot: input.site.root,
+    mode: input.mode,
+    url: handle.url,
+    logs,
+    ...(build ? { build } : {}),
+  };
 }
 
 function testImportPaths(): string[] | null {
@@ -496,9 +737,14 @@ function mcpConfigFor(rootPath: string): {
 } {
   const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
   const home = stateDir();
+  const sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
+  const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
+  const args = ["--workspace", rootPath, "--home", home];
+  if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
+  if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
     command,
-    args: ["--workspace", rootPath, "--home", home],
+    args,
     workspacePath: rootPath,
     home,
   };
@@ -759,6 +1005,17 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!isTrustedFrame(frameUrl)) {
     throw new Error(`Untrusted IPC sender: ${frameUrl}`);
   }
+}
+
+function requireAuthorizedWorkspace(
+  event: IpcMainInvokeEvent,
+  workspaceId: string,
+) {
+  assertTrustedSender(event);
+  // Desktop authorization is main-process owned: the renderer may name a
+  // workspace, but only registered workspaces in this local profile resolve,
+  // and workspaceAssets re-checks filesystem containment before reading.
+  return requireWorkspace(workspaceId);
 }
 
 function registerIpcHandlers(): void {
@@ -1140,10 +1397,12 @@ function registerIpcHandlers(): void {
     );
   });
 
+  // Site preview SDK reads use the combined helper to make the main-process
+  // workspace authorization boundary explicit. Older workspace handlers keep
+  // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ReadWorkspaceTextPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
+    const workspace = requireAuthorizedWorkspace(event, input.workspaceId);
     return ReadWorkspaceTextResult.parse(
       await readWorkspaceText(workspace.rootPath, input.relativePath),
     );
@@ -1446,55 +1705,57 @@ function registerIpcHandlers(): void {
     );
   });
 
-  ipcMain.handle(CHANNELS.getAppPackage, async (event, payload) => {
+  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
     assertTrustedSender(event);
-    const input = AppPackagePayload.parse(payload);
+    const input = ListSitesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return AppPackageResult.parse(
-      await getAppPackageInfo(workspace.rootPath, input.path),
+    return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
+  });
+
+  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SitePackagePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return SitePackageResult.parse(
+      await getSitePackage(workspace.rootPath, input.path),
     );
   });
 
-  ipcMain.handle(CHANNELS.runAppTester, async (event, payload) => {
+  ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);
-    const input = RunAppTesterPayload.parse(payload);
+    const input = StartSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return RunAppTesterResult.parse(
-      await runAppTesterStatic(workspace.rootPath, input.appRoot),
+    const site = await getSitePackage(workspace.rootPath, input.siteRoot);
+    if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
+    return StartSitePreviewResult.parse(
+      await startPreviewForSite({
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace.rootPath,
+        site,
+        mode: input.mode,
+      }),
     );
   });
 
-  ipcMain.handle(CHANNELS.grantAppTrust, async (event, payload) => {
+  ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
     assertTrustedSender(event);
-    const input = GrantAppTrustPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    await grantAppTrustState(workspace.rootPath, input.appRoot);
-  });
-
-  ipcMain.handle(CHANNELS.getAppRuntime, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AppRuntimePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const { getAppRuntime } = await import("./workspaces/appRuntime");
-    return AppRuntimeResult.parse(
-      await getAppRuntime(workspace.rootPath, input.appRoot),
+    const input = StopSitePreviewPayload.parse(payload);
+    requireWorkspace(input.workspaceId);
+    await withSitePreviewStartLock(
+      sitePreviewKey(input.workspaceId, input.siteRoot),
+      () => stopSitePreviewHandle(input.workspaceId, input.siteRoot),
     );
-  });
-
-  ipcMain.handle(CHANNELS.runAppRuntimeRpc, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AppRuntimeRpcPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const { runAppRuntimeRpc } = await import("./workspaces/appRuntime");
-    return AppRuntimeRpcResult.parse({
-      value: await runAppRuntimeRpc(workspace.rootPath, input.appRoot, input.request),
-    });
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    const previousWorkspaceId = preferredWorkspaceId;
+    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      await stopSitePreviewsForWorkspace(previousWorkspaceId);
+    }
+    preferredWorkspaceId = workspace.workspaceId;
     refreshNativeWorkspaceSurfaces();
     return SyncStatusResult.parse(await activity.open(workspace));
   });
@@ -1815,6 +2076,17 @@ if (!app.requestSingleInstanceLock()) {
       window.focus();
     }
     void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
+  });
+
+  app.on("before-quit", () => {
+    // Fire-and-forget on quit: skip locks and do not await async stops so
+    // termination stays quick; child.unref() and the OS finish process cleanup.
+    for (const [key, handle] of [...sitePreviewHandles]) {
+      sitePreviewOriginReleases.get(key)?.();
+      sitePreviewOriginReleases.delete(key);
+      sitePreviewHandles.delete(key);
+      void handle.stop().catch(() => undefined);
+    }
   });
 
   void app.whenReady().then(async () => {

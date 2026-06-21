@@ -28,6 +28,15 @@ describe("workspace filesystem metadata", () => {
     expect(assetKindForMediaType("text/plain", "plans/use-sqlite.txt")).toBe("file");
   });
 
+  it("keeps site source files text-readable while preserving explicit media types", () => {
+    expect(mediaTypeForPath("sites/review/src/App.tsx")).toBe("application/typescript");
+    expect(mediaTypeForPath("Sites/review/src/App.tsx")).toBe("application/typescript");
+    expect(mediaTypeForPath("client/src/App.tsx")).toBe("application/typescript");
+    expect(isTextMediaType("application/octet-stream", "sites/review/src/App.tsx")).toBe(true);
+    expect(isTextMediaType("application/octet-stream", "Sites/review/src/App.tsx")).toBe(true);
+    expect(isTextMediaType("application/octet-stream", "client/src/App.tsx")).toBe(false);
+  });
+
   it("rejects malformed sync manifests with an explicit corrupt-manifest error", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-manifest-"));
     try {

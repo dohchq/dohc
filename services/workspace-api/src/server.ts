@@ -1,3 +1,4 @@
+import { isApprovalErrorReason } from "@dohc/workspace-contracts";
 import type { Actor, WorkspaceBackend, WorkspaceErrorCode } from "@dohc/workspace-contracts";
 import type { ResolveActor } from "./auth/session";
 import {
@@ -280,7 +281,9 @@ function statusForError(message: string, code?: string) {
     case "invalid_manifest":
       return 400;
   }
-  if (code === "approval-required" || message === "approval required" || message === "approval-required") return 403;
+  if (isApprovalErrorReason(code) || isApprovalErrorReason(message)) {
+    return 403;
+  }
   if (/stale|revision|conflict/i.test(message)) return 409;
   if (/not found|missing/i.test(message)) return 404;
   return 400;

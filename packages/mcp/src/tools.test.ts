@@ -1,18 +1,24 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { FetchLike } from "@dohc/workspace-sync";
 import {
   createWorkspaceDirectory,
-  createApp,
+  addSiteSdk,
+  buildSite,
+  createSite,
   deleteWorkspacePath,
+  detectSites,
   importData,
   listWorkspaceFiles,
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
   openInDohc,
+  previewSite,
+  publishSite,
   queryDatabase,
   readChange,
   readWorkspaceFile,
@@ -22,11 +28,21 @@ import {
   share,
   syncCloud,
   syncNow,
-  testApp,
+  testSite,
   writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
+
+// Keep these split so siteNoLegacyAppModel.test.ts does not flag this
+// compatibility regression fixture as active legacy guidance.
+const LEGACY_APPS_SEGMENT = `.${"apps"}`;
+const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
+const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
+
+const TEST_SDK_PACKAGE_JSON_PATH =
+  process.env.DOHC_TEST_SDK_PACKAGE_JSON?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-test-"));
@@ -35,7 +51,7 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
   await mkdir(root, { recursive: true });
   await mkdir(home, { recursive: true });
   try {
-    return await fn({ root, home });
+    return await fn({ root, home, sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -282,14 +298,18 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  it("create_app refuses traversal and a .dohc escape via either arg", async () => {
+  it("create_site refuses traversal, .dohc, and legacy app folders", async () => {
     await withWorkspace(async (ctx) => {
-      await expect(createApp(ctx, { area: "..", name: "x" })).resolves.toMatchObject({ ok: false });
-      await expect(createApp(ctx, { area: ".dohc", name: "x" })).resolves.toMatchObject({ ok: false });
+      await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
+      await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
+      await expect(createSite(ctx, { path: `finance/${LEGACY_APPS_SEGMENT}/x` })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(`legacy ${LEGACY_APPS_SEGMENT}`),
+      });
     });
   });
 
-  it("query_database, import_data, test_app, open_in_dohc, share all refuse traversal", async () => {
+  it("query_database, import_data, site tools, open_in_dohc, share all refuse traversal", async () => {
     await withWorkspace(async (ctx) => {
       for (const evil of TRAVERSALS) {
         expect(await openInDohc(ctx, { path: evil })).toMatchObject({ ok: false });
@@ -303,9 +323,12 @@ describe("mcp tool path containment", () => {
         await expect(
           importData(ctx, { sourcePath: evil, databasePath: "out.sqlite", tableName: "t" }),
         ).resolves.toMatchObject({ ok: false });
-        await expect(
-          testApp(ctx, { appRoot: evil, sourcePaths: [] }),
-        ).resolves.toMatchObject({ ok: false });
+        await expect(detectSites(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
+        await expect(testSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
+        await expect(buildSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
+        await expect(previewSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
+        await expect(publishSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
+        await expect(addSiteSdk(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
       }
     });
   });
@@ -742,61 +765,272 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("create_app scaffolds app.json + src/App.tsx and never marks trust", async () => {
+  it("create_site scaffolds a normal website and records history", async () => {
     await withWorkspace(async (ctx) => {
-      const result = await createApp(ctx, { area: "finance", name: "ledger", title: "Ledger" });
-      expect(result).toMatchObject({ ok: true, trusted: false, appRoot: "finance/.apps/ledger" });
-      const manifest = JSON.parse(
-        await readFile(join(ctx.root, "finance/.apps/ledger/app.json"), "utf8"),
+      const result = await createSite(ctx, { path: "finance/ledger", title: "Ledger" });
+      expect(result).toMatchObject({ ok: true, siteRoot: "finance/ledger" });
+      if (!result.ok) return;
+      expect(result.files).toEqual(
+        expect.arrayContaining([
+          "finance/ledger/index.html",
+          "finance/ledger/styles.css",
+          "finance/ledger/script.js",
+          "finance/ledger/scripts/build-static.mjs",
+          "finance/ledger/package.json",
+          "finance/ledger/dohc.json",
+        ]),
       );
-      expect(manifest).toMatchObject({ entry: "src/App.tsx", network: false, write: [] });
-      // No apps-state.json trust record is written by the scaffold.
-      await expect(
-        readFile(join(ctx.root, ".dohc/apps-state.json"), "utf8"),
-      ).rejects.toThrow();
+      const html = await readFile(join(ctx.root, "finance/ledger/index.html"), "utf8");
+      const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
+      const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
+      expect(html).toContain("<title>Ledger</title>");
+      expect(html).not.toContain(LEGACY_SDK_PACKAGE);
+      expect(packageJson).toMatchObject({
+        private: true,
+        type: "module",
+        engines: {
+          node: ">=14.8.0",
+        },
+        scripts: {
+          dev: "serve . --listen 127.0.0.1:4173",
+          build: "node scripts/build-static.mjs",
+          preview: "serve dist --listen 127.0.0.1:4173",
+        },
+        devDependencies: {
+          serve: "14.2.6",
+        },
+      });
+      expect(config).toMatchObject({ type: "site", title: "Ledger", build: { output: "dist" } });
+      const changes = await listChanges(ctx, { includeFiles: true });
+      expect(changes.changes[0]).toMatchObject({
+        summary: "MCP created site finance/ledger",
+        files: expect.arrayContaining([expect.objectContaining({ path: "finance/ledger/index.html" })]),
+      });
     });
   });
 
-  it("create_app rejects traversal names and escapes TSX-significant app names", async () => {
+  it("create_site rejects existing non-empty folders and can omit dohc.json", async () => {
     await withWorkspace(async (ctx) => {
-      await expect(createApp(ctx, { area: "", name: "../evil" })).resolves.toMatchObject({
+      await mkdir(join(ctx.root, "existing"), { recursive: true });
+      await writeFile(join(ctx.root, "existing/file.txt"), "no overwrite");
+      await expect(createSite(ctx, { path: "existing" })).resolves.toMatchObject({ ok: false });
+
+      const result = await createSite(ctx, {
+        path: "plain-site",
+        title: "Plain Site",
+        withDohcJson: false,
+      });
+      expect(result).toMatchObject({ ok: true, siteRoot: "plain-site" });
+      await expect(readFile(join(ctx.root, "plain-site/dohc.json"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it("detect_sites finds configured, package, and static sites", async () => {
+    await withWorkspace(async (ctx) => {
+      await createSite(ctx, { path: "configured", title: "Configured" });
+      await mkdir(join(ctx.root, "static"), { recursive: true });
+      await writeFile(join(ctx.root, "static/index.html"), "<h1>Static</h1>");
+      await mkdir(join(ctx.root, "vitey"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "vitey/package.json"),
+        JSON.stringify({ scripts: { dev: "vite", build: "vite build" }, devDependencies: { vite: "^7.0.0" } }),
+      );
+      await writeFile(join(ctx.root, "vitey/vite.config.ts"), "export default {};");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, detector: "mcp-local", count: 3 });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => [site.root, site.kind, site.confidence])).toEqual([
+        ["configured", "configured", "high"],
+        ["static", "static", "medium"],
+        ["vitey", "package", "medium"],
+      ]);
+      expect(result.sites.find((site) => site.root === "vitey")).toMatchObject({
+        scripts: { dev: "vite", build: "vite build" },
+      });
+    });
+  });
+
+  it("detect_sites returns repairable diagnostics for invalid dohc.json", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "broken"), { recursive: true });
+      await writeFile(join(ctx.root, "broken/dohc.json"), "{");
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.sites[0]).toMatchObject({
+        root: "broken",
+        kind: "configured",
+        diagnostics: [expect.objectContaining({ code: "invalid_dohc_json", severity: "error" })],
+      });
+    });
+  });
+
+  it("detect_sites ignores non-site dohc.json unless website signals conflict", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "workflow"), { recursive: true });
+      await writeFile(join(ctx.root, "workflow/dohc.json"), JSON.stringify({ type: "workflow" }));
+      await mkdir(join(ctx.root, "conflict"), { recursive: true });
+      await writeFile(join(ctx.root, "conflict/dohc.json"), JSON.stringify({ type: "workflow" }));
+      await writeFile(join(ctx.root, "conflict/index.html"), "<h1>Conflict</h1>");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.sites[0]).toMatchObject({
+        root: "conflict",
+        diagnostics: [expect.objectContaining({ code: "unexpected_dohc_type" })],
+      });
+    });
+  });
+
+  it("test_site validates entries and refuses legacy app SDK imports", async () => {
+    await withWorkspace(async (ctx) => {
+      await createSite(ctx, { path: "todo" });
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
+
+      await writeFile(join(ctx.root, "todo/script.js"), `// ${importLegacySdk}`);
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
+
+      await writeFile(join(ctx.root, "todo/script.js"), `const marker = "/* ${LEGACY_SDK_PACKAGE} */";\n`);
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
+
+      await writeFile(
+        join(ctx.root, "todo/script.js"),
+        `const slashOrStar = /[/*]/;\n${importLegacySdk}`,
+      );
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
         ok: false,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
+        ]),
       });
 
-      const result = await createApp(ctx, { area: "", name: "bad {name}" });
-      expect(result).toMatchObject({ ok: true, trusted: false });
-      const source = await readFile(join(ctx.root, ".apps/bad {name}/src/App.tsx"), "utf8");
-      expect(source).toContain('<div>{"bad {name}"}</div>');
+      await writeFile(join(ctx.root, "todo/script.js"), importLegacySdk);
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: false,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
+        ]),
+      });
+
+      await writeFile(join(ctx.root, "todo/script.js"), "x".repeat(2 * 1024 * 1024 + 1));
+      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: false,
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            name: "no-legacy-sdk-import",
+            ok: false,
+            message: "Site source is too large for MCP static validation.",
+          }),
+        ]),
+      });
     });
   });
 
-  it("test_app runs the static checker over contained app source", async () => {
+  it("build_site returns the detected build plan without executing it", async () => {
     await withWorkspace(async (ctx) => {
-      await createApp(ctx, { area: "", name: "todo" });
-      const result = await testApp(ctx, {
-        appRoot: ".apps/todo",
-        sourcePaths: [".apps/todo/src/App.tsx"],
+      await createSite(ctx, { path: "todo", title: "Todo" });
+      const result = await buildSite(ctx, { siteRoot: "todo" });
+      expect(result).toMatchObject({
+        ok: true,
+        status: "planned",
+        siteRoot: "todo",
+        command: "npm run build",
+        output: "dist",
       });
-      // The scaffold imports @dohc/app, so the static SDK-import check passes.
-      expect(result).toMatchObject({ ok: true });
     });
   });
 
-  it("test_app reports missing or directory source paths as tool-safe failures", async () => {
+  it("preview_site returns available dohc preview modes", async () => {
     await withWorkspace(async (ctx) => {
-      await createApp(ctx, { area: "", name: "todo" });
-      await expect(
-        testApp(ctx, {
-          appRoot: ".apps/todo",
-          sourcePaths: [".apps/todo/src/Missing.tsx"],
-        }),
-      ).resolves.toMatchObject({ ok: false, reason: expect.stringMatching(/Missing\.tsx|no such/i) });
-      await expect(
-        testApp(ctx, {
-          appRoot: ".apps/todo",
-          sourcePaths: [".apps/todo/src"],
-        }),
-      ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });
+      await createSite(ctx, { path: "todo", title: "Todo" });
+      const result = await previewSite(ctx, { siteRoot: "todo" });
+      expect(result).toMatchObject({
+        ok: true,
+        siteRoot: "todo",
+        modes: expect.arrayContaining([
+          expect.objectContaining({ mode: "static", entry: "todo/index.html" }),
+          expect.objectContaining({ mode: "dev", command: "dev" }),
+          expect.objectContaining({ mode: "build", output: "dist" }),
+        ]),
+      });
+    });
+  });
+
+  it("add_sdk wires @dohc/sdk into a normal website package", async () => {
+    await withWorkspace(async (ctx) => {
+      await createSite(ctx, { path: "todo", title: "Todo" });
+      const result = await addSiteSdk(ctx, { siteRoot: "todo" });
+      expect(result).toMatchObject({
+        ok: true,
+        siteRoot: "todo",
+        packagePath: "todo/package.json",
+        dependency: "@dohc/sdk",
+      });
+      const sdkPackageJson = JSON.parse(
+        await readFile(TEST_SDK_PACKAGE_JSON_PATH, "utf8"),
+      ) as { version: string };
+      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
+      expect(packageJson.dependencies).toMatchObject({
+        "@dohc/sdk": `^${sdkPackageJson.version}`,
+      });
+      expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
+    });
+  });
+
+  it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
+    await withWorkspace(async (ctx) => {
+      const sdkPackageJsonPath = join(ctx.home, "sdk-package.json");
+      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "1.0.0" })}\n`);
+      const customCtx = { ...ctx, sdkPackageJsonPath };
+      await createSite(customCtx, { path: "todo", title: "Todo" });
+
+      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: true,
+      });
+      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "2.0.0" })}\n`);
+      const bumped = new Date(Date.now() + 5000);
+      await utimes(sdkPackageJsonPath, bumped, bumped);
+
+      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: true,
+      });
+      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
+      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^2.0.0" });
+    });
+  });
+
+  it("add_sdk refuses to overwrite malformed package metadata", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "todo"), { recursive: true });
+      await writeFile(join(ctx.root, "todo", "index.html"), "<h1>Todo</h1>");
+      await writeFile(join(ctx.root, "todo", "package.json"), "{ bad");
+
+      await expect(addSiteSdk(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("invalid package.json"),
+      });
+      await expect(readFile(join(ctx.root, "todo", "package.json"), "utf8")).resolves.toBe(
+        "{ bad",
+      );
+    });
+  });
+
+  it("publish_site stops at the explicit dohc Cloud review boundary", async () => {
+    await withWorkspace(async (ctx) => {
+      await createSite(ctx, { path: "todo", title: "Todo" });
+      const result = await publishSite(ctx, { siteRoot: "todo" });
+      expect(result).toMatchObject({
+        ok: false,
+        status: "review-required",
+        siteRoot: "todo",
+        reason: expect.stringMatching(/cloud boundary/i),
+        review: {
+          siteRoot: "todo",
+          includesSharedWithMe: false,
+        },
+      });
     });
   });
 

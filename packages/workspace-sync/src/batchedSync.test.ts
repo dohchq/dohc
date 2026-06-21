@@ -51,7 +51,7 @@ describe("batchToChangeSet", () => {
 
   it("groups an 18-file batch into a single change set", () => {
     const events: WatcherEvent[] = Array.from({ length: 18 }, (_, i) => ({
-      path: `finance/.apps/ledger/src/file-${i}.tsx`,
+      path: `finance/sites/ledger/src/file-${i}.tsx`,
       operation: "create" as const,
       sha256: `sha-${i}`,
     }));

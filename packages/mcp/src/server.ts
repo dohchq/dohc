@@ -13,14 +13,19 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
   createWorkspaceDirectory,
-  createApp,
+  addSiteSdk,
+  buildSite,
+  createSite,
   deleteWorkspacePath,
+  detectSites,
   importData,
   listWorkspaceFiles,
   listChanges,
   listWorkspaces,
   moveWorkspacePath,
   openInDohc,
+  previewSite,
+  publishSite,
   queryDatabase,
   readChange,
   readWorkspaceFile,
@@ -29,20 +34,48 @@ import {
   share,
   syncCloud,
   syncNow,
-  testApp,
+  testSite,
   writeWorkspaceFile,
   workspaceStatus,
   type ToolContext,
 } from "./tools";
 
 export function parseArgs(argv: string[]): ToolContext {
-  let root = process.cwd();
-  let home = process.env.HOME ?? process.cwd();
+  let root = nonEmptyArg(process.cwd(), "workspace root");
+  let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
+  let sdkPackageJsonPath = optionalNonEmptyArg(
+    process.env.DOHC_SDK_PACKAGE_JSON,
+    "DOHC_SDK_PACKAGE_JSON",
+  );
+  let sdkDependencyRange = optionalNonEmptyArg(
+    process.env.DOHC_SDK_DEPENDENCY_RANGE,
+    "DOHC_SDK_DEPENDENCY_RANGE",
+  );
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--workspace" && argv[i + 1]) root = argv[++i];
-    else if (argv[i] === "--home" && argv[i + 1]) home = argv[++i];
+    if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
+    else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
+    else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
+      sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
+    } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
+      sdkDependencyRange = nonEmptyArg(argv[++i], "--sdk-dependency-range");
+    }
   }
-  return { root, home };
+  return {
+    root,
+    home,
+    ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
+    ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
+  };
+}
+
+function nonEmptyArg(value: string, name: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${name} requires a non-empty value`);
+  return trimmed;
+}
+
+function optionalNonEmptyArg(value: string | undefined, name: string): string | undefined {
+  return value === undefined ? undefined : nonEmptyArg(value, name);
 }
 
 function text(value: unknown) {
@@ -207,28 +240,90 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   server.registerTool(
-    "dohc_create_app",
+    "dohc_detect_sites",
     {
-      description: "Scaffold a new app at <area>/.apps/<name>. Never trusts the app — the user grants trust in dohc.",
+      description:
+        "Detect normal browser-viewable website folders in the workspace using index.html, package.json, dohc.json, and common web configs.",
       inputSchema: {
-        area: z.string().max(4096).default(""),
-        name: z.string().min(1).max(200),
-        title: z.string().max(200).optional(),
+        path: z.string().max(4096).optional(),
+        maxDepth: z.number().int().nonnegative().max(12).optional(),
       },
     },
-    async (args) => text(await createApp(ctx, args)),
+    async (args) => text(await detectSites(ctx, args)),
   );
 
   server.registerTool(
-    "dohc_test_app",
+    "dohc_create_site",
     {
-      description: "Run the static AppTester (compile + SDK import check) over an app's source files.",
+      description:
+        "Scaffold a normal website folder with index.html, package.json, pinned serve devDependency, and optional dohc.json. Records history; does not create hidden app folders.",
       inputSchema: {
-        appRoot: z.string().min(1).max(4096),
-        sourcePaths: z.array(z.string().min(1).max(4096)).max(200),
+        path: z.string().min(1).max(4096),
+        title: z.string().max(200).optional(),
+        withDohcJson: z.boolean().optional(),
       },
     },
-    async (args) => text(await testApp(ctx, args)),
+    async (args) => text(await createSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_test_site",
+    {
+      description:
+        "Run bounded static validation for a normal website folder: detector diagnostics, entry presence, and no legacy app SDK import.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await testSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_build_site",
+    {
+      description:
+        "Return the detected build plan for a normal website folder. Command execution is not wired in this MCP stub yet.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await buildSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_preview_site",
+    {
+      description:
+        "Return the dohc preview modes available for a normal website folder: static, dev server, and built preview.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await previewSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_publish_site",
+    {
+      description:
+        "Prepare a site publish/share review. This refuses to publish until dohc Cloud publish is wired.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await publishSite(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_add_sdk",
+    {
+      description:
+        "Add the optional @dohc/sdk dependency to a normal website package so agents can enhance it with dohc-aware reads later.",
+      inputSchema: {
+        siteRoot: z.string().min(1).max(4096),
+      },
+    },
+    async (args) => text(await addSiteSdk(ctx, args)),
   );
 
   server.registerTool(

@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./domain": "./src/domain.ts",
     "./conformance": "./src/conformance.ts"
   },
   "scripts": {

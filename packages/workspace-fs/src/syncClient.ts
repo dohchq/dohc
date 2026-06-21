@@ -12,6 +12,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
+import { DEFAULT_APPROVAL_ERROR_REASON, isApprovalErrorReason } from "@dohc/workspace-contracts";
 import { scanWorkspaceDiff, type FsDiffOperation } from "./diff";
 import { materializeWorkspace } from "./materialize";
 import {
@@ -156,8 +157,8 @@ export function createLocalSyncClient({
           results?: Array<{ path: string; ok: boolean; error?: string; file?: WorkspaceFile | null }>;
         }>(fetchImpl, workspaceUrl(baseUrl, workspaceId, "sync/apply"), { operations });
         const failures = (result.results ?? []).filter((entry) => !entry.ok);
-        const approvals = failures.filter((entry) => /approval/i.test(entry.error ?? ""));
-        const hardFailure = failures.find((entry) => !/approval/i.test(entry.error ?? ""));
+        const approvals = failures.filter((entry) => isApprovalResultError(entry.error));
+        const hardFailure = failures.find((entry) => !isApprovalResultError(entry.error));
         if (hardFailure) {
           throw new Error(hardFailure.error ?? "sync apply failed");
         }
@@ -168,7 +169,7 @@ export function createLocalSyncClient({
             conflicts: [],
             approvalRequests: approvals.map((entry) => ({
               path: entry.path,
-              reason: entry.error ?? "approval required",
+              reason: entry.error ?? DEFAULT_APPROVAL_ERROR_REASON,
             })),
           };
         }
@@ -539,10 +540,14 @@ function encodePath(path: string) {
 function isApprovalError(error: unknown): error is Error & { code?: string; path?: string } {
   return (
     error instanceof Error &&
-    (("code" in error && error.code === "approval-required") ||
-      error.message === "approval required" ||
-      error.message === "approval-required")
+    (("code" in error &&
+      isApprovalErrorReason((error as Error & { code?: string }).code)) ||
+      isApprovalErrorReason(error.message))
   );
+}
+
+function isApprovalResultError(error: string | undefined): boolean {
+  return isApprovalErrorReason(error);
 }
 
 function firstOperationPath(operations: FsDiffOperation[]) {

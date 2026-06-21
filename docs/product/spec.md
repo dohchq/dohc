@@ -1,7 +1,12 @@
+---
+id: product-spec
+title: dohc Product Spec
+---
+
 # dohc — product spec (overview)
 
-A working summary of what the dohc app does today. The implementation
-lives in `apps/app`.
+A working summary of what dohc does today. The desktop implementation
+lives in `apps/desktop`; the Cloud web client lives in `apps/web`.
 
 ## Core model
 
@@ -15,18 +20,17 @@ lives in `apps/app`.
 - **Live queries** — block-level live lists/tables backed by inspectable
   fenced `query` source. They are for repeating collections; inline atoms
   and formulas remain the live scalar/value syntax.
-- **Folder apps** — app-like custom surfaces stored under any folder's
-  `.apps/<name>/` package with an `app.json` manifest. They use normal web
-  code and import `@dohc/app`; the canonical work state remains in atoms,
-  entities, inline values, imports/exports, collections, and databases.
+- **Sites** — normal browser-viewable website folders anywhere in the
+  workspace. dohc detects `index.html`, web package scripts/dependencies,
+  common framework config, build outputs, and optional `dohc.json` metadata.
+  Agents can create ordinary React/Vite/Next/static sites without knowing
+  dohc-specific structure.
 - **Collections** — readable structured data backed by markdown tables,
   markdown cards, CSV, JSONL, YAML, or SQLite-backed database tables.
 - **SQLite database files** — first-class workspace files stored outside
-  markdown atoms. Apps read them through database/collection APIs and write
-  through transactional row operations and operation logs; raw SQLite bytes
-  are never CRDT-synced.
+  markdown atoms. Raw SQLite bytes are never CRDT-synced.
 - **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, shown through live queries and apps.
+  user-declared types, shown through live queries and sites.
 - **Folders** — organize atoms; support icons, colors, stars, and
   drag-and-drop move with wikilink-rewrite cascade.
 
@@ -38,19 +42,19 @@ lives in `apps/app`.
   wikilink pills, inline-atom decorations, and ASCII sketches.
 - **HTML atoms** — `.html` atoms render in a sandboxed, server-built
   shell (zero-network, sanitized).
-- **Apps** — folder-local app surfaces over dohc. They live in `.apps/`,
-  compile ordinary TypeScript/React/CSS, render in an opaque sandbox, and
-  talk to the workspace only through `@dohc/app`. Manifests define maximum
-  read/write scopes only; actual authorization, source access, locks, and
-  per-user trust are enforced server-side. Legacy `.views/` packages are
-  supported only long enough to migrate to `.apps/`.
+- **Sites** — normal websites previewed inside dohc. Static sites are served
+  from the workspace folder; package sites can run a dev script; built sites
+  can run build and serve `dist`, `build`, or `out`. Optional dohc SDK
+  integration can enhance a site, starting with local file reads through the
+  preview bridge, but websites remain ordinary websites. See
+  [[docs/product/site-sdk.md]].
 - **Chat** — the dohc agent: find, draft, organize; shows sources and
   changes.
 - **Onboarding** — a short questionnaire seeds the agent's first turn,
   which builds source atoms, identity context, a setup run, and a first
-  cockpit (`home.html` for read-only reports or a use-case-named `.apps`
-  app for interactive workflows). Generated apps must run `test_app` and
-  fix failures before onboarding can finish.
+  cockpit (`home.html` or a normal site folder for interactive workflows).
+  Generated sites should pass the desktop Sites preview E2E path before
+  onboarding can finish.
 - **Graph** — a force-directed view of atoms and their links.
 - **Imports / Exports** — controlled workspace-to-workspace data/text
   exchange. Exports publish only selected fields; imports subscribe to

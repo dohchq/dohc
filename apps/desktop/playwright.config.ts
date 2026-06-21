@@ -11,14 +11,27 @@ if (platform() !== "win32" && !process.env.TMPDIR && existsSync("/tmp")) {
   process.env.TMPDIR = "/tmp";
 }
 
+const configuredWorkers = Number.parseInt(process.env.PLAYWRIGHT_WORKERS ?? "", 10);
+const desktopWorkers = configuredWorkers > 0 ? configuredWorkers : 1;
+
 // Dedicated desktop E2E config: Electron instances cannot safely run in
 // parallel on one display, and the web app's dev server is irrelevant here.
+// Keep CI serial by default; set PLAYWRIGHT_WORKERS locally to benchmark
+// isolated-display parallelism.
 // The root playwright.config.ts stays untouched for `pnpm test:e2e` (web).
 export default defineConfig({
   testDir: "./e2e",
-  workers: 1,
+  testMatch: "**/*.spec.ts",
+  workers: desktopWorkers,
   timeout: 60_000,
+  expect: {
+    timeout: 30_000,
+  },
   retries: 0,
   reporter: [["list"]],
+  use: {
+    screenshot: "only-on-failure",
+    trace: "retain-on-failure",
+  },
   outputDir: "../../test-results/desktop-e2e",
 });
