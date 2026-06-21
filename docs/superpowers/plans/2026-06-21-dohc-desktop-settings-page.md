@@ -268,6 +268,19 @@ content. Text must not overlap or depend on viewport-scaled font sizes.
 
 ## Architecture plan
 
+### Workspace async safety invariant
+
+Any settings surface that reads or mutates workspace-scoped state must bind
+each async response to the workspace/request that produced it before setting
+renderer state. Use a request token, abort signal, or equivalent guard whenever
+the active workspace can change while an IPC call is in flight. A stale response
+from workspace A must never repaint, enable controls for, or report status for
+workspace B.
+
+This is a correctness invariant, not a defensive flourish. It applies to
+settings-like panels for MCP, privacy, sync, cloud integrations, keyboard
+profiles, and any future workspace-local controls.
+
 ### 1. Rename the surface without breaking behavior
 
 - Keep `DesktopSettings.tsx` temporarily as the exported entry, or rename it to

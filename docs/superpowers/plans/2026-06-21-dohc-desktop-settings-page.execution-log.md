@@ -127,7 +127,9 @@ CodeRabbit findings fixed:
   failures in the settings UI; add visible focus styles for switches; document
   the `jsdom@27.2.0` pin in JSON-safe package metadata; keep legacy theme
   migration cleanup and appearance application durable if the migration write
-  fails.
+  fails; promote the workspace async safety invariant from this execution log
+  into root agent guidance, the settings architecture plan, and the MCP panel
+  request-token guard.
 - Trivial: add explicit preload payload types, stable warning keys, settings
   merge helpers, a default settings-section constant, safer theme toggle
   rejection handling, and expanded IPC/test documentation.
@@ -142,3 +144,6 @@ Rejected findings:
   `dependencyNotes`.
 - The package dependency-note request was implemented as `dependencyNotes`
   because comments are not valid JSON.
+- The requested `apps/app/AGENTS.md` target does not exist in this worktree;
+  the invariant was added to root `AGENTS.md` instead, which is the repo-wide
+  agent guidance file present for desktop work.

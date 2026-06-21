@@ -38,6 +38,8 @@ export function AgentsMcpSettings(props: {
   const [copyError, setCopyError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const mountedRef = useRef(false);
+  // Workspace async safety invariant: IPC responses are allowed to update this
+  // panel only if they belong to the latest workspace/request version.
   const requestVersionRef = useRef(0);
   const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
