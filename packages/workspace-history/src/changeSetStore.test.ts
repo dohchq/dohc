@@ -203,7 +203,7 @@ describe("changeSetStore persistence", () => {
     const store = createChangeSetStore(root);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await expect(store.get("corrupt")).rejects.toThrow(/unknown history change set kind/i);
+      await expect(store.get("corrupt")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining("[workspace-history] skipping unreadable record corrupt:"),
@@ -318,7 +318,7 @@ describe("changeSetStore persistence", () => {
     const store = createChangeSetStore(root);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await expect(store.get("bad-boundary")).rejects.toThrow(/unknown history boundary crossing/i);
+      await expect(store.get("bad-boundary")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining("[workspace-history] skipping unreadable record bad-boundary:"),
@@ -370,9 +370,7 @@ describe("changeSetStore persistence", () => {
     const store = createChangeSetStore(root);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await expect(store.get("bad-provenance")).rejects.toThrow(
-        /unknown history change set kind/i,
-      );
+      await expect(store.get("bad-provenance")).resolves.toBeNull();
       await expect(store.list()).resolves.toEqual([]);
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining("[workspace-history] skipping unreadable record bad-provenance:"),

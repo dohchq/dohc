@@ -300,16 +300,24 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       return records;
     },
 
-    // Detail reads are fail-fast once a valid index entry points to a bad
-    // record. Corrupt index entries are skipped by readIndex so one bad entry
-    // cannot blank the whole timeline.
+    // Detail reads are resilient like list reads: one corrupt persisted record
+    // cannot blank the timeline or crash direct lookup.
     async get(id) {
       assertSafeHistoryId(id);
       const index = await readIndex();
       const entry = index.find((e) => e.id === id);
       if (!entry) return null;
       const record = await readJson<HistoryRecord>(join(historyDir, recordFileName(entry)));
-      return record ? normalizeHistoryRecord(record) : null;
+      if (!record) return null;
+      try {
+        return normalizeHistoryRecord(record);
+      } catch (error) {
+        console.error(
+          `[workspace-history] skipping unreadable record ${entry.id}:`,
+          error,
+        );
+        return null;
+      }
     },
   };
 }

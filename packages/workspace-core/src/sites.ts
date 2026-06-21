@@ -176,8 +176,11 @@ function normalizeWorkspacePath(path: string): string | null {
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")
     .split("/")
-    .filter((segment) => segment !== "" && segment !== ".");
-  if (segments.includes("..")) return null;
+    .filter((segment) => segment !== "" && segment !== ".")
+    .map(stripSiteIgnoredAliasSuffix);
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    return null;
+  }
   const normalized = segments.join("/");
   if (normalized === "") return null;
   return normalized;

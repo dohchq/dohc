@@ -278,6 +278,10 @@ describe("mediaTypeForPath (shared extension -> media-type table)", () => {
     expect(mediaTypeForPath("docs/spec.pdf")).toBe("application/pdf");
     expect(mediaTypeForPath("data/app.sqlite")).toBe("application/vnd.sqlite3");
     expect(mediaTypeForPath("data/app.db")).toBe("application/vnd.sqlite3");
+    expect(mediaTypeForPath("sites/portal/src/App.tsx")).toBe("application/typescript");
+    expect(mediaTypeForPath("sites/portal/src/main.mts")).toBe("application/typescript");
+    expect(mediaTypeForPath("sites/portal/script.cjs")).toBe("text/javascript");
+    expect(mediaTypeForPath("sites/portal/styles.scss")).toBe("text/css");
   });
 
   it("returns null for unknown or missing extensions (fallback is the caller's)", () => {

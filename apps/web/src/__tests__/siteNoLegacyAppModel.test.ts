@@ -8,6 +8,7 @@ const ROOT = join(TEST_DIR, '..', '..')
 const REPO = join(TEST_DIR, '..', '..', '..', '..')
 
 const SCAN_ROOTS = [
+  join(REPO, 'src'),
   join(REPO, 'apps'),
   join(REPO, 'packages'),
   join(REPO, 'services'),
@@ -16,6 +17,16 @@ const SCAN_ROOTS = [
   join(REPO, 'docs/security'),
   join(REPO, 'docs/product'),
   join(REPO, 'docs/qa'),
+  join(REPO, 'AGENTS.md'),
+  join(REPO, 'CLAUDE.md'),
+  join(REPO, 'README.md'),
+  join(REPO, 'decisions.md'),
+  join(REPO, 'docker-compose.dev.yml'),
+  join(REPO, 'docker-compose.self-host.yml'),
+  join(REPO, 'package.json'),
+  join(REPO, 'playwright.config.ts'),
+  join(REPO, 'pnpm-workspace.yaml'),
+  join(REPO, 'tsconfig.base.json'),
 ]
 
 const SKIP_DIR = new Set([
@@ -38,6 +49,14 @@ const FORBIDDEN: ReadonlyArray<{ name: string; token: string; caseSensitive?: bo
   { name: 'legacy SDK package', token: '@dohc/app' },
   { name: 'legacy package type', token: 'AppPackage', caseSensitive: true },
   { name: 'legacy source marker', token: 'app-source' },
+  { name: 'retired hidden folder phrase', token: 'retired hidden site folder' },
+  { name: 'retired manifest phrase', token: 'retired site manifest' },
+  { name: 'retired SDK phrase', token: 'retired dohc app SDK' },
+  { name: 'retired package type phrase', token: 'retired app package type' },
+  { name: 'retired source marker phrase', token: 'retired atom source marker' },
+  { name: 'legacy apps view', token: 'AppsView', caseSensitive: true },
+  { name: 'legacy create app tool', token: 'dohc_create_app' },
+  { name: 'legacy test app tool', token: 'dohc_test_app' },
 ]
 
 const ACTIVE_SUPERPOWERS_SCAN = new Set([

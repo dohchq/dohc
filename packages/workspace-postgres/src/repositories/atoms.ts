@@ -18,6 +18,7 @@ type AtomRow = {
   revision: number;
   updated_at: Date;
 };
+type NormalizedAtomRow = Omit<AtomRow, "kind"> & { kind: AtomKind };
 
 function contentTypeForAtomKind(kind: AtomKind) {
   switch (kind) {
@@ -34,16 +35,34 @@ function contentTypeForAtomKind(kind: AtomKind) {
   }
 }
 
+function normalizeAtomKindForRow(row: AtomRow): AtomKind {
+  try {
+    return normalizeAtomKind(row.kind);
+  } catch (error) {
+    console.error("[workspace-postgres] invalid atom kind", {
+      path: row.path,
+      kind: row.kind,
+    });
+    throw new Error(
+      `Invalid atom kind for ${row.path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function normalizeAtomRow(row: AtomRow): NormalizedAtomRow {
+  return { ...row, kind: normalizeAtomKindForRow(row) };
+}
+
 export function atomRowToWorkspaceFile(row: AtomRow): WorkspaceFile {
-  const kind = normalizeAtomKind(row.kind);
+  const normalized = normalizeAtomRow(row);
   return {
-    id: row.id,
-    workspaceId: row.workspace_id,
-    path: row.path,
+    id: normalized.id,
+    workspaceId: normalized.workspace_id,
+    path: normalized.path,
     kind: "atom",
-    contentType: contentTypeForAtomKind(kind),
-    revision: String(row.revision),
-    updatedAt: row.updated_at.getTime(),
+    contentType: contentTypeForAtomKind(normalized.kind),
+    revision: String(normalized.revision),
+    updatedAt: normalized.updated_at.getTime(),
   };
 }
 
@@ -105,7 +124,7 @@ export async function readAtomMetadata(
   );
   const row = result.rows[0];
   if (!row) throw new WorkspaceError("not_found", "Atom not found");
-  return row;
+  return normalizeAtomRow(row);
 }
 
 export async function insertAtom(
@@ -130,7 +149,7 @@ export async function insertAtom(
       revision: 1,
       body: input.body,
     });
-    return result.rows[0];
+    return normalizeAtomRow(result.rows[0]!);
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new WorkspaceError("conflict", "File path already exists");
@@ -181,7 +200,7 @@ export async function updateAtom(
     revision: nextRevision,
     body: input.body,
   });
-  return updated.rows[0];
+  return normalizeAtomRow(updated.rows[0]!);
 }
 
 export async function softDeleteAtom(
@@ -264,7 +283,7 @@ export async function renameAtom(
       revision: nextRevision,
       body: row.body,
     });
-    return updated.rows[0];
+    return normalizeAtomRow(updated.rows[0]!);
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new WorkspaceError("conflict", "File path already exists");

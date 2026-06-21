@@ -786,6 +786,9 @@ describe("mcp tools operate on allowed paths", () => {
       expect(packageJson).toMatchObject({
         private: true,
         type: "module",
+        engines: {
+          node: ">=14.8.0",
+        },
         scripts: {
           dev: "serve . --listen 127.0.0.1:4173",
           build: "node scripts/build-static.mjs",

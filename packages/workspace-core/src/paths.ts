@@ -190,10 +190,15 @@ export function classifyPath(relativePath: string): PathClassification {
 // The ONE extension -> media-type table (check-architecture-debt single-owner
 // rule). Returns null for unknown extensions — each caller owns its fallback.
 const MEDIA_TYPES: Record<string, string> = {
+  cjs: "text/javascript",
+  cts: "application/typescript",
   csv: "text/csv",
+  css: "text/css",
   db: "application/vnd.sqlite3",
   htm: "text/html",
   html: "text/html",
+  js: "text/javascript",
+  jsx: "text/javascript",
   jpeg: "image/jpeg",
   jpg: "image/jpeg",
   json: "application/json",
@@ -201,12 +206,17 @@ const MEDIA_TYPES: Record<string, string> = {
   m4a: "audio/mp4",
   markdown: "text/markdown",
   md: "text/markdown",
+  mjs: "text/javascript",
+  mts: "application/typescript",
   ndjson: "application/x-ndjson",
   pdf: "application/pdf",
   png: "image/png",
+  scss: "text/css",
   sqlite: "application/vnd.sqlite3",
   sqlite3: "application/vnd.sqlite3",
   txt: "text/plain",
+  ts: "application/typescript",
+  tsx: "application/typescript",
 };
 
 export function mediaTypeForPath(path: string): string | null {

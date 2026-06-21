@@ -457,7 +457,7 @@ describe("workspace API service", () => {
         {
           path: "shared/locked.md",
           ok: false,
-          error: "approval-required",
+          error: SYNC_APPROVAL_REQUIRED_REASON,
         },
       ],
     });

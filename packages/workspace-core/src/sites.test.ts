@@ -186,6 +186,10 @@ describe("discoverSites", () => {
     ).toEqual([]);
   });
 
+  it("ignores site paths with Windows-aliased traversal segments", () => {
+    expect(discoverSites(["evil/.. /index.html", "evil/... /index.html"])).toEqual([]);
+  });
+
   it("keeps broken package.json repairable when it looks like a site root", () => {
     const [site] = discoverSites([
       "repairable/index.html",
