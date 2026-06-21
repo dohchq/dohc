@@ -10,6 +10,12 @@ import type {
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import {
+  ListSitesResult,
+  SitePackageResult,
+  StartSitePreviewResult,
+  StopSitePreviewResult,
+} from "./ipc/bridgeContract";
+import {
   CHANNELS,
   isExplorerMenuCommand,
   isMenuCommand,
@@ -104,13 +110,22 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  listSites: (payload: ListSitesPayload) => ipcRenderer.invoke(CHANNELS.listSites, payload),
-  getSitePackage: (payload: SitePackagePayload) =>
-    ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
-  startSitePreview: (payload: StartSitePreviewPayload) =>
-    ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
-  stopSitePreview: (payload: StopSitePreviewPayload) =>
-    ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
+  listSites: async (payload: ListSitesPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.listSites, payload);
+    return ListSitesResult.parse(result);
+  },
+  getSitePackage: async (payload: SitePackagePayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.getSitePackage, payload);
+    return SitePackageResult.parse(result);
+  },
+  startSitePreview: async (payload: StartSitePreviewPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.startSitePreview, payload);
+    return StartSitePreviewResult.parse(result);
+  },
+  stopSitePreview: async (payload: StopSitePreviewPayload) => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.stopSitePreview, payload);
+    return StopSitePreviewResult.parse(result);
+  },
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

@@ -616,6 +616,8 @@ export const StopSitePreviewPayload = z.object({
   siteRoot: SITE_ROOT_STRING,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
+export const StopSitePreviewResult = z.void();
+export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -1207,7 +1209,7 @@ export interface DohcDesktopBridge {
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
-  stopSitePreview(payload: StopSitePreviewPayload): Promise<void>;
+  stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
