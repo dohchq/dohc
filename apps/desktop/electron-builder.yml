@@ -63,13 +63,13 @@ fileAssociations:
     description: Open with dohc
     role: Editor
 
-# Auto-update feed STUB. The runtime feed comes from DOHC_UPDATE_URL
-# (src/updates/electronUpdater.ts setFeedURL); unset means updates are fully
-# disabled, so this RFC-reserved .invalid placeholder is never contacted.
-# RELEASE TRAP: replacing this url is NOT enough to ship real updates — end
-# users launch with no env vars, so updateFeedUrl() must also gain a packaged
-# fallback to the baked app-update.yml feed (env stays an override). Without
-# the code change a shipped release silently never updates.
+# Auto-update feed baked into packaged app-update.yml. GitHub Releases is the
+# first dogfood update host because it is available immediately from the
+# release workflow. DOHC_UPDATE_URL remains an explicit packaged/mock override
+# in src/updates/electronUpdater.ts. Move to https://updates.dohc.com/desktop
+# only after the bridge-release runbook in the desktop update plan is complete.
 publish:
-  provider: generic
-  url: https://updates.dohc.invalid/desktop
+  provider: github
+  owner: dohc-ai
+  repo: dohc
+  channel: latest

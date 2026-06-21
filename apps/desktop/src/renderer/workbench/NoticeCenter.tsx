@@ -7,8 +7,8 @@ import {
   Download,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 type Notice = {
@@ -19,6 +19,7 @@ type Notice = {
   action?: {
     label: string;
     onClick: () => void;
+    disabled?: boolean;
   };
   Icon: typeof Bell;
 };
@@ -38,18 +39,74 @@ export function NoticeCenter(props: {
   onOpenAgent: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
+  const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
+    string | null
+  >(null);
+  const [updateActionError, setUpdateActionError] = useState<string | null>(null);
+  const [installPending, setInstallPending] = useState(false);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
+  const updateSubscriptionFiredRef = useRef(false);
 
-  useEffect(
-    () =>
-      bridge().onUpdateState((update) => {
-        if (update.status === "ready") setUpdateMessage(update.message);
-      }),
-    [],
-  );
+  const applyUpdateState = useCallback((update: UpdateStateEvent) => {
+    if (update.status === "ready") {
+      setUpdateState(update);
+      setUpdateActionError(null);
+      return;
+    }
+    setUpdateState(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    updateSubscriptionFiredRef.current = false;
+    void bridge()
+      .getUpdateState()
+      .then((update) => {
+        if (!cancelled && !updateSubscriptionFiredRef.current) {
+          applyUpdateState(update);
+        }
+      })
+      .catch(() => undefined);
+    const unsubscribe = bridge().onUpdateState((update) => {
+      updateSubscriptionFiredRef.current = true;
+      applyUpdateState(update);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [applyUpdateState]);
+
+  const readyUpdateKey =
+    updateState?.status === "ready"
+      ? `${updateState.version ?? "unknown"}:${updateState.message}`
+      : null;
+  const updateToastVisible =
+    updateState?.status === "ready" &&
+    readyUpdateKey !== null &&
+    readyUpdateKey !== dismissedUpdateToastKey;
+  const installUpdate = useCallback(async () => {
+    if (installPending) return;
+    try {
+      setInstallPending(true);
+      setUpdateActionError(null);
+      const result = await bridge().installUpdate();
+      if (!result.accepted || result.state.status === "error") {
+        setUpdateActionError(
+          result.state.status === "error"
+            ? result.state.message
+            : "Could not restart into the update.",
+        );
+      }
+    } catch {
+      setUpdateActionError("Could not restart into the update.");
+    } finally {
+      setInstallPending(false);
+    }
+  }, [installPending]);
 
   useEffect(() => {
     if (!open) return;
@@ -104,12 +161,19 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (updateMessage) {
+    if (updateState?.status === "ready") {
       next.push({
         id: "update-ready",
         tone: "neutral",
         title: "Update ready",
-        body: updateMessage,
+        body: updateActionError ?? updateState.message,
+        action: updateState.canInstall
+          ? {
+              label: installPending ? "Restarting" : "Restart",
+              onClick: () => void installUpdate(),
+              disabled: installPending,
+            }
+          : undefined,
         Icon: Download,
       });
     }
@@ -121,25 +185,38 @@ export function NoticeCenter(props: {
     props.onOpenAgent,
     props.onOpenHistory,
     props.syncStatus,
-    updateMessage,
+    installPending,
+    installUpdate,
+    updateActionError,
+    updateState,
   ]);
 
   const count = notices.length;
 
   return (
     <>
-      {updateMessage ? (
+      {updateToastVisible && updateState?.status === "ready" ? (
         <div
           ref={toastRef}
           data-testid="update-toast"
           role="status"
           className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"
         >
-          <span>{updateMessage}</span>
+          <span>{updateActionError ?? updateState.message}</span>
+          {updateState.canInstall ? (
+            <button
+              type="button"
+              disabled={installPending}
+              onClick={() => void installUpdate()}
+              className="shrink-0 rounded bg-ink px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+            >
+              {installPending ? "Restarting" : "Restart"}
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label="Dismiss update notice"
-            onClick={() => setUpdateMessage(null)}
+            onClick={() => setDismissedUpdateToastKey(readyUpdateKey)}
             className="grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink"
           >
             <X size={12} aria-hidden />
@@ -154,7 +231,7 @@ export function NoticeCenter(props: {
           role="dialog"
           aria-label="Notices"
           className={`fixed right-3 z-20 flex w-[min(360px,calc(100vw-24px))] flex-col rounded-md border border-line bg-panel text-xs text-ink shadow-sm ${
-            updateMessage ? "bottom-20" : "bottom-9"
+            updateToastVisible ? "bottom-20" : "bottom-9"
           }`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
@@ -197,11 +274,12 @@ export function NoticeCenter(props: {
                       {notice.action ? (
                         <button
                           type="button"
+                          disabled={notice.action.disabled}
                           onClick={() => {
                             notice.action?.onClick();
                             setOpen(false);
                           }}
-                          className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+                          className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
                         >
                           {notice.action.label}
                         </button>

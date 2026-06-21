@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { Bot, Check, Copy } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Bot, Check, Copy, Download, RefreshCw } from "lucide-react";
 import type {
   AgentRunStatusResult,
   McpConfigResult,
+  UpdateStateEvent,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
@@ -40,8 +41,12 @@ export function DesktopSettings(props: {
   const { workspaceId, onAgentActiveChange } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
   const [busy, setBusy] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const updateSubscriptionFiredRef = useRef(false);
 
   const refresh = useCallback(async (): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
@@ -56,6 +61,28 @@ export function DesktopSettings(props: {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useEffect(() => {
+    let cancelled = false;
+    updateSubscriptionFiredRef.current = false;
+    void bridge()
+      .getUpdateState()
+      .then((next) => {
+        if (!cancelled && !updateSubscriptionFiredRef.current) {
+          setUpdateError(null);
+          setUpdateState(next);
+        }
+      })
+      .catch(() => undefined);
+    const unsubscribe = bridge().onUpdateState((next) => {
+      updateSubscriptionFiredRef.current = true;
+      setUpdateError(null);
+      setUpdateState(next);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   const enabled = status?.mcpEnabled ?? false;
 
@@ -87,6 +114,50 @@ export function DesktopSettings(props: {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }, [config]);
+
+  const checkForUpdates = useCallback(async () => {
+    setUpdateBusy("check");
+    setUpdateError(null);
+    try {
+      const result = await bridge().checkForUpdates();
+      setUpdateState(result.state);
+      if (!result.checked) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "No update check was started.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
+    } catch {
+      setUpdateError("Could not check for updates.");
+    } finally {
+      setUpdateBusy(null);
+    }
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    setUpdateBusy("install");
+    setUpdateError(null);
+    try {
+      const result = await bridge().installUpdate();
+      setUpdateState(result.state);
+      if (!result.accepted) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "Could not restart into the update.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
+    } catch {
+      setUpdateError("Could not restart into the update.");
+    } finally {
+      setUpdateBusy(null);
+    }
+  }, []);
 
   return (
     <div
@@ -152,6 +223,55 @@ export function DesktopSettings(props: {
         >
           {config ? configSnippet(config) : "…"}
         </pre>
+      </section>
+
+      <section className="flex flex-col gap-3 rounded border border-line px-3 py-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Download size={14} aria-hidden className="text-subtle" />
+          <div className="min-w-0 flex-1">
+            <span className="block text-[13px] text-ink">Desktop updates</span>
+            <span
+              data-testid="desktop-updates-status"
+              data-state={updateState?.status ?? "unknown"}
+              className="block truncate text-[11px] text-subtle"
+            >
+              {updateError ?? updateState?.message ?? "Update status unavailable."}
+            </span>
+          </div>
+          <button
+            type="button"
+            data-testid="check-updates-button"
+            disabled={updateBusy !== null || updateState?.canCheck === false}
+            onClick={() => void checkForUpdates()}
+            className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+          >
+            <RefreshCw size={12} aria-hidden />
+            {updateBusy === "check" ? "Checking" : "Check"}
+          </button>
+          <button
+            type="button"
+            data-testid="install-update-button"
+            disabled={updateBusy !== null || updateState?.canInstall !== true}
+            onClick={() => void installUpdate()}
+            className="h-7 shrink-0 rounded bg-ink px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+          >
+            {updateBusy === "install" ? "Restarting" : "Restart"}
+          </button>
+        </div>
+        <dl className="m-0 grid grid-cols-2 gap-2 text-[11px] text-muted">
+          <div>
+            <dt className="text-subtle">Version</dt>
+            <dd data-testid="desktop-updates-version" className="m-0 text-ink">
+              {updateState?.currentVersion ?? "unknown"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-subtle">Channel</dt>
+            <dd data-testid="desktop-updates-channel" className="m-0 text-ink">
+              {updateState?.channel ?? "unknown"}
+            </dd>
+          </div>
+        </dl>
       </section>
 
       <section className="flex flex-col gap-1.5">

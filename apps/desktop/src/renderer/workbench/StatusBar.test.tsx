@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
@@ -10,9 +10,35 @@ import { StatusBar } from "./StatusBar";
 // isPackaged + DOHC_UPDATE_URL), so the surface is driven with a fake.
 let pushUpdate: ((state: UpdateStateEvent) => void) | null = null;
 const unsubscribe = vi.fn();
+const installUpdate = vi.fn(async () => ({
+  accepted: true,
+  completed: false,
+  state: {
+    status: "ready" as const,
+    message: "Update 1.2.3 is ready — restart dohc to apply it.",
+    currentVersion: "1.2.2",
+    channel: "latest" as const,
+    canCheck: false,
+    canInstall: true,
+    version: "1.2.3",
+  },
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {
+    getUpdateState: vi.fn(
+      () => new Promise<UpdateStateEvent>(() => undefined),
+    ),
+    checkForUpdates: vi.fn(),
+    installUpdate,
     onUpdateState: (listener: (state: UpdateStateEvent) => void) => {
       pushUpdate = listener;
       return unsubscribe;
@@ -52,12 +78,56 @@ describe("update toast", () => {
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
     });
     const toast = await screen.findByTestId("update-toast");
     expect(toast.textContent).toContain("Update 1.2.3 is ready");
 
     await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
     expect(screen.queryByTestId("update-toast")).toBeNull();
+  });
+
+  it("keeps subscription state when the initial update fetch resolves later", async () => {
+    const pending = deferred<UpdateStateEvent>();
+    (
+      (window as unknown as {
+        dohcDesktop: {
+          getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
+        };
+      }).dohcDesktop as {
+        getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
+      }
+    ).getUpdateState.mockReturnValueOnce(pending.promise);
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+    await screen.findByTestId("update-toast");
+
+    pending.resolve({
+      status: "idle",
+      message: "Updates have not been checked yet.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: true,
+      canInstall: false,
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("update-toast").textContent).toContain(
+        "Update 1.2.3 is ready",
+      ),
+    );
   });
 
   it("ignores every non-ready state (checking/downloading/error stay silent)", () => {
@@ -121,6 +191,11 @@ describe("notice center", () => {
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
     });
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -160,13 +235,105 @@ describe("notice center", () => {
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
     });
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
 
     expect(screen.queryByTestId("update-toast")).toBeNull();
-    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
+    expect(screen.getByTestId("notice-center").textContent).toContain(
+      "Update 1.2.3 is ready",
+    );
+  });
+
+  it("calls installUpdate from the update notice action", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+
+    expect(installUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("shows restart failures in the update notice and toast", async () => {
+    installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      completed: false,
+      state: {
+        status: "ready",
+        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.3",
+      },
+    });
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+
+    await screen.findByText("Could not restart into the update.");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
+      "Could not restart into the update.",
+    );
+  });
+
+  it("does not show the restart action when the update is not installable", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: false,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
+      "Update 1.2.3 is ready",
+    );
+    expect(
+      within(screen.getByTestId("notice-center")).queryByRole("button", {
+        name: "Restart",
+      }),
+    ).toBeNull();
   });
 
   it("closes the notice popover on outside click while preserving inside clicks", async () => {

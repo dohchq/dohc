@@ -5,7 +5,47 @@ import {
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
+  UpdateActionResult,
+  UpdateCheckResult,
+  UpdateStateEvent,
 } from "./bridgeContract";
+
+describe("update IPC contract", () => {
+  const readyState = {
+    status: "ready",
+    message: "Update 1.2.4 is ready",
+    currentVersion: "1.2.3",
+    channel: "latest",
+    canCheck: false,
+    canInstall: true,
+    version: "1.2.4",
+  };
+
+  it("accepts public update state and action results", () => {
+    expect(UpdateStateEvent.parse(readyState)).toEqual(readyState);
+    expect(
+      UpdateCheckResult.parse({ checked: false, state: readyState }).state,
+    ).toEqual(readyState);
+    expect(
+      UpdateActionResult.parse({
+        accepted: true,
+        completed: false,
+        state: readyState,
+      }).accepted,
+    ).toBe(true);
+  });
+
+  it("strips feed/config fields and rejects malformed progress", () => {
+    const parsed = UpdateStateEvent.parse({ ...readyState, feedUrl: "https://x" });
+    expect(parsed).not.toHaveProperty("feedUrl");
+    expect(UpdateStateEvent.safeParse({ ...readyState, percent: 101 }).success).toBe(
+      false,
+    );
+    expect(UpdateStateEvent.safeParse({ ...readyState, channel: "beta" }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("site IPC contract", () => {
   it("accepts detected normal website metadata", () => {

@@ -220,6 +220,40 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.updateState, handler);
     return () => ipcRenderer.removeListener(CHANNELS.updateState, handler);
   },
+  getUpdateState: async () => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.getUpdateState);
+    const state = parseUpdateStateEvent(result);
+    if (!state) throw new Error("Invalid update state from main process.");
+    return state;
+  },
+  checkForUpdates: async () => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.checkForUpdates);
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      throw new Error("Invalid update check result from main process.");
+    }
+    const raw = result as Record<string, unknown>;
+    const state = parseUpdateStateEvent(raw.state);
+    if (typeof raw.checked !== "boolean" || !state) {
+      throw new Error("Invalid update check result from main process.");
+    }
+    return { checked: raw.checked, state };
+  },
+  installUpdate: async () => {
+    const result: unknown = await ipcRenderer.invoke(CHANNELS.installUpdate);
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      throw new Error("Invalid update install result from main process.");
+    }
+    const raw = result as Record<string, unknown>;
+    const state = parseUpdateStateEvent(raw.state);
+    if (
+      typeof raw.accepted !== "boolean" ||
+      typeof raw.completed !== "boolean" ||
+      !state
+    ) {
+      throw new Error("Invalid update install result from main process.");
+    }
+    return { accepted: raw.accepted, completed: raw.completed, state };
+  },
   // Content search (Phase E5.0): results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   searchWorkspace: (payload) =>

@@ -1,0 +1,320 @@
+name: Desktop Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - latest
+          - nightly
+      version:
+        description: Stable version, for example 0.1.0 or v0.1.0
+        required: false
+        type: string
+      dry_run:
+        description: Build and test without publishing artifacts
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: desktop-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      release_channel: ${{ steps.release.outputs.release_channel }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_name: ${{ steps.release.outputs.name }}
+      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
+      make_latest: ${{ steps.release.outputs.make_latest }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.14.0
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - id: mode
+        name: Resolve publish mode
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: release
+        name: Resolve release metadata
+        shell: bash
+        env:
+          DISPATCH_CHANNEL: ${{ inputs.channel }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            channel="nightly"
+            version_arg=()
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            channel="latest"
+            version_arg=(--version "${GITHUB_REF_NAME}")
+          else
+            channel="${DISPATCH_CHANNEL:-nightly}"
+            version_arg=()
+            if [[ -n "${DISPATCH_VERSION:-}" ]]; then
+              version_arg=(--version "${DISPATCH_VERSION}")
+            fi
+          fi
+
+          nightly_date="$(date -u +%Y%m%d)"
+          node scripts/resolve-desktop-release.mjs \
+            --channel "$channel" \
+            "${version_arg[@]}" \
+            --date "$nightly_date" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sha "$GITHUB_SHA" \
+            --github-output
+
+      - name: Stamp desktop package version
+        env:
+          DESKTOP_VERSION: ${{ steps.release.outputs.version }}
+        run: node scripts/update-desktop-package-version.mjs
+
+      - name: Release helper tests
+        run: pnpm test:release:desktop
+
+      - name: Desktop release smoke
+        run: pnpm smoke:release:desktop
+
+      - name: Desktop typecheck
+        run: pnpm --filter @dohc/desktop typecheck
+
+      - name: Desktop tests
+        run: pnpm test:desktop
+
+  build:
+    name: Package ${{ matrix.label }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS x64
+            os: macOS
+            runner: macos-latest
+            arch: x64
+            require_signing: "1"
+          - label: macOS arm64
+            os: macOS
+            runner: macos-latest
+            arch: arm64
+            require_signing: "1"
+          - label: Windows x64
+            os: Windows
+            runner: windows-latest
+            arch: x64
+            require_signing: "1"
+          - label: Linux x64
+            os: Linux
+            runner: ubuntu-latest
+            arch: x64
+            require_signing: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.14.0
+
+      - name: Setup pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Stamp desktop package version
+        env:
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
+        run: node scripts/update-desktop-package-version.mjs
+
+      - name: Build desktop
+        run: pnpm build:desktop
+
+      - name: Package smoke
+        env:
+          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: pnpm smoke:package:desktop
+
+      - name: Package desktop
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
+          if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
+            builder_args+=(-c.forceCodeSigning=true)
+          fi
+          pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
+
+      - name: Fuse smoke
+        if: runner.os != 'Windows'
+        run: pnpm smoke:fuses:desktop
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: apps/desktop/release/**
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs:
+      - preflight
+      - build
+    if: ${{ needs.preflight.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Required for creating GitHub releases via softprops/action-gh-release.
+      contents: write
+    steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Guard against stale nightly publish
+        if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && needs.preflight.outputs.release_channel == 'nightly' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$latest_sha" != "$GITHUB_SHA" ]]; then
+            echo "Refusing to publish stale nightly for $GITHUB_SHA; main is now $latest_sha."
+            exit 1
+          fi
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          channel="${{ needs.preflight.outputs.release_channel }}"
+          unexpected_channel="nightly"
+          if [[ "$channel" == "nightly" ]]; then
+            unexpected_channel="latest"
+          fi
+          rm -rf release-upload
+          mkdir -p release-upload
+
+          copy_unique() {
+            local source="$1"
+            local target="release-upload/$(basename "$source")"
+            if [[ -f "$target" ]] && ! cmp -s "$source" "$target"; then
+              echo "Conflicting release artifact basename: $(basename "$source")"
+              exit 1
+            fi
+            cp "$source" "$target"
+          }
+
+          mac_manifest_name="${channel}-mac.yml"
+          mac_manifests=(release-artifacts/**/"$mac_manifest_name")
+          if (( ${#mac_manifests[@]} > 0 )); then
+            cp "${mac_manifests[0]}" "release-upload/$mac_manifest_name"
+            for manifest in "${mac_manifests[@]:1}"; do
+              node scripts/merge-update-manifests.mjs \
+                --platform mac \
+                "release-upload/$mac_manifest_name" \
+                "$manifest" \
+                "release-upload/$mac_manifest_name"
+            done
+          fi
+
+          while IFS= read -r -d '' file; do
+            if [[ "$(basename "$file")" == "$mac_manifest_name" ]]; then
+              continue
+            fi
+            copy_unique "$file"
+          done < <(find release-artifacts -type f -print0)
+
+          expected_manifests=(release-upload/"$channel"*.yml)
+          if (( ${#expected_manifests[@]} == 0 )); then
+            echo "No $channel update manifests were produced."
+            exit 1
+          fi
+          unexpected_manifests=(release-upload/"$unexpected_channel"*.yml)
+          if (( ${#unexpected_manifests[@]} > 0 )); then
+            printf 'Unexpected %s manifests in %s release:\n' "$unexpected_channel" "$channel"
+            printf '  %s\n' "${unexpected_manifests[@]}"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ needs.preflight.outputs.make_latest == 'true' }}
+          files: release-upload/**

@@ -66,8 +66,25 @@ if (config) {
   // committed config (release pipelines opt in with -c.forceCodeSigning=true).
   check(config.mac?.identity === undefined, "mac.identity is not hard-coded");
   check(config.forceCodeSigning !== true, "forceCodeSigning stays a release-pipeline opt-in");
-  check(config.publish?.provider === "generic" && typeof config.publish?.url === "string",
-    "publish stub present (generic provider)");
+  const publishConfig = Array.isArray(config.publish)
+    ? config.publish[0]
+    : config.publish;
+  if (publishConfig?.provider === "github") {
+    check(publishConfig.owner === "dohc-ai", "publish GitHub owner is dohc-ai");
+    check(publishConfig.repo === "dohc", "publish GitHub repo is dohc");
+    check(
+      publishConfig.channel === "latest" || publishConfig.channel === "nightly",
+      `publish channel is explicit (${publishConfig.channel ?? "missing"})`,
+    );
+  } else {
+    check(publishConfig?.provider === "generic", "publish provider is generic or github");
+    check(
+      typeof publishConfig?.url === "string" &&
+        publishConfig.url.startsWith("https://") &&
+        !publishConfig.url.includes(".invalid"),
+      `publish URL is release-ready (${publishConfig?.url ?? "missing"})`,
+    );
+  }
   const fileExtensions = config.fileAssociations?.flatMap((entry) =>
     Array.isArray(entry.ext) ? entry.ext : [entry.ext],
   ) ?? [];
