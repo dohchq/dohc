@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { MenuItemConstructorOptions } from "electron";
 import { buildMenuTemplate } from "./applicationMenu";
 
-function build(isDev = false, platform: NodeJS.Platform = "linux") {
+function build(
+  isDev = false,
+  platform: NodeJS.Platform = "linux",
+  canInstallUpdate = false,
+) {
   const sendCommand = vi.fn();
   const openRecentWorkspace = vi.fn();
   const showAbout = vi.fn();
@@ -18,6 +22,7 @@ function build(isDev = false, platform: NodeJS.Platform = "linux") {
     isDev,
     platform,
     recentWorkspaces,
+    canInstallUpdate,
     sendCommand,
     openRecentWorkspace,
     showAbout,
@@ -181,7 +186,7 @@ describe("application menu template", () => {
   });
 
   it("routes Help update actions through renderer commands", () => {
-    const { template, sendCommand } = build();
+    const { template, sendCommand } = build(false, "linux", true);
     const helpItems = items(template, "Help");
     const check = helpItems.find((i) => i.label === "Check for Updates…");
     const install = helpItems.find((i) => i.label === "Update and Restart");
@@ -192,5 +197,14 @@ describe("application menu template", () => {
 
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "check-updates");
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "install-update");
+  });
+
+  it("disables Help restart when no update is installable", () => {
+    const { template } = build();
+    const install = items(template, "Help").find(
+      (i) => i.label === "Update and Restart",
+    );
+
+    expect(install?.enabled).toBe(false);
   });
 });

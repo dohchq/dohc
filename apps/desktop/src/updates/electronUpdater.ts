@@ -89,6 +89,7 @@ function shouldStartUpdates(
 // else is a real error.
 const OFFLINE_PATTERN =
   /ERR_INTERNET_DISCONNECTED|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|net::/i;
+const INSTALL_RESTART_FAILURE = "Could not restart into the update.";
 
 function boundedPercent(percent: number): number {
   if (!Number.isFinite(percent)) return 0;
@@ -149,14 +150,19 @@ export async function startAutoUpdates(options: {
   let state = initialUpdateState;
   let checkInFlight = false;
   let installInFlight = false;
+  let installErrorMessage: string | null = null;
   let stopped = false;
-  const publicState = () =>
-    publicUpdateState(state, {
+  const publicState = () => {
+    const base = publicUpdateState(state, {
       currentVersion,
       channel,
       checkInFlight,
       installInFlight,
     });
+    return installErrorMessage && state.status === "ready"
+      ? { ...base, message: installErrorMessage }
+      : base;
+  };
   const dispatch = (event: UpdateEvent): void => {
     state = transition(state, event);
     options.onState?.(state, publicState());
@@ -176,6 +182,7 @@ export async function startAutoUpdates(options: {
   }
 
   autoUpdater.on("checking-for-update", () => {
+    installErrorMessage = null;
     checkInFlight = true;
     dispatch({ type: "check" });
   });
@@ -191,6 +198,7 @@ export async function startAutoUpdates(options: {
     dispatch({ type: "progress", percent: boundedPercent(progress.percent) }),
   );
   autoUpdater.on("update-downloaded", (info) => {
+    installErrorMessage = null;
     dispatch({ type: "downloaded", version: info.version });
     checkInFlight = false;
     options.onState?.(state, publicState());
@@ -199,14 +207,19 @@ export async function startAutoUpdates(options: {
     options.onBeforeQuitForUpdate?.();
   });
   autoUpdater.on("error", (error) => {
+    if (installInFlight && state.status === "ready") {
+      installInFlight = false;
+      installErrorMessage = INSTALL_RESTART_FAILURE;
+      options.onState?.(state, publicState());
+      return;
+    }
+    checkInFlight = false;
+    installInFlight = false;
     dispatch(
       OFFLINE_PATTERN.test(error.message)
         ? { type: "offline" }
         : { type: "error", message: error.message },
     );
-    checkInFlight = false;
-    installInFlight = false;
-    options.onState?.(state, publicState());
   });
 
   const checkForUpdates = async (): Promise<UpdateCheckResult> => {
@@ -222,13 +235,23 @@ export async function startAutoUpdates(options: {
       return { checked: false, state: publicState() };
     }
     checkInFlight = true;
+    installErrorMessage = null;
     try {
       await autoUpdater.checkForUpdates();
       return { checked: true, state: publicState() };
-    } catch {
+    } catch (error) {
       // The updater emits "error"; if it does not, leave the app usable and
       // make the action visibly retryable.
-      checkInFlight = false;
+      if (checkInFlight) {
+        checkInFlight = false;
+        const message =
+          error instanceof Error ? error.message : "checkForUpdates failed";
+        dispatch(
+          OFFLINE_PATTERN.test(message)
+            ? { type: "offline" }
+            : { type: "error", message },
+        );
+      }
       return { checked: false, state: publicState() };
     }
   };
@@ -238,16 +261,18 @@ export async function startAutoUpdates(options: {
       return { accepted: false, completed: false, state: publicState() };
     }
     installInFlight = true;
+    installErrorMessage = null;
     options.onState?.(state, publicState());
     try {
       autoUpdater.quitAndInstall(false, true);
+      if (installErrorMessage) {
+        return { accepted: false, completed: false, state: publicState() };
+      }
       return { accepted: true, completed: false, state: publicState() };
-    } catch (error) {
+    } catch {
       installInFlight = false;
-      dispatch({
-        type: "error",
-        message: error instanceof Error ? error.message : "quitAndInstall failed",
-      });
+      installErrorMessage = INSTALL_RESTART_FAILURE;
+      options.onState?.(state, publicState());
       return { accepted: false, completed: false, state: publicState() };
     }
   };

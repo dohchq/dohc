@@ -109,7 +109,7 @@ export async function resolveDesktopRelease(options = {}) {
     if (!STABLE_VERSION_PATTERN.test(version)) {
       throw new Error(`Stable desktop releases require x.y.z, got '${version}'.`);
     }
-    if (stableCore(packageVersion) !== version) {
+    if (stripVersionPrefix(packageVersion) !== version) {
       throw new Error(
         `Stable release version '${version}' must match apps/desktop/package.json '${packageVersion}'.`,
       );

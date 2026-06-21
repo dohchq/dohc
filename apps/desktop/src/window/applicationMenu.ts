@@ -19,6 +19,7 @@ export function buildMenuTemplate(options: {
   isDev: boolean;
   platform: NodeJS.Platform;
   recentWorkspaces?: WorkspaceSummary[];
+  canInstallUpdate?: boolean;
   sendCommand: (window: BrowserWindow | undefined, command: MenuCommand) => void;
   openRecentWorkspace?: (
     window: BrowserWindow | undefined,
@@ -30,8 +31,10 @@ export function buildMenuTemplate(options: {
     label: string,
     name: MenuCommand,
     accelerator?: string,
+    enabled = true,
   ): MenuItemConstructorOptions => ({
     label,
+    enabled,
     ...(accelerator ? { accelerator, registerAccelerator: false } : {}),
     click: (_item, window) =>
       options.sendCommand(window as BrowserWindow | undefined, name),
@@ -122,7 +125,12 @@ export function buildMenuTemplate(options: {
       label: "Help",
       submenu: [
         command("Check for Updates…", "check-updates"),
-        command("Update and Restart", "install-update"),
+        command(
+          "Update and Restart",
+          "install-update",
+          undefined,
+          options.canInstallUpdate === true,
+        ),
         { type: "separator" },
         { label: "About dohc", click: () => options.showAbout() },
       ],

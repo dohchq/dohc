@@ -240,6 +240,7 @@ const sitePreviewHandles = new Map<string, SitePreviewHandle>();
 const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 let autoUpdateController: AutoUpdateController | null = null;
+let applicationMenuCanInstallUpdate: boolean | null = null;
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
@@ -601,12 +602,15 @@ function quoteWindowsArg(value: string): string {
 
 function refreshApplicationMenu(): void {
   if (!app.isReady()) return;
+  const canInstallUpdate = currentUpdateState().canInstall === true;
+  applicationMenuCanInstallUpdate = canInstallUpdate;
   Menu.setApplicationMenu(
     Menu.buildFromTemplate(
       buildMenuTemplate({
         isDev: !app.isPackaged,
         platform: process.platform,
         recentWorkspaces: nativeWorkspaceSummaries(),
+        canInstallUpdate,
         sendCommand: (window, command) => {
           targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
         },
@@ -882,6 +886,9 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   if (!payload) return;
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.updateState, payload);
+  }
+  if (payload.canInstall !== applicationMenuCanInstallUpdate) {
+    refreshApplicationMenu();
   }
 }
 
@@ -1325,8 +1332,10 @@ function registerIpcHandlers(): void {
       const item = (
         label: string,
         id: WorkbenchMenuCommand,
+        options: Electron.MenuItemConstructorOptions = {},
       ): Electron.MenuItemConstructorOptions => ({
         label,
+        ...options,
         click: () => {
           picked = id;
         },
@@ -1361,7 +1370,9 @@ function registerIpcHandlers(): void {
                 item("Settings", "settings"),
                 separator,
                 item("Check for Updates…", "check-updates"),
-                item("Update and Restart", "install-update"),
+                item("Update and Restart", "install-update", {
+                  enabled: currentUpdateState().canInstall === true,
+                }),
                 separator,
                 item("Toggle Theme", "toggle-theme"),
               ]

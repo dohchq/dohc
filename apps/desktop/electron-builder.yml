@@ -72,3 +72,4 @@ publish:
   provider: github
   owner: dohc-ai
   repo: dohc
+  channel: latest

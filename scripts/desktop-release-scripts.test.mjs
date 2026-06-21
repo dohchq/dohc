@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   nextNightlyBaseVersion,
   resolveDesktopRelease,
+  writeGithubOutput,
 } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
 import {
@@ -78,6 +79,20 @@ test("release metadata requires a real commit sha", async () => {
   }
 });
 
+test("stable release metadata rejects prerelease package versions", async () => {
+  const root = await fixtureRoot("0.1.0-nightly.20260621.12.2");
+  await assert.rejects(
+    () =>
+      resolveDesktopRelease({
+        root,
+        channel: "latest",
+        version: "v0.1.0",
+        sha: "0123456789abcdef",
+      }),
+    /must match apps\/desktop\/package\.json/,
+  );
+});
+
 test("nightly release dates must be real calendar dates", async () => {
   const root = await fixtureRoot("0.1.0");
   await assert.rejects(
@@ -119,6 +134,30 @@ test("updates apps/desktop/package.json version idempotently", async () => {
   assert.equal(first.changed, true);
   assert.equal(second.changed, false);
   assert.equal(packageJson.version, "0.1.1-nightly.20260621.12.2");
+});
+
+test("writes GitHub output in action-compatible key value form", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-release-output-"));
+  const outputPath = join(root, "github-output.txt");
+
+  await writeGithubOutput(
+    {
+      release_channel: "nightly",
+      version: "0.1.1-nightly.20260621.12.2",
+      make_latest: "false",
+    },
+    outputPath,
+  );
+
+  assert.equal(
+    await readFile(outputPath, "utf8"),
+    [
+      "release_channel=nightly",
+      "version=0.1.1-nightly.20260621.12.2",
+      "make_latest=false",
+      "",
+    ].join("\n"),
+  );
 });
 
 test("merges Electron updater manifests by version and unique file URL", () => {
@@ -194,6 +233,7 @@ test("mock update server serves files and blocks traversal/symlink escapes", asy
     const escaped = await fetch(`${server.url}/../secret.txt`);
     const nul = await fetch(`${server.url}/latest%00.yml`);
     assert.equal(ok.status, 200);
+    assert.match(ok.headers.get("content-type") ?? "", /^text\/yaml/);
     assert.equal(await ok.text(), "version: 0.1.0\n");
     assert.equal(escaped.status, 404);
     assert.equal(nul.status, 404);

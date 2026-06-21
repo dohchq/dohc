@@ -144,6 +144,21 @@ describe("electron updater actions", () => {
     });
   });
 
+  it("recovers when a check rejects after entering checking without an error event", async () => {
+    const updater = fakeUpdater();
+    updater.checkForUpdates.mockImplementationOnce(async () => {
+      updater.emit("checking-for-update");
+      throw new Error("socket failed");
+    });
+    const controller = await startWith(updater);
+    expect(controller).not.toBeNull();
+
+    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
+      checked: false,
+      state: { status: "error", canCheck: true },
+    });
+  });
+
   it("installs only after update-downloaded and only once", async () => {
     const updater = fakeUpdater();
     const controller = await startWith(updater);
@@ -208,7 +223,32 @@ describe("electron updater actions", () => {
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: false,
-      state: { status: "ready", canInstall: true },
+      state: {
+        status: "ready",
+        canInstall: true,
+        message: "Could not restart into the update.",
+      },
+    });
+  });
+
+  it("surfaces updater install error events while keeping the update retryable", async () => {
+    const updater = fakeUpdater();
+    updater.quitAndInstall.mockImplementationOnce(() => {
+      updater.emit("error", new Error("quit failed"));
+    });
+    const controller = await startWith(updater);
+    expect(controller).not.toBeNull();
+
+    updater.emit("checking-for-update");
+    updater.emit("update-downloaded", { version: "1.2.4" });
+
+    await expect(controller!.installUpdate()).resolves.toMatchObject({
+      accepted: false,
+      state: {
+        status: "ready",
+        canInstall: true,
+        message: "Could not restart into the update.",
+      },
     });
   });
 

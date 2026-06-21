@@ -119,3 +119,34 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - `node scripts/release-smoke.mjs` passed.
   - `node apps/desktop/scripts/package-smoke.mjs` passed with GitHub Releases
     publish configuration.
+- A fourth local review round used two read-only subagents:
+  - release/feed audit: stale nightly guard, explicit update channel metadata,
+    exact stable package-version matching, mac arch artifact separation,
+    release-upload manifest merging, and stronger smoke coverage.
+  - runtime/UI audit: install-error event surfacing, rejected-check recovery,
+    Settings negative-result handling, and disabled restart menu items when no
+    update is installable.
+- Addressed those audit findings:
+  - changed workflow concurrency to cancel stale nightly runs and added a
+    publish-time `main` SHA guard.
+  - added explicit `publish.channel` defaults and dynamic channel override in
+    packaging.
+  - split macOS x64/arm64 package rows and normalize artifacts through a
+    release-upload directory that merges mac update manifests.
+  - added release smoke to workflow preflight and strengthened local release
+    smoke/tests.
+  - made stable releases reject prerelease-stamped desktop package versions.
+  - surfaced install failures reported through updater `error` events while
+    keeping downloaded updates retryable.
+  - made rejected checks transition back into a visible retryable state.
+  - surfaced negative update results in Settings and disabled native/status
+    restart menu items unless `canInstall` is true.
+- Verification after subagent-audit fixes:
+  - `pnpm --filter @dohc/desktop test` passed: 70 files, 710 tests.
+  - `pnpm --filter @dohc/desktop typecheck` passed.
+  - `node --test scripts/desktop-release-scripts.test.mjs` passed: 8 tests.
+  - `node scripts/release-smoke.mjs` passed.
+  - `node apps/desktop/scripts/package-smoke.mjs` passed with explicit GitHub
+    release channel validation.
+  - `pnpm --filter @dohc/desktop build` passed.
+  - `git diff --check` passed.

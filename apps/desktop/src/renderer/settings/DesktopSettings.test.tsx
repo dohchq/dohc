@@ -30,6 +30,7 @@ const readyUpdateState = {
   canInstall: true,
   version: "1.2.4",
 };
+type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
 const bridge = {
   getMcpConfig: vi.fn(async () => config),
   getAgentRunStatus: vi.fn(async () => ({
@@ -45,11 +46,18 @@ const bridge = {
     mcpEnabled = false;
   }),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
-  checkForUpdates: vi.fn(async () => {
+  checkForUpdates: vi.fn(async (): Promise<{
+    checked: boolean;
+    state: SettingsUpdateState;
+  }> => {
     updateReady = true;
     return { checked: true, state: readyUpdateState };
   }),
-  installUpdate: vi.fn(async () => ({
+  installUpdate: vi.fn(async (): Promise<{
+    accepted: boolean;
+    completed: boolean;
+    state: SettingsUpdateState;
+  }> => ({
     accepted: updateReady,
     completed: false,
     state: updateReady ? readyUpdateState : idleUpdateState,
@@ -248,6 +256,24 @@ describe("DesktopSettings", () => {
     );
   });
 
+  it("shows rejected update checks returned by the main process", async () => {
+    bridge.checkForUpdates.mockResolvedValueOnce({
+      checked: false,
+      state: idleUpdateState,
+    });
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await screen.findByTestId("desktop-updates-status");
+
+    await user.click(screen.getByTestId("check-updates-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
+        "No update check was started.",
+      ),
+    );
+  });
+
   it("disables update actions while an update check is pending", async () => {
     const pending = deferred<{ checked: boolean; state: typeof readyUpdateState }>();
     bridge.checkForUpdates.mockImplementationOnce(() => pending.promise);
@@ -317,5 +343,29 @@ describe("DesktopSettings", () => {
     await user.click(screen.getByTestId("install-update-button"));
 
     expect(bridge.installUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("shows rejected restart requests returned by the main process", async () => {
+    updateReady = true;
+    bridge.installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      completed: false,
+      state: readyUpdateState,
+    });
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
+    );
+
+    await user.click(screen.getByTestId("install-update-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").textContent).toContain(
+        "Could not restart into the update.",
+      ),
+    );
   });
 });

@@ -57,11 +57,30 @@ sha512: b
   );
   assert.equal(merged.files.length, 2);
 
-  await writeFile(join(root, "latest.yml"), "version: 0.1.0\n");
+  await writeFile(join(root, "dohc-x64.zip"), "zip-bytes");
+  await writeFile(
+    join(root, "latest.yml"),
+    [
+      "version: 0.1.0",
+      "files:",
+      "  - url: dohc-x64.zip",
+      "    sha512: test-sha",
+      "    size: 9",
+      "path: dohc-x64.zip",
+      "sha512: test-sha",
+      "",
+    ].join("\n"),
+  );
   const server = await createMockUpdateServer({ root });
   try {
-    const response = await fetch(`${server.url}/latest.yml`);
-    assert.equal(response.status, 200);
+    const manifest = await fetch(`${server.url}/latest.yml`);
+    assert.equal(manifest.status, 200);
+    assert.match(manifest.headers.get("content-type") ?? "", /^text\/yaml/);
+    assert.match(await manifest.text(), /url: dohc-x64\.zip/);
+
+    const artifact = await fetch(`${server.url}/dohc-x64.zip`);
+    assert.equal(artifact.status, 200);
+    assert.equal(await artifact.text(), "zip-bytes");
   } finally {
     await server.close();
   }

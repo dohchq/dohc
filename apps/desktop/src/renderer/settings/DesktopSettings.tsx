@@ -118,6 +118,15 @@ export function DesktopSettings(props: {
     try {
       const result = await bridge().checkForUpdates();
       setUpdateState(result.state);
+      if (!result.checked) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "No update check was started.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
     } catch {
       setUpdateError("Could not check for updates.");
     } finally {
@@ -131,6 +140,15 @@ export function DesktopSettings(props: {
     try {
       const result = await bridge().installUpdate();
       setUpdateState(result.state);
+      if (!result.accepted) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "Could not restart into the update.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
     } catch {
       setUpdateError("Could not restart into the update.");
     } finally {
