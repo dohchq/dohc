@@ -266,6 +266,70 @@ describe("changeSetStore persistence", () => {
     }
   });
 
+  it("skips corrupt index entries with unknown kinds", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "corrupt-index",
+            recordedAtMs: 1000,
+            kind: "made-up-kind",
+            author: userAuthor,
+            summary: "Corrupt index",
+            fileCount: 1,
+          },
+          {
+            id: "valid",
+            recordedAtMs: 2000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Valid record",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "2000-valid.json"),
+      `${JSON.stringify(
+        {
+          id: "valid",
+          recordedAtMs: 2000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Valid record",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("corrupt-index")).resolves.toBeNull();
+      await expect(store.list()).resolves.toMatchObject([{ id: "valid", kind: "user-edit" }]);
+      await expect(store.listSince(0)).resolves.toMatchObject([
+        { id: "valid", kind: "user-edit" },
+      ]);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "[workspace-history] skipping unreadable index entry corrupt-index:",
+        ),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("rejects unknown persisted boundary crossings even when the kind is valid", async () => {
     const historyDir = join(root, ".dohc", "history");
     await mkdir(historyDir, { recursive: true });

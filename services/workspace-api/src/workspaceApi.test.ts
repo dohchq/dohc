@@ -13,6 +13,7 @@ import type pg from "pg";
 import { createWorkspaceApiHandler } from "./server";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_api" };
+const SYNC_APPROVAL_REQUIRED_REASON = APPROVAL_ERROR_REASONS[1];
 
 function file(path: string, kind: WorkspaceFile["kind"], contentType = "text/plain"): WorkspaceFile {
   return {
@@ -109,7 +110,7 @@ function memoryBackend() {
       calls.push({ method: "deleteFile", input: { path, expectedRevision }, actor: resolvedActor });
       if (path === "shared/locked.md") {
         const error = new Error("approval required for locked/shared file");
-        (error as Error & { code?: string }).code = APPROVAL_ERROR_REASONS[1];
+        (error as Error & { code?: string }).code = SYNC_APPROVAL_REQUIRED_REASON;
         throw error;
       }
       text.delete(path);

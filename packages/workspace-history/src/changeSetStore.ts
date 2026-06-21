@@ -144,6 +144,29 @@ function normalizeIndexEntry(entry: IndexEntry): IndexEntry {
   };
 }
 
+function indexEntryIdForLog(entry: unknown): string {
+  if (entry && typeof entry === "object" && "id" in entry) {
+    const id = (entry as { id?: unknown }).id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return "<unknown>";
+}
+
+function normalizeReadableIndexEntries(entries: IndexEntry[]): IndexEntry[] {
+  const normalized: IndexEntry[] = [];
+  for (const entry of entries) {
+    try {
+      normalized.push(normalizeIndexEntry(entry));
+    } catch (error) {
+      console.error(
+        `[workspace-history] skipping unreadable index entry ${indexEntryIdForLog(entry)}:`,
+        error,
+      );
+    }
+  }
+  return normalized;
+}
+
 // Atomic write: serialize to a temp file then rename over the target so a
 // concurrent reader never sees a half-written index, and a crash can't leave
 // a truncated file.
@@ -159,7 +182,7 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
   const indexPath = join(historyDir, "index.json");
 
   async function readIndex(): Promise<IndexEntry[]> {
-    return ((await readJson<IndexEntry[]>(indexPath)) ?? []).map(normalizeIndexEntry);
+    return normalizeReadableIndexEntries((await readJson<IndexEntry[]>(indexPath)) ?? []);
   }
 
   // Serialize record() within this store instance: the index is a
@@ -279,9 +302,9 @@ export function createChangeSetStore(rootDir: string): ChangeSetStore {
       return records;
     },
 
-    // Detail reads are fail-fast by design: an unknown persisted kind should
-    // surface to the caller, while listIndexed/listSince skip bad records so
-    // one corrupt entry cannot blank the whole timeline.
+    // Detail reads are fail-fast once a valid index entry points to a bad
+    // record. Corrupt index entries are skipped by readIndex so one bad entry
+    // cannot blank the whole timeline.
     async get(id) {
       assertSafeHistoryId(id);
       const index = await readIndex();

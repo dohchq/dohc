@@ -85,6 +85,14 @@ function sdkErrorResponse(
   };
 }
 
+/**
+ * dohc site previews intentionally expose workspace-relative reads through the
+ * SDK bridge. That is a broader trust boundary than a traditional site-root
+ * sandbox: preview scripts may ask for files beside the site, such as notes or
+ * shared workspace data. The main process remains the authority that binds the
+ * iframe to a registered workspace and rejects filesystem traversal before
+ * returning bytes.
+ */
 function isSafeWorkspaceRelativePath(path: string): boolean {
   let decoded = path;
   try {
@@ -105,10 +113,6 @@ function isSafeWorkspaceRelativePath(path: string): boolean {
     !value.startsWith("/") &&
     !/^[A-Za-z]:/.test(value) &&
     value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
-  // `files.read` is intentionally workspace-relative, not site-root-relative:
-  // dohc sites are workspace-native and may read files such as notes/today.md.
-  // Main-process IPC still enforces the registered workspace boundary and
-  // filesystem containment before any bytes are read.
   return safe(path) && safe(decoded);
 }
 
