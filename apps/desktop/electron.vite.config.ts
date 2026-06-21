@@ -2,6 +2,12 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
+// Electron 42 ships Chromium 148 and Node 24.15. electron-vite 5.0.0
+// currently only maps Electron targets through major 39, so keep these
+// explicit until upstream support lands.
+const electronMainTarget = "node24.15";
+const electronRendererTarget = "chrome148";
+
 export default defineConfig({
   main: {
     // Workspace packages ship raw TS — they must be bundled, not
@@ -20,12 +26,14 @@ export default defineConfig({
       }),
     ],
     build: {
+      target: electronMainTarget,
       outDir: "dist/main",
       lib: { entry: "src/main.ts" },
     },
   },
   preload: {
     build: {
+      target: electronMainTarget,
       outDir: "dist/preload",
       // Sandboxed preloads must be CommonJS.
       lib: { entry: "src/preload.ts", formats: ["cjs"] },
@@ -35,6 +43,7 @@ export default defineConfig({
     root: "src/renderer",
     plugins: [react(), tailwindcss()],
     build: {
+      target: electronRendererTarget,
       outDir: "dist/renderer",
       rollupOptions: { input: "src/renderer/index.html" },
     },
