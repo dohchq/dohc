@@ -330,6 +330,34 @@ describe("DesktopSettings", () => {
     );
   });
 
+  it("keeps subscription state when the initial update fetch resolves later", async () => {
+    let pushUpdate: ((state: typeof readyUpdateState) => void) | undefined;
+    const pending = deferred<typeof idleUpdateState>();
+    bridge.getUpdateState.mockImplementationOnce(() => pending.promise);
+    const onUpdateStateMock = bridge.onUpdateState as unknown as {
+      mockImplementationOnce(
+        implementation: (
+          listener: (state: typeof readyUpdateState) => void,
+        ) => () => void,
+      ): void;
+    };
+    onUpdateStateMock.mockImplementationOnce((listener) => {
+      pushUpdate = listener;
+      return () => undefined;
+    });
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    if (!pushUpdate) throw new Error("Update subscription was not registered.");
+    pushUpdate(readyUpdateState);
+    pending.resolve(idleUpdateState);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
+    );
+  });
+
   it("restarts into a ready update from settings", async () => {
     updateReady = true;
     const user = userEvent.setup();

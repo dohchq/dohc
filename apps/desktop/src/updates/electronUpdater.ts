@@ -21,6 +21,9 @@ export type PublicUpdateState = {
 
 export type UpdateActionResult = {
   accepted: boolean;
+  // Electron applies updates by quitting the current process, so the running
+  // app can only report whether the restart handoff was accepted. The field is
+  // reserved for future installers that can confirm completion before exit.
   completed: boolean;
   state: PublicUpdateState;
 };

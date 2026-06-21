@@ -36,7 +36,7 @@ user machines to call private GitHub APIs or hold tokens. A GitHub Releases
 provider is acceptable for the first implementation if the update repo/releases
 are public, and it matches the local `t3code` pattern.
 
-## Current repo state
+## Pre-implementation baseline
 
 dohc already has a strong partial updater foundation:
 
@@ -700,7 +700,6 @@ Detailed checklist:
 
 ## Open decisions
 
-- Is the first update host GitHub Releases or `updates.dohc.com`?
 - Should nightly be a side-by-side app identity before public alpha, or is one
   app/channel enough during dogfood?
 - What update poll interval is acceptable for frequent main pushes without

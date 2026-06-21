@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
@@ -23,6 +23,14 @@ const installUpdate = vi.fn(async () => ({
     version: "1.2.3",
   },
 }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {
@@ -81,6 +89,45 @@ describe("update toast", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /dismiss update/i }));
     expect(screen.queryByTestId("update-toast")).toBeNull();
+  });
+
+  it("keeps subscription state when the initial update fetch resolves later", async () => {
+    const pending = deferred<UpdateStateEvent>();
+    (
+      (window as unknown as {
+        dohcDesktop: {
+          getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
+        };
+      }).dohcDesktop as {
+        getUpdateState: { mockReturnValueOnce(value: Promise<UpdateStateEvent>): void };
+      }
+    ).getUpdateState.mockReturnValueOnce(pending.promise);
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+    await screen.findByTestId("update-toast");
+
+    pending.resolve({
+      status: "idle",
+      message: "Updates have not been checked yet.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: true,
+      canInstall: false,
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("update-toast").textContent).toContain(
+        "Update 1.2.3 is ready",
+      ),
+    );
   });
 
   it("ignores every non-ready state (checking/downloading/error stay silent)", () => {

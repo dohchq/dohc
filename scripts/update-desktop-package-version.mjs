@@ -56,7 +56,12 @@ function parseArgs(argv) {
     else if (!arg.startsWith("--") && !out.version) out.version = arg;
     else throw new Error(`Unknown argument '${arg}'.`);
   }
-  if (!out.version) throw new Error("Usage: update-desktop-package-version <version>");
+  out.version ??= process.env.DESKTOP_VERSION;
+  if (!out.version) {
+    throw new Error(
+      "Usage: update-desktop-package-version <version> or DESKTOP_VERSION=<version>",
+    );
+  }
   return out;
 }
 

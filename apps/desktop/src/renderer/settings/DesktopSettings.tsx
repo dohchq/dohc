@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, Check, Copy, Download, RefreshCw } from "lucide-react";
 import type {
   AgentRunStatusResult,
@@ -46,6 +46,7 @@ export function DesktopSettings(props: {
   const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const updateSubscriptionFiredRef = useRef(false);
 
   const refresh = useCallback(async (): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
@@ -62,16 +63,18 @@ export function DesktopSettings(props: {
   }, [refresh]);
   useEffect(() => {
     let cancelled = false;
+    updateSubscriptionFiredRef.current = false;
     void bridge()
       .getUpdateState()
       .then((next) => {
-        if (!cancelled) {
+        if (!cancelled && !updateSubscriptionFiredRef.current) {
           setUpdateError(null);
           setUpdateState(next);
         }
       })
       .catch(() => undefined);
     const unsubscribe = bridge().onUpdateState((next) => {
+      updateSubscriptionFiredRef.current = true;
       setUpdateError(null);
       setUpdateState(next);
     });

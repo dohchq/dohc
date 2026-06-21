@@ -48,6 +48,7 @@ export function NoticeCenter(props: {
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
+  const updateSubscriptionFiredRef = useRef(false);
 
   const applyUpdateState = useCallback((update: UpdateStateEvent) => {
     if (update.status === "ready") {
@@ -60,13 +61,19 @@ export function NoticeCenter(props: {
 
   useEffect(() => {
     let cancelled = false;
+    updateSubscriptionFiredRef.current = false;
     void bridge()
       .getUpdateState()
       .then((update) => {
-        if (!cancelled) applyUpdateState(update);
+        if (!cancelled && !updateSubscriptionFiredRef.current) {
+          applyUpdateState(update);
+        }
       })
       .catch(() => undefined);
-    const unsubscribe = bridge().onUpdateState(applyUpdateState);
+    const unsubscribe = bridge().onUpdateState((update) => {
+      updateSubscriptionFiredRef.current = true;
+      applyUpdateState(update);
+    });
     return () => {
       cancelled = true;
       unsubscribe();

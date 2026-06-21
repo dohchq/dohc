@@ -150,3 +150,22 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
     release channel validation.
   - `pnpm --filter @dohc/desktop build` passed.
   - `git diff --check` passed.
+- Ran another `coderabbit review --agent` pass after the subagent-audit fixes.
+- Addressed the returned CodeRabbit findings:
+  - guarded Settings and NoticeCenter initial update fetches so stale fetch
+    results cannot overwrite newer subscription state.
+  - clarified `UpdateActionResult.completed` as a reserved future signal
+    because Electron quits before the current process can observe completion.
+  - removed stale open-decision wording from the plan and renamed the baseline
+    repo-state section.
+  - removed setup-node pnpm cache restoration from the release workflow, removed
+    the no-op package branch, and passed stamped desktop versions through
+    `DESKTOP_VERSION`.
+- Verification after this CodeRabbit pass:
+  - `pnpm --filter @dohc/desktop typecheck` passed.
+  - `pnpm --filter @dohc/desktop test -- src/renderer/workbench/StatusBar.test.tsx src/renderer/settings/DesktopSettings.test.tsx` passed: 70 files, 712 tests.
+  - `node --test scripts/desktop-release-scripts.test.mjs` passed: 8 tests.
+  - `node scripts/release-smoke.mjs` passed.
+  - `node apps/desktop/scripts/package-smoke.mjs` passed.
+  - workflow YAML parsed with PyYAML.
+  - `git diff --check` passed.

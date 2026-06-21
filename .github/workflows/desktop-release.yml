@@ -57,7 +57,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.0
-          cache: pnpm
 
       - name: Setup pnpm
         run: |
@@ -110,7 +109,9 @@ jobs:
             --github-output
 
       - name: Stamp desktop package version
-        run: node scripts/update-desktop-package-version.mjs "${{ steps.release.outputs.version }}"
+        env:
+          DESKTOP_VERSION: ${{ steps.release.outputs.version }}
+        run: node scripts/update-desktop-package-version.mjs
 
       - name: Release helper tests
         run: pnpm test:release:desktop
@@ -163,7 +164,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.0
-          cache: pnpm
 
       - name: Setup pnpm
         shell: bash
@@ -175,7 +175,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Stamp desktop package version
-        run: node scripts/update-desktop-package-version.mjs "${{ needs.preflight.outputs.version }}"
+        env:
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
+        run: node scripts/update-desktop-package-version.mjs
 
       - name: Build desktop
         run: pnpm build:desktop
@@ -203,8 +205,6 @@ jobs:
           builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
           if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
             builder_args+=(-c.forceCodeSigning=true)
-          else
-            :
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
