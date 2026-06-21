@@ -201,6 +201,25 @@ describe("DesktopSettings", () => {
     });
   });
 
+  it("reports a copy failure without claiming success", async () => {
+    const user = userEvent.setup();
+    bridge.writeClipboardText.mockRejectedValueOnce(new Error("Clipboard denied"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByTestId("mcp-config-snippet");
+    await user.click(screen.getByText("Copy"));
+    expect((await screen.findByTestId("mcp-copy-error")).textContent).toBe(
+      "Could not copy MCP config.",
+    );
+    expect(screen.queryByText("Copied")).toBeNull();
+  });
+
   it("toggles the MCP server on, then reflects running status", async () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();

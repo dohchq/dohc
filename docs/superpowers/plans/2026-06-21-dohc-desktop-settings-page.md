@@ -231,9 +231,7 @@ already useful and sets up the future.
 
 - Open user settings JSON.
 - Open workspace local settings JSON.
-- Reset section to defaults.
-- Reset all user settings.
-- Reset all workspace-local settings.
+- Reset section, all user, or all workspace-local settings.
 - Export diagnostics bundle.
 
 Advanced should be real escape hatches, not a junk drawer.
@@ -251,8 +249,8 @@ full settings page:
   reset affordance when modified.
 - Search filters rows and sections by title, description, keywords, and setting
   id.
-- `@modified` can be a later VS Code-style filter, but the row model should
-  already know whether a value differs from default.
+- The row model should already know whether a value differs from default;
+  `@modified` can be a later VS Code-style filter.
 - Use segmented controls for small enumerations, switches for booleans, selects
   for longer option sets, sliders/number inputs for numeric values, and icon
   buttons with tooltips for reset/copy/open actions.
@@ -569,8 +567,8 @@ a substitute for full Electron E2E.
 
 - Settings components should be split by responsibility; no single component
   should become a second `DesktopWorkspaceShell`.
-- Descriptor-driven row rendering is allowed, but avoid a settings DSL so
-  abstract that simple behavior is hard to inspect.
+- Descriptor-driven row rendering is allowed, but avoid a settings DSL where
+  reviewers cannot quickly verify what a row does.
 - Keep test helpers local and readable; do not create broad global mocks that
   hide IPC mistakes.
 - Use accessible names and `data-testid` only where semantic queries are not
@@ -794,7 +792,8 @@ After each phase, answer these in the execution log:
 - Did renderer code gain raw filesystem, Node, or Electron access?
 - Are all IPC payloads/results bounded and parsed?
 - Are secrets excluded from JSON settings?
-- Are corrupt, oversized, and newer-version settings files tolerated?
+- Can the app tolerate corrupt, oversized, and newer-version settings files
+  without losing a usable settings surface?
 - Did any change weaken authorization, workspace scoping, sharing boundaries,
   locks, review gates, sandboxing, or provenance?
 - Does the diff rely on raw full-body markdown patching as source of truth?

@@ -35,6 +35,7 @@ export function AgentsMcpSettings(props: {
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const mountedRef = useRef(false);
   const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -94,13 +95,23 @@ export function AgentsMcpSettings(props: {
   const copyConfig = useCallback(async () => {
     if (!config) return;
     const text = configSnippet(config);
-    if (window.dohcDesktop?.writeClipboardText) {
-      await bridge().writeClipboardText({ text });
-    } else {
-      await navigator.clipboard.writeText(text);
+    try {
+      if (window.dohcDesktop?.writeClipboardText) {
+        await bridge().writeClipboardText({ text });
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch {
+      if (mountedRef.current) {
+        clearCopyResetTimer();
+        setCopied(false);
+        setCopyError("Could not copy MCP config.");
+      }
+      return;
     }
     if (!mountedRef.current) return;
     clearCopyResetTimer();
+    setCopyError(null);
     setCopied(true);
     copyResetTimerRef.current = setTimeout(() => {
       copyResetTimerRef.current = null;
@@ -161,6 +172,11 @@ export function AgentsMcpSettings(props: {
         <p className="m-0 mb-2 text-[11px] text-muted">
           Paste this into your AI tool to let it use this workspace.
         </p>
+        {copyError ? (
+          <p data-testid="mcp-copy-error" className="m-0 mb-2 text-[11px] text-danger">
+            {copyError}
+          </p>
+        ) : null}
         <pre
           data-testid="mcp-config-snippet"
           className="m-0 max-h-56 overflow-auto rounded bg-panel-2 p-3 text-[11px] leading-relaxed text-ink"
