@@ -90,5 +90,11 @@ CodeRabbit findings fixed:
 
 Rejected findings:
 
-- None so far. The package dependency-note request was implemented as
-  `dependencyNotes` because comments are not valid JSON.
+- Vitest 4 / jsdom 29 migration: rejected for this settings PR. The desktop app
+  still sits in the repo's broader Vitest 2 test-runner cohort, while a
+  Vitest-major upgrade would be a separate test-infrastructure migration across
+  desktop, web, and workspace packages. This PR keeps the scoped,
+  fully-validated `jsdom@27.2.0` desktop pin and documents the reason in
+  `dependencyNotes`.
+- The package dependency-note request was implemented as `dependencyNotes`
+  because comments are not valid JSON.

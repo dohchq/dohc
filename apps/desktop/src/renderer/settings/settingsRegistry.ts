@@ -9,6 +9,16 @@ import {
   Wrench,
 } from "lucide-react";
 
+export type SettingsScope = "User" | "Workspace" | "Mixed";
+
+type SettingsSection = {
+  id: string;
+  label: string;
+  scope: SettingsScope;
+  keywords: readonly string[];
+  Icon: typeof Settings;
+};
+
 export const SETTINGS_SECTIONS = [
   {
     id: "general",
@@ -66,7 +76,7 @@ export const SETTINGS_SECTIONS = [
     keywords: ["reset", "json", "diagnostics", "defaults"],
     Icon: Wrench,
   },
-] as const;
+] as const satisfies readonly SettingsSection[];
 
 export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 

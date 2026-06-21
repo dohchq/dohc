@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencyNotes": {
-    "jsdom": "Pinned to ^27.2.0 because jsdom 29.1.1 pulls html-encoding-sniffer@6 through a CJS/ESM path that breaks the current Vitest jsdom harness."
+    "jsdom": "Pinned to ^27.2.0 because jsdom 29.1.1 pulls html-encoding-sniffer@6 through a CJS/ESM path that breaks the current Vitest 2 desktop harness; Vitest 4 migration is tracked as repo-wide test infrastructure, not this settings PR."
   },
   "devDependencies": {
     "@dohc/performance": "workspace:*",

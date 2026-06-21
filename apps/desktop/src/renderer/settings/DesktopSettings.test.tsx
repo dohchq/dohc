@@ -33,8 +33,9 @@ const readyUpdateState = {
   version: "1.2.4",
 };
 type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
+const getDefaultMcpConfig = async (_payload: { workspaceId: string }) => config;
 const bridge = {
-  getMcpConfig: vi.fn(async (_payload: { workspaceId: string }) => config),
+  getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
     mcpEnabled,
     activeRun: mcpEnabled ? { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const } : null,
@@ -270,51 +271,55 @@ describe("DesktopSettings", () => {
     // Delay ws-old and resolve it only after rerendering ws-new; if cancellation
     // fails, the old config overwrites the visible snippet.
     let resolveOldConfig = () => {};
-    bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
-      if (workspaceId === "ws-old") {
-        return new Promise<typeof config>((resolve) => {
-          resolveOldConfig = () =>
-            resolve({
-              ...config,
-              args: ["--workspace", "/old"],
-              workspacePath: "/old",
-            });
+    try {
+      bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId === "ws-old") {
+          return new Promise<typeof config>((resolve) => {
+            resolveOldConfig = () =>
+              resolve({
+                ...config,
+                args: ["--workspace", "/old"],
+                workspacePath: "/old",
+              });
+          });
+        }
+        return Promise.resolve({
+          ...config,
+          args: ["--workspace", "/new"],
+          workspacePath: "/new",
         });
-      }
-      return Promise.resolve({
-        ...config,
-        args: ["--workspace", "/new"],
-        workspacePath: "/new",
       });
-    });
-    const view = render(
-      <DesktopSettings
-        workspaceId="ws-old"
-        workspacePath="/old"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
-    await waitFor(() =>
-      expect(bridge.getMcpConfig).toHaveBeenCalledWith({ workspaceId: "ws-old" }),
-    );
+      const view = render(
+        <DesktopSettings
+          workspaceId="ws-old"
+          workspacePath="/old"
+          initialSection="agents"
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() =>
+        expect(bridge.getMcpConfig).toHaveBeenCalledWith({ workspaceId: "ws-old" }),
+      );
 
-    view.rerender(
-      <DesktopSettings
-        workspaceId="ws-new"
-        workspacePath="/new"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
-    );
-    resolveOldConfig();
-    await waitFor(() =>
-      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
-    );
-    expect(screen.getByTestId("mcp-config-snippet").textContent).not.toContain("/old");
+      view.rerender(
+        <DesktopSettings
+          workspaceId="ws-new"
+          workspacePath="/new"
+          initialSection="agents"
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+      );
+      resolveOldConfig();
+      await waitFor(() =>
+        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+      );
+      expect(screen.getByTestId("mcp-config-snippet").textContent).not.toContain("/old");
+    } finally {
+      bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
+    }
   });
 
   it("toggles the MCP server on, then reflects running status", async () => {

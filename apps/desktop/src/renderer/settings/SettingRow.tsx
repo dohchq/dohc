@@ -94,7 +94,7 @@ export function SegmentedControl<T extends string>(props: {
           type="button"
           role="radio"
           aria-checked={props.value === option.value}
-          tabIndex={props.value === option.value ? 0 : -1}
+          tabIndex={index === currentIndex ? 0 : -1}
           onClick={() => props.onChange(option.value)}
           className={`min-w-16 rounded px-2 py-1 text-[11px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
             props.value === option.value
