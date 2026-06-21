@@ -274,6 +274,36 @@ describe("DesktopSettings", () => {
     );
   });
 
+  it("updates desktop update status from the live update subscription", async () => {
+    let pushUpdate: ((state: typeof readyUpdateState) => void) | undefined;
+    const onUpdateStateMock = bridge.onUpdateState as unknown as {
+      mockImplementationOnce(
+        implementation: (
+          listener: (state: typeof readyUpdateState) => void,
+        ) => () => void,
+      ): void;
+    };
+    onUpdateStateMock.mockImplementationOnce((listener) => {
+      pushUpdate = listener;
+      return () => undefined;
+    });
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "idle",
+      ),
+    );
+
+    if (!pushUpdate) throw new Error("Update subscription was not registered.");
+    pushUpdate(readyUpdateState);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
+    );
+  });
+
   it("restarts into a ready update from settings", async () => {
     updateReady = true;
     const user = userEvent.setup();

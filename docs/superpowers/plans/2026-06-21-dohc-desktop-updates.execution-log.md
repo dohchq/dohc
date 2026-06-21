@@ -27,8 +27,8 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
 ### Results
 
 - Implemented packaged-update defaults through electron-builder's baked
-  `app-update.yml` feed (`https://updates.dohc.com/desktop`), with
-  `DOHC_UPDATE_URL` retained only as an explicit packaged/mock override.
+  `app-update.yml` feed using GitHub Releases as the first dogfood update host,
+  with `DOHC_UPDATE_URL` retained only as an explicit packaged/mock override.
 - Added an `AutoUpdateController` with channel derivation, public state,
   coalesced manual checks, guarded install/restart, install-on-quit behavior,
   and pre-update site-preview cleanup.
@@ -47,8 +47,7 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - `scripts/desktop-release-scripts.test.mjs`
 - Added `.github/workflows/desktop-release.yml` with main-branch nightly
   releases, tag/manual latest releases, manual dry-runs, package stamping,
-  signing gates, GitHub release publication, and R2 update-feed publication
-  guarded by required feed configuration.
+  signing gates, and GitHub release publication.
 
 ### Verification
 
@@ -66,15 +65,16 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - `node --test scripts/desktop-release-scripts.test.mjs` passed: 4 tests.
   - `pnpm --filter @dohc/desktop build` passed.
   - `node apps/desktop/scripts/package-smoke.mjs` passed and verified the
-    release-ready generic publish URL.
-  - `pnpm --filter @dohc/desktop test` passed: 70 files, 695 tests.
+    release-ready GitHub publish configuration.
+  - Initial full run: `pnpm --filter @dohc/desktop test` passed: 70 files,
+    695 tests.
 
 ### Remaining Release Configuration
 
-- Before a real non-dry-run main/tag release can publish the update feed, the
-  repository must have `CLOUDFLARE_ACCOUNT_ID`, `DOHC_DESKTOP_UPDATE_BUCKET`,
-  `CLOUDFLARE_R2_ACCESS_KEY_ID`, and `CLOUDFLARE_R2_SECRET_ACCESS_KEY`
-  configured. The workflow fails fast if these are missing for a real publish.
+- `updates.dohc.com` did not resolve during the CodeRabbit follow-up audit, so
+  it is not baked into shipped apps yet. Before migrating from GitHub Releases
+  to `updates.dohc.com`, configure DNS/CDN/object storage and run the bridge
+  release checklist documented in the plan.
 - macOS/Windows real releases require signing credentials; dry-runs and Linux
   packaging do not.
 
@@ -86,7 +86,7 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - made updater tests model `before-quit-for-update` after `quitAndInstall`.
   - pinned GitHub Actions to commit SHAs and added release concurrency.
   - documented publish-job `contents: write`.
-  - removed destructive `--delete` from R2 feed sync.
+  - removed the unvalidated R2 feed publish path from the first-host workflow.
   - required a real commit SHA for release metadata.
   - changed manifest fallback `releaseDate` to current time.
   - tightened manifest parser context reset behavior.
@@ -103,3 +103,19 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   - validated nightly dates as real calendar dates.
   - made missing manifest `releaseDate` deterministic by omitting it.
   - added Settings update failure and busy-state tests.
+- Ran a third `coderabbit review --agent` pass and addressed the returned
+  follow-up findings:
+  - expanded `publicUpdateState` coverage and renamed the active-check test.
+  - added `%00` mock-update-server rejection coverage.
+  - preserved release-smoke stack traces on failure.
+  - switched the first shipped update host to GitHub Releases because
+    `updates.dohc.com` DNS was not configured yet.
+  - expanded manifest merge metadata assertions.
+  - added Settings `onUpdateState` subscription coverage.
+- Final verification after third-pass fixes:
+  - `pnpm --filter @dohc/desktop test` passed: 70 files, 704 tests.
+  - `pnpm --filter @dohc/desktop typecheck` passed.
+  - `node --test scripts/desktop-release-scripts.test.mjs` passed: 6 tests.
+  - `node scripts/release-smoke.mjs` passed.
+  - `node apps/desktop/scripts/package-smoke.mjs` passed with GitHub Releases
+    publish configuration.

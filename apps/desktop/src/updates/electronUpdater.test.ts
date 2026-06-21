@@ -208,14 +208,60 @@ describe("electron updater actions", () => {
 });
 
 describe("publicUpdateState", () => {
-  it("exposes bounded action flags without trusting persisted state", () => {
-    const ready = transition(initialUpdateState, { type: "check" });
+  it("gates actions during an active check", () => {
+    const checking = transition(initialUpdateState, { type: "check" });
     expect(
-      publicUpdateState(ready, {
+      publicUpdateState(checking, {
         currentVersion: "1.0.0",
         channel: "latest",
         checkInFlight: true,
       }),
     ).toMatchObject({ canCheck: false, canInstall: false });
+  });
+
+  it("enables install when an update is downloaded and ready", () => {
+    const checking = transition(initialUpdateState, { type: "check" });
+    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+
+    expect(
+      publicUpdateState(ready, {
+        currentVersion: "1.0.0",
+        channel: "latest",
+      }),
+    ).toMatchObject({
+      status: "ready",
+      version: "1.0.1",
+      canCheck: false,
+      canInstall: true,
+    });
+  });
+
+  it("keeps checks available after retryable error and offline states", () => {
+    expect(
+      publicUpdateState(transition(initialUpdateState, { type: "error", message: "boom" }), {
+        currentVersion: "1.0.0",
+        channel: "latest",
+      }),
+    ).toMatchObject({ status: "error", canCheck: true, canInstall: false });
+    expect(
+      publicUpdateState(transition(initialUpdateState, { type: "offline" }), {
+        currentVersion: "1.0.0",
+        channel: "latest",
+      }),
+    ).toMatchObject({ status: "offline", canCheck: true, canInstall: false });
+  });
+
+  it("carries current version and channel through public state", () => {
+    expect(
+      publicUpdateState(initialUpdateState, {
+        currentVersion: "1.0.1-nightly.20260621.12.2",
+        channel: "nightly",
+      }),
+    ).toMatchObject({
+      currentVersion: "1.0.1-nightly.20260621.12.2",
+      channel: "nightly",
+      canCheck: true,
+      canInstall: false,
+    });
   });
 });

@@ -148,6 +148,10 @@ sha512: x64
     merged.files.map((file) => file.url),
     ["dohc-0.1.0-mac-arm64.zip", "dohc-0.1.0-mac-x64.zip"],
   );
+  assert.equal(merged.files[0].sha512, "arm");
+  assert.equal(merged.files[0].size, 12);
+  assert.equal(merged.files[1].sha512, "x64");
+  assert.equal(merged.files[1].size, 13);
   assert.match(serialized, /releaseDate: 2026-06-21T00:00:00.000Z/);
   assert.throws(
     () =>
@@ -181,15 +185,18 @@ test("mock update server serves files and blocks traversal/symlink escapes", asy
 
   assert.ok(await resolveServablePath(root, "/latest.yml"));
   assert.equal(await resolveServablePath(root, "/../secret.txt"), null);
+  assert.equal(await resolveServablePath(root, "/latest%00.yml"), null);
   assert.equal(await resolveServablePath(root, "/secret-link.txt"), null);
 
   const server = await createMockUpdateServer({ root });
   try {
     const ok = await fetch(`${server.url}/latest.yml`);
     const escaped = await fetch(`${server.url}/../secret.txt`);
+    const nul = await fetch(`${server.url}/latest%00.yml`);
     assert.equal(ok.status, 200);
     assert.equal(await ok.text(), "version: 0.1.0\n");
     assert.equal(escaped.status, 404);
+    assert.equal(nul.status, 404);
   } finally {
     await server.close();
   }
