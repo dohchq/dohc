@@ -1205,7 +1205,12 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
 type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
   Record<string, unknown>;
 
-type SiteCheck = { name: string; ok: boolean; message?: string; path?: string };
+type SiteCheck = {
+  name: string;
+  ok: boolean;
+  message?: string;
+  path?: string;
+};
 
 const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const SITE_SCAN_IGNORED_NAMES = new Set([

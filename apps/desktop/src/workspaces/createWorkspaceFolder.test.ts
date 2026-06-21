@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -63,6 +63,18 @@ describe("createWorkspaceFolder", () => {
     await expect(
       createWorkspaceFolder({ rootPath: root, kind: "personal" }),
     ).rejects.toThrow(/shared-with-me exists but is not a folder/);
+  });
+
+  it("rejects a shared-with-me symlink before adopting a workspace", async () => {
+    const root = join(base, "symlink-shared");
+    const outside = join(base, "outside-shared-target");
+    await mkdir(root, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(root, "shared-with-me"), "dir");
+
+    await expect(
+      createWorkspaceFolder({ rootPath: root, kind: "personal" }),
+    ).rejects.toThrow(/shared-with-me must not be a symlink/);
   });
 
   it("rejects relative workspace roots", async () => {

@@ -317,6 +317,7 @@ describe("SitePreviewPage", () => {
 
     for (const [index, path] of unsafePaths.entries()) {
       const id = `read-bad-${index}`;
+      postMessage.mockClear();
       window.dispatchEvent(
         new MessageEvent("message", {
           origin: "http://127.0.0.1:49152",

@@ -83,6 +83,9 @@ type _AllBoundaryCrossingsRepresented = AssertNever<
   Exclude<BoundaryCrossing, (typeof VALID_BOUNDARY_CROSSING_VALUES)[number]>
 >;
 const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>(VALID_BOUNDARY_CROSSING_VALUES);
+
+// Template literals avoid triggering the legacy-term scanner while defining
+// constants for backward-compatible normalization of persisted history records.
 const LEGACY_CHANGE_SET_KIND_APP_BUILD = `${"app"}-${"build"}`;
 const LEGACY_BOUNDARY_CROSSING_APP_TRUST = `${"app"}-${"trust"}`;
 
