@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SETTINGS_READ_SOURCES } from "../settings/userSettings";
 
 export const WorkspaceSettings = z.object({
   version: z.literal(1),
@@ -33,7 +34,7 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
 
 export const WorkspaceSettingsResult = z.object({
   settings: WorkspaceSettings,
-  source: z.enum(["stored", "default", "recovered"]),
+  source: z.enum(SETTINGS_READ_SOURCES),
   warning: z.string().min(1).max(500).optional(),
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;

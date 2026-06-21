@@ -50,11 +50,12 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   },
 };
 
-export type SettingsReadSource = "stored" | "default" | "recovered";
+export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;
+export type SettingsReadSource = (typeof SETTINGS_READ_SOURCES)[number];
 
 export const DesktopUserSettingsResult = z.object({
   settings: DesktopUserSettings,
-  source: z.enum(["stored", "default", "recovered"]),
+  source: z.enum(SETTINGS_READ_SOURCES),
   warning: z.string().min(1).max(500).optional(),
 }).strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
