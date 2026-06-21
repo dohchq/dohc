@@ -10,6 +10,10 @@ import {
 import { readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
+import {
+  assertLoopbackOnlyDevServerCommand,
+  splitCommandLine,
+} from "./siteRunner";
 import { listFiles } from "./workspaceFiles";
 
 export interface SitePackageInfo {
@@ -67,6 +71,20 @@ function entryPathFor(root: string, entry?: string): string | null {
   return joinSitePath(root, entry);
 }
 
+function configuredServerCommand(command: string, configPath: string): string | null {
+  try {
+    const parsed = splitCommandLine(command);
+    assertLoopbackOnlyDevServerCommand(parsed.command, parsed.args);
+    return command;
+  } catch (error) {
+    console.warn("[desktop] ignoring configured site command", {
+      configPath,
+      error,
+    });
+    return null;
+  }
+}
+
 function mapWorkspaceSite(
   site: WorkspaceSite,
   files: WorkspaceFileEntry[],
@@ -113,8 +131,11 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     const scripts: SiteScripts = {};
     const preview = parsed.config?.preview;
     if (preview?.command) {
-      if (preview.mode === "build" || preview.mode === "static") scripts.preview = preview.command;
-      else scripts.dev = preview.command;
+      const command = configuredServerCommand(preview.command, site.configPath);
+      if (command) {
+        if (preview.mode === "build" || preview.mode === "static") scripts.preview = command;
+        else scripts.dev = command;
+      }
     }
     if (parsed.config?.build?.command) scripts.build = parsed.config.build.command;
     return scripts;

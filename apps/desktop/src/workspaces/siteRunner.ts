@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
+import { isLoopbackHostname } from "../security/loopback";
 
 export interface SiteLogEntry {
   stream: "stdout" | "stderr" | "system";
@@ -39,7 +40,8 @@ export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 const MAX_LOG_ENTRIES = 500;
 const BUILD_TIMEOUT_MS = 120000;
 const BUILD_HARD_KILL_GRACE_MS = 5000;
-const DEV_URL_RE = /(https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?)/i;
+const DEV_URL_RE = /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?)/i;
+const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
@@ -252,6 +254,32 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
   return { command, args };
 }
 
+function explicitHostBind(args: string[]): string | null {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    const inlineHost = /^(?:--host|--hostname|-H)=(.+)$/i.exec(arg)?.[1];
+    if (inlineHost !== undefined) return inlineHost;
+    if (HOST_BIND_FLAGS.has(arg)) {
+      const next = args[index + 1];
+      return next && !next.startsWith("-") ? next : "";
+    }
+  }
+  return null;
+}
+
+export function assertLoopbackOnlyDevServerCommand(command: string, args: string[]): void {
+  const host = explicitHostBind(args);
+  if (host === null) return;
+  if (host !== "" && isLoopbackHostname(host)) return;
+  const displayHost = host === "" ? "all interfaces" : host;
+  throw new Error(
+    `Site dev server command must bind to a loopback host, not ${displayHost}: ${[
+      command,
+      ...args,
+    ].join(" ")}`,
+  );
+}
+
 export function detectDevUrl(text: string): string | null {
   return DEV_URL_RE.exec(text)?.[1]?.replace("[::1]", "127.0.0.1") ?? null;
 }
@@ -266,6 +294,7 @@ export async function startSiteDevServer(input: {
 }): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
+  assertLoopbackOnlyDevServerCommand(input.command, args);
   const logs: SiteLogEntry[] = [];
   const child = spawn(input.command, args, {
     cwd,

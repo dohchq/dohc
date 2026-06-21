@@ -1642,7 +1642,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
             preview: "serve dist --listen 127.0.0.1:4173",
           },
           devDependencies: {
-            serve: "14.2.5",
+            serve: "14.2.6",
           },
         },
         null,

@@ -33,4 +33,14 @@ describe("site preview origin allowances", () => {
     secondRelease();
     expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(false);
   });
+
+  it("ignores non-loopback preview origins without adding allowances", () => {
+    const release = allowSitePreviewOrigin("http://example.com:4173/site");
+
+    expect(isAllowedSitePreviewUrl("http://example.com:4173/frame")).toBe(false);
+    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(false);
+
+    release();
+    expect(isAllowedSitePreviewUrl("http://example.com:4173/frame")).toBe(false);
+  });
 });

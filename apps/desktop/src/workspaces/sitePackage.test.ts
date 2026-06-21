@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeTmpdir } from "./testTemp";
 import { discoverSiteRoots, getSitePackage, listSitePackages } from "./sitePackage";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
@@ -115,6 +115,48 @@ describe("listSitePackages", () => {
       expect(site?.configuredScripts).toMatchObject({
         [slot]: `node /tmp/${folder}.js --host 127.0.0.1`,
       });
+    }
+  });
+
+  it("drops configured preview commands that explicitly bind outside loopback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const cases = [
+        ["loopback-dev", "dev", "vite --host 127.0.0.1", "dev"],
+        ["default-dev", "dev", "npm run dev", "dev"],
+        ["lan-dev", "dev", "vite --host 192.168.1.1", null],
+        ["all-interfaces-dev", "dev", "vite --host", null],
+        ["domain-dev", "dev", "next dev -H mysite.local", null],
+        ["public-static", "static", "serve dist --host=0.0.0.0", null],
+      ] as const;
+
+      for (const [folder, mode, command] of cases) {
+        await mkdir(join(root, folder), { recursive: true });
+        await writeFile(
+          join(root, folder, "package.json"),
+          JSON.stringify({ scripts: { dev: "vite" } }),
+        );
+        await writeFile(
+          join(root, folder, "dohc.json"),
+          JSON.stringify({
+            type: "site",
+            preview: { mode, command },
+          }),
+        );
+      }
+
+      const sites = await listSitePackages(root);
+      for (const [folder, , command, slot] of cases) {
+        const site = sites.find((entry) => entry.root === folder);
+        if (slot) {
+          expect(site?.configuredScripts).toMatchObject({ [slot]: command });
+        } else {
+          expect(site?.configuredScripts).toEqual({});
+        }
+      }
+      expect(warn).toHaveBeenCalledTimes(4);
+    } finally {
+      warn.mockRestore();
     }
   });
 

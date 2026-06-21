@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "./testTemp";
 import {
+  assertLoopbackOnlyDevServerCommand,
   buildSite,
   detectBuildOutput,
   detectDevUrl,
@@ -77,7 +78,15 @@ describe("package manager helpers", () => {
   it("extracts local dev server urls from common tool output", () => {
     expect(detectDevUrl("  Local:   http://localhost:5173/")).toBe("http://localhost:5173/");
     expect(detectDevUrl("ready on http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+    expect(detectDevUrl("ready on http://[::1]:5173/app")).toBe("http://127.0.0.1:5173/app");
+    expect(detectDevUrl("ready on https://localhost:5173")).toBeNull();
     expect(detectDevUrl("deployed at https://example.com")).toBeNull();
+    expect(detectDevUrl("listening on http://0.0.0.0:3000")).toBeNull();
+    expect(detectDevUrl("network at http://192.168.1.1:5173")).toBeNull();
+    expect(detectDevUrl("network at http://10.0.0.1:5173")).toBeNull();
+    expect(detectDevUrl("ready on http://[2001:db8::1]:5173")).toBeNull();
+    expect(detectDevUrl("ready on http://example.com:5173")).toBeNull();
+    expect(detectDevUrl("ready on http://mysite.local:5173")).toBeNull();
   });
 
   it("splits simple configured command strings", () => {
@@ -86,6 +95,30 @@ describe("package manager helpers", () => {
       args: ["vite", "--host", "127.0.0.1"],
     });
     expect(() => splitCommandLine('"unterminated')).toThrow(/unterminated/);
+  });
+
+  it("rejects dev server commands that explicitly bind outside loopback", () => {
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host", "127.0.0.1"]),
+    ).not.toThrow();
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host=localhost"]),
+    ).not.toThrow();
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--hostname", "::1"]),
+    ).not.toThrow();
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host", "0.0.0.0"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host=192.168.1.1"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("next", ["-H", "mysite.local"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host"]),
+    ).toThrow(/all interfaces/);
   });
 });
 
