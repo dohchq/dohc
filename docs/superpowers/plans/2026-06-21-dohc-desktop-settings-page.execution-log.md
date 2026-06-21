@@ -39,6 +39,34 @@ Initial execution map:
 - Added settings-specific smoke and E2E coverage, including persistence,
   search, corrupt settings recovery, clipboard copy, and minimum window size.
 
+Implemented IA sections:
+
+- Complete: General, Appearance, Workbench, Agents & MCP, Cloud & Sync entry
+  points, and Advanced.
+- Deferred/read-only by design: Privacy, Keyboard, and Sites. These do not ship
+  fake controls; they render explanatory rows or route to existing workflows
+  until the real controls exist.
+
+Tests added or expanded:
+
+- `apps/desktop/src/settings/userSettings.test.ts`
+- `apps/desktop/src/workspaces/workspaceSettings.test.ts`
+- `apps/desktop/src/workspaces/workspaceUiState.test.ts`
+- `apps/desktop/src/renderer/settings/DesktopSettings.test.tsx`
+- `apps/desktop/src/renderer/DesktopWorkspaceShell.test.tsx`
+- `apps/desktop/src/window/applicationMenu.test.ts`
+- `apps/desktop/e2e/settings.spec.ts`
+
+Exit-gate checklist:
+
+- [x] Phase 1 renderer tests cover shell search, entry points, rollback,
+  keyboard behavior, MCP copy/error states, and workspace-switch races.
+- [x] Phase 2 persistence/migration covers user settings, legacy theme
+  migration, atomic writes, bounded reads, and corrupt/oversized recovery.
+- [x] Phase 3 workspace isolation covers workspace-local settings,
+  `.dohc` metadata safety, symlink refusal, history silence, smoke tests, and
+  Electron E2E.
+
 ## Verification
 
 - `pnpm --filter @dohc/desktop typecheck`
@@ -74,11 +102,15 @@ covered directly by `e2e/settings.spec.ts`.
 
 ## Lessons learned
 
-- Workspace-scoped async UI should carry a request token or equivalent
-  cancellation guard whenever props can switch the active workspace. This PR
-  applies the pattern only to the Agents & MCP settings panel because that was
-  the async workspace-scoped settings surface introduced here; future
-  settings-like panels should use the same pattern before writing loaded state.
+### Workspace-Scoped Async Safety Pattern
+
+Any settings UI that fetches workspace-specific state must use a request token,
+abort signal, or equivalent cancellation guard before writing loaded state.
+This is required, not optional: the review found that a slow response for
+workspace A could otherwise repaint workspace B after a switch. This PR applies
+the pattern only to the Agents & MCP settings panel because that was the async
+workspace-scoped settings surface introduced here; future settings-like panels
+must use the same pattern.
 
 ## CodeRabbit review loop
 
