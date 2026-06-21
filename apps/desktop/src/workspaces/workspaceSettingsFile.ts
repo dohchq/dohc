@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -57,6 +57,10 @@ export async function writeWorkspaceSettingsFile(
     WORKSPACE_SETTINGS_FILE,
   );
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmp, `${JSON.stringify(WorkspaceSettings.parse(settings), null, 2)}\n`);
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, `${JSON.stringify(WorkspaceSettings.parse(settings), null, 2)}\n`);
+    await rename(tmp, path);
+  } finally {
+    await unlink(tmp).catch(() => undefined);
+  }
 }

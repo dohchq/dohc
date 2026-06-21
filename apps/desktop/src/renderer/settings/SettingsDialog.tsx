@@ -81,10 +81,34 @@ export function SettingsDialog(props: {
     useState<WorkspaceSettingsResult | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearSaveStateTimer = useCallback(() => {
+    if (saveStateTimerRef.current) {
+      clearTimeout(saveStateTimerRef.current);
+      saveStateTimerRef.current = null;
+    }
+  }, []);
+
+  const markSaving = useCallback(() => {
+    clearSaveStateTimer();
+    setSaveState("saving");
+  }, [clearSaveStateTimer]);
+
+  const markSaved = useCallback(() => {
+    clearSaveStateTimer();
+    setSaveState("saved");
+    saveStateTimerRef.current = setTimeout(() => {
+      saveStateTimerRef.current = null;
+      setSaveState((current) => (current === "saved" ? "idle" : current));
+    }, 1200);
+  }, [clearSaveStateTimer]);
 
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
+
+  useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
 
   useEffect(() => {
     if (props.initialSection) setActiveSection(props.initialSection);
@@ -130,23 +154,22 @@ export function SettingsDialog(props: {
   const saveUserSettings = useCallback(async (settings: DesktopUserSettings) => {
     setUserResult({ settings, source: "stored" });
     applyAppearanceSettings(settings.appearance);
-    setSaveState("saving");
+    markSaving();
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings });
       setUserResult(saved);
-      setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 1200);
+      markSaved();
     } catch (cause) {
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [markSaved, markSaving]);
 
   const saveWorkspaceSettings = useCallback(
     async (settings: WorkspaceSettings) => {
       setWorkspaceResult({ settings, source: "stored" });
-      setSaveState("saving");
+      markSaving();
       setError(null);
       try {
         const saved = await bridge().setWorkspaceSettings({
@@ -154,46 +177,43 @@ export function SettingsDialog(props: {
           settings,
         });
         setWorkspaceResult(saved);
-        setSaveState("saved");
-        setTimeout(() => setSaveState("idle"), 1200);
+        markSaved();
       } catch (cause) {
         setSaveState("error");
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [props.workspaceId],
+    [markSaved, markSaving, props.workspaceId],
   );
 
   const resetUserSettings = useCallback(async () => {
-    setSaveState("saving");
+    markSaving();
     setError(null);
     try {
       const next = await bridge().resetUserSettings();
       setUserResult(next);
       applyAppearanceSettings(next.settings.appearance);
-      setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 1200);
+      markSaved();
     } catch (cause) {
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [markSaved, markSaving]);
 
   const resetWorkspaceSettings = useCallback(async () => {
-    setSaveState("saving");
+    markSaving();
     setError(null);
     try {
       const next = await bridge().resetWorkspaceSettings({
         workspaceId: props.workspaceId,
       });
       setWorkspaceResult(next);
-      setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 1200);
+      markSaved();
     } catch (cause) {
       setSaveState("error");
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [props.workspaceId]);
+  }, [markSaved, markSaving, props.workspaceId]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;

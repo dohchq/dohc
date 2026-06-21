@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import type {
   AgentRunStatusResult,
@@ -35,20 +35,36 @@ export function AgentsMcpSettings(props: {
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const mountedRef = useRef(false);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearCopyResetTimer = useCallback(() => {
+    if (copyResetTimerRef.current) {
+      clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = null;
+    }
+  }, []);
 
   const refresh = useCallback(async (): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),
     ]);
-    setStatus(nextStatus);
-    setConfig(nextConfig);
+    if (mountedRef.current) {
+      setStatus(nextStatus);
+      setConfig(nextConfig);
+    }
     return nextStatus;
   }, [workspaceId]);
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh();
-  }, [refresh]);
+    return () => {
+      mountedRef.current = false;
+      clearCopyResetTimer();
+    };
+  }, [clearCopyResetTimer, refresh]);
 
   const enabled = status?.mcpEnabled ?? false;
 
@@ -57,6 +73,7 @@ export function AgentsMcpSettings(props: {
     setBusy(true);
     try {
       const latestStatus = await refresh();
+      if (!mountedRef.current) return;
       const latestRun = latestStatus.activeRun;
       if ((latestRun?.id ?? null) !== renderedRunId) {
         onAgentActiveChange?.(latestRun !== null);
@@ -70,7 +87,7 @@ export function AgentsMcpSettings(props: {
       const finalStatus = await refresh();
       onAgentActiveChange?.(finalStatus.activeRun !== null);
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }, [workspaceId, refresh, status?.activeRun?.id, onAgentActiveChange]);
 
@@ -82,9 +99,14 @@ export function AgentsMcpSettings(props: {
     } else {
       await navigator.clipboard.writeText(text);
     }
+    if (!mountedRef.current) return;
+    clearCopyResetTimer();
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }, [config]);
+    copyResetTimerRef.current = setTimeout(() => {
+      copyResetTimerRef.current = null;
+      if (mountedRef.current) setCopied(false);
+    }, 1500);
+  }, [clearCopyResetTimer, config]);
 
   return (
     <div className="flex flex-col">

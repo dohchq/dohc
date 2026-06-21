@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_USER_SETTINGS,
@@ -51,6 +51,10 @@ export async function writeUserSettingsFile(
   await mkdir(dir, { recursive: true });
   const path = join(dir, USER_SETTINGS_FILE);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmp, `${JSON.stringify(DesktopUserSettings.parse(settings), null, 2)}\n`);
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, `${JSON.stringify(DesktopUserSettings.parse(settings), null, 2)}\n`);
+    await rename(tmp, path);
+  } finally {
+    await unlink(tmp).catch(() => undefined);
+  }
 }

@@ -1114,7 +1114,7 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-section-appearance")).toBeTruthy();
     await user.click(screen.getByLabelText("Close settings"));
 
-    fireEvent.keyDown(window, { key: ",", ctrlKey: true });
+    await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 });

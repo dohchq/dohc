@@ -1,6 +1,7 @@
 import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
@@ -117,12 +118,12 @@ describe("workspace settings file store", () => {
 describe("workspace settings writes never reach history", () => {
   it("the watcher records the user file but nothing for settings.local.json", async () => {
     const root = await tempRoot();
-    const workspace = {
+    const workspace: CreatedWorkspace = {
       workspaceId: "ws-settings-test",
       rootPath: root,
       kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
+      mode: defaultWorkspaceMode("personal"),
+    };
 
     let recorded = 0;
     let resolveFirst: (() => void) | null = null;
@@ -146,7 +147,6 @@ describe("workspace settings writes never reach history", () => {
       ...DEFAULT_WORKSPACE_SETTINGS,
       privacy: { confirmExternalLinks: false },
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
     await handle.stop();
 
     expect(recorded).toBe(1);
