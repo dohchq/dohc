@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { createRequire } from "node:module";
 import process from "node:process";
 
@@ -22,10 +22,18 @@ function fail(message, error) {
   process.exit(1);
 }
 
+function isFile(path) {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 const override = process.env.ELECTRON_EXEC_PATH?.trim();
 if (override) {
-  if (!existsSync(override)) {
-    fail(`ELECTRON_EXEC_PATH points at a missing executable: ${override}`);
+  if (!isFile(override)) {
+    fail(`ELECTRON_EXEC_PATH must point at an executable file: ${override}`);
   }
   process.exit(0);
 }
@@ -36,6 +44,9 @@ try {
   // its own installer. electron-vite reads path.txt directly, so do this first.
   electronPath = require("electron");
 } catch (error) {
+  if (error?.code === "MODULE_NOT_FOUND") {
+    fail("Electron is not installed in node_modules.", error);
+  }
   fail("Electron is installed in node_modules, but its platform binary is missing.", error);
 }
 
@@ -43,6 +54,6 @@ if (typeof electronPath !== "string" || electronPath.length === 0) {
   fail("Electron resolved to an invalid executable path.");
 }
 
-if (!existsSync(electronPath)) {
+if (!isFile(electronPath)) {
   fail(`Electron resolved to a missing executable: ${electronPath}`);
 }
