@@ -77,6 +77,8 @@ export async function createWorkspaceFolder(input: {
   if (state.kind === "blocked") {
     throw new Error(state.reason);
   }
+  // Ensure shared-with-me exists in both new and adopted workspaces; existing
+  // local workspaces created before sharing support need this migration path.
   await mkdir(join(input.rootPath, SHARED_WITH_ME_FOLDER), { recursive: true });
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.

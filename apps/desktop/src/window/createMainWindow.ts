@@ -95,14 +95,17 @@ export function allowSitePreviewOrigin(previewUrl: string): () => void {
     origin,
     (allowedSitePreviewOrigins.get(origin) ?? 0) + 1,
   );
+  let disposed = false;
   return () => {
+    if (disposed) return;
+    disposed = true;
     const count = allowedSitePreviewOrigins.get(origin) ?? 0;
     if (count <= 1) allowedSitePreviewOrigins.delete(origin);
     else allowedSitePreviewOrigins.set(origin, count - 1);
   };
 }
 
-function isAllowedSitePreviewUrl(targetUrl: string): boolean {
+export function isAllowedSitePreviewUrl(targetUrl: string): boolean {
   const origin = loopbackHttpOrigin(targetUrl);
   return origin !== null && allowedSitePreviewOrigins.has(origin);
 }
