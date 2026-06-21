@@ -20,7 +20,9 @@ import type {
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
-import type { SearchResultsEvent } from "../ipc/channels";
+import type { MenuCommandId, SearchResultsEvent } from "../ipc/channels";
+import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { historyDiffTabPath } from "./workbench/workbenchState";
@@ -110,6 +112,7 @@ function makeBridge(
   let changeSets = initialChangeSets;
   let activityCallback: (() => void) | null = null;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
+  let menuCallback: ((command: MenuCommandId) => void) | null = null;
   return {
     setChangeSets: (next: ChangeSetRecord[]) => {
       changeSets = next;
@@ -165,6 +168,34 @@ function makeBridge(
       workspacePath: WORKSPACE.rootPath,
       home: "/tmp/dohc-home",
     })),
+    getUserSettings: vi.fn(async () => ({
+      settings: DEFAULT_USER_SETTINGS,
+      source: "default" as const,
+    })),
+    setUserSettings: vi.fn(async (payload: { settings: typeof DEFAULT_USER_SETTINGS }) => ({
+      settings: payload.settings,
+      source: "stored" as const,
+    })),
+    resetUserSettings: vi.fn(async () => ({
+      settings: DEFAULT_USER_SETTINGS,
+      source: "stored" as const,
+    })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
+    setWorkspaceSettings: vi.fn(
+      async (payload: { settings: typeof DEFAULT_WORKSPACE_SETTINGS }) => ({
+        settings: payload.settings,
+        source: "stored" as const,
+      }),
+    ),
+    resetWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored" as const,
+    })),
+    writeClipboardText: vi.fn(async () => undefined),
+    setTitlebarTheme: vi.fn(async () => undefined),
     probeAgentDrivers: vi.fn(async () => ({
       drivers: [],
       session: null,
@@ -293,7 +324,13 @@ function makeBridge(
         activityCallback = null;
       };
     }),
-    onMenuCommand: vi.fn(() => () => {}),
+    onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
+      menuCallback = callback;
+      return () => {
+        menuCallback = null;
+      };
+    }),
+    emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
@@ -1012,6 +1049,7 @@ describe("native workbench context menus", () => {
   it("routes status bar update commands to the updater bridge", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.showWorkbenchMenu.mockResolvedValue("install-update");
+
     renderShell(bridge);
 
     fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
@@ -1019,6 +1057,65 @@ describe("native workbench context menus", () => {
     await waitFor(() => {
       expect(bridge.installUpdate).toHaveBeenCalledOnce();
     });
+  });
+
+  it("opens settings from the status bar context menu", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("settings");
+    renderShell(bridge);
+
+    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
+
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+});
+
+describe("settings entry points", () => {
+  it("opens settings from the status bar and activity bar", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("open-settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await user.click(screen.getByLabelText("Close settings"));
+
+    await user.click(screen.getByTestId("activity-settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
+  it("opens settings from the command palette and menu command", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText("Settings"),
+    );
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await user.click(screen.getByLabelText("Close settings"));
+
+    act(() => bridge.emitMenuCommand("settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
+  it("opens appearance settings from a section command and Ctrl+comma", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Appearance",
+      ),
+    );
+    expect(await screen.findByTestId("settings-section-appearance")).toBeTruthy();
+    await user.click(screen.getByLabelText("Close settings"));
+
+    fireEvent.keyDown(window, { key: ",", ctrlKey: true });
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 });
 

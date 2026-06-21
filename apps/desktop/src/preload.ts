@@ -10,12 +10,6 @@ import type {
   WorkspaceSummary,
 } from "./ipc/bridgeContract";
 import {
-  ListSitesResult,
-  SitePackageResult,
-  StartSitePreviewResult,
-  StopSitePreviewResult,
-} from "./ipc/bridgeContract";
-import {
   CHANNELS,
   isExplorerMenuCommand,
   isMenuCommand,
@@ -110,22 +104,14 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  listSites: async (payload: ListSitesPayload) => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.listSites, payload);
-    return ListSitesResult.parse(result);
-  },
-  getSitePackage: async (payload: SitePackagePayload) => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.getSitePackage, payload);
-    return SitePackageResult.parse(result);
-  },
-  startSitePreview: async (payload: StartSitePreviewPayload) => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.startSitePreview, payload);
-    return StartSitePreviewResult.parse(result);
-  },
-  stopSitePreview: async (payload: StopSitePreviewPayload) => {
-    const result: unknown = await ipcRenderer.invoke(CHANNELS.stopSitePreview, payload);
-    return StopSitePreviewResult.parse(result);
-  },
+  listSites: (payload: ListSitesPayload) =>
+    ipcRenderer.invoke(CHANNELS.listSites, payload),
+  getSitePackage: (payload: SitePackagePayload) =>
+    ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
+  startSitePreview: (payload: StartSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
+  stopSitePreview: (payload: StopSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>
@@ -175,6 +161,18 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.stopAgentSession, payload),
   answerAgentPermission: (payload) =>
     ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
+  getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
+  setUserSettings: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
+  resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
+  getWorkspaceSettings: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getWorkspaceSettings, payload),
+  setWorkspaceSettings: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setWorkspaceSettings, payload),
+  resetWorkspaceSettings: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resetWorkspaceSettings, payload),
+  writeClipboardText: (payload) =>
+    ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   getWorkspaceUiState: (payload) =>

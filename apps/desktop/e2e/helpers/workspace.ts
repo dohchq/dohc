@@ -125,10 +125,15 @@ export async function openWorkspaceFromFirstRun(
   workspace: Pick<TempWorkspace, "rootPath">,
 ): Promise<WorkspaceSummary> {
   const shell = page.getByTestId("workspace-shell");
-  if ((await shell.count()) === 0) {
-    await page
-      .getByRole("button", { name: /open an existing folder as a workspace/i })
-      .click();
+  const openFolder = page.getByRole("button", {
+    name: /open an existing folder as a workspace/i,
+  });
+  const surface = await Promise.race([
+    shell.waitFor({ state: "attached" }).then(() => "shell" as const),
+    openFolder.waitFor({ state: "visible" }).then(() => "first-run" as const),
+  ]);
+  if (surface === "first-run") {
+    await openFolder.click();
   }
   await waitForWorkspaceReady(page);
   return activeWorkspace(page, workspace.rootPath);

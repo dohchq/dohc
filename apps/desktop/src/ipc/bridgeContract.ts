@@ -23,6 +23,22 @@ import {
   type SearchResultsEvent,
 } from "./channels";
 import { isLoopbackHostname } from "../security/loopback";
+import {
+  DesktopUserSettings as DesktopUserSettingsSchema,
+  DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
+} from "../settings/userSettings";
+import type {
+  DesktopUserSettings as DesktopUserSettingsType,
+  DesktopUserSettingsResult as DesktopUserSettingsResultType,
+} from "../settings/userSettings";
+import {
+  WorkspaceSettings as WorkspaceSettingsSchema,
+  WorkspaceSettingsResult as WorkspaceSettingsResultSchema,
+} from "../workspaces/workspaceSettings";
+import type {
+  WorkspaceSettings as WorkspaceSettingsType,
+  WorkspaceSettingsResult as WorkspaceSettingsResultType,
+} from "../workspaces/workspaceSettings";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -1015,6 +1031,37 @@ export const AgentPermissionResponsePayload = z.object({
 });
 export type AgentPermissionResponsePayload = z.infer<typeof AgentPermissionResponsePayload>;
 
+export const DesktopUserSettings = DesktopUserSettingsSchema;
+export const DesktopUserSettingsResult = DesktopUserSettingsResultSchema;
+export type DesktopUserSettings = DesktopUserSettingsType;
+export type DesktopUserSettingsResult = DesktopUserSettingsResultType;
+
+export const SetUserSettingsPayload = z.object({
+  settings: DesktopUserSettingsSchema,
+}).strict();
+export type SetUserSettingsPayload = z.infer<typeof SetUserSettingsPayload>;
+
+export const WorkspaceSettings = WorkspaceSettingsSchema;
+export const WorkspaceSettingsResult = WorkspaceSettingsResultSchema;
+export type WorkspaceSettings = WorkspaceSettingsType;
+export type WorkspaceSettingsResult = WorkspaceSettingsResultType;
+
+export const WorkspaceSettingsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type WorkspaceSettingsPayload = z.infer<typeof WorkspaceSettingsPayload>;
+
+export const SetWorkspaceSettingsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  settings: WorkspaceSettingsSchema,
+}).strict();
+export type SetWorkspaceSettingsPayload = z.infer<typeof SetWorkspaceSettingsPayload>;
+
+export const WriteClipboardTextPayload = z.object({
+  text: z.string().min(1).max(20_000),
+}).strict();
+export type WriteClipboardTextPayload = z.infer<typeof WriteClipboardTextPayload>;
+
 // Native window chrome (Phase E1). The renderer mirrors its theme flip to
 // main so the OS titleBarOverlay (Windows/Linux) re-tints with the app; main
 // feature-detects overlay support and no-ops where it doesn't exist.
@@ -1278,6 +1325,19 @@ export interface DohcDesktopBridge {
   answerAgentPermission(
     payload: AgentPermissionResponsePayload,
   ): Promise<AgentPanelSnapshotResult>;
+  getUserSettings(): Promise<DesktopUserSettingsResult>;
+  setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
+  resetUserSettings(): Promise<DesktopUserSettingsResult>;
+  getWorkspaceSettings(
+    payload: WorkspaceSettingsPayload,
+  ): Promise<WorkspaceSettingsResult>;
+  setWorkspaceSettings(
+    payload: SetWorkspaceSettingsPayload,
+  ): Promise<WorkspaceSettingsResult>;
+  resetWorkspaceSettings(
+    payload: WorkspaceSettingsPayload,
+  ): Promise<WorkspaceSettingsResult>;
+  writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
