@@ -128,10 +128,19 @@ export async function openWorkspaceFromFirstRun(
   const openFolder = page.getByRole("button", {
     name: /open an existing folder as a workspace/i,
   });
-  const surface = await Promise.race([
-    shell.waitFor({ state: "attached" }).then(() => "shell" as const),
-    openFolder.waitFor({ state: "visible" }).then(() => "first-run" as const),
-  ]);
+  let surface: "shell" | "first-run";
+  try {
+    surface = await Promise.race([
+      shell.waitFor({ state: "attached", timeout: 10_000 }).then(() => "shell" as const),
+      openFolder.waitFor({ state: "visible", timeout: 10_000 }).then(() => "first-run" as const),
+    ]);
+  } catch (cause) {
+    throw new Error(
+      `Timed out waiting for workspace shell or first-run picker: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+  }
   if (surface === "first-run") {
     await openFolder.click();
   }

@@ -127,6 +127,15 @@ test("settings remains usable at desktop minimum size", async () => {
         },
         { width, height },
       );
+      await expect
+        .poll(() =>
+          desktop!.app.evaluate(({ BrowserWindow }) => {
+            const [currentWidth, currentHeight] =
+              BrowserWindow.getAllWindows()[0]?.getSize() ?? [0, 0];
+            return { height: currentHeight, width: currentWidth };
+          }),
+        )
+        .toEqual({ height, width });
       await openSettings(desktop.page);
       await expect(desktop.page.getByTestId("settings-search")).toBeVisible();
       await expect(desktop.page.getByRole("button", { name: "Close settings" })).toBeVisible();
