@@ -43,8 +43,10 @@ export function initTheme(): void {
     legacy === "light" || legacy === "dark" ? legacy : "system";
   applyAppearance({ ...currentAppearance, themeMode: legacyThemeMode });
 
-  void window.dohcDesktop
-    ?.getUserSettings?.()
+  const settingsResult = window.dohcDesktop?.getUserSettings?.();
+  if (!settingsResult) return;
+
+  void settingsResult
     .then(async (result: DesktopUserSettingsResult) => {
       let next = result.settings.appearance;
       if (result.source === "default" && (legacy === "light" || legacy === "dark")) {

@@ -1084,6 +1084,16 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
+  it("opens settings from the status bar context menu", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("settings");
+    renderShell(bridge);
+
+    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
+
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_USER_SETTINGS,
@@ -15,7 +15,15 @@ export async function readUserSettingsFile(
 ): Promise<DesktopUserSettingsResult> {
   const path = join(dir, USER_SETTINGS_FILE);
   try {
-    if ((await stat(path)).size > MAX_USER_SETTINGS_FILE_BYTES) {
+    const fileStats = await lstat(path);
+    if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
+      return {
+        settings: DEFAULT_USER_SETTINGS,
+        source: "recovered",
+        warning: "User settings were not a regular file and were ignored.",
+      };
+    }
+    if (fileStats.size > MAX_USER_SETTINGS_FILE_BYTES) {
       return {
         settings: DEFAULT_USER_SETTINGS,
         source: "recovered",

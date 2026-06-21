@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -103,6 +110,28 @@ describe("desktop user settings store", () => {
       JSON.stringify({ padding: "x".repeat(MAX_USER_SETTINGS_FILE_BYTES) }),
     );
     expect(await readUserSettingsFile(huge)).toMatchObject({
+      settings: DEFAULT_USER_SETTINGS,
+      source: "recovered",
+    });
+  });
+
+  it("refuses to read a symlinked user settings file", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await writeUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    const outsideSettings = join(outside, USER_SETTINGS_FILE);
+    await writeFile(
+      outsideSettings,
+      JSON.stringify(
+        mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+          appearance: { themeMode: "dark" },
+        }),
+      ),
+    );
+    await unlink(join(root, USER_SETTINGS_FILE));
+    await symlink(outsideSettings, join(root, USER_SETTINGS_FILE));
+
+    expect(await readUserSettingsFile(root)).toMatchObject({
       settings: DEFAULT_USER_SETTINGS,
       source: "recovered",
     });
