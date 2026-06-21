@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nativeTmpdir } from "./testTemp";
 import { discoverSiteRoots, getSitePackage, listSitePackages } from "./sitePackage";
+import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 let root: string;
@@ -28,13 +29,20 @@ describe("discoverSiteRoots", () => {
           file("dash/package.json"),
           file("dash/vite.config.ts"),
           file("portal/vite.config.ts"),
-          file("shared-with-me/alex/portal/index.html"),
+          file(`${SHARED_WITH_ME_FOLDER}/alex/portal/index.html`),
           file("notes/today.md"),
           file("dohc.json"),
         ],
         ["built/dist", "plain"],
       ),
-    ).toEqual([".", "built", "dash", "portal", "report", "shared-with-me/alex/portal"]);
+    ).toEqual([
+      ".",
+      "built",
+      "dash",
+      "portal",
+      "report",
+      `${SHARED_WITH_ME_FOLDER}/alex/portal`,
+    ]);
   });
 });
 

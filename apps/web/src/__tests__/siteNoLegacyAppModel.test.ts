@@ -93,8 +93,9 @@ describe('site no legacy app-model gate', () => {
         )
         lines.forEach((line, index) => {
           if (re.test(line)) {
+            const location = `${relative(REPO, file)}:${index + 1}`
             violations.push(
-              `${relative(ROOT, file)}:${index + 1} - ${name}: ${line.trim().slice(0, 100)}`,
+              `${location} - ${name}: ${line.trim().slice(0, 100)}`,
             )
           }
         })

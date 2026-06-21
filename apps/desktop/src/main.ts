@@ -2082,6 +2082,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("before-quit", () => {
+    // Fire-and-forget on quit: skip locks and do not await async stops so
+    // termination stays quick; child.unref() and the OS finish process cleanup.
     for (const [key, handle] of [...sitePreviewHandles]) {
       sitePreviewOriginReleases.get(key)?.();
       sitePreviewOriginReleases.delete(key);

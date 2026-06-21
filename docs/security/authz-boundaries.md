@@ -58,8 +58,11 @@ be weakened by rebrand or UI work.
 - Source-like files under a `sites/` path segment (`.ts`, `.tsx`, `.mts`,
   `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.css`, `.scss`, `.json`, `.htm`,
   `.html`) collab as plain text. This is path-dependent:
-  `isPlainTextAtomPath()` requires both the `sites/` segment and the extension
-  match. Matching extensions elsewhere remain normal workspace files.
+  `isSiteSourcePath()` requires the `sites/` segment, a site folder segment
+  after it, and a matching file extension. For example,
+  `sites/workspace/index.html` and `clients/acme/sites/portal/src/App.tsx`
+  match, while `sites/index.html` and `clients/acme/sites/styles.css` do not.
+  Matching extensions elsewhere remain normal workspace files.
 - `@dohc/sdk` access is separate from merely rendering a site. The first
   preview bridge supports bounded local file reads through the desktop
   `readWorkspaceText` IPC path; browser code cannot choose an identity or
