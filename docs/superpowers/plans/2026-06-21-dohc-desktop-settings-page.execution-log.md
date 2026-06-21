@@ -67,8 +67,18 @@ covered directly by `e2e/settings.spec.ts`.
   already-mounted workspace shell instead of committing to one surface too
   early.
 - Added workspace-scoped request cancellation and visible retry feedback around
-  the Agents & MCP settings panel so stale async responses cannot repaint the
-  current workspace.
+  the Agents & MCP settings panel. This was a production correctness risk found
+  during review, not just a defensive flourish: without the guard, a slow MCP
+  status/config response for workspace A could repaint the panel after the user
+  switched to workspace B.
+
+## Lessons learned
+
+- Workspace-scoped async UI should carry a request token or equivalent
+  cancellation guard whenever props can switch the active workspace. This PR
+  applies the pattern only to the Agents & MCP settings panel because that was
+  the async workspace-scoped settings surface introduced here; future
+  settings-like panels should use the same pattern before writing loaded state.
 
 ## CodeRabbit review loop
 
