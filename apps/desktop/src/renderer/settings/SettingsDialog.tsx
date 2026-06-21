@@ -1,6 +1,8 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
+  RefreshCw,
   Search,
   X,
 } from "lucide-react";
@@ -11,6 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import {
   DEFAULT_USER_SETTINGS,
   type DesktopUserSettings,
@@ -78,6 +81,7 @@ export function SettingsDialog(props: {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const userSaveRequestRef = useRef(0);
   const workspaceSaveRequestRef = useRef(0);
+  const updateSubscriptionFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
   );
@@ -87,6 +91,9 @@ export function SettingsDialog(props: {
     useState<WorkspaceSettingsResult | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
+  const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
@@ -158,6 +165,29 @@ export function SettingsDialog(props: {
   }, [props.onClose]);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
+
+  useEffect(() => {
+    let cancelled = false;
+    updateSubscriptionFiredRef.current = false;
+    void bridge()
+      .getUpdateState()
+      .then((next) => {
+        if (!cancelled && !updateSubscriptionFiredRef.current) {
+          setUpdateError(null);
+          setUpdateState(next);
+        }
+      })
+      .catch(() => undefined);
+    const unsubscribe = bridge().onUpdateState((next) => {
+      updateSubscriptionFiredRef.current = true;
+      setUpdateError(null);
+      setUpdateState(next);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (props.initialSection) setActiveSection(props.initialSection);
@@ -300,6 +330,50 @@ export function SettingsDialog(props: {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [markSaved, markSaving, props.workspaceId]);
+
+  const checkForUpdates = useCallback(async () => {
+    setUpdateBusy("check");
+    setUpdateError(null);
+    try {
+      const result = await bridge().checkForUpdates();
+      setUpdateState(result.state);
+      if (!result.checked) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "No update check was started.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
+    } catch {
+      setUpdateError("Could not check for updates.");
+    } finally {
+      setUpdateBusy(null);
+    }
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    setUpdateBusy("install");
+    setUpdateError(null);
+    try {
+      const result = await bridge().installUpdate();
+      setUpdateState(result.state);
+      if (!result.accepted) {
+        setUpdateError(
+          result.state.status === "error"
+            ? result.state.message
+            : "Could not restart into the update.",
+        );
+      } else if (result.state.status === "error") {
+        setUpdateError(result.state.message);
+      }
+    } catch {
+      setUpdateError("Could not restart into the update.");
+    } finally {
+      setUpdateBusy(null);
+    }
+  }, []);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
@@ -589,6 +663,61 @@ export function SettingsDialog(props: {
                   })
                 }
               />
+            </SettingRow>
+            <SettingRow
+              title="Desktop updates"
+              description="Check for a new desktop build and restart when an update is ready."
+              testId="settings-row-desktop-updates"
+            >
+              <div className="flex min-w-[260px] flex-col gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Download size={14} aria-hidden className="shrink-0 text-subtle" />
+                  <div className="min-w-0 flex-1">
+                    <span
+                      data-testid="desktop-updates-status"
+                      data-state={updateState?.status ?? "unknown"}
+                      className="block truncate text-[11px] text-subtle"
+                    >
+                      {updateError ?? updateState?.message ?? "Update status unavailable."}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="check-updates-button"
+                    disabled={updateBusy !== null || updateState?.canCheck === false}
+                    onClick={() => void checkForUpdates()}
+                    className="flex h-7 shrink-0 items-center gap-1 rounded border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} aria-hidden />
+                    {updateBusy === "check" ? "Checking" : "Check"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="install-update-button"
+                    disabled={updateBusy !== null || updateState?.canInstall !== true}
+                    onClick={() => void installUpdate()}
+                    className="h-7 shrink-0 rounded bg-ink px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+                  >
+                    {updateBusy === "install" ? "Restarting" : "Restart"}
+                  </button>
+                </div>
+                <dl className="m-0 grid grid-cols-2 gap-2 text-[11px] text-muted">
+                  <div>
+                    <dt className="text-subtle">Version</dt>
+                    <dd data-testid="desktop-updates-version" className="m-0 text-ink">
+                      {updateState?.currentVersion ?? "unknown"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-subtle">Channel</dt>
+                    <dd data-testid="desktop-updates-channel" className="m-0 text-ink">
+                      {updateState?.channel ?? "unknown"}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
             </SettingRow>
           </div>
         );
