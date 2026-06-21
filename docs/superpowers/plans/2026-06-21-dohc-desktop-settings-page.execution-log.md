@@ -125,7 +125,9 @@ CodeRabbit findings fixed:
   pending workspace saves; preserve nested workspace privacy fields.
 - Minor: route clipboard copy through bounded main-process IPC; show copy/load
   failures in the settings UI; add visible focus styles for switches; document
-  the `jsdom@27.2.0` pin in JSON-safe package metadata.
+  the `jsdom@27.2.0` pin in JSON-safe package metadata; keep legacy theme
+  migration cleanup and appearance application durable if the migration write
+  fails.
 - Trivial: add explicit preload payload types, stable warning keys, settings
   merge helpers, a default settings-section constant, safer theme toggle
   rejection handling, and expanded IPC/test documentation.

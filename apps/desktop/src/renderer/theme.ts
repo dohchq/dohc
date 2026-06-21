@@ -51,12 +51,16 @@ export function initTheme(): void {
       let next = result.settings.appearance;
       if (result.source === "default" && (legacy === "light" || legacy === "dark")) {
         next = { ...next, themeMode: legacy };
-        await window.dohcDesktop?.setUserSettings?.({
-          settings: {
-            ...result.settings,
-            appearance: next,
-          },
-        });
+        try {
+          await window.dohcDesktop?.setUserSettings?.({
+            settings: {
+              ...result.settings,
+              appearance: next,
+            },
+          });
+        } catch (error) {
+          console.warn("Failed to migrate legacy theme setting", error);
+        }
       }
       localStorage.removeItem(LEGACY_STORAGE_KEY);
       applyAppearance(next);
