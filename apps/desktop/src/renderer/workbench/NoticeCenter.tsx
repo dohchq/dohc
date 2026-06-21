@@ -19,6 +19,7 @@ type Notice = {
   action?: {
     label: string;
     onClick: () => void;
+    disabled?: boolean;
   };
   Icon: typeof Bell;
 };
@@ -43,6 +44,7 @@ export function NoticeCenter(props: {
     string | null
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
+  const [installPending, setInstallPending] = useState(false);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
@@ -80,13 +82,17 @@ export function NoticeCenter(props: {
     readyUpdateKey !== null &&
     readyUpdateKey !== dismissedUpdateToastKey;
   const installUpdate = useCallback(async () => {
+    if (installPending) return;
     try {
+      setInstallPending(true);
       setUpdateActionError(null);
       await bridge().installUpdate();
     } catch {
       setUpdateActionError("Could not restart into the update.");
+    } finally {
+      setInstallPending(false);
     }
-  }, []);
+  }, [installPending]);
 
   useEffect(() => {
     if (!open) return;
@@ -148,7 +154,11 @@ export function NoticeCenter(props: {
         title: "Update ready",
         body: updateActionError ?? updateState.message,
         action: updateState.canInstall
-          ? { label: "Restart", onClick: () => void installUpdate() }
+          ? {
+              label: installPending ? "Restarting" : "Restart",
+              onClick: () => void installUpdate(),
+              disabled: installPending,
+            }
           : undefined,
         Icon: Download,
       });
@@ -161,6 +171,7 @@ export function NoticeCenter(props: {
     props.onOpenAgent,
     props.onOpenHistory,
     props.syncStatus,
+    installPending,
     installUpdate,
     updateActionError,
     updateState,
@@ -177,14 +188,15 @@ export function NoticeCenter(props: {
           role="status"
           className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"
         >
-          <span>{updateState.message}</span>
+          <span>{updateActionError ?? updateState.message}</span>
           {updateState.canInstall ? (
             <button
               type="button"
+              disabled={installPending}
               onClick={() => void installUpdate()}
-              className="shrink-0 rounded bg-ink px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
+              className="shrink-0 rounded bg-ink px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
             >
-              Restart
+              {installPending ? "Restarting" : "Restart"}
             </button>
           ) : null}
           <button
@@ -248,11 +260,12 @@ export function NoticeCenter(props: {
                       {notice.action ? (
                         <button
                           type="button"
+                          disabled={notice.action.disabled}
                           onClick={() => {
                             notice.action?.onClick();
                             setOpen(false);
                           }}
-                          className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+                          className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:opacity-50"
                         >
                           {notice.action.label}
                         </button>

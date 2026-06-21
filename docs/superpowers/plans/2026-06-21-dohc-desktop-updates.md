@@ -233,6 +233,26 @@ Feed migration rule:
   points future installed apps to the new feed, then keeping the old feed alive
   long enough for stragglers.
 
+Bridge-release runbook:
+
+1. Freeze the old feed's channel metadata and record every artifact URL it
+   references.
+2. Ship a signed bridge release on the old feed. That build must keep the old
+   update provider reachable for the current update, but bake the new
+   `updates.dohc.com` feed into `app-update.yml` for subsequent releases.
+3. Verify the bridge release from an installed old-feed build on macOS,
+   Windows, and Linux before changing DNS, redirects, or object-store routing.
+4. After the bridge release is live, configure the old feed to either serve the
+   bridge metadata directly or redirect channel metadata to an equivalent
+   bridge manifest. Do not redirect artifact URLs unless the updater smoke test
+   proves blockmaps and installers still resolve.
+5. Keep the old feed, bridge artifacts, and any old-feed manifests available for
+   at least one full dogfood release cycle plus a documented straggler window.
+   Do not delete them until telemetry or manual audit shows old-feed clients are
+   below the accepted threshold.
+6. Document rollback: restore the previous old-feed manifest first, then remove
+   redirects, then republish the last known-good new-feed manifest if needed.
+
 Recommended path:
 
 1. Implement code/UX in a provider-neutral way.

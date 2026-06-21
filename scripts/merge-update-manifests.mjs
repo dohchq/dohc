@@ -27,7 +27,10 @@ export function parseUpdateManifest(raw, sourcePath = "manifest") {
   const manifest = { files: [] };
   let currentFile = null;
   for (const line of raw.split(/\r?\n/)) {
-    if (line.trim().length === 0 || line.trimStart().startsWith("#")) continue;
+    if (line.trim().length === 0 || line.trimStart().startsWith("#")) {
+      currentFile = null;
+      continue;
+    }
     const fileStart = /^\s*-\s+([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
     if (fileStart) {
       currentFile = { [fileStart[1]]: parseScalar(fileStart[2]) };
@@ -39,9 +42,9 @@ export function parseUpdateManifest(raw, sourcePath = "manifest") {
       currentFile[fileProperty[1]] = parseScalar(fileProperty[2]);
       continue;
     }
-    currentFile = null;
     const property = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
     if (property) {
+      currentFile = null;
       const [, key, value] = property;
       if (key === "files") continue;
       manifest[key] = parseScalar(value);
@@ -88,7 +91,7 @@ export function mergeUpdateManifests(primary, secondary, platform = "mac") {
     ...primary,
     files,
     ...(firstFile ? { path: firstFile.url, sha512: firstFile.sha512 } : {}),
-    releaseDate: primary.releaseDate ?? secondary.releaseDate ?? new Date(0).toISOString(),
+    releaseDate: primary.releaseDate ?? secondary.releaseDate ?? new Date().toISOString(),
   };
 }
 

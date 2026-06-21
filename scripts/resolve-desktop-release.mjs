@@ -43,7 +43,9 @@ export function defaultUtcDate(now = new Date()) {
 function normalizeChannel(channel) {
   if (channel === "stable") return "latest";
   if (channel === "latest" || channel === "nightly") return channel;
-  throw new Error(`Invalid release channel '${channel}'. Expected latest or nightly.`);
+  throw new Error(
+    `Invalid release channel '${channel}'. Expected stable, latest, or nightly.`,
+  );
 }
 
 function validateReleaseInputs({ channel, date, runNumber, runAttempt, sha }) {
@@ -70,7 +72,8 @@ export async function resolveDesktopRelease(options = {}) {
     : options.version?.includes("-nightly.")
       ? "nightly"
       : "latest";
-  const sha = options.sha ?? process.env.GITHUB_SHA ?? "0000000";
+  const sha = options.sha ?? process.env.GITHUB_SHA;
+  if (!sha) throw new Error("Commit SHA is required for release metadata.");
   const date = options.date ?? defaultUtcDate();
   const runNumber = Number(options.runNumber ?? process.env.GITHUB_RUN_NUMBER ?? 1);
   const runAttempt = Number(

@@ -56,6 +56,28 @@ test("resolves stable and nightly desktop release metadata", async () => {
   assert.equal(nightly.make_latest, "false");
 });
 
+test("release metadata requires a real commit sha", async () => {
+  const root = await fixtureRoot("0.1.0");
+  const previousSha = process.env.GITHUB_SHA;
+  delete process.env.GITHUB_SHA;
+  try {
+    await assert.rejects(
+      () =>
+        resolveDesktopRelease({
+          root,
+          channel: "nightly",
+          date: "20260621",
+          runNumber: 12,
+          runAttempt: 2,
+        }),
+      /Commit SHA is required/,
+    );
+  } finally {
+    if (previousSha === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previousSha;
+  }
+});
+
 test("updates apps/desktop/package.json version idempotently", async () => {
   const root = await fixtureRoot("0.1.0");
   const first = await updateDesktopPackageVersion("0.1.1-nightly.20260621.12.2", {

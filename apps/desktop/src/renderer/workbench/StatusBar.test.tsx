@@ -226,6 +226,57 @@ describe("notice center", () => {
     expect(installUpdate).toHaveBeenCalledOnce();
   });
 
+  it("shows restart failures in the update notice and toast", async () => {
+    installUpdate.mockRejectedValueOnce(new Error("quit failed"));
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+
+    await screen.findByText("Could not restart into the update.");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
+      "Could not restart into the update.",
+    );
+  });
+
+  it("does not show the restart action when the update is not installable", async () => {
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: false,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    expect(screen.getByTestId("notice-update-ready").textContent).toContain(
+      "Update 1.2.3 is ready",
+    );
+    expect(
+      within(screen.getByTestId("notice-center")).queryByRole("button", {
+        name: "Restart",
+      }),
+    ).toBeNull();
+  });
+
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
     renderBar({
       syncStatus: {

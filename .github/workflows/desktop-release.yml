@@ -26,6 +26,10 @@ on:
         default: true
         type: boolean
 
+concurrency:
+  group: desktop-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' && 'latest' || 'nightly') }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -44,12 +48,12 @@ jobs:
       dry_run: ${{ steps.mode.outputs.dry_run }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.0
           cache: pnpm
@@ -136,10 +140,10 @@ jobs:
             require_signing: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.14.0
           cache: pnpm
@@ -190,7 +194,7 @@ jobs:
         run: pnpm smoke:fuses:desktop
 
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-${{ matrix.label }}
           path: apps/desktop/release/**
@@ -206,6 +210,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      # Required for creating GitHub releases via softprops/action-gh-release.
       contents: write
     steps:
       - name: Require update feed configuration
@@ -229,13 +234,13 @@ jobs:
           fi
 
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: release-artifacts
           merge-multiple: true
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: ${{ needs.preflight.outputs.release_name }}
@@ -244,7 +249,7 @@ jobs:
           files: release-artifacts/**
 
       - name: Configure R2 credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-access-key-id: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
@@ -258,6 +263,7 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Never delete feed files as part of a release upload; stale cleanup
+          # must be explicit so a partial artifact download cannot strand users.
           aws s3 sync release-artifacts "s3://${R2_BUCKET}/desktop" \
-            --endpoint-url "$endpoint" \
-            --delete
+            --endpoint-url "$endpoint"

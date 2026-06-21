@@ -77,3 +77,18 @@ workflow, robust tests/smokes, non-draft PR, and CodeRabbit review loop.
   configured. The workflow fails fast if these are missing for a real publish.
 - macOS/Windows real releases require signing credentials; dry-runs and Linux
   packaging do not.
+
+### CodeRabbit Follow-Up
+
+- Ran `coderabbit review --agent` on PR #42.
+- Addressed the returned findings:
+  - added bridge-release migration runbook details.
+  - made updater tests model `before-quit-for-update` after `quitAndInstall`.
+  - pinned GitHub Actions to commit SHAs and added release concurrency.
+  - documented publish-job `contents: write`.
+  - removed destructive `--delete` from R2 feed sync.
+  - required a real commit SHA for release metadata.
+  - changed manifest fallback `releaseDate` to current time.
+  - tightened manifest parser context reset behavior.
+  - surfaced restart failures in the update toast/notice.
+  - added restart failure and `canInstall: false` renderer tests.

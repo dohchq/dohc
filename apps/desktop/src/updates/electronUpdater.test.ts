@@ -29,6 +29,9 @@ function fakeUpdater() {
       for (const listener of listeners.get(eventName) ?? []) listener(...args);
     },
   };
+  updater.quitAndInstall.mockImplementation(() => {
+    updater.emit("before-quit-for-update");
+  });
   return updater;
 }
 
@@ -170,7 +173,7 @@ describe("electron updater actions", () => {
     updater.emit("update-downloaded", { version: "1.2.4" });
     await controller!.installUpdate();
 
-    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(1);
+    expect(onBeforeQuitForUpdate).toHaveBeenCalledTimes(2);
     expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
   });
 
