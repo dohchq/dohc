@@ -57,8 +57,10 @@ export function hasIgnoredSegment(relativePath: string): boolean {
 export function isSiteSourcePath(relativePath: string): boolean {
   const normalized = relativePath.replaceAll("\\", "/");
   const segments = normalized.split("/").filter(Boolean);
+  const siteSegmentIndex = segments.findIndex((segment) => segment.toLowerCase() === "sites");
   return (
-    segments.some((segment) => segment.toLowerCase() === "sites") &&
+    siteSegmentIndex >= 0 &&
+    siteSegmentIndex < segments.length - 2 &&
     SITE_SOURCE_CODE_EXT_RE.test(normalized)
   );
 }

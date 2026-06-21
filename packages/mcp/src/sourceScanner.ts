@@ -35,6 +35,8 @@ export function stripSourceComments(body: string): string {
     return (
       previousToken === "" ||
       ["return", "throw", "case", "yield", "await", "typeof", "void", "delete"].includes(previousToken) ||
+      // Heuristic lexer: accepting ")" preserves `if (x) /regex/` cases. A
+      // rare `fn() / value` false positive is fine for legacy-import scanning.
       "([{,;:=!?&|+-*~^<>)".includes(previousToken)
     );
   }

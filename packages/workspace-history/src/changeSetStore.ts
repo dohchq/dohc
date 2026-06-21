@@ -54,15 +54,23 @@ export interface ChangeSetStore {
 // Each record lives in its own file so history is inspectable: open
 // .dohc/history/<recordedAtMs>-<id>.json and read what changed and why.
 const HISTORY_ID_RE = /^[A-Za-z0-9._-]+$/;
-const VALID_CHANGE_SET_KINDS = new Set<ChangeSetKind>([
+
+type AssertNever<T extends never> = T;
+
+const VALID_CHANGE_SET_KIND_VALUES = [
   "user-edit",
   "agent-run",
   "import",
   "sync",
   "site-build",
   "history-restore",
-]);
-const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>([
+] as const satisfies readonly ChangeSetKind[];
+type _AllChangeSetKindsRepresented = AssertNever<
+  Exclude<ChangeSetKind, (typeof VALID_CHANGE_SET_KIND_VALUES)[number]>
+>;
+const VALID_CHANGE_SET_KINDS = new Set<ChangeSetKind>(VALID_CHANGE_SET_KIND_VALUES);
+
+const VALID_BOUNDARY_CROSSING_VALUES = [
   "public-share",
   "external-export",
   "permission-change",
@@ -70,7 +78,11 @@ const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>([
   "site-publish",
   "private-to-shared",
   "unmergeable-overwrite",
-]);
+] as const satisfies readonly BoundaryCrossing[];
+type _AllBoundaryCrossingsRepresented = AssertNever<
+  Exclude<BoundaryCrossing, (typeof VALID_BOUNDARY_CROSSING_VALUES)[number]>
+>;
+const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>(VALID_BOUNDARY_CROSSING_VALUES);
 
 function assertSafeHistoryId(id: string): string {
   if (!HISTORY_ID_RE.test(id)) {
