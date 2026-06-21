@@ -8,18 +8,12 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { APPROVAL_ERROR_REASONS, WorkspaceError } from "@dohc/workspace-contracts";
+import { DEFAULT_APPROVAL_ERROR_REASON, WorkspaceError } from "@dohc/workspace-contracts";
 import type pg from "pg";
 import { createWorkspaceApiHandler } from "./server";
 
 const actor: Actor = { userId: "user_1", workspaceId: "ws_api" };
-const SYNC_APPROVAL_REQUIRED_REASON = approvalRequiredReason();
-
-function approvalRequiredReason(): string {
-  const reason = APPROVAL_ERROR_REASONS.find((candidate) => candidate === "approval-required");
-  if (!reason) throw new Error("approval-required must be a canonical approval reason");
-  return reason;
-}
+const SYNC_APPROVAL_REQUIRED_REASON = DEFAULT_APPROVAL_ERROR_REASON;
 
 function file(path: string, kind: WorkspaceFile["kind"], contentType = "text/plain"): WorkspaceFile {
   return {

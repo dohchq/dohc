@@ -663,6 +663,8 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     const candidate = getCandidate(candidates, root);
 
     if (name === "index.html") {
+      // Build output folders are artifacts of a parent site; do not promote
+      // their index.html files into separate site roots.
       if (BUILD_OUTPUT_DIRS.includes(pathBasename(root))) continue;
       candidate.hasIndexHtml = true;
       candidate.entry = "index.html";

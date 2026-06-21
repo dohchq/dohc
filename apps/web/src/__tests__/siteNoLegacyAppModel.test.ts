@@ -14,6 +14,7 @@ const SCAN_ROOTS = [
   join(REPO, 'apps'),
   join(REPO, 'packages'),
   join(REPO, 'services'),
+  join(REPO, 'docs/architecture'),
   join(REPO, 'docs/security'),
   join(REPO, 'docs/product'),
   join(REPO, 'docs/qa'),

@@ -55,14 +55,20 @@ be weakened by rebrand or UI work.
 - Site preview iframes may render loopback preview URLs. Top-level desktop
   navigation remains locked down; external sharing/publishing is a separate
   dohc Cloud decision.
+- Site detection is broader than the dedicated `sites/` namespace. Normal
+  website folders such as `report/`, `client-dashboard/`, and
+  `shared-with-me/alex/pricing-portal/` are detected by website signals
+  (`index.html`, package scripts, configs, and build outputs) in
+  `@dohc/workspace-core`, not by their folder name.
 - Source-like files under a `sites/` path segment (`.ts`, `.tsx`, `.mts`,
   `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.css`, `.scss`, `.json`, `.htm`,
-  `.html`) collab as plain text. This is path-dependent:
-  `isSiteSourcePath()` requires the `sites/` segment, a site folder segment
-  after it, and a matching file extension. For example,
-  `sites/workspace/index.html` and `clients/acme/sites/portal/src/App.tsx`
-  match, while `sites/index.html` and `clients/acme/sites/styles.css` do not.
-  Matching extensions elsewhere remain normal workspace files.
+  `.html`) collab as plain text. This helper is only the path-dependent rule
+  for that dedicated namespace: `isSiteSourcePath()` requires the `sites/`
+  segment, a site folder segment after it, and a matching file extension. For
+  example, `sites/workspace/index.html` and
+  `clients/acme/sites/portal/src/App.tsx` match, while `sites/index.html` and
+  `clients/acme/sites/styles.css` do not. Matching extensions elsewhere
+  remain normal workspace files.
 - `@dohc/sdk` access is separate from merely rendering a site. The first
   preview bridge supports bounded local file reads through the desktop
   `readWorkspaceText` IPC path; browser code cannot choose an identity or

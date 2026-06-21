@@ -38,7 +38,9 @@ const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
 const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
 
-const TEST_SDK_PACKAGE_JSON_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
+const TEST_SDK_PACKAGE_JSON_PATH =
+  process.env.DOHC_TEST_SDK_PACKAGE_JSON?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
   const base = await mkdtemp(join(tmpdir(), "dohc-mcp-test-"));

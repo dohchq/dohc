@@ -12,7 +12,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { APPROVAL_ERROR_REASONS, isApprovalErrorReason } from "@dohc/workspace-contracts";
+import { DEFAULT_APPROVAL_ERROR_REASON, isApprovalErrorReason } from "@dohc/workspace-contracts";
 import { scanWorkspaceDiff, type FsDiffOperation } from "./diff";
 import { materializeWorkspace } from "./materialize";
 import {
@@ -169,7 +169,7 @@ export function createLocalSyncClient({
             conflicts: [],
             approvalRequests: approvals.map((entry) => ({
               path: entry.path,
-              reason: entry.error ?? APPROVAL_ERROR_REASONS[0],
+              reason: entry.error ?? DEFAULT_APPROVAL_ERROR_REASON,
             })),
           };
         }

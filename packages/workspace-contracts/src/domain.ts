@@ -23,6 +23,7 @@ export const APPROVAL_ERROR_REASONS = [
   "site-publish-required",
 ] as const;
 export type ApprovalErrorReason = (typeof APPROVAL_ERROR_REASONS)[number];
+export const DEFAULT_APPROVAL_ERROR_REASON: ApprovalErrorReason = APPROVAL_ERROR_REASONS[0];
 
 const APPROVAL_ERROR_REASON_SET: ReadonlySet<string> = new Set(APPROVAL_ERROR_REASONS);
 export function isApprovalErrorReason(reason: string | undefined): reason is ApprovalErrorReason {

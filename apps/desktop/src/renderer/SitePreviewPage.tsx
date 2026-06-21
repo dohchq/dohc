@@ -149,7 +149,7 @@ export function SitePreviewPage(props: {
         message: error instanceof Error ? error.message : "Could not load this site.",
       });
     }
-  }, [props.workspaceId]);
+  }, [props.workspaceId, props.siteRoot]);
 
   useEffect(() => {
     void reloadSite();
@@ -161,7 +161,7 @@ export function SitePreviewPage(props: {
         .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot })
         .catch(() => undefined);
     };
-  }, [props.workspaceId, props.siteRoot]);
+  }, [props.workspaceId]);
 
   useEffect(() => {
     async function handleSdkRequest(event: MessageEvent) {
