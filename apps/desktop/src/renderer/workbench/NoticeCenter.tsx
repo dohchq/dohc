@@ -7,8 +7,8 @@ import {
   Download,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 type Notice = {
@@ -38,18 +38,55 @@ export function NoticeCenter(props: {
   onOpenAgent: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
+  const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
+    string | null
+  >(null);
+  const [updateActionError, setUpdateActionError] = useState<string | null>(null);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(
-    () =>
-      bridge().onUpdateState((update) => {
-        if (update.status === "ready") setUpdateMessage(update.message);
-      }),
-    [],
-  );
+  const applyUpdateState = useCallback((update: UpdateStateEvent) => {
+    if (update.status === "ready") {
+      setUpdateState(update);
+      setUpdateActionError(null);
+      return;
+    }
+    setUpdateState(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void bridge()
+      .getUpdateState()
+      .then((update) => {
+        if (!cancelled) applyUpdateState(update);
+      })
+      .catch(() => undefined);
+    const unsubscribe = bridge().onUpdateState(applyUpdateState);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [applyUpdateState]);
+
+  const readyUpdateKey =
+    updateState?.status === "ready"
+      ? `${updateState.version ?? "unknown"}:${updateState.message}`
+      : null;
+  const updateToastVisible =
+    updateState?.status === "ready" &&
+    readyUpdateKey !== null &&
+    readyUpdateKey !== dismissedUpdateToastKey;
+  const installUpdate = useCallback(async () => {
+    try {
+      setUpdateActionError(null);
+      await bridge().installUpdate();
+    } catch {
+      setUpdateActionError("Could not restart into the update.");
+    }
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -104,12 +141,15 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (updateMessage) {
+    if (updateState?.status === "ready") {
       next.push({
         id: "update-ready",
         tone: "neutral",
         title: "Update ready",
-        body: updateMessage,
+        body: updateActionError ?? updateState.message,
+        action: updateState.canInstall
+          ? { label: "Restart", onClick: () => void installUpdate() }
+          : undefined,
         Icon: Download,
       });
     }
@@ -121,25 +161,36 @@ export function NoticeCenter(props: {
     props.onOpenAgent,
     props.onOpenHistory,
     props.syncStatus,
-    updateMessage,
+    installUpdate,
+    updateActionError,
+    updateState,
   ]);
 
   const count = notices.length;
 
   return (
     <>
-      {updateMessage ? (
+      {updateToastVisible && updateState?.status === "ready" ? (
         <div
           ref={toastRef}
           data-testid="update-toast"
           role="status"
           className="fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink shadow-sm"
         >
-          <span>{updateMessage}</span>
+          <span>{updateState.message}</span>
+          {updateState.canInstall ? (
+            <button
+              type="button"
+              onClick={() => void installUpdate()}
+              className="shrink-0 rounded bg-ink px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
+            >
+              Restart
+            </button>
+          ) : null}
           <button
             type="button"
             aria-label="Dismiss update notice"
-            onClick={() => setUpdateMessage(null)}
+            onClick={() => setDismissedUpdateToastKey(readyUpdateKey)}
             className="grid size-4 shrink-0 place-items-center rounded text-subtle hover:text-ink"
           >
             <X size={12} aria-hidden />
@@ -154,7 +205,7 @@ export function NoticeCenter(props: {
           role="dialog"
           aria-label="Notices"
           className={`fixed right-3 z-20 flex w-[min(360px,calc(100vw-24px))] flex-col rounded-md border border-line bg-panel text-xs text-ink shadow-sm ${
-            updateMessage ? "bottom-20" : "bottom-9"
+            updateToastVisible ? "bottom-20" : "bottom-9"
           }`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">

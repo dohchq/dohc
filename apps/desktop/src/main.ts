@@ -108,11 +108,21 @@ import {
   WorkspaceSearchPayload,
   CancelWorkspaceSearchPayload,
   SearchResultsEventSchema,
+  UpdateActionResult,
+  UpdateCheckResult,
+  UpdateStateEvent,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks } from "./performance/launchMarks";
-import { startAutoUpdates } from "./updates/electronUpdater";
+import {
+  publicUpdateState,
+  resolveUpdateChannel,
+  startAutoUpdates,
+  type AutoUpdateController,
+  type PublicUpdateState,
+} from "./updates/electronUpdater";
+import { initialUpdateState } from "./updates/updateMachine";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
@@ -229,6 +239,7 @@ type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 const sitePreviewHandles = new Map<string, SitePreviewHandle>();
 const sitePreviewOriginReleases = new Map<string, () => void>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
+let autoUpdateController: AutoUpdateController | null = null;
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
@@ -266,6 +277,15 @@ async function stopSitePreviewHandle(workspaceId: string, siteRoot: string): Pro
   } finally {
     sitePreviewOriginReleases.get(key)?.();
     sitePreviewOriginReleases.delete(key);
+  }
+}
+
+function stopSitePreviewsForQuit(): void {
+  for (const [key, handle] of [...sitePreviewHandles]) {
+    sitePreviewOriginReleases.get(key)?.();
+    sitePreviewOriginReleases.delete(key);
+    sitePreviewHandles.delete(key);
+    void handle.stop().catch(() => undefined);
   }
 }
 
@@ -836,6 +856,27 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
+function fallbackUpdateState(): PublicUpdateState {
+  const currentVersion = app.getVersion();
+  return publicUpdateState(initialUpdateState, {
+    currentVersion,
+    channel: resolveUpdateChannel(currentVersion),
+  });
+}
+
+function currentUpdateState(): UpdateStateEvent {
+  return UpdateStateEvent.parse(
+    autoUpdateController?.publicState() ?? fallbackUpdateState(),
+  );
+}
+
+function broadcastUpdateState(state: PublicUpdateState): void {
+  const payload = UpdateStateEvent.parse(state);
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(CHANNELS.updateState, payload);
+  }
+}
+
 // Quit must wait for the final settle-window flush AND its history record to
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
@@ -1310,6 +1351,9 @@ function registerIpcHandlers(): void {
                 separator,
                 item("Connect dohc Cloud", "connect-cloud"),
                 item("Settings", "settings"),
+                separator,
+                item("Check for Updates…", "check-updates"),
+                item("Update and Restart", "install-update"),
                 separator,
                 item("Toggle Theme", "toggle-theme"),
               ]
@@ -2035,6 +2079,34 @@ function registerIpcHandlers(): void {
     searchRegistry.cancel(event.sender.id, input.searchId);
   });
 
+  ipcMain.handle(CHANNELS.getUpdateState, (event) => {
+    assertTrustedSender(event);
+    return currentUpdateState();
+  });
+
+  ipcMain.handle(CHANNELS.checkForUpdates, async (event) => {
+    assertTrustedSender(event);
+    if (!autoUpdateController) {
+      return UpdateCheckResult.parse({
+        checked: false,
+        state: currentUpdateState(),
+      });
+    }
+    return UpdateCheckResult.parse(await autoUpdateController.checkForUpdates());
+  });
+
+  ipcMain.handle(CHANNELS.installUpdate, async (event) => {
+    assertTrustedSender(event);
+    if (!autoUpdateController) {
+      return UpdateActionResult.parse({
+        accepted: false,
+        completed: false,
+        state: currentUpdateState(),
+      });
+    }
+    return UpdateActionResult.parse(await autoUpdateController.installUpdate());
+  });
+
   ipcMain.on(CHANNELS.firstPaint, (event) => {
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();
@@ -2081,12 +2153,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", () => {
     // Fire-and-forget on quit: skip locks and do not await async stops so
     // termination stays quick; child.unref() and the OS finish process cleanup.
-    for (const [key, handle] of [...sitePreviewHandles]) {
-      sitePreviewOriginReleases.get(key)?.();
-      sitePreviewOriginReleases.delete(key);
-      sitePreviewHandles.delete(key);
-      void handle.stop().catch(() => undefined);
-    }
+    stopSitePreviewsForQuit();
   });
 
   void app.whenReady().then(async () => {
@@ -2153,23 +2220,22 @@ if (!app.requestSingleInstanceLock()) {
     // workspaces do not pay credential-store I/O on the visible-launch path.
     void warmCredentialCache().then(() => activity.reconcileCloud(engineForWorkspace));
 
-    // Auto-updates: only a packaged app with DOHC_UPDATE_URL set ever checks
-    // (local/dev builds never self-mutate). Failures are absorbed — updates
-    // must never take the app down. Each machine state is pushed to every
-    // window as a closed {status, message} event; the preload re-validates it
-    // (parseUpdateStateEvent) and the status bar surfaces "ready" as a toast.
-    // Downloaded updates still install on quit (autoInstallOnAppQuit).
+    // Auto-updates: packaged builds use electron-builder's baked app-update.yml
+    // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+    // Failures are absorbed — updates must never take the app down.
     void startAutoUpdates({
       isPackaged: app.isPackaged,
-      onState: (state) => {
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send(CHANNELS.updateState, {
-            status: state.status,
-            message: state.message,
-          });
-        }
+      currentVersion: app.getVersion(),
+      onBeforeQuitForUpdate: stopSitePreviewsForQuit,
+      onState: (_state, state) => {
+        broadcastUpdateState(state);
       },
-    }).catch(() => undefined);
+    })
+      .then((controller) => {
+        autoUpdateController = controller;
+        broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+      })
+      .catch(() => undefined);
   });
 
   app.on("window-all-closed", () => {

@@ -179,4 +179,18 @@ describe("application menu template", () => {
     expect(showAbout).toHaveBeenCalledOnce();
     expect(sendCommand).not.toHaveBeenCalled();
   });
+
+  it("routes Help update actions through renderer commands", () => {
+    const { template, sendCommand } = build();
+    const helpItems = items(template, "Help");
+    const check = helpItems.find((i) => i.label === "Check for Updates…");
+    const install = helpItems.find((i) => i.label === "Update and Restart");
+    const fakeWindow = { id: 5 };
+
+    (check?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    (install?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "check-updates");
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "install-update");
+  });
 });

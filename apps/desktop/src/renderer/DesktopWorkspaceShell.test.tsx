@@ -16,6 +16,7 @@ import type {
   ChangeSetRecord,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
+  UpdateStateEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -35,6 +36,25 @@ const SYNC_STATUS = {
   state: "synced" as const,
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
+};
+
+const IDLE_UPDATE_STATE: UpdateStateEvent = {
+  status: "idle",
+  message: "Updates have not been checked yet.",
+  currentVersion: "1.2.3",
+  channel: "latest",
+  canCheck: true,
+  canInstall: false,
+};
+
+const READY_UPDATE_STATE: UpdateStateEvent = {
+  status: "ready",
+  message: "Update 1.2.4 is ready — restart dohc to apply it.",
+  currentVersion: "1.2.3",
+  channel: "latest",
+  canCheck: false,
+  canInstall: true,
+  version: "1.2.4",
 };
 
 const STORED_STATE: WorkspaceUiState = {
@@ -190,6 +210,16 @@ function makeBridge(
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
     showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
+    getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
+    checkForUpdates: vi.fn(async () => ({
+      checked: true,
+      state: READY_UPDATE_STATE,
+    })),
+    installUpdate: vi.fn(async () => ({
+      accepted: true,
+      completed: false,
+      state: READY_UPDATE_STATE,
+    })),
     getDroppedFilePaths: vi.fn(() => []),
     cloudStatus: vi.fn(async () => ({
       connected: true,
@@ -858,6 +888,19 @@ describe("data fragments and file transfers", () => {
       });
     });
   });
+
+  it("checks for desktop updates from the command palette", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Check for updates"));
+
+    await waitFor(() => {
+      expect(bridge.checkForUpdates).toHaveBeenCalledOnce();
+    });
+  });
 });
 
 describe("native workbench context menus", () => {
@@ -964,6 +1007,18 @@ describe("native workbench context menus", () => {
       });
     });
     expect(await screen.findByTestId("agent-panel")).toBeTruthy();
+  });
+
+  it("routes status bar update commands to the updater bridge", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.showWorkbenchMenu.mockResolvedValue("install-update");
+    renderShell(bridge);
+
+    fireEvent.contextMenu(await screen.findByTestId("status-workspace"));
+
+    await waitFor(() => {
+      expect(bridge.installUpdate).toHaveBeenCalledOnce();
+    });
   });
 });
 

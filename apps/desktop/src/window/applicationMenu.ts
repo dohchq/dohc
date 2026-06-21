@@ -120,7 +120,12 @@ export function buildMenuTemplate(options: {
     ...(isMac ? [{ role: "windowMenu" } as const] : []),
     {
       label: "Help",
-      submenu: [{ label: "About dohc", click: () => options.showAbout() }],
+      submenu: [
+        command("Check for Updates…", "check-updates"),
+        command("Update and Restart", "install-update"),
+        { type: "separator" },
+        { label: "About dohc", click: () => options.showAbout() },
+      ],
     },
   ];
 }

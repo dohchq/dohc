@@ -12,6 +12,24 @@ const config = {
 };
 
 let mcpEnabled = false;
+let updateReady = false;
+const idleUpdateState = {
+  status: "idle" as const,
+  message: "Updates have not been checked yet.",
+  currentVersion: "1.2.3",
+  channel: "latest" as const,
+  canCheck: true,
+  canInstall: false,
+};
+const readyUpdateState = {
+  status: "ready" as const,
+  message: "Update 1.2.4 is ready — restart dohc to apply it.",
+  currentVersion: "1.2.3",
+  channel: "latest" as const,
+  canCheck: false,
+  canInstall: true,
+  version: "1.2.4",
+};
 const bridge = {
   getMcpConfig: vi.fn(async () => config),
   getAgentRunStatus: vi.fn(async () => ({
@@ -26,6 +44,17 @@ const bridge = {
   endAgentRun: vi.fn(async () => {
     mcpEnabled = false;
   }),
+  getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
+  checkForUpdates: vi.fn(async () => {
+    updateReady = true;
+    return { checked: true, state: readyUpdateState };
+  }),
+  installUpdate: vi.fn(async () => ({
+    accepted: updateReady,
+    completed: false,
+    state: updateReady ? readyUpdateState : idleUpdateState,
+  })),
+  onUpdateState: vi.fn(() => () => {}),
 };
 
 const writeText = vi.fn(async () => {});
@@ -41,6 +70,7 @@ function stubClipboard() {
 
 beforeEach(() => {
   mcpEnabled = false;
+  updateReady = false;
   vi.stubGlobal("dohcDesktop", bridge);
 });
 
@@ -160,5 +190,50 @@ describe("DesktopSettings", () => {
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toContain("Enable");
+  });
+
+  it("shows current desktop update version and channel", async () => {
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "idle",
+      ),
+    );
+    expect(screen.getByTestId("desktop-updates-version").textContent).toBe("1.2.3");
+    expect(screen.getByTestId("desktop-updates-channel").textContent).toBe("latest");
+  });
+
+  it("checks for updates and enables restart when an update is ready", async () => {
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await screen.findByTestId("desktop-updates-status");
+
+    await user.click(screen.getByTestId("check-updates-button"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
+    );
+    expect(bridge.checkForUpdates).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("install-update-button").hasAttribute("disabled")).toBe(
+      false,
+    );
+  });
+
+  it("restarts into a ready update from settings", async () => {
+    updateReady = true;
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
+        "ready",
+      ),
+    );
+
+    await user.click(screen.getByTestId("install-update-button"));
+
+    expect(bridge.installUpdate).toHaveBeenCalledOnce();
   });
 });

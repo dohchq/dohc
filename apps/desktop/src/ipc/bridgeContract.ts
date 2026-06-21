@@ -17,6 +17,7 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
+  UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
   type SearchResultsEvent,
@@ -1032,12 +1033,32 @@ export type MenuCommand = z.infer<typeof MenuCommand>;
 // Main→renderer auto-update event (Phase E2 status bar toast). channels.ts
 // owns the closed status tuple and the dependency-free preload check
 // (parseUpdateStateEvent) — this schema derives from the same tuple so the
-// two can never drift. Only {status, message} ever crosses the boundary.
+// two can never drift. Only public status/action metadata crosses the boundary;
+// feed URLs and updater configuration stay main-process-only.
 export const UpdateStateEvent = z.object({
   status: z.enum(UPDATE_STATUSES),
   message: z.string().min(1).max(500),
+  currentVersion: z.string().min(1).max(200).optional(),
+  channel: z.enum(UPDATE_CHANNELS).optional(),
+  canCheck: z.boolean().optional(),
+  canInstall: z.boolean().optional(),
+  version: z.string().min(1).max(200).optional(),
+  percent: z.number().min(0).max(100).optional(),
 });
 export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
+
+export const UpdateActionResult = z.object({
+  accepted: z.boolean(),
+  completed: z.boolean(),
+  state: UpdateStateEvent,
+});
+export type UpdateActionResult = z.infer<typeof UpdateActionResult>;
+
+export const UpdateCheckResult = z.object({
+  checked: z.boolean(),
+  state: UpdateStateEvent,
+});
+export type UpdateCheckResult = z.infer<typeof UpdateCheckResult>;
 
 // Per-workspace UI state persisted to .dohc/ui-state.json by MAIN (the
 // renderer cannot write .dohc through writeWorkspaceText by design —
@@ -1278,6 +1299,11 @@ export interface DohcDesktopBridge {
   // UPDATE_STATUSES tuple in the preload (parseUpdateStateEvent) before they
   // reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;
+  // Explicit update actions. The renderer can ask main to check or install;
+  // it cannot set feed URLs or mutate update channels.
+  getUpdateState(): Promise<UpdateStateEvent>;
+  checkForUpdates(): Promise<UpdateCheckResult>;
+  installUpdate(): Promise<UpdateActionResult>;
   // Workspace content search (Phase E5.0). Resolves when the search has been
   // ACCEPTED and the rg child spawned; results stream separately through
   // onSearchResults. Issuing a new search cancels the previous one in main.

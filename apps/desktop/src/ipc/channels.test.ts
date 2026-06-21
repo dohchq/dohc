@@ -7,6 +7,10 @@ import {
 } from "@dohc/workspace-core";
 import type { UpdateState } from "../updates/updateMachine";
 import {
+  UPDATE_CHANNELS as UPDATER_UPDATE_CHANNELS,
+  type UpdateChannel,
+} from "../updates/electronUpdater";
+import {
   EXPLORER_MENU_COMMANDS,
   isExplorerMenuCommand,
   isMenuCommand,
@@ -16,6 +20,7 @@ import {
   parseSearchResultsEvent,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
+  UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
   WORKSPACE_KINDS,
@@ -182,10 +187,10 @@ describe("parseWorkspaceActivatedEvent (preload boundary)", () => {
 });
 
 // The preload boundary for main→renderer update events — same attack set as
-// isMenuCommand: only a plain object with an exact tuple-member status and a
-// bounded primitive-string message passes, and only those two fields survive.
+// isMenuCommand: only a plain object with exact tuple-member status/channel
+// fields and bounded primitive public metadata passes.
 describe("parseUpdateStateEvent (preload boundary)", () => {
-  it("accepts every closed-tuple status and strips extra fields", () => {
+  it("accepts every closed-tuple status and strips unknown fields", () => {
     for (const status of UPDATE_STATUSES) {
       expect(parseUpdateStateEvent({ status, message: "m" })).toEqual({
         status,
@@ -195,6 +200,31 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
     expect(
       parseUpdateStateEvent({ status: "ready", message: "m", evil: "x" }),
     ).toEqual({ status: "ready", message: "m" });
+  });
+
+  it("accepts validated public update metadata", () => {
+    expect(
+      parseUpdateStateEvent({
+        status: "ready",
+        message: "Update 1.2.4 is ready",
+        currentVersion: "1.2.3",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.4",
+        percent: 100,
+        extra: "dropped",
+      }),
+    ).toEqual({
+      status: "ready",
+      message: "Update 1.2.4 is ready",
+      currentVersion: "1.2.3",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.4",
+      percent: 100,
+    });
   });
 
   it("rejects unknown/case-variant statuses and non-primitive impostors", () => {
@@ -215,6 +245,19 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
       parseUpdateStateEvent({ status: "ready", message: "x".repeat(501) }),
     ).toBeNull();
     expect(parseUpdateStateEvent({ status: "ready", message: 42 })).toBeNull();
+  });
+
+  it("rejects malformed public update metadata", () => {
+    const base = { status: "ready", message: "m" };
+    expect(parseUpdateStateEvent({ ...base, currentVersion: "" })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, currentVersion: "x".repeat(201) })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, version: "" })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, channel: "beta" })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, canCheck: "true" })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, canInstall: 1 })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, percent: -1 })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, percent: 101 })).toBeNull();
+    expect(parseUpdateStateEvent({ ...base, percent: Number.NaN })).toBeNull();
   });
 
   it("rejects non-objects, null, and arrays", () => {
@@ -357,5 +400,16 @@ describe("isSafeRelativePath", () => {
 const _tupleCoversMachine: readonly UpdateState["status"][] = UPDATE_STATUSES;
 const _machineCoversTuple: (typeof UPDATE_STATUSES)[number] =
   null as unknown as UpdateState["status"];
+const _tupleCoversUpdaterChannels: readonly UpdateChannel[] = UPDATE_CHANNELS;
+const _updaterChannelsCoverTuple: (typeof UPDATE_CHANNELS)[number] =
+  null as unknown as UpdateChannel;
 void _tupleCoversMachine;
 void _machineCoversTuple;
+void _tupleCoversUpdaterChannels;
+void _updaterChannelsCoverTuple;
+
+describe("update channel drift guard", () => {
+  it("keeps preload and updater channel tuples in sync", () => {
+    expect(UPDATE_CHANNELS).toEqual(UPDATER_UPDATE_CHANNELS);
+  });
+});

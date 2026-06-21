@@ -1,0 +1,263 @@
+name: Desktop Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - latest
+          - nightly
+      version:
+        description: Stable version, for example 0.1.0 or v0.1.0
+        required: false
+        type: string
+      dry_run:
+        description: Build and test without publishing artifacts
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      release_channel: ${{ steps.release.outputs.release_channel }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_name: ${{ steps.release.outputs.name }}
+      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
+      make_latest: ${{ steps.release.outputs.make_latest }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - id: mode
+        name: Resolve publish mode
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: release
+        name: Resolve release metadata
+        shell: bash
+        env:
+          DISPATCH_CHANNEL: ${{ inputs.channel }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            channel="nightly"
+            version_arg=()
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            channel="latest"
+            version_arg=(--version "${GITHUB_REF_NAME}")
+          else
+            channel="${DISPATCH_CHANNEL:-nightly}"
+            version_arg=()
+            if [[ -n "${DISPATCH_VERSION:-}" ]]; then
+              version_arg=(--version "${DISPATCH_VERSION}")
+            fi
+          fi
+
+          nightly_date="$(date -u +%Y%m%d)"
+          node scripts/resolve-desktop-release.mjs \
+            --channel "$channel" \
+            "${version_arg[@]}" \
+            --date "$nightly_date" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sha "$GITHUB_SHA" \
+            --github-output
+
+      - name: Stamp desktop package version
+        run: node scripts/update-desktop-package-version.mjs "${{ steps.release.outputs.version }}"
+
+      - name: Release helper tests
+        run: pnpm test:release:desktop
+
+      - name: Desktop typecheck
+        run: pnpm --filter @dohc/desktop typecheck
+
+      - name: Desktop tests
+        run: pnpm test:desktop
+
+  build:
+    name: Package ${{ matrix.label }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            runner: macos-latest
+            require_signing: "1"
+          - label: Windows
+            runner: windows-latest
+            require_signing: "1"
+          - label: Linux
+            runner: ubuntu-latest
+            require_signing: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+
+      - name: Setup pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Stamp desktop package version
+        run: node scripts/update-desktop-package-version.mjs "${{ needs.preflight.outputs.version }}"
+
+      - name: Build desktop
+        run: pnpm build:desktop
+
+      - name: Package smoke
+        env:
+          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: pnpm smoke:package:desktop
+
+      - name: Package desktop
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
+            pnpm --filter @dohc/desktop exec electron-builder --publish never -c.forceCodeSigning=true
+          else
+            pnpm --filter @dohc/desktop package
+          fi
+
+      - name: Fuse smoke
+        if: runner.os != 'Windows'
+        run: pnpm smoke:fuses:desktop
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: apps/desktop/release/**
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs:
+      - preflight
+      - build
+    if: ${{ needs.preflight.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Require update feed configuration
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.DOHC_DESKTOP_UPDATE_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop update feed configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ needs.preflight.outputs.make_latest == 'true' }}
+          files: release-artifacts/**
+
+      - name: Configure R2 credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          aws-region: auto
+
+      - name: Publish update feed
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.DOHC_DESKTOP_UPDATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 sync release-artifacts "s3://${R2_BUCKET}/desktop" \
+            --endpoint-url "$endpoint" \
+            --delete

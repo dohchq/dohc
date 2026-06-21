@@ -14,6 +14,8 @@ export const MENU_COMMANDS = [
   "toggle-sidebar",
   "toggle-theme",
   "settings",
+  "check-updates",
+  "install-update",
   "close-tab",
 ] as const;
 
@@ -77,6 +79,8 @@ export const WORKBENCH_MENU_COMMANDS = [
   "open-agent",
   "open-history",
   "connect-cloud",
+  "check-updates",
+  "install-update",
   "settings",
   "toggle-theme",
 ] as const;
@@ -110,14 +114,56 @@ export const UPDATE_STATUSES = [
 
 export type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
 
+export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
+export type UpdateChannelId = (typeof UPDATE_CHANNELS)[number];
+
+function isUpdateChannel(value: unknown): value is UpdateChannelId {
+  return (
+    typeof value === "string" &&
+    (UPDATE_CHANNELS as readonly string[]).includes(value)
+  );
+}
+
+function optionalBoundedString(
+  value: unknown,
+  max: number,
+): string | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= max
+    ? value
+    : null;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === "boolean" ? value : null;
+}
+
+function optionalPercent(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null;
+}
+
 // THE preload boundary check for update events: only a plain object whose
-// status is an exact primitive member of the closed tuple and whose message
-// is a bounded primitive string passes — and ONLY those two fields cross the
-// boundary (extra fields are dropped, String objects/toString tricks fail the
-// typeof checks). Unit-tested like isMenuCommand.
+// status is an exact primitive member of the closed tuple, whose message is a
+// bounded primitive string, and whose optional public update metadata is
+// primitive and bounded can cross. Unknown fields are dropped, and String
+// objects/toString tricks fail the typeof checks. Unit-tested like
+// isMenuCommand.
 export function parseUpdateStateEvent(
   value: unknown,
-): { status: UpdateStatusId; message: string } | null {
+): {
+  status: UpdateStatusId;
+  message: string;
+  currentVersion?: string;
+  channel?: UpdateChannelId;
+  canCheck?: boolean;
+  canInstall?: boolean;
+  version?: string;
+  percent?: number;
+} | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   // OWN properties only: an object inheriting status/message from a crafted
   // prototype must not pass a check that promises "plain object".
@@ -134,7 +180,32 @@ export function parseUpdateStateEvent(
   if (typeof message !== "string" || message.length === 0 || message.length > 500) {
     return null;
   }
-  return { status: status as UpdateStatusId, message };
+  const raw = value as Record<string, unknown>;
+  const currentVersion = optionalBoundedString(raw.currentVersion, 200);
+  const version = optionalBoundedString(raw.version, 200);
+  const canCheck = optionalBoolean(raw.canCheck);
+  const canInstall = optionalBoolean(raw.canInstall);
+  const percent = optionalPercent(raw.percent);
+  if (
+    currentVersion === null ||
+    version === null ||
+    canCheck === null ||
+    canInstall === null ||
+    percent === null
+  ) {
+    return null;
+  }
+  if (raw.channel !== undefined && !isUpdateChannel(raw.channel)) return null;
+  return {
+    status: status as UpdateStatusId,
+    message,
+    ...(currentVersion ? { currentVersion } : {}),
+    ...(raw.channel ? { channel: raw.channel as UpdateChannelId } : {}),
+    ...(canCheck !== undefined ? { canCheck } : {}),
+    ...(canInstall !== undefined ? { canInstall } : {}),
+    ...(version ? { version } : {}),
+    ...(percent !== undefined ? { percent } : {}),
+  };
 }
 
 // Closed main→renderer search-results event shape (Phase E5.0). Like
@@ -365,6 +436,9 @@ export const CHANNELS = {
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   updateState: "desktop:update-state",
+  getUpdateState: "desktop:get-update-state",
+  checkForUpdates: "desktop:check-for-updates",
+  installUpdate: "desktop:install-update",
   workspaceActivity: "desktop:workspace-activity",
   firstPaint: "desktop:first-paint",
   getLaunchMarks: "desktop:test:get-launch-marks",

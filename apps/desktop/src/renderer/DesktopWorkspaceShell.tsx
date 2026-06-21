@@ -1937,6 +1937,20 @@ export function DesktopWorkspaceShell(props: {
     setImportExportSelectionText(canUseSelection ? readSelectedText() : "");
     setImportExportOpen(true);
   }, [activeDocumentPath]);
+  const checkForDesktopUpdates = useCallback(async () => {
+    try {
+      await bridge().checkForUpdates();
+    } catch (error) {
+      reportShellError("Could not check for updates.", error);
+    }
+  }, [reportShellError]);
+  const installDesktopUpdate = useCallback(async () => {
+    try {
+      await bridge().installUpdate();
+    } catch (error) {
+      reportShellError("Could not install the update.", error);
+    }
+  }, [reportShellError]);
 
   const runWorkbenchMenuCommand = useCallback(
     (command: WorkbenchMenuCommand, path?: string) => {
@@ -1960,6 +1974,10 @@ export function DesktopWorkspaceShell(props: {
         setCloudOpen(true);
       } else if (command === "settings") {
         setSettingsOpen(true);
+      } else if (command === "check-updates") {
+        void checkForDesktopUpdates();
+      } else if (command === "install-update") {
+        void installDesktopUpdate();
       } else if (command === "toggle-theme") {
         toggleTheme();
       }
@@ -1968,6 +1986,8 @@ export function DesktopWorkspaceShell(props: {
       activeDocumentPath,
       closeFileTab,
       closeOtherTabs,
+      checkForDesktopUpdates,
+      installDesktopUpdate,
       openAgentView,
       openHistoryView,
       openImportExportDialog,
@@ -2167,6 +2187,16 @@ export function DesktopWorkspaceShell(props: {
         run: () => setSettingsOpen(true),
       },
       {
+        id: "check-updates",
+        label: "Check for updates",
+        run: () => void checkForDesktopUpdates(),
+      },
+      {
+        id: "install-update",
+        label: "Update and restart",
+        run: () => void installDesktopUpdate(),
+      },
+      {
         id: "toggle-theme",
         label: "Toggle light/dark theme",
         run: toggleTheme,
@@ -2179,6 +2209,8 @@ export function DesktopWorkspaceShell(props: {
       mutateWb,
       requestExplorerCreate,
       openImportExportDialog,
+      checkForDesktopUpdates,
+      installDesktopUpdate,
       reportShellError,
       workspaceId,
     ],
