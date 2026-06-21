@@ -45,6 +45,7 @@ function availableModes(site: SitePackageInfo): SitePreviewMode[] {
 function isLoopbackOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
+    if (url.username || url.password) return false;
     return url.protocol === "http:" && isLoopbackHostname(url.hostname);
   } catch {
     return false;
@@ -161,7 +162,7 @@ export function SitePreviewPage(props: {
         .stopSitePreview({ workspaceId: props.workspaceId, siteRoot: props.siteRoot })
         .catch(() => undefined);
     };
-  }, [props.workspaceId]);
+  }, [props.workspaceId, props.siteRoot]);
 
   useEffect(() => {
     async function handleSdkRequest(event: MessageEvent) {
@@ -226,7 +227,7 @@ export function SitePreviewPage(props: {
 
     window.addEventListener("message", handleSdkRequest);
     return () => window.removeEventListener("message", handleSdkRequest);
-  }, [props.workspaceId, props.siteRoot]);
+  }, [props.workspaceId]);
 
   const modes = useMemo(
     () => (load.status === "ready" ? availableModes(load.site) : []),

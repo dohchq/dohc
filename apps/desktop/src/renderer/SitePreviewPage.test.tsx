@@ -87,6 +87,40 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
+  it("refuses to render HTTPS loopback preview URLs", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "https://127.0.0.1:49152/",
+      logs: [],
+    });
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
+  it("refuses to render authenticated loopback preview URLs", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "http://user:pass@127.0.0.1:49152/",
+      logs: [],
+    });
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
   it("stops the preview when the page unmounts", async () => {
     const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
     await screen.findByText("Report");
@@ -96,6 +130,17 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
     });
+  });
+
+  it("removes the SDK message listener when the page unmounts", async () => {
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    view.unmount();
+
+    expect(removeEventListener).toHaveBeenCalledWith("message", expect.any(Function));
+    removeEventListener.mockRestore();
   });
 
   it("keeps the preview visible and reports stop failures", async () => {
@@ -155,6 +200,39 @@ describe("SitePreviewPage", () => {
       },
       "http://127.0.0.1:49152",
     );
+  });
+
+  it("ignores SDK messages from a source that is not the preview iframe", async () => {
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    const frame = (await screen.findByTestId("site-preview-frame")) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    const fakeSource = { postMessage: vi.fn() } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "http://127.0.0.1:49152",
+        source: fakeSource,
+        data: {
+          protocol: DOHC_SDK_PROTOCOL,
+          id: "read-wrong-source",
+          method: "files.read",
+          params: { path: "notes/q1.md" },
+        },
+      }),
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("returns SDK host errors when workspace file reads fail", async () => {
@@ -218,10 +296,17 @@ describe("SitePreviewPage", () => {
     });
 
     const unsafePaths = [
+      "",
+      ".",
+      "..",
       "../secret.md",
       "/etc/passwd",
       "../../secret.md",
       "notes/../../../secret.md",
+      "notes/",
+      "notes//file.md",
+      "./notes/file.md",
+      "notes/./file.md",
       "notes\\secret.md",
       "C:\\Users\\ice\\secret.md",
       "%2e%2e%2fsecret.md",
