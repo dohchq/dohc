@@ -249,6 +249,8 @@ describe("isSiteSourcePath", () => {
     expect(isSiteSourcePath("notes/sites-backup/index.html")).toBe(false);
     expect(isSiteSourcePath("sites/index.html")).toBe(false);
     expect(isSiteSourcePath("finance/sites/styles.css")).toBe(false);
+    expect(isSiteSourcePath("sites/workspace/src/main.mjsx")).toBe(false);
+    expect(isSiteSourcePath("sites/workspace/src/main.ctsx")).toBe(false);
   });
 
   it("matches the sites path segment case-insensitively", () => {

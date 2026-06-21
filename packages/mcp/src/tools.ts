@@ -1318,7 +1318,7 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
   const packageJsonPath = ctx.sdkPackageJsonPath?.trim();
   if (!packageJsonPath) {
     throw new Error(
-      "@dohc/sdk dependency range is not configured; pass --sdk-package-json or DOHC_SDK_PACKAGE_JSON",
+      "MCP server configuration is missing @dohc/sdk package metadata; launch with --sdk-package-json or set DOHC_SDK_PACKAGE_JSON",
     );
   }
 

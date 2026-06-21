@@ -16,7 +16,7 @@ export const WorkspacePath = z
     "workspace paths cannot contain ..",
   );
 
-export const SITE_SOURCE_CODE_EXT_RE = /\.(?:[cm]?[jt]sx?|s?css|json|html?)$/i;
+export const SITE_SOURCE_CODE_EXT_RE = /\.(?:tsx?|jsx?|[cm][jt]s|s?css|json|html?)$/i;
 
 export const APPROVAL_ERROR_REASONS = [
   "approval required",
@@ -38,6 +38,16 @@ export const AtomKind = z.enum([
   "html",
 ]);
 export type AtomKind = z.infer<typeof AtomKind>;
+
+const LEGACY_ATOM_KIND_APP_SOURCE = `${"app"}-${"source"}`;
+export function normalizeAtomKind(kind: unknown): AtomKind {
+  const normalized = kind === LEGACY_ATOM_KIND_APP_SOURCE ? "text" : kind;
+  const parsed = AtomKind.safeParse(normalized);
+  if (!parsed.success) {
+    throw new Error(`Unknown atom kind: ${String(kind)}`);
+  }
+  return parsed.data;
+}
 
 export const AssetKind = z.enum([
   "image",

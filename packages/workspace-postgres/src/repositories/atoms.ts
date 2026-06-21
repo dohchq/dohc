@@ -6,14 +6,14 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { WorkspaceError, WorkspacePath } from "@dohc/workspace-contracts";
+import { normalizeAtomKind, WorkspaceError, WorkspacePath } from "@dohc/workspace-contracts";
 import type { PgQueryable } from "./workspaces";
 
 type AtomRow = {
   id: string;
   workspace_id: string;
   path: string;
-  kind: AtomKind;
+  kind: unknown;
   body: string;
   revision: number;
   updated_at: Date;
@@ -35,12 +35,13 @@ function contentTypeForAtomKind(kind: AtomKind) {
 }
 
 export function atomRowToWorkspaceFile(row: AtomRow): WorkspaceFile {
+  const kind = normalizeAtomKind(row.kind);
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     path: row.path,
     kind: "atom",
-    contentType: contentTypeForAtomKind(row.kind),
+    contentType: contentTypeForAtomKind(kind),
     revision: String(row.revision),
     updatedAt: row.updated_at.getTime(),
   };

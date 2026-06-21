@@ -36,6 +36,10 @@ function denormalizeRoot(root: string): string {
   return root === "." ? "" : root;
 }
 
+// Conventional web build output folders that can signal a built/static site
+// even when discovery sees the folder before an index.html entry underneath it.
+const BUILD_OUTPUT_FOLDER_NAMES = ["dist", "build", "out"];
+
 function joinSitePath(root: string, relativePath: string): string {
   const normalized = normalizeRoot(root);
   return normalized === "." ? relativePath : `${normalized}/${relativePath}`;
@@ -148,7 +152,7 @@ export function discoverSiteRoots(
 ): Promise<string[]> | string[] {
   if (Array.isArray(rootPathOrFiles)) {
     const folderSignals = folders
-      .filter((folder) => ["dist", "build", "out"].includes(posix.basename(folder)))
+      .filter((folder) => BUILD_OUTPUT_FOLDER_NAMES.includes(posix.basename(folder)))
       .map((folder) => `${folder}/index.html`);
     return discoverSites([...rootPathOrFiles.map((file) => file.path), ...folderSignals]).map(
       (site) => normalizeRoot(site.root),
@@ -161,7 +165,7 @@ export async function listSitePackages(rootPath: string): Promise<SitePackageInf
   const listed = await listFiles(rootPath);
   const sources = await Promise.all(listed.files.map((file) => sourceForFile(rootPath, file.path)));
   const folderSignals = listed.folders
-    .filter((folder) => ["dist", "build", "out"].includes(posix.basename(folder)))
+    .filter((folder) => BUILD_OUTPUT_FOLDER_NAMES.includes(posix.basename(folder)))
     .map((folder) => `${folder}/index.html`);
   const sites = discoverSites([...sources, ...folderSignals]);
   const mapped = await Promise.all(

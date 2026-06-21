@@ -8,7 +8,7 @@ import type {
   WorkspaceFile,
   WriteAtomInput,
 } from "@dohc/workspace-contracts";
-import { WorkspaceError } from "@dohc/workspace-contracts";
+import { APPROVAL_ERROR_REASONS, WorkspaceError } from "@dohc/workspace-contracts";
 import type pg from "pg";
 import { createWorkspaceApiHandler } from "./server";
 
@@ -109,7 +109,7 @@ function memoryBackend() {
       calls.push({ method: "deleteFile", input: { path, expectedRevision }, actor: resolvedActor });
       if (path === "shared/locked.md") {
         const error = new Error("approval required for locked/shared file");
-        (error as Error & { code?: string }).code = "approval-required";
+        (error as Error & { code?: string }).code = APPROVAL_ERROR_REASONS[1];
         throw error;
       }
       text.delete(path);

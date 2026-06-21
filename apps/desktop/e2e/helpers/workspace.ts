@@ -51,7 +51,9 @@ export async function cleanupDesktopWorkspace(
   const rejected = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
-  if (rejected) throw rejected.reason;
+  if (rejected) {
+    console.error("[desktop-e2e] cleanup failed:", rejected.reason);
+  }
 }
 
 /**

@@ -337,7 +337,7 @@ function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
   const text = logs
     .slice(-3)
     .map((log) => log.text)
-    .join("")
+    .join("\n")
     .trim();
   return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
 }
