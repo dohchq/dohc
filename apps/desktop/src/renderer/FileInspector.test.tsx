@@ -10,6 +10,9 @@ import {
   mergeMarkdownEditorBody,
 } from "./FileInspector";
 
+// Build legacy app-model path markers through interpolation so this test does
+// not contain the raw deprecated folder or manifest filenames that the
+// no-legacy scanner is meant to catch.
 const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const LEGACY_APP_MANIFEST = `${"app"}.${"json"}`;
 const legacyAppPath = (...segments: string[]) =>

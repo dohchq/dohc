@@ -285,6 +285,12 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     capabilities: readCapabilities,
     files: {
       read: async (path: string) => {
+        if (isAbsoluteWorkspacePath(path)) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.badResponse,
+            "File paths must be workspace-relative. Absolute paths are not allowed.",
+          );
+        }
         const capabilities = await readCapabilities();
         if (!capabilities.files.read) {
           throw new DohcSdkError(
@@ -348,6 +354,14 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       },
     },
   };
+}
+
+function isAbsoluteWorkspacePath(path: string): boolean {
+  return (
+    path.startsWith("/") ||
+    path.startsWith("\\") ||
+    /^[A-Za-z]:[\\/]/.test(path)
+  );
 }
 
 export type DohcClient = ReturnType<typeof createDohcClient>;

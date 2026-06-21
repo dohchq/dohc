@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DohcSdkError,
+  DohcSdkErrorCodes,
   createDohcClient,
   createPostMessageTransport,
   DOHC_SDK_PROTOCOL,
@@ -66,6 +67,31 @@ describe("@dohc/sdk", () => {
       { method: "capabilities", params: undefined },
       { method: "files.read", params: { path: "notes/today.md" } },
     ]);
+  });
+
+  it("rejects absolute file paths before contacting the host", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return { text: "should not read" };
+        },
+      },
+    });
+
+    await expect(
+      client.files.read("/Users/ice/private.md"),
+    ).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.badResponse,
+      message: "File paths must be workspace-relative. Absolute paths are not allowed.",
+    });
+    await expect(
+      client.files.read("C:\\Users\\ice\\private.md"),
+    ).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.badResponse,
+    });
+    expect(calls).toEqual([]);
   });
 
   it("surfaces host errors with stable codes", async () => {
