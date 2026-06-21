@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 export function SettingRow(props: {
   title: string;
@@ -48,20 +48,55 @@ export function SegmentedControl<T extends string>(props: {
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
 }) {
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const currentIndex = Math.max(
+    0,
+    props.options.findIndex((option) => option.value === props.value),
+  );
+
+  const focusOption = (index: number) => {
+    const option = props.options[index];
+    if (!option) return;
+    props.onChange(option.value);
+    optionRefs.current[index]?.focus();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (props.options.length === 0) return;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOption((currentIndex + 1) % props.options.length);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption((currentIndex - 1 + props.options.length) % props.options.length);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusOption(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusOption(props.options.length - 1);
+    }
+  };
+
   return (
     <div
       role="radiogroup"
       aria-label={props.label}
+      onKeyDown={handleKeyDown}
       className="inline-flex rounded-md border border-line bg-panel-2 p-0.5"
     >
-      {props.options.map((option) => (
+      {props.options.map((option, index) => (
         <button
           key={option.value}
+          ref={(element) => {
+            optionRefs.current[index] = element;
+          }}
           type="button"
           role="radio"
           aria-checked={props.value === option.value}
+          tabIndex={props.value === option.value ? 0 : -1}
           onClick={() => props.onChange(option.value)}
-          className={`min-w-16 rounded px-2 py-1 text-[11px] ${
+          className={`min-w-16 rounded px-2 py-1 text-[11px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
             props.value === option.value
               ? "bg-bg text-ink shadow-sm"
               : "text-muted hover:text-ink"
@@ -86,7 +121,7 @@ export function SwitchControl(props: {
       aria-label={props.label}
       aria-checked={props.checked}
       onClick={() => props.onChange(!props.checked)}
-      className={`relative h-5 w-9 rounded-full border transition-colors ${
+      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
         props.checked ? "border-ink bg-ink" : "border-line bg-panel-2"
       }`}
     >

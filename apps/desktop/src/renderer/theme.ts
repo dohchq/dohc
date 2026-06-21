@@ -83,5 +83,5 @@ export async function setThemeMode(themeMode: ThemeMode): Promise<void> {
 export function toggleTheme(): void {
   const next =
     document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  void setThemeMode(next);
+  void setThemeMode(next).catch(() => undefined);
 }

@@ -29,7 +29,7 @@ describe("settings IPC contract", () => {
     ).toBe("auto");
   });
 
-  it("rejects unknown settings keys and invalid enum values", () => {
+  it("rejects unknown settings keys, invalid values, bounds, and oversized strings", () => {
     expect(
       SetUserSettingsPayload.safeParse({
         settings: {
@@ -63,6 +63,12 @@ describe("settings IPC contract", () => {
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "WS-settings",
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "",
         settings: DEFAULT_WORKSPACE_SETTINGS,
       }).success,
     ).toBe(false);

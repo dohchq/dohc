@@ -85,6 +85,7 @@ export function AgentsMcpSettings(props: {
     setCopied(false);
     setCopyError(null);
     setLoadError(null);
+    setBusy(false);
     void refresh(version).catch(() => {
       if (isCurrentRequest(version)) {
         setLoadError("Could not load MCP settings.");

@@ -46,7 +46,10 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
-import type { SettingsSectionId } from "./settings/settingsRegistry";
+import {
+  DEFAULT_SETTINGS_SECTION,
+  type SettingsSectionId,
+} from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
@@ -1486,7 +1489,7 @@ export function DesktopWorkspaceShell(props: {
     setAgentPanelRefreshKey((key) => key + 1);
   }, []);
   const openSettings = useCallback(
-    (section: SettingsSectionId = "general") => setSettingsSection(section),
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
     [],
   );
   const closeSettings = useCallback(() => setSettingsSection(null), []);

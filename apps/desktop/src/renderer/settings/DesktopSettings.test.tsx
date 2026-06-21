@@ -164,6 +164,32 @@ describe("DesktopSettings", () => {
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
   });
 
+  it("supports arrow-key navigation inside segmented appearance controls", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const system = await screen.findByRole("radio", { name: "System" });
+    system.focus();
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "Light" }).getAttribute("aria-checked")).toBe(
+        "true",
+      ),
+    );
+    expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      settings: expect.objectContaining({
+        appearance: expect.objectContaining({ themeMode: "light" }),
+      }),
+    });
+  });
+
   it("shows the workspace path, a copyable MCP config snippet, and usage examples", async () => {
     render(
       <DesktopSettings
@@ -241,6 +267,8 @@ describe("DesktopSettings", () => {
   });
 
   it("ignores in-flight MCP config responses after switching workspaces", async () => {
+    // Delay ws-old and resolve it only after rerendering ws-new; if cancellation
+    // fails, the old config overwrites the visible snippet.
     let resolveOldConfig = () => {};
     bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
       if (workspaceId === "ws-old") {

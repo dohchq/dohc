@@ -16,6 +16,9 @@
     "test:sites:e2e": "pnpm run build && playwright test --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
   },
+  "dependencyNotes": {
+    "jsdom": "Pinned to ^27.2.0 because jsdom 29.1.1 pulls html-encoding-sniffer@6 through a CJS/ESM path that breaks the current Vitest jsdom harness."
+  },
   "devDependencies": {
     "@dohc/performance": "workspace:*",
     "@electron/asar": "^3.4.1",

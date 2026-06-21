@@ -113,8 +113,10 @@ body {
 }
 
 [data-reduce-motion='true'] *,
-[data-reduce-motion='true'] ::before,
-[data-reduce-motion='true'] ::after {
+[data-reduce-motion='true'] *::before,
+[data-reduce-motion='true'] *::after,
+[data-reduce-motion='true']::before,
+[data-reduce-motion='true']::after {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   scroll-behavior: auto !important;

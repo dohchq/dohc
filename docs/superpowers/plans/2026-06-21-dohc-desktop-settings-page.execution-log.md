@@ -69,3 +69,26 @@ covered directly by `e2e/settings.spec.ts`.
 - Added workspace-scoped request cancellation and visible retry feedback around
   the Agents & MCP settings panel so stale async responses cannot repaint the
   current workspace.
+
+## CodeRabbit review loop
+
+PR: https://github.com/dohc-ai/dohc/pull/41
+
+CodeRabbit findings fixed:
+
+- Critical: complete the reduce-motion override so descendant pseudo-elements
+  also disable animation and transitions.
+- Major: reset Agents & MCP busy state on workspace changes; add
+  workspace-scoped async cancellation; avoid optimistic `"stored"` sources for
+  pending workspace saves; preserve nested workspace privacy fields.
+- Minor: route clipboard copy through bounded main-process IPC; show copy/load
+  failures in the settings UI; add visible focus styles for switches; document
+  the `jsdom@27.2.0` pin in JSON-safe package metadata.
+- Trivial: add explicit preload payload types, stable warning keys, settings
+  merge helpers, a default settings-section constant, safer theme toggle
+  rejection handling, and expanded IPC/test documentation.
+
+Rejected findings:
+
+- None so far. The package dependency-note request was implemented as
+  `dependencyNotes` because comments are not valid JSON.
