@@ -199,6 +199,10 @@ describe("discoverSites", () => {
       severity: "error",
     });
   });
+
+  it("does not classify diagnostics-only folders as sites", () => {
+    expect(discoverSites([{ path: "not-a-site/package.json", body: "{ bad" }])).toEqual([]);
+  });
 });
 
 describe("parseDohcSiteConfig", () => {

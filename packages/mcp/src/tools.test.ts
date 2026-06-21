@@ -996,6 +996,22 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("add_sdk refuses to overwrite malformed package metadata", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "todo"), { recursive: true });
+      await writeFile(join(ctx.root, "todo", "index.html"), "<h1>Todo</h1>");
+      await writeFile(join(ctx.root, "todo", "package.json"), "{ bad");
+
+      await expect(addSiteSdk(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("invalid package.json"),
+      });
+      await expect(readFile(join(ctx.root, "todo", "package.json"), "utf8")).resolves.toBe(
+        "{ bad",
+      );
+    });
+  });
+
   it("publish_site stops at the explicit dohc Cloud review boundary", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo", title: "Todo" });

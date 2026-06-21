@@ -1912,8 +1912,11 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   if (existingBytes) {
     try {
       existing = JSON.parse(existingBytes.toString("utf8")) as PackageJson;
-    } catch {
-      existing = null;
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason: `invalid package.json at ${relativeJoin(root.normalized, "package.json")}: ${failureReason(error, "invalid JSON")}`,
+      };
     }
   }
   const packageJson = ensureObject(existing);

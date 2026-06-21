@@ -35,11 +35,15 @@ function stripWindowsAliasSuffix(segment: string): string {
 // one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
 // a user/agent write into one must be refused, not just the first segment.
 export function isReservedPath(relativePath: string): boolean {
-  return relativePath
+  const segments = relativePath
     .replaceAll("\\", "/")
     .toLowerCase()
     .split("/")
-    .some((segment) => stripWindowsAliasSuffix(segment) === ".dohc");
+    .map(stripWindowsAliasSuffix);
+  return (
+    segments.some((segment) => segment === ".dohc") ||
+    segments[0] === "shared-with-me"
+  );
 }
 
 // Path segments that are dohc/system internals at ANY depth — hidden from the

@@ -29,8 +29,14 @@ origin instead of becoming `"null"`, which lets the parent perform exact
 origin checks. `allow-scripts` lets normal web apps run. `allow-forms` keeps
 ordinary local forms usable inside previews.
 
-The sandbox is not treated as the authorization boundary. Privileged dohc
-operations still pass through dohc IPC and server-side policy. Loopback URL
-restriction, exact origin matching, and dohc-owned preview processes work
-together so a site can render like a normal website without gaining ambient
-workspace or cloud authority.
+This combination is intentionally treated as minimal UI containment, not a
+security boundary. A same-origin scripted page can effectively escape many
+iframe sandbox restrictions, so dohc must never rely on this attribute for
+authorization, workspace isolation, or cloud access control.
+
+Privileged dohc operations still pass through dohc IPC and server-side policy.
+Loopback URL restriction, exact origin matching, dohc-owned preview processes,
+path containment, and SDK capability checks are the real controls. A future
+host that needs stronger containment should add a dedicated unguessable origin
+or stricter Content Security Policy rather than assuming the iframe sandbox is
+enough.

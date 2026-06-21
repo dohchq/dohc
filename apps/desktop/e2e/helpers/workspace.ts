@@ -44,15 +44,15 @@ export async function cleanupDesktopWorkspace(
   desktop: CloseableDesktop | null | undefined,
   workspace: Pick<TempWorkspace, "cleanup">,
 ): Promise<void> {
-  const results = await Promise.allSettled([
-    desktop ? desktop.close() : Promise.resolve(),
-    workspace.cleanup(),
-  ]);
-  const rejected = results.find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
-  );
-  if (rejected) {
-    console.error("[desktop-e2e] cleanup failed:", rejected.reason);
+  try {
+    if (desktop) await desktop.close();
+  } catch (error) {
+    console.error("[desktop-e2e] desktop close failed:", error);
+  }
+  try {
+    await workspace.cleanup();
+  } catch (error) {
+    console.error("[desktop-e2e] workspace cleanup failed:", error);
   }
 }
 

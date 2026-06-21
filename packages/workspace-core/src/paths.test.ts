@@ -59,6 +59,16 @@ describe("reserved paths", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("reserved");
   });
+
+  it("reserves the top-level shared-with-me sync folder", () => {
+    expect(isReservedPath("shared-with-me/alex/brief.md")).toBe(true);
+    expect(isReservedPath("Shared-With-Me./alex/brief.md")).toBe(true);
+    expect(isReservedPath("notes/shared-with-me/brief.md")).toBe(false);
+
+    const result = validateUserWritePath("shared-with-me/alex/brief.md");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("reserved");
+  });
 });
 
 describe("path traversal", () => {

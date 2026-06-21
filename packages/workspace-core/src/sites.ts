@@ -603,8 +603,7 @@ function shouldIncludeCandidate(candidate: Candidate): boolean {
     candidate.hasIndexHtml ||
     candidate.hasWebPackageSignal ||
     candidate.hasFrameworkConfig ||
-    candidate.hasBuildOutputSignal ||
-    candidate.diagnostics.length > 0
+    candidate.hasBuildOutputSignal
   );
 }
 
