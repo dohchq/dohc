@@ -380,6 +380,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
           // never accepts caller-supplied workspace/user identity here; the
           // host transport decides whether collections.read is available and
           // enforces workspace scope server-side before returning rows.
+          assertCollectionName(name);
           const capabilities = await readCapabilities();
           if (!capabilities.collections.read) {
             throw new DohcSdkError(
@@ -387,7 +388,6 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
               "dohc collections.read capability is disabled by this host.",
             );
           }
-          assertCollectionName(name);
           const result = await transport.request("collections.list", { name });
           if (!Array.isArray(result)) {
             throw new DohcSdkError(

@@ -436,7 +436,7 @@ describe("@dohc/sdk", () => {
       code: "DOHC_INVALID_INPUT",
       message: expect.stringMatching(/collection name/i),
     });
-    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+    expect(calls).toEqual([]);
   });
 
   it("reports disabled provenance recording before sending provenance data", async () => {
