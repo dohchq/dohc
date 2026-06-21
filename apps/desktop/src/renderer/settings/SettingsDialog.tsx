@@ -18,6 +18,7 @@ import {
 } from "../../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
+  mergeWorkspaceSettings,
   type WorkspaceSettings,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
@@ -44,6 +45,8 @@ function sectionMatches(section: (typeof SETTINGS_SECTIONS)[number], query: stri
 }
 
 function isModified(value: unknown, defaultValue: unknown): boolean {
+  // Settings schemas are strict serializable POJOs, so stable stringify is enough
+  // for reset badges without pulling a deep-equality helper into preload-bound code.
   return JSON.stringify(value) !== JSON.stringify(defaultValue);
 }
 
@@ -152,7 +155,11 @@ export function SettingsDialog(props: {
   }, [activeSection, filteredSections, query]);
 
   const saveUserSettings = useCallback(async (settings: DesktopUserSettings) => {
-    setUserResult({ settings, source: "stored" });
+    setUserResult((current) => ({
+      settings,
+      source: current?.source ?? "default",
+      ...(current?.warning ? { warning: current.warning } : {}),
+    }));
     applyAppearanceSettings(settings.appearance);
     markSaving();
     setError(null);
@@ -168,7 +175,11 @@ export function SettingsDialog(props: {
 
   const saveWorkspaceSettings = useCallback(
     async (settings: WorkspaceSettings) => {
-      setWorkspaceResult({ settings, source: "stored" });
+      setWorkspaceResult((current) => ({
+        settings,
+        source: current?.source ?? "default",
+        ...(current?.warning ? { warning: current.warning } : {}),
+      }));
       markSaving();
       setError(null);
       try {
@@ -391,23 +402,22 @@ export function SettingsDialog(props: {
                 DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
               )}
               onReset={() =>
-                void saveWorkspaceSettings({
-                  ...workspaceSettings,
+                void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
                   privacy: {
+                    ...workspaceSettings.privacy,
                     confirmExternalLinks:
                       DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
                   },
-                })
+                }))
               }
             >
               <SwitchControl
                 label="Confirm external links"
                 checked={workspaceSettings.privacy.confirmExternalLinks}
                 onChange={(confirmExternalLinks) =>
-                  void saveWorkspaceSettings({
-                    ...workspaceSettings,
-                    privacy: { confirmExternalLinks },
-                  })
+                  void saveWorkspaceSettings(mergeWorkspaceSettings(workspaceSettings, {
+                    privacy: { ...workspaceSettings.privacy, confirmExternalLinks },
+                  }))
                 }
               />
             </SettingRow>
@@ -602,9 +612,9 @@ export function SettingsDialog(props: {
 
         {warnings.length > 0 ? (
           <div className="flex shrink-0 flex-col gap-1 border-b border-line bg-panel px-4 py-2">
-            {warnings.map((warning) => (
+            {warnings.map((warning, index) => (
               <div
-                key={warning}
+                key={`${index}-${warning}`}
                 data-testid="settings-warning"
                 className="flex items-center gap-2 text-[11px] text-warning"
               >

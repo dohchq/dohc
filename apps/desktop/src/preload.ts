@@ -4,10 +4,14 @@ import type {
   DohcDesktopBridge,
   ListSitesPayload,
   MenuCommand,
+  SetUserSettingsPayload,
+  SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
   StopSitePreviewPayload,
+  WorkspaceSettingsPayload,
   WorkspaceSummary,
+  WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -162,16 +166,16 @@ const bridge: DohcDesktopBridge = {
   answerAgentPermission: (payload) =>
     ipcRenderer.invoke(CHANNELS.answerAgentPermission, payload),
   getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
-  setUserSettings: (payload) =>
+  setUserSettings: (payload: SetUserSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
   resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
-  getWorkspaceSettings: (payload) =>
+  getWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.getWorkspaceSettings, payload),
-  setWorkspaceSettings: (payload) =>
+  setWorkspaceSettings: (payload: SetWorkspaceSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.setWorkspaceSettings, payload),
-  resetWorkspaceSettings: (payload) =>
+  resetWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.resetWorkspaceSettings, payload),
-  writeClipboardText: (payload) =>
+  writeClipboardText: (payload: WriteClipboardTextPayload) =>
     ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),

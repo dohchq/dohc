@@ -34,7 +34,7 @@ const readyUpdateState = {
 };
 type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
 const bridge = {
-  getMcpConfig: vi.fn(async () => config),
+  getMcpConfig: vi.fn(async (_payload: { workspaceId: string }) => config),
   getAgentRunStatus: vi.fn(async () => ({
     mcpEnabled,
     activeRun: mcpEnabled ? { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const } : null,
@@ -154,7 +154,7 @@ describe("DesktopSettings", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Dark" }));
+    await user.click(await screen.findByRole("radio", { name: "Dark" }));
     expect(bridge.setUserSettings).toHaveBeenCalledWith({
       settings: expect.objectContaining({
         appearance: expect.objectContaining({ themeMode: "dark" }),
@@ -218,6 +218,75 @@ describe("DesktopSettings", () => {
       "Could not copy MCP config.",
     );
     expect(screen.queryByText("Copied")).toBeNull();
+  });
+
+  it("reports MCP load failures and retries without leaving stale UI", async () => {
+    const user = userEvent.setup();
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    expect((await screen.findByTestId("mcp-load-error")).textContent).toContain(
+      "Could not load MCP settings.",
+    );
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByTestId("mcp-load-error")).toBeNull());
+    expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
+  });
+
+  it("ignores in-flight MCP config responses after switching workspaces", async () => {
+    let resolveOldConfig = () => {};
+    bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+      if (workspaceId === "ws-old") {
+        return new Promise<typeof config>((resolve) => {
+          resolveOldConfig = () =>
+            resolve({
+              ...config,
+              args: ["--workspace", "/old"],
+              workspacePath: "/old",
+            });
+        });
+      }
+      return Promise.resolve({
+        ...config,
+        args: ["--workspace", "/new"],
+        workspacePath: "/new",
+      });
+    });
+    const view = render(
+      <DesktopSettings
+        workspaceId="ws-old"
+        workspacePath="/old"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.getMcpConfig).toHaveBeenCalledWith({ workspaceId: "ws-old" }),
+    );
+
+    view.rerender(
+      <DesktopSettings
+        workspaceId="ws-new"
+        workspacePath="/new"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+    );
+    resolveOldConfig();
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+    );
+    expect(screen.getByTestId("mcp-config-snippet").textContent).not.toContain("/old");
   });
 
   it("toggles the MCP server on, then reflects running status", async () => {

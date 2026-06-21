@@ -50,7 +50,7 @@ export function SegmentedControl<T extends string>(props: {
 }) {
   return (
     <div
-      role="group"
+      role="radiogroup"
       aria-label={props.label}
       className="inline-flex rounded-md border border-line bg-panel-2 p-0.5"
     >
@@ -58,7 +58,8 @@ export function SegmentedControl<T extends string>(props: {
         <button
           key={option.value}
           type="button"
-          aria-pressed={props.value === option.value}
+          role="radio"
+          aria-checked={props.value === option.value}
           onClick={() => props.onChange(option.value)}
           className={`min-w-16 rounded px-2 py-1 text-[11px] ${
             props.value === option.value

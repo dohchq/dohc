@@ -52,7 +52,7 @@ test("@settings-smoke opens settings and survives a basic appearance edit", asyn
     await expect(desktop.page.getByTestId("settings-nav-appearance")).toBeVisible();
     await desktop.page.getByTestId("settings-nav-appearance").click();
     await expect(desktop.page.getByTestId("settings-section-appearance")).toBeVisible();
-    await desktop.page.getByRole("button", { name: "Dark" }).click();
+    await desktop.page.getByRole("radio", { name: "Dark" }).click();
     await closeSettings(desktop.page);
     await openSettings(desktop.page);
     await expect(desktop.page.getByTestId("settings-dialog")).toBeVisible();
@@ -78,7 +78,7 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await desktop.page.getByTestId("settings-search").fill("");
 
     await desktop.page.getByTestId("settings-nav-appearance").click();
-    await desktop.page.getByRole("button", { name: "Dark" }).click();
+    await desktop.page.getByRole("radio", { name: "Dark" }).click();
     await expect
       .poll(() => desktop!.page.evaluate(() => document.documentElement.dataset.theme))
       .toBe("dark");

@@ -48,6 +48,11 @@ Initial execution map:
 - `pnpm --dir apps/desktop exec playwright test --config playwright.config.ts e2e/settings.spec.ts`
 - `git diff --check`
 
+The verification loop used the settings-specific smoke and E2E gates for this
+feature plus the full desktop unit suite and desktop build. The broader desktop
+E2E pack remains outside this feature gate because the touched runtime paths are
+covered directly by `e2e/settings.spec.ts`.
+
 ## Fix loop notes
 
 - Repaired desktop jsdom test resolution by pinning desktop to `jsdom@27.2.0`;
@@ -61,3 +66,6 @@ Initial execution map:
 - Hardened the first-run E2E helper so it waits for either first-run or an
   already-mounted workspace shell instead of committing to one surface too
   early.
+- Added workspace-scoped request cancellation and visible retry feedback around
+  the Agents & MCP settings panel so stale async responses cannot repaint the
+  current workspace.

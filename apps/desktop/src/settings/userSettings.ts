@@ -59,6 +59,14 @@ export const DesktopUserSettingsResult = z.object({
 }).strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 
+export type DesktopUserSettingsPatch =
+  Partial<Omit<DesktopUserSettings, "appearance" | "general" | "editor" | "notifications">> & {
+    appearance?: Partial<DesktopUserSettings["appearance"]>;
+    general?: Partial<DesktopUserSettings["general"]>;
+    editor?: Partial<DesktopUserSettings["editor"]>;
+    notifications?: Partial<DesktopUserSettings["notifications"]>;
+  };
+
 export function parseDesktopUserSettings(raw: unknown): DesktopUserSettings {
   const parsed = DesktopUserSettings.safeParse(raw);
   return parsed.success ? parsed.data : DEFAULT_USER_SETTINGS;
@@ -78,7 +86,7 @@ export function desktopUserSettingsResult(
 
 export function mergeDesktopUserSettings(
   current: DesktopUserSettings,
-  patch: Partial<DesktopUserSettings>,
+  patch: DesktopUserSettingsPatch,
 ): DesktopUserSettings {
   return DesktopUserSettings.parse({
     ...current,

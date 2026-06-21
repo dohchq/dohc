@@ -38,9 +38,29 @@ export const WorkspaceSettingsResult = z.object({
 }).strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
+export type WorkspaceSettingsPatch =
+  Partial<Omit<WorkspaceSettings, "agents" | "sites" | "privacy">> & {
+    agents?: Partial<WorkspaceSettings["agents"]>;
+    sites?: Partial<WorkspaceSettings["sites"]>;
+    privacy?: Partial<WorkspaceSettings["privacy"]>;
+  };
+
 export function parseWorkspaceSettings(raw: unknown): WorkspaceSettings {
   const parsed = WorkspaceSettings.safeParse(raw);
   return parsed.success ? parsed.data : DEFAULT_WORKSPACE_SETTINGS;
+}
+
+export function mergeWorkspaceSettings(
+  current: WorkspaceSettings,
+  patch: WorkspaceSettingsPatch,
+): WorkspaceSettings {
+  return WorkspaceSettings.parse({
+    ...current,
+    ...patch,
+    agents: { ...current.agents, ...patch.agents },
+    sites: { ...current.sites, ...patch.sites },
+    privacy: { ...current.privacy, ...patch.privacy },
+  });
 }
 
 export function workspaceSettingsModified(settings: WorkspaceSettings): boolean {

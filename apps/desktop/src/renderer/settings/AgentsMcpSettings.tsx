@@ -36,7 +36,9 @@ export function AgentsMcpSettings(props: {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const mountedRef = useRef(false);
+  const requestVersionRef = useRef(0);
   const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearCopyResetTimer = useCallback(() => {
@@ -46,35 +48,64 @@ export function AgentsMcpSettings(props: {
     }
   }, []);
 
-  const refresh = useCallback(async (): Promise<AgentRunStatusResult> => {
+  const isCurrentRequest = useCallback(
+    (version: number) => mountedRef.current && requestVersionRef.current === version,
+    [],
+  );
+
+  const refresh = useCallback(async (version = requestVersionRef.current): Promise<AgentRunStatusResult> => {
     const [nextStatus, nextConfig] = await Promise.all([
       bridge().getAgentRunStatus({ workspaceId }),
       bridge().getMcpConfig({ workspaceId }),
     ]);
-    if (mountedRef.current) {
+    if (isCurrentRequest(version)) {
       setStatus(nextStatus);
       setConfig(nextConfig);
+      setLoadError(null);
     }
     return nextStatus;
-  }, [workspaceId]);
+  }, [isCurrentRequest, workspaceId]);
+
+  const retryRefresh = useCallback(() => {
+    const version = requestVersionRef.current;
+    setLoadError(null);
+    void refresh(version).catch(() => {
+      if (isCurrentRequest(version)) {
+        setLoadError("Could not load MCP settings.");
+      }
+    });
+  }, [isCurrentRequest, refresh]);
 
   useEffect(() => {
     mountedRef.current = true;
-    void refresh();
+    const version = requestVersionRef.current + 1;
+    requestVersionRef.current = version;
+    setStatus(null);
+    setConfig(null);
+    setCopied(false);
+    setCopyError(null);
+    setLoadError(null);
+    void refresh(version).catch(() => {
+      if (isCurrentRequest(version)) {
+        setLoadError("Could not load MCP settings.");
+      }
+    });
     return () => {
+      requestVersionRef.current += 1;
       mountedRef.current = false;
       clearCopyResetTimer();
     };
-  }, [clearCopyResetTimer, refresh]);
+  }, [clearCopyResetTimer, isCurrentRequest, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
 
   const toggle = useCallback(async () => {
+    const version = requestVersionRef.current;
     const renderedRunId = status?.activeRun?.id ?? null;
     setBusy(true);
     try {
-      const latestStatus = await refresh();
-      if (!mountedRef.current) return;
+      const latestStatus = await refresh(version);
+      if (!isCurrentRequest(version)) return;
       const latestRun = latestStatus.activeRun;
       if ((latestRun?.id ?? null) !== renderedRunId) {
         onAgentActiveChange?.(latestRun !== null);
@@ -85,15 +116,22 @@ export function AgentsMcpSettings(props: {
       } else {
         await bridge().startAgentRun({ workspaceId });
       }
-      const finalStatus = await refresh();
-      onAgentActiveChange?.(finalStatus.activeRun !== null);
+      const finalStatus = await refresh(version);
+      if (isCurrentRequest(version)) {
+        onAgentActiveChange?.(finalStatus.activeRun !== null);
+      }
+    } catch {
+      if (isCurrentRequest(version)) {
+        setLoadError("Could not update MCP server.");
+      }
     } finally {
-      if (mountedRef.current) setBusy(false);
+      if (isCurrentRequest(version)) setBusy(false);
     }
-  }, [workspaceId, refresh, status?.activeRun?.id, onAgentActiveChange]);
+  }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
 
   const copyConfig = useCallback(async () => {
     if (!config) return;
+    const version = requestVersionRef.current;
     const text = configSnippet(config);
     try {
       if (window.dohcDesktop?.writeClipboardText) {
@@ -102,22 +140,22 @@ export function AgentsMcpSettings(props: {
         await navigator.clipboard.writeText(text);
       }
     } catch {
-      if (mountedRef.current) {
+      if (isCurrentRequest(version)) {
         clearCopyResetTimer();
         setCopied(false);
         setCopyError("Could not copy MCP config.");
       }
       return;
     }
-    if (!mountedRef.current) return;
+    if (!isCurrentRequest(version)) return;
     clearCopyResetTimer();
     setCopyError(null);
     setCopied(true);
     copyResetTimerRef.current = setTimeout(() => {
       copyResetTimerRef.current = null;
-      if (mountedRef.current) setCopied(false);
+      if (isCurrentRequest(version)) setCopied(false);
     }, 1500);
-  }, [clearCopyResetTimer, config]);
+  }, [clearCopyResetTimer, config, isCurrentRequest]);
 
   return (
     <div className="flex flex-col">
@@ -156,6 +194,22 @@ export function AgentsMcpSettings(props: {
           {enabled ? "Disable" : "Enable"}
         </button>
       </SettingRow>
+
+      {loadError ? (
+        <div
+          data-testid="mcp-load-error"
+          className="flex items-center justify-between gap-3 border-b border-line py-3 text-[11px] text-danger"
+        >
+          <span>{loadError}</span>
+          <button
+            type="button"
+            onClick={retryRefresh}
+            className="rounded border border-line px-2 py-1 text-muted hover:bg-panel-2 hover:text-ink"
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       <section className="border-b border-line py-4">
         <div className="mb-2 flex items-center gap-2">
