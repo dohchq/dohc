@@ -2,13 +2,105 @@ import { describe, expect, it } from "vitest";
 import {
   CreateDataFragmentPayload,
   ListSitesResult,
+  SetUserSettingsPayload,
+  SetWorkspaceSettingsPayload,
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  WriteClipboardTextPayload,
 } from "./bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+
+describe("settings IPC contract", () => {
+  it("accepts bounded user and workspace settings payloads", () => {
+    expect(
+      SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS }).settings
+        .appearance.themeMode,
+    ).toBe("system");
+    expect(
+      SetWorkspaceSettingsPayload.parse({
+        workspaceId: "ws-settings",
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+      }).settings.sites.defaultPreviewMode,
+    ).toBe("auto");
+  });
+
+  it("rejects unknown settings keys, invalid values, bounds, and oversized strings", () => {
+    expect(
+      SetUserSettingsPayload.safeParse({
+        settings: {
+          ...DEFAULT_USER_SETTINGS,
+          secretToken: "nope",
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetUserSettingsPayload.safeParse({
+        settings: {
+          ...DEFAULT_USER_SETTINGS,
+          appearance: {
+            ...DEFAULT_USER_SETTINGS.appearance,
+            themeMode: "sepia",
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetUserSettingsPayload.safeParse({
+        settings: {
+          ...DEFAULT_USER_SETTINGS,
+          editor: {
+            ...DEFAULT_USER_SETTINGS.editor,
+            fontSize: 25,
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "WS-settings",
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "",
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          agents: {
+            ...DEFAULT_WORKSPACE_SETTINGS.agents,
+            defaultModel: "x".repeat(201),
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("clipboard IPC contract", () => {
+  it("accepts bounded text and rejects empty or oversized writes", () => {
+    expect(WriteClipboardTextPayload.parse({ text: "copy me" }).text).toBe(
+      "copy me",
+    );
+    expect(WriteClipboardTextPayload.safeParse({ text: "" }).success).toBe(false);
+    expect(
+      WriteClipboardTextPayload.safeParse({ text: "x".repeat(20_001) }).success,
+    ).toBe(false);
+    expect(
+      WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
+    ).toBe(false);
+  });
+});
 
 describe("update IPC contract", () => {
   const readyState = {

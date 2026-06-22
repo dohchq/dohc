@@ -46,6 +46,10 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { Overlay } from "./Overlay";
 import { DesktopSettings } from "./settings/DesktopSettings";
+import {
+  DEFAULT_SETTINGS_SECTION,
+  type SettingsSectionId,
+} from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
@@ -1456,7 +1460,7 @@ export function DesktopWorkspaceShell(props: {
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [sharePath, setSharePath] = useState<string | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
   const [importExportPath, setImportExportPath] = useState<string | null>(null);
@@ -1484,6 +1488,11 @@ export function DesktopWorkspaceShell(props: {
     setAgentActive(active);
     setAgentPanelRefreshKey((key) => key + 1);
   }, []);
+  const openSettings = useCallback(
+    (section: SettingsSectionId = DEFAULT_SETTINGS_SECTION) => setSettingsSection(section),
+    [],
+  );
+  const closeSettings = useCallback(() => setSettingsSection(null), []);
 
   // Imperative flush for the active editor's unsaved draft (registered by
   // the mounted MarkdownView). Explorer ops await it BEFORE their disk ops:
@@ -1986,7 +1995,7 @@ export function DesktopWorkspaceShell(props: {
       } else if (command === "connect-cloud") {
         setCloudOpen(true);
       } else if (command === "settings") {
-        setSettingsOpen(true);
+        openSettings();
       } else if (command === "check-updates") {
         void checkForDesktopUpdates();
       } else if (command === "install-update") {
@@ -2004,6 +2013,7 @@ export function DesktopWorkspaceShell(props: {
       openAgentView,
       openHistoryView,
       openImportExportDialog,
+      openSettings,
       showPathInExplorer,
     ],
   );
@@ -2071,6 +2081,13 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
       if (!mod) return;
+      if (event.key === "," && !event.shiftKey && !event.altKey) {
+        if (!hasBlockingModal()) {
+          event.preventDefault();
+          openSettings();
+        }
+        return;
+      }
       if (
         event.key.toLowerCase() === "z" &&
         !event.shiftKey &&
@@ -2109,7 +2126,7 @@ export function DesktopWorkspaceShell(props: {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeActiveTab, mutateWb, reportShellError]);
+  }, [closeActiveTab, mutateWb, openSettings, reportShellError]);
 
   const openWorkspaceFolder = useCallback(async () => {
     try {
@@ -2196,8 +2213,18 @@ export function DesktopWorkspaceShell(props: {
       },
       {
         id: "settings",
-        label: "Settings: Agents & MCP",
-        run: () => setSettingsOpen(true),
+        label: "Settings",
+        run: () => openSettings(),
+      },
+      {
+        id: "settings-appearance",
+        label: "Settings: Open Appearance",
+        run: () => openSettings("appearance"),
+      },
+      {
+        id: "settings-agents",
+        label: "Settings: Open Agents & MCP",
+        run: () => openSettings("agents"),
       },
       {
         id: "check-updates",
@@ -2224,6 +2251,7 @@ export function DesktopWorkspaceShell(props: {
       openImportExportDialog,
       checkForDesktopUpdates,
       installDesktopUpdate,
+      openSettings,
       reportShellError,
       workspaceId,
     ],
@@ -2332,7 +2360,7 @@ export function DesktopWorkspaceShell(props: {
           }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenCloud={() => setCloudOpen(true)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettings={() => openSettings()}
         />
 
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
@@ -2594,7 +2622,7 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenAgent={openAgentView}
         onOpenHistory={openHistoryView}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
       />
@@ -2661,13 +2689,18 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
-      {settingsOpen ? (
-        <Overlay onClose={() => setSettingsOpen(false)}>
+      {settingsSection ? (
+        <Overlay onClose={closeSettings}>
           <DesktopSettings
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
-            onClose={() => setSettingsOpen(false)}
+            initialSection={settingsSection}
+            onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
+            onOpenCloud={() => {
+              closeSettings();
+              setCloudOpen(true);
+            }}
           />
         </Overlay>
       ) : null}

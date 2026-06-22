@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -81,6 +89,18 @@ describe("ui-state file store", () => {
     expect(await readUiStateFile(root)).toBeNull();
     // The escape target stayed untouched: no ui-state.json, no temp files.
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("refuses to read a symlinked ui-state file", async () => {
+    const root = await tempRoot();
+    const outside = await tempRoot();
+    await writeUiStateFile(root, STATE);
+    const outsideState = join(outside, "ui-state.json");
+    await writeFile(outsideState, JSON.stringify({ ...STATE, sidebarWidth: 999 }));
+    await unlink(join(root, ".dohc", "ui-state.json"));
+    await symlink(outsideState, join(root, ".dohc", "ui-state.json"));
+
+    expect(await readUiStateFile(root)).toBeNull();
   });
 });
 

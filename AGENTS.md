@@ -103,6 +103,10 @@ Do not weaken authorization, ownership, or review gates for convenience.
 - Agent writes must respect user locks, folder/atom access, sharing boundaries, and skill-turn gates.
 - HTML atoms are sandboxed and sanitized.
 - `atoms.body` is becoming a derived markdown cache from the canonical Y.Doc. Do not build new behavior that depends on raw full-body markdown patching as the source of truth.
+- Renderer surfaces that load workspace-scoped state asynchronously must guard
+  every response with a workspace/request token, abort signal, or equivalent
+  before setting UI state. A slow response for workspace A must never repaint
+  workspace B after the user switches workspaces.
 
 ### Repeated work should become skills
 

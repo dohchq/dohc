@@ -9,11 +9,15 @@
     "build": "node scripts/ensure-electron-installed.mjs && electron-vite build",
     "package": "node scripts/ensure-electron-installed.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
+    "smoke:settings": "playwright test --config playwright.config.ts --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
     "test": "vitest run",
     "test:e2e": "pnpm run build && playwright test --config playwright.config.ts",
     "test:sites:e2e": "pnpm run build && playwright test --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencyNotes": {
+    "jsdom": "Pinned to ^27.2.0 because jsdom 29.1.1 pulls html-encoding-sniffer@6 through a CJS/ESM path that breaks the current Vitest 2 desktop harness; Vitest 4 migration is tracked as repo-wide test infrastructure, not this settings PR."
   },
   "devDependencies": {
     "@dohc/performance": "workspace:*",
@@ -33,7 +37,7 @@
     "electron-builder": "^26.15.2",
     "electron-vite": "^5.0.0",
     "js-yaml": "^4.1.1",
-    "jsdom": "^29.1.1",
+    "jsdom": "^27.2.0",
     "playwright": "^1.60.0",
     "tailwindcss": "^4.3.0",
     "vite": "^8.0.14",

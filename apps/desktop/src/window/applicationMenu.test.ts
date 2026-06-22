@@ -127,6 +127,7 @@ describe("application menu template", () => {
       ["View", "Command Palette", "CommandOrControl+Shift+P"],
       ["View", "Quick Open", "CommandOrControl+P"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
+      ["Go", "Settings", "CommandOrControl+,"],
     ] as const) {
       const item = items(template, menu).find((i) => i.label === label);
       expect(item?.accelerator, label).toBe(accelerator);

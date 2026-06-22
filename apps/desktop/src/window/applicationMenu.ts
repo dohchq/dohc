@@ -117,7 +117,7 @@ export function buildMenuTemplate(options: {
     },
     {
       label: "Go",
-      submenu: [command("Settings", "settings")],
+      submenu: [command("Settings", "settings", "CommandOrControl+,")],
     },
     // Standard macOS Window menu (minimize/zoom/front + window list).
     ...(isMac ? [{ role: "windowMenu" } as const] : []),

@@ -6,6 +6,7 @@ import {
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -87,6 +88,7 @@ import {
   AgentPanelSnapshotResult,
   AgentPermissionResponsePayload,
   StartAgentSessionPayload,
+  DesktopUserSettingsResult,
   PickWorkspaceRootResult,
   ReadWorkspaceGraphPayload,
   ReadWorkspaceDatabasePayload,
@@ -99,7 +101,12 @@ import {
   RevokeWorkspaceInvitePayload,
   WriteWorkspaceTextPayload,
   SetTitlebarThemePayload,
+  SetUserSettingsPayload,
+  SetWorkspaceSettingsPayload,
   SetWorkspaceUiStatePayload,
+  WorkspaceSettingsPayload,
+  WorkspaceSettingsResult,
+  WriteClipboardTextPayload,
   GetWorkspaceUiStateResult,
   SyncStatusResult,
   WorkspaceRegistryResult,
@@ -198,6 +205,18 @@ import {
 } from "./workspaces/workspaceFiles";
 import { buildStoreZip } from "./workspaces/zipWriter";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
+import {
+  DEFAULT_USER_SETTINGS,
+} from "./settings/userSettings";
+import {
+  readUserSettingsFile,
+  writeUserSettingsFile,
+} from "./settings/userSettingsStore";
+import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaces/workspaceSettings";
+import {
+  readWorkspaceSettingsFile,
+  writeWorkspaceSettingsFile,
+} from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { rgPath } from "@vscode/ripgrep";
 
@@ -2008,6 +2027,67 @@ function registerIpcHandlers(): void {
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
     return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
+  });
+
+  ipcMain.handle(CHANNELS.getUserSettings, async (event) => {
+    assertTrustedSender(event);
+    return DesktopUserSettingsResult.parse(await readUserSettingsFile(stateDir()));
+  });
+
+  ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetUserSettingsPayload.parse(payload);
+    await writeUserSettingsFile(stateDir(), input.settings);
+    return DesktopUserSettingsResult.parse({
+      settings: input.settings,
+      source: "stored",
+    });
+  });
+
+  ipcMain.handle(CHANNELS.resetUserSettings, async (event) => {
+    assertTrustedSender(event);
+    await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
+    return DesktopUserSettingsResult.parse({
+      settings: DEFAULT_USER_SETTINGS,
+      source: "stored",
+    });
+  });
+
+  ipcMain.handle(CHANNELS.getWorkspaceSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceSettingsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    return WorkspaceSettingsResult.parse(
+      await readWorkspaceSettingsFile(workspace.rootPath),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.setWorkspaceSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetWorkspaceSettingsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await writeWorkspaceSettingsFile(workspace.rootPath, input.settings);
+    return WorkspaceSettingsResult.parse({
+      settings: input.settings,
+      source: "stored",
+    });
+  });
+
+  ipcMain.handle(CHANNELS.resetWorkspaceSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WorkspaceSettingsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    await writeWorkspaceSettingsFile(workspace.rootPath, DEFAULT_WORKSPACE_SETTINGS);
+    return WorkspaceSettingsResult.parse({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+    });
+  });
+
+  ipcMain.handle(CHANNELS.writeClipboardText, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WriteClipboardTextPayload.parse(payload);
+    clipboard.writeText(input.text);
   });
 
   // Theme flip → re-tint the OS window-control overlay. setTitleBarOverlay

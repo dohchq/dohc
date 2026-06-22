@@ -2,6 +2,8 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../../workspaces/workspaceSettings";
 import { DesktopSettings } from "./DesktopSettings";
 
 const config = {
@@ -31,8 +33,9 @@ const readyUpdateState = {
   version: "1.2.4",
 };
 type SettingsUpdateState = typeof idleUpdateState | typeof readyUpdateState;
+const getDefaultMcpConfig = async (_payload: { workspaceId: string }) => config;
 const bridge = {
-  getMcpConfig: vi.fn(async () => config),
+  getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
     mcpEnabled,
     activeRun: mcpEnabled ? { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const } : null,
@@ -63,6 +66,34 @@ const bridge = {
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
+  getUserSettings: vi.fn(async () => ({
+    settings: DEFAULT_USER_SETTINGS,
+    source: "default" as const,
+  })),
+  setUserSettings: vi.fn(async (payload: { settings: typeof DEFAULT_USER_SETTINGS }) => ({
+    settings: payload.settings,
+    source: "stored" as const,
+  })),
+  resetUserSettings: vi.fn(async () => ({
+    settings: DEFAULT_USER_SETTINGS,
+    source: "stored" as const,
+  })),
+  getWorkspaceSettings: vi.fn(async () => ({
+    settings: DEFAULT_WORKSPACE_SETTINGS,
+    source: "default" as const,
+  })),
+  setWorkspaceSettings: vi.fn(
+    async (payload: { settings: typeof DEFAULT_WORKSPACE_SETTINGS }) => ({
+      settings: payload.settings,
+      source: "stored" as const,
+    }),
+  ),
+  resetWorkspaceSettings: vi.fn(async () => ({
+    settings: DEFAULT_WORKSPACE_SETTINGS,
+    source: "stored" as const,
+  })),
+  writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
+  setTitlebarTheme: vi.fn(async () => undefined),
 };
 
 const writeText = vi.fn(async () => {});
@@ -87,6 +118,9 @@ function stubClipboard() {
 beforeEach(() => {
   mcpEnabled = false;
   updateReady = false;
+  document.documentElement.dataset.theme = "";
+  document.documentElement.dataset.density = "";
+  document.documentElement.dataset.reduceMotion = "";
   vi.stubGlobal("dohcDesktop", bridge);
 });
 
@@ -97,15 +131,112 @@ afterEach(() => {
 });
 
 describe("DesktopSettings", () => {
+  it("renders the settings shell, searches sections, and shows an empty search state", async () => {
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    expect(screen.getByTestId("settings-section-general")).toBeTruthy();
+    await user.type(screen.getByTestId("settings-search"), "theme");
+    expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
+    await user.clear(screen.getByTestId("settings-search"));
+    await user.type(screen.getByTestId("settings-search"), "nothing-here");
+    expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
+  });
+
+  it("closes from Escape", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />);
+
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("persists appearance changes and applies them immediately", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(await screen.findByRole("radio", { name: "Dark" }));
+    expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      settings: expect.objectContaining({
+        appearance: expect.objectContaining({ themeMode: "dark" }),
+      }),
+    });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
+  });
+
+  it("rolls back optimistic appearance changes when save fails", async () => {
+    const user = userEvent.setup();
+    bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByRole("radio", { name: "System" });
+    const initialTheme = document.documentElement.dataset.theme;
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
+        "error",
+      ),
+    );
+    expect(document.documentElement.dataset.theme).toBe(initialTheme);
+    expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+  });
+
+  it("supports arrow-key navigation inside segmented appearance controls", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const system = await screen.findByRole("radio", { name: "System" });
+    system.focus();
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "Light" }).getAttribute("aria-checked")).toBe(
+        "true",
+      ),
+    );
+    expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      settings: expect.objectContaining({
+        appearance: expect.objectContaining({ themeMode: "light" }),
+      }),
+    });
+  });
+
   it("shows the workspace path, a copyable MCP config snippet, and usage examples", async () => {
     render(
       <DesktopSettings
         workspaceId="ws-1"
         workspacePath="/home/ice/dohc/personal"
+        initialSection="agents"
         onClose={() => {}}
       />,
     );
-    expect(screen.getByTestId("settings-panel")).toBeTruthy();
+    expect(screen.getByTestId("settings-dialog")).toBeTruthy();
     const snippet = await screen.findByTestId("mcp-config-snippet");
     // The snippet is the literal config the user pastes into their AI tool.
     expect(snippet.textContent).toContain('"mcpServers"');
@@ -118,10 +249,113 @@ describe("DesktopSettings", () => {
   it("copies the config snippet to the clipboard", async () => {
     const user = userEvent.setup();
     stubClipboard();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"'));
+    expect(bridge.writeClipboardText).toHaveBeenCalledWith({
+      text: expect.stringContaining('"mcpServers"'),
+    });
+  });
+
+  it("reports a copy failure without claiming success", async () => {
+    const user = userEvent.setup();
+    bridge.writeClipboardText.mockRejectedValueOnce(new Error("Clipboard denied"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByTestId("mcp-config-snippet");
+    await user.click(screen.getByText("Copy"));
+    expect((await screen.findByTestId("mcp-copy-error")).textContent).toBe(
+      "Could not copy MCP config.",
+    );
+    expect(screen.queryByText("Copied")).toBeNull();
+  });
+
+  it("reports MCP load failures and retries without leaving stale UI", async () => {
+    const user = userEvent.setup();
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    expect((await screen.findByTestId("mcp-load-error")).textContent).toContain(
+      "Could not load MCP settings.",
+    );
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByTestId("mcp-load-error")).toBeNull());
+    expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
+  });
+
+  it("ignores in-flight MCP config responses after switching workspaces", async () => {
+    // Delay ws-old and resolve it only after rerendering ws-new; if cancellation
+    // fails, the old config overwrites the visible snippet.
+    let resolveOldConfig = () => {};
+    try {
+      bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId === "ws-old") {
+          return new Promise<typeof config>((resolve) => {
+            resolveOldConfig = () =>
+              resolve({
+                ...config,
+                args: ["--workspace", "/old"],
+                workspacePath: "/old",
+              });
+          });
+        }
+        return Promise.resolve({
+          ...config,
+          args: ["--workspace", "/new"],
+          workspacePath: "/new",
+        });
+      });
+      const view = render(
+        <DesktopSettings
+          workspaceId="ws-old"
+          workspacePath="/old"
+          initialSection="agents"
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() =>
+        expect(bridge.getMcpConfig).toHaveBeenCalledWith({ workspaceId: "ws-old" }),
+      );
+
+      view.rerender(
+        <DesktopSettings
+          workspaceId="ws-new"
+          workspacePath="/new"
+          initialSection="agents"
+          onClose={() => {}}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+      );
+      resolveOldConfig();
+      await waitFor(() =>
+        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+      );
+      expect(screen.getByTestId("mcp-config-snippet").textContent).not.toContain("/old");
+    } finally {
+      bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
+    }
   });
 
   it("toggles the MCP server on, then reflects running status", async () => {
@@ -131,6 +365,7 @@ describe("DesktopSettings", () => {
       <DesktopSettings
         workspaceId="ws-1"
         workspacePath="/x"
+        initialSection="agents"
         onClose={() => {}}
         onAgentActiveChange={onAgentActiveChange}
       />,
@@ -154,6 +389,7 @@ describe("DesktopSettings", () => {
       <DesktopSettings
         workspaceId="ws-1"
         workspacePath="/x"
+        initialSection="agents"
         onClose={() => {}}
         onAgentActiveChange={onAgentActiveChange}
       />,
@@ -169,7 +405,14 @@ describe("DesktopSettings", () => {
 
   it("refreshes stale stopped UI before toggling so it cannot disable behind an Enable label", async () => {
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
     const toggle = await screen.findByTestId("mcp-enable-toggle");
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
     mcpEnabled = true;
@@ -189,7 +432,14 @@ describe("DesktopSettings", () => {
   it("refreshes stale running UI before toggling so it cannot enable behind a Disable label", async () => {
     mcpEnabled = true;
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
     const toggle = await screen.findByTestId("mcp-enable-toggle");
     await waitFor(() =>
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
