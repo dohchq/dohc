@@ -366,3 +366,32 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
   assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
   assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
 });
+
+test("desktop release workflow uploads only distributable release assets", async () => {
+  const workflow = await readFile(
+    join(process.cwd(), ".github/workflows/desktop-release.yml"),
+    "utf8",
+  );
+  const prepareReleaseUpload = stepBlock(workflow, "Prepare release upload");
+
+  assert.match(
+    prepareReleaseUpload,
+    /is_release_upload_file\(\)/,
+    "release upload step must filter downloaded package contents before flattening",
+  );
+  assert.match(
+    prepareReleaseUpload,
+    /\*\/\*\.app\/\*\|.*\*\/win-unpacked\/\*\|.*\*\/linux-unpacked\/\*/,
+    "release upload step must skip unpacked app internals that contain duplicate basenames",
+  );
+  assert.match(
+    prepareReleaseUpload,
+    /latest\*\.yml\|nightly\*\.yml\|\*\.dmg\|\*\.zip\|\*\.exe\|\*\.AppImage\|\*\.blockmap/,
+    "release upload step must allow update manifests and configured installer artifacts",
+  );
+  assert.match(
+    prepareReleaseUpload,
+    /if ! is_release_upload_file "\$file"; then\s+continue\s+fi/,
+    "release upload step must skip non-release files before the basename conflict guard",
+  );
+});
