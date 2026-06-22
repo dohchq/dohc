@@ -8,6 +8,21 @@ import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 const electronMainTarget = "node24.15";
 const electronRendererTarget = "chrome148";
 
+export const mainBundledWorkspaceDeps = [
+  "@dohc/workspace-core",
+  "@dohc/workspace-contracts",
+  "@dohc/workspace-fs",
+  "@dohc/workspace-sync",
+  "@dohc/workspace-history",
+  "@dohc/sqlite-worker",
+];
+
+export const preloadBundledRuntimeDeps = [
+  // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/workspace-core",
+  "zod",
+];
+
 export default defineConfig({
   main: {
     // Workspace packages ship raw TS — they must be bundled, not
@@ -15,14 +30,7 @@ export default defineConfig({
     // chokidar and other real npm deps stay external (loaded from node_modules).
     plugins: [
       externalizeDepsPlugin({
-        exclude: [
-          "@dohc/workspace-core",
-          "@dohc/workspace-contracts",
-          "@dohc/workspace-fs",
-          "@dohc/workspace-sync",
-          "@dohc/workspace-history",
-          "@dohc/sqlite-worker",
-        ],
+        exclude: mainBundledWorkspaceDeps,
       }),
     ],
     build: {
@@ -32,6 +40,11 @@ export default defineConfig({
     },
   },
   preload: {
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: preloadBundledRuntimeDeps,
+      }),
+    ],
     build: {
       target: electronMainTarget,
       outDir: "dist/preload",
