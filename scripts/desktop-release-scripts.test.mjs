@@ -241,3 +241,31 @@ test("mock update server serves files and blocks traversal/symlink escapes", asy
     await server.close();
   }
 });
+
+test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
+  const workflow = await readFile(
+    join(process.cwd(), ".github/workflows/desktop-release.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /builder_args\+=\(-c\.forceCodeSigning=true\)/,
+    "stable/signing-required jobs must still hard-fail without a signing identity",
+  );
+  assert.match(
+    workflow,
+    /CSC_IDENTITY_AUTO_DISCOVERY=false/,
+    "unsigned macOS dry runs must not try the GitHub runner's signing autodiscovery path",
+  );
+  assert.match(
+    workflow,
+    /DOHC_E2E_NO_CHROMIUM_SANDBOX:\s*"1"/,
+    "Linux fuse smoke must boot Electron without the root-owned SUID sandbox in CI",
+  );
+  assert.match(
+    workflow,
+    /if:\s*runner\.os == 'Linux'[\s\S]*xvfb-run -a pnpm smoke:fuses:desktop/,
+    "fuse smoke is linux-only and must run under xvfb on headless runners",
+  );
+});

@@ -239,12 +239,16 @@ jobs:
           builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
           if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
             builder_args+=(-c.forceCodeSigning=true)
+          else
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
       - name: Fuse smoke
-        if: runner.os != 'Windows'
-        run: pnpm smoke:fuses:desktop
+        if: runner.os == 'Linux'
+        env:
+          DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
+        run: xvfb-run -a pnpm smoke:fuses:desktop
 
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
