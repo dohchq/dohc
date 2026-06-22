@@ -241,3 +241,128 @@ test("mock update server serves files and blocks traversal/symlink escapes", asy
     await server.close();
   }
 });
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function topLevelSection(source, name) {
+  const pattern = new RegExp(
+    `^${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^[^\\s].*:|(?![\\s\\S]))`,
+    "m",
+  );
+  const match = source.match(pattern);
+  assert.ok(match, `workflow section exists: ${name}`);
+  return match[1];
+}
+
+function indentedSection(source, indent, name) {
+  const pattern = new RegExp(
+    `^ {${indent}}${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|(?![\\s\\S]))`,
+    "m",
+  );
+  const match = source.match(pattern);
+  assert.ok(match, `workflow subsection exists: ${name}`);
+  return match[1];
+}
+
+function stepBlocks(source) {
+  return source.match(/^ {6}- name: .*(?:\n(?! {6}- name: ).*)*/gm) ?? [];
+}
+
+function stepBlock(source, name) {
+  const prefix = `      - name: ${name}`;
+  const block = stepBlocks(source).find((candidate) => candidate.startsWith(prefix));
+  assert.ok(block, `workflow step exists: ${name}`);
+  return block;
+}
+
+test("workflow section helpers support sections at end of file", () => {
+  const source = [
+    "on:",
+    "  pull_request:",
+    "    branches:",
+    "      - main",
+  ].join("\n");
+
+  const onSection = topLevelSection(source, "on");
+  assert.equal(onSection, "  pull_request:\n    branches:\n      - main");
+  assert.equal(indentedSection(onSection, 2, "pull_request"), "    branches:\n      - main");
+});
+
+test("workflow section helpers support CRLF line endings", () => {
+  const source = [
+    "on:",
+    "  pull_request:",
+    "    branches:",
+    "      - main",
+    "jobs:",
+    "  build:",
+    "    runs-on: ubuntu-latest",
+  ].join("\r\n");
+
+  const onSection = topLevelSection(source, "on");
+  assert.equal(onSection, "  pull_request:\r\n    branches:\r\n      - main\r\n");
+  assert.equal(
+    indentedSection(onSection, 2, "pull_request"),
+    "    branches:\r\n      - main\r\n",
+  );
+});
+
+test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
+  const workflow = await readFile(
+    join(process.cwd(), ".github/workflows/desktop-release.yml"),
+    "utf8",
+  );
+  const onSection = topLevelSection(workflow, "on");
+  const pullRequestSection = indentedSection(onSection, 2, "pull_request");
+  const packageDesktop = stepBlock(workflow, "Package desktop");
+  const fuseSmoke = stepBlock(workflow, "Fuse smoke");
+  const packageSteps = stepBlocks(workflow).filter((step) =>
+    step.includes("electron-builder")
+  );
+
+  assert.match(pullRequestSection, /^ {4}branches:\n {6}- main$/m);
+  assert.match(
+    pullRequestSection,
+    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "apps\/desktop\/\*\*"/m,
+    "desktop release simulation must run on PRs that touch desktop code",
+  );
+  assert.match(
+    workflow,
+    /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "pull_request" \]\]; then\s+echo "dry_run=true"/,
+    "pull requests must be forced into dry-run mode",
+  );
+  assert.match(
+    workflow,
+    /if:\s*\$\{\{\s*github\.event_name != 'pull_request' && needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/,
+    "publish job must be disabled for pull requests",
+  );
+  assert.equal(packageSteps.length, 1, "all electron-builder package paths are explicitly covered");
+  assert.equal(packageSteps[0], packageDesktop);
+  for (const step of packageSteps) {
+    assert.match(
+      step,
+      /builder_args=\(--publish never/,
+      "package step must never publish directly",
+    );
+  }
+  assert.match(
+    packageDesktop,
+    /builder_args\+=\(-c\.forceCodeSigning=true\)/,
+    "stable/signing-required jobs must still hard-fail without a signing identity",
+  );
+  assert.match(
+    packageDesktop,
+    /CSC_IDENTITY_AUTO_DISCOVERY=false/,
+    "unsigned macOS dry runs must not try the GitHub runner's signing autodiscovery path",
+  );
+  assert.match(
+    packageDesktop,
+    /builder_args\+=\(-c\.mac\.identity=null\)/,
+    "unsigned macOS package jobs must explicitly disable signing in electron-builder",
+  );
+  assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
+  assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
+  assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
+});

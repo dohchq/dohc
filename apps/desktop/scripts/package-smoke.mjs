@@ -42,6 +42,7 @@ if (config) {
   check(true, "electron-builder.yml parses");
   check(config.productName === "dohc", "productName is dohc");
   check(typeof config.appId === "string" && config.appId.includes("dohc"), `appId carries dohc (${config.appId})`);
+  check(config.executableName === "dohc", "executableName is filesystem-safe");
   check(config.asar === true, "asar is enabled");
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
 

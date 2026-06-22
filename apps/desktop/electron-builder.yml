@@ -7,14 +7,14 @@
 #            APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID.
 #   Windows: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD.
 # Without them the artifact is UNSIGNED (scripts/package-smoke.mjs labels it
-# "SIGNING: unsigned (dev)"). forceCodeSigning stays unset here so local dev
-# packaging works; a release pipeline MUST export DOHC_REQUIRE_SIGNING=1 (the
-# package smoke then fails without credentials) and pass
-# `-c.forceCodeSigning=true` so a missing cert fails the build instead of
-# shipping an unsigned binary as a release.
+# "SIGNING: unsigned (dev)"). forceCodeSigning stays unset here so local/dev
+# and unsigned nightly dogfood packaging work. Stable release pipelines export
+# DOHC_REQUIRE_SIGNING=1 and pass `-c.forceCodeSigning=true` so a missing cert
+# fails the build instead of shipping an unsigned stable binary.
 
 appId: app.dohc.desktop
 productName: dohc
+executableName: dohc
 directories:
   output: release
   # App icon: build/icon.png (512px, rendered from icon.svg by

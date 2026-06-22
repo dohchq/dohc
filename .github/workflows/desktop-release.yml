@@ -1,6 +1,23 @@
 name: Desktop Release
 
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/desktop-release.yml"
+      - "apps/desktop/**"
+      - "packages/**"
+      - "services/**"
+      - "scripts/desktop-release-scripts.test.mjs"
+      - "scripts/merge-update-manifests.mjs"
+      - "scripts/mock-update-server.mjs"
+      - "scripts/release-smoke.mjs"
+      - "scripts/resolve-desktop-release.mjs"
+      - "scripts/update-desktop-package-version.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
   push:
     branches:
       - main
@@ -27,8 +44,8 @@ on:
         type: boolean
 
 concurrency:
-  group: desktop-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || github.ref }}
-  cancel-in-progress: ${{ github.ref_type == 'branch' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
+  group: desktop-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'workflow_dispatch' && inputs.channel || github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref_type == 'branch' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
 
 permissions:
   contents: read
@@ -70,7 +87,9 @@ jobs:
         name: Resolve publish mode
         shell: bash
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
           else
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
@@ -90,6 +109,9 @@ jobs:
           elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
             channel="latest"
             version_arg=(--version "${GITHUB_REF_NAME}")
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            channel="nightly"
+            version_arg=()
           else
             channel="${DISPATCH_CHANNEL:-nightly}"
             version_arg=()
@@ -182,9 +204,43 @@ jobs:
       - name: Build desktop
         run: pnpm build:desktop
 
+      - id: signing
+        name: Resolve signing mode
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          OS_NAME: ${{ matrix.os }}
+          REQUIRE_SIGNING: ${{ matrix.require_signing }}
+          MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: |
+          set -euo pipefail
+          require=0
+          has_credentials=0
+          if [[ "$OS_NAME" == "macOS" && -n "$MACOS_CSC_LINK" ]]; then
+            has_credentials=1
+          elif [[ "$OS_NAME" == "Windows" && -n "$WIN_CSC_LINK" ]]; then
+            has_credentials=1
+          elif [[ "$REQUIRE_SIGNING" != "1" ]]; then
+            has_credentials=1
+          fi
+
+          if [[ "$DRY_RUN" == "true" || "$REQUIRE_SIGNING" != "1" ]]; then
+            require=0
+          elif [[ "$RELEASE_CHANNEL" == "latest" ]]; then
+            require=1
+          elif [[ "$has_credentials" == "1" ]]; then
+            require=1
+          else
+            echo "::warning::Signing credentials are not configured; building unsigned nightly ${OS_NAME} artifacts."
+          fi
+
+          echo "require=$require" >> "$GITHUB_OUTPUT"
+
       - name: Package smoke
         env:
-          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
         run: pnpm smoke:package:desktop
@@ -193,7 +249,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -205,12 +261,19 @@ jobs:
           builder_args=(--publish never "-c.publish.channel=${{ needs.preflight.outputs.release_channel }}" "--${{ matrix.arch }}")
           if [[ "$DOHC_REQUIRE_SIGNING" == "1" ]]; then
             builder_args+=(-c.forceCodeSigning=true)
+          else
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            if [[ "${{ matrix.os }}" == "macOS" ]]; then
+              builder_args+=(-c.mac.identity=null)
+            fi
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
       - name: Fuse smoke
-        if: runner.os != 'Windows'
-        run: pnpm smoke:fuses:desktop
+        if: runner.os == 'Linux'
+        env:
+          DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
+        run: xvfb-run -a pnpm smoke:fuses:desktop
 
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -225,7 +288,7 @@ jobs:
     needs:
       - preflight
       - build
-    if: ${{ needs.preflight.outputs.dry_run != 'true' }}
+    if: ${{ github.event_name != 'pull_request' && needs.preflight.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -25,10 +25,47 @@ const require = createRequire(join(desktopDir, "scripts/fuse-smoke.mjs"));
 // Resolve a dependency's package root from its entry point (pnpm-safe).
 function packageRoot(name) {
   const marker = join("node_modules", name) + sep;
-  const resolved = require.resolve(name);
+  let resolved;
+  try {
+    resolved = require.resolve(name);
+  } catch (error) {
+    if (error?.code !== "MODULE_NOT_FOUND") throw error;
+    resolved = require.resolve(`${name}/package.json`);
+  }
   const index = resolved.lastIndexOf(marker);
   if (index === -1) throw new Error(`cannot locate package root for ${name}`);
   return resolved.slice(0, index + marker.length);
+}
+
+function packageRootFromResolvedPath(name, resolved) {
+  const marker = join("node_modules", name) + sep;
+  const index = resolved.lastIndexOf(marker);
+  if (index === -1) throw new Error(`cannot locate package root for ${name}`);
+  return resolved.slice(0, index + marker.length);
+}
+
+function stagePackageFromRoot(appDir, name, root) {
+  const destination = join(appDir, "node_modules", ...name.split("/"));
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(root, destination, {
+    recursive: true,
+    dereference: true,
+  });
+}
+
+function stagePackage(appDir, name) {
+  stagePackageFromRoot(appDir, name, packageRoot(name));
+}
+
+async function stageRipgrepPlatformPackage(appDir) {
+  const { rgPath } = await import("@vscode/ripgrep");
+  const arch = process.env.npm_config_arch || process.arch;
+  const platformPackage = `@vscode/ripgrep-${process.platform}-${arch}`;
+  stagePackageFromRoot(
+    appDir,
+    platformPackage,
+    packageRootFromResolvedPath(platformPackage, rgPath),
+  );
 }
 
 const fuses = require("js-yaml").load(
@@ -54,19 +91,24 @@ try {
   cpSync(join(packageRoot("electron"), "dist"), electronDir, { recursive: true });
 
   // Stage the app exactly as packaging ships it: package.json + dist/** plus
-  // zod, the only externalized npm dep main.js loads at boot (electron-updater
-  // and typescript are lazy and gated off in the smoke).
+  // the externalized npm deps main.js loads at boot. electron-updater and
+  // typescript are lazy and gated off in the smoke.
   const appDir = join(stage, "app");
   mkdirSync(appDir);
   writeFileSync(
     join(appDir, "package.json"),
-    JSON.stringify({ name: "dohc-fuse-smoke", version: "0.0.0", main: "dist/main/main.js" }),
+    JSON.stringify({
+      name: "dohc-fuse-smoke",
+      version: "0.0.0",
+      type: "module",
+      main: "dist/main/main.js",
+    }),
   );
   cpSync(join(desktopDir, "dist"), join(appDir, "dist"), { recursive: true });
-  cpSync(packageRoot("zod"), join(appDir, "node_modules", "zod"), {
-    recursive: true,
-    dereference: true,
-  });
+  for (const name of ["zod", "@vscode/ripgrep"]) {
+    stagePackage(appDir, name);
+  }
+  await stageRipgrepPlatformPackage(appDir);
   await require("@electron/asar").createPackage(appDir, join(electronDir, "resources", "app.asar"));
 
   const config = { version: FuseVersion.V1 };
