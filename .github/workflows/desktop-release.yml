@@ -341,6 +341,25 @@ jobs:
             cp "$source" "$target"
           }
 
+          is_release_upload_file() {
+            local source="$1"
+            local name
+            name="$(basename "$source")"
+            case "$source" in
+              */*.app/*|*/win-unpacked/*|*/linux-unpacked/*)
+                return 1
+                ;;
+            esac
+            case "$name" in
+              latest*.yml|nightly*.yml|*.dmg|*.zip|*.exe|*.AppImage|*.blockmap)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
           mac_manifest_name="${channel}-mac.yml"
           mac_manifests=(release-artifacts/**/"$mac_manifest_name")
           if (( ${#mac_manifests[@]} > 0 )); then
@@ -356,6 +375,9 @@ jobs:
 
           while IFS= read -r -d '' file; do
             if [[ "$(basename "$file")" == "$mac_manifest_name" ]]; then
+              continue
+            fi
+            if ! is_release_upload_file "$file"; then
               continue
             fi
             copy_unique "$file"
