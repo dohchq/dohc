@@ -182,9 +182,43 @@ jobs:
       - name: Build desktop
         run: pnpm build:desktop
 
+      - id: signing
+        name: Resolve signing mode
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          OS_NAME: ${{ matrix.os }}
+          REQUIRE_SIGNING: ${{ matrix.require_signing }}
+          MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+        run: |
+          set -euo pipefail
+          require=0
+          has_credentials=0
+          if [[ "$OS_NAME" == "macOS" && -n "$MACOS_CSC_LINK" ]]; then
+            has_credentials=1
+          elif [[ "$OS_NAME" == "Windows" && -n "$WIN_CSC_LINK" ]]; then
+            has_credentials=1
+          elif [[ "$REQUIRE_SIGNING" != "1" ]]; then
+            has_credentials=1
+          fi
+
+          if [[ "$DRY_RUN" == "true" || "$REQUIRE_SIGNING" != "1" ]]; then
+            require=0
+          elif [[ "$RELEASE_CHANNEL" == "latest" ]]; then
+            require=1
+          elif [[ "$has_credentials" == "1" ]]; then
+            require=1
+          else
+            echo "::warning::Signing credentials are not configured; building unsigned nightly ${OS_NAME} artifacts."
+          fi
+
+          echo "require=$require" >> "$GITHUB_OUTPUT"
+
       - name: Package smoke
         env:
-          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
         run: pnpm smoke:package:desktop
@@ -193,7 +227,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          DOHC_REQUIRE_SIGNING: ${{ needs.preflight.outputs.dry_run == 'true' && '0' || matrix.require_signing }}
+          DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
