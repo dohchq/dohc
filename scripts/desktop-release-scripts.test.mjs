@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,9 +19,6 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
-
-const require = createRequire(import.meta.url);
-const yaml = require("js-yaml");
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -246,23 +242,55 @@ test("mock update server serves files and blocks traversal/symlink escapes", asy
   }
 });
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function topLevelSection(source, name) {
+  const pattern = new RegExp(`^${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^[^\\s].*:|\\z)`, "m");
+  const match = source.match(pattern);
+  assert.ok(match, `workflow section exists: ${name}`);
+  return match[1];
+}
+
+function indentedSection(source, indent, name) {
+  const pattern = new RegExp(
+    `^ {${indent}}${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|\\z)`,
+    "m",
+  );
+  const match = source.match(pattern);
+  assert.ok(match, `workflow subsection exists: ${name}`);
+  return match[1];
+}
+
+function stepBlocks(source) {
+  return source.match(/^ {6}- name: .*(?:\n(?! {6}- name: ).*)*/gm) ?? [];
+}
+
+function stepBlock(source, name) {
+  const prefix = `      - name: ${name}`;
+  const block = stepBlocks(source).find((candidate) => candidate.startsWith(prefix));
+  assert.ok(block, `workflow step exists: ${name}`);
+  return block;
+}
+
 test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
   const workflow = await readFile(
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
   );
-  const parsedWorkflow = yaml.load(workflow);
-  const pullRequest = parsedWorkflow.on.pull_request;
-  const buildSteps = parsedWorkflow.jobs.build.steps;
-  const packageDesktop = buildSteps.find((step) => step.name === "Package desktop");
-  const fuseSmoke = buildSteps.find((step) => step.name === "Fuse smoke");
-  const packageSteps = buildSteps.filter((step) =>
-    typeof step.run === "string" && step.run.includes("electron-builder")
+  const onSection = topLevelSection(workflow, "on");
+  const pullRequestSection = indentedSection(onSection, 2, "pull_request");
+  const packageDesktop = stepBlock(workflow, "Package desktop");
+  const fuseSmoke = stepBlock(workflow, "Fuse smoke");
+  const packageSteps = stepBlocks(workflow).filter((step) =>
+    step.includes("electron-builder")
   );
 
-  assert.deepEqual(pullRequest.branches, ["main"]);
-  assert.ok(
-    pullRequest.paths.includes("apps/desktop/**"),
+  assert.match(pullRequestSection, /^ {4}branches:\n {6}- main$/m);
+  assert.match(
+    pullRequestSection,
+    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "apps\/desktop\/\*\*"/m,
     "desktop release simulation must run on PRs that touch desktop code",
   );
   assert.match(
@@ -279,27 +307,27 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
   assert.equal(packageSteps[0], packageDesktop);
   for (const step of packageSteps) {
     assert.match(
-      step.run,
+      step,
       /builder_args=\(--publish never/,
-      `${step.name} must never publish directly`,
+      "package step must never publish directly",
     );
   }
   assert.match(
-    packageDesktop.run,
+    packageDesktop,
     /builder_args\+=\(-c\.forceCodeSigning=true\)/,
     "stable/signing-required jobs must still hard-fail without a signing identity",
   );
   assert.match(
-    packageDesktop.run,
+    packageDesktop,
     /CSC_IDENTITY_AUTO_DISCOVERY=false/,
     "unsigned macOS dry runs must not try the GitHub runner's signing autodiscovery path",
   );
   assert.match(
-    packageDesktop.run,
+    packageDesktop,
     /builder_args\+=\(-c\.mac\.identity=null\)/,
     "unsigned macOS package jobs must explicitly disable signing in electron-builder",
   );
-  assert.equal(fuseSmoke.if, "runner.os == 'Linux'");
-  assert.equal(fuseSmoke.env.DOHC_E2E_NO_CHROMIUM_SANDBOX, "1");
-  assert.equal(fuseSmoke.run, "xvfb-run -a pnpm smoke:fuses:desktop");
+  assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
+  assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
+  assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
 });
