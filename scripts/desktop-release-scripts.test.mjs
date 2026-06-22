@@ -248,7 +248,7 @@ function escapeRegex(value) {
 
 function topLevelSection(source, name) {
   const pattern = new RegExp(
-    `^${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^[^\\s].*:|(?![\\s\\S]))`,
+    `^${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^[^\\s].*:|(?![\\s\\S]))`,
     "m",
   );
   const match = source.match(pattern);
@@ -258,7 +258,7 @@ function topLevelSection(source, name) {
 
 function indentedSection(source, indent, name) {
   const pattern = new RegExp(
-    `^ {${indent}}${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|(?![\\s\\S]))`,
+    `^ {${indent}}${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|(?![\\s\\S]))`,
     "m",
   );
   const match = source.match(pattern);
@@ -288,6 +288,25 @@ test("workflow section helpers support sections at end of file", () => {
   const onSection = topLevelSection(source, "on");
   assert.equal(onSection, "  pull_request:\n    branches:\n      - main");
   assert.equal(indentedSection(onSection, 2, "pull_request"), "    branches:\n      - main");
+});
+
+test("workflow section helpers support CRLF line endings", () => {
+  const source = [
+    "on:",
+    "  pull_request:",
+    "    branches:",
+    "      - main",
+    "jobs:",
+    "  build:",
+    "    runs-on: ubuntu-latest",
+  ].join("\r\n");
+
+  const onSection = topLevelSection(source, "on");
+  assert.equal(onSection, "  pull_request:\r\n    branches:\r\n      - main\r\n");
+  assert.equal(
+    indentedSection(onSection, 2, "pull_request"),
+    "    branches:\r\n      - main\r\n",
+  );
 });
 
 test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
