@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +20,9 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
+
+const require = createRequire(import.meta.url);
+const yaml = require("js-yaml");
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -247,10 +251,18 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
   );
+  const parsedWorkflow = yaml.load(workflow);
+  const pullRequest = parsedWorkflow.on.pull_request;
+  const buildSteps = parsedWorkflow.jobs.build.steps;
+  const packageDesktop = buildSteps.find((step) => step.name === "Package desktop");
+  const fuseSmoke = buildSteps.find((step) => step.name === "Fuse smoke");
+  const packageSteps = buildSteps.filter((step) =>
+    typeof step.run === "string" && step.run.includes("electron-builder")
+  );
 
-  assert.match(
-    workflow,
-    /pull_request:[\s\S]*branches:[\s\S]*-\s+main[\s\S]*paths:[\s\S]*apps\/desktop\/\*\*/,
+  assert.deepEqual(pullRequest.branches, ["main"]);
+  assert.ok(
+    pullRequest.paths.includes("apps/desktop/**"),
     "desktop release simulation must run on PRs that touch desktop code",
   );
   assert.match(
@@ -263,34 +275,31 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
     /if:\s*\$\{\{\s*github\.event_name != 'pull_request' && needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/,
     "publish job must be disabled for pull requests",
   );
+  assert.equal(packageSteps.length, 1, "all electron-builder package paths are explicitly covered");
+  assert.equal(packageSteps[0], packageDesktop);
+  for (const step of packageSteps) {
+    assert.match(
+      step.run,
+      /builder_args=\(--publish never/,
+      `${step.name} must never publish directly`,
+    );
+  }
   assert.match(
-    workflow,
-    /builder_args=\(--publish never/,
-    "package jobs must never publish directly",
-  );
-  assert.match(
-    workflow,
+    packageDesktop.run,
     /builder_args\+=\(-c\.forceCodeSigning=true\)/,
     "stable/signing-required jobs must still hard-fail without a signing identity",
   );
   assert.match(
-    workflow,
+    packageDesktop.run,
     /CSC_IDENTITY_AUTO_DISCOVERY=false/,
     "unsigned macOS dry runs must not try the GitHub runner's signing autodiscovery path",
   );
   assert.match(
-    workflow,
+    packageDesktop.run,
     /builder_args\+=\(-c\.mac\.identity=null\)/,
     "unsigned macOS package jobs must explicitly disable signing in electron-builder",
   );
-  assert.match(
-    workflow,
-    /DOHC_E2E_NO_CHROMIUM_SANDBOX:\s*"1"/,
-    "Linux fuse smoke must boot Electron without the root-owned SUID sandbox in CI",
-  );
-  assert.match(
-    workflow,
-    /if:\s*runner\.os == 'Linux'[\s\S]*xvfb-run -a pnpm smoke:fuses:desktop/,
-    "fuse smoke is linux-only and must run under xvfb on headless runners",
-  );
+  assert.equal(fuseSmoke.if, "runner.os == 'Linux'");
+  assert.equal(fuseSmoke.env.DOHC_E2E_NO_CHROMIUM_SANDBOX, "1");
+  assert.equal(fuseSmoke.run, "xvfb-run -a pnpm smoke:fuses:desktop");
 });
