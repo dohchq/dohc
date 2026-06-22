@@ -247,7 +247,10 @@ function escapeRegex(value) {
 }
 
 function topLevelSection(source, name) {
-  const pattern = new RegExp(`^${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^[^\\s].*:|\\z)`, "m");
+  const pattern = new RegExp(
+    `^${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^[^\\s].*:|(?![\\s\\S]))`,
+    "m",
+  );
   const match = source.match(pattern);
   assert.ok(match, `workflow section exists: ${name}`);
   return match[1];
@@ -255,7 +258,7 @@ function topLevelSection(source, name) {
 
 function indentedSection(source, indent, name) {
   const pattern = new RegExp(
-    `^ {${indent}}${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|\\z)`,
+    `^ {${indent}}${escapeRegex(name)}:\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|(?![\\s\\S]))`,
     "m",
   );
   const match = source.match(pattern);
@@ -273,6 +276,19 @@ function stepBlock(source, name) {
   assert.ok(block, `workflow step exists: ${name}`);
   return block;
 }
+
+test("workflow section helpers support sections at end of file", () => {
+  const source = [
+    "on:",
+    "  pull_request:",
+    "    branches:",
+    "      - main",
+  ].join("\n");
+
+  const onSection = topLevelSection(source, "on");
+  assert.equal(onSection, "  pull_request:\n    branches:\n      - main");
+  assert.equal(indentedSection(onSection, 2, "pull_request"), "    branches:\n      - main");
+});
 
 test("desktop release workflow keeps unsigned package smoke reliable in CI", async () => {
   const workflow = await readFile(
