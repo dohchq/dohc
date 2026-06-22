@@ -250,6 +250,26 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
 
   assert.match(
     workflow,
+    /pull_request:[\s\S]*branches:[\s\S]*-\s+main[\s\S]*paths:[\s\S]*apps\/desktop\/\*\*/,
+    "desktop release simulation must run on PRs that touch desktop code",
+  );
+  assert.match(
+    workflow,
+    /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "pull_request" \]\]; then\s+echo "dry_run=true"/,
+    "pull requests must be forced into dry-run mode",
+  );
+  assert.match(
+    workflow,
+    /if:\s*\$\{\{\s*github\.event_name != 'pull_request' && needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/,
+    "publish job must be disabled for pull requests",
+  );
+  assert.match(
+    workflow,
+    /builder_args=\(--publish never/,
+    "package jobs must never publish directly",
+  );
+  assert.match(
+    workflow,
     /builder_args\+=\(-c\.forceCodeSigning=true\)/,
     "stable/signing-required jobs must still hard-fail without a signing identity",
   );
