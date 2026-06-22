@@ -37,13 +37,35 @@ function packageRoot(name) {
   return resolved.slice(0, index + marker.length);
 }
 
-function stagePackage(appDir, name) {
+function packageRootFromResolvedPath(name, resolved) {
+  const marker = join("node_modules", name) + sep;
+  const index = resolved.lastIndexOf(marker);
+  if (index === -1) throw new Error(`cannot locate package root for ${name}`);
+  return resolved.slice(0, index + marker.length);
+}
+
+function stagePackageFromRoot(appDir, name, root) {
   const destination = join(appDir, "node_modules", ...name.split("/"));
   mkdirSync(dirname(destination), { recursive: true });
-  cpSync(packageRoot(name), destination, {
+  cpSync(root, destination, {
     recursive: true,
     dereference: true,
   });
+}
+
+function stagePackage(appDir, name) {
+  stagePackageFromRoot(appDir, name, packageRoot(name));
+}
+
+async function stageRipgrepPlatformPackage(appDir) {
+  const { rgPath } = await import("@vscode/ripgrep");
+  const arch = process.env.npm_config_arch || process.arch;
+  const platformPackage = `@vscode/ripgrep-${process.platform}-${arch}`;
+  stagePackageFromRoot(
+    appDir,
+    platformPackage,
+    packageRootFromResolvedPath(platformPackage, rgPath),
+  );
 }
 
 const fuses = require("js-yaml").load(
@@ -83,9 +105,10 @@ try {
     }),
   );
   cpSync(join(desktopDir, "dist"), join(appDir, "dist"), { recursive: true });
-  for (const name of ["zod", "@vscode/ripgrep", "@vscode/ripgrep-linux-x64"]) {
+  for (const name of ["zod", "@vscode/ripgrep"]) {
     stagePackage(appDir, name);
   }
+  await stageRipgrepPlatformPackage(appDir);
   await require("@electron/asar").createPackage(appDir, join(electronDir, "resources", "app.asar"));
 
   const config = { version: FuseVersion.V1 };

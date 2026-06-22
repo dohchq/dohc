@@ -260,6 +260,11 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
   );
   assert.match(
     workflow,
+    /builder_args\+=\(-c\.mac\.identity=null\)/,
+    "unsigned macOS package jobs must explicitly disable signing in electron-builder",
+  );
+  assert.match(
+    workflow,
     /DOHC_E2E_NO_CHROMIUM_SANDBOX:\s*"1"/,
     "Linux fuse smoke must boot Electron without the root-owned SUID sandbox in CI",
   );

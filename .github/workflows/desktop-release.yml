@@ -241,6 +241,9 @@ jobs:
             builder_args+=(-c.forceCodeSigning=true)
           else
             export CSC_IDENTITY_AUTO_DISCOVERY=false
+            if [[ "${{ matrix.os }}" == "macOS" ]]; then
+              builder_args+=(-c.mac.identity=null)
+            fi
           fi
           pnpm --filter @dohc/desktop exec electron-builder "${builder_args[@]}"
 
