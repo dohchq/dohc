@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Chat ordering/metadata fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Restore/write/holding-area/status fixes applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -247,7 +247,8 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after chat ordering/metadata fix.
+- Status: fixes applied; rerun pending after restore/write/holding-area/status
+  fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -635,9 +636,9 @@ Twenty-second pass:
 
 Twenty-third pass:
 
-- CodeRabbit approved the latest committed diff with 0 findings.
+- Historical outcome: CodeRabbit approved that committed diff with 0 findings.
 - Updated PR00 status, CodeRabbit status, and unresolved findings to reflect the
-  approved review.
+  then-current approved review.
 
 Twenty-fourth pass:
 
@@ -653,6 +654,19 @@ Twenty-fifth pass:
   - Marked `ChatThread.title` and user/agent-authored thread metadata as
     untrusted text requiring escaping or sanitization across UI, search,
     notifications, projections, summaries, and exports.
+
+Twenty-sixth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Normalized PR00 execution-log status so historical approval remains
+    historical and the current state is unambiguously rerun pending.
+  - Added explicit causal write/merge/restore preconditions to the versioned
+    workspace and native filesystem API contracts.
+  - Made native filesystem restore non-destructive and guarded by the same
+    precondition/conflict contract as writes.
+  - Added first-slice E2E coverage for holding-area quotas, TTL bounds,
+    payload-size caps, ingest rate limits, and deterministic
+    eviction/backpressure.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -660,7 +674,8 @@ Twenty-fifth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the chat ordering/metadata fix.
+- Pending the latest CodeRabbit rerun after the restore/write/holding-area/status
+  fix.
 
 ### Subagent Reviews
 

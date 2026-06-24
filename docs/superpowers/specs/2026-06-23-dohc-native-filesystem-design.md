@@ -227,7 +227,8 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId,
+  idempotencyKey?
 })
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
@@ -235,8 +236,14 @@ search(workspaceId, versionId, query)
 watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
-merge(workspaceId, sourceVersionId, targetVersionId)
-restore(workspaceId, versionId, pointInTime)
+merge(workspaceId, sourceVersionId, targetVersionId, {
+  precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
+  idempotencyKey?
+})
+restore(workspaceId, versionId, pointInTime, {
+  precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
+  idempotencyKey?
+})
 ```
 
 This answers the API-native workspace requirement. The file mount and the API
@@ -260,6 +267,20 @@ Exactly one precondition mode may be supplied per write. Supplying none or
 combining incompatible guards, such as `expectedAbsent` with
 `expectedObjectId`, fails closed with a validation/conflict response and does
 not mutate canonical content.
+
+`merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
+write-producing and must carry a causal precondition for the target version.
+If the target version changed since the caller's expected base, the merge
+returns a deterministic conflict response instead of applying stale output.
+
+`restore(workspaceId, versionId, pointInTime, ...)` is also write-producing, but
+it is never a destructive rollback. A successful restore records a new
+checkpoint in the target version whose content is derived from the selected
+earlier point, preserving intervening history for audit, compare, and recovery.
+Restore must carry exactly one causal precondition for the target version. If
+the current version state no longer matches that guard, the API returns the
+same deterministic conflict response as `write(...)`, preserving current and
+requested-restored content instead of applying the restore.
 
 Every async watch/status/snapshot payload must include workspace identity,
 version identity, a request token or equivalent correlation id, and a monotonic
@@ -624,7 +645,8 @@ Use two layers:
 
 2. **Meaningful checkpoint**
    - coalesces writes by quiescence, related file batch, explicit checkpoint,
-     import, merge, restore, publish, or a known dohc action boundary.
+     import, merge, non-destructive restore, publish, or a known dohc action
+     boundary.
    - appears in history and compare views.
 
 This preserves "everything saves immediately" without turning history into

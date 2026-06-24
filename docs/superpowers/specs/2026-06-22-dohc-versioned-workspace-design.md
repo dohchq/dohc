@@ -288,17 +288,39 @@ in-memory, browser, and agent runtimes:
 
 ```text
 read(workspaceId, versionId, path)
-write(workspaceId, versionId, path, bytes)
+write(workspaceId, versionId, path, bytes, {
+  precondition: exactly one of expectedBaseSnapshot | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId,
+  idempotencyKey?
+})
 list(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
-merge(workspaceId, sourceVersionId, targetVersionId)
-restore(workspaceId, versionId, pointInTime)
+merge(workspaceId, sourceVersionId, targetVersionId, {
+  precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
+  idempotencyKey?
+})
+restore(workspaceId, versionId, pointInTime, {
+  precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
+  idempotencyKey?
+})
 ```
 
 The filesystem is one interface. It should not be the only possible execution
 environment.
+
+API writes are never unconditional overwrites. A write must include exactly one
+causal precondition: expected base snapshot, etag, content hash, absence
+assertion for creates, or expected object id for overwrites. If the
+precondition does not match the current workspace/version/path state, the
+engine returns a deterministic conflict response preserving current and
+incoming content instead of mutating canonical state. Supplying no precondition
+or multiple incompatible preconditions fails closed.
+
+`snapshot(...)` and `diff(...)` are read-only scoped views. `merge(...)` and
+`restore(...)` are write-producing operations and must use the same
+workspace/version scoping, causal guard, idempotency, and conflict-response
+rules as `write(...)`.
 
 ## Conflict behavior
 
@@ -524,7 +546,8 @@ The first proof should be small but real:
 4. A user can compare the named version against Main.
 5. A clean file merge can move changes from one version to another.
 6. A conflicting text edit preserves both sides and shows a simple conflict.
-7. A restore can return a version to an earlier point.
+7. A restore can create a new checkpoint from an earlier point without deleting
+   intervening history.
 8. The engine records honest provenance without changing write rules:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
@@ -539,6 +562,10 @@ The first proof should be small but real:
 12. E2E proves holding-area replay is causal: stale base/CAS tokens or
     workspace/version mismatches never apply as canonical state and instead
     degrade to conflict/manual reconciliation or remain quarantined.
+13. E2E proves holding-area abuse resistance: per-workspace/per-actor quotas,
+    TTL retention bounds, payload-size caps, ingest rate limits, and
+    deterministic eviction/backpressure prevent storage exhaustion or canonical
+    durability starvation.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.
