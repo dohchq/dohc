@@ -462,10 +462,10 @@ projected Markdown file, the projection pipeline must classify secret content
 and apply the same policy-aware redaction rules used by chat rendering, search,
 notifications, summaries, and export. Derived chat files must never persist
 plaintext secrets outside the authorized secret-backed read path.
-`.dohc/chats/**` is an explicit internal projection allowlist entry under the
+`.dohc/chats/**` is an explicit reserved internal projection scope under the
 same fail-closed `.dohc/**` reserved-namespace rules used by the native
-filesystem model. It is not a source-backed policy file and is not re-ingested
-as canonical user content.
+filesystem model. It is not a source-backed policy file, not an allowlisted
+user-content path, and is not re-ingested as canonical user content.
 `<thread-id>` in the projection path is conceptual. Projection writers must map
 the canonical thread id to a deterministic filename using one fixed algorithm
 across all runtimes: compute

@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; chat projection filename fix applied; rerun pending
+Status: PR 00 in review; mutation API/projection scope fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Chat projection filename fix applied; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Mutation API/projection scope fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -267,8 +267,9 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after chat projection filename fix.
-- Current findings: chat projection filename fix applied; pending latest rerun.
+- Status: fixes applied; rerun pending after mutation API/projection scope fix.
+- Current findings: mutation API/projection scope fix applied; pending latest
+  rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -869,6 +870,16 @@ Forty-fourth pass:
   - Defined the exact `.dohc/chats/**` projection filename algorithm:
     SHA-256 over `v1\0workspaceId\0threadId\0projectionKind`, lowercase
     RFC 4648 base32 without padding, and `v1-<digest>.md`.
+
+Forty-fifth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added first-class `delete(...)`, `rename(...)`, and `move(...)` operations
+    to the versioned workspace and native filesystem API surfaces.
+  - Required source object identity, source freshness preconditions, destination
+    absence guards for rename/move, and idempotency keys for those mutations.
+  - Reworded `.dohc/chats/**` as a reserved internal projection scope, not an
+    allowlisted user-content path.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -876,7 +887,8 @@ Forty-fourth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the chat projection filename fix.
+- Pending the latest CodeRabbit rerun after the mutation API/projection scope
+  fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 

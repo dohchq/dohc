@@ -307,6 +307,23 @@ write(workspaceId, versionId, path, bytes, {
   targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
+delete(workspaceId, versionId, path, {
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  idempotencyKey
+})
+rename(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
+move(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
 list(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
 snapshot(workspaceId, versionId)
@@ -342,10 +359,15 @@ echo full current, incoming, restored, or secret-backed bytes unless the
 server-side authorization path explicitly grants secret materialization for
 that caller and resolution session.
 
-`snapshot(...)` and `diff(...)` are read-only scoped views. `merge(...)` and
-`restore(...)` are write-producing operations and must use the same
-workspace/version scoping, causal guard, idempotency, and conflict-response
-rules as `write(...)`.
+`snapshot(...)` and `diff(...)` are read-only scoped views. `delete(...)`,
+`rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
+write-producing operations and must use the same workspace/version scoping,
+causal guard, idempotency, and conflict-response rules as `write(...)`.
+Delete, rename, and move require the source `targetObjectId` plus exactly one
+source freshness precondition. Rename/move destination overwrite is not
+implicit: the first contract supports only `destinationPrecondition:
+expectedAbsent`; replace-style behavior must be modeled as a separate
+write-producing operation with explicit source and destination object ids.
 All client-originated write-producing operations, including filesystem-captured
 saves, must carry an idempotency key bound to the actor/session, workspace,
 version, operation type, target, and causal precondition. Duplicate delivery

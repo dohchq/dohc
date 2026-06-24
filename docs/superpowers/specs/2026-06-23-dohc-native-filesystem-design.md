@@ -242,6 +242,23 @@ write(workspaceId, versionId, path, bytes, {
   targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
+delete(workspaceId, versionId, path, {
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  idempotencyKey
+})
+rename(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
+move(workspaceId, versionId, fromPath, toPath, {
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  targetObjectId,
+  destinationPrecondition: expectedAbsent,
+  idempotencyKey
+})
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -288,6 +305,13 @@ object/version handles, hashes, policy decisions, redacted previews, and
 explainable metadata. They do not echo full current, incoming, restored, or
 secret-backed bytes unless the server-side authorization path explicitly grants
 secret materialization for that caller and resolution session.
+
+`delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
+mutations. They require the source `targetObjectId` plus exactly one source
+freshness precondition and an idempotency key. Rename/move destination overwrite
+is not implicit: the first contract supports only `destinationPrecondition:
+expectedAbsent`; replace-style behavior must be modeled as an explicit
+write-producing operation with source and destination object ids.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry a causal precondition for the target version.
