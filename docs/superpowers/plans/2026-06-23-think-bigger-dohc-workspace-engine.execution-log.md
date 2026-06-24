@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | Base-version/.dohc boundary fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Auto-save/E2E/table/chat safety fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -255,7 +255,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after base-version/.dohc boundary fix.
+- Status: fixes applied; rerun pending after auto-save/E2E/table/chat safety
+  fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -716,6 +717,20 @@ Thirtieth pass:
     `.dohc/status.json`, `.dohc/conflicts/**`, and `.dohc/chats/**` are
     internal projections/reserved state unless a purpose-built export policy
     explicitly includes redacted derived state.
+
+Thirty-first pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Reworded versioned workspace examples to use auto-save/automatic-history
+    language instead of implying manual save.
+  - Added first-slice E2E coverage for missing or incompatible causal
+    preconditions on `write(...)`, `merge(...)`, and `restore(...)`.
+  - Restored the missing PR00 table cell so CodeRabbit, Tests, and Notes remain
+    aligned.
+  - Required DM participant sorting to use bytewise ascending UTF-8 encoding of
+    the canonical persisted actor id.
+  - Added TOCTOU-safe, no-symlink chat projection write requirements for
+    `.dohc/chats/<thread-id>.md`.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -723,7 +738,8 @@ Thirtieth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the base-version/.dohc boundary fix.
+- Pending the latest CodeRabbit rerun after the auto-save/E2E/table/chat safety
+  fix.
 
 ### Subagent Reviews
 

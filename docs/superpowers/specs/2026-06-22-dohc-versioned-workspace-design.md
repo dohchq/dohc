@@ -116,13 +116,13 @@ Review appears only when crossing a real boundary:
 Normal editing remains:
 
 ```text
-edit -> save -> automatic history
+authorized edit -> auto-save -> automatic history
 ```
 
 Parallel work is:
 
 ```text
-create/open version -> edit normally -> compare or merge when ready
+create/open version -> edit with automatic saves -> compare or merge when ready
 ```
 
 ## Actor-neutral rule
@@ -570,6 +570,9 @@ The first proof should be small but real:
     TTL retention bounds, payload-size caps, ingest rate limits, and
     deterministic eviction/backpressure prevent storage exhaustion or canonical
     durability starvation.
+14. E2E proves `write(...)`, `merge(...)`, and `restore(...)` fail closed when
+    causal preconditions are missing or multiple/incompatible, and only proceed
+    when exactly one valid causal guard is supplied.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.

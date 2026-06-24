@@ -258,8 +258,9 @@ persistence, routing, key generation, indexing, ACL checks, fanout, or atomic
 create logic. Before the remaining write path runs, `dmParticipantIds` must be
 canonicalized with one deterministic algorithm shared across runtimes:
 normalize actor IDs to their canonical persisted form, deduplicate by exact
-canonical ID match, then sort by bytewise ascending canonical ID, not locale
-collation. All services must use this comparator before key generation. The XOR
+canonical ID match, then sort by bytewise ascending UTF-8 encoding of the
+canonical ID, not locale collation and not runtime-native UTF-16 code-unit
+order. All services must use this comparator before key generation. The XOR
 ownership rule is enforced after canonicalization. For DM-backed thread
 create/update, the authenticated actor identity must be derived server-side,
 must be included in the canonical participant set, and must be authorized to
@@ -446,6 +447,14 @@ encoded canonical thread id. Projection writers must reject path separators,
 relative path segments, control characters, reserved names, and any other unsafe
 input before constructing `.dohc/chats/<thread-id>.md`, so a crafted thread id
 cannot traverse directories or overwrite another projection.
+At write time, the projection writer must resolve and verify that the final
+target remains under the workspace `.dohc/chats/` root, refuse to follow
+symlinks for parent or target path components, and open/create the target with
+safe no-follow primitives where the platform provides them. Writes must use
+atomic create/replace semantics and fail closed if any canonicalization,
+descriptor/handle continuity, or root-containment check changes between
+validation and write, so symlink swaps or other TOCTOU races cannot redirect
+projection output.
 
 ## File projections
 
