@@ -90,6 +90,12 @@ quarantined before capture. If the engine cannot prove the resolved target and
 file identity are inside the active workspace boundary, it fails closed. This
 path boundary applies to every file capture that may back an atom, folder,
 entity, share, or capture record.
+Canonicalization must also be TOCTOU-safe: after a path is resolved, subsequent
+stat/read/write/capture work must use the same verified descriptor, handle,
+inode/file-id binding, or equivalent identity-bound mechanism. The engine must
+not validate one path and then reopen a different path for content. If the
+handle identity no longer matches the canonicalized path, workspace, version,
+or reserved-namespace decision, the operation is quarantined or rejected.
 
 Identity-light capture is allowed; identity-light commit is not. During
 reconciliation, each raw local write must be revalidated against workspace

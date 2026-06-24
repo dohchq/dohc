@@ -470,8 +470,8 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 Twelfth pass:
 
 - Fixed CodeRabbit follow-up findings:
-  - Required denied/quarantined ingest holding areas to be secret-safe and to
-    avoid plaintext secrets in payloads, indexes, logs, explanations, and retry
+  - Required denied/quarantined ingest holding areas to be secret-safe and avoid
+    plaintext secrets in payloads, indexes, logs, explanations, and retry
     metadata.
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
     sequence used with `createdAt` and `messageId` for read cursor advancement.
@@ -609,6 +609,18 @@ Twentieth pass:
     encrypted, or policy-redacted.
   - Added first-slice proof that channel sends map to `ChatThread` and
     `ThreadMessage`, not a separate durable channel-stream model.
+
+Twenty-first pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Reworded the denied/quarantined ingest holding-area grammar in the Twelfth
+    pass entry.
+  - Added TOCTOU-safe descriptor/handle continuity requirements after
+    filesystem path canonicalization.
+  - Clarified that `ThreadLink` cross-workspace exceptions are allowed only for
+    explicit shared-channel grants and must be re-authorized on every use.
+  - Added a strict 16-participant cap for DM-backed threads and early rejection
+    of oversized raw or canonical participant lists.
 - Overrides:
 
 ### Unresolved Findings
