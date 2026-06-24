@@ -66,3 +66,14 @@ export type {
   LinkedChatStoreErrorCode,
   LinkedChatStoreOptions,
 } from "./linkedChatStore";
+export {
+  WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
+  searchWorkspaceEngine,
+} from "./workspaceSearch";
+export type {
+  SearchSurface,
+  SearchVisibility,
+  WorkspaceEngineSearchOptions,
+  WorkspaceEngineSearchResult,
+  WorkspaceSearchPolicy,
+} from "./workspaceSearch";
