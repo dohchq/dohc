@@ -291,6 +291,22 @@ git diff --check
     permission rules.
   - Fifth pass major: raw local write reconciliation needed authorization before
     persisting into version history.
+  - Sixth pass major: local ingest provenance still needed explicit quarantine
+    or rejection when ownership/lock/visibility proof is missing.
+  - Sixth pass major: first proof slice needed mandatory fail-closed and secret
+    non-leak E2E checks.
+  - Sixth pass major: chat message bodies needed explicit XSS-safe rendering
+    and formatting-subset rules.
+  - Sixth pass major: chat read state needed canonical ordering and unique
+    upsert semantics.
+  - Sixth pass major: chat action authorization needed user locks, sharing
+    boundaries, and skill-turn/review gates.
+  - Sixth pass major: secret-backed filesystem plaintext exclusion needed to
+    include durability-log payloads.
+  - Sixth pass major: `.dohc/**` needed an internal-state boundary with
+    source-backed policy-file allowlist.
+  - Sixth pass major: version mount examples needed canonical `.versions`
+    naming.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -331,6 +347,21 @@ git diff --check
   - Added async workspace/version/request correlation requirements.
   - Split secret read vs write permission requirements.
   - Added reconciliation-time authorization for raw local writes.
+  - Clarified that unverified local ingest is server/engine policy-evaluated
+    before becoming canonical and is quarantined/rejected on missing proof.
+  - Added mandatory Phase 0 E2E checks for fail-closed authorization and no
+    plaintext secret leakage across durability logs, history, diffs, export,
+    search, and agent logs.
+  - Added chat body escaping/sanitization requirements and a permitted rich-text
+    subset.
+  - Added canonical read-state ordering and unique
+    `(workspaceId, threadId, actorId)` upsert semantics.
+  - Extended chat action authorization to locks, sharing boundaries, protected
+    work, and skill-turn/review gates.
+  - Added durability-log payloads to secret-backed plaintext exclusion.
+  - Added `.dohc/**` self-capture exclusion plus allowlisted policy files.
+  - Replaced sibling `personal.versions/*` examples with in-workspace
+    `.versions/*` projections.
 - Overrides:
 
 ### Subagent Reviews

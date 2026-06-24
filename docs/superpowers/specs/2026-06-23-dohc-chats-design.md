@@ -62,6 +62,12 @@ At least one of `lastReadMessageId` or `lastReadAt` is required. Updates are
 monotonic: read state can only advance forward in the thread, never move
 backward. Chats, Inbox, file side rails, notification badges, and search result
 read/unread markers must all derive from this workspace-scoped state.
+Monotonicity is validated against a canonical per-thread ordering comparator,
+preferably a server-assigned `(threadSequence, createdAt, id)` tuple. Message
+IDs alone are not an ordering contract. `ThreadReadState` is unique on
+`(workspaceId, threadId, actorId)` and writes are upserts, not inserts that can
+duplicate rows. Updating `lastReadMessageId` or `lastReadAt` must compare
+against that canonical order before advancing.
 
 ## Core model
 
@@ -233,6 +239,14 @@ notified, or projected. Message create/update paths must validate this before
 rendering nested replies, indexing, notification fanout, or projection
 generation.
 
+`ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
+text by default or sanitize through an allowlisted formatting subset before
+display. If rich text is supported, the permitted subset is limited to ordinary
+inline formatting, code, links with safe protocols, mentions, and file/work
+references; raw HTML, scriptable URLs, event handlers, and embedded active
+content are not allowed. The same sanitization contract applies to chat
+projections, search snippets, notifications, and summaries.
+
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
 
@@ -298,6 +312,9 @@ Callers must not be able to assert user/workspace identity, widen chat
 visibility, or link a chat to work they cannot access. Agent messages use the
 same authorization model as human messages; the display label is different, not
 the authority model.
+Chat writes and links must also respect user locks, folder/atom/file sharing
+boundaries, protected work, and skill-turn/review gates before persisting
+messages, links, notifications, or projections.
 
 Renderer surfaces that load channels, chats, linked work, summaries, search
 results, or side-rail state asynchronously must guard responses with a
@@ -352,6 +369,8 @@ canonical chat. The engine should treat it as an invalid projection write,
 preserve the edited bytes as a local recovery artifact or status item, and
 regenerate the projection from canonical chat state. The user or agent should
 be directed to post through chat actions instead of editing the projection.
+Projection renderers must use the same body escaping/sanitization rules as the
+interactive chat UI.
 
 ## Integration with files and versions
 

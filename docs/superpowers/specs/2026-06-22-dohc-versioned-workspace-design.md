@@ -128,6 +128,10 @@ must not later be upgraded to authenticated human or agent identity without
 cryptographic proof, a trusted session boundary, or a dohc-controlled action
 record. Sync/import flows must preserve the original provenance class; if proof
 is absent, the change remains local/device/session/import provenance.
+Unverified local, device, or session edits still pass through server/engine-side
+workspace ownership, lock, protected-path, and visibility checks before they
+become canonical workspace state. If the engine cannot prove the required access
+or policy state, the ingest is quarantined or rejected rather than trusted.
 Agent-specific authorship is required for social actions like chat replies,
 where the message display must make clear whether the human or the user's agent
 wrote it.
@@ -488,6 +492,11 @@ The first proof should be small but real:
 8. The engine records honest provenance without changing write rules:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
+9. E2E proves fail-closed behavior when authorization, policy, visibility,
+   protected-path, lock, or version-access evaluators are unavailable or
+   indeterminate.
+10. E2E proves plaintext secrets do not enter durability-log payloads, history,
+    diffs, export bundles, search indexes, or agent logs.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.

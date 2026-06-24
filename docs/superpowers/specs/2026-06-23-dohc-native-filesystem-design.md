@@ -56,10 +56,10 @@ That folder can represent `Main`.
 Named versions can appear as their own folders or mounts:
 
 ```text
-~/dohc/personal/                       # Main
-~/dohc/personal.versions/q3-plan/      # Q3 Plan version
-~/dohc/personal.versions/agent-try/    # Agent Try version
-~/dohc/personal.versions/client-view/  # Client-facing version
+~/dohc/personal/                         # Main
+~/dohc/personal/.versions/q3-plan/       # Q3 Plan version
+~/dohc/personal/.versions/agent-try/     # Agent Try version
+~/dohc/personal/.versions/client-view/   # Client-facing version
 ```
 
 The path is an affordance, not the security boundary. The engine still resolves
@@ -116,7 +116,7 @@ Phase 0 should use a normal folder plus reconciliation:
    - Use OS file watching for create/modify/delete/rename events.
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
-   - Append captured tracked changes to the durability log.
+   - Append captured tracked non-secret changes to the durability log.
    - Coalesce them into meaningful history moments.
 
 3. **When dohc starts after being closed**
@@ -285,6 +285,15 @@ A workspace can define readable policy files such as:
 Early versions may start with a simpler `.dohcignore`, but the durable model
 should support richer rules.
 
+`.dohc/**` is engine-managed internal state and is excluded from normal
+capture/sync ingestion by default. Recursive self-capture is forbidden: history,
+status, conflicts, indexes, caches, and generated projections under `.dohc/`
+must not be exported, searched, synced, or re-ingested as ordinary user files.
+Only a small explicit allowlist of source-backed policy files such as
+`.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary `.dohcignore` may
+participate in normal tracking, and even those files are interpreted as policy
+inputs, not arbitrary captured content.
+
 Example:
 
 ```toml
@@ -448,7 +457,7 @@ or exclude the file entirely, depending on policy.
 ## Secret storage
 
 Secret-backed files should not store plaintext values in normal history,
-search, diffs, public export, or agent logs.
+durability-log payloads, search, diffs, public export, or agent logs.
 
 Implementation can use:
 
@@ -542,6 +551,8 @@ Possible rule:
 - no conflicting state is silently dropped.
 - secret-backed conflicts do not materialize plaintext in `.dohc/conflicts/`
   by default.
+- `.dohc/conflicts/` is an engine projection and is not captured, synced,
+  searched, or exported as ordinary workspace input.
 
 The chosen/current value must be deterministic and auditable:
 
@@ -597,6 +608,9 @@ Possible surfaces:
 - API status calls.
 
 Hidden mechanics are okay. Hidden safety-relevant state is not.
+`.dohc/status.json` is an engine status projection, not user content; it follows
+the `.dohc/**` internal-state boundary and must not be re-ingested as a normal
+workspace file.
 
 ## Export and ownership
 
