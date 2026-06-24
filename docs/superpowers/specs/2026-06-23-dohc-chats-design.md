@@ -467,15 +467,20 @@ same fail-closed `.dohc/**` reserved-namespace rules used by the native
 filesystem model. It is not a source-backed policy file and is not re-ingested
 as canonical user content.
 `<thread-id>` in the projection path is conceptual. Projection writers must map
-the canonical thread id to a deterministic filename that is collision-safe on
-case-insensitive filesystems, such as a lowercase base32url hash of
-`workspaceId`, `threadId`, and projection kind. The projection must store or
-otherwise verify the exact canonical thread id in metadata before writing, and
-must reject ambiguous ids or any computed filename that already maps to a
-different canonical thread id. Projection writers must reject path separators,
-relative path segments, control characters, reserved names, and any other unsafe
-input before constructing `.dohc/chats/<thread-id>.md`, so a crafted thread id
-cannot traverse directories or overwrite another projection.
+the canonical thread id to a deterministic filename using one fixed algorithm
+across all runtimes: compute
+`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind)`, encode
+the digest as lowercase RFC 4648 base32 with no padding, and write
+`.dohc/chats/v1-<digest>.md`. The input framing, hash, encoding, lowercase
+normalization, no-padding rule, and `v1-` prefix are the canonical contract and
+must not vary by implementation. The projection must store or otherwise verify
+the exact canonical thread id, workspace id, projection kind, and derived
+filename in metadata before writing, and must reject ambiguous ids or any
+computed filename that already maps to a different canonical tuple. Projection
+writers must reject path separators, relative path segments, control characters,
+reserved names, and any other unsafe input before constructing the projection
+path, so a crafted thread id cannot traverse directories or overwrite another
+projection.
 At write time, the projection writer must resolve and verify that the final
 target remains under the workspace `.dohc/chats/` root, refuse to follow
 symlinks for parent or target path components, and open/create the target with
