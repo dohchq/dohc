@@ -227,7 +227,8 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId,
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
+  targetObjectId?,
   idempotencyKey?
 })
 list(workspaceId, versionId, path)
@@ -256,16 +257,17 @@ references fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
-version, etag, content hash, an absence assertion for creates, or the expected
-existing object id for overwrites.
+version, etag, content hash, or an absence assertion for creates.
 Create and overwrite calls must be explicit: `expectedAbsent: true` means
-"create only if no object exists at this path"; `expectedObjectId` means
-"overwrite this known object only." If the precondition does not match the
-current workspace/version/path state, the API returns a conflict response
-preserving current and incoming content rather than applying the mutation.
-Exactly one precondition mode may be supplied per write. Supplying none or
-combining incompatible guards, such as `expectedAbsent` with
-`expectedObjectId`, fails closed with a validation/conflict response and does
+"create only if no object exists at this path." `targetObjectId` may identify
+the intended object for an overwrite, but it is not a freshness guard and must
+be paired with exactly one causal precondition such as `expectedEtag`,
+`expectedContentHash`, or `expectedBaseVersion`. If the precondition does not
+match the current workspace/version/path state, the API returns a conflict
+response preserving current and incoming content rather than applying the
+mutation. Exactly one precondition mode may be supplied per write. Supplying no
+causal precondition or combining incompatible guards, such as `expectedAbsent`
+with `expectedEtag`, fails closed with a validation/conflict response and does
 not mutate canonical content.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also

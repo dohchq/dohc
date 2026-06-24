@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Restore/write/holding-area/status fixes applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Causal-token/chat-link/brand-command fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -223,14 +223,22 @@ coderabbit review --agent -t committed -c AGENTS.md
 rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
 pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
-<bundled Node 24.14.0> <pnpm.cjs> --dir <repo> --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz -o /tmp/dohc-node-v24.18.0-linux-x64.tar.xz
+rm -rf /tmp/dohc-node-v24.18.0-linux-x64
+mkdir -p /tmp/dohc-node-v24.18.0-linux-x64
+tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-linux-x64 --strip-components=1
+/tmp/dohc-node-v24.18.0-linux-x64/bin/node -v
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node /mnt/c/Users/ice/AppData/Roaming/npm/node_modules/pnpm/bin/pnpm.cjs --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 ```
 
 ### E2E / Visual / Manual QA
 
 - Manual docs sanity only.
 - Focused brand/no-legacy guard passed: `apps/web/src/__tests__/brandNoLegacy.test.ts`
-  reported 1 file and 2 tests passed under bundled Node 24.14.0.
+  reported 1 file and 2 tests passed under Linux Node 24.18.0.
+- Node 24 environment: official Linux Node v24.18.0 tarball extracted to
+  `/tmp/dohc-node-v24.18.0-linux-x64/bin/node`.
+- pnpm entrypoint: `/mnt/c/Users/ice/AppData/Roaming/npm/node_modules/pnpm/bin/pnpm.cjs`.
 - Earlier Node 18.19.1 run is retained only as exploratory output and is not
   counted as gate evidence because it does not satisfy the repo engine field.
 
@@ -247,7 +255,7 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after restore/write/holding-area/status
+- Status: fixes applied; rerun pending after causal-token/chat-link/brand-command
   fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -478,8 +486,8 @@ Twelfth pass:
     sequence used with `createdAt` and `messageId` for read cursor advancement.
   - Required `.dohc/chats/<thread-id>.md` projections to classify and redact
     secrets before writing derived Markdown.
-  - Made API writes explicit about create-vs-overwrite preconditions through
-    `expectedAbsent` and `expectedObjectId`.
+  - Made API writes explicit about create-only absence guards and overwrite
+    targeting metadata.
   - Clarified `tracked`/`versioned` invariants and corrected `.env`
     materialization to the canonical `local` value.
   - Consolidated duplicate CodeRabbit loop language and made auth, ownership,
@@ -667,6 +675,17 @@ Twenty-sixth pass:
   - Added first-slice E2E coverage for holding-area quotas, TTL bounds,
     payload-size caps, ingest rate limits, and deterministic
     eviction/backpressure.
+
+Twenty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Removed stable object ids from causal write precondition unions; object ids
+    are now optional targeting metadata and must be paired with freshness
+    tokens such as base snapshot, etag, content hash, or absence assertion.
+  - Added chat links to the first-slice workspace-scoping E2E checklist.
+  - Replaced placeholder brand-guard command text with the exact Node 24.18.0
+    setup and test command executed, while recording Node and pnpm environment
+    details separately.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -674,8 +693,8 @@ Twenty-sixth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the restore/write/holding-area/status
-  fix.
+- Pending the latest CodeRabbit rerun after the
+  causal-token/chat-link/brand-command fix.
 
 ### Subagent Reviews
 

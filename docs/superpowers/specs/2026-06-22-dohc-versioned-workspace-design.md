@@ -289,7 +289,8 @@ in-memory, browser, and agent runtimes:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseSnapshot | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId,
+  precondition: exactly one of expectedBaseSnapshot | expectedEtag | expectedContentHash | expectedAbsent,
+  targetObjectId?,
   idempotencyKey?
 })
 list(workspaceId, versionId, path)
@@ -311,11 +312,13 @@ environment.
 
 API writes are never unconditional overwrites. A write must include exactly one
 causal precondition: expected base snapshot, etag, content hash, absence
-assertion for creates, or expected object id for overwrites. If the
-precondition does not match the current workspace/version/path state, the
-engine returns a deterministic conflict response preserving current and
-incoming content instead of mutating canonical state. Supplying no precondition
-or multiple incompatible preconditions fails closed.
+assertion for creates, or another monotonic freshness token. Stable object ids
+may identify the intended target object, but they are not causal freshness
+guards and cannot authorize overwrite by themselves. If the precondition does
+not match the current workspace/version/path state, the engine returns a
+deterministic conflict response preserving current and incoming content instead
+of mutating canonical state. Supplying no causal precondition or multiple
+incompatible preconditions fails closed.
 
 `snapshot(...)` and `diff(...)` are read-only scoped views. `merge(...)` and
 `restore(...)` are write-producing operations and must use the same
@@ -557,8 +560,9 @@ The first proof should be small but real:
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 11. E2E proves every persisted atom, folder, entity, share, capture, file,
-    version, event, projection, and history record is workspace-scoped, and that
-    cross-workspace references are rejected by default.
+    version, event, chat link, projection, and history record is
+    workspace-scoped, and that cross-workspace references are rejected by
+    default.
 12. E2E proves holding-area replay is causal: stale base/CAS tokens or
     workspace/version mismatches never apply as canonical state and instead
     degrade to conflict/manual reconciliation or remain quarantined.
