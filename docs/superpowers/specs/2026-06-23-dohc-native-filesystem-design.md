@@ -70,9 +70,9 @@ write can be reconciled as a local/device/session change.
 Reserved namespace collisions fail closed. The importer evaluates the explicit
 source-backed policy allowlist before applying reserved-namespace quarantine:
 approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
-optional `.dohcignore` may be tracked as policy files, while all other
-`.dohc/**` content remains reserved engine state. If import, attach, sync, or a
-raw filesystem scan finds user-created `.versions/**`, non-allowlisted
+optional workspace-root `.dohcignore` may be tracked as policy files, while all
+other `.dohc/**` content remains reserved engine state. If import, attach,
+sync, or a raw filesystem scan finds user-created `.versions/**`, non-allowlisted
 `.dohc/**`, or aliases of those names where dohc expects engine state, dohc must
 not treat the content as normal workspace data. The importer either quarantines
 the tree with an explainable record, proposes a safe rename outside reserved
@@ -342,8 +342,8 @@ A workspace can define readable policy files such as:
 .dohc/visibility.toml
 ```
 
-Early versions may start with a simpler `.dohcignore`, but the durable model
-should support richer rules.
+Early versions may start with a simpler workspace-root `.dohcignore`, but the
+durable model should support richer rules.
 
 `.dohc/**` is engine-managed internal state and is excluded from normal
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,
@@ -351,11 +351,12 @@ status, conflicts, indexes, caches, and generated projections under `.dohc/`
 must not be exported, searched, synced, or re-ingested as ordinary user files.
 The importer applies the same allowlist-before-quarantine rule here: only a
 small explicit allowlist of source-backed policy files such as
-`.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary `.dohcignore` may
-participate in normal tracking, and even those files are interpreted as policy
-inputs, not arbitrary captured content. All other `.dohc/**` paths are
-reserved, non-user-content inputs that must be quarantined, ignored, or handled
-through engine-specific recovery rather than captured as ordinary files.
+`.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary workspace-root
+`.dohcignore` may participate in normal tracking, and even those files are
+interpreted as policy inputs, not arbitrary captured content. All other
+`.dohc/**` paths are reserved, non-user-content inputs that must be quarantined,
+ignored, or handled through engine-specific recovery rather than captured as
+ordinary files.
 
 Example:
 
@@ -693,7 +694,7 @@ Export should produce:
 
 - readable files.
 - only allowlisted source-backed policy files such as `.dohc/files.toml`,
-  `.dohc/visibility.toml`, and optional `.dohcignore`.
+  `.dohc/visibility.toml`, and optional workspace-root `.dohcignore`.
 - history/provenance metadata.
 - hashes or commitments for verification.
 - redacted/excluded secret files according to policy.

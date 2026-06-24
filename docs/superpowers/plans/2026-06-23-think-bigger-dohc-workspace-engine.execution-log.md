@@ -564,11 +564,20 @@ Seventeenth pass:
     participants before persistence/fanout.
   - Cleaned the denied/quarantined ingest holding-area grammar again with the
     exact secret-safe wording CodeRabbit requested.
+
+Eighteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Changed the live PR 00 `Unresolved Findings` section from final
+    no-open-items wording to provisional rerun-pending wording.
+  - Clarified that `.dohc/files.toml` and `.dohc/visibility.toml` live under
+    `.dohc/`, while optional `.dohcignore` is a workspace-root policy file.
 - Overrides:
 
 ### Unresolved Findings
 
-- None.
+- Pending the latest CodeRabbit rerun; no finding is considered finally
+  resolved until the rerun completes.
 
 ### Subagent Reviews
 
