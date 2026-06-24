@@ -237,7 +237,7 @@ read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
   targetObjectId?,
-  idempotencyKey?
+  idempotencyKey
 })
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
@@ -247,11 +247,11 @@ snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
 merge(workspaceId, sourceVersionId, targetVersionId, {
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
-  idempotencyKey?
+  idempotencyKey
 })
 restore(workspaceId, versionId, pointInTime, {
   precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
-  idempotencyKey?
+  idempotencyKey
 })
 ```
 
@@ -282,6 +282,13 @@ not mutate canonical content.
 write-producing and must carry a causal precondition for the target version.
 If the target version changed since the caller's expected base, the merge
 returns a deterministic conflict response instead of applying stale output.
+
+All client-originated write-producing operations, including file-mount captured
+saves, must carry an idempotency key bound to the actor/session, workspace,
+version, operation type, target, and causal precondition. Duplicate delivery
+with the same idempotency key returns the original result or a deterministic
+equivalent without creating extra canonical mutations, history entries,
+projections, notifications, or search-index side effects.
 
 `restore(workspaceId, versionId, pointInTime, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new

@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; Phase 0 lane status fix applied; rerun pending
+Status: PR 00 in review; native idempotency/Node note fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Phase 0 lane status fix applied; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Native idempotency/Node note fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -262,8 +262,9 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after Phase 0 lane status fix.
-- Current findings: Phase 0 lane status fix applied; pending latest rerun.
+- Status: fixes applied; rerun pending after native idempotency/Node note fix.
+- Current findings: native idempotency/Node note fix applied; pending latest
+  rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -616,7 +617,7 @@ Twentieth pass:
     requirements for denied/quarantined ingest holding areas.
   - Added E2E proof that stale CAS/base tokens and workspace/version mismatches
     cannot replay quarantined ingests into canonical state.
-  - Reran the focused brand/no-legacy guard under bundled Node 24.14.0 and
+  - Reran the focused brand/no-legacy guard under Linux Node 24.18.0 and
     recorded the earlier Node 18 run as non-gating exploratory output.
   - Marked PR00 local agent CLI QA as a docs-only exception pending human
     approval before completion/merge-readiness.
@@ -808,6 +809,14 @@ Thirty-eighth pass:
     PR00 approval, stack reconciliation, lane PRs, tests, and CodeRabbit.
   - Added the 2026-06-24 user-approved unattended execution note that explains
     why provisional Phase 0 branches exist before PR00 is merge-ready.
+
+Thirty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Made native filesystem `write(...)`, `merge(...)`, and `restore(...)`
+    require `idempotencyKey`, matching the versioned workspace contract.
+  - Normalized historical Node test evidence to Linux Node 24.18.0, matching
+    the executed brand-guard command.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -815,7 +824,8 @@ Thirty-eighth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the Phase 0 lane status fix.
+- Pending the latest CodeRabbit rerun after the native idempotency/Node note
+  fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 
