@@ -59,7 +59,7 @@ approval.
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
 | P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | blocked on CodeRabbit service hang after latest pushed fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes are pushed in `1f39e60`. Three reruns after that hung before findings/completion. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
-| P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
+| P0D | Compare, Clean Merge, Conflict Preservation | restacking on P0C; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0G | Proof Arc QA And Review Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -4759,6 +4759,157 @@ coderabbit review --agent --base-commit a935e96 -c AGENTS.md
   text/file driver.
 - P0G must add local agent CLI QA against this file loop.
 
+## PR P0D - Compare, Clean Merge, Conflict Preservation
+
+Status: restacked on P0C; not approved
+Branch: codex/think-bigger-p0d-merge-conflicts
+Worktree: `/home/ice/dev/dohc-p0d-merge-conflicts`
+Implementation chat/thread: main orchestration thread
+PR:
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0D worktree stacked after P0C.
+- [x] Persist immutable fork-base snapshots when a named version is created.
+- [x] Compare one text path across base/current/incoming.
+- [x] Cleanly merge non-overlapping named-version edits into Main.
+- [x] Preserve same-line and delete-vs-edit conflicts without mutating Main.
+- [x] Store durable conflict records with base/current/incoming and visible
+      `chosenFrom: "current"`.
+- [x] Resolve a conflict by keeping current, applying incoming, or applying
+      explicit merged text.
+- [x] Fail closed when a named version has no durable fork-base data.
+- [ ] Open PR after PR00 docs-only exception approval and upstream lane PR
+      decisions are settled, or use a stacked PR target.
+
+### Files Changed
+
+- packages/workspace-engine/src/versionedTextStore.ts
+- packages/workspace-engine/src/versionedTextStore.test.ts
+- packages/workspace-engine/src/versionedFileWorkspace.test.ts
+- packages/workspace-engine/src/versionedTextMerge.test.ts
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- `packages/workspace-engine/src/versionedTextMerge.test.ts`
+  - compare returns exact base/current/incoming text.
+  - clean non-overlapping merge writes Main with both edits and no Git conflict
+    markers.
+  - same-line conflict preserves base/current/incoming and leaves Main
+    untouched.
+  - delete-vs-edit is preserved as a conflict.
+  - applying incoming resolves a conflict after confirming Main is unchanged.
+  - stale conflict resolution is refused after Main changes again.
+  - missing fork-base data fails closed.
+  - wrong-workspace merge is denied.
+  - small edit/delete combinations do not silently drop either side.
+- Existing deterministic ID helpers now include conflict IDs.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0d-merge-conflicts /home/ice/dev/dohc-p0d-merge-conflicts codex/think-bigger-p0c-file-history
+pnpm install --frozen-lockfile
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+pnpm --filter @dohc/workspace-history test
+git diff --check
+git rebase --onto codex/think-bigger-p0c-file-history 3ecf5ea codex/think-bigger-p0d-merge-conflicts
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-history test
+```
+
+### E2E / Visual / Manual QA
+
+- No desktop E2E yet. P0D is a package-level merge/conflict proof.
+- The later P0G proof lane must exercise edit different versions, compare,
+  conflict, inspect both sides, resolve, and restore through the integrated
+  surface.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable until P0G wires the local agent loop
+  against the proof arc.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: no secret-backed files touched.
+
+### CodeRabbit
+
+- Status: pending.
+- Findings:
+- Fixes:
+- Overrides:
+
+### Subagent Reviews
+
+- Merge explorer: complete.
+  - Recommended keeping P0D in `@dohc/workspace-engine`.
+  - Recommended reusing `@dohc/workspace-history/mergeMarkdown` instead of
+    building a second merge primitive.
+  - Identified immutable `forkBaseSnapshots[versionId][objectId]` as the
+    required missing data for real three-way merge.
+  - Warned that history should not learn about versions.
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+
+### Security / Privacy Notes
+
+- Merge and conflict APIs validate paths through the same
+  `validateUserWritePath` guard as ordinary version writes.
+- Workspace/version ownership checks run inside the serialized store path; a
+  source version from another workspace is denied.
+- Conflict records preserve both sides without inserting Git conflict markers
+  into user files.
+- Missing fork-base state fails closed instead of inventing merge ancestry.
+- Conflict resolution refuses to apply if Main no longer matches the preserved
+  current side.
+
+### Performance Notes
+
+- Budget areas touched: package-level local JSON metadata store and pure text
+  merge helper.
+- Metrics:
+  - workspace-engine tests: 22 tests in 1.62s locally.
+  - workspace-history tests: 28 tests in 2.42s locally.
+- Machine/CI context: local Codex machine; latest rerun happened after the P0C
+  restack and used Linux Node v24.18.0 Corepack.
+- Budget pass/fail: no renderer/startup/watch budget applies yet.
+- Jank/blocking notes: merge is not wired into renderer or watcher loops yet.
+- Regression risk: large-file behavior inherits `mergeMarkdown`'s conservative
+  conflict behavior instead of running an expensive automatic merge.
+
+### Migration Notes
+
+- Existing schema-1 stores load with empty `forkBaseSnapshots` and `conflicts`
+  maps for compatibility.
+- Named versions created before fork-base persistence cannot be merged
+  automatically; compare/merge fails closed with `fork-base-not-found`.
+- No production app path reads or writes the new conflict records yet.
+
+### Remaining Risk
+
+- This is a one-path text/file driver proof, not the final multi-file merge
+  planner.
+- Rename-aware merge remains out of scope; ambiguous add/delete/rename-shaped
+  cases are preserved as conflicts.
+- PR00 docs-only local-agent-CLI exception and upstream lane PR approvals remain
+  gates before P0D can be marked complete.
+- CodeRabbit and stacked PR review are still pending.
+
+### Follow-Up / Deletion Conditions
+
+- P0E/P0F should treat conflict/search projections as read-only views over
+  engine state rather than editable user files.
+- P0G must add integrated E2E and local agent CLI QA for the compare/conflict
+  loop.
+
 ### Phase 0 Proof Arc
 
 PRs:
@@ -4795,8 +4946,8 @@ Gate evidence:
 - [ ] External editor/process edits made while dohc is stopped reconcile on
       next launch.
 - [ ] Restore works.
-- [ ] Clean merge works.
-- [ ] Conflict preserves base/current/incoming.
+- [x] Clean merge works.
+- [x] Conflict preserves base/current/incoming.
 - [ ] One chat can link to a file and appear beside the file.
 - [ ] Chat projection is read-only.
 - [ ] Search returns linked chat/file context without policy leaks.

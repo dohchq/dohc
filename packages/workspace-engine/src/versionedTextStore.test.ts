@@ -27,7 +27,7 @@ afterEach(async () => {
 });
 
 function storeWithDeterministicIds() {
-  const counters = { moment: 0, object: 0, version: 0 };
+  const counters = { conflict: 0, moment: 0, object: 0, version: 0 };
   return createVersionedTextStore(root, {
     nowMs: () => {
       now += 10;
@@ -1582,7 +1582,7 @@ describe("versioned text store", () => {
   });
 
   it("leaves the in-memory cache unchanged when persistence fails", async () => {
-    const counters = { moment: 0, object: 0, version: 0 };
+    const counters = { conflict: 0, moment: 0, object: 0, version: 0 };
     let failNextPersist = false;
     const store = createTestableVersionedTextStore({
       nowMs: () => {

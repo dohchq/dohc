@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { mergeMarkdown } from "@dohc/workspace-history/mergeMarkdown";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/versioned-text-store.json";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -12,10 +13,14 @@ export type WorkspaceObjectId = string;
 export type VersionId = string;
 export type WorkspaceId = string;
 export type VersionedTextMomentId = string;
+export type VersionedTextConflictId = string;
 
 export type VersionedTextStoreErrorCode =
+  | "conflict-not-found"
+  | "conflict-stale-target"
   | "duplicate-id"
   | "file-not-found"
+  | "fork-base-not-found"
   | "invalid-generated-id"
   | "invalid-input"
   | "invalid-metadata"
@@ -87,6 +92,89 @@ export interface TextFileSnapshot {
   metadata: ActorNeutralWriteMetadata;
 }
 
+export interface VersionedTextFileState {
+  exists: boolean;
+  path: string;
+  objectId?: WorkspaceObjectId;
+  text?: string;
+  updatedAtMs?: number;
+  latestMomentId?: VersionedTextMomentId;
+  metadata?: ActorNeutralWriteMetadata;
+}
+
+export type VersionedTextComparisonStatus =
+  | "same"
+  | "incoming-changed"
+  | "current-changed"
+  | "diverged";
+
+export interface VersionedTextComparison {
+  workspaceId: WorkspaceId;
+  path: string;
+  targetVersionId: VersionId;
+  sourceVersionId: VersionId;
+  base: VersionedTextFileState;
+  current: VersionedTextFileState;
+  incoming: VersionedTextFileState;
+  status: VersionedTextComparisonStatus;
+}
+
+export type VersionedTextConflictStatus = "open" | "resolved";
+export type VersionedTextConflictResolution =
+  | "applied-incoming"
+  | "applied-merged"
+  | "kept-current";
+export type VersionedTextConflictChoice = "current" | "incoming" | "merged";
+
+export interface VersionedTextConflictRecord {
+  id: VersionedTextConflictId;
+  workspaceId: WorkspaceId;
+  path: string;
+  targetVersionId: VersionId;
+  sourceVersionId: VersionId;
+  createdAtMs: number;
+  updatedAtMs: number;
+  base: VersionedTextFileState;
+  current: VersionedTextFileState;
+  incoming: VersionedTextFileState;
+  status: VersionedTextConflictStatus;
+  chosenFrom: VersionedTextConflictChoice;
+  metadata: ActorNeutralWriteMetadata;
+  resolution?: VersionedTextConflictResolution;
+}
+
+export type VersionedTextMergeResult =
+  | {
+      kind: "unchanged";
+      reason: "already-same" | "source-unchanged";
+      comparison: VersionedTextComparison;
+    }
+  | {
+      kind: "merged";
+      operation: "write";
+      comparison: VersionedTextComparison;
+      write: VersionedTextWriteResult;
+    }
+  | {
+      kind: "merged";
+      operation: "delete";
+      comparison: VersionedTextComparison;
+      delete: VersionedTextDeleteResult;
+    }
+  | {
+      kind: "conflict";
+      comparison: VersionedTextComparison;
+      conflict: VersionedTextConflictRecord;
+    };
+
+export type VersionedTextConflictResolveResult =
+  | {
+      kind: "resolved";
+      conflict: VersionedTextConflictRecord;
+      write?: VersionedTextWriteResult;
+      delete?: VersionedTextDeleteResult;
+    };
+
 export interface VersionedTextMoment {
   id: VersionedTextMomentId;
   workspaceId: WorkspaceId;
@@ -147,6 +235,32 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
   }): Promise<TextFileSnapshot | null>;
+  compareTextFileVersions(input: {
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersionId: VersionId;
+    path: string;
+  }): Promise<VersionedTextComparison>;
+  mergeTextFileFromVersion(input: {
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<VersionedTextMergeResult>;
+  listTextConflicts(input: {
+    workspaceId: WorkspaceId;
+    status?: VersionedTextConflictStatus;
+  }): Promise<VersionedTextConflictRecord[]>;
+  resolveTextConflict(input: {
+    workspaceId: WorkspaceId;
+    conflictId: VersionedTextConflictId;
+    resolution:
+      | { kind: "keep-current" }
+      | { kind: "apply-incoming" }
+      | { kind: "apply-merged"; text: string };
+    metadata: ActorNeutralWriteMetadata;
+  }): Promise<VersionedTextConflictResolveResult>;
   listTextFiles(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -180,7 +294,7 @@ export interface VersionedTextStore {
 
 export interface VersionedTextStoreOptions {
   nowMs?: () => number;
-  createId?: (kind: "moment" | "object" | "version") => string;
+  createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
 }
 
 export interface VersionedTextStoreTestHooks {
@@ -204,7 +318,9 @@ interface PersistedWorkspaceState {
   objects: Record<WorkspaceObjectId, FileObjectRecord>;
   pathAliases: Record<VersionId, Record<string, WorkspaceObjectId>>;
   snapshots: Record<VersionId, Record<WorkspaceObjectId, TextFileSnapshot>>;
+  forkBaseSnapshots: Record<VersionId, Record<WorkspaceObjectId, TextFileSnapshot>>;
   moments: VersionedTextMoment[];
+  conflicts: Record<VersionedTextConflictId, VersionedTextConflictRecord>;
 }
 
 interface PersistedVersionedTextState {
@@ -214,6 +330,10 @@ interface PersistedVersionedTextState {
 
 function initialState(): PersistedVersionedTextState {
   return { schemaVersion: 1, workspaces: createDictionary() };
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function createDictionary<T>(
@@ -461,6 +581,10 @@ function normalizeState(raw: unknown): PersistedVersionedTextState {
   const seenVersionIds = new Map<VersionId, WorkspaceId>();
   const seenObjectIds = new Map<WorkspaceObjectId, WorkspaceId>();
   for (const [workspaceId, workspace] of Object.entries(raw.workspaces)) {
+    if (isRecord(workspace)) {
+      workspace.forkBaseSnapshots ??= createDictionary();
+      workspace.conflicts ??= createDictionary();
+    }
     assertWorkspaceState(workspaceId, workspace);
     const normalizedWorkspace = normalizeWorkspaceState(
       workspace as unknown as PersistedWorkspaceState,
@@ -559,7 +683,24 @@ function normalizeWorkspaceState(workspace: PersistedWorkspaceState): PersistedW
         ),
       ]),
     ),
+    forkBaseSnapshots: createDictionary(
+      Object.entries(workspace.forkBaseSnapshots).map(([versionId, snapshots]) => [
+        versionId,
+        createDictionary(
+          Object.entries(snapshots).map(([objectId, snapshot]) => [
+            objectId,
+            cloneSnapshot(snapshot),
+          ]),
+        ),
+      ]),
+    ),
     moments: workspace.moments.map(cloneMoment),
+    conflicts: createDictionary(
+      Object.entries(workspace.conflicts).map(([conflictId, conflict]) => [
+        conflictId,
+        cloneJson(conflict),
+      ]),
+    ),
   };
 }
 
@@ -571,6 +712,8 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
   assertRecord(value.objects);
   assertRecord(value.pathAliases);
   assertRecord(value.snapshots);
+  assertRecord(value.forkBaseSnapshots);
+  assertRecord(value.conflicts);
   if (!Array.isArray(value.moments)) {
     throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
   }
@@ -1803,11 +1946,14 @@ function invalidRollbackSnapshot(): never {
   );
 }
 
-function rejectDuplicateId(kind: "moment" | "object" | "version", id: string): never {
+function rejectDuplicateId(kind: "conflict" | "moment" | "object" | "version", id: string): never {
   throw new VersionedTextStoreError("duplicate-id", `Generated ${kind} id ${id} already exists.`);
 }
 
-function normalizeGeneratedId(kind: "moment" | "object" | "version", id: unknown): string {
+function normalizeGeneratedId(
+  kind: "conflict" | "moment" | "object" | "version",
+  id: unknown,
+): string {
   if (
     typeof id !== "string" ||
     id.trim() !== id ||
@@ -1822,7 +1968,7 @@ function normalizeGeneratedId(kind: "moment" | "object" | "version", id: unknown
   return id;
 }
 
-function defaultCreateId(kind: "moment" | "object" | "version"): string {
+function defaultCreateId(kind: "conflict" | "moment" | "object" | "version"): string {
   return `${kind}_${randomUUID()}`;
 }
 
@@ -1847,7 +1993,9 @@ function ensureWorkspace(
     objects: createDictionary(),
     pathAliases: createDictionary([[main.id, createDictionary<WorkspaceObjectId>()]]),
     snapshots: createDictionary([[main.id, createDictionary<TextFileSnapshot>()]]),
+    forkBaseSnapshots: createDictionary(),
     moments: [],
+    conflicts: createDictionary(),
   };
   state.workspaces[workspaceId] = workspace;
   return workspace;
@@ -2137,6 +2285,49 @@ function legacyRollbackBeforeSnapshot(input: {
   );
 }
 
+function snapshotByPath(
+  snapshots: Record<WorkspaceObjectId, TextFileSnapshot> | undefined,
+  path: string,
+): TextFileSnapshot | null {
+  for (const snapshot of Object.values(snapshots ?? {})) {
+    if (snapshot.path === path) return snapshot;
+  }
+  return null;
+}
+
+function fileStateFromSnapshot(
+  path: string,
+  snapshot: TextFileSnapshot | null,
+): VersionedTextFileState {
+  if (!snapshot) return { exists: false, path };
+  return {
+    exists: true,
+    path: snapshot.path,
+    objectId: snapshot.objectId,
+    text: snapshot.text,
+    updatedAtMs: snapshot.updatedAtMs,
+    latestMomentId: snapshot.latestMomentId,
+    metadata: cloneJson(snapshot.metadata),
+  };
+}
+
+function fileStatesEqual(a: VersionedTextFileState, b: VersionedTextFileState): boolean {
+  if (a.exists !== b.exists) return false;
+  if (!a.exists && !b.exists) return true;
+  return a.text === b.text;
+}
+
+function comparisonStatus(input: {
+  base: VersionedTextFileState;
+  current: VersionedTextFileState;
+  incoming: VersionedTextFileState;
+}): VersionedTextComparisonStatus {
+  if (fileStatesEqual(input.current, input.incoming)) return "same";
+  if (fileStatesEqual(input.current, input.base)) return "incoming-changed";
+  if (fileStatesEqual(input.incoming, input.base)) return "current-changed";
+  return "diverged";
+}
+
 function createMoment(input: {
   id: VersionedTextMomentId;
   workspaceId: WorkspaceId;
@@ -2169,7 +2360,7 @@ function createVersionedTextStoreWithHooks(
   const nowMs = options.nowMs ?? (() => Date.now());
   const readNowMs = () => normalizeTimestamp(nowMs());
   const createId = options.createId ?? defaultCreateId;
-  const createGeneratedId = (kind: "moment" | "object" | "version") =>
+  const createGeneratedId = (kind: "conflict" | "moment" | "object" | "version") =>
     normalizeGeneratedId(kind, createId(kind));
   const stateFilePath = storePath(resolve(normalizeRootDir(rootDir)));
   const lockDirPath = `${stateFilePath}.lock`;
@@ -2278,6 +2469,224 @@ function createVersionedTextStoreWithHooks(
     return task();
   }
 
+  function compareTextFileVersionsInWorkspace(input: {
+    workspace: PersistedWorkspaceState;
+    workspaceId: WorkspaceId;
+    targetVersionId: VersionId;
+    sourceVersion: VersionRecord;
+    path: string;
+  }): VersionedTextComparison {
+    if (
+      input.sourceVersion.kind !== "named" ||
+      input.sourceVersion.forkPoint?.versionId !== input.targetVersionId
+    ) {
+      throw new VersionedTextStoreError(
+        "fork-base-not-found",
+        `Version ${input.sourceVersion.id} does not have a fork base for ${input.targetVersionId}.`,
+      );
+    }
+
+    const baseSnapshots = input.workspace.forkBaseSnapshots[input.sourceVersion.id];
+    if (!baseSnapshots) {
+      throw new VersionedTextStoreError(
+        "fork-base-not-found",
+        `Version ${input.sourceVersion.id} does not have durable fork-base snapshots.`,
+      );
+    }
+
+    const base = fileStateFromSnapshot(input.path, snapshotByPath(baseSnapshots, input.path));
+    const current = fileStateFromSnapshot(
+      input.path,
+      snapshotByPath(input.workspace.snapshots[input.targetVersionId], input.path),
+    );
+    const incoming = fileStateFromSnapshot(
+      input.path,
+      snapshotByPath(input.workspace.snapshots[input.sourceVersion.id], input.path),
+    );
+
+    return {
+      workspaceId: input.workspaceId,
+      path: input.path,
+      targetVersionId: input.targetVersionId,
+      sourceVersionId: input.sourceVersion.id,
+      base,
+      current,
+      incoming,
+      status: comparisonStatus({ base, current, incoming }),
+    };
+  }
+
+  function writeTextFileInWorkspace(input: {
+    state: PersistedVersionedTextState;
+    workspace: PersistedWorkspaceState;
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    text: string;
+    metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
+  }): VersionedTextWriteResult {
+    const existingObjectId = findObjectIdByVersionPath(
+      input.workspace,
+      input.versionId,
+      input.path,
+    );
+    const snapshots =
+      getOwn(input.workspace.snapshots, input.versionId) ?? createDictionary<TextFileSnapshot>();
+    input.workspace.snapshots[input.versionId] = snapshots;
+    const before = existingObjectId ? (getOwn(snapshots, existingObjectId) ?? null) : null;
+    if (before && before.path !== input.path) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    const recordedAtMs = readNowMs();
+    let objectId = existingObjectId;
+    let newObject: FileObjectRecord | null = null;
+
+    if (!objectId) {
+      objectId = createGeneratedId("object");
+      if (
+        getOwn(input.workspace.objects, objectId) !== undefined ||
+        objectExistsInAnotherWorkspace(input.state, input.workspaceId, objectId)
+      ) {
+        rejectDuplicateId("object", objectId);
+      }
+      newObject = {
+        id: objectId,
+        workspaceId: input.workspaceId,
+        createdAtMs: recordedAtMs,
+      };
+    }
+
+    const momentId =
+      input.momentId === undefined
+        ? createGeneratedId("moment")
+        : normalizeGeneratedId("moment", input.momentId);
+    if (input.workspace.moments.some((moment) => moment.id === momentId)) {
+      rejectDuplicateId("moment", momentId);
+    }
+    if (newObject) {
+      input.workspace.objects[objectId] = newObject;
+    }
+    const object = getOwn(input.workspace.objects, objectId);
+    if (!object) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    const moment = createMoment({
+      id: momentId,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId,
+      path: input.path,
+      recordedAtMs,
+      operation: "write",
+      metadata: input.metadata,
+      before,
+    });
+    const snapshot: TextFileSnapshot = {
+      objectId,
+      versionId: input.versionId,
+      path: input.path,
+      text: input.text,
+      updatedAtMs: recordedAtMs,
+      latestMomentId: moment.id,
+      metadata: pickWriteMetadata(input.metadata),
+    };
+
+    pathAliasesForVersion(input.workspace, input.versionId)[input.path] = objectId;
+    snapshots[objectId] = snapshot;
+    input.workspace.moments.push(moment);
+    return {
+      object: cloneFileObject(object),
+      snapshot: cloneSnapshot(snapshot),
+      moment: cloneMoment(moment),
+    };
+  }
+
+  function deleteTextFileInWorkspace(input: {
+    workspace: PersistedWorkspaceState;
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
+  }): VersionedTextDeleteResult {
+    const objectId = findObjectIdByVersionPath(input.workspace, input.versionId, input.path);
+    if (!objectId) {
+      throw new VersionedTextStoreError("file-not-found", `File ${input.path} was not found.`);
+    }
+    const snapshots =
+      getOwn(input.workspace.snapshots, input.versionId) ?? createDictionary<TextFileSnapshot>();
+    input.workspace.snapshots[input.versionId] = snapshots;
+    const before = getOwn(snapshots, objectId);
+    if (!before || before.path !== input.path) {
+      throw new VersionedTextStoreError("file-not-found", `File ${input.path} was not found.`);
+    }
+
+    const recordedAtMs = readNowMs();
+    const momentId =
+      input.momentId === undefined
+        ? createGeneratedId("moment")
+        : normalizeGeneratedId("moment", input.momentId);
+    if (input.workspace.moments.some((moment) => moment.id === momentId)) {
+      rejectDuplicateId("moment", momentId);
+    }
+    const moment = createMoment({
+      id: momentId,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      objectId,
+      path: input.path,
+      recordedAtMs,
+      operation: "delete",
+      metadata: input.metadata,
+      before,
+    });
+    const aliases = pathAliasesForVersion(input.workspace, input.versionId);
+    if (getOwn(aliases, input.path) === objectId) {
+      delete aliases[input.path];
+    }
+    delete snapshots[objectId];
+    input.workspace.moments.push(moment);
+    const object = getOwn(input.workspace.objects, objectId);
+    if (!object) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    return {
+      object: cloneFileObject(object),
+      before: cloneSnapshot(before),
+      moment: cloneMoment(moment),
+    };
+  }
+
+  function recordTextConflict(input: {
+    workspace: PersistedWorkspaceState;
+    comparison: VersionedTextComparison;
+    metadata: ActorNeutralWriteMetadata;
+  }): VersionedTextConflictRecord {
+    const recordedAtMs = readNowMs();
+    const conflictId = createGeneratedId("conflict");
+    if (getOwn(input.workspace.conflicts, conflictId) !== undefined) {
+      rejectDuplicateId("conflict", conflictId);
+    }
+    const conflict: VersionedTextConflictRecord = {
+      id: conflictId,
+      workspaceId: input.comparison.workspaceId,
+      path: input.comparison.path,
+      targetVersionId: input.comparison.targetVersionId,
+      sourceVersionId: input.comparison.sourceVersionId,
+      createdAtMs: recordedAtMs,
+      updatedAtMs: recordedAtMs,
+      base: cloneJson(input.comparison.base),
+      current: cloneJson(input.comparison.current),
+      incoming: cloneJson(input.comparison.incoming),
+      status: "open",
+      chosenFrom: "current",
+      metadata: pickWriteMetadata(input.metadata),
+    };
+    input.workspace.conflicts[conflict.id] = conflict;
+    return conflict;
+  }
+
   return {
     ensureMainVersion(input) {
       return serialize(async () => {
@@ -2365,6 +2774,12 @@ function createVersionedTextStoreWithHooks(
             getOwn(workspace.pathAliases, source.id) ?? createDictionary<WorkspaceObjectId>(),
           ),
         );
+        workspace.forkBaseSnapshots[id] = createDictionary<TextFileSnapshot>(
+          Object.entries(sourceSnapshots).map(([objectId, snapshot]) => [
+            objectId,
+            cloneSnapshot(snapshot),
+          ]),
+        );
         await saveState(state, workspaceId);
         return cloneVersion(version);
       });
@@ -2393,77 +2808,18 @@ function createVersionedTextStoreWithHooks(
         const metadata = normalizeWriteMetadata(input.metadata);
         const state = await loadWritableState();
         const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const existingObjectId = findObjectIdByVersionPath(workspace, versionId, path);
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[versionId] = snapshots;
-        const before = existingObjectId ? (getOwn(snapshots, existingObjectId) ?? null) : null;
-        if (before && before.path !== path) {
-          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-        }
-        const recordedAtMs = readNowMs();
-        let objectId = existingObjectId;
-        let newObject: FileObjectRecord | null = null;
-
-        if (!objectId) {
-          objectId = createGeneratedId("object");
-          if (
-            getOwn(workspace.objects, objectId) !== undefined ||
-            objectExistsInAnotherWorkspace(state, workspaceId, objectId)
-          ) {
-            rejectDuplicateId("object", objectId);
-          }
-          newObject = {
-            id: objectId,
-            workspaceId,
-            createdAtMs: recordedAtMs,
-          };
-        }
-
-        const momentId =
-          input.momentId === undefined
-            ? createGeneratedId("moment")
-            : normalizeGeneratedId("moment", input.momentId);
-        if (workspace.moments.some((moment) => moment.id === momentId)) {
-          rejectDuplicateId("moment", momentId);
-        }
-        if (newObject) {
-          workspace.objects[objectId] = newObject;
-        }
-        const object = getOwn(workspace.objects, objectId);
-        if (!object) {
-          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-        }
-        const moment = createMoment({
-          id: momentId,
+        const result = writeTextFileInWorkspace({
+          state,
+          workspace,
           workspaceId,
-          versionId,
-          objectId,
-          path,
-          recordedAtMs,
-          operation: "write",
-          metadata,
-          before,
-        });
-        const snapshot: TextFileSnapshot = {
-          objectId,
           versionId,
           path,
           text,
-          updatedAtMs: recordedAtMs,
-          latestMomentId: moment.id,
-          metadata: pickWriteMetadata(metadata),
-        };
-
-        pathAliasesForVersion(workspace, versionId)[path] = objectId;
-        snapshots[objectId] = snapshot;
-        workspace.moments.push(moment);
+          metadata,
+          momentId: input.momentId,
+        });
         await saveState(state, workspaceId);
-        return {
-          object: cloneFileObject(object),
-          snapshot: cloneSnapshot(snapshot),
-          moment: cloneMoment(moment),
-        };
+        return result;
       });
     },
 
@@ -2480,6 +2836,225 @@ function createVersionedTextStoreWithHooks(
         const snapshots = getOwn(workspace.snapshots, versionId);
         const snapshot = snapshots ? (getOwn(snapshots, objectId) ?? null) : null;
         return snapshot?.path === path ? cloneSnapshot(snapshot) : null;
+      });
+    },
+
+    compareTextFileVersions(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const targetVersionId = normalizeVersionId(input.targetVersionId);
+        const sourceVersionId = normalizeVersionId(input.sourceVersionId);
+        const path = normalizeWritePath(input.path);
+        const state = await loadState();
+        const { workspace } = requireWorkspaceVersion(state, workspaceId, targetVersionId);
+        const { version: sourceVersion } = requireWorkspaceVersion(
+          state,
+          workspaceId,
+          sourceVersionId,
+        );
+        return cloneJson(
+          compareTextFileVersionsInWorkspace({
+            workspace,
+            workspaceId,
+            targetVersionId,
+            sourceVersion,
+            path,
+          }),
+        );
+      });
+    },
+
+    mergeTextFileFromVersion(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const targetVersionId = normalizeVersionId(input.targetVersionId);
+        const sourceVersionId = normalizeVersionId(input.sourceVersionId);
+        const path = normalizeWritePath(input.path);
+        const metadata = normalizeWriteMetadata(input.metadata);
+        const state = await loadWritableState();
+        const { workspace } = requireWorkspaceVersion(state, workspaceId, targetVersionId);
+        const { version: sourceVersion } = requireWorkspaceVersion(
+          state,
+          workspaceId,
+          sourceVersionId,
+        );
+        const comparison = compareTextFileVersionsInWorkspace({
+          workspace,
+          workspaceId,
+          targetVersionId,
+          sourceVersion,
+          path,
+        });
+
+        if (fileStatesEqual(comparison.current, comparison.incoming)) {
+          return cloneJson({ kind: "unchanged", reason: "already-same", comparison });
+        }
+        if (fileStatesEqual(comparison.incoming, comparison.base)) {
+          return cloneJson({ kind: "unchanged", reason: "source-unchanged", comparison });
+        }
+
+        if (fileStatesEqual(comparison.current, comparison.base)) {
+          if (comparison.incoming.exists) {
+            const write = writeTextFileInWorkspace({
+              state,
+              workspace,
+              workspaceId,
+              versionId: targetVersionId,
+              path,
+              text: comparison.incoming.text ?? "",
+              metadata,
+            });
+            await saveState(state, workspaceId);
+            return cloneJson({ kind: "merged", operation: "write", comparison, write });
+          }
+          const deletion = deleteTextFileInWorkspace({
+            workspace,
+            workspaceId,
+            versionId: targetVersionId,
+            path,
+            metadata,
+          });
+          await saveState(state, workspaceId);
+          return cloneJson({
+            kind: "merged",
+            operation: "delete",
+            comparison,
+            delete: deletion,
+          });
+        }
+
+        if (
+          comparison.base.exists &&
+          comparison.current.exists &&
+          comparison.incoming.exists
+        ) {
+          const merged = mergeMarkdown({
+            base: comparison.base.text ?? "",
+            local: comparison.current.text ?? "",
+            remote: comparison.incoming.text ?? "",
+          });
+          if (merged.kind === "merged") {
+            const write = writeTextFileInWorkspace({
+              state,
+              workspace,
+              workspaceId,
+              versionId: targetVersionId,
+              path,
+              text: merged.content,
+              metadata,
+            });
+            await saveState(state, workspaceId);
+            return cloneJson({ kind: "merged", operation: "write", comparison, write });
+          }
+        }
+
+        const conflict = recordTextConflict({
+          workspace,
+          comparison,
+          metadata,
+        });
+        await saveState(state, workspaceId);
+        return cloneJson({ kind: "conflict", comparison, conflict });
+      });
+    },
+
+    listTextConflicts(input) {
+      return afterWrites(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        if (
+          input.status !== undefined &&
+          input.status !== "open" &&
+          input.status !== "resolved"
+        ) {
+          throw new VersionedTextStoreError("invalid-input", "Conflict status is invalid.");
+        }
+        const state = await loadState();
+        const workspace = getOwn(state.workspaces, workspaceId);
+        if (!workspace) return [];
+        return Object.values(workspace.conflicts)
+          .filter((conflict) => !input.status || conflict.status === input.status)
+          .sort((a, b) => a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id))
+          .map(cloneJson);
+      });
+    },
+
+    resolveTextConflict(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const conflictId = normalizeGeneratedId("conflict", input.conflictId);
+        const metadata = normalizeWriteMetadata(input.metadata);
+        const mergedText =
+          input.resolution.kind === "apply-merged"
+            ? normalizeWriteText(input.resolution.text)
+            : undefined;
+        const state = await loadWritableState();
+        const workspace = getOwn(state.workspaces, workspaceId);
+        const conflict = workspace ? getOwn(workspace.conflicts, conflictId) : undefined;
+        if (!workspace || !conflict) {
+          throw new VersionedTextStoreError(
+            "conflict-not-found",
+            `Conflict ${conflictId} was not found in workspace ${workspaceId}.`,
+          );
+        }
+        const current = fileStateFromSnapshot(
+          conflict.path,
+          snapshotByPath(workspace.snapshots[conflict.targetVersionId], conflict.path),
+        );
+        if (!fileStatesEqual(current, conflict.current)) {
+          throw new VersionedTextStoreError(
+            "conflict-stale-target",
+            `Conflict ${conflict.id} no longer matches ${conflict.path}.`,
+          );
+        }
+
+        let write: VersionedTextWriteResult | undefined;
+        let deletion: VersionedTextDeleteResult | undefined;
+        let resolution: VersionedTextConflictResolution = "kept-current";
+        if (input.resolution.kind === "apply-incoming") {
+          resolution = "applied-incoming";
+          conflict.chosenFrom = "incoming";
+          if (conflict.incoming.exists) {
+            write = writeTextFileInWorkspace({
+              state,
+              workspace,
+              workspaceId,
+              versionId: conflict.targetVersionId,
+              path: conflict.path,
+              text: conflict.incoming.text ?? "",
+              metadata,
+            });
+          } else if (conflict.current.exists) {
+            deletion = deleteTextFileInWorkspace({
+              workspace,
+              workspaceId,
+              versionId: conflict.targetVersionId,
+              path: conflict.path,
+              metadata,
+            });
+          }
+        } else if (input.resolution.kind === "apply-merged") {
+          resolution = "applied-merged";
+          conflict.chosenFrom = "merged";
+          write = writeTextFileInWorkspace({
+            state,
+            workspace,
+            workspaceId,
+            versionId: conflict.targetVersionId,
+            path: conflict.path,
+            text: mergedText ?? "",
+            metadata,
+          });
+        }
+
+        conflict.status = "resolved";
+        conflict.resolution = resolution;
+        conflict.updatedAtMs = readNowMs();
+        await saveState(state, workspaceId);
+        return cloneJson({ kind: "resolved", conflict, write, delete: deletion });
       });
     },
 
@@ -2587,53 +3162,16 @@ function createVersionedTextStoreWithHooks(
         const metadata = normalizeWriteMetadata(input.metadata);
         const state = await loadWritableState();
         const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
-        const objectId = findObjectIdByVersionPath(workspace, versionId, path);
-        if (!objectId) {
-          throw new VersionedTextStoreError("file-not-found", `File ${path} was not found.`);
-        }
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[versionId] = snapshots;
-        const before = getOwn(snapshots, objectId);
-        if (!before || before.path !== path) {
-          throw new VersionedTextStoreError("file-not-found", `File ${path} was not found.`);
-        }
-
-        const recordedAtMs = readNowMs();
-        const momentId =
-          input.momentId === undefined
-            ? createGeneratedId("moment")
-            : normalizeGeneratedId("moment", input.momentId);
-        if (workspace.moments.some((moment) => moment.id === momentId)) {
-          rejectDuplicateId("moment", momentId);
-        }
-        const moment = createMoment({
-          id: momentId,
+        const result = deleteTextFileInWorkspace({
+          workspace,
           workspaceId,
           versionId,
-          objectId,
           path,
-          recordedAtMs,
-          operation: "delete",
           metadata,
-          before,
+          momentId: input.momentId,
         });
-        const aliases = pathAliasesForVersion(workspace, versionId);
-        if (getOwn(aliases, path) === objectId) {
-          delete aliases[path];
-        }
-        delete snapshots[objectId];
-        workspace.moments.push(moment);
-        const object = getOwn(workspace.objects, objectId);
-        if (!object) {
-          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
-        }
         await saveState(state, workspaceId);
-        return {
-          object: cloneFileObject(object),
-          before: cloneSnapshot(before),
-          moment: cloneMoment(moment),
-        };
+        return result;
       });
     },
 
