@@ -65,18 +65,27 @@ The UI can say chat. The system should not inherit a stream-first data model.
 Minimal `ThreadReadState`:
 
 ```ts
+type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
+type UnixMsDecimalString = string // canonical base-10 Unix epoch milliseconds
+
 type ThreadReadState = {
   workspaceId: string
   threadId: string
   actorId: string
   lastReadCursor: {
-    threadSequence: number
-    createdAt: number
+    threadSequence: UInt64DecimalString
+    createdAt: UnixMsDecimalString
     messageId: string
   }
-  updatedAt: number
+  updatedAt: UnixMsDecimalString
 }
 ```
+
+`threadSequence`, `createdAt`, `editedAt`, `deletedAt`, `lastActivityAt`, and
+`updatedAt` use these canonical decimal-string encodings at storage, API,
+projection, and worker boundaries. Implementations compare them as integer
+values using a 64-bit/BigInt-safe path, never as floating-point JavaScript
+numbers and never with locale string collation.
 
 The canonical read cursor is sequence-based, not timestamp-based. No row means
 nothing in the thread has been read by that actor. Updates are monotonic: read
@@ -210,8 +219,8 @@ type ChatThreadBase = {
   title?: string
   status: 'open' | 'closed' | 'decided' | 'archived'
   createdBy: string
-  createdAt: number
-  lastActivityAt: number
+  createdAt: UnixMsDecimalString
+  lastActivityAt: UnixMsDecimalString
   linkedWork: ThreadLink[]
   pinned: boolean
 }
@@ -228,6 +237,11 @@ type DmChatThread = ChatThreadBase & {
 
 type ChatThread = ChannelChatThread | DmChatThread
 ```
+
+`ChatThread.title` and any other user/agent-authored thread metadata are
+untrusted text. They must be escaped by default or sanitized through the same
+allowlisted formatting subset used for message bodies before appearing in UI,
+search snippets, notifications, summaries, projections, or exports.
 
 A thread must have exactly one owner shape: channel-backed or DM-backed. It
 must never have both `channelId` and `dmParticipantIds`, and it must never have
@@ -278,14 +292,14 @@ type ThreadMessage = {
   id: string
   workspaceId: string
   threadId: string
-  threadSequence: number
+  threadSequence: UInt64DecimalString
   parentMessageId?: string
   authorId: string
   authorKind: 'human' | 'agent' | 'system'
   body: string
-  createdAt: number
-  editedAt?: number
-  deletedAt?: number
+  createdAt: UnixMsDecimalString
+  editedAt?: UnixMsDecimalString
+  deletedAt?: UnixMsDecimalString
   deletedById?: string
   deleteReason?: string
   tombstone?: boolean

@@ -644,6 +644,15 @@ Twenty-fourth pass:
 - Fixed CodeRabbit follow-up finding:
   - Aligned execution-log table titles for PR IDs 13-15 with the canonical mega
     plan entries.
+
+Twenty-fifth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added canonical decimal-string encodings for chat sequence and timestamp
+    fields, with BigInt/64-bit-safe comparison requirements.
+  - Marked `ChatThread.title` and user/agent-authored thread metadata as
+    untrusted text requiring escaping or sanitization across UI, search,
+    notifications, projections, summaries, and exports.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
