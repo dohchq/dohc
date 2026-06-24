@@ -226,6 +226,11 @@ Examples:
 Files remain a first-class affordance. The engine gives them stronger history,
 visibility, recovery, and merge behavior.
 
+Projection safety is mandatory. Any HTML/renderable projection, including HTML
+atoms and app/site previews, must be sanitized and sandboxed before display.
+Content drivers must declare projection safety behavior as part of their
+snapshot/diff/merge/projection/export/search contract.
+
 ## Filesystem/API duality
 
 Agents should not need a special dohc source-control protocol.
@@ -353,6 +358,10 @@ History, durability logs, diffs, search, exports, and agent logs must not
 capture raw secret values. Secret-backed content may be persisted only as
 encrypted references, redacted forms, or broker-managed metadata while the
 timeline remains crash-safe and recoverable.
+
+Secret reference resolution is workspace-scoped and fail-closed. A reference
+issued for one workspace must not be dereferenced from another workspace,
+version, share, export, capture, search, or agent-log context.
 
 ## Interface sketch
 

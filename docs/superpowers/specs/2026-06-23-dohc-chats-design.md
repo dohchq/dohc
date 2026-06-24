@@ -45,6 +45,24 @@ Use better primitives internally:
 The UI can say chat. The system should not inherit Slack's stream-first data
 model.
 
+Minimal `ThreadReadState`:
+
+```ts
+type ThreadReadState = {
+  workspaceId: string
+  threadId: string
+  actorId: string
+  lastReadMessageId?: string
+  lastReadAt?: number
+  updatedAt: number
+}
+```
+
+At least one of `lastReadMessageId` or `lastReadAt` is required. Updates are
+monotonic: read state can only advance forward in the thread, never move
+backward. Chats, Inbox, file side rails, notification badges, and search result
+read/unread markers must all derive from this workspace-scoped state.
+
 ## Core model
 
 ```text
@@ -170,7 +188,9 @@ must never have both `channelId` and `dmParticipantIds`, and it must never have
 neither. Creation and update paths must validate this XOR before routing,
 authorization checks, notifications, search indexing, or projection handling.
 DM-backed threads require at least two unique participants; a one-person DM is
-invalid.
+invalid. Before persistence, routing, key generation, indexing, or ACL checks,
+`dmParticipantIds` must be deduplicated and stable-sorted. The XOR ownership
+rule is enforced after canonicalization.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
@@ -194,6 +214,7 @@ Fields:
 ```ts
 type ThreadMessage = {
   id: string
+  workspaceId: string
   threadId: string
   parentMessageId?: string
   authorId: string
@@ -205,9 +226,11 @@ type ThreadMessage = {
 ```
 
 If `parentMessageId` is present, it must reference an existing message in the
-same `threadId`, must not equal the message's own `id`, and must not introduce
-a cycle in the ancestry chain. Message create/update paths must validate this
-before rendering nested replies, indexing, notification fanout, or projection
+same workspace and `threadId`, must not equal the message's own `id`, and must
+not introduce a cycle in the ancestry chain. `ThreadMessage.workspaceId` must
+match `ChatThread.workspaceId` wherever messages are written, read, indexed,
+notified, or projected. Message create/update paths must validate this before
+rendering nested replies, indexing, notification fanout, or projection
 generation.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.

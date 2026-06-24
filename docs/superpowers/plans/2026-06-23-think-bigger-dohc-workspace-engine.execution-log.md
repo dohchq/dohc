@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: not started
+Status: PR 00 in review
 Created: 2026-06-23
 
 Plan:
@@ -274,6 +274,23 @@ git diff --check
   - Fourth pass major: message reply parent integrity was underspecified.
   - Fourth pass major: local edits to read-only chat projection files needed a
     canonical reject/preserve/regenerate policy.
+  - Fifth pass major: versioned workspace projections needed mandatory HTML
+    sanitization and sandboxing.
+  - Fifth pass major: secret references needed workspace-scoped fail-closed
+    resolution.
+  - Fifth pass minor: top-level execution status was stale.
+  - Fifth pass major: Phase 0 workspace-scope gate needed atom/folder/entity
+    coverage.
+  - Fifth pass major: chat read state needed schema and monotonic update rules.
+  - Fifth pass major: DM participant ids needed dedupe/stable-sort
+    canonicalization.
+  - Fifth pass major: messages needed direct workspace scoping.
+  - Fifth pass major: filesystem async payloads needed workspace/version/request
+    correlation.
+  - Fifth pass major: secret access policy needed separate read/write
+    permission rules.
+  - Fifth pass major: raw local write reconciliation needed authorization before
+    persisting into version history.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -304,6 +321,16 @@ git diff --check
   - Added `parentMessageId` same-thread, no-self, no-cycle invariants.
   - Specified that local projection edits do not mutate canonical chat and must
     be preserved as recovery/status before projection regeneration.
+  - Added mandatory sanitization/sandboxing for HTML/renderable projections.
+  - Added workspace-scoped fail-closed secret reference resolution.
+  - Updated top-level status to PR 00 in review.
+  - Expanded Phase 0 workspace-scope gate to atoms, folders, and entities.
+  - Added `ThreadReadState` schema and monotonic update rules.
+  - Added DM participant canonicalization rules.
+  - Added `ThreadMessage.workspaceId` and matching invariants.
+  - Added async workspace/version/request correlation requirements.
+  - Split secret read vs write permission requirements.
+  - Added reconciliation-time authorization for raw local writes.
 - Overrides:
 
 ### Subagent Reviews
@@ -367,8 +394,8 @@ Gate evidence:
 - [ ] File/API writes save immediately and produce recoverable history.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
-- [ ] Every file, version, chat, share, capture, event, search result, and
-      projection is workspace-scoped.
+- [ ] Every atom, folder, entity, file, version, chat, share, capture, event,
+      search result, and projection is workspace-scoped.
 - [ ] Agent writes respect user locks, protected paths, folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.

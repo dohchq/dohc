@@ -67,6 +67,12 @@ the active workspace, version, and effective file policy for captured writes.
 For raw local filesystem writes, exact process identity is not required; the
 write can be reconciled as a local/device/session change.
 
+Identity-light capture is allowed; identity-light commit is not. During
+reconciliation, each raw local write must be revalidated against workspace
+scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
+and effective policy before it is persisted into version history. Unauthorized
+or indeterminate writes must be quarantined or rejected rather than merged.
+
 ## Same rules for humans and agents
 
 dohc should not make agents second-class writers.
@@ -193,6 +199,22 @@ restore(version, pointInTime)
 This answers the "source control should not require a real OS/filesystem"
 requirement. The file mount and the API are peer views over the same versioned
 workspace engine.
+
+Every async watch/status/snapshot payload must include workspace identity,
+version identity, and a request token or equivalent correlation id before it can
+update UI state:
+
+```ts
+type WorkspaceAsyncPayload = {
+  workspaceId: string
+  versionId: string
+  requestToken: string
+}
+```
+
+Handlers for `watch(path)`, `snapshot(version)`, status APIs, and filesystem
+loading must verify these fields before applying results. A stale response from
+one workspace/version/session must never repaint another.
 
 ## File state axes
 
@@ -452,8 +474,9 @@ policy where dohc controls the access path.
 
 Possible policies:
 
-- `allow`: dohc-controlled tools can read/write when they have version write
-  access.
+- `allow`: dohc-controlled tools can read when they have read permission plus
+  the secret capability, and write when they have write permission plus the
+  secret capability.
 - `ask`: ask before first access in a run/session.
 - `explicit`: the user must grant this run/process access.
 - `deny`: never expose through dohc-controlled agent/tool paths.
