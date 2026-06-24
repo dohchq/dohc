@@ -470,11 +470,13 @@ The displayed `v1-<digest>.md` filename is the canonical deterministic
 projection path shape; the raw thread id must not be used as a projection
 filename. Projection writers must map the canonical thread id to a
 deterministic filename using one fixed algorithm across all runtimes: compute
-`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind)`, encode
-the digest as lowercase RFC 4648 base32 with no padding, and write
-`.dohc/chats/v1-<digest>.md`. The input framing, hash, encoding, lowercase
-normalization, no-padding rule, and `v1-` prefix are the canonical contract and
-must not vary by implementation. The projection must store or otherwise verify
+`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind)`, where
+each field is first normalized to Unicode NFC and encoded as UTF-8 bytes. Then
+encode the digest as lowercase RFC 4648 base32 with no padding, and write
+`.dohc/chats/v1-<digest>.md`. The input framing, Unicode normalization,
+UTF-8 encoding, hash, lowercase digest encoding, no-padding rule, and `v1-`
+prefix are the canonical contract and must not vary by implementation. The
+projection must store or otherwise verify
 the exact canonical thread id, workspace id, projection kind, and derived
 filename in metadata before writing, and must reject ambiguous ids or any
 computed filename that already maps to a different canonical tuple. Projection
