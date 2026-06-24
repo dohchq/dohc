@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Kickoff pre-read path fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | Base-version/.dohc boundary fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -255,7 +255,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after kickoff pre-read path fix.
+- Status: fixes applied; rerun pending after base-version/.dohc boundary fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -589,7 +589,7 @@ Nineteenth pass:
 
 - Fixed CodeRabbit follow-up findings:
   - Added causal replay gates for denied/quarantined ingest holding areas,
-    including base snapshot/CAS metadata and fresh apply-time auth/policy
+    including base version/CAS metadata and fresh apply-time auth/policy
     revalidation.
   - Required every chat primitive, including channels, links, activities, and
     read state, to carry and key lookups by `workspaceId`.
@@ -680,7 +680,7 @@ Twenty-seventh pass:
 - Fixed CodeRabbit follow-up findings:
   - Removed stable object ids from causal write precondition unions; object ids
     are now optional targeting metadata and must be paired with freshness
-    tokens such as base snapshot, etag, content hash, or absence assertion.
+    tokens such as base version, etag, content hash, or absence assertion.
   - Added chat links to the first-slice workspace-scoping E2E checklist.
   - Replaced placeholder brand-guard command text with the exact Node 24.18.0
     setup and test command executed, while recording Node and pnpm environment
@@ -706,6 +706,16 @@ Twenty-ninth pass:
   - Added repo-mandated `apps/app/AGENTS.md` and
     `apps/app/convex/_generated/ai/guidelines.md` kickoff checks alongside the
     existing `apps/web/AGENTS.md` check, with execution-log recording required.
+
+Thirtieth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Normalized the versioned workspace write precondition to the shared
+    `expectedBaseVersion` schema name used by the native filesystem API.
+  - Clarified that `.dohc/files.toml` is a source-backed policy entry while
+    `.dohc/status.json`, `.dohc/conflicts/**`, and `.dohc/chats/**` are
+    internal projections/reserved state unless a purpose-built export policy
+    explicitly includes redacted derived state.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -713,7 +723,7 @@ Twenty-ninth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the kickoff pre-read path fix.
+- Pending the latest CodeRabbit rerun after the base-version/.dohc boundary fix.
 
 ### Subagent Reviews
 

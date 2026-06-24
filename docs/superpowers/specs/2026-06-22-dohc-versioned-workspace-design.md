@@ -90,8 +90,8 @@ explanations, or retry metadata. Secret-bearing ingests are stored only as
 encrypted references, redacted forms, or broker metadata until an authorized
 read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata
-must include `workspaceId`, `versionId`, and the expected base snapshot,
-content hash, or equivalent CAS token captured with the original ingest. At
+must include `workspaceId`, `versionId`, and the `expectedBaseVersion`, content
+hash, or equivalent CAS token captured with the original ingest. At
 apply time, the engine revalidates workspace scope plus server-derived
 authorization, policy, visibility, protected-path, lock, version-access, and
 skill-turn checks. If the base advanced, the workspace binding is ambiguous, or
@@ -289,7 +289,7 @@ in-memory, browser, and agent runtimes:
 ```text
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
-  precondition: exactly one of expectedBaseSnapshot | expectedEtag | expectedContentHash | expectedAbsent,
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
   targetObjectId?,
   idempotencyKey?
 })
@@ -311,7 +311,7 @@ The filesystem is one interface. It should not be the only possible execution
 environment.
 
 API writes are never unconditional overwrites. A write must include exactly one
-causal precondition: expected base snapshot, etag, content hash, absence
+causal precondition: expected base version, etag, content hash, absence
 assertion for creates, or another monotonic freshness token. Stable object ids
 may identify the intended target object, but they are not causal freshness
 guards and cannot authorize overwrite by themselves. If the precondition does

@@ -368,15 +368,24 @@ This avoids accidental deletion, duplication, or merge of social state.
 `.dohc/` is an inspectable control/projection surface, not an unmanaged user
 workspace.
 
-Allowed examples:
+Source-backed policy entries are explicitly allowlisted and validated before
+they can affect engine behavior:
 
 - `.dohc/files.toml`
+
+Internal projection/reserved-state examples are inspectable, but they are not
+source-backed user content, not importable as ordinary workspace files, and not
+exported unless a purpose-built export policy explicitly includes redacted
+derived state:
+
 - `.dohc/status.json`
 - `.dohc/conflicts/**`
 - `.dohc/chats/**` read projections
 
-Every `.dohc/` path must declare its projection writeability and validation
-rules. The engine must reject unsafe direct edits.
+Every `.dohc/` path must declare whether it is an allowlisted policy file or an
+internal projection/reserved-state path, plus its projection writeability and
+validation rules. The engine must reject unsafe direct edits and must never
+re-ingest internal `.dohc/` projections as canonical user content.
 
 ## Engine Concepts
 
