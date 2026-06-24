@@ -500,6 +500,18 @@ Thirteenth pass:
     secret-handling, data-loss, and review-gate blockers are non-overridable.
   - Added the missing `### Unresolved Findings` section to the live PR 00
     execution-log entry and marked it as none after fixes.
+
+Fourteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Updated the duplicate CodeRabbit-loop pointer to reference the actual
+    `CodeRabbit Loop` section under `Agent And Review Workflow`.
+  - Clarified that importers evaluate allowlisted `.dohc/*` policy inputs
+    before quarantining reserved `.dohc/**` namespace content.
+  - Required atomic conditional upsert/CAS semantics for `lastReadCursor`
+    advancement so stale concurrent reads cannot regress read state.
+  - Required a unique `(workspaceId, threadId, threadSequence)` constraint and
+    transactional or serialized sequence allocation for chat messages.
 - Overrides:
 
 ### Unresolved Findings

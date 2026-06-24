@@ -2368,7 +2368,7 @@ Reproduce
 
 ### CodeRabbit Loop
 
-Use the canonical CodeRabbit loop defined in `Review And QA Orchestration`
+Use the canonical `CodeRabbit Loop` section under `Agent And Review Workflow`
 above. Do not move to the next PR with unresolved CodeRabbit findings unless
 the finding is a documented non-sensitive non-blocker and the user explicitly
 approves the override in the PR and execution log. Authorization, ownership,

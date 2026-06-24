@@ -67,14 +67,19 @@ the active workspace, version, and effective file policy for captured writes.
 For raw local filesystem writes, exact process identity is not required; the
 write can be reconciled as a local/device/session change.
 
-Reserved namespace collisions fail closed. If import, attach, sync, or a raw
-filesystem scan finds user-created `.versions/**`, `.dohc/**`, or aliases of
-those names where dohc expects engine state, dohc must not treat the content as
-normal workspace data. The importer either quarantines the tree with an
-explainable record, proposes a safe rename outside reserved namespaces, or asks
-for manual resolution before the workspace is activated. Internal `.dohc/**`
-state is never re-ingested as user content, and user-created `.versions` content
-is never silently promoted into a named version.
+Reserved namespace collisions fail closed. The importer evaluates the explicit
+source-backed policy allowlist before applying reserved-namespace quarantine:
+approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
+optional `.dohcignore` may be tracked as policy files, while all other
+`.dohc/**` content remains reserved engine state. If import, attach, sync, or a
+raw filesystem scan finds user-created `.versions/**`, non-allowlisted
+`.dohc/**`, or aliases of those names where dohc expects engine state, dohc must
+not treat the content as normal workspace data. The importer either quarantines
+the tree with an explainable record, proposes a safe rename outside reserved
+namespaces, or asks for manual resolution before the workspace is activated.
+Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
+and user-created `.versions` content is never silently promoted into a named
+version.
 
 Identity-light capture is allowed; identity-light commit is not. During
 reconciliation, each raw local write must be revalidated against workspace
@@ -326,10 +331,13 @@ should support richer rules.
 capture/sync ingestion by default. Recursive self-capture is forbidden: history,
 status, conflicts, indexes, caches, and generated projections under `.dohc/`
 must not be exported, searched, synced, or re-ingested as ordinary user files.
-Only a small explicit allowlist of source-backed policy files such as
+The importer applies the same allowlist-before-quarantine rule here: only a
+small explicit allowlist of source-backed policy files such as
 `.dohc/files.toml`, `.dohc/visibility.toml`, or a temporary `.dohcignore` may
 participate in normal tracking, and even those files are interpreted as policy
-inputs, not arbitrary captured content.
+inputs, not arbitrary captured content. All other `.dohc/**` paths are
+reserved, non-user-content inputs that must be quarantined, ignored, or handled
+through engine-specific recovery rather than captured as ordinary files.
 
 Example:
 

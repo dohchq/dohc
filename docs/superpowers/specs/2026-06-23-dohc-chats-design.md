@@ -70,7 +70,12 @@ the canonical per-thread ordering comparator:
 contract, and `lastReadAt` is not a valid advancement fallback. `ThreadReadState`
 is unique on `(workspaceId, threadId, actorId)` and writes are upserts, not
 inserts that can duplicate rows. Updating `lastReadCursor` must compare against
-the canonical comparator before advancing.
+the canonical comparator before advancing. The write must be atomic: use a
+conditional upsert, transactional compare-and-swap, or equivalent CAS semantics
+that advances `lastReadCursor` only when the incoming
+`(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
+Concurrent stale updates must no-op or retry, never overwrite a newer cursor
+with an older one.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -78,7 +83,10 @@ creation time. It is scoped to `(workspaceId, threadId)`, never reused, and used
 with `createdAt` and `messageId` only as the deterministic ordering tuple for
 cursor advancement. Projection builders, notification workers, search indexers,
 and read-state updates must all use that same
-`(threadSequence, createdAt, messageId)` tuple.
+`(threadSequence, createdAt, messageId)` tuple. The canonical store must enforce
+a unique constraint on `(workspaceId, threadId, threadSequence)`, and sequence
+allocation must happen transactionally or under serialized per-thread locking
+during message creation so duplicate sequence numbers cannot be persisted.
 
 ## Core model
 
