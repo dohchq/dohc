@@ -39,8 +39,10 @@ Required evidence:
 - follow-up deletion conditions.
 
 Do not mark a PR complete with skipped critical E2E, unresolved P0/P1 findings,
-missing CodeRabbit review, or unmeasured performance-sensitive changes unless
-the user explicitly approves an override.
+missing CodeRabbit review, or unmeasured performance-sensitive changes. Only
+non-critical documentation-only exceptions may be overridden by explicit user
+approval, and never for authorization, ownership, workspace-scope,
+secret-handling, data-loss, or review-gate blockers.
 
 ## PR Status Table
 
@@ -487,7 +489,22 @@ Twelfth pass:
   - Narrowed export wording to explicitly allowlist `.dohc/files.toml`,
     `.dohc/visibility.toml`, and optional `.dohcignore` while excluding
     generated/internal projections, indexes, caches, and durability internals.
+
+Thirteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Removed external product comparison language from the chats and native
+    filesystem specs while preserving the dohc-native product intent.
+  - Tightened PR completion rules so critical E2E, unresolved P0/P1,
+    CodeRabbit, performance, authorization, ownership, workspace-scope,
+    secret-handling, data-loss, and review-gate blockers are non-overridable.
+  - Added the missing `### Unresolved Findings` section to the live PR 00
+    execution-log entry and marked it as none after fixes.
 - Overrides:
+
+### Unresolved Findings
+
+- None.
 
 ### Subagent Reviews
 

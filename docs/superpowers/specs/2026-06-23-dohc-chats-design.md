@@ -10,8 +10,8 @@ Companions:
 
 ## Core thesis
 
-dohc should not add Slack as a sidebar. dohc should make conversation part of
-the workspace.
+dohc should not bolt chat onto the side. dohc should make conversation part of
+the workspace itself.
 
 The user-facing label should be **Chats** because it is familiar and obvious.
 The underlying shape should be durable, post-like work threads attached to
@@ -21,8 +21,8 @@ The product promise:
 
 > Chat about work where the work actually lives.
 
-Slack is mostly a stream of messages. dohc chats should be durable work
-conversations with source context.
+Stream-first chat tools are mostly message timelines. dohc chats should be
+durable work conversations with source context.
 
 ## Naming
 
@@ -42,8 +42,7 @@ Use better primitives internally:
 - `ThreadActivity`
 - `ThreadReadState`
 
-The UI can say chat. The system should not inherit Slack's stream-first data
-model.
+The UI can say chat. The system should not inherit a stream-first data model.
 
 Minimal `ThreadReadState`:
 
@@ -93,10 +92,10 @@ Channel / DM
 
 Channels organize chats. Chats hold the work.
 
-This is the key difference from Slack:
+This is the key model difference:
 
 ```text
-Slack:
+conventional chat:
   channel stream -> messages -> occasional thread
 
 dohc:
@@ -147,7 +146,7 @@ viewed.
 dohc needs fast personal conversation.
 
 If dohc only supports channels and durable work threads, it will feel stiff.
-Slack and Teams are sticky partly because direct conversation is effortless.
+Messaging tools are sticky partly because direct conversation is effortless.
 
 Required surfaces:
 
@@ -214,7 +213,7 @@ Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
 
 The interface must not feel like a forum. Starting a chat should be as fast as
-typing in Slack:
+typing in a normal chat:
 
 ```text
 open channel -> type -> send
@@ -503,8 +502,8 @@ Right rail:
     <User Name>'s agent updated the forecast
 ```
 
-This is where dohc becomes better than Slack. The conversation is beside the
-work, not in a separate stream.
+This is where dohc becomes work-native. The conversation is beside the work,
+not in a separate stream.
 
 ## Presence and lightweight reactions
 
@@ -550,7 +549,7 @@ Notification priority should come from work relevance:
 Avoid noisy bot spam. Integrations and agents should post into relevant chats,
 not dump every event into a channel stream.
 
-## Search better than Slack
+## Workspace-native search
 
 Search must span the workspace, not just chat text.
 
@@ -582,8 +581,8 @@ Agent run: <User Name>'s agent forecast pass
   replied in Q3 pricing decision
 ```
 
-This is a major advantage over Slack: search can understand the relationship
-between the conversation and the work.
+This is a major advantage over standalone chat: search can understand the
+relationship between the conversation and the work.
 The search pipeline must classify or redact secrets before indexing or rendering
 results across chats, messages, files, versions, history moments, agent runs,
 apps/data, and source-context snippets. Search snippets must never expose
@@ -591,7 +590,7 @@ plaintext secrets that are not visible through the same policy-aware read path.
 
 ## External and shared channels
 
-Shared channels are one of Slack's strongest lock-in features.
+Shared channels are one of standalone chat products' strongest retention loops.
 
 dohc should eventually support external/shared channels across workspaces.
 This fits dohc especially well because dohc can already share files, folders,
@@ -680,7 +679,7 @@ Examples:
 - summarize a chat into a document.
 - create tasks from a chat.
 
-This is what makes dohc more than Slack.
+This is what makes dohc more than standalone chat.
 
 ## What not to do
 
@@ -691,7 +690,7 @@ Do not make chats feel like a forum:
 - no heavy templates for casual conversation.
 - no making every message a formal artifact in the UI.
 
-Do not make chats feel like a generic Slack clone:
+Do not make chats feel like a generic chat clone:
 
 - no channel-only stream as the core model.
 - no bot spam firehose.
@@ -729,11 +728,11 @@ workflow features.
 
 ## North star
 
-Slack is where people talk around the work.
+Standalone chat is where people talk around the work.
 
 dohc Chats should be where people and agents talk inside the work.
 
-The interface should feel familiar enough that Slack users understand it, but
+The interface should feel familiar enough that chat users understand it, but
 the model should be much stronger:
 
 > Channels gather people. Chats hold work. Every chat can connect to files,

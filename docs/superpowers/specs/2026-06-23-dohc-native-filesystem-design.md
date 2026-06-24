@@ -16,9 +16,9 @@ The user-facing promise:
 > terminals, and tools. dohc quietly adds versions, history, sync, lazy
 > hydration, permissions, conflict recovery, and safe secrets.
 
-This is the dohc version of "Dropbox for devs / agents": one consistent
-workspace structure across machines and agents, with the safety and semantics
-that Dropbox and Git do not provide.
+This is the dohc-native version of workspace sync for humans and agents: one
+consistent workspace structure across machines and agent environments, with the
+safety, versioning, and permission semantics dohc needs.
 
 ## Relationship to version control
 
@@ -216,9 +216,8 @@ merge(sourceVersion, targetVersion)
 restore(version, pointInTime)
 ```
 
-This answers the "source control should not require a real OS/filesystem"
-requirement. The file mount and the API are peer views over the same versioned
-workspace engine.
+This answers the API-native workspace requirement. The file mount and the API
+are peer views over the same versioned workspace engine.
 
 `write(path, bytes, ...)` is never an unconditional overwrite. It must carry a
 causal precondition such as the expected base version, etag, content hash, an
@@ -273,7 +272,7 @@ Examples:
 | `scratch/**` | optional | no | local |
 | `.env` | yes | yes | local |
 
-This avoids naive Dropbox behavior such as syncing `node_modules`, build output,
+This avoids naive folder-sync behavior such as syncing `node_modules`, build output,
 and cache folders.
 Materialization describes storage shape only; authorization decides whether a
 specific actor can hydrate or read local plaintext for a protected path such as
@@ -287,9 +286,9 @@ history.
 
 ## Workspace file policy
 
-dohc needs a richer version of `.gitignore`.
+dohc needs a richer source-backed file policy.
 
-Git mostly asks:
+Traditional ignore rules mostly ask:
 
 ```text
 track this file or not?
@@ -676,12 +675,12 @@ allowlisted. Status projections, conflict projections, indexes, caches, derived
 chat projections, and durability internals are not exported as ordinary user
 files.
 
-Git/JJ export may remain useful for code-heavy projects, but should be an
+External VCS export may remain useful for code-heavy projects, but should be an
 integration/export surface rather than dohc's native model.
 
 ## What to avoid
 
-Avoid naive Dropbox sync:
+Avoid naive folder sync:
 
 - no blind last-writer-wins.
 - no syncing `node_modules` by default.
@@ -716,4 +715,4 @@ The first proof should demonstrate the whole shape without solving every driver:
 
 If this works, dohc has the beginning of a filesystem that feels normal to
 humans and agents while being much safer and more powerful than normal folders,
-Dropbox, or Git worktrees.
+folder sync, or conventional worktree flows.
