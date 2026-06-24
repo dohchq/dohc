@@ -239,7 +239,7 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
-  targetObjectId?,
+  targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
 list(workspaceId, versionId, path)
@@ -270,16 +270,24 @@ references fail closed before filesystem or storage access.
 overwrite. It must carry a causal precondition such as the expected base
 version, etag, content hash, or an absence assertion for creates.
 Create and overwrite calls must be explicit: `expectedAbsent: true` means
-"create only if no object exists at this path." `targetObjectId` may identify
-the intended object for an overwrite, but it is not a freshness guard and must
-be paired with exactly one causal precondition such as `expectedEtag`,
-`expectedContentHash`, or `expectedBaseVersion`. If the precondition does not
-match the current workspace/version/path state, the API returns a conflict
-response preserving current and incoming content rather than applying the
-mutation. Exactly one precondition mode may be supplied per write. Supplying no
-causal precondition or combining incompatible guards, such as `expectedAbsent`
-with `expectedEtag`, fails closed with a validation/conflict response and does
-not mutate canonical content.
+"create only if no object exists at this path" and must omit `targetObjectId`.
+Overwrite must provide `targetObjectId` for the intended existing object plus
+exactly one causal freshness precondition such as `expectedEtag`,
+`expectedContentHash`, or `expectedBaseVersion`. `targetObjectId` binds object
+identity so delete/recreate substitution cannot satisfy a path-only overwrite,
+but it is not a freshness guard by itself. If the precondition or target object
+does not match the current workspace/version/path state, the API returns a
+conflict response rather than applying the mutation. Exactly one precondition
+mode may be supplied per write. Supplying no causal precondition, omitting
+`targetObjectId` for overwrite, or combining incompatible guards such as
+`expectedAbsent` with `expectedEtag` fails closed with a validation/conflict
+response and does not mutate canonical content.
+
+Conflict responses are secret-safe envelopes by default: they return opaque
+object/version handles, hashes, policy decisions, redacted previews, and
+explainable metadata. They do not echo full current, incoming, restored, or
+secret-backed bytes unless the server-side authorization path explicitly grants
+secret materialization for that caller and resolution session.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry a causal precondition for the target version.
@@ -299,8 +307,9 @@ checkpoint in the target version whose content is derived from the selected
 earlier point, preserving intervening history for audit, compare, and recovery.
 Restore must carry exactly one causal precondition for the target version. If
 the current version state no longer matches that guard, the API returns the
-same deterministic conflict response as `write(...)`, preserving current and
-requested-restored content instead of applying the restore.
+same deterministic secret-safe conflict envelope as `write(...)`, preserving
+references to current and requested-restored content instead of applying the
+restore.
 
 Every async watch/status/snapshot payload must include workspace identity,
 version identity, a request token or equivalent correlation id, and a monotonic
