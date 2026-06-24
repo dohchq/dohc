@@ -10,7 +10,7 @@ new labels.
 
 The user-facing promise is simple:
 
-> Use normal files. Humans and agents can edit them. Everything saves
+> Use normal files. Humans and agents can edit them. Authorized writes save
 > immediately. dohc remembers what happened, preserves recovery, supports
 > parallel versions, and helps reconcile conflicts.
 
@@ -75,6 +75,12 @@ protection checks before a write can land. The write path is fail-closed: if
 any authorization, policy, visibility, protected-path, user-lock, or
 version-access evaluator is unavailable or indeterminate, the save is denied
 rather than applied.
+
+Workspace scoping is a required data-model invariant, not just an authorization
+check. Every persisted atom, folder, entity, share, capture, file object,
+version, event, chat link, projection, and history record carries `workspaceId`.
+Write, read, query, search, import, sync, and projection boundaries reject
+cross-workspace references by default, even when an actor is otherwise valid.
 
 Review appears only when crossing a real boundary:
 
@@ -444,9 +450,9 @@ This model preserves the core dohc philosophy:
 
 The engine is sophisticated, but the user experience should remain obvious:
 
-> You are editing a version of your workspace. Everything saves. dohc remembers
-> everything. You can create other versions, compare them, merge them, share
-> them, or go back.
+> You are editing a version of your workspace. Authorized writes save. dohc
+> remembers everything. You can create other versions, compare them, merge them,
+> share them, or go back.
 
 ## Open questions
 

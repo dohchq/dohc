@@ -317,6 +317,12 @@ git diff --check
     entries as encrypted references/envelopes.
   - Seventh pass minor: Markdown document capitalization.
   - Seventh pass minor: restore wording used redundant "point in time".
+  - Eighth pass major: Rust/local kernel bridge needed authenticated channel
+    binding, not localhost trust.
+  - Eighth pass major: workspace scoping needed to be a data-model invariant
+    requiring `workspaceId` on persisted objects.
+  - Eighth pass minor: "Everything saves" wording needed to be scoped to
+    authorized writes.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -382,6 +388,13 @@ git diff --check
     references/envelopes or broker metadata.
   - Capitalized Markdown document table entry.
   - Shortened restore proof wording to "earlier point".
+  - Added authenticated local channel binding requirements for IPC/JSON-RPC,
+    localhost HTTP, N-API, Tauri-style commands, and sidecar daemon bridge
+    options.
+  - Added `workspaceId` as a data-model invariant for persisted atoms, folders,
+    entities, shares, captures, files, versions, events, chat links,
+    projections, and history records.
+  - Replaced broad "Everything saves" phrasing with "Authorized writes save."
 - Overrides:
 
 ### Subagent Reviews

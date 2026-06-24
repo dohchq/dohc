@@ -19,7 +19,7 @@ underneath.
 
 ```text
 Use normal files.
-Everything saves immediately.
+Authorized writes save immediately.
 Versions make parallel work obvious.
 History and recovery are automatic.
 The same workspace appears across machines and agents.
@@ -631,11 +631,19 @@ answer:
 - Can the Rust kernel expose a small stable API to the TypeScript app?
 - Should the boundary be IPC/JSON-RPC, HTTP over localhost, N-API, Tauri-style
   commands, or a sidecar daemon?
+- How does the boundary authenticate local callers and bind each request to the
+  server/engine-derived actor, workspace, and version?
 - Can packaging work cleanly for macOS, Windows, and Linux?
 - Can development stay fast enough for the MVP?
 - Can tests run in CI without fragile native setup?
 - Can the Rust path beat or match TypeScript for scan/reconcile/hash workloads?
 - Can policy/authz contracts stay testable and shared?
+
+Any local kernel bridge, regardless of transport, must be an authenticated local
+channel. IPC/JSON-RPC, localhost HTTP, N-API, Tauri-style commands, and sidecar
+daemons all must enforce channel binding plus server/engine-derived actor,
+workspace, and version resolution on every request. Localhost alone is not a
+security boundary.
 
 Adoption criteria after the spike:
 
