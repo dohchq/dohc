@@ -453,7 +453,7 @@ and notifications. It should be an action.
 Agents should still get readable context projections:
 
 ```text
-.dohc/chats/<thread-id>.md
+.dohc/chats/v1-<digest>.md
 ```
 
 That projection is primarily for reading/reference/export. It should not be the
@@ -466,9 +466,10 @@ plaintext secrets outside the authorized secret-backed read path.
 same fail-closed `.dohc/**` reserved-namespace rules used by the native
 filesystem model. It is not a source-backed policy file, not an allowlisted
 user-content path, and is not re-ingested as canonical user content.
-`<thread-id>` in the projection path is conceptual. Projection writers must map
-the canonical thread id to a deterministic filename using one fixed algorithm
-across all runtimes: compute
+The displayed `v1-<digest>.md` filename is the canonical deterministic
+projection path shape; the raw thread id must not be used as a projection
+filename. Projection writers must map the canonical thread id to a
+deterministic filename using one fixed algorithm across all runtimes: compute
 `sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind)`, encode
 the digest as lowercase RFC 4648 base32 with no padding, and write
 `.dohc/chats/v1-<digest>.md`. The input framing, hash, encoding, lowercase
@@ -528,7 +529,8 @@ projection from canonical chat state. The user or agent should be directed to
 post through chat actions instead of editing the projection. Projection
 renderers must use the same body escaping/sanitization rules as the interactive
 chat UI, and must run secret classification/redaction before writing any message
-body into `.dohc/chats/<thread-id>.md`.
+body into the canonical deterministic projection path
+`.dohc/chats/v1-<digest>.md`.
 
 ## Integration with files and versions
 
