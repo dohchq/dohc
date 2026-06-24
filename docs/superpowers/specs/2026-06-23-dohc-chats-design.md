@@ -215,12 +215,16 @@ authorization checks, notifications, search indexing, or projection handling.
 DM-backed threads require at least two unique participants; a one-person DM is
 invalid. Before persistence, routing, key generation, indexing, or ACL checks,
 `dmParticipantIds` must be deduplicated and stable-sorted. The XOR ownership
-rule is enforced after canonicalization. For DM-backed threads, the canonical
-participant set must derive a stable unique persistence key within the workspace
-such as `(workspaceId, dmParticipantSetHash)`. Creation must be atomic through
-upsert, CAS, a transaction, or an equivalent uniqueness constraint so
-concurrent creates resolve to one canonical thread instead of duplicate DM
-threads for the same participant set.
+rule is enforced after canonicalization. For DM-backed thread create/update,
+the authenticated actor identity must be derived server-side, must be included
+in the canonical participant set, and must be authorized to message every
+participant before routing, key generation, indexing, ACL checks, persistence,
+fanout, or atomic create logic. For DM-backed threads, the canonical participant
+set must derive a stable unique persistence key within the workspace such as
+`(workspaceId, dmParticipantSetHash)`. Creation must be atomic through upsert,
+CAS, a transaction, or an equivalent uniqueness constraint so concurrent
+creates resolve to one canonical thread instead of duplicate DM threads for the
+same participant set.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
@@ -376,6 +380,11 @@ projected Markdown file, the projection pipeline must classify secret content
 and apply the same policy-aware redaction rules used by chat rendering, search,
 notifications, summaries, and export. Derived chat files must never persist
 plaintext secrets outside the authorized secret-backed read path.
+`<thread-id>` in the projection path must be a filesystem-safe opaque id or
+encoded canonical thread id. Projection writers must reject path separators,
+relative path segments, control characters, reserved names, and any other unsafe
+input before constructing `.dohc/chats/<thread-id>.md`, so a crafted thread id
+cannot traverse directories or overwrite another projection.
 
 ## File projections
 

@@ -244,7 +244,7 @@ Examples:
 
 | Workspace object | Likely content driver | File experience |
 | --- | --- | --- |
-| Markdown document | Y.Doc / Markdown body | `docs/plan.md` |
+| Markdown document | Canonical Y.Doc; Markdown body/`atoms.body` is a derived cache or projection | `docs/plan.md` |
 | code file | file/blob content | `code/fs/file.c` |
 | post | Markdown body + structured comments | `posts/q3-pricing.post.md` |
 | database | SQLite or table store | `data/transactions.sqlite` or projections |
@@ -276,14 +276,14 @@ But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
 
 ```text
-read(path)
-write(path, bytes)
-list(path)
-search(query)
-snapshot(version)
-diff(versionA, versionB)
-merge(sourceVersion, targetVersion)
-restore(version, pointInTime)
+read(workspaceId, versionId, path)
+write(workspaceId, versionId, path, bytes)
+list(workspaceId, versionId, path)
+search(workspaceId, versionId, query)
+snapshot(workspaceId, versionId)
+diff(workspaceId, versionAId, versionBId)
+merge(workspaceId, sourceVersionId, targetVersionId)
+restore(workspaceId, versionId, pointInTime)
 ```
 
 The filesystem is one interface. It should not be the only possible execution
@@ -522,6 +522,9 @@ The first proof should be small but real:
    unavailable or indeterminate.
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
+11. E2E proves every persisted atom, folder, entity, share, capture, file,
+    version, event, projection, and history record is workspace-scoped, and that
+    cross-workspace references are rejected by default.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.

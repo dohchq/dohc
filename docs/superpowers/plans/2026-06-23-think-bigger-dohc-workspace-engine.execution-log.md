@@ -466,8 +466,8 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 Twelfth pass:
 
 - Fixed CodeRabbit follow-up findings:
-  - Required denied/quarantined ingest holding areas to be secret-safe and avoid
-    plaintext secrets in payloads, indexes, logs, explanations, and retry
+  - Required denied/quarantined ingest holding areas to be secret-safe and to
+    avoid plaintext secrets in payloads, indexes, logs, explanations, and retry
     metadata.
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
     sequence used with `createdAt` and `messageId` for read cursor advancement.
@@ -545,6 +545,25 @@ Sixteenth pass:
   - Replaced legacy chats wording with dohc Chats terminology.
   - Cleaned the denied/quarantined ingest holding-area grammar in the execution
     log while preserving the secret-safe durability requirement.
+
+Seventeenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Clarified that Markdown workspace documents use canonical Y.Doc state, with
+    Markdown body/`atoms.body` only as a derived cache or projection.
+  - Added a first-slice E2E proof for workspace-scoped persisted records and
+    default rejection of cross-workspace references.
+  - Made native filesystem API examples explicitly workspace/version scoped,
+    while allowing validated bound sessions.
+  - Aligned the versioned workspace API example with the same workspace/version
+    scoped shape.
+  - Required chat projection filenames to use filesystem-safe opaque or encoded
+    thread ids and reject traversal/unsafe path input.
+  - Added DM-backed thread authorization rules requiring the server-derived
+    actor to be in the canonical participant set and authorized to message all
+    participants before persistence/fanout.
+  - Cleaned the denied/quarantined ingest holding-area grammar again with the
+    exact secret-safe wording CodeRabbit requested.
 - Overrides:
 
 ### Unresolved Findings

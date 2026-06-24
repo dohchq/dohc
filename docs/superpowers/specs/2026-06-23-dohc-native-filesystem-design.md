@@ -209,26 +209,32 @@ The same workspace should be accessible through API calls for cloud agents,
 browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 
 ```text
-read(path)
-write(path, bytes, {
+read(workspaceId, versionId, path)
+write(workspaceId, versionId, path, bytes, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId
 })
-list(path)
-stat(path)
-search(query)
-watch(path)
-snapshot(version)
-diff(versionA, versionB)
-merge(sourceVersion, targetVersion)
-restore(version, pointInTime)
+list(workspaceId, versionId, path)
+stat(workspaceId, versionId, path)
+search(workspaceId, versionId, query)
+watch(workspaceId, versionId, path)
+snapshot(workspaceId, versionId)
+diff(workspaceId, versionAId, versionBId)
+merge(workspaceId, sourceVersionId, targetVersionId)
+restore(workspaceId, versionId, pointInTime)
 ```
 
 This answers the API-native workspace requirement. The file mount and the API
-are peer views over the same versioned workspace engine.
+are peer views over the same versioned workspace engine. APIs may use a
+validated bound session instead of repeating `workspaceId`/`versionId` in every
+call, but every read, write, list, stat, search, watch, snapshot, diff, merge,
+and restore request must resolve inside exactly one workspace and, where
+content is versioned, exactly one version. Cross-workspace path or version
+references fail closed before filesystem or storage access.
 
-`write(path, bytes, ...)` is never an unconditional overwrite. It must carry a
-causal precondition such as the expected base version, etag, content hash, an
-absence assertion for creates, or the expected existing object id for overwrites.
+`write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
+overwrite. It must carry a causal precondition such as the expected base
+version, etag, content hash, an absence assertion for creates, or the expected
+existing object id for overwrites.
 Create and overwrite calls must be explicit: `expectedAbsent: true` means
 "create only if no object exists at this path"; `expectedObjectId` means
 "overwrite this known object only." If the precondition does not match the
