@@ -75,6 +75,11 @@ protection checks before a write can land. The write path is fail-closed: if
 any authorization, policy, visibility, protected-path, user-lock, or
 version-access evaluator is unavailable or indeterminate, the save is denied
 rather than applied.
+Denied or quarantined ingests must still be durable in a non-canonical holding
+area with enough metadata to retry or explain the decision after evaluators
+recover. Humans, agents, imports, and sync processes all get the same guarantee:
+the change is not silently lost, but it also does not become canonical workspace
+state until protection checks pass.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,
@@ -190,9 +195,9 @@ Immediate save should not mean noisy visible history.
 dohc should track two levels:
 
 1. **Fine-grained durability log**
-   - every non-secret save/write needed for recovery.
-   - secret-backed writes record encrypted references, redacted markers, or
-     broker metadata instead of raw secret bytes.
+   - every save/write needed for recovery.
+   - secret-backed writes are recovery-tracked only as encrypted references,
+     redacted markers, or broker metadata instead of raw secret bytes.
    - crash-safe and time-travel friendly.
    - write-ack boundary: a save is acknowledged only after the durability-log
      record is persisted to recoverable storage, or after an equivalent

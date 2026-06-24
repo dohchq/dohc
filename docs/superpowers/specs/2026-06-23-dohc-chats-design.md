@@ -463,7 +463,10 @@ Pinned
 ```
 
 The channel may support lightweight stream messages, but durable chats should be
-the object that survives and resurfaces.
+the object that survives and resurfaces. A channel send always maps to a
+`ThreadMessage` inside a `ChatThread`, creating or resolving that thread
+implicitly when needed. There is no separate durable `ChannelMessage` entity
+outside the canonical `ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 

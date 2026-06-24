@@ -396,6 +396,10 @@ Internal policy keys are canonical camelCase. Human-authored policy files may
 use snake_case aliases, but parsers must normalize them into canonical camelCase
 before validation, storage, API responses, indexing, or enforcement. Clients
 and services must enforce the canonical schema, not a mix of key spellings.
+Policy parsing is fail-closed: unknown keys, misspelled keys, duplicate semantic
+keys, and alias-plus-canonical collisions in the same rule are rejected before
+validation or storage. Canonical normalization must not silently accept
+ambiguous input.
 
 Example internal shape:
 

@@ -689,9 +689,11 @@ Each PR must:
 Recommended branch naming:
 
 ```text
-<branch-prefix>/think-bigger-00-foundation
-<branch-prefix>/think-bigger-01-version-contracts
-<branch-prefix>/think-bigger-02-file-policy
+<branch-prefix>/think-bigger-00-readiness-scaffold
+<branch-prefix>/think-bigger-p0a-inventory
+<branch-prefix>/think-bigger-p0r-rust-kernel
+<branch-prefix>/think-bigger-p0b-versioned-store
+<branch-prefix>/think-bigger-p0c-file-history
 ...
 ```
 
@@ -1026,8 +1028,8 @@ Implementation should happen in isolated worktrees by default:
 ```text
 main planning checkout
   -> <branch-prefix>/think-bigger-p0r-rust-kernel      in ../dohc-p0r-rust-kernel
-  -> <branch-prefix>/think-bigger-p0b-version-store    in ../dohc-p0b-version-store
-  -> <branch-prefix>/think-bigger-p0c-file-capture     in ../dohc-p0c-file-capture
+  -> <branch-prefix>/think-bigger-p0b-versioned-store  in ../dohc-p0b-versioned-store
+  -> <branch-prefix>/think-bigger-p0c-file-history     in ../dohc-p0c-file-history
   -> <branch-prefix>/think-bigger-p0e-linked-chat      in ../dohc-p0e-linked-chat
   -> <branch-prefix>/think-bigger-p0f-search-policy    in ../dohc-p0f-search-policy
 ```
@@ -1063,6 +1065,9 @@ Each implementation thread should start with:
 - CodeRabbit loop instructions.
 - if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
   before editing and record that in its execution-log entry.
+- if the scope touches Convex code, the thread must read
+  `apps/app/convex/_generated/ai/guidelines.md` before editing and record that
+  in its execution-log entry.
 
 Separate implementation chats/threads are user-visible and should only be
 created when the user explicitly asks or approves. Subagents remain the default
@@ -1181,6 +1186,11 @@ Each relevant PR must include:
 - accessibility checks for chat, conflict, search, and version UI.
 
 ### Never Skip These E2E Areas
+
+These E2E requirements apply to surfaces that are implemented, shipped, or in
+scope for the PR/milestone under review. Deferred Phase 0 areas do not require
+their E2E before they exist, but once a surface is introduced its listed E2E is
+mandatory for that PR and future release gates.
 
 - workspace creation/open.
 - file editing and automatic save.

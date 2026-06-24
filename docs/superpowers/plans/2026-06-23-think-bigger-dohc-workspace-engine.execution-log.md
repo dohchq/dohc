@@ -130,6 +130,10 @@ Date completed:
 - Fixes:
 - Overrides:
 
+### Unresolved Findings
+
+- ...
+
 ### Subagent Reviews
 
 - Architecture:
@@ -335,6 +339,22 @@ git diff --check
     binding instead of current-active-version fallback.
   - Ninth pass major: raw local filesystem reconciliation needed fresh
     server/engine-derived auth/policy context before persistence.
+  - Tenth pass major: denied/quarantined ingests needed durable non-canonical
+    holding records.
+  - Tenth pass major: versioned workspace durability log wording needed to cover
+    secret-backed writes as recovery-tracked encrypted references.
+  - Tenth pass major: implementation thread kickoff needed the Convex
+    guidelines pre-read gate.
+  - Tenth pass major: Never Skip E2E wording needed to apply only to
+    implemented/in-scope surfaces.
+  - Tenth pass minor: branch naming examples drifted from the Phase 0 worktree
+    topology.
+  - Tenth pass major: filesystem policy parsing needed fail-closed unknown key
+    and alias collision rejection.
+  - Tenth pass major: channel sends needed to map to canonical
+    `ChatThread -> ThreadMessage`.
+  - Tenth pass major: reusable entry template needed an explicit Unresolved
+    Findings section.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -419,6 +439,21 @@ git diff --check
     path/mount-bound version and quarantine ambiguous version binding.
   - Required fresh server/engine-derived authorization and policy context before
     raw local writes persist into durability/history.
+  - Required denied/quarantined ingests to persist in durable non-canonical
+    holding state for retry/explanation.
+  - Clarified that the durability log tracks every save/write, with
+    secret-backed writes represented only as encrypted references, redacted
+    markers, or broker metadata.
+  - Added the Convex guidelines pre-read requirement for implementation threads
+    touching Convex code.
+  - Scoped Never Skip E2E requirements to implemented, shipped, or in-scope
+    surfaces.
+  - Aligned branch naming examples with the actual Phase 0 worktree topology.
+  - Added fail-closed policy parser rejection for unknown/misspelled keys,
+    duplicate semantic keys, and alias/canonical collisions.
+  - Clarified that channel sends create/resolve `ChatThread` and persist as
+    `ThreadMessage`; no separate durable `ChannelMessage` exists.
+  - Added Unresolved Findings to the reusable execution-log template.
 - Overrides:
 
 ### Subagent Reviews
