@@ -372,6 +372,8 @@ Source-backed policy entries are explicitly allowlisted and validated before
 they can affect engine behavior:
 
 - `.dohc/files.toml`
+- `.dohc/visibility.toml`
+- optional workspace-root `.dohcignore`
 
 Internal projection/reserved-state examples are inspectable, but they are not
 source-backed user content, not importable as ordinary workspace files, and not

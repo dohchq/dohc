@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending
+Status: PR 00 in review; `.dohc` allowlist fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | CodeRabbit 0 findings; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | `.dohc` allowlist fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -257,8 +257,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: approved with 0 findings on the latest committed diff.
-- Current findings: none.
+- Status: fixes applied; rerun pending after `.dohc` allowlist fix.
+- Current findings: `.dohc` allowlist fix applied; pending latest rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -743,11 +743,18 @@ Thirty-second pass:
 
 Thirty-third pass:
 
-- CodeRabbit approved the latest committed diff with 0 findings after the
+- Historical outcome: CodeRabbit approved that committed diff with 0 findings after the
   portable Node 24 test command fix.
 - Updated PR00 status, CodeRabbit status, and unresolved findings to record the
   clean review while leaving the docs-only local-agent-CLI exception pending
   human approval before completion or merge-readiness.
+
+Thirty-fourth pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Aligned the mega-plan `.dohc/` source-backed policy allowlist with the
+    native filesystem spec by adding `.dohc/visibility.toml` and optional
+    workspace-root `.dohcignore`.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -755,7 +762,7 @@ Thirty-third pass:
 
 ### Unresolved Findings
 
-- None after the latest CodeRabbit approval.
+- Pending the latest CodeRabbit rerun after the `.dohc` allowlist fix.
 
 ### Subagent Reviews
 
