@@ -470,8 +470,8 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 Twelfth pass:
 
 - Fixed CodeRabbit follow-up findings:
-  - Required denied/quarantined ingest holding areas to be secret-safe and avoid
-    plaintext secrets in payloads, indexes, logs, explanations, and retry
+  - Required denied/quarantined ingest holding areas to be secret-safe, with no
+    plaintext secrets in payloads, indexes, logs, explanations, or retry
     metadata.
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
     sequence used with `createdAt` and `messageId` for read cursor advancement.
@@ -621,7 +621,21 @@ Twenty-first pass:
     explicit shared-channel grants and must be re-authorized on every use.
   - Added a strict 16-participant cap for DM-backed threads and early rejection
     of oversized raw or canonical participant lists.
+
+Twenty-second pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added an explicit Overrides entry instead of leaving the field blank.
+  - Rephrased the Twelfth-pass denied/quarantined ingest holding-area sentence.
+  - Required shared-channel grant revoke/expiry cleanup to purge or reindex
+    derived chat projections, search snippets, notification payloads, and export
+    artifacts.
+  - Defined deterministic DM participant canonicalization: persisted actor-id
+    form, exact dedupe, and bytewise ascending sort before key generation.
 - Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
 
 ### Unresolved Findings
 

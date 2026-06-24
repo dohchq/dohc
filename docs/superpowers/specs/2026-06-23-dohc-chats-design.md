@@ -53,8 +53,12 @@ shared-channel exceptions: the link must carry the owning `workspaceId`, target
 workspace/resource identity, share/grant id, and visibility scope, and every
 read, projection, search result, notification, and export must re-authorize that
 grant. Missing, expired, revoked, or ambiguous shared-channel grants fail
-closed. Thread activity records are append-only events keyed by `(workspaceId,
-threadId, activityId)` or an equivalent workspace/thread scoped sequence.
+closed. Grant revoke/expiry also triggers cleanup: derived projections, search
+snippets, notification payloads, export artifacts, and other materialized chat
+context for that exception must be purged or reindexed so stale shared data does
+not remain exposed after access changes. Thread activity records are append-only
+events keyed by `(workspaceId, threadId, activityId)` or an equivalent
+workspace/thread scoped sequence.
 
 The UI can say chat. The system should not inherit a stream-first data model.
 
@@ -234,17 +238,21 @@ invalid, and both the raw submitted list and canonicalized list must stay at or
 below 16 participants. Oversized participant lists are rejected before
 persistence, routing, key generation, indexing, ACL checks, fanout, or atomic
 create logic. Before the remaining write path runs, `dmParticipantIds` must be
-deduplicated and stable-sorted. The XOR ownership rule is enforced after
-canonicalization. For DM-backed thread create/update, the authenticated actor
-identity must be derived server-side, must be included in the canonical
-participant set, and must be authorized to message every participant before
-routing, key generation, indexing, ACL checks, persistence, fanout, or atomic
-create logic. For DM-backed threads, the canonical participant set must derive a
-collision-safe unique persistence key within the workspace by using an exact
-canonical participant-set value, or a hash plus exact-set verification, scoped
-by `workspaceId`. Creation must be atomic through upsert, CAS, a transaction, or
-an equivalent uniqueness constraint so concurrent creates resolve to one
-canonical thread instead of duplicate DM threads for the same participant set.
+canonicalized with one deterministic algorithm shared across runtimes:
+normalize actor IDs to their canonical persisted form, deduplicate by exact
+canonical ID match, then sort by bytewise ascending canonical ID, not locale
+collation. All services must use this comparator before key generation. The XOR
+ownership rule is enforced after canonicalization. For DM-backed thread
+create/update, the authenticated actor identity must be derived server-side,
+must be included in the canonical participant set, and must be authorized to
+message every participant before routing, key generation, indexing, ACL checks,
+persistence, fanout, or atomic create logic. For DM-backed threads, the
+canonical participant set must derive a collision-safe unique persistence key
+within the workspace by using an exact canonical participant-set value, or a
+hash plus exact-set verification, scoped by `workspaceId`. Creation must be
+atomic through upsert, CAS, a transaction, or an equivalent uniqueness
+constraint so concurrent creates resolve to one canonical thread instead of
+duplicate DM threads for the same participant set.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
