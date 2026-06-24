@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved; 0 findings | docs sanity + brand guard | CodeRabbit approved latest committed diff. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Table alignment fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -69,9 +69,9 @@ secret-handling, data-loss, or review-gate blockers.
 | 10 | Workspace Status And Diagnostics | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 11 | Search Foundation Across Versions And Files | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 12 | Chats Schema And Channel/DM Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 13 | Chats Actions And Agent Participation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 14 | Chats UI: Fast Channels, DMs, Composer | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| 15 | Chats Linked To Files, Versions, And History | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
+| 13 | Chats UI: Fast Channels, DMs, Composer | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
+| 14 | Chats Linked To Files, Versions, And History | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
+| 15 | Agent Chat Participation Tools | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 16 | Presence, Reactions, And Notification Core | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 17 | Search Across Chats, Files, Versions, And Agents | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 18 | External And Shared Channels | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -247,7 +247,7 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 
 ### CodeRabbit
 
-- Status: approved; latest committed-diff rerun returned 0 findings.
+- Status: fixes applied; rerun pending after table alignment fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -638,6 +638,12 @@ Twenty-third pass:
 - CodeRabbit approved the latest committed diff with 0 findings.
 - Updated PR00 status, CodeRabbit status, and unresolved findings to reflect the
   approved review.
+
+Twenty-fourth pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Aligned execution-log table titles for PR IDs 13-15 with the canonical mega
+    plan entries.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -645,7 +651,8 @@ Twenty-third pass:
 
 ### Unresolved Findings
 
-- None after the latest CodeRabbit committed-diff review.
+- Pending the latest CodeRabbit rerun after the PR ID 13-15 table alignment
+  fix.
 
 ### Subagent Reviews
 
