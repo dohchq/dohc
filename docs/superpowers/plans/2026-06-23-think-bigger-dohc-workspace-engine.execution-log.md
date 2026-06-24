@@ -307,6 +307,16 @@ git diff --check
     source-backed policy-file allowlist.
   - Sixth pass major: version mount examples needed canonical `.versions`
     naming.
+  - Seventh pass major: chat read-state cursor needed to be sequence-based
+    rather than timestamp fallback-based.
+  - Seventh pass major: chat message deletes needed tombstone fields on
+    `ThreadMessage`.
+  - Seventh pass major: filesystem API writes needed causal preconditions
+    instead of unconditional overwrites.
+  - Seventh pass major: secret-backed writes still needed crash-safe durability
+    entries as encrypted references/envelopes.
+  - Seventh pass minor: Markdown document capitalization.
+  - Seventh pass minor: restore wording used redundant "point in time".
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -362,6 +372,16 @@ git diff --check
   - Added `.dohc/**` self-capture exclusion plus allowlisted policy files.
   - Replaced sibling `personal.versions/*` examples with in-workspace
     `.versions/*` projections.
+  - Replaced chat read-state timestamp fallback with a canonical
+    `(threadSequence, createdAt, messageId)` cursor.
+  - Added `deletedAt`, `deletedById`, `deleteReason`, and `tombstone` fields to
+    `ThreadMessage` and aligned edit/delete history language.
+  - Required API writes to carry an expected base version, etag, or content
+    hash and return conflicts on mismatch.
+  - Clarified that secret-backed writes enter durability only as encrypted
+    references/envelopes or broker metadata.
+  - Capitalized Markdown document table entry.
+  - Shortened restore proof wording to "earlier point".
 - Overrides:
 
 ### Subagent Reviews

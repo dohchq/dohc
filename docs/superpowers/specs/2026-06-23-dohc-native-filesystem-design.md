@@ -116,7 +116,9 @@ Phase 0 should use a normal folder plus reconciliation:
    - Use OS file watching for create/modify/delete/rename events.
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
-   - Append captured tracked non-secret changes to the durability log.
+   - Append captured tracked changes to the durability log. Secret-backed
+     writes are included only as encrypted references/envelopes or broker
+     metadata, never plaintext secret content.
    - Coalesce them into meaningful history moments.
 
 3. **When dohc starts after being closed**
@@ -185,7 +187,7 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 
 ```text
 read(path)
-write(path, bytes)
+write(path, bytes, { expectedBaseVersion | expectedEtag | expectedContentHash })
 list(path)
 stat(path)
 search(query)
@@ -199,6 +201,12 @@ restore(version, pointInTime)
 This answers the "source control should not require a real OS/filesystem"
 requirement. The file mount and the API are peer views over the same versioned
 workspace engine.
+
+`write(path, bytes, ...)` is never an unconditional overwrite. It must carry a
+causal precondition such as the expected base version, etag, or content hash.
+If that precondition does not match the current workspace/version/path state,
+the API returns a conflict response preserving current and incoming content
+rather than applying the mutation.
 
 Every async watch/status/snapshot payload must include workspace identity,
 version identity, and a request token or equivalent correlation id before it can

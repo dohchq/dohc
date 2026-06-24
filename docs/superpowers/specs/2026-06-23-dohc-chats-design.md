@@ -52,22 +52,26 @@ type ThreadReadState = {
   workspaceId: string
   threadId: string
   actorId: string
-  lastReadMessageId?: string
-  lastReadAt?: number
+  lastReadCursor: {
+    threadSequence: number
+    createdAt: number
+    messageId: string
+  }
   updatedAt: number
 }
 ```
 
-At least one of `lastReadMessageId` or `lastReadAt` is required. Updates are
-monotonic: read state can only advance forward in the thread, never move
-backward. Chats, Inbox, file side rails, notification badges, and search result
-read/unread markers must all derive from this workspace-scoped state.
-Monotonicity is validated against a canonical per-thread ordering comparator,
-preferably a server-assigned `(threadSequence, createdAt, id)` tuple. Message
-IDs alone are not an ordering contract. `ThreadReadState` is unique on
-`(workspaceId, threadId, actorId)` and writes are upserts, not inserts that can
-duplicate rows. Updating `lastReadMessageId` or `lastReadAt` must compare
-against that canonical order before advancing.
+The canonical read cursor is sequence-based, not timestamp-based. No row means
+nothing in the thread has been read by that actor. Updates are monotonic: read
+state can only advance forward in the thread, never move backward. Chats, Inbox,
+file side rails, notification badges, and search result read/unread markers must
+all derive from this workspace-scoped state. Monotonicity is validated against
+the canonical per-thread ordering comparator:
+`(threadSequence, createdAt, messageId)`. Message IDs alone are not an ordering
+contract, and `lastReadAt` is not a valid advancement fallback. `ThreadReadState`
+is unique on `(workspaceId, threadId, actorId)` and writes are upserts, not
+inserts that can duplicate rows. Updating `lastReadCursor` must compare against
+the canonical comparator before advancing.
 
 ## Core model
 
@@ -228,6 +232,10 @@ type ThreadMessage = {
   body: string
   createdAt: number
   editedAt?: number
+  deletedAt?: number
+  deletedById?: string
+  deleteReason?: string
+  tombstone?: boolean
 }
 ```
 
@@ -246,6 +254,12 @@ inline formatting, code, links with safe protocols, mentions, and file/work
 references; raw HTML, scriptable URLs, event handlers, and embedded active
 content are not allowed. The same sanitization contract applies to chat
 projections, search snippets, notifications, and summaries.
+
+Deletes are tombstones, not hard deletes. If `deletedAt` is present,
+`tombstone` must be true, `body` must render as a deletion placeholder, and the
+original body must remain available only through authorized audit/history paths.
+Projections, search, notifications, and summaries all read the same
+`ThreadMessage` deletion state and must not invent ad hoc redaction behavior.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
@@ -482,7 +496,8 @@ Required lightweight features:
 - read/seen state where appropriate.
 - quick reactions.
 - simple acknowledgements.
-- message edit/delete with history.
+- message edit/delete with history through the `ThreadMessage` edit and
+  tombstone fields.
 
 Keep reactions lightweight. They should make collaboration feel alive without
 turning work into noise.

@@ -220,7 +220,7 @@ Examples:
 
 | Workspace object | Likely content driver | File experience |
 | --- | --- | --- |
-| markdown document | Y.Doc / markdown body | `docs/plan.md` |
+| Markdown document | Y.Doc / markdown body | `docs/plan.md` |
 | code file | file/blob content | `code/fs/file.c` |
 | post | markdown body + structured comments | `posts/q3-pricing.post.md` |
 | database | SQLite or table store | `data/transactions.sqlite` or projections |
@@ -488,7 +488,7 @@ The first proof should be small but real:
 4. A user can compare the named version against Main.
 5. A clean file merge can move changes from one version to another.
 6. A conflicting text edit preserves both sides and shows a simple conflict.
-7. A restore can return a version to an earlier point in time.
+7. A restore can return a version to an earlier point.
 8. The engine records honest provenance without changing write rules:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
