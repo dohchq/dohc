@@ -48,14 +48,14 @@ secret-handling, data-loss, or review-gate blockers.
 
 | PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | not started | TBD | TBD | main | TBD | TBD | docs/inventory | Must happen before implementation. |
-| P0R | Rust Workspace Kernel Spike | not started | TBD | TBD | TBD | TBD | TBD | rust spike + perf | Decide local engine boundary before deep implementation. |
-| P0B | Minimal Versioned Text Store | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| P0C | File/API Write Capture And History | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| P0D | Compare, Clean Merge, Conflict Preservation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| P0E | Minimal Chat Linked To File | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| P0F | Search And Policy Smoke | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
-| P0G | Proof Arc QA And CodeRabbit Hardening | not started | TBD | TBD | TBD | TBD | TBD | agent CLI + full matrix + perf |  |
+| P0A | Current System Inventory And Decisions | branch pushed; PR pending | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending | docs/inventory | Open after PR00 clears and stack base is reconciled. |
+| P0R | Rust Workspace Kernel Spike | branch pushed; PR pending | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | rust spike + perf | Rust scanner proof recorded; open after PR00 clears. |
+| P0B | Minimal Versioned Text Store | branch pushed; PR pending | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
+| P0C | File/API Write Capture And History | branch pushed; PR pending | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending | workspace-history + typecheck | Open after PR00 clears and stack base is reconciled. |
+| P0D | Compare, Clean Merge, Conflict Preservation | branch pushed; PR pending | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Open after PR00 clears and stack base is reconciled. |
+| P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
+| P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
 | 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity | This log created with plan. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -535,6 +535,8 @@ Fifteenth pass:
     the touched plan/spec docs.
   - Ran the focused web brand/no-legacy guard and recorded the Node engine
     warning from the local shell.
+  - Updated the Phase 0 lane status table to show P0A-P0G branches as pushed
+    with PRs pending until PR00 clears and the stack base is reconciled.
 - Overrides:
 
 ### Unresolved Findings
