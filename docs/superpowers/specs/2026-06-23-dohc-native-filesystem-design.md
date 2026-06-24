@@ -86,7 +86,11 @@ deterministic collision-proof safe rename outside reserved namespaces, or sent
 to manual resolution before the workspace is activated. Safe rename proposals
 must never overwrite existing user content; destination names are derived from a
 stable sanitized basename plus a workspace-scoped content/id hash, then
-validated for non-existence before activation.
+reserved atomically at activation time with create-if-absent, `O_EXCL`, or an
+equivalent exclusive reservation primitive. A non-atomic check-then-create flow
+is not allowed. Activation may proceed only if the reservation succeeds;
+reservation failure is a fail-closed collision that stays in quarantine or
+manual resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions` content is never silently promoted into a named version.
 
@@ -324,6 +328,13 @@ version, operation type, target, and causal precondition. Duplicate delivery
 with the same idempotency key returns the original result or a deterministic
 equivalent without creating extra canonical mutations, history entries,
 projections, notifications, or search-index side effects.
+Idempotency records must be persisted for a documented minimum replay window of
+at least 24 hours after the operation reaches a terminal result. After that
+window, a retry with the same key must fail closed with an explicit
+`idempotency_expired` response or a deterministic conflict response; it must not
+silently apply as a new mutation. Implementations may garbage-collect expired
+key tombstones only after the documented maximum retry horizon has passed or the
+operation namespace is rotated.
 
 `restore(workspaceId, versionId, pointInTime, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new
