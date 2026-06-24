@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Causal-token/chat-link/brand-command fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Chat auth/E2E/path/log grammar fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -255,7 +255,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after causal-token/chat-link/brand-command
+- Status: fixes applied; rerun pending after chat auth/E2E/path/log grammar
   fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -348,7 +348,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
   - Eighth pass minor: "Everything saves" wording needed to be scoped to
     authorized writes.
   - Ninth pass major: implementation-thread kickoff checklist needed the
-    `apps/app/AGENTS.md` read gate for `apps/app` work.
+    `apps/web/AGENTS.md` read gate for `apps/web` work.
   - Ninth pass major: chat tombstone retention needed secret-safe audit/history
     storage rules.
   - Ninth pass major: chat search snippets and indexes needed explicit
@@ -455,8 +455,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
     entities, shares, captures, files, versions, events, chat links,
     projections, and history records.
   - Replaced broad "Everything saves" phrasing with "Authorized writes save."
-  - Added `apps/app/AGENTS.md` to implementation-thread kickoff requirements
-    for lanes touching `apps/app`.
+  - Added `apps/web/AGENTS.md` to implementation-thread kickoff requirements
+    for lanes touching `apps/web`.
   - Required chat tombstone audit/history retention to use secret-backed
     references, encrypted payloads, or redacted forms when secrets may exist.
   - Added secret classification/redaction requirements for chat/work search
@@ -479,7 +479,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 Twelfth pass:
 
 - Fixed CodeRabbit follow-up findings:
-  - Required denied/quarantined ingest holding areas to be secret-safe, with no
+  - Denied/quarantined ingest holding areas must remain secret-safe, with no
     plaintext secrets in payloads, indexes, logs, explanations, or retry
     metadata.
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
@@ -686,6 +686,20 @@ Twenty-seventh pass:
   - Replaced placeholder brand-guard command text with the exact Node 24.18.0
     setup and test command executed, while recording Node and pnpm environment
     details separately.
+
+Twenty-eighth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Rephrased the Twelfth-pass denied/quarantined holding-area grammar.
+  - Aligned E2E policy wording so implemented, shipped, and in-scope surfaces
+    cannot skip E2E while deferred surfaces are recorded as not applicable.
+  - Replaced stale app pre-edit references with `apps/web/AGENTS.md` and a
+    checked-if-present Convex guidance rule.
+  - Required DM read/write paths and read-state updates to verify server-derived
+    actor membership before routing, indexing, persistence, fanout,
+    notifications, or cursor updates.
+  - Required read-state cursor updates to resolve to an existing
+    `ThreadMessage` in the same `(workspaceId, threadId)` before CAS advance.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -693,8 +707,8 @@ Twenty-seventh pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the
-  causal-token/chat-link/brand-command fix.
+- Pending the latest CodeRabbit rerun after the chat auth/E2E/path/log grammar
+  fix.
 
 ### Subagent Reviews
 

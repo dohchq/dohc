@@ -120,7 +120,8 @@ Those are engine-room concepts.
 - No hidden safety-relevant state.
 - Every content/projection driver must declare snapshot, diff, merge/conflict,
   projection, search, export, restore, and ACL behavior.
-- No skipped E2E tests.
+- No skipped E2E tests for implemented, shipped, or in-scope surfaces;
+  deferred surfaces are recorded as not applicable, not skipped.
 
 ### Performance
 
@@ -175,7 +176,8 @@ Those are engine-room concepts.
 ### Engineering
 
 - No giant unreviewable implementation PR.
-- Every PR must have targeted tests, regression tests, and relevant E2E.
+- Every PR must have targeted tests, regression tests, and relevant E2E for its
+  implemented, shipped, or in-scope surfaces.
 - Every PR must go through the canonical CodeRabbit loop until approval or an
   explicitly approved non-sensitive override.
 - Every security-sensitive PR must use subagent review.
@@ -1063,11 +1065,12 @@ Each implementation thread should start with:
 - the branch/worktree path.
 - required tests and performance budgets.
 - CodeRabbit loop instructions.
-- if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
+- if the scope touches `apps/web`, the thread must read `apps/web/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches Convex code, the thread must read
-  `apps/app/convex/_generated/ai/guidelines.md` before editing and record that
-  in its execution-log entry.
+- if the scope touches Convex code, the thread must first check for an existing
+  `convex/_generated/ai/guidelines.md` under the touched app/package, read it
+  when present, and record the checked path or absence in its execution-log
+  entry before editing.
 
 Separate implementation chats/threads are user-visible and should only be
 created when the user explicitly asks or approves. Subagents remain the default

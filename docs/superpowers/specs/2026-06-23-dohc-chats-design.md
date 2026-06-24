@@ -101,8 +101,12 @@ the canonical comparator before advancing. The write must be atomic: use a
 conditional upsert, transactional compare-and-swap, or equivalent CAS semantics
 that advances `lastReadCursor` only when the incoming
 `(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
-Concurrent stale updates must no-op or retry, never overwrite a newer cursor
-with an older one.
+Before CAS evaluation, the incoming tuple must resolve to an existing
+`ThreadMessage` in the same `(workspaceId, threadId)` and match that message's
+canonical persisted ordering fields. If no such message exists, the workspace
+or thread does not match, or the tuple is forged/stale relative to persisted
+message state, the read-state update is rejected fail-closed. Concurrent stale
+updates must no-op or retry, never overwrite a newer cursor with an older one.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -260,8 +264,16 @@ ownership rule is enforced after canonicalization. For DM-backed thread
 create/update, the authenticated actor identity must be derived server-side,
 must be included in the canonical participant set, and must be authorized to
 message every participant before routing, key generation, indexing, ACL checks,
-persistence, fanout, or atomic create logic. For DM-backed threads, the
-canonical participant set must derive a collision-safe unique persistence key
+persistence, fanout, or atomic create logic. The same server-derived membership
+rule applies to every DM read/write path: `read_chat`, `reply_to_chat`,
+reactions, notifications, and read-state updates. Membership must be verified
+against the canonical participant set before routing, indexing, persistence,
+fanout, notification generation, search snippet exposure, or cursor
+advancement. If membership changes or is revoked, new reads, replies,
+reactions, notifications, and read-state updates for that actor fail closed
+unless an explicit retained-history policy grants narrower access. For
+DM-backed threads, the canonical participant set must derive a collision-safe
+unique persistence key
 within the workspace by using an exact canonical participant-set value, or a
 hash plus exact-set verification, scoped by `workspaceId`. Creation must be
 atomic through upsert, CAS, a transaction, or an equivalent uniqueness
