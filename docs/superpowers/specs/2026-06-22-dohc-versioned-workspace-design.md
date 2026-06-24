@@ -325,7 +325,9 @@ move(workspaceId, versionId, fromPath, toPath, {
   idempotencyKey
 })
 list(workspaceId, versionId, path)
+stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
+watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
 merge(workspaceId, sourceVersionId, targetVersionId, {
@@ -359,7 +361,8 @@ echo full current, incoming, restored, or secret-backed bytes unless the
 server-side authorization path explicitly grants secret materialization for
 that caller and resolution session.
 
-`snapshot(...)` and `diff(...)` are read-only scoped views. `delete(...)`,
+`read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
+`snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,
 `rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
 write-producing operations and must use the same workspace/version scoping,
 causal guard, idempotency, and conflict-response rules as `write(...)`.
