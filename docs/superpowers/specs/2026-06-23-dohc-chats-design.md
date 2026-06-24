@@ -159,7 +159,7 @@ type ChannelChatThread = ChatThreadBase & {
 
 type DmChatThread = ChatThreadBase & {
   channelId?: never
-  dmParticipantIds: [string, ...string[]]
+  dmParticipantIds: [string, string, ...string[]]
 }
 
 type ChatThread = ChannelChatThread | DmChatThread
@@ -169,6 +169,8 @@ A thread must have exactly one owner shape: channel-backed or DM-backed. It
 must never have both `channelId` and `dmParticipantIds`, and it must never have
 neither. Creation and update paths must validate this XOR before routing,
 authorization checks, notifications, search indexing, or projection handling.
+DM-backed threads require at least two unique participants; a one-person DM is
+invalid.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.

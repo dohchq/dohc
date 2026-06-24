@@ -71,7 +71,10 @@ workspace-scoped authorization, protected-path rules, user locks, version
 access, and visibility boundaries before applying a change. Authenticated actor
 identity is derived by the server/engine, never trusted from the caller. Humans,
 agents, automations, imports, and sync processes all pass through the same
-protection checks before a write can land.
+protection checks before a write can land. The write path is fail-closed: if
+any authorization, policy, visibility, protected-path, user-lock, or
+version-access evaluator is unavailable or indeterminate, the save is denied
+rather than applied.
 
 Review appears only when crossing a real boundary:
 
@@ -181,6 +184,9 @@ dohc should track two levels:
    - secret-backed writes record encrypted references, redacted markers, or
      broker metadata instead of raw secret bytes.
    - crash-safe and time-travel friendly.
+   - write-ack boundary: a save is acknowledged only after the durability-log
+     record is persisted to recoverable storage, or after an equivalent
+     durability guarantee, so acknowledged writes survive process crash/restart.
    - not necessarily the main visible timeline.
 
 2. **Meaningful moments**

@@ -436,7 +436,10 @@ Implementation can use:
 - encrypted blob storage with per-actor/workspace keys.
 
 The file projection may materialize plaintext only for an authorized workspace,
-version, user/device, and dohc-controlled process context.
+version, and user/device. Process-level secret gating applies only to
+dohc-controlled execution paths, such as brokered API access, managed mounts,
+or injected runtime secrets, not arbitrary local processes that can read a
+materialized plaintext file via OS permissions.
 
 When launching a process or agent, dohc can also inject secrets as environment
 variables from the same broker. File materialization and process injection are

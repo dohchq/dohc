@@ -261,6 +261,13 @@ git diff --check
     wording.
   - Second pass trivial: duplicate PR review loop needed to reference the
     canonical CodeRabbit loop.
+  - Third pass major: write-path authorization needed fail-closed behavior when
+    an evaluator is unavailable.
+  - Third pass major: immediate-save acknowledgement needed a durability
+    boundary.
+  - Third pass major: DM-backed chats needed at least two unique participants.
+  - Third pass major: secret projection wording overstated process-level
+    enforcement for normal local folders.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -282,6 +289,10 @@ git diff --check
     specs and plan text.
   - Replaced the duplicate PR loop with a reference to the canonical CodeRabbit
     loop.
+  - Added fail-closed write-path authorization language.
+  - Added write-ack boundary after durable persistence.
+  - Required DM-backed chat threads to have at least two unique participants.
+  - Scoped process-level secret gating to dohc-controlled execution paths.
 - Overrides:
 
 ### Subagent Reviews
