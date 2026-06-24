@@ -223,21 +223,25 @@ coderabbit review --agent -t committed -c AGENTS.md
 rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
 pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+<bundled Node 24.14.0> <pnpm.cjs> --dir <repo> --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 ```
 
 ### E2E / Visual / Manual QA
 
 - Manual docs sanity only.
 - Focused brand/no-legacy guard passed: `apps/web/src/__tests__/brandNoLegacy.test.ts`
-  reported 1 file and 2 tests passed.
-- Test environment warning: this shell used Node 18.19.1 while the repo engine
-  field asks for Node 20.19+, 22.13+, or 24+.
+  reported 1 file and 2 tests passed under bundled Node 24.14.0.
+- Earlier Node 18.19.1 run is retained only as exploratory output and is not
+  counted as gate evidence because it does not satisfy the repo engine field.
 
 ### Local Agent CLI QA
 
 - `DOHC_TEST_AGENT_CLI`: not applicable for docs-only scaffold.
-- Codex result: not run.
-- Claude result, if available: not run.
+- Docs-only exception approval: pending human approval before PR00 is marked
+  complete or merge-ready.
+- Codex result: not run for PR00 docs-only scaffold; exception pending.
+- Claude result, if available: not run for PR00 docs-only scaffold; exception
+  pending.
 - Transcript/artifact path: not applicable.
 - Secret redaction notes: not applicable.
 
@@ -587,6 +591,24 @@ Nineteenth pass:
     payload application.
   - Replaced DM hash-only identity with exact canonical participant-set identity
     or hash plus exact-set verification.
+
+Twentieth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added quota, TTL, rate-limit, payload-size cap, and backpressure/eviction
+    requirements for denied/quarantined ingest holding areas.
+  - Added E2E proof that stale CAS/base tokens and workspace/version mismatches
+    cannot replay quarantined ingests into canonical state.
+  - Reran the focused brand/no-legacy guard under bundled Node 24.14.0 and
+    recorded the earlier Node 18 run as non-gating exploratory output.
+  - Marked PR00 local agent CLI QA as a docs-only exception pending human
+    approval before completion/merge-readiness.
+  - Added legal-erasure handling for chat tombstones while preserving tombstone
+    metadata and deletion-placeholder behavior.
+  - Required invalid chat projection write recovery artifacts to be secret-safe,
+    encrypted, or policy-redacted.
+  - Added first-slice proof that channel sends map to `ChatThread` and
+    `ThreadMessage`, not a separate durable channel-stream model.
 - Overrides:
 
 ### Unresolved Findings

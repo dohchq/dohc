@@ -300,6 +300,13 @@ plaintext secret content.
 Projections, search, notifications, and summaries all read the same
 `ThreadMessage` deletion state and must not invent ad hoc redaction behavior or
 retain plaintext secrets in history, audit, search, export, or agent-log flows.
+Authorized legal erasure is the exception to original-body retention: when a
+GDPR/CCPA or equivalent request is approved through policy, the engine may
+cryptographically purge, destroy keys for, or irreversibly redact the original
+body while preserving `deletedAt`, `tombstone`, deletion-placeholder rendering,
+and minimal audit metadata. Secret-backed references, encrypted payloads, or
+redacted forms replace plaintext wherever audit/history access would otherwise
+have retained the original body.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
@@ -429,12 +436,13 @@ messages.
 
 If a projected chat file is edited locally, the edit must not mutate the
 canonical chat. The engine should treat it as an invalid projection write,
-preserve the edited bytes as a local recovery artifact or status item, and
-regenerate the projection from canonical chat state. The user or agent should
-be directed to post through chat actions instead of editing the projection.
-Projection renderers must use the same body escaping/sanitization rules as the
-interactive chat UI, and must run secret classification/redaction before
-writing any message body into `.dohc/chats/<thread-id>.md`.
+preserve recovery data only through secret-safe storage such as secret-backed,
+encrypted, or policy-redacted artifacts/status items, and regenerate the
+projection from canonical chat state. The user or agent should be directed to
+post through chat actions instead of editing the projection. Projection
+renderers must use the same body escaping/sanitization rules as the interactive
+chat UI, and must run secret classification/redaction before writing any message
+body into `.dohc/chats/<thread-id>.md`.
 
 ## Integration with files and versions
 
@@ -742,8 +750,10 @@ The first useful version should prove dohc-native collaboration:
 
 1. Chats top-level navigation exists.
 2. Users can create channels.
-3. Users can send fast messages in a channel.
-4. A burst of messages can become or belong to a durable chat thread.
+3. Users can send fast messages in a channel, and each send creates or resolves
+   a durable `ChatThread` and persists a `ThreadMessage`.
+4. A burst of messages can become or belong to a durable chat thread without
+   introducing a separate canonical channel-stream message model.
 5. Users can create a DM or small group chat.
 6. Users can link a chat to a file.
 7. Related chats show in the file side rail.

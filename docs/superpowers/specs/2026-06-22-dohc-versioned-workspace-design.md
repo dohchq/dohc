@@ -78,14 +78,17 @@ user-lock, version-access, or skill-turn evaluator is unavailable or
 indeterminate, the save is denied rather than applied.
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
-recover. Humans, agents, imports, and sync processes all get the same guarantee:
-the change is not silently lost, but it also does not become canonical workspace
-state until protection checks pass. This holding area follows the same
-secret-backed durability rules as canonical history: it must not persist
-plaintext secret values in payloads, indexes, logs, explanations, or retry
-metadata. Secret-bearing ingests are stored only as encrypted references,
-redacted forms, or broker metadata until an authorized read path reconstructs
-them.
+recover. The holding area must be abuse-resistant: enforce per-workspace and
+per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
+deterministic eviction or backpressure behavior so ingest floods cannot exhaust
+storage or starve canonical durability paths. Humans, agents, imports, and sync
+processes all get the same guarantee: the change is not silently lost, but it
+also does not become canonical workspace state until protection checks pass.
+This holding area follows the same secret-backed durability rules as canonical
+history: it must not persist plaintext secret values in payloads, indexes, logs,
+explanations, or retry metadata. Secret-bearing ingests are stored only as
+encrypted references, redacted forms, or broker metadata until an authorized
+read path reconstructs them.
 Replay from the holding area must be causal and fail-closed. Retry metadata
 must include `workspaceId`, `versionId`, and the expected base snapshot,
 content hash, or equivalent CAS token captured with the original ingest. At
@@ -533,6 +536,9 @@ The first proof should be small but real:
 11. E2E proves every persisted atom, folder, entity, share, capture, file,
     version, event, projection, and history record is workspace-scoped, and that
     cross-workspace references are rejected by default.
+12. E2E proves holding-area replay is causal: stale base/CAS tokens or
+    workspace/version mismatches never apply as canonical state and instead
+    degrade to conflict/manual reconciliation or remain quarantined.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.
