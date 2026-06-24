@@ -67,7 +67,7 @@ Keep the surface simple:
 
 - **Workspace**: where the user's work lives.
 - **Version**: a live parallel line of work, like Main, Client Version, or
-  Codex Experiment.
+  Agent Experiment.
 - **Files**: the normal way humans and agents edit work.
 - **History**: automatic memory inside a version.
 - **Chats**: familiar communication surface, internally durable work threads.
@@ -387,7 +387,7 @@ Examples:
 - Main
 - Q3 Plan
 - Client View
-- Codex Experiment
+- Agent Experiment
 - Security Fix
 
 Edits inside a version save immediately.
@@ -450,9 +450,9 @@ product surface.
 
 ## External Review Incorporated
 
-Claude Opus reviewed the mega plan before execution. The review agreed with
-the direction, but pushed hard against starting with an abstract universal
-substrate before proving the real loop.
+An external architecture review was incorporated before execution. The review
+agreed with the direction, but pushed hard against starting with an abstract
+universal substrate before proving the real loop.
 
 The plan now incorporates that critique:
 
@@ -492,7 +492,7 @@ better answer.
 
 3. **Version meaning:** workspace-wide named versions.
    - A Version is a live parallel line of workspace work, such as Main,
-     Experiment, Client Draft, or Codex Rewrite.
+     Experiment, Client Draft, or Agent Rewrite.
    - UI can show file/folder-scoped diffs, but ancestry and merge semantics are
      workspace-level.
 
@@ -512,8 +512,9 @@ better answer.
      related files, explicit checkpoints, imports, merges, restores, publishes,
      and known dohc action boundaries when available.
    - For ordinary local file writes, dohc does not need to distinguish whether
-     the process was Ice, Codex, Claude, a script, or an editor plugin. Honest
-     generic attribution such as local edit/device/session is acceptable.
+     the process was a user, an agent CLI, a script, or an editor plugin.
+     Honest generic attribution such as local edit/device/session is
+     acceptable.
 
 6. **Conflict model:** preserve both sides; never silently overwrite tracked
    workspace content.
@@ -675,18 +676,14 @@ Each PR must:
 5. Run required integration/E2E/security regressions.
 6. Update the execution log.
 7. Open a PR.
-8. Run CodeRabbit.
-9. Fix CodeRabbit findings.
-10. Re-run tests.
-11. Repeat until CodeRabbit approves or the user explicitly overrides a
-    non-applicable finding.
+8. Run the canonical CodeRabbit loop defined below.
 
 Recommended branch naming:
 
 ```text
-codex/think-bigger-00-foundation
-codex/think-bigger-01-version-contracts
-codex/think-bigger-02-file-policy
+<branch-prefix>/think-bigger-00-foundation
+<branch-prefix>/think-bigger-01-version-contracts
+<branch-prefix>/think-bigger-02-file-policy
 ...
 ```
 
@@ -1011,7 +1008,7 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 
 ## Agent And Review Workflow
 
-### Execution Topology: Worktrees And Codex Chats
+### Execution Topology: Worktrees And Focused Implementation Threads
 
 Use this main thread as the orchestration thread. It owns the mega plan,
 execution log, cross-lane decisions, and final reconciliation.
@@ -1020,32 +1017,34 @@ Implementation should happen in isolated worktrees by default:
 
 ```text
 main planning checkout
-  -> codex/think-bigger-p0r-rust-kernel      in ../dohc-p0r-rust-kernel
-  -> codex/think-bigger-p0b-version-store    in ../dohc-p0b-version-store
-  -> codex/think-bigger-p0c-file-capture     in ../dohc-p0c-file-capture
-  -> codex/think-bigger-p0e-linked-chat      in ../dohc-p0e-linked-chat
-  -> codex/think-bigger-p0f-search-policy    in ../dohc-p0f-search-policy
+  -> <branch-prefix>/think-bigger-p0r-rust-kernel      in ../dohc-p0r-rust-kernel
+  -> <branch-prefix>/think-bigger-p0b-version-store    in ../dohc-p0b-version-store
+  -> <branch-prefix>/think-bigger-p0c-file-capture     in ../dohc-p0c-file-capture
+  -> <branch-prefix>/think-bigger-p0e-linked-chat      in ../dohc-p0e-linked-chat
+  -> <branch-prefix>/think-bigger-p0f-search-policy    in ../dohc-p0f-search-policy
 ```
 
 Default rule:
 
 - one implementation PR = one branch = one worktree.
-- one focused Codex chat may own that worktree when the lane is substantial.
+- one focused implementation chat/thread may own that worktree when the lane is
+  substantial.
 - no two agents edit the same worktree at the same time.
 - shared decisions flow back into this main thread and the execution log.
 - generated artifacts, perf measurements, review notes, and migration notes
   must be copied back into the PR entry before the lane is considered done.
 
-Create separate Codex chats for major lanes, not for tiny edits:
+Create separate focused implementation chats/threads for major lanes, not for
+tiny edits:
 
-- **Rust Kernel Spike Chat:** PR P0R.
-- **Versioned Store Chat:** PR P0B/P0D if merge work stays tightly coupled.
-- **Filesystem Capture Chat:** PR P0C and later PR 05/06/09/10.
-- **Chats Product Chat:** PR P0E and later PR 12-17.
-- **Search/Policy Chat:** PR P0F and later PR 04/11/17/18.
-- **QA/Performance Hardening Chat:** PR P0G and later release gates.
+- **Rust Kernel Spike Thread:** PR P0R.
+- **Versioned Store Thread:** PR P0B/P0D if merge work stays tightly coupled.
+- **Filesystem Capture Thread:** PR P0C and later PR 05/06/09/10.
+- **Chats Product Thread:** PR P0E and later PR 12-17.
+- **Search/Policy Thread:** PR P0F and later PR 04/11/17/18.
+- **QA/Performance Hardening Thread:** PR P0G and later release gates.
 
-Each Codex chat should start with:
+Each implementation thread should start with:
 
 - this mega plan.
 - the execution log.
@@ -1055,13 +1054,13 @@ Each Codex chat should start with:
 - required tests and performance budgets.
 - CodeRabbit loop instructions.
 
-Separate Codex chats are user-visible and should only be created when the user
-explicitly asks or approves. Subagents remain the default for short bounded
-reviews inside the current thread.
+Separate implementation chats/threads are user-visible and should only be
+created when the user explicitly asks or approves. Subagents remain the default
+for short bounded reviews inside the current thread.
 
 Worktree hygiene:
 
-- Create branches with the `codex/` prefix.
+- Create branches with the configured branch prefix for the environment.
 - Keep worktrees narrow and disposable.
 - Never share uncommitted edits across lanes.
 - Rebase/merge only through explicit PR reconciliation.
@@ -2308,10 +2307,7 @@ Plan PR scope
   -> run required E2E/security/perf
   -> update execution log
   -> open PR
-  -> CodeRabbit review
-  -> fix findings
-  -> rerun tests
-  -> repeat until approved
+  -> run the canonical CodeRabbit loop
   -> merge only after acceptance criteria
 ```
 

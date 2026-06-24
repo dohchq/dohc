@@ -119,10 +119,15 @@ It should ask only:
 If the actor can write, the change saves immediately to that version.
 
 For raw local file edits, dohc does not need to prove whether the process was
-Ice, Codex, Claude, a script, or an editor plugin. Those edits can be attributed
-honestly as local/device/session edits. Agent-specific authorship is required
-for social actions like chat replies, where the message display must make clear
-whether the human or the user's agent wrote it.
+a user, an agent CLI, a script, or an editor plugin. Those edits can be
+attributed honestly as unverified local/device/session edits. That provenance
+must not later be upgraded to authenticated human or agent identity without
+cryptographic proof, a trusted session boundary, or a dohc-controlled action
+record. Sync/import flows must preserve the original provenance class; if proof
+is absent, the change remains local/device/session/import provenance.
+Agent-specific authorship is required for social actions like chat replies,
+where the message display must make clear whether the human or the user's agent
+wrote it.
 
 ## Robustness invariants
 
@@ -155,11 +160,11 @@ Versions
   Main
   Q3 Rewrite
   Client Version
-  Codex Experiment
+  Agent Experiment
 
 History inside Main
-  10:05 Ice edited docs/plan.md
-  10:12 Codex updated apps/finance/index.html
+  10:05 <User Name> edited docs/plan.md
+  10:12 Agent updated apps/finance/index.html
   10:20 CSV import added 812 rows
 ```
 
@@ -172,7 +177,9 @@ Immediate save should not mean noisy visible history.
 dohc should track two levels:
 
 1. **Fine-grained durability log**
-   - every save/write needed for recovery.
+   - every non-secret save/write needed for recovery.
+   - secret-backed writes record encrypted references, redacted markers, or
+     broker metadata instead of raw secret bytes.
    - crash-safe and time-travel friendly.
    - not necessarily the main visible timeline.
 
@@ -336,7 +343,10 @@ secret broker:
 - dohc Cloud KMS.
 - self-hosted secret store.
 
-History, diffs, search, exports, and agent logs must not capture secret values.
+History, durability logs, diffs, search, exports, and agent logs must not
+capture raw secret values. Secret-backed content may be persisted only as
+encrypted references, redacted forms, or broker-managed metadata while the
+timeline remains crash-safe and recoverable.
 
 ## Interface sketch
 
@@ -353,7 +363,7 @@ Version menu:
 Main
 Q3 Rewrite
 Client Version
-Codex Experiment
+Agent Experiment
 Create version
 View history
 ```
@@ -366,17 +376,17 @@ Today
 10:20 CSV import
 Added 812 rows to transactions
 
-10:12 Codex edited Finance Tracker
+10:12 Agent edited Finance Tracker
 Changed 6 files
 
-10:05 Ice edited Budget Notes
+10:05 <User Name> edited Budget Notes
 Changed 1 document
 ```
 
 Compare versions:
 
 ```text
-Compare: Codex Experiment -> Main
+Compare: Agent Experiment -> Main
 
 Changed
 - 6 app files
@@ -397,7 +407,7 @@ Budget Notes changed in both versions.
 
 Choose what to keep:
 - Main paragraph
-- Codex Experiment paragraph
+- Agent Experiment paragraph
 - open side-by-side editor
 ```
 

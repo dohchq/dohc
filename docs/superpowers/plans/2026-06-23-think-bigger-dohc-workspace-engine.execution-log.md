@@ -21,7 +21,7 @@ Required evidence:
 
 - branch name.
 - worktree path.
-- Codex chat/thread, if used.
+- implementation chat/thread, if used.
 - PR link.
 - scope completed.
 - files changed.
@@ -44,7 +44,7 @@ the user explicitly approves an override.
 
 ## PR Status Table
 
-| PR ID | Title | Status | Branch | Worktree | Codex Chat | PR Link | CodeRabbit | Tests | Notes |
+| PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | P0A | Current System Inventory And Decisions | not started | TBD | TBD | main | TBD | TBD | docs/inventory | Must happen before implementation. |
 | P0R | Rust Workspace Kernel Spike | not started | TBD | TBD | TBD | TBD | TBD | rust spike + perf | Decide local engine boundary before deep implementation. |
@@ -88,7 +88,7 @@ Copy this section for each PR.
 Status:
 Branch:
 Worktree:
-Codex chat/thread:
+Implementation chat/thread:
 PR:
 Date started:
 Date completed:
@@ -173,7 +173,7 @@ Date completed:
 Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: `<current checkout>`
-Codex chat/thread: main orchestration thread
+Implementation chat/thread: main orchestration thread
 PR: https://github.com/dohc-ai/dohc/pull/46
 Date started: 2026-06-24
 Date completed:
@@ -187,7 +187,7 @@ Date completed:
 - [x] Add Phase 0 proof arc and PR lane breakdown.
 - [x] Add Rust workspace kernel strategy and P0R spike.
 - [x] Add performance as a top-level invariant and gate.
-- [x] Add worktree/Codex chat execution topology.
+- [x] Add worktree/focused implementation thread execution topology.
 - [x] Create execution log for PR and milestone evidence.
 
 ### Files Changed
@@ -209,7 +209,7 @@ git status --short --branch
 git remote -v
 gh --version
 gh auth status
-rg -n "Execution Topology|worktree|Codex chat|one implementation PR|Rust Kernel Spike Chat|Phase 0 branch/worktree/chat ownership|Codex chat/thread" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+rg -n "Execution Topology|worktree|implementation thread|one implementation PR|Rust Kernel Spike|Phase 0 branch/worktree/chat ownership" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
 git diff --cached --check
 git push -u origin codex/think-bigger-00-readiness-scaffold
 gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "[codex] Add Think Bigger workspace engine plan"
@@ -243,10 +243,24 @@ git diff --check
     workspace-scoped chat action results, and stale workspace response guards.
   - Major: Phase 0 execution gate needed explicit security/data-integrity
     invariants.
-  - Minor: plan scenario used concrete `Ice's agent` instead of
-    `<User Name>'s agent`.
+  - Minor: plan scenario used a concrete user-specific agent token instead of
+    the standardized `<User Name>'s agent`.
   - Minor: execution log used a machine-specific worktree path.
   - Minor: execution log table had ambiguous `PR` columns.
+  - Second pass major: raw local file provenance needed a stronger trust
+    boundary so unverified local/device/session attribution cannot become
+    authenticated human/agent identity without proof.
+  - Second pass major: durability log language needed to exclude raw secret
+    bytes while preserving crash-safety.
+  - Second pass major: chat thread ownership needed strict channel-vs-DM XOR.
+  - Second pass major: effective file policy needed deterministic precedence,
+    tie-breakers, and canonical key normalization.
+  - Second pass major: conflict visible-value choice needed deterministic,
+    auditable selection.
+  - Second pass major: canonical plan examples needed neutral agent/tool
+    wording.
+  - Second pass trivial: duplicate PR review loop needed to reference the
+    canonical CodeRabbit loop.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -257,6 +271,17 @@ git diff --check
   - Standardized agent display placeholders.
   - Replaced absolute worktree path with `<current checkout>`.
   - Renamed table columns to `PR ID` and `PR Link`.
+  - Marked raw local file provenance as unverified unless backed by proof.
+  - Clarified secret-backed durability entries as encrypted references,
+    redacted markers, or broker metadata.
+  - Added exclusive channel-backed vs DM-backed chat thread types.
+  - Added effective policy resolution order, tie-breakers, and camelCase
+    canonical key normalization.
+  - Added deterministic chosen/current conflict value rules.
+  - Replaced concrete agent/tool examples with neutral wording in canonical
+    specs and plan text.
+  - Replaced the duplicate PR loop with a reference to the canonical CodeRabbit
+    loop.
 - Overrides:
 
 ### Subagent Reviews
@@ -264,7 +289,7 @@ git diff --check
 - Architecture: prior planning review incorporated.
 - Security: prior planning review incorporated.
 - QA: prior planning review incorporated.
-- Other: Claude Opus plan review incorporated.
+- Other: external architecture review incorporated.
 
 ### Security / Privacy Notes
 
@@ -289,7 +314,7 @@ git diff --check
 ### Remaining Risk
 
 - Phase 0 scope is large and must be split into lane PRs before implementation.
-- Worktree/Codex chat ownership is not yet assigned for P0 lanes.
+- Worktree/implementation-thread ownership is not yet assigned for P0 lanes.
 
 ### Follow-Up / Deletion Conditions
 

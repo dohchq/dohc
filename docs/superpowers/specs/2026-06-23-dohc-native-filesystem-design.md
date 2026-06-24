@@ -58,7 +58,7 @@ Named versions can appear as their own folders or mounts:
 ```text
 ~/dohc/personal/                       # Main
 ~/dohc/personal.versions/q3-plan/      # Q3 Plan version
-~/dohc/personal.versions/codex-try/    # Codex Try version
+~/dohc/personal.versions/agent-try/    # Agent Try version
 ~/dohc/personal.versions/client-view/  # Client-facing version
 ```
 
@@ -84,18 +84,18 @@ The filesystem layer records authorship and provenance, but it does not impose
 different write semantics just because the actor is an agent.
 
 For ordinary local filesystem writes, provenance can be device/session-level
-rather than agent-level. A user should be able to point Codex, Claude Code, a
-script, or a text editor at the dohc folder without teaching that tool dohc
-identity rules. dohc captures the file change; explicit agent authorship is
-only required when the agent performs a social/action-native operation such as
+rather than agent-level. A user should be able to point an agent CLI, script,
+or text editor at the dohc folder without teaching that tool dohc identity
+rules. dohc captures the file change; explicit agent authorship is only
+required when the agent performs a social/action-native operation such as
 posting a chat message.
 
 ## Local capture and reconciliation
 
 External edits are not an edge case. They are the core promise.
 
-If a user edits `notes/todo.txt` in Notepad, VS Code, Vim, a shell script,
-Codex, or Claude Code, dohc should notice the same kind of file change.
+If a user edits `notes/todo.txt` in a native editor, IDE, terminal editor, shell
+script, or agent CLI, dohc should notice the same kind of file change.
 
 Phase 0 should use a normal folder plus reconciliation:
 
@@ -329,6 +329,26 @@ dohc resolves effective policy from:
 - sharing/export context.
 - explicit user overrides.
 
+Resolution order is deterministic:
+
+1. Start from workspace defaults.
+2. Apply object-type hard constraints.
+3. Apply version policy.
+4. Apply path/folder rules from least specific to most specific.
+5. Apply authorized explicit user overrides.
+6. Intersect with actor permissions.
+7. Intersect with sharing/export context.
+
+Deny/restrictive outcomes win when two rules conflict. For equal specificity,
+rules sort by explicit priority when present, then by stable source order, then
+by lexical rule id. Exact paths are more specific than globs; longer literal
+prefixes are more specific than shorter prefixes.
+
+Internal policy keys are canonical camelCase. Human-authored policy files may
+use snake_case aliases, but parsers must normalize them into canonical camelCase
+before validation, storage, API responses, indexing, or enforcement. Clients
+and services must enforce the canonical schema, not a mix of key spellings.
+
 Example internal shape:
 
 ```ts
@@ -438,7 +458,7 @@ Possible policies:
 The user-facing framing should be:
 
 ```text
-Codex wants to read .env
+Agent wants to read .env
 Visibility: private
 Reason: run local tests
 
@@ -496,6 +516,15 @@ Possible rule:
 - no conflicting state is silently dropped.
 - secret-backed conflicts do not materialize plaintext in `.dohc/conflicts/`
   by default.
+
+The chosen/current value must be deterministic and auditable:
+
+- prefer an explicit user/system resolution commit when present.
+- otherwise use a stable engine rule, such as highest logical clock followed by
+  deterministic actor/version tiebreaker.
+- record `chosen_from`, `base`, and rationale in conflict metadata.
+- never switch the visible winner silently without emitting a status/event
+  update.
 
 Example:
 

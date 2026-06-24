@@ -140,11 +140,9 @@ A chat thread is a durable work conversation.
 Fields:
 
 ```ts
-type ChatThread = {
+type ChatThreadBase = {
   id: string
   workspaceId: string
-  channelId?: string
-  dmParticipantIds?: string[]
   title?: string
   status: 'open' | 'closed' | 'decided' | 'archived'
   createdBy: string
@@ -153,7 +151,24 @@ type ChatThread = {
   linkedWork: ThreadLink[]
   pinned: boolean
 }
+
+type ChannelChatThread = ChatThreadBase & {
+  channelId: string
+  dmParticipantIds?: never
+}
+
+type DmChatThread = ChatThreadBase & {
+  channelId?: never
+  dmParticipantIds: [string, ...string[]]
+}
+
+type ChatThread = ChannelChatThread | DmChatThread
 ```
+
+A thread must have exactly one owner shape: channel-backed or DM-backed. It
+must never have both `channelId` and `dmParticipantIds`, and it must never have
+neither. Creation and update paths must validate this XOR before routing,
+authorization checks, notifications, search indexing, or projection handling.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
@@ -365,7 +380,7 @@ Composer...
 Active
 - Versioned workspace conflict handling
 - Desktop update rollout
-- Codex filesystem findings
+- Agent filesystem findings
 
 Pinned
 - Release checklist
@@ -389,7 +404,7 @@ Right rail:
   Chats
     Q3 pricing decision
     Enterprise tier concern
-    Codex forecast update
+    Agent forecast update
 
   Activity
     <User Name> edited this file
