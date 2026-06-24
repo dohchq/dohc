@@ -1326,7 +1326,10 @@ pnpm install --filter @dohc/workspace-core --filter @dohc/workspace-contracts --
 cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml
 cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
 node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
 git rebase codex/think-bigger-p0a-inventory
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
 ```
 
 ### E2E / Visual / Manual QA
@@ -1367,16 +1370,19 @@ git rebase codex/think-bigger-p0a-inventory
 
 - Budget areas touched: planning/spike only.
 - Metrics:
-  - Rust spike: min 6.80ms, max 8.16ms, average 7.33ms.
-  - Current TypeScript baseline: min 187.04ms, max 193.14ms, average
-    189.27ms.
+  - Rust spike: min 6.89ms, max 8.57ms, average 7.70ms.
+  - Current TypeScript baseline: min 332.91ms, max 337.55ms, average
+    335.74ms.
 - Workspace/file/chat sizes: generated 1,000-file fixture, 1,024 bytes per
   file, three iterations.
-- Machine/CI context: local Codex machine; Node v18.19.1 emitted repo engine
-  warnings because dohc declares Node 20.19+/22.13+.
+- Machine/CI context: local Codex machine; latest rerun happened after the P0A
+  restack and used Linux Node v24.18.0 and Cargo 1.82.0.
 - Budget pass/fail: no production budget applies yet. Result strongly supports
-  promoting scan/hash/reconcile/indexing to a Rust kernel behind shared
-  contracts.
+  continuing the Rust kernel lane behind shared contracts. The fixture now uses
+  the same ignored-segment behavior for Rust and the TypeScript
+  `scanWorkspaceFiles` baseline (`.dohc`, `.git`, and `node_modules`), but the
+  numbers are still directional local smoke data rather than release budgets for
+  the full future scan/hash/reconcile/indexing engine.
 
 ### Migration Notes
 

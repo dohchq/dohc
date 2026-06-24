@@ -44,6 +44,11 @@ struct Args {
     json: bool,
 }
 
+enum ParsedArgs {
+    Help,
+    Scan(Args),
+}
+
 fn main() {
     match run() {
         Ok(()) => {}
@@ -55,7 +60,13 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args(env::args().skip(1))?;
+    let args = match parse_args(env::args().skip(1))? {
+        ParsedArgs::Help => {
+            println!("{}", usage());
+            return Ok(());
+        }
+        ParsedArgs::Scan(args) => args,
+    };
     let output = scan_workspace(&args.root).map_err(|error| error.to_string())?;
 
     if args.json {
@@ -73,11 +84,14 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_args<I>(mut args: I) -> Result<Args, String>
+fn parse_args<I>(mut args: I) -> Result<ParsedArgs, String>
 where
     I: Iterator<Item = String>,
 {
     let command = args.next().ok_or_else(usage)?;
+    if command == "--help" || command == "-h" {
+        return Ok(ParsedArgs::Help);
+    }
     if command != "scan" {
         return Err(usage());
     }
@@ -94,15 +108,15 @@ where
                 root = Some(PathBuf::from(value));
             }
             "--json" => json = true,
-            "--help" | "-h" => return Err(usage()),
+            "--help" | "-h" => return Ok(ParsedArgs::Help),
             other => return Err(format!("unknown argument: {other}\n{}", usage())),
         }
     }
 
-    Ok(Args {
+    Ok(ParsedArgs::Scan(Args {
         root: root.ok_or_else(|| "--root is required".to_string())?,
         json,
-    })
+    }))
 }
 
 fn usage() -> String {
@@ -164,8 +178,26 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
             continue;
         }
 
-        let metadata = entry.metadata()?;
-        let sha = sha256_file(entry.path())?;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                skipped.push(SkippedPath {
+                    path: relative.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let sha = match sha256_file(entry.path()) {
+            Ok(sha) => sha,
+            Err(error) => {
+                skipped.push(SkippedPath {
+                    path: relative.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
         files.push(ScannedFile {
             path: relative.clone(),
             size: metadata.len(),
@@ -276,6 +308,18 @@ mod tests {
 
         let err = scan_workspace(&file).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn help_is_a_successful_parse() {
+        assert!(matches!(
+            parse_args(vec!["scan".to_string(), "--help".to_string()].into_iter()).unwrap(),
+            ParsedArgs::Help
+        ));
+        assert!(matches!(
+            parse_args(vec!["--help".to_string()].into_iter()).unwrap(),
+            ParsedArgs::Help
+        ));
     }
 
     fn write_file(path: impl AsRef<Path>, bytes: &[u8]) {

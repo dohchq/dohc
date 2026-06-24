@@ -12,7 +12,11 @@ function parseArgs(argv: string[]): Args {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--root") {
-      root = argv[index + 1] ?? "";
+      const value = argv[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error("--root requires a path");
+      }
+      root = value;
       index += 1;
       continue;
     }

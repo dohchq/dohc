@@ -138,23 +138,28 @@ Commands:
 ```bash
 cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
 node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+git rebase codex/think-bigger-p0a-inventory
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
 ```
 
 Results on the local Codex machine:
 
 | Scanner | Files Seen | Bytes | Min | Max | Average |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Rust spike | 1000 | 1,028,890 | 6.80ms | 8.16ms | 7.33ms |
-| Current TypeScript baseline | 1002 | 1,028,902 | 187.04ms | 193.14ms | 189.27ms |
+| Rust spike | 1000 | 1,028,890 | 6.89ms | 8.57ms | 7.70ms |
+| Current TypeScript baseline | 1000 | 1,028,890 | 332.91ms | 337.55ms | 335.74ms |
 
 Notes:
 
-- The Rust spike skips `.dohc`, `.git`, and `node_modules`.
-- The current TypeScript baseline calls `scanWorkspaceFiles`, which only skips
-  `.dohc`; the extra two files are from `.git/config` and
-  `node_modules/pkg/index.js` in the fixture.
-- These are local smoke numbers, not release budgets. They are still strong
-  enough to justify a real Rust kernel lane for hot local filesystem work.
+- The Rust spike and current TypeScript baseline both skip `.dohc`, `.git`, and
+  `node_modules` for this fixture.
+- These are local smoke numbers, not release budgets. They are normalized for
+  the ignored-segment fixture behavior, but still directional because the spike
+  is a narrow scan/hash prototype rather than the full future engine.
+- Latest rerun happened after the P0A restack and used Linux Node v24.18.0
+  and Cargo 1.82.0.
 
 ## Decision
 
@@ -165,8 +170,8 @@ Do not rewrite dohc around Rust all at once. Instead:
 
 - keep permissions, durable write contracts, event shapes, and conflict
   semantics in shared schemas and cross-language tests.
-- promote Rust first for scan/hash/reconcile/indexing work where the
-  performance win is obvious.
+- promote Rust first for scan/hash/reconcile/indexing experiments where the
+  systems shape and directional local smoke data justify deeper investment.
 - bridge the Rust kernel through supervised JSON-RPC over stdio or named pipes,
   not direct in-process native bindings.
 - require every Rust behavior that touches user data to have a TypeScript

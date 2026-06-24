@@ -10,7 +10,9 @@ const nativeTmpdir = process.platform === "win32" ? tmpdir() : "/tmp";
 const rustManifest = join(repoRoot, "crates/workspace-kernel-spike/Cargo.toml");
 const rustBin = join(
   repoRoot,
-  "crates/workspace-kernel-spike/target/release/dohc-workspace-kernel-spike",
+  `crates/workspace-kernel-spike/target/release/dohc-workspace-kernel-spike${
+    process.platform === "win32" ? ".exe" : ""
+  }`,
 );
 
 function arg(name, fallback) {
@@ -78,6 +80,16 @@ const bytesPerFile = Number(arg("--bytes-per-file", "1024"));
 const iterations = Number(arg("--iterations", "3"));
 const keepFixture = process.argv.includes("--keep-fixture");
 
+if (!Number.isInteger(files) || files < 1) {
+  throw new Error("--files must be an integer >= 1");
+}
+if (!Number.isInteger(bytesPerFile) || bytesPerFile < 1) {
+  throw new Error("--bytes-per-file must be an integer >= 1");
+}
+if (!Number.isInteger(iterations) || iterations < 1) {
+  throw new Error("--iterations must be an integer >= 1");
+}
+
 const fixture = await createFixture({ files, bytesPerFile });
 
 try {
@@ -115,8 +127,7 @@ try {
     rust: summarize(rustRuns),
     typescript: summarize(tsRuns),
     notes: [
-      "Rust spike skips .dohc, .git, and node_modules.",
-      "TypeScript baseline calls current scanWorkspaceFiles, which only skips .dohc.",
+      "Rust spike and TypeScript baseline both skip .dohc, .git, and node_modules.",
       "Numbers are local-machine smoke data, not release budgets.",
     ],
   };
