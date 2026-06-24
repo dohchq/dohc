@@ -204,7 +204,7 @@ Can we check the pricing?
 Agent message:
 
 ```text
-Ice's agent
+<User Name>'s agent
 I checked the forecast. The enterprise tier looks underpriced.
 ```
 
@@ -236,6 +236,26 @@ reply_to_chat
 link_chat_to_work
 summarize_chat
 ```
+
+Every chat action must derive actor identity server-side or engine-side and
+enforce workspace scope on every entity and result:
+
+- `list_chats`
+- `read_chat`
+- `create_chat`
+- `reply_to_chat`
+- `link_chat_to_work`
+- `summarize_chat`
+
+Callers must not be able to assert user/workspace identity, widen chat
+visibility, or link a chat to work they cannot access. Agent messages use the
+same authorization model as human messages; the display label is different, not
+the authority model.
+
+Renderer surfaces that load channels, chats, linked work, summaries, search
+results, or side-rail state asynchronously must guard responses with a
+workspace/request token, abort signal, or equivalent. A slow response for
+workspace A must never repaint workspace B after a workspace switch.
 
 This does not violate the dohc file philosophy. Chats are social actions, not
 plain file writes. Posting a message triggers activity, mentions, read state,
@@ -270,10 +290,10 @@ linked:
 
 ## Messages
 
-Ice:
+<User Name>:
 Can we make conflict handling feel more like Google Docs?
 
-Ice's agent:
+<User Name>'s agent:
 I checked the filesystem spec and found one risk...
 ```
 
@@ -372,8 +392,8 @@ Right rail:
     Codex forecast update
 
   Activity
-    Ice edited this file
-    Ice's agent updated the forecast
+    <User Name> edited this file
+    <User Name>'s agent updated the forecast
 ```
 
 This is where dohc becomes better than Slack. The conversation is beside the
@@ -450,7 +470,7 @@ Chat: Q3 pricing decision
 Document: docs/pricing.md
   discussed in Q3 pricing decision
 
-Agent run: Ice's agent forecast pass
+Agent run: <User Name>'s agent forecast pass
   replied in Q3 pricing decision
 ```
 
@@ -537,7 +557,7 @@ chat -> workflow
 Examples:
 
 - turn a chat into a decision.
-- ask Ice's agent to investigate from a message.
+- ask <User Name>'s agent to investigate from a message.
 - create a version from a chat.
 - link a file to a chat.
 - summarize a chat into a document.

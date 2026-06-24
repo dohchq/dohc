@@ -66,6 +66,13 @@ agents second-class writers. Safety comes from snapshots, permissions, history,
 conflict preservation, and recovery, not from forcing all agent work through a
 separate approval flow.
 
+Immediate save is not permission bypass. Every save path must enforce
+workspace-scoped authorization, protected-path rules, user locks, version
+access, and visibility boundaries before applying a change. Authenticated actor
+identity is derived by the server/engine, never trusted from the caller. Humans,
+agents, automations, imports, and sync processes all pass through the same
+protection checks before a write can land.
+
 Review appears only when crossing a real boundary:
 
 - merging one version into another.
@@ -101,10 +108,13 @@ The version engine should not care whether a change came from:
 
 It should ask only:
 
-1. Does this actor have permission to write this version/path/object?
-2. Can the change be recorded durably?
-3. Can the system preserve recovery and honest provenance?
-4. Does the change create a conflict or cross a visibility boundary?
+1. What server/engine-derived actor is performing the write?
+2. Does this actor have permission to write this workspace/version/path/object?
+3. Is the path/object protected by a user lock, policy boundary, or visibility
+   boundary?
+4. Can the change be recorded durably?
+5. Can the system preserve recovery and honest provenance?
+6. Does the change create a conflict or cross a visibility boundary?
 
 If the actor can write, the change saves immediately to that version.
 

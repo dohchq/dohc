@@ -44,7 +44,7 @@ the user explicitly approves an override.
 
 ## PR Status Table
 
-| PR | Title | Status | Branch | Worktree | Codex Chat | PR | CodeRabbit | Tests | Notes |
+| PR ID | Title | Status | Branch | Worktree | Codex Chat | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | P0A | Current System Inventory And Decisions | not started | TBD | TBD | main | TBD | TBD | docs/inventory | Must happen before implementation. |
 | P0R | Rust Workspace Kernel Spike | not started | TBD | TBD | TBD | TBD | TBD | rust spike + perf | Decide local engine boundary before deep implementation. |
@@ -54,7 +54,7 @@ the user explicitly approves an override.
 | P0E | Minimal Chat Linked To File | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | P0F | Search And Policy Smoke | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | P0G | Proof Arc QA And CodeRabbit Hardening | not started | TBD | TBD | TBD | TBD | TBD | agent CLI + full matrix + perf |  |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | /home/ice/dev/dohc | main | https://github.com/dohc-ai/dohc/pull/46 | pending | docs sanity | This log created with plan. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity | This log created with plan. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -172,7 +172,7 @@ Date completed:
 
 Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
-Worktree: /home/ice/dev/dohc
+Worktree: `<current checkout>`
 Codex chat/thread: main orchestration thread
 PR: https://github.com/dohc-ai/dohc/pull/46
 Date started: 2026-06-24
@@ -213,6 +213,9 @@ rg -n "Execution Topology|worktree|Codex chat|one implementation PR|Rust Kernel 
 git diff --cached --check
 git push -u origin codex/think-bigger-00-readiness-scaffold
 gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "[codex] Add Think Bigger workspace engine plan"
+coderabbit review --agent -t committed -c AGENTS.md
+rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
+git diff --check
 ```
 
 ### E2E / Visual / Manual QA
@@ -229,9 +232,31 @@ gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold
 
 ### CodeRabbit
 
-- Status: pending.
+- Status: fixes applied; rerun pending.
 - Findings:
+  - Major: versioned workspace spec needed explicit server/engine-derived
+    authorization, locks, protected paths, and visibility-boundary checks before
+    immediate save.
+  - Major: filesystem conflict projection needed secret-backed conflict
+    redaction rules for `.dohc/conflicts/`.
+  - Major: chats spec needed server/engine-derived actor authorization,
+    workspace-scoped chat action results, and stale workspace response guards.
+  - Major: Phase 0 execution gate needed explicit security/data-integrity
+    invariants.
+  - Minor: plan scenario used concrete `Ice's agent` instead of
+    `<User Name>'s agent`.
+  - Minor: execution log used a machine-specific worktree path.
+  - Minor: execution log table had ambiguous `PR` columns.
 - Fixes:
+  - Added write authorization/lock/protected-path invariants to the versioned
+    workspace spec.
+  - Added secret-backed conflict redaction/materialization rules.
+  - Added chat action authorization and workspace async response guards.
+  - Added Phase 0 security/data-integrity gates for actor identity, workspace
+    scoping, agent write boundaries, HTML sandboxing, and canonical Y.Doc.
+  - Standardized agent display placeholders.
+  - Replaced absolute worktree path with `<current checkout>`.
+  - Renamed table columns to `PR ID` and `PR Link`.
 - Overrides:
 
 ### Subagent Reviews
@@ -293,6 +318,15 @@ Gate evidence:
 - [ ] Rust bridge/packaging/CI recommendation is recorded.
 - [ ] Main plus one named version works for one text/file driver.
 - [ ] File/API writes save immediately and produce recoverable history.
+- [ ] Server/engine-derived actor identity is enforced for write paths; callers
+      cannot assert trusted user identity.
+- [ ] Every file, version, chat, share, capture, event, search result, and
+      projection is workspace-scoped.
+- [ ] Agent writes respect user locks, protected paths, folder/file access,
+      sharing boundaries, and skill-turn gates.
+- [ ] HTML atoms remain sandboxed and sanitized.
+- [ ] Canonical Y.Doc state takes precedence over derived markdown/body caches
+      where rich docs are involved.
 - [ ] External editor/process edits are detected while dohc is running.
 - [ ] External editor/process edits made while dohc is stopped reconcile on
       next launch.

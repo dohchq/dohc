@@ -151,6 +151,11 @@ Those are engine-room concepts.
 - Every object, event, projection, file, folder, version, chat, channel, DM,
   message, share, app, database, secret reference, search index entry, and
   export is scoped to a workspace.
+- Agent writes must respect user locks, protected paths, folder/file access,
+  sharing boundaries, and skill-turn gates.
+- HTML atoms remain sandboxed and sanitized.
+- Canonical Y.Doc state takes precedence over derived markdown/body caches for
+  rich document content.
 - Secret-backed files are allowed, including `.env`, but plaintext secrets must
   not leak into normal history, search, public export, logs, or unauthorized
   projections.
@@ -2408,7 +2413,7 @@ These are the product-level scenarios the full initiative must eventually pass.
 2. User starts a chat from the file side rail.
 3. Another user replies in `#product`.
 4. Same chat appears in file side rail and channel.
-5. Agent replies as `Ice's agent`.
+5. Agent replies as `<User Name>'s agent`.
 6. Search returns the chat and linked file together.
 
 ### Scenario G - External Shared Channel

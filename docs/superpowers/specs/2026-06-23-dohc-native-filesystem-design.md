@@ -494,6 +494,8 @@ Possible rule:
 - all conflicting states are preserved in the engine.
 - conflicts appear in UI, status APIs, and a `.dohc/conflicts/` view.
 - no conflicting state is silently dropped.
+- secret-backed conflicts do not materialize plaintext in `.dohc/conflicts/`
+  by default.
 
 Example:
 
@@ -509,6 +511,13 @@ Example:
 Normal tools keep working. Users and agents can inspect conflicts explicitly.
 
 The filesystem may simplify. It must not lie about loss.
+
+Secret-backed paths need stricter conflict projection rules. The engine should
+preserve base/current/incoming states, but `.dohc/conflicts/` must show redacted
+placeholders or metadata-only artifacts unless the actor is authorized and
+secret access is explicitly granted for that resolution session. The visible
+path/current-value rule must not silently expose secret content through a
+conflict artifact.
 
 ## Status and legibility
 
