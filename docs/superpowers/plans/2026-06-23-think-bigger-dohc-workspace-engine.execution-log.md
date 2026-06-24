@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; filesystem/chat consistency fix applied; rerun pending
+Status: PR 00 in review; idempotency/read-state/DM fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Filesystem/chat consistency fix applied; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Idempotency/read-state/DM fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -257,9 +257,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after filesystem/chat consistency fix.
-- Current findings: filesystem/chat consistency fix applied; pending latest
-  rerun.
+- Status: fixes applied; rerun pending after idempotency/read-state/DM fix.
+- Current findings: idempotency/read-state/DM fix applied; pending latest rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -783,6 +782,18 @@ Thirty-sixth pass:
     the UX remains lightweight.
   - Required collision-safe chat projection filename mapping on
     case-insensitive filesystems.
+
+Thirty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Required idempotency keys and deterministic duplicate-delivery behavior for
+    `write(...)`, `merge(...)`, and `restore(...)`, including filesystem-captured
+    saves.
+  - Required chat read-state writes to derive `actorId` from authenticated
+    server/engine identity rather than caller payloads.
+  - Made DM participant sets immutable after creation; membership changes create
+    or resolve a new canonical DM-backed `ChatThread` and link from the prior
+    thread.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -790,7 +801,7 @@ Thirty-sixth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the filesystem/chat consistency fix.
+- Pending the latest CodeRabbit rerun after the idempotency/read-state/DM fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 

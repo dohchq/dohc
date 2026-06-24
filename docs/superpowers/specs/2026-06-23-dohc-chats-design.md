@@ -97,7 +97,10 @@ the canonical per-thread ordering comparator:
 contract, and `lastReadAt` is not a valid advancement fallback. `ThreadReadState`
 is unique on `(workspaceId, threadId, actorId)` and writes are upserts, not
 inserts that can duplicate rows. Updating `lastReadCursor` must compare against
-the canonical comparator before advancing. The write must be atomic: use a
+the canonical comparator before advancing. For every read-state write, `actorId`
+must be derived from authenticated server/engine identity, never trusted from
+client payload fields; caller-supplied actor identity is ignored or rejected
+before message-existence or ordering checks run. The write must be atomic: use a
 conditional upsert, transactional compare-and-swap, or equivalent CAS semantics
 that advances `lastReadCursor` only when the incoming
 `(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
@@ -285,6 +288,13 @@ hash plus exact-set verification, scoped by `workspaceId`. Creation must be
 atomic through upsert, CAS, a transaction, or an equivalent uniqueness
 constraint so concurrent creates resolve to one canonical thread instead of
 duplicate DM threads for the same participant set.
+DM participant sets are immutable after thread creation. Any membership change
+creates or resolves a new canonical DM-backed `ChatThread` for the new exact
+participant set and records a linkage event from the prior thread, rather than
+mutating `dmParticipantIds` in place. `read_chat`, `reply_to_chat`, reactions,
+notifications, and read-state updates continue to authorize against the
+canonical participant set of the specific thread being accessed, so membership
+changes cannot silently merge, split, or reassign thread history.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.

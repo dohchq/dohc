@@ -305,7 +305,7 @@ read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
   targetObjectId?,
-  idempotencyKey?
+  idempotencyKey
 })
 list(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -313,11 +313,11 @@ snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
 merge(workspaceId, sourceVersionId, targetVersionId, {
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
-  idempotencyKey?
+  idempotencyKey
 })
 restore(workspaceId, versionId, pointInTime, {
   precondition: exactly one of expectedCurrentCheckpoint | expectedVersionEtag | expectedSnapshotId,
-  idempotencyKey?
+  idempotencyKey
 })
 ```
 
@@ -338,6 +338,13 @@ incompatible preconditions fails closed.
 `restore(...)` are write-producing operations and must use the same
 workspace/version scoping, causal guard, idempotency, and conflict-response
 rules as `write(...)`.
+All client-originated write-producing operations, including filesystem-captured
+saves, must carry an idempotency key bound to the actor/session, workspace,
+version, operation type, target, and causal precondition. Duplicate delivery
+with the same idempotency key must return the original result or a deterministic
+equivalent and must not create additional canonical mutations, duplicate
+history events, duplicate projections, or repeated notification/search side
+effects.
 
 ## Conflict behavior
 
