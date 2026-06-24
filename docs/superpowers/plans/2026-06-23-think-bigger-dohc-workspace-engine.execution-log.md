@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; idempotency/read-state/DM fix applied; rerun pending
+Status: PR 00 in review; Phase 0 lane status fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -46,17 +46,22 @@ secret-handling, data-loss, or review-gate blockers.
 
 ## PR Status Table
 
+P0A-P0G branches are provisional throughput work started after user approval for
+unattended Phase 0 execution on 2026-06-24. They are not approved, complete, or
+merge-ready. Do not open or merge them until PR00 clears, the stack base is
+reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
+
 | PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | branch pushed; PR pending | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending | docs/inventory | Open after PR00 clears and stack base is reconciled. |
-| P0R | Rust Workspace Kernel Spike | branch pushed; PR pending | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | rust spike + perf | Rust scanner proof recorded; open after PR00 clears. |
-| P0B | Minimal Versioned Text Store | branch pushed; PR pending | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
-| P0C | File/API Write Capture And History | branch pushed; PR pending | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending | workspace-history + typecheck | Open after PR00 clears and stack base is reconciled. |
-| P0D | Compare, Clean Merge, Conflict Preservation | branch pushed; PR pending | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Open after PR00 clears and stack base is reconciled. |
-| P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
-| P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
-| P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Idempotency/read-state/DM fix applied; docs-only local-agent-CLI exception pending. |
+| P0A | Current System Inventory And Decisions | provisional branch pushed; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending | docs/inventory | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0R | Rust Workspace Kernel Spike | provisional branch pushed; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | rust spike + perf | Rust scanner proof is provisional; blocked on PR00 approval and lane PR. |
+| P0B | Minimal Versioned Text Store | provisional branch pushed; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0C | File/API Write Capture And History | provisional branch pushed; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending | workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Phase 0 lane status fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -257,8 +262,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after idempotency/read-state/DM fix.
-- Current findings: idempotency/read-state/DM fix applied; pending latest rerun.
+- Status: fixes applied; rerun pending after Phase 0 lane status fix.
+- Current findings: Phase 0 lane status fix applied; pending latest rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -551,8 +556,9 @@ Fifteenth pass:
     the touched plan/spec docs.
   - Ran the focused web brand/no-legacy guard and recorded the Node engine
     warning from the local shell.
-  - Updated the Phase 0 lane status table to show P0A-P0G branches as pushed
-    with PRs pending until PR00 clears and the stack base is reconciled.
+  - Updated the Phase 0 lane status table to show P0A-P0G branches as
+    provisionally pushed with PRs pending until PR00 clears and the stack base
+    is reconciled.
 
 Sixteenth pass:
 
@@ -794,6 +800,14 @@ Thirty-seventh pass:
   - Made DM participant sets immutable after creation; membership changes create
     or resolve a new canonical DM-backed `ChatThread` and link from the prior
     thread.
+
+Thirty-eighth pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Marked P0A-P0G lane branches as provisional, not approved, and blocked on
+    PR00 approval, stack reconciliation, lane PRs, tests, and CodeRabbit.
+  - Added the 2026-06-24 user-approved unattended execution note that explains
+    why provisional Phase 0 branches exist before PR00 is merge-ready.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -801,7 +815,7 @@ Thirty-seventh pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the idempotency/read-state/DM fix.
+- Pending the latest CodeRabbit rerun after the Phase 0 lane status fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 
