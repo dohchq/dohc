@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity | This log created with plan. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved; 0 findings | docs sanity + brand guard | CodeRabbit approved latest committed diff. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -247,7 +247,7 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending.
+- Status: approved; latest committed-diff rerun returned 0 findings.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -632,6 +632,12 @@ Twenty-second pass:
     artifacts.
   - Defined deterministic DM participant canonicalization: persisted actor-id
     form, exact dedupe, and bytewise ascending sort before key generation.
+
+Twenty-third pass:
+
+- CodeRabbit approved the latest committed diff with 0 findings.
+- Updated PR00 status, CodeRabbit status, and unresolved findings to reflect the
+  approved review.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -639,8 +645,7 @@ Twenty-second pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun; no finding is considered finally
-  resolved until the rerun completes.
+- None after the latest CodeRabbit committed-diff review.
 
 ### Subagent Reviews
 
