@@ -5,8 +5,8 @@ Date: 2026-06-22
 
 ## Core thesis
 
-dohc should rethink source control as a versioned workspace, not as Git with
-new labels.
+dohc should rethink source control as a versioned workspace, not as traditional
+source-control concepts with new labels.
 
 The user-facing promise is simple:
 
@@ -18,9 +18,10 @@ This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
 version-control concepts to work safely.
 
-## What changes from Git
+## What changes from traditional source control
 
-Git's surface primitives are not the right default for agents or normal users:
+Traditional source-control surface primitives are not the right default for
+agents or normal users:
 
 - commits force people to think about history too early.
 - branches expose implementation ceremony for parallel work.
@@ -28,9 +29,9 @@ Git's surface primitives are not the right default for agents or normal users:
 - public/private is usually repo-level instead of object/path/change-level.
 - source control assumes a real OS and filesystem.
 
-dohc should keep Git-grade robustness while replacing Git-shaped interaction.
+dohc should keep VCS-grade robustness while replacing VCS-shaped interaction.
 
-| Git concept | dohc user concept |
+| Traditional concept | dohc user concept |
 | --- | --- |
 | repository | workspace |
 | branch | version |
@@ -160,7 +161,7 @@ wrote it.
 
 ## Robustness invariants
 
-dohc should steal Git's robustness, not Git's UX.
+dohc should keep VCS-grade robustness, not VCS-shaped UX.
 
 The underlying engine must preserve:
 
@@ -173,7 +174,8 @@ The underlying engine must preserve:
 - conflict preservation when merge safety is uncertain.
 - meaningful provenance for human, agent, and system changes.
 
-These are not Git quirks. They are the physics of reliable versioned work.
+These are not tool-specific quirks. They are the physics of reliable versioned
+work.
 
 ## Versions and history
 
@@ -304,7 +306,7 @@ For code and file trees:
 
 - preserve base, current, and incoming states.
 - use common-base merge.
-- surface conflicts without raw Git conflict markers by default.
+- surface conflicts without raw conflict markers by default.
 - allow power users to inspect raw diffs when useful.
 
 For databases:
@@ -490,7 +492,8 @@ The engine is sophisticated, but the user experience should remain obvious:
    - explicit dohc sync process.
    - all of the above in stages.
 
-4. How much of the version graph should be exportable as Git/JJ?
+4. How much of the version graph should be exportable through external VCS
+   formats?
 
 5. Which conflict UI is required for the first useful version?
 

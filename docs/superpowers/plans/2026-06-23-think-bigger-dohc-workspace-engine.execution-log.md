@@ -186,9 +186,9 @@ Date completed:
 
 ### Scope
 
-- [x] Capture Better Git / versioned workspace source spec.
-- [x] Capture native filesystem / Dropbox for agents source spec.
-- [x] Capture Chats / Better Slack source spec.
+- [x] Capture versioned workspace source spec.
+- [x] Capture native filesystem source spec.
+- [x] Capture chats source spec.
 - [x] Collate specs into the Think Bigger workspace engine mega plan.
 - [x] Add Phase 0 proof arc and PR lane breakdown.
 - [x] Add Rust workspace kernel strategy and P0R spike.
@@ -524,6 +524,8 @@ Fifteenth pass:
     to prevent duplicate DM threads under concurrent creates.
   - Tightened execution-gate override wording to documented non-sensitive
     non-blockers only.
+  - Removed remaining explicit external product comparison language from the
+    touched planning/spec docs in favor of dohc-native vocabulary.
   - Cleaned execution-log grammar and normalized Markdown capitalization across
     the touched plan/spec docs.
 - Overrides:

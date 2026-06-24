@@ -10,9 +10,9 @@
 **Date:** 2026-06-23
 
 **Goal:** Turn dohc into a versioned, file-native, chat-aware AI workspace
-engine: normal files for humans and agents, Git-grade robustness underneath,
-Dropbox-for-agents sync/materialization semantics, and Slack/Teams-style chats
-rebuilt around work context instead of message streams.
+engine: normal files for humans and agents, VCS-grade robustness underneath,
+agent-native sync/materialization semantics, and fast channel/DM chats rebuilt
+around work context instead of message streams.
 
 **Core thesis:** dohc should feel obvious on the surface and ambitious
 underneath.
@@ -41,9 +41,9 @@ Those files are the conceptual inputs. This file is the execution plan.
 
 dohc should not become:
 
-- a Git UI.
-- a Dropbox clone.
-- a Slack clone.
+- a VCS UI.
+- a folder-sync clone.
+- a standalone chat clone.
 - a document app with a chatbot.
 
 dohc should become:
@@ -110,7 +110,7 @@ Those are engine-room concepts.
 
 ### Robustness
 
-- Do not sacrifice Git-grade durability.
+- Do not sacrifice VCS-grade durability.
 - Stable object IDs are canonical. Paths are aliases.
 - Every version must have clear ancestry/fork-point metadata.
 - Meaningful state must be recoverable.
@@ -467,7 +467,7 @@ The plan now incorporates that critique:
 - Add crash recovery, multi-writer concurrency, merge property tests,
   prompt-injection-to-action tests, and accessibility gates.
 - Defer external channels, large-scale lazy hydration, rich chat texture,
-  semantic merge, non-text content drivers, and Git/JJ export fidelity until
+  semantic merge, non-text content drivers, and external VCS export fidelity until
   the proof arc passes.
 
 ## Refined Implementation Defaults
@@ -885,7 +885,7 @@ history.
 
 #### PR P0D - Compare, Clean Merge, Conflict Preservation
 
-**Goal:** Prove Git-grade basics for one text/file driver.
+**Goal:** Prove VCS-grade basics for one text/file driver.
 
 **Scope:**
 
@@ -1013,7 +1013,7 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 - app/site-aware merge and build gates.
 - presence, typing indicators, reactions, digest mode, and quiet hours.
 - mobile chat UI.
-- Git/JJ export fidelity.
+- external VCS export fidelity.
 - semantic code merge.
 
 ## Agent And Review Workflow
@@ -1504,7 +1504,7 @@ default user behavior.
 
 ### PR 03 - Snapshot And Restore Foundation
 
-**Goal:** Add Git-grade snapshot/recovery primitives for file-backed content.
+**Goal:** Add VCS-grade snapshot/recovery primitives for file-backed content.
 
 **Scope:**
 
@@ -2064,7 +2064,7 @@ collaboration.
 
 ### PR 17 - Search Across Chats, Files, Versions, And Agents
 
-**Goal:** Make dohc search better than Slack by understanding work context.
+**Goal:** Make dohc search work-native by understanding conversation context.
 
 **Scope:**
 
@@ -2101,7 +2101,7 @@ collaboration.
 
 ### PR 18 - External And Shared Channels
 
-**Goal:** Support Slack-style shared-channel collaboration, but composed with
+**Goal:** Support shared-channel collaboration composed with
 dohc file/folder/version sharing.
 
 **Scope:**
@@ -2501,7 +2501,7 @@ arc unless the user expands scope:
 - mobile apps.
 - calls/huddles.
 - deep email/calendar replacement.
-- full Git/JJ mirror/export.
+- full external VCS mirror/export.
 - federation between self-hosted dohc instances.
 - advanced semantic merge for rich docs beyond first useful conflict handling.
 - large-scale enterprise retention/legal hold.
@@ -2516,10 +2516,10 @@ Versioned workspace without filesystem
   -> too abstract.
 
 Filesystem without versioning
-  -> naive Dropbox.
+  -> naive folder sync.
 
 Chats without files/versions
-  -> Slack clone.
+  -> standalone chat.
 
 All three together
   -> dohc.
