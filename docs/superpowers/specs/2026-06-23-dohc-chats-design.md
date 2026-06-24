@@ -104,12 +104,17 @@ before message-existence or ordering checks run. The write must be atomic: use a
 conditional upsert, transactional compare-and-swap, or equivalent CAS semantics
 that advances `lastReadCursor` only when the incoming
 `(threadSequence, createdAt, messageId)` tuple is greater than the stored tuple.
-Before CAS evaluation, the incoming tuple must resolve to an existing
+Before CAS evaluation or any tuple-to-message existence lookup, the caller must
+be authorized for the target workspace/thread using server-derived identity:
+workspace scope, thread visibility, and channel/DM membership must pass first.
+Only after authorization succeeds may the incoming tuple resolve against
 `ThreadMessage` in the same `(workspaceId, threadId)` and match that message's
-canonical persisted ordering fields. If no such message exists, the workspace
-or thread does not match, or the tuple is forged/stale relative to persisted
-message state, the read-state update is rejected fail-closed. Concurrent stale
-updates must no-op or retry, never overwrite a newer cursor with an older one.
+canonical persisted ordering fields. If authorization fails, no message
+existence signal is returned. If no such message exists after authorization,
+the workspace or thread does not match, or the tuple is forged/stale relative to
+persisted message state, the read-state update is rejected fail-closed.
+Concurrent stale updates must no-op or retry, never overwrite a newer cursor
+with an older one.
 If the incoming tuple exactly equals the stored `lastReadCursor`, the operation
 is an idempotent success with no state change after the same message-existence
 validation. Only strictly greater tuples advance the cursor.

@@ -81,9 +81,12 @@ sync, or a raw filesystem scan finds unmanaged or out-of-contract
 dohc expects engine state, dohc must not treat the content as normal workspace
 data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
 they are bound to a known workspace/version by the engine. Other reserved
-namespace content is quarantined with an explainable record, proposed for a safe
-rename outside reserved namespaces, or sent to manual resolution before the
-workspace is activated.
+namespace content is quarantined with an explainable record, proposed for a
+deterministic collision-proof safe rename outside reserved namespaces, or sent
+to manual resolution before the workspace is activated. Safe rename proposals
+must never overwrite existing user content; destination names are derived from a
+stable sanitized basename plus a workspace-scoped content/id hash, then
+validated for non-existence before activation.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions` content is never silently promoted into a named version.
 
@@ -304,11 +307,13 @@ version identity, a request token or equivalent correlation id, and a monotonic
 ordering guard before it can update UI state:
 
 ```ts
+type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
+
 type WorkspaceAsyncPayload = {
   workspaceId: string
   versionId: string
   requestToken: string
-  sequence: number
+  sequence: UInt64DecimalString
 }
 ```
 
@@ -316,9 +321,10 @@ Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, status APIs, and filesystem loading must
 verify these fields before applying results. Each handler also compares the
 payload sequence, cursor, or server timestamp against the latest applied value
-for the same workspace/version/request stream, and applies only newer responses.
-A stale response from one workspace/version/session must never repaint another
-or regress current UI state.
+for the same workspace/version/request stream using BigInt-safe decimal-string
+comparison, and applies only newer responses. A stale response from one
+workspace/version/session must never repaint another or regress current UI
+state.
 
 ## File state axes
 

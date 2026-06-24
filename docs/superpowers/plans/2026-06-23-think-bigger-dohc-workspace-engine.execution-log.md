@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending
+Status: PR 00 in review; checksum/async/quarantine/chat auth fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | CodeRabbit 0 findings; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Checksum/async/quarantine/chat auth fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -229,6 +229,11 @@ rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secre
 git diff --check
 pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz -o /tmp/dohc-node-v24.18.0-linux-x64.tar.xz
+curl -fsSL https://nodejs.org/dist/v24.18.0/SHASUMS256.txt -o /tmp/dohc-node-v24.18.0-SHASUMS256.txt
+expected=$(grep ' node-v24.18.0-linux-x64.tar.xz$' /tmp/dohc-node-v24.18.0-SHASUMS256.txt | awk '{print $1}')
+actual=$(sha256sum /tmp/dohc-node-v24.18.0-linux-x64.tar.xz | awk '{print $1}')
+test "$expected" = "$actual"
+printf '%s  %s\n' "$expected" "/tmp/dohc-node-v24.18.0-linux-x64.tar.xz"
 rm -rf /tmp/dohc-node-v24.18.0-linux-x64
 mkdir -p /tmp/dohc-node-v24.18.0-linux-x64
 tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-linux-x64 --strip-components=1
@@ -262,8 +267,10 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: approved with 0 findings on the latest committed diff.
-- Current findings: none.
+- Status: fixes applied; rerun pending after checksum/async/quarantine/chat auth
+  fix.
+- Current findings: checksum/async/quarantine/chat auth fix applied; pending
+  latest rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -824,6 +831,18 @@ Fortieth pass:
 - Updated PR00 status, CodeRabbit status, and unresolved findings to record the
   clean review while leaving the docs-only local-agent-CLI exception pending
   human approval before completion or merge-readiness.
+
+Forty-first pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added SHA256 manifest verification before extracting or executing the Node
+    v24.18.0 tarball used for the brand guard.
+  - Changed native filesystem async payload sequence to a BigInt-safe decimal
+    string ordering guard.
+  - Required deterministic collision-proof quarantine rename destinations that
+    never overwrite existing user content.
+  - Required chat read-state authorization to happen before tuple-to-message
+    existence checks so failures do not become existence oracles.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -831,6 +850,8 @@ Fortieth pass:
 
 ### Unresolved Findings
 
+- Pending the latest CodeRabbit rerun after the checksum/async/quarantine/chat
+  auth fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 
