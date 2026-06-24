@@ -155,13 +155,21 @@ It should ask only:
 
 If the actor can write, the change saves immediately to that version.
 
-For raw local file edits, dohc does not need to prove whether the process was
-a user, an agent CLI, a script, or an editor plugin. Those edits can be
-attributed honestly as unverified local/device/session edits. That provenance
-must not later be upgraded to authenticated human or agent identity without
-cryptographic proof, a trusted session boundary, or a dohc-controlled action
-record. Sync/import flows must preserve the original provenance class; if proof
-is absent, the change remains local/device/session/import provenance.
+For raw passive local file edits observed through the normal OS filesystem,
+dohc does not need to prove whether the process was a user, an external agent
+CLI, a script, or an editor plugin. Those edits can be attributed honestly as
+unverified local/device/session edits. That provenance must not later be
+upgraded to authenticated human or agent identity without cryptographic proof,
+a trusted session boundary, or a dohc-controlled action record.
+Agent-origin-capable ingest paths are different: dohc-controlled agent
+runtimes, skill turns, MCP/tool bridges, privileged agent workspace mounts, or
+sync/import channels that carry agent/run metadata must supply verifiable
+skill-turn context before becoming canonical state. If that proof is missing,
+stale, or indeterminate, the ingest is quarantined or rejected; it must not be
+downgraded into unverified local/session provenance. Sync/import flows must
+preserve the original provenance class; only truly passive ordinary OS writes
+with no dohc-controlled agent/run context may remain
+local/device/session/import provenance when proof is absent.
 Unverified local, device, or session edits still pass through server/engine-side
 workspace ownership, lock, protected-path, and visibility checks before they
 become canonical workspace state. If the engine cannot prove the required access
@@ -342,6 +350,16 @@ restore(workspaceId, versionId, pointInTime, {
 
 The filesystem is one interface. It should not be the only possible execution
 environment.
+
+Read-only API responses and streamed events must be bound to the requested
+`workspaceId`, `versionId`, and a request token, epoch, or equivalent
+correlation id. Async reads such as `list(...)`, `stat(...)`, `search(...)`,
+`snapshot(...)`, and `diff(...)` must accept abort semantics or an equivalent
+request-cancellation contract, and callers must ignore responses whose token,
+workspace, or version no longer matches the active view. `watch(...)` events
+must carry the same binding and must stop or no-op after abort, workspace
+switch, or version switch. A stale read or watch event from one workspace must
+never repaint or leak data into a newer workspace context.
 
 API writes are never unconditional overwrites. Create and overwrite modes are
 explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.
