@@ -54,7 +54,7 @@ the user explicitly approves an override.
 | P0E | Minimal Chat Linked To File | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | P0F | Search And Policy Smoke | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | P0G | Proof Arc QA And CodeRabbit Hardening | not started | TBD | TBD | TBD | TBD | TBD | agent CLI + full matrix + perf |  |
-| 00 | Mega Plan And Readiness Scaffold | in progress | codex/think-bigger-00-readiness-scaffold | /home/ice/dev/dohc | main | TBD | TBD | docs sanity | This log created with plan. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | /home/ice/dev/dohc | main | https://github.com/dohc-ai/dohc/pull/46 | pending | docs sanity | This log created with plan. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -170,11 +170,11 @@ Date completed:
 
 ## PR 00 - Mega Plan And Readiness Scaffold
 
-Status: in progress
+Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: /home/ice/dev/dohc
 Codex chat/thread: main orchestration thread
-PR: TBD
+PR: https://github.com/dohc-ai/dohc/pull/46
 Date started: 2026-06-24
 Date completed:
 
@@ -210,6 +210,9 @@ git remote -v
 gh --version
 gh auth status
 rg -n "Execution Topology|worktree|Codex chat|one implementation PR|Rust Kernel Spike Chat|Phase 0 branch/worktree/chat ownership|Codex chat/thread" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+git diff --cached --check
+git push -u origin codex/think-bigger-00-readiness-scaffold
+gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "[codex] Add Think Bigger workspace engine plan"
 ```
 
 ### E2E / Visual / Manual QA
@@ -226,7 +229,7 @@ rg -n "Execution Topology|worktree|Codex chat|one implementation PR|Rust Kernel 
 
 ### CodeRabbit
 
-- Status: TBD after draft PR opens.
+- Status: pending.
 - Findings:
 - Fixes:
 - Overrides:
