@@ -372,7 +372,7 @@ Agents should still get readable context projections:
 
 That projection is primarily for reading/reference/export. It should not be the
 canonical write path for posting. Before any chat text is written to this
-projected markdown file, the projection pipeline must classify secret content
+projected Markdown file, the projection pipeline must classify secret content
 and apply the same policy-aware redaction rules used by chat rendering, search,
 notifications, summaries, and export. Derived chat files must never persist
 plaintext secrets outside the authorized secret-backed read path.

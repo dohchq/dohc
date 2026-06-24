@@ -154,7 +154,7 @@ Those are engine-room concepts.
 - Agent writes must respect user locks, protected paths, folder/file access,
   sharing boundaries, and skill-turn gates.
 - HTML atoms remain sandboxed and sanitized.
-- Canonical Y.Doc state takes precedence over derived markdown/body caches for
+- Canonical Y.Doc state takes precedence over derived Markdown/body caches for
   rich document content.
 - Secret-backed files are allowed, including `.env`, but plaintext secrets must
   not leak into normal history, search, public export, logs, or unauthorized
@@ -1950,7 +1950,7 @@ links, activity, read state, and reactions.
 - Link chats to files/folders/versions/moments/apps/data.
 - Show related chats in file side rail.
 - Show related chats in version/history views.
-- Add one-way markdown/text projection for agent context.
+- Add one-way Markdown/text projection for agent context.
 - Mark chat text projections `readOnly` by default.
 
 **Tests:**
@@ -1960,7 +1960,7 @@ links, activity, read state, and reactions.
 - linked chat appears in file side rail.
 - projection includes allowed linked context only.
 - unauthorized linked work is hidden/redacted.
-- editing chat markdown projection does not post a message.
+- editing chat Markdown projection does not post a message.
 - projection writeability is reported to agents/API.
 
 **E2E:**

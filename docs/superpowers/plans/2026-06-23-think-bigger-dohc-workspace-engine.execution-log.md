@@ -524,8 +524,8 @@ Fifteenth pass:
     to prevent duplicate DM threads under concurrent creates.
   - Tightened execution-gate override wording to documented non-sensitive
     non-blockers only.
-  - Cleaned execution-log grammar and Markdown capitalization in the review
-    findings/fixes list.
+  - Cleaned execution-log grammar and normalized Markdown capitalization across
+    the touched plan/spec docs.
 - Overrides:
 
 ### Unresolved Findings
@@ -598,7 +598,7 @@ Gate evidence:
 - [ ] Agent writes respect user locks, protected paths, folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.
-- [ ] Canonical Y.Doc state takes precedence over derived markdown/body caches
+- [ ] Canonical Y.Doc state takes precedence over derived Markdown/body caches
       where rich docs are involved.
 - [ ] External editor/process edits are detected while dohc is running.
 - [ ] External editor/process edits made while dohc is stopped reconcile on

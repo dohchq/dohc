@@ -242,9 +242,9 @@ Examples:
 
 | Workspace object | Likely content driver | File experience |
 | --- | --- | --- |
-| Markdown document | Y.Doc / markdown body | `docs/plan.md` |
+| Markdown document | Y.Doc / Markdown body | `docs/plan.md` |
 | code file | file/blob content | `code/fs/file.c` |
-| post | markdown body + structured comments | `posts/q3-pricing.post.md` |
+| post | Markdown body + structured comments | `posts/q3-pricing.post.md` |
 | database | SQLite or table store | `data/transactions.sqlite` or projections |
 | app/site | file tree + manifest | `.apps/finance/index.html` |
 | agent run | execution trace + changed paths | history/timeline projection |
@@ -479,7 +479,7 @@ The engine is sophisticated, but the user experience should remain obvious:
    - whole workspace.
 
 2. Which drivers must ship first?
-   - markdown/Y.Doc.
+   - Markdown/Y.Doc.
    - normal file/blob.
    - SQLite/table.
    - post/comment.
