@@ -55,8 +55,8 @@ approval.
 
 | PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after scan-policy and share-revocation fixes | docs + focused package tests | CodeRabbit rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
-| P0R | Rust Workspace Kernel Spike | provisional branch pushed; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | rust spike + perf | Rust scanner proof is provisional; blocked on PR00 approval and lane PR. |
+| P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after CodeRabbit follow-up fixes | docs + focused package tests | CodeRabbit rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
+| P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and CodeRabbit. |
 | P0B | Minimal Versioned Text Store | provisional branch pushed; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0C | File/API Write Capture And History | provisional branch pushed; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending | workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
@@ -1274,6 +1274,129 @@ docker compose -f docker-compose.dev.yml up -d postgres
 
 - Keep this note until Phase 0 decisions are either implemented or superseded
   by a later architecture decision record.
+
+## PR P0R - Rust Workspace Kernel Spike
+
+Status: restacked on P0A; not approved
+Branch: codex/think-bigger-p0r-rust-kernel
+Worktree: `/home/ice/dev/dohc-p0r-rust-kernel`
+Implementation chat/thread: main orchestration thread
+PR:
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0R worktree.
+- [x] Add contained Rust workspace-kernel scanner spike.
+- [x] Add TypeScript comparison scanner that calls current
+      `scanWorkspaceFiles`.
+- [x] Add local benchmark harness.
+- [x] Add bridge-option recommendation note.
+- [x] Run Rust tests.
+- [x] Run TypeScript/Rust benchmark.
+- [x] Record measurements and final recommendation.
+- [ ] Open PR after PR00 docs-only exception approval and P0A lane PR decision
+      are settled or use a stacked PR target.
+
+### Files Changed
+
+- crates/workspace-kernel-spike/Cargo.toml
+- crates/workspace-kernel-spike/Cargo.lock
+- crates/workspace-kernel-spike/src/main.rs
+- scripts/workspace-kernel-spike/ts-scan.ts
+- scripts/workspace-kernel-spike/bench.mjs
+- .gitignore
+- docs/superpowers/plans/2026-06-24-think-bigger-p0r-rust-kernel-spike.md
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- Rust unit tests inside `crates/workspace-kernel-spike/src/main.rs`.
+- Benchmark harness for generated fixture comparison.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0r-rust-kernel /home/ice/dev/dohc-p0r-rust-kernel HEAD
+rustc --version
+cargo --version
+pnpm install --filter @dohc/workspace-fs --frozen-lockfile
+pnpm install --filter @dohc/workspace-core --filter @dohc/workspace-contracts --frozen-lockfile
+cargo fmt --manifest-path crates/workspace-kernel-spike/Cargo.toml
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+node scripts/workspace-kernel-spike/bench.mjs --files 1000 --bytes-per-file 1024 --iterations 3
+git rebase codex/think-bigger-p0a-inventory
+```
+
+### E2E / Visual / Manual QA
+
+- Not applicable yet. P0R is a kernel spike, not UI.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: not applicable for this spike unless later wired into
+  P0G.
+- Codex result: not run.
+- Claude result, if available: not run.
+- Transcript/artifact path: not applicable.
+- Secret redaction notes: not applicable.
+
+### CodeRabbit
+
+- Status: pending.
+- Findings:
+- Fixes:
+- Overrides:
+
+### Subagent Reviews
+
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+- Other:
+
+### Security / Privacy Notes
+
+- Spike does not change production behavior.
+- Rust scanner skips `.dohc`, `.git`, and `node_modules`.
+- Rust scanner does not follow symlinks.
+- Effective policy and authz stay outside native code for this spike.
+
+### Performance Notes
+
+- Budget areas touched: planning/spike only.
+- Metrics:
+  - Rust spike: min 6.80ms, max 8.16ms, average 7.33ms.
+  - Current TypeScript baseline: min 187.04ms, max 193.14ms, average
+    189.27ms.
+- Workspace/file/chat sizes: generated 1,000-file fixture, 1,024 bytes per
+  file, three iterations.
+- Machine/CI context: local Codex machine; Node v18.19.1 emitted repo engine
+  warnings because dohc declares Node 20.19+/22.13+.
+- Budget pass/fail: no production budget applies yet. Result strongly supports
+  promoting scan/hash/reconcile/indexing to a Rust kernel behind shared
+  contracts.
+
+### Migration Notes
+
+- No migrations.
+- No production package depends on the spike.
+
+### Remaining Risk
+
+- Rust packaging and CI are not yet proven.
+- Current Rust spike uses a one-shot CLI, not the recommended long-term
+  sidecar/JSON-RPC bridge.
+- The Rust scanner intentionally tests a stronger skip policy than current
+  TypeScript `scanWorkspaceFiles`; benchmark results must note that comparison.
+- PR00 docs-only local-agent-CLI exception and P0A lane PR approval remain
+  upstream gates before P0R can be marked complete.
+
+### Follow-Up / Deletion Conditions
+
+- Delete once a production Rust kernel lane supersedes the spike, or keep as a
+  benchmark fixture until cross-language contract tests replace it.
 
 ### Phase 0 Proof Arc
 
