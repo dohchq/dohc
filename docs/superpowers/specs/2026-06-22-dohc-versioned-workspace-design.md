@@ -68,13 +68,13 @@ separate approval flow.
 
 Immediate save is not permission bypass. Every save path must enforce
 workspace-scoped authorization, protected-path rules, user locks, version
-access, and visibility boundaries before applying a change. Authenticated actor
-identity is derived by the server/engine, never trusted from the caller. Humans,
-agents, automations, imports, and sync processes all pass through the same
-protection checks before a write can land. The write path is fail-closed: if
-any authorization, policy, visibility, protected-path, user-lock, or
-version-access evaluator is unavailable or indeterminate, the save is denied
-rather than applied.
+access, visibility boundaries, and skill-turn gates before applying a change.
+Authenticated actor identity is derived by the server/engine, never trusted from
+the caller. Humans, agents, automations, imports, and sync processes all pass
+through the same protection checks before a write can land. The write path is
+fail-closed: if any authorization, policy, visibility, protected-path,
+user-lock, version-access, or skill-turn evaluator is unavailable or
+indeterminate, the save is denied rather than applied.
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
 recover. Humans, agents, imports, and sync processes all get the same guarantee:
@@ -126,9 +126,11 @@ It should ask only:
 2. Does this actor have permission to write this workspace/version/path/object?
 3. Is the path/object protected by a user lock, policy boundary, or visibility
    boundary?
-4. Can the change be recorded durably?
-5. Can the system preserve recovery and honest provenance?
-6. Does the change create a conflict or cross a visibility boundary?
+4. Is the write allowed by the active skill-turn gate, when the actor is an
+   agent/tool/action running inside a delegated turn?
+5. Can the change be recorded durably?
+6. Can the system preserve recovery and honest provenance?
+7. Does the change create a conflict or cross a visibility boundary?
 
 If the actor can write, the change saves immediately to that version.
 
@@ -142,7 +144,11 @@ is absent, the change remains local/device/session/import provenance.
 Unverified local, device, or session edits still pass through server/engine-side
 workspace ownership, lock, protected-path, and visibility checks before they
 become canonical workspace state. If the engine cannot prove the required access
-or policy state, the ingest is quarantined or rejected rather than trusted.
+or policy/skill-turn state, the ingest is quarantined or rejected rather than
+trusted. Agent-originated writes must fail closed when the relevant skill-turn
+gate cannot be evaluated or is indeterminate; local provenance does not bypass
+that evaluator when the write is being applied through a dohc-controlled
+agent/tool action.
 Agent-specific authorship is required for social actions like chat replies,
 where the message display must make clear whether the human or the user's agent
 wrote it.
@@ -504,8 +510,8 @@ The first proof should be small but real:
    dohc-authenticated actions can distinguish human/agent/system, while raw
    local file edits may be local/device/session changes.
 9. E2E proves fail-closed behavior when authorization, policy, visibility,
-   protected-path, lock, or version-access evaluators are unavailable or
-   indeterminate.
+   protected-path, lock, version-access, or skill-turn evaluators are
+   unavailable or indeterminate.
 10. E2E proves plaintext secrets do not enter durability-log payloads, history,
     diffs, export bundles, search indexes, or agent logs.
 

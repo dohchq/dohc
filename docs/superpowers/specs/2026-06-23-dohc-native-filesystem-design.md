@@ -67,6 +67,15 @@ the active workspace, version, and effective file policy for captured writes.
 For raw local filesystem writes, exact process identity is not required; the
 write can be reconciled as a local/device/session change.
 
+Reserved namespace collisions fail closed. If import, attach, sync, or a raw
+filesystem scan finds user-created `.versions/**`, `.dohc/**`, or aliases of
+those names where dohc expects engine state, dohc must not treat the content as
+normal workspace data. The importer either quarantines the tree with an
+explainable record, proposes a safe rename outside reserved namespaces, or asks
+for manual resolution before the workspace is activated. Internal `.dohc/**`
+state is never re-ingested as user content, and user-created `.versions` content
+is never silently promoted into a named version.
+
 Identity-light capture is allowed; identity-light commit is not. During
 reconciliation, each raw local write must be revalidated against workspace
 scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
@@ -640,11 +649,17 @@ dohc must preserve the user's ownership of their work.
 Export should produce:
 
 - readable files.
-- `.dohc` policy files.
+- only allowlisted source-backed policy files such as `.dohc/files.toml`,
+  `.dohc/visibility.toml`, and optional `.dohcignore`.
 - history/provenance metadata.
 - hashes or commitments for verification.
 - redacted/excluded secret files according to policy.
 - enough metadata to re-import and compare.
+
+Generated or internal `.dohc/**` state is excluded from export unless explicitly
+allowlisted. Status projections, conflict projections, indexes, caches, derived
+chat projections, and durability internals are not exported as ordinary user
+files.
 
 Git/JJ export may remain useful for code-heavy projects, but should be an
 integration/export surface rather than dohc's native model.

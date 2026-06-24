@@ -355,6 +355,14 @@ git diff --check
     `ChatThread -> ThreadMessage`.
   - Tenth pass major: reusable entry template needed an explicit Unresolved
     Findings section.
+  - Eleventh pass major: versioned write/evaluator contract needed explicit
+    skill-turn gates and fail-closed behavior when skill-turn evaluation is
+    unavailable or indeterminate.
+  - Eleventh pass major: native filesystem reserved `.versions` and `.dohc`
+    namespace collisions needed fail-closed import/quarantine/manual-resolution
+    behavior.
+  - Eleventh pass major: export allowlist wording needed to clarify that only
+    source-backed policy files are exported, not all `.dohc/**` internal state.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -454,6 +462,13 @@ git diff --check
   - Clarified that channel sends create/resolve `ChatThread` and persist as
     `ThreadMessage`; no separate durable `ChannelMessage` exists.
   - Added Unresolved Findings to the reusable execution-log template.
+  - Added skill-turn gates to versioned write-path and evaluator fail-closed
+    requirements.
+  - Added fail-closed reserved namespace collision handling for imported or
+    existing `.versions/**` and `.dohc/**` content.
+  - Narrowed export wording to explicitly allowlist `.dohc/files.toml`,
+    `.dohc/visibility.toml`, and optional `.dohcignore` while excluding
+    generated/internal projections, indexes, caches, and durability internals.
 - Overrides:
 
 ### Subagent Reviews
