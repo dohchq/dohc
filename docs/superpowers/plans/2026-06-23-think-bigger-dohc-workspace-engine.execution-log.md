@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Auto-save/E2E/table/chat safety fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Portable Node 24 test command fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -228,7 +228,8 @@ rm -rf /tmp/dohc-node-v24.18.0-linux-x64
 mkdir -p /tmp/dohc-node-v24.18.0-linux-x64
 tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-linux-x64 --strip-components=1
 /tmp/dohc-node-v24.18.0-linux-x64/bin/node -v
-PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node /mnt/c/Users/ice/AppData/Roaming/npm/node_modules/pnpm/bin/pnpm.cjs --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --version
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 ```
 
 ### E2E / Visual / Manual QA
@@ -238,7 +239,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
   reported 1 file and 2 tests passed under Linux Node 24.18.0.
 - Node 24 environment: official Linux Node v24.18.0 tarball extracted to
   `/tmp/dohc-node-v24.18.0-linux-x64/bin/node`.
-- pnpm entrypoint: `/mnt/c/Users/ice/AppData/Roaming/npm/node_modules/pnpm/bin/pnpm.cjs`.
+- pnpm entrypoint: Node v24.18.0 Corepack resolved repo package manager
+  `pnpm@10.24.0`.
 - Earlier Node 18.19.1 run is retained only as exploratory output and is not
   counted as gate evidence because it does not satisfy the repo engine field.
 
@@ -255,8 +257,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after auto-save/E2E/table/chat safety
-  fix.
+- Status: fixes applied; rerun pending after portable Node 24 test command fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -731,6 +732,13 @@ Thirty-first pass:
     the canonical persisted actor id.
   - Added TOCTOU-safe, no-symlink chat projection write requirements for
     `.dohc/chats/<thread-id>.md`.
+
+Thirty-second pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Removed the host-specific pnpm path from the Node 24 brand-guard command
+    and replaced it with the portable Node v24.18.0 Corepack invocation that
+    resolves `pnpm@10.24.0` from the repo package manager field.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -738,7 +746,7 @@ Thirty-first pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the auto-save/E2E/table/chat safety
+- Pending the latest CodeRabbit rerun after the portable Node 24 test command
   fix.
 
 ### Subagent Reviews
