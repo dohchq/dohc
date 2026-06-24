@@ -28,6 +28,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:e2e": "playwright test",
+    "test:phase0-agent-cli": "node scripts/phase0-agent-cli-smoke.mjs",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",

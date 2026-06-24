@@ -61,8 +61,8 @@ approval.
 | P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | blocked on CodeRabbit service hang after latest pushed fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes are pushed in `1f39e60`. Three reruns after that hung before findings/completion. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | restacked on P0C; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and automated review. |
-| P0F | Search And Policy Smoke | restacking on P0E; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and automated review. |
-| P0G | Proof Arc QA And Review Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
+| P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and automated review. |
+| P0G | Proof Arc QA And Review Hardening | restacking on P0F; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, tests, and automated review. |
 | 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | automated review raised 0 issues on the latest committed diff; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -5186,6 +5186,162 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 - Later search architecture should either promote this API or replace it with a
   shared policy-aware indexer.
 
+## PR P0G - Proof Arc QA And CodeRabbit Hardening
+
+Status: restacked on P0F; not approved
+Branch: codex/think-bigger-p0g-proof-qa
+Worktree: `/home/ice/dev/dohc-p0g-proof-qa`
+Implementation chat/thread: main orchestration thread
+PR:
+Date started: 2026-06-24
+Date completed:
+
+### Scope
+
+- [x] Create dedicated P0G worktree stacked after P0F.
+- [x] Add deterministic Phase 0 proof test for file history, restore, named
+      versions, clean merge, conflict preservation, linked chat, search, and
+      `.env` exclusion.
+- [x] Add local agent CLI smoke harness with `DOHC_TEST_AGENT_CLI=codex`
+      default.
+- [x] Run Codex local-agent smoke and record the safe-sandbox blocker.
+- [x] Run Codex local-agent smoke successfully in a disposable workspace with
+      `DOHC_CODEX_SANDBOX=danger-full-access`.
+- [x] Run Claude compatibility smoke successfully with
+      `DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet`.
+- [x] Record desktop/integration blockers instead of claiming skipped E2E as
+      passed.
+- [ ] CodeRabbit loop for every Phase 0 PR.
+- [ ] Architecture/security/QA subagent reviews.
+- [ ] Open PR after PR00 docs-only exception approval and upstream lane PR
+      decisions are settled, or use a stacked PR target.
+
+### Files Changed
+
+- package.json
+- packages/workspace-engine/src/phase0Proof.test.ts
+- scripts/phase0-agent-cli-smoke.mjs
+- docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
+
+### Tests Added Or Updated
+
+- `packages/workspace-engine/src/phase0Proof.test.ts`
+  - file writes save to disk and record history.
+  - restore records forward history.
+  - named version isolation supports clean merge.
+  - same-line conflict preserves base/current/incoming.
+  - linked chat attaches to stable file object ID.
+  - search returns file/chat context and excludes `.env`.
+  - local-file history attribution stays actor-neutral.
+- `scripts/phase0-agent-cli-smoke.mjs`
+  - creates a disposable local workspace.
+  - asks a real local agent CLI to edit one normal file.
+  - writes a redacted transcript artifact.
+  - supports `codex` by default and `claude` compatibility.
+
+### Commands Run
+
+```bash
+git worktree add -b codex/think-bigger-p0g-proof-qa /home/ice/dev/dohc-p0g-proof-qa codex/think-bigger-p0f-search-policy
+pnpm install --frozen-lockfile
+pnpm --filter @dohc/workspace-engine test
+pnpm --filter @dohc/workspace-engine typecheck
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
+git diff --check
+git rebase --onto codex/think-bigger-p0f-search-policy 40c9cbf codex/think-bigger-p0g-proof-qa
+```
+
+### E2E / Visual / Manual QA
+
+- Deterministic engine proof passed in Vitest.
+- Desktop E2E not run because the Phase 0 lanes are still package-level and
+  not mounted into the desktop file/chat/search UI.
+- Open blockers:
+  - file-adjacent chat rail is not yet implemented.
+  - desktop search is not yet wired to the engine search substrate.
+  - workspace-switch race coverage for file/search/chat loading is not yet
+    implemented.
+  - raw external agent edit capture through the desktop watcher is not wired to
+    the P0C/P0G engine proof.
+
+### Local Agent CLI QA
+
+- `DOHC_TEST_AGENT_CLI`: defaults to `codex`.
+- Codex safe sandbox result: failed due missing local sandbox helper
+  (`bubblewrap` unavailable); transcript:
+  `/tmp/dohc-agent-smoke-whNhJs/agent-transcript.json`.
+- Codex disposable fallback result: passed with
+  `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
+  `/tmp/dohc-agent-smoke-43S8JJ/agent-transcript.json`.
+- Claude default result: failed because default model alias `Fable 5` is
+  unavailable; transcript:
+  `/tmp/dohc-agent-smoke-FPlRvf/agent-transcript.json`.
+- Claude compatibility result: passed with `DOHC_CLAUDE_MODEL=sonnet`;
+  transcript: `/tmp/dohc-agent-smoke-P4VXA5/agent-transcript.json`.
+- Secret redaction notes: transcripts redact `ALPHA_SECRET=...`; throwaway
+  `.env` files were created only in disposable temp workspaces.
+
+### CodeRabbit
+
+- Status: pending.
+- Findings:
+- Fixes:
+- Overrides:
+
+### Subagent Reviews
+
+- Architecture: pending.
+- Security: pending.
+- QA: pending.
+
+### Security / Privacy Notes
+
+- Agent CLI smoke uses disposable temp workspaces only.
+- Codex fallback uses `danger-full-access` only when explicitly requested via
+  `DOHC_CODEX_SANDBOX` because this machine lacks the safe sandbox helper.
+- The harness redacts throwaway secret values from transcript JSON.
+- Phase 0 proof keeps local file edits actor-neutral unless a chat post
+  explicitly identifies an agent.
+
+### Performance Notes
+
+- Budget areas touched: deterministic package-level proof only.
+- Metrics:
+  - workspace-engine tests: 38 tests in about 2.13s locally.
+  - Codex fallback agent smoke: completed successfully in about 72s.
+  - Claude Sonnet agent smoke: completed successfully in about 13s.
+- Machine/CI context: local Codex machine; Node v18.19.1 emitted repo engine
+  warnings because dohc declares Node 20.19+/22.13+.
+- Budget pass/fail: renderer/startup/watch budgets remain unmeasured because
+  the Phase 0 proof is not mounted into desktop UI.
+- Jank/blocking notes: no renderer integration ships in this PR.
+
+### Migration Notes
+
+- Adds one root npm script: `test:phase0-agent-cli`.
+- No persisted production data migration.
+
+### Remaining Risk
+
+- P0G does not make the full Phase 0 product surface shippable; it records
+  package-level proof plus clear integration blockers.
+- PR00 docs-only local-agent-CLI exception and upstream lane PR approvals remain
+  gates before P0G can be marked complete.
+- CodeRabbit review for stacked Phase 0 PRs is still pending.
+- Architecture/security/QA subagent reviews are still pending.
+- Local Codex safe-mode agent QA is blocked until `bubblewrap` or Codex's
+  bundled sandbox helper is available.
+
+### Follow-Up / Deletion Conditions
+
+- Delete or replace this smoke harness only when a richer desktop E2E covers
+  the same real local-agent file edit promise.
+- The next UI integration lane must mount file-adjacent chats and route desktop
+  search through policy-aware chat/file search.
+
 ### Phase 0 Proof Arc
 
 PRs:
@@ -5207,8 +5363,8 @@ Gate evidence:
 - [ ] Rust workspace kernel spike completed or explicitly deferred by user.
 - [ ] Rust vs TypeScript scan/reconcile/hash benchmark numbers are recorded.
 - [ ] Rust bridge/packaging/CI recommendation is recorded.
-- [ ] Main plus one named version works for one text/file driver.
-- [ ] File/API writes save immediately and produce recoverable history.
+- [x] Main plus one named version works for one text/file driver.
+- [x] File/API writes save immediately and produce recoverable history.
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, share, capture, event,
@@ -5221,7 +5377,7 @@ Gate evidence:
 - [ ] External editor/process edits are detected while dohc is running.
 - [ ] External editor/process edits made while dohc is stopped reconcile on
       next launch.
-- [ ] Restore works.
+- [x] Restore works.
 - [x] Clean merge works.
 - [x] Conflict preserves base/current/incoming.
 - [ ] One chat can link to a file and appear beside the file.
@@ -5234,8 +5390,8 @@ Gate evidence:
 - [ ] Phase 0 performance budgets pass or budget misses have explicit user
       approval and follow-up.
 - [ ] No renderer-blocking whole-workspace scan ships in Phase 0.
-- [ ] Local agent CLI QA passes with `DOHC_TEST_AGENT_CLI=codex`.
-- [ ] Claude local agent CLI compatibility is run or unavailable status is
+- [x] Local agent CLI QA passes with `DOHC_TEST_AGENT_CLI=codex`.
+- [x] Claude local agent CLI compatibility is run or unavailable status is
       recorded.
 - [ ] Local agent file edits are captured without requiring agent-specific file
       attribution.
