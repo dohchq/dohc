@@ -1,6 +1,14 @@
 import type pg from "pg";
 
-export type SharedAtomDeps = { pool: pg.Pool };
+export type HocuspocusAdminClient = {
+  disconnectWorkspaceUser(input: {
+    workspaceId: string;
+    userId: string;
+    signal?: AbortSignal;
+  }): Promise<void>;
+};
+
+export type SharedAtomDeps = { pool: pg.Pool; hocuspocusAdmin?: HocuspocusAdminClient };
 
 export type SharedAtomResult = {
   ok: true;

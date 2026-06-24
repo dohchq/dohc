@@ -4,6 +4,7 @@ import { defaultPostgresUrl } from "@dohc/workspace-postgres";
 import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createWorkspaceApiHandler } from "../server";
+import type { SharedAtomDeps } from "./shared";
 import { createShare } from "./shares";
 
 // Live-pg share lifecycle (plan Phase E5 server lane): members/owners create
@@ -34,18 +35,22 @@ const otherAtomId = "e5-shares-atom-2";
 
 let pool: pg.Pool;
 
-const handlerFor = (userId: string) =>
+const handlerFor = (userId: string, sharedOverrides: Partial<SharedAtomDeps> = {}) =>
   createWorkspaceApiHandler({
     backend: {} as unknown as WorkspaceBackend,
     resolveActor: async (_request, workspaceIdFromRoute) => ({
       userId,
       workspaceId: workspaceIdFromRoute,
     }),
-    shared: { pool },
+    shared: { ...sharedOverrides, pool },
   });
 
-const call = (userId: string, path: string, init?: RequestInit) =>
-  handlerFor(userId)(new Request(`http://api.test${path}`, init));
+const call = (
+  userId: string,
+  path: string,
+  init?: RequestInit,
+  sharedOverrides?: Partial<SharedAtomDeps>,
+) => handlerFor(userId, sharedOverrides)(new Request(`http://api.test${path}`, init));
 
 const postShare = (userId: string, body: unknown) =>
   call(userId, `/workspaces/${workspaceId}/shares`, {
@@ -298,6 +303,14 @@ describe("share lifecycle routes (live pg)", () => {
   });
 
   it("revokes end to end: only sharer/owner may revoke, and the shared link 403s immediately", async () => {
+    const disconnects: Array<{ workspaceId: string; userId: string }> = [];
+    const sharedOverrides: Partial<SharedAtomDeps> = {
+      hocuspocusAdmin: {
+        disconnectWorkspaceUser: async (input) => {
+          disconnects.push({ workspaceId: input.workspaceId, userId: input.userId });
+        },
+      },
+    };
     const { share } = await (
       await postShare(memberId, { atomId, recipientEmail, capability: "view" })
     ).json();
@@ -307,13 +320,21 @@ describe("share lifecycle routes (live pg)", () => {
 
     // …a fellow member who is NOT the sharer gets an honest 403, while a
     // stranger gets the missing-row 404 (no cross-tenant existence oracle)…
-    expect((await call(otherMemberId, `/shares/${share.shareId}`, { method: "DELETE" })).status).toBe(403);
-    expect((await call(strangerId, `/shares/${share.shareId}`, { method: "DELETE" })).status).toBe(404);
+    expect(
+      (await call(otherMemberId, `/shares/${share.shareId}`, { method: "DELETE" }, sharedOverrides))
+        .status,
+    ).toBe(403);
+    expect(
+      (await call(strangerId, `/shares/${share.shareId}`, { method: "DELETE" }, sharedOverrides))
+        .status,
+    ).toBe(404);
+    expect(disconnects).toEqual([]);
 
     // …the sharer can, and the link 403s immediately after.
-    const revoked = await call(memberId, `/shares/${share.shareId}`, { method: "DELETE" });
+    const revoked = await call(memberId, `/shares/${share.shareId}`, { method: "DELETE" }, sharedOverrides);
     expect(revoked.status).toBe(200);
     await expect(revoked.json()).resolves.toEqual({ ok: true, revoked: true });
+    expect(disconnects).toEqual([{ workspaceId, userId: recipientId }]);
     expect((await call(recipientId, `/shared/atoms/${atomId}`)).status).toBe(403);
 
     // Revoked shares vanish from listings and a second DELETE is a 404.
@@ -325,7 +346,9 @@ describe("share lifecycle routes (live pg)", () => {
     const { share: second } = await (
       await postShare(memberId, { atomId: otherAtomId, recipientEmail, capability: "view" })
     ).json();
-    expect((await call(ownerId, `/shares/${second.shareId}`, { method: "DELETE" })).status).toBe(200);
+    expect((await call(ownerId, `/shares/${second.shareId}`, { method: "DELETE" }, sharedOverrides)).status).toBe(200);
+    expect(disconnects).toHaveLength(2);
+    expect(disconnects[1]).toEqual({ workspaceId, userId: recipientId });
   });
 
   it("migration 0005 dedupes pre-existing duplicate audience rows, keeping the newest", async () => {
