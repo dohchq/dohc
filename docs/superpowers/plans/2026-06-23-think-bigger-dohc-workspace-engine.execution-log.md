@@ -222,11 +222,16 @@ gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold
 coderabbit review --agent -t committed -c AGENTS.md
 rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
+pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 ```
 
 ### E2E / Visual / Manual QA
 
 - Manual docs sanity only.
+- Focused brand/no-legacy guard passed: `apps/web/src/__tests__/brandNoLegacy.test.ts`
+  reported 1 file and 2 tests passed.
+- Test environment warning: this shell used Node 18.19.1 while the repo engine
+  field asks for Node 20.19+, 22.13+, or 24+.
 
 ### Local Agent CLI QA
 
@@ -528,6 +533,8 @@ Fifteenth pass:
     touched planning/spec docs in favor of dohc-native vocabulary.
   - Cleaned execution-log grammar and normalized Markdown capitalization across
     the touched plan/spec docs.
+  - Ran the focused web brand/no-legacy guard and recorded the Node engine
+    warning from the local shell.
 - Overrides:
 
 ### Unresolved Findings
