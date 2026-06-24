@@ -1,0 +1,590 @@
+# dohc Native Filesystem Design
+
+Status: exploratory architecture direction
+Date: 2026-06-23
+
+Companion: `docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md`
+
+## Core thesis
+
+dohc should feel like a normal folder on the user's computer, but that folder
+should be backed by a versioned workspace engine.
+
+The user-facing promise:
+
+> Your workspace is just files. Humans and agents can use normal editors,
+> terminals, and tools. dohc quietly adds versions, history, sync, lazy
+> hydration, permissions, conflict recovery, and safe secrets.
+
+This is the dohc version of "Dropbox for devs / agents": one consistent
+workspace structure across machines and agents, with the safety and semantics
+that Dropbox and Git do not provide.
+
+## Relationship to version control
+
+The filesystem and version control are not separate products.
+
+- The filesystem is how humans, agents, editors, and tools touch a version.
+- The version engine records snapshots, ancestry, history, conflicts, and
+  recovery underneath.
+
+```text
+normal files and folders
+  -> live Version
+  -> versioned workspace engine
+  -> history, merge, sync, permissions, recovery
+```
+
+Editing a file saves immediately to the version represented by that folder or
+mount. No commit step. No apply step. No special agent protocol.
+
+## Filesystem shape
+
+A dohc workspace should have a normal, obvious folder shape:
+
+```text
+~/dohc/personal/
+  docs/
+  posts/
+  apps/
+  data/
+  code/
+```
+
+That folder can represent `Main`.
+
+Named versions can appear as their own folders or mounts:
+
+```text
+~/dohc/personal/                       # Main
+~/dohc/personal.versions/q3-plan/      # Q3 Plan version
+~/dohc/personal.versions/codex-try/    # Codex Try version
+~/dohc/personal.versions/client-view/  # Client-facing version
+```
+
+The path is an affordance, not the security boundary. The engine still resolves
+the active workspace, version, and effective file policy for captured writes.
+For raw local filesystem writes, exact process identity is not required; the
+write can be reconciled as a local/device/session change.
+
+## Same rules for humans and agents
+
+dohc should not make agents second-class writers.
+
+If an actor can write to a version, the actor can edit files in that version.
+The actor can be:
+
+- a human.
+- an agent.
+- an automation.
+- a sync process.
+- an import.
+
+The filesystem layer records authorship and provenance, but it does not impose
+different write semantics just because the actor is an agent.
+
+For ordinary local filesystem writes, provenance can be device/session-level
+rather than agent-level. A user should be able to point Codex, Claude Code, a
+script, or a text editor at the dohc folder without teaching that tool dohc
+identity rules. dohc captures the file change; explicit agent authorship is
+only required when the agent performs a social/action-native operation such as
+posting a chat message.
+
+## Local capture and reconciliation
+
+External edits are not an edge case. They are the core promise.
+
+If a user edits `notes/todo.txt` in Notepad, VS Code, Vim, a shell script,
+Codex, or Claude Code, dohc should notice the same kind of file change.
+
+Phase 0 should use a normal folder plus reconciliation:
+
+1. **First open/import**
+   - Walk the materialized workspace tree.
+   - Apply file policy.
+   - Assign stable object IDs.
+   - Store path, file identity where available, size, mtime, content hash, and
+     version/base metadata.
+
+2. **While dohc is running**
+   - Use OS file watching for create/modify/delete/rename events.
+   - Debounce noisy save sequences.
+   - Stat and hash changed candidates.
+   - Append captured tracked changes to the durability log.
+   - Coalesce them into meaningful history moments.
+
+3. **When dohc starts after being closed**
+   - Run a reconciliation pass before declaring the workspace clean.
+   - Walk metadata for the materialized tree.
+   - Compare against the last known index.
+   - Hash only files whose metadata or identity changed, plus suspicious cases.
+   - Detect creates, edits, deletes, and likely renames/moves.
+   - Record the result as local/device/session changes in the active version.
+
+4. **Periodic audit**
+   - Recheck parts of the tree over time to recover from missed watcher events,
+     crashes, filesystem quirks, clock skew, or external sync tools.
+
+5. **Remote/cloud reconciliation**
+   - If cloud state changed while local files also changed, compare both sides
+     against the common base.
+   - Clean merges can apply automatically.
+   - Conflicts preserve base/current/incoming instead of using last-writer-wins.
+
+This should be optimized, not naive. dohc should not read and hash every byte
+of every file on every launch unless policy or corruption recovery requires it.
+Use cached metadata, platform file IDs where available, content hashes for
+changed candidates, batching, background work, and visible status such as
+"Reconciling workspace..." for large trees.
+
+## Lazy hydration
+
+New machines and cloud agents should see the workspace tree immediately.
+
+The tree should be available before all content is local:
+
+```text
+docs/
+apps/
+data/
+code/
+```
+
+Content hydrates when needed:
+
+- a user opens a file.
+- an agent reads a file.
+- search needs full content.
+- a build needs source files.
+- an app preview needs assets.
+- a folder is pinned offline.
+
+The system should support explicit materialization:
+
+```text
+pin docs/**
+pin apps/finance/**
+pin code/kernel/**
+```
+
+Materialization state must be legible. Users and agents should be able to tell
+whether a subtree is local, lazy, remote-only, or pinned.
+
+## API-native access
+
+The filesystem is the default interface, but not the only interface.
+
+The same workspace should be accessible through API calls for cloud agents,
+browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
+
+```text
+read(path)
+write(path, bytes)
+list(path)
+stat(path)
+search(query)
+watch(path)
+snapshot(version)
+diff(versionA, versionB)
+merge(sourceVersion, targetVersion)
+restore(version, pointInTime)
+```
+
+This answers the "source control should not require a real OS/filesystem"
+requirement. The file mount and the API are peer views over the same versioned
+workspace engine.
+
+## File state axes
+
+dohc must not collapse every file into a single synced/tracked/local state.
+
+At least three independent axes are needed:
+
+1. **Tracked in history**
+   - Should changes be recorded as part of workspace version history?
+
+2. **Synced/durable**
+   - Should contents sync to dohc Cloud or another remote?
+
+3. **Materialized locally**
+   - Should contents exist on local disk, hydrate lazily, or remain virtual?
+
+Examples:
+
+| Path | Tracked | Synced | Materialized |
+| --- | --- | --- | --- |
+| `docs/**` | yes | yes | lazy or pinned |
+| `apps/**` | yes | yes | lazy or pinned |
+| `data/raw/**` | yes | yes | lazy |
+| `node_modules/**` | no | no | local |
+| `dist/**` | no | no | local |
+| `.cache/**` | no | no | local |
+| `scratch/**` | optional | no | local |
+| `.env` | yes | yes | local for authorized actors |
+
+This avoids naive Dropbox behavior such as syncing `node_modules`, build output,
+and cache folders.
+
+## Workspace file policy
+
+dohc needs a richer version of `.gitignore`.
+
+Git mostly asks:
+
+```text
+track this file or not?
+```
+
+dohc asks:
+
+```text
+track this?
+sync this?
+materialize this?
+encrypt this?
+search this?
+share this?
+redact this on export?
+allow dohc-controlled agent tools/API to read/write this?
+```
+
+The policy should be source-backed and inspectable, but enforcement must be
+engine-backed.
+
+## Policy files
+
+A workspace can define readable policy files such as:
+
+```text
+.dohc/files.toml
+.dohc/visibility.toml
+```
+
+Early versions may start with a simpler `.dohcignore`, but the durable model
+should support richer rules.
+
+Example:
+
+```toml
+[[rule]]
+match = "node_modules/**"
+tracked = false
+synced = false
+materialized = "local"
+
+[[rule]]
+match = "dist/**"
+tracked = false
+synced = false
+materialized = "local"
+
+[[rule]]
+match = "docs/**"
+tracked = true
+synced = true
+materialized = "lazy"
+
+[[rule]]
+match = ".env"
+tracked = true
+versioned = true
+synced = true
+encrypted = true
+searchable = false
+visibility = "private"
+public_export = "redacted"
+agent_access = "explicit"
+
+[[rule]]
+match = ".env.team"
+tracked = true
+versioned = true
+synced = true
+encrypted = true
+searchable = false
+visibility = "team"
+agent_access = "ask"
+```
+
+The policy file is not blindly trusted as authorization. It expresses desired
+workspace behavior. The engine/server still derives and enforces actual
+permissions.
+
+`agent_access` applies only to dohc-controlled agent tools, APIs, and launched
+processes. It cannot reliably distinguish arbitrary local processes after
+plaintext content is materialized into a normal folder. For raw local file
+access, the enforceable controls are workspace materialization, encryption,
+redaction, OS permissions, and whether the user explicitly exposes that folder
+or secret to a tool.
+
+## Effective policy
+
+dohc resolves effective policy from:
+
+- workspace defaults.
+- version policy.
+- path/folder rules.
+- object type.
+- actor permissions.
+- sharing/export context.
+- explicit user overrides.
+
+Example internal shape:
+
+```ts
+type FilePolicy = {
+  tracked: boolean
+  versioned: boolean
+  synced: boolean
+  encrypted: boolean
+  searchable: boolean
+  visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
+  publicExport: 'include' | 'redact' | 'exclude'
+  agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
+  materialized: 'local' | 'lazy' | 'pinned' | 'virtual'
+}
+```
+
+The key rule:
+
+> Policy is source-backed, but enforcement is engine-backed.
+
+## Secret-backed files
+
+dohc should support committing `.env`-style files safely.
+
+Theo's critique is correct: it is strange that modern source control cannot
+store the file that a project actually needs while controlling who can see it.
+
+dohc should allow:
+
+```text
+.env
+.env.local
+.env.team
+```
+
+to exist as real files in the workspace, while treating them as secret-backed
+files with stricter policy.
+
+Example policy:
+
+```yaml
+path: ".env"
+tracked: true
+versioned: true
+encrypted: true
+searchable: false
+visibility: private
+publicExport: redacted
+agentAccess: explicit
+```
+
+For an authorized user on their own machine, `.env` can look like a normal file:
+
+```text
+DATABASE_URL=postgres://...
+STRIPE_KEY=sk_live_...
+```
+
+For an unauthorized collaborator, the same path might show:
+
+```text
+[private secret file]
+```
+
+For public export, dohc may emit:
+
+```text
+.env.example
+DATABASE_URL=
+STRIPE_KEY=
+```
+
+or exclude the file entirely, depending on policy.
+
+## Secret storage
+
+Secret-backed files should not store plaintext values in normal history,
+search, diffs, public export, or agent logs.
+
+Implementation can use:
+
+- local OS keychain.
+- dohc Cloud KMS.
+- self-hosted secret storage.
+- encrypted blob storage with per-actor/workspace keys.
+
+The file projection may materialize plaintext only for an authorized workspace,
+version, user/device, and dohc-controlled process context.
+
+When launching a process or agent, dohc can also inject secrets as environment
+variables from the same broker. File materialization and process injection are
+two projections of the same secret-backed source.
+
+## Secret access by tools and agents
+
+Agents follow the same write model as humans, but secret access still respects
+policy where dohc controls the access path.
+
+Possible policies:
+
+- `allow`: dohc-controlled tools can read/write when they have version write
+  access.
+- `ask`: ask before first access in a run/session.
+- `explicit`: the user must grant this run/process access.
+- `deny`: never expose through dohc-controlled agent/tool paths.
+
+The user-facing framing should be:
+
+```text
+Codex wants to read .env
+Visibility: private
+Reason: run local tests
+
+[Allow once] [Allow for this version] [Deny]
+```
+
+This is not because agents are second-class writers. It is because secret
+access is a separate capability from normal file write access.
+
+Important caveat: if a plaintext secret file is materialized into a normal
+folder, any local process with OS permission to read that file may read it.
+dohc should not claim per-agent secret enforcement for arbitrary local
+processes. Strong per-agent enforcement requires a dohc-controlled process,
+API, sandbox, mount, redacted projection, or secret injection path.
+
+## Capture semantics
+
+Filesystem tools write in messy ways:
+
+- temp file then rename.
+- partial write then fsync.
+- delete and recreate.
+- save on every keystroke.
+- generated files and cache churn.
+
+dohc should not make every filesystem event a visible history item.
+
+Use two layers:
+
+1. **Durability log**
+   - captures low-level writes for recovery and crash safety.
+   - hash-committed and version-specific.
+
+2. **Meaningful checkpoint**
+   - coalesces writes by quiescence, related file batch, explicit checkpoint,
+     import, merge, restore, publish, or a known dohc action boundary.
+   - appears in history and compare views.
+
+This preserves "everything saves immediately" without turning history into
+noise.
+
+## Conflict behavior in the filesystem
+
+A real file path is single-valued. Normal tools expect one readable file at a
+path.
+
+dohc should therefore keep the mounted tree coherent and buildable while still
+preserving conflicts.
+
+Possible rule:
+
+- the visible path shows the chosen/current value.
+- all conflicting states are preserved in the engine.
+- conflicts appear in UI, status APIs, and a `.dohc/conflicts/` view.
+- no conflicting state is silently dropped.
+
+Example:
+
+```text
+.dohc/conflicts/
+  docs/plan.md/
+    main.md
+    incoming.md
+    base.md
+    conflict.toml
+```
+
+Normal tools keep working. Users and agents can inspect conflicts explicitly.
+
+The filesystem may simplify. It must not lie about loss.
+
+## Status and legibility
+
+"Feels like a normal folder" must not mean invisible magic.
+
+The system should expose:
+
+- what is local vs remote.
+- what is pinned vs lazy.
+- what is tracked vs ignored.
+- what is synced vs local-only.
+- what is conflicted.
+- what is secret-backed.
+- what is excluded/redacted on export.
+
+Possible surfaces:
+
+- dohc UI badges.
+- `dohc status`.
+- file attributes/xattrs where available.
+- `.dohc/status.json`.
+- API status calls.
+
+Hidden mechanics are okay. Hidden safety-relevant state is not.
+
+## Export and ownership
+
+dohc must preserve the user's ownership of their work.
+
+Export should produce:
+
+- readable files.
+- `.dohc` policy files.
+- history/provenance metadata.
+- hashes or commitments for verification.
+- redacted/excluded secret files according to policy.
+- enough metadata to re-import and compare.
+
+Git/JJ export may remain useful for code-heavy projects, but should be an
+integration/export surface rather than dohc's native model.
+
+## What to avoid
+
+Avoid naive Dropbox sync:
+
+- no blind last-writer-wins.
+- no syncing `node_modules` by default.
+- no materializing everything by default.
+- no single state axis for tracked/synced/local.
+- no "conflicted copy from Bob's MacBook" as the primary conflict model.
+
+Avoid overcomplicated invisible magic:
+
+- no filesystem mount that lies about local/remote state.
+- no silent secret materialization.
+- no silent conflict loss.
+- no history spam from every low-level save event.
+- no dohc-only agent protocol required for ordinary file editing.
+
+## First proof slice
+
+The first proof should demonstrate the whole shape without solving every driver:
+
+1. A workspace folder represents `Main`.
+2. A named version appears as a second folder or mount.
+3. Editing files in either folder saves immediately to that version.
+4. dohc records a durability log and coalesced meaningful history.
+5. `.dohc/files.toml` controls tracked/synced/materialized behavior for a few
+   path patterns.
+6. `node_modules/**` and `dist/**` are local materialized but untracked and
+   unsynced.
+7. A `.env` file can be tracked as secret-backed and private.
+8. Unauthorized export redacts or excludes `.env`.
+9. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.
+10. An API can read/write the same version without relying on a real filesystem.
+
+If this works, dohc has the beginning of a filesystem that feels normal to
+humans and agents while being much safer and more powerful than normal folders,
+Dropbox, or Git worktrees.
