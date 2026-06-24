@@ -62,8 +62,11 @@ describe("Phase 0 proof arc", () => {
     );
     await expect(files.history.list()).resolves.toHaveLength(3);
 
-    const main = await files.ensureMainVersion();
-    const versions = files.versions;
+    const versions = createVersionedTextStore(root, {
+      nowMs: nextNow,
+      createId,
+    });
+    const main = await versions.ensureMainVersion({ workspaceId });
     await versions.writeTextFile({
       workspaceId,
       versionId: main.id,
@@ -78,7 +81,8 @@ describe("Phase 0 proof arc", () => {
       text: "Decision: base\n",
       metadata: { origin: "api", summary: "seed conflict file" },
     });
-    const named = await files.createNamedVersion({
+    const named = await versions.createNamedVersion({
+      workspaceId,
       name: "Experiment",
       fromVersionId: main.id,
     });

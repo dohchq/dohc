@@ -3,10 +3,23 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const cli = process.env.DOHC_TEST_AGENT_CLI || "codex";
 const keep = process.env.DOHC_KEEP_AGENT_SMOKE_WORKSPACE === "1";
 const timeoutMs = Number(process.env.DOHC_TEST_AGENT_TIMEOUT_MS || 180_000);
+
+function redactTempPath(value) {
+  return value.includes("dohc-agent-smoke") ? "<temp>" : value;
+}
+
+function redactSecrets(value) {
+  return value.replace(/ALPHA_SECRET=[^\n]*/g, "ALPHA_SECRET=<redacted>");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
 
 function commandFor(cliName, workspaceRoot, prompt) {
   if (cliName === "codex") {
@@ -14,6 +27,7 @@ function commandFor(cliName, workspaceRoot, prompt) {
     const sandbox = process.env.DOHC_CODEX_SANDBOX || "workspace-write";
     return {
       bin,
+      cwd: workspaceRoot,
       args: [
         "exec",
         "--cd",
@@ -33,6 +47,7 @@ function commandFor(cliName, workspaceRoot, prompt) {
       : [];
     return {
       bin,
+      cwd: workspaceRoot,
       args: [
         "--print",
         "--permission-mode",
@@ -47,17 +62,36 @@ function commandFor(cliName, workspaceRoot, prompt) {
   throw new Error(`Unsupported DOHC_TEST_AGENT_CLI=${cliName}. Expected codex or claude.`);
 }
 
-function runAgent(command, transcriptPath) {
-  return new Promise((resolve, reject) => {
+function runAgent(command) {
+  return new Promise((resolve) => {
+    const startedAtMs = Date.now();
     const child = spawn(command.bin, command.args, {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: command.cwd,
       env: { ...process.env },
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        command: command.bin,
+        cwd: command.cwd ? redactTempPath(command.cwd) : undefined,
+        args: command.args.map(redactTempPath),
+        durationMs: Date.now() - startedAtMs,
+        stdout: redactSecrets(stdout),
+        stderr: redactSecrets(stderr),
+        ...result,
+      });
+    };
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
-      reject(new Error(`Agent CLI timed out after ${timeoutMs}ms`));
+      setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
@@ -72,28 +106,10 @@ function runAgent(command, transcriptPath) {
       child.stdin.end();
     }
     child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+      settle({ exitCode: null, spawnError: error.message, timedOut });
     });
-    child.on("close", async (code) => {
-      clearTimeout(timer);
-      await writeFile(
-        transcriptPath,
-        JSON.stringify(
-          {
-            command: command.bin,
-            args: command.args.map((arg) => (arg.includes("dohc-agent-smoke") ? "<temp>" : arg)),
-            exitCode: code,
-            stdout: stdout.replace(/ALPHA_SECRET=[^\n]*/g, "ALPHA_SECRET=<redacted>"),
-            stderr: stderr.replace(/ALPHA_SECRET=[^\n]*/g, "ALPHA_SECRET=<redacted>"),
-          },
-          null,
-          2,
-        ),
-        "utf8",
-      );
-      if (code === 0) resolve(undefined);
-      else reject(new Error(`Agent CLI exited with ${code}; transcript: ${transcriptPath}`));
+    child.on("close", (code) => {
+      settle({ exitCode: code, timedOut });
     });
   });
 }
@@ -103,6 +119,8 @@ const workspaceRoot = await mkdtemp(join(tempRoot || tmpdir(), "dohc-agent-smoke
 const notesDir = join(workspaceRoot, "notes");
 const targetPath = join(notesDir, "agent-task.txt");
 const transcriptPath = join(workspaceRoot, "agent-transcript.json");
+let transcript = null;
+let failure = null;
 
 try {
   await mkdir(notesDir, { recursive: true });
@@ -116,10 +134,33 @@ try {
     "after agent via normal files",
     "",
   ].join("\n");
-  await runAgent(commandFor(cli, workspaceRoot, prompt), transcriptPath);
+  const agent = await runAgent(commandFor(cli, workspaceRoot, prompt));
   const result = await readFile(targetPath, "utf8");
-  if (result.trim() !== "after agent via normal files") {
-    throw new Error(`Agent did not write expected file contents. Got: ${JSON.stringify(result)}`);
+  const postcondition = {
+    expectedTrimmedText: "after agent via normal files",
+    matched: result.trim() === "after agent via normal files",
+    targetSizeBytes: Buffer.byteLength(result, "utf8"),
+    targetSha256: sha256(result),
+    targetPreview: result.slice(0, 200),
+  };
+  const failureReasons = [];
+  if (agent.spawnError) failureReasons.push(`Agent CLI failed to spawn: ${agent.spawnError}`);
+  if (agent.timedOut) failureReasons.push(`Agent CLI timed out after ${timeoutMs}ms`);
+  if (agent.exitCode !== 0) failureReasons.push(`Agent CLI exited with ${agent.exitCode}`);
+  if (!postcondition.matched) {
+    failureReasons.push(`Agent did not write expected file contents. Got: ${JSON.stringify(result)}`);
+  }
+  transcript = {
+    ...agent,
+    harness: {
+      ok: failureReasons.length === 0,
+      cli,
+      postcondition,
+      failureReason: failureReasons.join("; ") || undefined,
+    },
+  };
+  if (!transcript.harness.ok) {
+    throw new Error(`${transcript.harness.failureReason}; transcript: ${transcriptPath}`);
   }
   console.log(
     JSON.stringify(
@@ -135,8 +176,27 @@ try {
       2,
     ),
   );
+} catch (error) {
+  failure = error;
+  if (!transcript) {
+    transcript = {
+      command: cli,
+      harness: {
+        ok: false,
+        cli,
+        failureReason: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
 } finally {
+  if (transcript) {
+    await writeFile(transcriptPath, `${JSON.stringify(transcript, null, 2)}\n`, "utf8");
+  }
   if (!keep) {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
+}
+
+if (failure) {
+  throw failure;
 }

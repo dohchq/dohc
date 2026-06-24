@@ -62,7 +62,7 @@ approval.
 | P0D | Compare, Clean Merge, Conflict Preservation | restacked on P0C; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and automated review. |
-| P0G | Proof Arc QA And Review Hardening | restacking on P0F; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, tests, and automated review. |
+| P0G | Proof Arc QA And Review Hardening | restacked on P0F; local validation passed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and automated review. |
 | 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | automated review raised 0 issues on the latest committed diff; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -5188,7 +5188,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ## PR P0G - Proof Arc QA And CodeRabbit Hardening
 
-Status: restacked on P0F; not approved
+Status: restacked on P0F; local validation passed; not approved
 Branch: codex/think-bigger-p0g-proof-qa
 Worktree: `/home/ice/dev/dohc-p0g-proof-qa`
 Implementation chat/thread: main orchestration thread
@@ -5204,6 +5204,8 @@ Date completed:
       `.env` exclusion.
 - [x] Add local agent CLI smoke harness with `DOHC_TEST_AGENT_CLI=codex`
       default.
+- [x] Ensure local agent CLI smoke runs from the disposable workspace cwd, not
+      the repo cwd.
 - [x] Run Codex local-agent smoke and record the safe-sandbox blocker.
 - [x] Run Codex local-agent smoke successfully in a disposable workspace with
       `DOHC_CODEX_SANDBOX=danger-full-access`.
@@ -5236,6 +5238,7 @@ Date completed:
 - `scripts/phase0-agent-cli-smoke.mjs`
   - creates a disposable local workspace.
   - asks a real local agent CLI to edit one normal file.
+  - launches the agent process with the disposable workspace as cwd.
   - writes a redacted transcript artifact.
   - supports `codex` by default and `claude` compatibility.
 
@@ -5250,8 +5253,35 @@ DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_TEST_AGENT_TIME
 DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
 DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
 DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=240000 node scripts/phase0-agent-cli-smoke.mjs
+/tmp/dohc-node-v24.18.0-linux-x64/bin/node --check scripts/phase0-agent-cli-smoke.mjs
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=120000 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm test:phase0-agent-cli
+DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=120000 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm test:phase0-agent-cli
 git diff --check
 git rebase --onto codex/think-bigger-p0f-search-policy 40c9cbf codex/think-bigger-p0g-proof-qa
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+git rebase --onto codex/think-bigger-p0f-search-policy 3ab7f82 codex/think-bigger-p0g-proof-qa
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-fs test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-history test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-core test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-fs typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-core typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-sync typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/desktop typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/node --check scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine test
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=codex DOHC_CODEX_SANDBOX=danger-full-access DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
+PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" DOHC_KEEP_AGENT_SMOKE_WORKSPACE=1 DOHC_TEST_AGENT_CLI=claude DOHC_CLAUDE_MODEL=sonnet DOHC_TEST_AGENT_TIMEOUT_MS=240000 /tmp/dohc-node-v24.18.0-linux-x64/bin/node scripts/phase0-agent-cli-smoke.mjs
 ```
 
 ### E2E / Visual / Manual QA
@@ -5271,16 +5301,45 @@ git rebase --onto codex/think-bigger-p0f-search-policy 40c9cbf codex/think-bigge
 
 - `DOHC_TEST_AGENT_CLI`: defaults to `codex`.
 - Codex safe sandbox result: failed due missing local sandbox helper
-  (`bubblewrap` unavailable); transcript:
-  `/tmp/dohc-agent-smoke-whNhJs/agent-transcript.json`.
+  (`bubblewrap` unavailable) and rejected fallback edit surfaces; transcript:
+  `/tmp/dohc-agent-smoke-ipZhf0/agent-transcript.json`.
+- Current restack Codex safe sandbox result: failed due missing local sandbox
+  helper (`bubblewrap` unavailable) before file tools could run; transcript:
+  `/tmp/dohc-agent-smoke-HM0KEh/agent-transcript.json`.
 - Codex disposable fallback result: passed with
   `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
-  `/tmp/dohc-agent-smoke-43S8JJ/agent-transcript.json`.
+  `/tmp/dohc-agent-smoke-g6sWwU/agent-transcript.json`.
+- Latest restack Codex fallback result: passed with
+  `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
+  `/tmp/dohc-agent-smoke-DI2J5n/agent-transcript.json`.
+- Latest transcript-schema Codex fallback result: passed with
+  `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
+  `/tmp/dohc-agent-smoke-wjLJoW/agent-transcript.json`.
+- Final full-restack Codex fallback result: passed with
+  `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
+  `/tmp/dohc-agent-smoke-KVjgUH/agent-transcript.json`.
+- Current restack Codex fallback result: passed with
+  `DOHC_CODEX_SANDBOX=danger-full-access`; transcript:
+  `/tmp/dohc-agent-smoke-C3ZI55/agent-transcript.json`; target SHA-256
+  `fd1ed44c505b3de9bd909bb1fe6232346d9d4dc11e32d5efe88c5f0f48e9864d`;
+  transcript check confirmed no throwaway secret value leaked.
 - Claude default result: failed because default model alias `Fable 5` is
   unavailable; transcript:
-  `/tmp/dohc-agent-smoke-FPlRvf/agent-transcript.json`.
+  `/tmp/dohc-agent-smoke-R96bTV/agent-transcript.json`.
 - Claude compatibility result: passed with `DOHC_CLAUDE_MODEL=sonnet`;
-  transcript: `/tmp/dohc-agent-smoke-P4VXA5/agent-transcript.json`.
+  transcript: `/tmp/dohc-agent-smoke-ElTBpm/agent-transcript.json`.
+- Latest restack Claude compatibility result: passed with
+  `DOHC_CLAUDE_MODEL=sonnet`; transcript:
+  `/tmp/dohc-agent-smoke-K1zFbU/agent-transcript.json`.
+- Latest transcript-schema Claude compatibility result: passed with
+  `DOHC_CLAUDE_MODEL=sonnet`; transcript:
+  `/tmp/dohc-agent-smoke-CWXa0X/agent-transcript.json`.
+- Final full-restack Claude compatibility result: passed with
+  `DOHC_CLAUDE_MODEL=sonnet`; transcript:
+  `/tmp/dohc-agent-smoke-WwjPHl/agent-transcript.json`.
+- Transcript schema now records the child process result plus final
+  `harness.ok`, postcondition match, target hash, target size, preview, duration,
+  timeout state, and failure reason.
 - Secret redaction notes: transcripts redact `ALPHA_SECRET=...`; throwaway
   `.env` files were created only in disposable temp workspaces.
 
@@ -5293,16 +5352,41 @@ git rebase --onto codex/think-bigger-p0f-search-policy 40c9cbf codex/think-bigge
 
 ### Subagent Reviews
 
-- Architecture: pending.
-- Security: pending.
-- QA: pending.
+- Architecture: complete.
+  - Confirmed P0B-P0G are still package-level proof stores, not the product write
+    authority. Next integration PR must route authoritative writes through the
+    engine or reconcile normal file edits into the engine.
+  - Called out `atoms.body` direct-write paths, fragmented object/path identity,
+    split history timelines, and Hocuspocus/Y.Doc version boundaries as hard
+    follow-up gates.
+- Security: complete.
+  - Identified that active desktop/MCP/sync/search/export paths do not yet
+    uniformly exclude `.env`-style secret files. P0A now records this as an
+    implementation requirement, not a current guarantee.
+  - Identified broad host environment inheritance and dohc cloud-token exposure
+    to agent-facing MCP configuration as follow-up security work.
+  - Identified weaker server/cloud path validation than local desktop path
+    validation.
+- QA: complete.
+  - Found and fixed stale `.dohc/projections/chats/<threadId>.md` projection
+    assertions. Chat projections now use deterministic
+    `.dohc/chats/v1-<digest>.md` paths.
+  - Found and fixed ambiguous local-agent smoke transcripts by adding final
+    harness verdict and target-file postcondition data.
+  - Performance gates remain unsatisfied beyond package-level runtimes; scaled
+    scan/search/write/watch benchmarks are still required before product merge.
 
 ### Security / Privacy Notes
 
 - Agent CLI smoke uses disposable temp workspaces only.
+- The harness sets the agent child process cwd to the disposable workspace;
+  `--add-dir` alone was insufficient for Claude because it allowed access
+  without making relative file edits land in the temp workspace.
 - Codex fallback uses `danger-full-access` only when explicitly requested via
   `DOHC_CODEX_SANDBOX` because this machine lacks the safe sandbox helper.
-- The harness redacts throwaway secret values from transcript JSON.
+- The harness redacts throwaway secret values from transcript JSON and records
+  final postcondition status so a child-process success cannot mask a failed
+  file edit.
 - Phase 0 proof keeps local file edits actor-neutral unless a chat post
   explicitly identifies an agent.
 
@@ -5310,11 +5394,58 @@ git rebase --onto codex/think-bigger-p0f-search-policy 40c9cbf codex/think-bigge
 
 - Budget areas touched: deterministic package-level proof only.
 - Metrics:
-  - workspace-engine tests: 38 tests in about 2.13s locally.
-  - Codex fallback agent smoke: completed successfully in about 72s.
-  - Claude Sonnet agent smoke: completed successfully in about 13s.
-- Machine/CI context: local Codex machine; Node v18.19.1 emitted repo engine
-  warnings because dohc declares Node 20.19+/22.13+.
+  - P0B-clean restack validation on P0G: Rust kernel spike `cargo test`
+    passed 3 tests; workspace-fs passed 40 tests and typecheck;
+    workspace-history passed 28 tests and typecheck; workspace-engine passed
+    79 tests and typecheck; workspace-api share revocation passed 15 tests and
+    typecheck; `node --check scripts/phase0-agent-cli-smoke.mjs` passed; `git
+    diff --check` passed.
+  - workspace-engine tests: 38 tests in 1.60s locally.
+  - latest restack workspace-engine tests: 38 tests in 1.64s locally.
+  - latest projection-path workspace-engine tests: 40 tests in 1.62s locally.
+  - final full-restack workspace-engine tests: 40 tests in 2.58s locally.
+  - current restack workspace-engine tests: 177 tests in 29.68s locally.
+  - latest restack workspace-engine typecheck: passed.
+  - final full-restack workspace-engine typecheck: passed.
+  - current restack workspace-engine typecheck: passed.
+  - latest restack workspace-fs tests: 40 tests in 3.25s locally.
+  - final full-restack workspace-fs tests: 40 tests in 3.41s locally.
+  - latest restack workspace-history tests: 28 tests in 2.83s locally.
+  - final full-restack workspace-history tests: 28 tests in 3.45s locally.
+  - current restack workspace-history conflict-resolution test: 8 tests in
+    348ms locally.
+  - current restack workspace-history typecheck: passed.
+  - latest restack workspace-core tests: 104 tests in 809ms locally.
+  - final full-restack workspace-core tests: 104 tests in 953ms locally.
+  - latest restack workspace-fs typecheck: passed.
+  - final full-restack workspace-fs typecheck: passed.
+  - latest restack workspace-core typecheck: passed.
+  - final full-restack workspace-core typecheck: passed.
+  - latest restack workspace-sync typecheck: passed.
+  - final full-restack workspace-sync typecheck: passed.
+  - latest restack desktop typecheck: passed.
+  - final full-restack desktop typecheck: passed.
+  - latest restack Rust kernel spike tests: 2 tests passed.
+  - final full-restack Rust kernel spike tests: 2 tests passed.
+  - Codex fallback agent smoke: completed successfully in 26.26s.
+  - latest restack Codex fallback agent smoke: completed successfully.
+  - latest transcript-schema Codex fallback agent smoke: completed successfully
+    in 36.16s.
+  - final full-restack Codex fallback agent smoke: completed successfully in
+    64.26s.
+  - current restack Codex fallback agent smoke: completed successfully in
+    27.19s.
+  - Claude Sonnet agent smoke: completed successfully in 16.62s.
+  - latest restack Claude Sonnet agent smoke: completed successfully.
+  - latest transcript-schema Claude Sonnet agent smoke: completed successfully
+    in 12.43s.
+  - final full-restack Claude Sonnet agent smoke: completed successfully in
+    12.96s.
+  - Codex default sandbox smoke: failed as expected in about 67s.
+  - Claude default smoke: failed as expected in 1.14s.
+- Machine/CI context: local Codex machine; latest rerun happened after the
+  P0A secret-policy wording fix, projection-path fix, transcript-schema fix, and
+  full P0R-P0G restack, using Linux Node v24.18.0 Corepack.
 - Budget pass/fail: renderer/startup/watch budgets remain unmeasured because
   the Phase 0 proof is not mounted into desktop UI.
 - Jank/blocking notes: no renderer integration ships in this PR.
