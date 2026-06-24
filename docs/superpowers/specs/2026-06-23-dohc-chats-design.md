@@ -204,6 +204,12 @@ type ThreadMessage = {
 }
 ```
 
+If `parentMessageId` is present, it must reference an existing message in the
+same `threadId`, must not equal the message's own `id`, and must not introduce
+a cycle in the ancestry chain. Message create/update paths must validate this
+before rendering nested replies, indexing, notification fanout, or projection
+generation.
+
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
 
@@ -258,6 +264,7 @@ Every chat action must derive actor identity server-side or engine-side and
 enforce workspace scope on every entity and result:
 
 - `list_chats`
+- `list_channels`
 - `read_chat`
 - `create_chat`
 - `reply_to_chat`
@@ -316,6 +323,12 @@ I checked the filesystem spec and found one risk...
 
 This is one-way by default. Editing this file should not be how users post
 messages.
+
+If a projected chat file is edited locally, the edit must not mutate the
+canonical chat. The engine should treat it as an invalid projection write,
+preserve the edited bytes as a local recovery artifact or status item, and
+regenerate the projection from canonical chat state. The user or agent should
+be directed to post through chat actions instead of editing the projection.
 
 ## Integration with files and versions
 

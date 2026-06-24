@@ -268,6 +268,12 @@ git diff --check
   - Third pass major: DM-backed chats needed at least two unique participants.
   - Third pass major: secret projection wording overstated process-level
     enforcement for normal local folders.
+  - Fourth pass major: native filesystem examples used `redacted` instead of
+    canonical `redact` export enum value.
+  - Fourth pass major: chat authorization list omitted `list_channels`.
+  - Fourth pass major: message reply parent integrity was underspecified.
+  - Fourth pass major: local edits to read-only chat projection files needed a
+    canonical reject/preserve/regenerate policy.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -293,6 +299,11 @@ git diff --check
   - Added write-ack boundary after durable persistence.
   - Required DM-backed chat threads to have at least two unique participants.
   - Scoped process-level secret gating to dohc-controlled execution paths.
+  - Normalized public export enum examples to `redact`.
+  - Added `list_channels` to server/engine-derived chat authorization scope.
+  - Added `parentMessageId` same-thread, no-self, no-cycle invariants.
+  - Specified that local projection edits do not mutate canonical chat and must
+    be preserved as recovery/status before projection regeneration.
 - Overrides:
 
 ### Subagent Reviews

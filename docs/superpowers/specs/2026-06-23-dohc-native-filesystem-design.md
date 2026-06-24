@@ -292,7 +292,7 @@ synced = true
 encrypted = true
 searchable = false
 visibility = "private"
-public_export = "redacted"
+public_export = "redact"
 agent_access = "explicit"
 
 [[rule]]
@@ -396,7 +396,7 @@ versioned: true
 encrypted: true
 searchable: false
 visibility: private
-publicExport: redacted
+publicExport: redact
 agentAccess: explicit
 ```
 
