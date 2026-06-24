@@ -72,6 +72,11 @@ reconciliation, each raw local write must be revalidated against workspace
 scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
 and effective policy before it is persisted into version history. Unauthorized
 or indeterminate writes must be quarantined or rejected rather than merged.
+Authorization/policy resolution is fail-closed: if authoritative workspace
+membership, share state, lock state, or effective-policy inputs are stale,
+unavailable, or indeterminate, the write remains quarantined and is not
+persisted to durability/history until fresh server/engine-derived validation
+succeeds.
 
 ## Same rules for humans and agents
 
@@ -127,7 +132,11 @@ Phase 0 should use a normal folder plus reconciliation:
    - Compare against the last known index.
    - Hash only files whose metadata or identity changed, plus suspicious cases.
    - Detect creates, edits, deletes, and likely renames/moves.
-   - Record the result as local/device/session changes in the active version.
+   - Record each result as a local/device/session change in the version bound to
+     the edited path or mount at capture time, or deterministically inferred
+     from persisted mount metadata during restart reconciliation.
+   - If version binding is ambiguous, quarantine and require explicit user
+     resolution; never fall back to the current active version.
 
 4. **Periodic audit**
    - Recheck parts of the tree over time to recover from missed watcher events,

@@ -1061,6 +1061,8 @@ Each implementation thread should start with:
 - the branch/worktree path.
 - required tests and performance budgets.
 - CodeRabbit loop instructions.
+- if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
+  before editing and record that in its execution-log entry.
 
 Separate implementation chats/threads are user-visible and should only be
 created when the user explicitly asks or approves. Subagents remain the default

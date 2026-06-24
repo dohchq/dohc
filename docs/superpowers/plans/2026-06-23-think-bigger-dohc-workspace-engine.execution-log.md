@@ -323,6 +323,18 @@ git diff --check
     requiring `workspaceId` on persisted objects.
   - Eighth pass minor: "Everything saves" wording needed to be scoped to
     authorized writes.
+  - Ninth pass major: implementation-thread kickoff checklist needed the
+    `apps/app/AGENTS.md` read gate for `apps/app` work.
+  - Ninth pass major: chat tombstone retention needed secret-safe audit/history
+    storage rules.
+  - Ninth pass major: chat search snippets and indexes needed explicit
+    no-plaintext-secrets behavior.
+  - Ninth pass major: shared channels needed per-message/link/reference
+    authorization instead of broad thread inheritance.
+  - Ninth pass major: filesystem restart reconciliation needed path-to-version
+    binding instead of current-active-version fallback.
+  - Ninth pass major: raw local filesystem reconciliation needed fresh
+    server/engine-derived auth/policy context before persistence.
 - Fixes:
   - Added write authorization/lock/protected-path invariants to the versioned
     workspace spec.
@@ -395,6 +407,18 @@ git diff --check
     entities, shares, captures, files, versions, events, chat links,
     projections, and history records.
   - Replaced broad "Everything saves" phrasing with "Authorized writes save."
+  - Added `apps/app/AGENTS.md` to implementation-thread kickoff requirements
+    for lanes touching `apps/app`.
+  - Required chat tombstone audit/history retention to use secret-backed
+    references, encrypted payloads, or redacted forms when secrets may exist.
+  - Added secret classification/redaction requirements for chat/work search
+    indexes and source-context snippets.
+  - Required shared channels to re-authorize every message, link, and projected
+    reference against normal policy.
+  - Required restart reconciliation to write local/device/session changes to the
+    path/mount-bound version and quarantine ambiguous version binding.
+  - Required fresh server/engine-derived authorization and policy context before
+    raw local writes persist into durability/history.
 - Overrides:
 
 ### Subagent Reviews

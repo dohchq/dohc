@@ -258,8 +258,12 @@ projections, search snippets, notifications, and summaries.
 Deletes are tombstones, not hard deletes. If `deletedAt` is present,
 `tombstone` must be true, `body` must render as a deletion placeholder, and the
 original body must remain available only through authorized audit/history paths.
+If the original body contains or may contain secrets, audit/history retention
+must store secret-backed references, encrypted payloads, or redacted forms, not
+plaintext secret content.
 Projections, search, notifications, and summaries all read the same
-`ThreadMessage` deletion state and must not invent ad hoc redaction behavior.
+`ThreadMessage` deletion state and must not invent ad hoc redaction behavior or
+retain plaintext secrets in history, audit, search, export, or agent-log flows.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
@@ -563,6 +567,10 @@ Agent run: <User Name>'s agent forecast pass
 
 This is a major advantage over Slack: search can understand the relationship
 between the conversation and the work.
+The search pipeline must classify or redact secrets before indexing or rendering
+results across chats, messages, files, versions, history moments, agent runs,
+apps/data, and source-context snippets. Search snippets must never expose
+plaintext secrets that are not visible through the same policy-aware read path.
 
 ## External and shared channels
 
@@ -590,6 +598,11 @@ A shared channel can expose selected workspace resources:
 
 The channel should not grant broad workspace access. Shared channel access must
 compose with normal file/folder/version visibility.
+Every message, link, and projected reference inside a shared channel must be
+re-authorized against normal workspace policy before exposure. An external
+viewer can see only the chat content and work artifacts explicitly shared with
+them; non-shared files, atoms, versions, app views, agent runs, and links remain
+hidden even if they are mentioned inside an otherwise shared thread.
 
 User-facing preview before sharing:
 
