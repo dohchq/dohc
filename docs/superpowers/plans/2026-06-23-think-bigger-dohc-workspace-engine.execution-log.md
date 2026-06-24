@@ -572,6 +572,21 @@ Eighteenth pass:
     no-open-items wording to provisional rerun-pending wording.
   - Clarified that `.dohc/files.toml` and `.dohc/visibility.toml` live under
     `.dohc/`, while optional `.dohcignore` is a workspace-root policy file.
+
+Nineteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Added causal replay gates for denied/quarantined ingest holding areas,
+    including base snapshot/CAS metadata and fresh apply-time auth/policy
+    revalidation.
+  - Required every chat primitive, including channels, links, activities, and
+    read state, to carry and key lookups by `workspaceId`.
+  - Added symlink/hardlink and filesystem-indirection boundary checks before
+    import, capture, scan, sync, or reconciliation.
+  - Added monotonic sequence/cursor ordering guards to async workspace/status
+    payload application.
+  - Replaced DM hash-only identity with exact canonical participant-set identity
+    or hash plus exact-set verification.
 - Overrides:
 
 ### Unresolved Findings

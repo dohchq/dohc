@@ -86,6 +86,14 @@ plaintext secret values in payloads, indexes, logs, explanations, or retry
 metadata. Secret-bearing ingests are stored only as encrypted references,
 redacted forms, or broker metadata until an authorized read path reconstructs
 them.
+Replay from the holding area must be causal and fail-closed. Retry metadata
+must include `workspaceId`, `versionId`, and the expected base snapshot,
+content hash, or equivalent CAS token captured with the original ingest. At
+apply time, the engine revalidates workspace scope plus server-derived
+authorization, policy, visibility, protected-path, lock, version-access, and
+skill-turn checks. If the base advanced, the workspace binding is ambiguous, or
+permissions changed, the retry degrades to conflict/manual reconciliation or
+stays quarantined instead of becoming canonical state.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,

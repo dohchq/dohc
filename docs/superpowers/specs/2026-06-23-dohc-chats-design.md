@@ -42,6 +42,16 @@ Use better primitives internally:
 - `ThreadActivity`
 - `ThreadReadState`
 
+All chat primitives are workspace-scoped data. `Channel`, `ChatThread`,
+`ThreadMessage`, `ThreadLink`, `ThreadActivity`, and `ThreadReadState` all carry
+`workspaceId`, and create/read/update/delete, lookup, projection, notification,
+and search paths must include `workspaceId` in their keys. Channels are unique
+within `(workspaceId, channelSlugOrId)`. Thread links must reference
+workspace-scoped source and target objects and reject cross-workspace links by
+default. Thread activity records are append-only events keyed by
+`(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
+sequence.
+
 The UI can say chat. The system should not inherit a stream-first data model.
 
 Minimal `ThreadReadState`:
@@ -220,11 +230,12 @@ the authenticated actor identity must be derived server-side, must be included
 in the canonical participant set, and must be authorized to message every
 participant before routing, key generation, indexing, ACL checks, persistence,
 fanout, or atomic create logic. For DM-backed threads, the canonical participant
-set must derive a stable unique persistence key within the workspace such as
-`(workspaceId, dmParticipantSetHash)`. Creation must be atomic through upsert,
-CAS, a transaction, or an equivalent uniqueness constraint so concurrent
-creates resolve to one canonical thread instead of duplicate DM threads for the
-same participant set.
+set must derive a collision-safe unique persistence key within the workspace by
+using an exact canonical participant-set value, or a hash plus exact-set
+verification, scoped by `workspaceId`. Creation must be atomic through upsert,
+CAS, a transaction, or an equivalent uniqueness constraint so concurrent creates
+resolve to one canonical thread instead of duplicate DM threads for the same
+participant set.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.

@@ -81,6 +81,16 @@ Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and user-created `.versions` content is never silently promoted into a named
 version.
 
+Path canonicalization must happen before import, attach, sync, raw filesystem
+scan, watcher reconciliation, or policy evaluation. Symlinks, hardlinks,
+junctions, bind mounts, aliases, or any equivalent filesystem indirection that
+resolves outside the active workspace, crosses into another workspace, or enters
+reserved engine state such as `.dohc/**` or `.versions/**` must be rejected or
+quarantined before capture. If the engine cannot prove the resolved target and
+file identity are inside the active workspace boundary, it fails closed. This
+path boundary applies to every file capture that may back an atom, folder,
+entity, share, or capture record.
+
 Identity-light capture is allowed; identity-light commit is not. During
 reconciliation, each raw local write must be revalidated against workspace
 scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
@@ -246,20 +256,25 @@ combining incompatible guards, such as `expectedAbsent` with
 not mutate canonical content.
 
 Every async watch/status/snapshot payload must include workspace identity,
-version identity, and a request token or equivalent correlation id before it can
-update UI state:
+version identity, a request token or equivalent correlation id, and a monotonic
+ordering guard before it can update UI state:
 
 ```ts
 type WorkspaceAsyncPayload = {
   workspaceId: string
   versionId: string
   requestToken: string
+  sequence: number
 }
 ```
 
-Handlers for `watch(path)`, `snapshot(version)`, status APIs, and filesystem
-loading must verify these fields before applying results. A stale response from
-one workspace/version/session must never repaint another.
+Handlers for `watch(workspaceId, versionId, path)`,
+`snapshot(workspaceId, versionId)`, status APIs, and filesystem loading must
+verify these fields before applying results. Each handler also compares the
+payload sequence, cursor, or server timestamp against the latest applied value
+for the same workspace/version/request stream, and applies only newer responses.
+A stale response from one workspace/version/session must never repaint another
+or regress current UI state.
 
 ## File state axes
 
