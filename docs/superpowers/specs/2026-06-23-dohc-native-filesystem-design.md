@@ -62,6 +62,10 @@ Named versions can appear as their own folders or mounts:
 ~/dohc/personal/.versions/client-view/   # Client-facing version
 ```
 
+These `.versions/<version>/` roots are valid managed version locations only
+when the engine creates or resolves them as named-version mounts for the active
+workspace. They are not ordinary user-created folders.
+
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
 For raw local filesystem writes, exact process identity is not required; the
@@ -72,21 +76,25 @@ source-backed policy allowlist before applying reserved-namespace quarantine:
 approved policy inputs such as `.dohc/files.toml`, `.dohc/visibility.toml`, and
 optional workspace-root `.dohcignore` may be tracked as policy files, while all
 other `.dohc/**` content remains reserved engine state. If import, attach,
-sync, or a raw filesystem scan finds user-created `.versions/**`, non-allowlisted
-`.dohc/**`, or aliases of those names where dohc expects engine state, dohc must
-not treat the content as normal workspace data. The importer either quarantines
-the tree with an explainable record, proposes a safe rename outside reserved
-namespaces, or asks for manual resolution before the workspace is activated.
+sync, or a raw filesystem scan finds unmanaged or out-of-contract
+`.versions/**`, non-allowlisted `.dohc/**`, or aliases of those names where
+dohc expects engine state, dohc must not treat the content as normal workspace
+data. Managed `~/dohc/<space>/.versions/<version>/` roots are allowed only when
+they are bound to a known workspace/version by the engine. Other reserved
+namespace content is quarantined with an explainable record, proposed for a safe
+rename outside reserved namespaces, or sent to manual resolution before the
+workspace is activated.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
-and user-created `.versions` content is never silently promoted into a named
-version.
+and unmanaged `.versions` content is never silently promoted into a named version.
 
 Path canonicalization must happen before import, attach, sync, raw filesystem
 scan, watcher reconciliation, or policy evaluation. Symlinks, hardlinks,
 junctions, bind mounts, aliases, or any equivalent filesystem indirection that
 resolves outside the active workspace, crosses into another workspace, or enters
-reserved engine state such as `.dohc/**` or `.versions/**` must be rejected or
-quarantined before capture. If the engine cannot prove the resolved target and
+reserved engine state such as `.dohc/**` or unmanaged `.versions/**` must be
+rejected or quarantined before capture. Managed `.versions/<version>/` roots are
+valid only when the path is already bound to that workspace/version by the
+engine. If the engine cannot prove the resolved target and
 file identity are inside the active workspace boundary, it fails closed. This
 path boundary applies to every file capture that may back an atom, folder,
 entity, share, or capture record.

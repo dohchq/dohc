@@ -80,10 +80,14 @@ Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
 recover. The holding area must be abuse-resistant: enforce per-workspace and
 per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
-deterministic eviction or backpressure behavior so ingest floods cannot exhaust
-storage or starve canonical durability paths. Humans, agents, imports, and sync
-processes all get the same guarantee: the change is not silently lost, but it
-also does not become canonical workspace state until protection checks pass.
+deterministic backpressure so ingest floods cannot exhaust storage or starve
+canonical durability paths. Eviction applies only to rejected-before-acceptance
+items or to already-durable holding records that reached a declared TTL/retention
+boundary; when an accepted holding record expires or is evicted, the engine
+preserves durable rejection/expiration evidence. Humans, agents, imports, and
+sync processes all get the same guarantee: an accepted change is not silently
+lost, but it also does not become canonical workspace state until protection
+checks pass.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as
@@ -282,6 +286,16 @@ write file
 run command
 save
 ```
+
+Normal filesystem saves are translated into the same write contract as
+`write(workspaceId, versionId, path, bytes, ...)`. When a file is read or
+materialized, the engine records exactly one causal token for that path, such
+as the last seen base version, etag, content hash, or absence assertion. When
+the file is saved or captured, the filesystem path must submit exactly one valid
+causal precondition with the incoming bytes. Missing preconditions, multiple
+incompatible guards, or stale tokens fail closed and return the same
+deterministic current-vs-incoming conflict behavior as the API write flow
+instead of blindly overwriting canonical state.
 
 But the same workspace must also be accessible through APIs for cloud,
 in-memory, browser, and agent runtimes:
@@ -568,8 +582,8 @@ The first proof should be small but real:
     degrade to conflict/manual reconciliation or remain quarantined.
 13. E2E proves holding-area abuse resistance: per-workspace/per-actor quotas,
     TTL retention bounds, payload-size caps, ingest rate limits, and
-    deterministic eviction/backpressure prevent storage exhaustion or canonical
-    durability starvation.
+    deterministic backpressure prevent storage exhaustion or canonical
+    durability starvation without silently dropping accepted holding records.
 14. E2E proves `write(...)`, `merge(...)`, and `restore(...)` fail closed when
     causal preconditions are missing or multiple/incompatible, and only proceed
     when exactly one valid causal guard is supplied.

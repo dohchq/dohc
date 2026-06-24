@@ -107,6 +107,9 @@ canonical persisted ordering fields. If no such message exists, the workspace
 or thread does not match, or the tuple is forged/stale relative to persisted
 message state, the read-state update is rejected fail-closed. Concurrent stale
 updates must no-op or retry, never overwrite a newer cursor with an older one.
+If the incoming tuple exactly equals the stored `lastReadCursor`, the operation
+is an idempotent success with no state change after the same message-existence
+validation. Only strictly greater tuples advance the cursor.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -208,7 +211,9 @@ linked:
 - Version: q3-plan
 ```
 
-But DMs must stay fast. Do not force every DM to become a formal work thread.
+But DMs must stay fast. The UX does not have to feel like a formal work thread,
+but internally every one-to-one or small group DM is represented as a DM-backed
+`ChatThread`; there is no separate durable DM model.
 
 ## Chat threads
 
@@ -442,8 +447,17 @@ projected Markdown file, the projection pipeline must classify secret content
 and apply the same policy-aware redaction rules used by chat rendering, search,
 notifications, summaries, and export. Derived chat files must never persist
 plaintext secrets outside the authorized secret-backed read path.
-`<thread-id>` in the projection path must be a filesystem-safe opaque id or
-encoded canonical thread id. Projection writers must reject path separators,
+`.dohc/chats/**` is an explicit internal projection allowlist entry under the
+same fail-closed `.dohc/**` reserved-namespace rules used by the native
+filesystem model. It is not a source-backed policy file and is not re-ingested
+as canonical user content.
+`<thread-id>` in the projection path is conceptual. Projection writers must map
+the canonical thread id to a deterministic filename that is collision-safe on
+case-insensitive filesystems, such as a lowercase base32url hash of
+`workspaceId`, `threadId`, and projection kind. The projection must store or
+otherwise verify the exact canonical thread id in metadata before writing, and
+must reject ambiguous ids or any computed filename that already maps to a
+different canonical thread id. Projection writers must reject path separators,
 relative path segments, control characters, reserved names, and any other unsafe
 input before constructing `.dohc/chats/<thread-id>.md`, so a crafted thread id
 cannot traverse directories or overwrite another projection.
