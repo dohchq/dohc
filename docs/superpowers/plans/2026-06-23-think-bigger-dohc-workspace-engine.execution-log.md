@@ -692,7 +692,7 @@ Twenty-eighth pass:
   - Rephrased the Twelfth-pass denied/quarantined holding-area grammar.
   - Aligned E2E policy wording so implemented, shipped, and in-scope surfaces
     cannot skip E2E while deferred surfaces are recorded as not applicable.
-  - Replaced stale app pre-edit references with `apps/web/AGENTS.md` and a
+  - Added the current `apps/web/AGENTS.md` pre-edit check and a
     checked-if-present Convex guidance rule.
   - Required DM read/write paths and read-state updates to verify server-derived
     actor membership before routing, indexing, persistence, fanout,
