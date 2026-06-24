@@ -449,8 +449,8 @@ git diff --check
     path/mount-bound version and quarantine ambiguous version binding.
   - Required fresh server/engine-derived authorization and policy context before
     raw local writes persist into durability/history.
-  - Required denied/quarantined ingests to persist in durable non-canonical
-    holding state for retry/explanation while following secret-safe durability
+  - Required durable non-canonical holding records for denied/quarantined
+    ingests, including retry/explanation metadata and secret-safe durability
     rules.
   - Clarified that the durability log tracks every save/write, with
     secret-backed writes represented only as encrypted references, redacted
@@ -466,7 +466,7 @@ Twelfth pass:
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
     sequence used with `createdAt` and `messageId` for read cursor advancement.
   - Required `.dohc/chats/<thread-id>.md` projections to classify and redact
-    secrets before writing derived markdown.
+    secrets before writing derived Markdown.
   - Made API writes explicit about create-vs-overwrite preconditions through
     `expectedAbsent` and `expectedObjectId`.
   - Clarified `tracked`/`versioned` invariants and corrected `.env`
@@ -512,6 +512,18 @@ Fourteenth pass:
     advancement so stale concurrent reads cannot regress read state.
   - Required a unique `(workspaceId, threadId, threadSequence)` constraint and
     transactional or serialized sequence allocation for chat messages.
+
+Fifteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Required exactly one write precondition mode per native filesystem API
+    write, with invalid guard combinations failing closed.
+  - Split file policy state into tracked/captured and versioned/history-visible
+    axes so durable capture cannot be confused with user-facing history.
+  - Added workspace-unique DM participant-set keys and atomic create semantics
+    to prevent duplicate DM threads under concurrent creates.
+  - Cleaned execution-log grammar and Markdown capitalization in the review
+    findings/fixes list.
 - Overrides:
 
 ### Unresolved Findings

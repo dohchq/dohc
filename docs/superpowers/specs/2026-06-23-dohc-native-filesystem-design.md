@@ -210,7 +210,9 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 
 ```text
 read(path)
-write(path, bytes, { expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId })
+write(path, bytes, {
+  precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId
+})
 list(path)
 stat(path)
 search(query)
@@ -232,6 +234,10 @@ Create and overwrite calls must be explicit: `expectedAbsent: true` means
 "overwrite this known object only." If the precondition does not match the
 current workspace/version/path state, the API returns a conflict response
 preserving current and incoming content rather than applying the mutation.
+Exactly one precondition mode may be supplied per write. Supplying none or
+combining incompatible guards, such as `expectedAbsent` with
+`expectedObjectId`, fails closed with a validation/conflict response and does
+not mutate canonical content.
 
 Every async watch/status/snapshot payload must include workspace identity,
 version identity, and a request token or equivalent correlation id before it can
@@ -251,34 +257,40 @@ one workspace/version/session must never repaint another.
 
 ## File state axes
 
-dohc must not collapse every file into a single synced/tracked/local state.
+dohc must not collapse every file into a single
+tracked/versioned/synced/materialized state.
 
-At least three independent axes are needed:
+At least four independent axes are needed:
 
-1. **Tracked in history**
-   - Should changes be recorded as part of workspace version history?
+1. **Tracked/captured**
+   - Should changes be observed, captured, and made durable by the workspace
+     engine?
 
-2. **Synced/durable**
+2. **Versioned/history-visible**
+   - Should captured changes appear in user-facing version history and named
+     versions?
+
+3. **Synced/durable**
    - Should contents sync to dohc Cloud or another remote?
 
-3. **Materialized locally**
+4. **Materialized locally**
    - Should contents exist on local disk, hydrate lazily, or remain virtual?
 
 Examples:
 
-| Path | Tracked | Synced | Materialized |
-| --- | --- | --- | --- |
-| `docs/**` | yes | yes | lazy or pinned |
-| `apps/**` | yes | yes | lazy or pinned |
-| `data/raw/**` | yes | yes | lazy |
-| `node_modules/**` | no | no | local |
-| `dist/**` | no | no | local |
-| `.cache/**` | no | no | local |
-| `scratch/**` | optional | no | local |
-| `.env` | yes | yes | local |
+| Path | Tracked | Versioned | Synced | Materialized |
+| --- | --- | --- | --- | --- |
+| `docs/**` | yes | yes | yes | lazy or pinned |
+| `apps/**` | yes | yes | yes | lazy or pinned |
+| `data/raw/**` | yes | yes | yes | lazy |
+| `node_modules/**` | no | no | no | local |
+| `dist/**` | no | no | no | local |
+| `.cache/**` | no | no | no | local |
+| `scratch/**` | optional | optional | no | local |
+| `.env` | yes | yes | yes | local |
 
-This avoids naive folder-sync behavior such as syncing `node_modules`, build output,
-and cache folders.
+This avoids naive folder-sync behavior such as syncing `node_modules`, build
+output, and cache folders.
 Materialization describes storage shape only; authorization decides whether a
 specific actor can hydrate or read local plaintext for a protected path such as
 `.env`.
@@ -286,8 +298,8 @@ specific actor can hydrate or read local plaintext for a protected path such as
 `tracked` and `versioned` are related but not identical. `versioned = true`
 implies `tracked = true`; `tracked = false` implies `versioned = false`.
 `tracked = true, versioned = false` is allowed for local or synced artifacts
-that should be durable or observable without appearing in user-facing version
-history.
+that should be captured, reconciled, or made durable without appearing in
+user-facing version history.
 
 ## Workspace file policy
 
@@ -345,18 +357,21 @@ Example:
 [[rule]]
 match = "node_modules/**"
 tracked = false
+versioned = false
 synced = false
 materialized = "local"
 
 [[rule]]
 match = "dist/**"
 tracked = false
+versioned = false
 synced = false
 materialized = "local"
 
 [[rule]]
 match = "docs/**"
 tracked = true
+versioned = true
 synced = true
 materialized = "lazy"
 
@@ -693,7 +708,7 @@ Avoid naive folder sync:
 - no blind last-writer-wins.
 - no syncing `node_modules` by default.
 - no materializing everything by default.
-- no single state axis for tracked/synced/local.
+- no single state axis for tracked/versioned/synced/materialized.
 - no "conflicted copy from Bob's MacBook" as the primary conflict model.
 
 Avoid overcomplicated invisible magic:
@@ -712,10 +727,10 @@ The first proof should demonstrate the whole shape without solving every driver:
 2. A named version appears as a second folder or mount.
 3. Editing files in either folder saves immediately to that version.
 4. dohc records a durability log and coalesced meaningful history.
-5. `.dohc/files.toml` controls tracked/synced/materialized behavior for a few
-   path patterns.
-6. `node_modules/**` and `dist/**` are local materialized but untracked and
-   unsynced.
+5. `.dohc/files.toml` controls tracked/versioned/synced/materialized behavior
+   for a few path patterns.
+6. `node_modules/**` and `dist/**` are local materialized but untracked,
+   unversioned, and unsynced.
 7. A `.env` file can be tracked as secret-backed and private.
 8. Unauthorized export redacts or excludes `.env`.
 9. A simple conflict preserves both sides and exposes `.dohc/conflicts/`.

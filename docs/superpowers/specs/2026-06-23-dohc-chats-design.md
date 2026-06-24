@@ -215,7 +215,12 @@ authorization checks, notifications, search indexing, or projection handling.
 DM-backed threads require at least two unique participants; a one-person DM is
 invalid. Before persistence, routing, key generation, indexing, or ACL checks,
 `dmParticipantIds` must be deduplicated and stable-sorted. The XOR ownership
-rule is enforced after canonicalization.
+rule is enforced after canonicalization. For DM-backed threads, the canonical
+participant set must derive a stable unique persistence key within the workspace
+such as `(workspaceId, dmParticipantSetHash)`. Creation must be atomic through
+upsert, CAS, a transaction, or an equivalent uniqueness constraint so
+concurrent creates resolve to one canonical thread instead of duplicate DM
+threads for the same participant set.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
