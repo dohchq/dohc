@@ -304,7 +304,7 @@ in-memory, browser, and agent runtimes:
 read(workspaceId, versionId, path)
 write(workspaceId, versionId, path, bytes, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent,
-  targetObjectId?,
+  targetObjectId: required for overwrite; omit only when expectedAbsent is used,
   idempotencyKey
 })
 list(workspaceId, versionId, path)
@@ -324,15 +324,23 @@ restore(workspaceId, versionId, pointInTime, {
 The filesystem is one interface. It should not be the only possible execution
 environment.
 
-API writes are never unconditional overwrites. A write must include exactly one
-causal precondition: expected base version, etag, content hash, absence
-assertion for creates, or another monotonic freshness token. Stable object ids
-may identify the intended target object, but they are not causal freshness
-guards and cannot authorize overwrite by themselves. If the precondition does
-not match the current workspace/version/path state, the engine returns a
-deterministic conflict response preserving current and incoming content instead
-of mutating canonical state. Supplying no causal precondition or multiple
-incompatible preconditions fails closed.
+API writes are never unconditional overwrites. Create and overwrite modes are
+explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.
+Overwrite must include `targetObjectId` plus exactly one causal freshness
+precondition, such as `expectedBaseVersion`, `expectedEtag`, or
+`expectedContentHash`. `targetObjectId` binds the intended object identity so a
+delete/recreate substitution cannot satisfy a path-only overwrite, but it is
+not a freshness guard by itself. If the precondition or target object does not
+match the current workspace/version/path state, the engine returns a
+deterministic secret-safe conflict envelope instead of mutating canonical state.
+Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
+providing multiple incompatible preconditions fails closed.
+
+Conflict envelopes return opaque object/version handles, hashes, policy
+decisions, redacted previews, and explainable metadata by default. They do not
+echo full current, incoming, restored, or secret-backed bytes unless the
+server-side authorization path explicitly grants secret materialization for
+that caller and resolution session.
 
 `snapshot(...)` and `diff(...)` are read-only scoped views. `merge(...)` and
 `restore(...)` are write-producing operations and must use the same

@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; native overwrite/conflict fix applied; rerun pending
+Status: PR 00 in review; versioned overwrite/conflict fix applied; rerun pending
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Native overwrite/conflict fix applied; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Versioned overwrite/conflict fix applied; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -267,8 +267,9 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after native overwrite/conflict fix.
-- Current findings: native overwrite/conflict fix applied; pending latest rerun.
+- Status: fixes applied; rerun pending after versioned overwrite/conflict fix.
+- Current findings: versioned overwrite/conflict fix applied; pending latest
+  rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -852,6 +853,16 @@ Forty-second pass:
     opaque handles, hashes, redacted previews, policy decisions, and metadata by
     default, with raw bytes materialized only through explicit server-side
     authorization.
+
+Forty-third pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Aligned the versioned workspace `write(...)` contract with the native
+    filesystem overwrite rule: overwrite requires `targetObjectId` plus exactly
+    one causal freshness precondition, while create-only `expectedAbsent` omits
+    `targetObjectId`.
+  - Added secret-safe conflict envelope wording to the versioned workspace API
+    contract.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -859,7 +870,7 @@ Forty-second pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the native overwrite/conflict fix.
+- Pending the latest CodeRabbit rerun after the versioned overwrite/conflict fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 
