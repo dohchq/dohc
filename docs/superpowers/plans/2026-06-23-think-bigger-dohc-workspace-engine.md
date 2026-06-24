@@ -299,7 +299,7 @@ Every projection must declare its write contract:
 Examples:
 
 - normal source file projection: writable.
-- `.dohc/chats/<thread>.md`: read-only by default.
+- `.dohc/chats/v1-<digest>.md`: read-only by default.
 - public export of `.env`: redacted or excluded.
 - generated dashboard summary: lossy unless explicitly source-backed.
 - `.dohc/status.json`: read-only.
