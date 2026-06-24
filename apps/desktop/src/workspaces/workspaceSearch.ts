@@ -151,10 +151,9 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   }
   const validated = validateUserWritePath(rawPath.replaceAll("\\", "/"));
   if (!validated.ok) return [];
-  // Reserved-segment backstop (.git / node_modules / .dohc at any depth):
-  // validateUserWritePath rejects only `.dohc`, and rg's glob exclusions can
-  // be out-voted by a user include glob (last-match-wins) — this check is
-  // the guaranteed engine-level containment regardless of argv shape.
+  // Defense-in-depth reserved/ignored segment backstop. The shared validator
+  // rejects these today, and this stays near rg parsing because include globs
+  // can out-vote CLI exclusions (last-match-wins).
   if (hasIgnoredSegment(validated.normalized)) return [];
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
   const line = rawLine.replace(/\r?\n$/, "");

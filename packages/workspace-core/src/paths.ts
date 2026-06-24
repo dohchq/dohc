@@ -110,6 +110,7 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
   if (isReservedPath(normalized)) return { ok: false, reason: "reserved" };
+  if (hasIgnoredSegment(normalized)) return { ok: false, reason: "reserved" };
   return { ok: true, normalized };
 }
 
@@ -212,6 +213,7 @@ const MEDIA_TYPES: Record<string, string> = {
   pdf: "application/pdf",
   png: "image/png",
   scss: "text/css",
+  sh: "text/plain",
   sqlite: "application/vnd.sqlite3",
   sqlite3: "application/vnd.sqlite3",
   txt: "text/plain",

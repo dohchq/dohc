@@ -332,6 +332,16 @@ move(workspaceId, versionId, fromPath, toPath, {
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
+replace(workspaceId, versionId, fromPath, toPath, {
+  sourceObjectId,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationObjectId,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedDestinationEtag | expectedDestinationContentHash,
+  idempotencyKey bound to the validated server-derived auth context,
+    actor/session, workspace/version, operation type, canonical fromPath,
+    canonical toPath, sourceObjectId, destinationObjectId, both causal
+    preconditions, and the replacement payload digest
+})
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -347,6 +357,10 @@ restore(workspaceId, versionId, pointInTime, {
   idempotencyKey
 })
 ```
+
+The destination precondition deliberately includes `expectedBaseVersion` for
+self-replace and other version-guarded replacements where the caller is proving
+the destination object version, not just a destination path etag or content hash.
 
 The filesystem is one interface. It should not be the only possible execution
 environment.
@@ -373,6 +387,17 @@ deterministic secret-safe conflict envelope instead of mutating canonical state.
 Supplying no causal precondition, omitting `targetObjectId` for overwrite, or
 providing multiple incompatible preconditions fails closed.
 
+`replace(...)` permits `sourceObjectId === destinationObjectId` only when the
+source and destination paths are the same canonical workspace path. That
+self-replace is treated as an idempotent no-op replacement: it records no new
+provenance edge, requires the destination precondition to validate the same
+object state as the source precondition, including `expectedBaseVersion` when
+the caller uses a version guard, and binds the idempotency key to the single
+object/path, both causal preconditions, and the replacement payload digest. If
+the paths differ, or if the two ids are equal but either precondition observes a
+different object state, the request fails as a validation error rather than
+emitting two contradictory replacement events.
+
 Conflict envelopes return opaque object/version handles, hashes, policy
 decisions, redacted previews, and explainable metadata by default. They do not
 echo full current, incoming, restored, or secret-backed bytes unless the
@@ -381,21 +406,53 @@ that caller and resolution session.
 
 `read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
 `snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,
-`rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
-write-producing operations and must use the same workspace/version scoping,
-causal guard, idempotency, and conflict-response rules as `write(...)`.
-Delete, rename, and move require the source `targetObjectId` plus exactly one
-source freshness precondition. Rename/move destination overwrite is not
-implicit: the first contract supports only `destinationPrecondition:
-expectedAbsent`; replace-style behavior must be modeled as a separate
-write-producing operation with explicit source and destination object ids.
-All client-originated write-producing operations, including filesystem-captured
-saves, must carry an idempotency key bound to the actor/session, workspace,
-version, operation type, target, and causal precondition. Duplicate delivery
-with the same idempotency key must return the original result or a deterministic
-equivalent and must not create additional canonical mutations, duplicate
-history events, duplicate projections, or repeated notification/search side
-effects.
+`rename(...)`, `move(...)`, `replace(...)`, `merge(...)`, and `restore(...)` are
+write-producing operations and must use the same workspace scoping, validation,
+authorization, idempotency, and conflict-response rules as `write(...)`, while
+keeping their own version shape: `merge(...)` may span source and target
+versions, and `restore(...)` is point-in-time based rather than a single
+active-version write.
+Delete requires `targetObjectId` plus exactly one freshness precondition for
+the object being deleted. Rename and move require the source `targetObjectId`
+plus exactly one source freshness precondition. Rename/move destination
+overwrite is not implicit: the first contract supports only
+`destinationPrecondition: expectedAbsent`; replace-style behavior must be
+modeled as a separate write-producing operation with explicit source and
+destination object ids plus a freshness guard for both sides. `replace(...)` is
+the atomic overwrite/move contract; it is not modeled as delete plus recreate,
+and it preserves a single history/provenance event for the replacement.
+Client-originated API write-producing operations must carry an idempotency key
+bound to the validated server-derived auth context, actor/session, workspace,
+version, operation type, causal precondition, and request payload digest.
+Create-only writes bind the key to canonical path plus `expectedAbsent`;
+overwrite writes additionally bind target object identity and their causal
+preconditions. Native raw filesystem saves do not introduce a second client
+idempotency contract: the watcher/engine mints one workspace-scoped observation
+token for the captured save after path, policy, and content identity are
+validated, then reuses that token for duplicate observer delivery of the same
+disk event. The payload digest is computed from the validated write intent and
+bytes/metadata that can affect canonical state, not from raw transport framing,
+so HTTP, MCP, and agent-tool retries use the API idempotency key while native
+filesystem captures dedupe through the engine-minted observation token. For
+`replace(...)`, the replay/dedupe context must also bind both `sourceObjectId`
+and `destinationObjectId`, canonical `fromPath` and canonical `toPath`, both
+sides' freshness guards including symmetric `expectedBaseVersion` guards when
+used, and the replacement payload digest; retries cannot be applied to a
+different auth context, source endpoint, destination endpoint, canonical path
+pair, precondition, or payload.
+For `merge(...)`, the replay/dedupe context must bind both `sourceVersionId`
+and `targetVersionId`, the target causal precondition, merge strategy/options,
+and payload digest; retries cannot be applied to a different source/target
+version pair or stale target base.
+Duplicate delivery with the same idempotency key and full operation context must
+return the original result or a deterministic equivalent and must not create
+additional canonical mutations, duplicate history events, duplicate
+projections, or repeated notification/search side effects. Reusing an
+idempotency key with a different validated auth context, payload digest,
+sourceObjectId, destinationObjectId, canonical `fromPath`, canonical `toPath`,
+canonical create path, source/target merge versions, object/version target,
+`expectedAbsent`, or causal precondition fails closed as an idempotency
+conflict.
 Idempotency records must be persisted for a documented minimum replay window of
 at least 24 hours after the operation reaches a terminal result. After that
 window, a retry with the same key must fail closed with an explicit

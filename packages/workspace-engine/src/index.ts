@@ -11,6 +11,7 @@ export type {
   VersionId,
   VersionKind,
   VersionRecord,
+  VersionedTextDeleteResult,
   VersionedTextMoment,
   VersionedTextMomentId,
   VersionedTextRenameResult,
@@ -21,3 +22,16 @@ export type {
   WorkspaceId,
   WorkspaceObjectId,
 } from "./versionedTextStore";
+export type {
+  VersionedFileDeleteResult,
+  VersionedFileHistoryReader,
+  VersionedFileListResult,
+  VersionedFileReadResult,
+  VersionedFileRestoreResult,
+  VersionedFileStat,
+  VersionedFileVersionReader,
+  VersionedFileWorkspace,
+  VersionedFileWorkspaceErrorCode,
+  VersionedFileWorkspaceOptions,
+  VersionedFileWriteResult,
+} from "./versionedFileWorkspace";

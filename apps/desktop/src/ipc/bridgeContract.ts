@@ -1,4 +1,8 @@
-import { WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
+import {
+  WORKSPACE_KINDS,
+  WORKSPACE_MODES,
+  parseChangeAuthor,
+} from "@dohc/workspace-core";
 import { z } from "zod";
 import {
   MAX_EXPANDED_FOLDERS,
@@ -389,14 +393,17 @@ export const SyncStatusResult = z.object({
 });
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
-const ChangeAuthorSchema = z.union([
-  z.object({ kind: z.literal("user"), userId: z.string() }),
-  z.object({
-    kind: z.literal("agent"),
-    agentId: z.string(),
-    onBehalfOf: z.string(),
-  }),
-]);
+const ChangeAuthorSchema = z.unknown().transform((value, ctx) => {
+  try {
+    return parseChangeAuthor(value);
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: error instanceof Error ? error.message : "Change author is invalid.",
+    });
+    return z.NEVER;
+  }
+});
 
 export const ChangeSetFilePreview = z.object({
   path: z.string().min(1),
@@ -483,7 +490,7 @@ export const ChangeSetDetailRecord = ChangeSetRecord.extend({
       importPath: z.string().optional(),
       restoreOfChangeSetId: z.string().optional(),
       restoreOfPath: z.string().optional(),
-      restoreDirection: z.enum(["restore", "undo"]).optional(),
+      restoreDirection: z.enum(["restore", "undo", "redo"]).optional(),
     })
     .optional(),
   boundaryCrossings: z.array(BoundaryCrossingSchema),

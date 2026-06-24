@@ -6,6 +6,7 @@ import type {
   WatcherEvent,
   WatcherEventBatch,
 } from "@dohc/workspace-core";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import {
   collapseSqliteSidecars,
   isTextMediaType,
@@ -13,7 +14,12 @@ import {
   shouldIgnoreWatchPath,
   watchWorkspaceEvents,
 } from "@dohc/workspace-fs";
-import { createChangeSetStore, humanSummary } from "@dohc/workspace-history";
+import {
+  createChangeSetStore,
+  humanSummary,
+  isDurableChangeSetRecordingSupported,
+  isDurableChangeSetRecordingUnsupportedError,
+} from "@dohc/workspace-history";
 import { batchToChangeSet } from "@dohc/workspace-sync";
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -21,11 +27,14 @@ import { join, relative } from "node:path";
 import { desktopMarks } from "../performance/desktopMarks";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
-// Local user is the implicit author of filesystem edits. When an agent run is
-// active (an MCP-driven turn the user started), its writes are attributed to
-// the agent instead — see ActiveAgentRun below.
-const LOCAL_USER: ChangeAuthor = { kind: "user", userId: "local" };
+// Raw filesystem edits can come from a person, an editor, a shell command, or
+// an agent. Attribute them to the local file surface unless dohc has trusted
+// active-run context.
+const LOCAL_AUTHOR: ChangeAuthor = createLocalChangeAuthor("Local file edit");
 const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
+export const DESKTOP_HISTORY_STORE_OPTIONS = {
+  ephemeralIfUnsupported: true,
+} as const;
 
 // The active-run fact a batch attributes to: who the agent is and which run it
 // belongs to. workspaceActivity owns the slot; the watcher only reads it.
@@ -276,9 +285,22 @@ export function startWorkspaceWatch(
     ) => ActiveLocalOperation | null;
   } = {},
 ): WorkspaceWatchHandle {
-  const store = createChangeSetStore(workspace.rootPath);
+  const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
   const now = options.now ?? (() => Date.now());
   let snapshotCache = new Map<string, HistorySnapshotEntry>();
+  let warnedDurableHistoryUnavailable = false;
+
+  function warnDurableHistoryUnavailable(): void {
+    if (warnedDurableHistoryUnavailable) return;
+    warnedDurableHistoryUnavailable = true;
+    console.warn(
+      `[desktop] durable local history is unavailable for ${workspace.rootPath}; observed local edits will not have durable history records.`,
+    );
+  }
+
+  if (!isDurableChangeSetRecordingSupported()) {
+    warnDurableHistoryUnavailable();
+  }
 
   async function recordBatch(paths: string[]): Promise<void> {
     // Defense in depth: never record changes to .dohc/** (our own history
@@ -314,7 +336,7 @@ export function startWorkspaceWatch(
     const run = localOperation ? null : (options.activeAgentRun?.() ?? null);
     const author: ChangeAuthor = run
       ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf }
-      : LOCAL_USER;
+      : LOCAL_AUTHOR;
     const provenance: ChangeProvenance | undefined =
       localOperation?.provenance ??
       (run ? { source: "agent-run", agentRunId: run.agentRunId } : undefined);
@@ -327,7 +349,12 @@ export function startWorkspaceWatch(
         ...(provenance ? { provenance } : {}),
       }),
     );
-    await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
+    try {
+      await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
+    } catch (error) {
+      if (!isDurableChangeSetRecordingUnsupportedError(error)) throw error;
+      warnDurableHistoryUnavailable();
+    }
     desktopMarks.measureSince("sync-batch", "sync-batch-start");
     desktopMarks.mark("sync-batch-complete");
     options.onRecorded?.();

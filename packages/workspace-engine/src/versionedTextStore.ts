@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/versioned-text-store.json";
+export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
 
 export type WorkspaceObjectId = string;
 export type VersionId = string;
@@ -92,8 +93,9 @@ export interface VersionedTextMoment {
   objectId: WorkspaceObjectId;
   path: string;
   recordedAtMs: number;
-  operation: "write" | "rename";
+  operation: "write" | "rename" | "delete";
   metadata: ActorNeutralWriteMetadata;
+  before?: TextFileSnapshot | null;
 }
 
 export interface VersionedTextWriteResult {
@@ -106,6 +108,12 @@ export interface VersionedTextRenameResult {
   object: FileObjectRecord;
   before: TextFileSnapshot;
   after: TextFileSnapshot;
+  moment: VersionedTextMoment;
+}
+
+export interface VersionedTextDeleteResult {
+  object: FileObjectRecord;
+  before: TextFileSnapshot;
   moment: VersionedTextMoment;
 }
 
@@ -131,6 +139,7 @@ export interface VersionedTextStore {
     path: string;
     text: string;
     metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   readTextFile(input: {
     workspaceId: WorkspaceId;
@@ -148,6 +157,20 @@ export interface VersionedTextStore {
     toPath: string;
     metadata: ActorNeutralWriteMetadata;
   }): Promise<VersionedTextRenameResult>;
+  deleteTextFile(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    metadata: ActorNeutralWriteMetadata;
+    momentId?: VersionedTextMomentId;
+  }): Promise<VersionedTextDeleteResult>;
+  rollbackTextFileMutation(input: {
+    workspaceId: WorkspaceId;
+    versionId: VersionId;
+    path: string;
+    mutationMomentId: VersionedTextMomentId;
+    legacyBeforeText?: string;
+  }): Promise<void>;
   getObject(input: {
     workspaceId: WorkspaceId;
     objectId: WorkspaceObjectId;
@@ -161,6 +184,7 @@ export interface VersionedTextStoreOptions {
 
 export interface VersionedTextStoreTestHooks {
   afterLoadWritableState?: () => void | Promise<void>;
+  beforeAtomicPublish?: () => void | Promise<void>;
   beforePersist?: () => void | Promise<void>;
   lockStaleMs?: number;
   lockTimeoutMs?: number;
@@ -189,10 +213,6 @@ interface PersistedVersionedTextState {
 
 function initialState(): PersistedVersionedTextState {
   return { schemaVersion: 1, workspaces: createDictionary() };
-}
-
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function createDictionary<T>(
@@ -272,6 +292,31 @@ function assertPersistedWritePath(value: unknown): asserts value is string {
   }
 }
 
+function assertPersistedText(value: unknown): asserts value is string {
+  assertString(value);
+  try {
+    normalizeWriteText(value);
+  } catch {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+}
+
+function assertPersistedSnapshot(value: unknown): asserts value is TextFileSnapshot {
+  assertRecord(value);
+  assertPersistedGeneratedId(value.objectId);
+  assertString(value.versionId);
+  assertPersistedWritePath(value.path);
+  assertPersistedText(value.text);
+  assertNumber(value.updatedAtMs);
+  assertPersistedGeneratedId(value.latestMomentId);
+  assertWriteMetadata(value.metadata);
+}
+
+function assertMomentBefore(value: unknown): asserts value is TextFileSnapshot | null | undefined {
+  if (value === undefined || value === null) return;
+  assertPersistedSnapshot(value);
+}
+
 function pickWriteMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutralWriteMetadata {
   return {
     origin: metadata.origin,
@@ -315,6 +360,9 @@ function cloneMoment(moment: VersionedTextMoment): VersionedTextMoment {
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     metadata: pickWriteMetadata(moment.metadata),
+    ...(moment.before !== undefined
+      ? { before: moment.before === null ? null : cloneSnapshot(moment.before) }
+      : {}),
   };
 }
 
@@ -437,6 +485,45 @@ function normalizeState(raw: unknown): PersistedVersionedTextState {
     workspaces[workspaceId] = normalizedWorkspace;
   }
   return { schemaVersion: 1, workspaces };
+}
+
+function normalizeStateAfterWorkspaceMutation(
+  state: PersistedVersionedTextState,
+  changedWorkspaceId: WorkspaceId,
+): PersistedVersionedTextState {
+  if (state.schemaVersion !== 1 || !isRecord(state.workspaces)) {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+  const workspace = getOwn(state.workspaces, changedWorkspaceId);
+  if (!workspace) {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+  assertWorkspaceState(changedWorkspaceId, workspace);
+  const normalizedWorkspace = normalizeWorkspaceState(workspace);
+
+  for (const [workspaceId, otherWorkspace] of Object.entries(state.workspaces)) {
+    if (workspaceId === changedWorkspaceId) continue;
+    for (const versionId of Object.keys(normalizedWorkspace.versions)) {
+      if (versionId !== "main" && getOwn(otherWorkspace.versions, versionId) !== undefined) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+    }
+    for (const objectId of Object.keys(normalizedWorkspace.objects)) {
+      if (getOwn(otherWorkspace.objects, objectId) !== undefined) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+    }
+  }
+
+  return {
+    schemaVersion: 1,
+    workspaces: createDictionary(
+      Object.entries(state.workspaces).map(([workspaceId, workspaceState]) => [
+        workspaceId,
+        workspaceId === changedWorkspaceId ? normalizedWorkspace : workspaceState,
+      ]),
+    ),
+  };
 }
 
 function normalizeWorkspaceState(workspace: PersistedWorkspaceState): PersistedWorkspaceState {
@@ -619,7 +706,7 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
       }
       seenSnapshotPaths.set(snapshot.path, objectId);
       referencedObjectIds.add(objectId);
-      assertString(snapshot.text);
+      assertPersistedText(snapshot.text);
       assertNumber(snapshot.updatedAtMs);
       assertPersistedGeneratedId(snapshot.latestMomentId);
       assertWriteMetadata(snapshot.metadata);
@@ -648,10 +735,30 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
     referencedObjectIds.add(moment.objectId);
     assertPersistedWritePath(moment.path);
     assertNumber(moment.recordedAtMs);
-    if (moment.operation !== "write" && moment.operation !== "rename") {
+    if (
+      moment.operation !== "write" &&
+      moment.operation !== "rename" &&
+      moment.operation !== "delete"
+    ) {
       throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
     }
     assertWriteMetadata(moment.metadata);
+    assertMomentBefore(moment.before);
+    if (moment.operation === "delete" && (moment.before === undefined || moment.before === null)) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    if (moment.operation === "rename" && moment.before === null) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+    if (moment.before !== undefined && moment.before !== null) {
+      if (
+        moment.before.objectId !== moment.objectId ||
+        moment.before.versionId !== moment.versionId ||
+        (moment.operation !== "rename" && moment.before.path !== moment.path)
+      ) {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+    }
     if (momentsById.has(moment.id)) {
       throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
     }
@@ -729,6 +836,30 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
     return inherited;
   };
 
+  for (const [index, moment] of persistedMoments.entries()) {
+    const before = moment.before;
+    if (before === undefined) continue;
+    const expectedBefore =
+      latestMomentForObject(moment.versionId, moment.objectId, index - 1) ??
+      inheritedLatestMomentForObject(moment.versionId, moment.objectId);
+    if (before === null) {
+      if (expectedBefore && expectedBefore.operation !== "delete") {
+        throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+      }
+      continue;
+    }
+    if (
+      !expectedBefore ||
+      expectedBefore.operation === "delete" ||
+      expectedBefore.id !== before.latestMomentId ||
+      expectedBefore.path !== before.path ||
+      expectedBefore.recordedAtMs !== before.updatedAtMs ||
+      !sameWriteMetadata(expectedBefore.metadata, before.metadata)
+    ) {
+      throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+    }
+  }
+
   for (const version of Object.values(value.versions)) {
     assertRecord(version);
     assertString(version.id);
@@ -793,6 +924,12 @@ function assertWorkspaceState(workspaceId: string, value: unknown): void {
         inheritedLatestMomentForObject(versionId, objectId);
       if (!expectedMoment) continue;
       const snapshot = getOwn(snapshots, objectId);
+      if (expectedMoment.operation === "delete") {
+        if (snapshot !== undefined || getOwn(aliases, expectedMoment.path) === objectId) {
+          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+        }
+        continue;
+      }
       if (
         !isRecord(snapshot) ||
         snapshot.path !== expectedMoment.path ||
@@ -809,19 +946,26 @@ function versionObjectKey(versionId: VersionId, objectId: WorkspaceObjectId): st
   return `${versionId}${ID_KEY_SEPARATOR}${objectId}`;
 }
 
-async function writeFileAtomic(path: string, data: string): Promise<void> {
+type AtomicPublishGuard = () => void | Promise<void>;
+
+async function writeFileAtomic(
+  path: string,
+  data: string,
+  beforePublish?: AtomicPublishGuard,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await replaceFileAtomic(path, data);
+  await replaceFileAtomic(path, data, beforePublish);
 }
 
-async function writeExistingFileAtomic(path: string, data: string): Promise<void> {
-  await replaceFileAtomic(path, data);
-}
-
-async function replaceFileAtomic(path: string, data: string): Promise<void> {
+async function replaceFileAtomic(
+  path: string,
+  data: string,
+  beforePublish?: AtomicPublishGuard,
+): Promise<void> {
   const tmp = `${path}.tmp-${process.pid}-${process.hrtime.bigint()}`;
   try {
     await writeFileDurably(tmp, data);
+    await beforePublish?.();
     await rename(tmp, path);
     await syncParentDirectory(path);
   } catch (error) {
@@ -865,6 +1009,16 @@ function delayMs(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
+function lockHeartbeatIntervalMs(staleMs: number): number {
+  if (!Number.isFinite(staleMs) || staleMs <= 0) {
+    throw new VersionedTextStoreError(
+      "persist-failed",
+      "Versioned text store lock stale threshold is too low for safe heartbeats.",
+    );
+  }
+  return Math.max(1, Math.min(5_000, Math.floor(staleMs / 3)));
+}
+
 interface StoreLockOwner {
   token: string;
   pid: number;
@@ -901,6 +1055,32 @@ function parseLockOwner(text: string): StoreLockOwner | null {
   }
 }
 
+async function statIfExists(path: string): Promise<Stats | null> {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function readLockOwnerIfExists(ownerPath: string): Promise<StoreLockOwner | null> {
+  try {
+    return parseLockOwner(await readFile(ownerPath, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function readLockOwnerBestEffort(ownerPath: string): Promise<StoreLockOwner | null> {
+  try {
+    return await readLockOwnerIfExists(ownerPath);
+  } catch {
+    return null;
+  }
+}
+
 function lockOwnershipLost(cause?: unknown): VersionedTextStoreError {
   const wrapped = new VersionedTextStoreError(
     "persist-failed",
@@ -912,25 +1092,398 @@ function lockOwnershipLost(cause?: unknown): VersionedTextStoreError {
   return wrapped;
 }
 
+function lockInspectionFailed(message: string, cause: unknown): VersionedTextStoreError {
+  const wrapped = new VersionedTextStoreError("persist-failed", message);
+  (wrapped as Error & { cause?: unknown }).cause = cause;
+  return wrapped;
+}
+
+interface LockOwnerDirectoryFence {
+  directoryPath: string;
+  directoryStats: Stats;
+}
+
+async function assertLockOwnerDirectoryFence(fence: LockOwnerDirectoryFence): Promise<void> {
+  const current = await statIfExists(fence.directoryPath);
+  if (!current || !current.isDirectory() || !sameFileIdentity(fence.directoryStats, current)) {
+    throw lockOwnershipLost();
+  }
+}
+
+async function removeDirectoryIfSameIdentity(path: string, expected: Stats): Promise<void> {
+  const current = await statIfExists(path);
+  if (!current || !sameFileIdentity(expected, current)) return;
+  const quarantinePath = `${path}.removing-${process.pid}-${process.hrtime.bigint()}`;
+  try {
+    await rename(path, quarantinePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await syncParentDirectory(path);
+
+  const quarantined = await statIfExists(quarantinePath);
+  if (!quarantined || !sameFileIdentity(expected, quarantined)) {
+    if (!(await statIfExists(path))) {
+      try {
+        await rename(quarantinePath, path);
+        await syncParentDirectory(path);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY") {
+          throw error;
+        }
+      }
+    }
+    return;
+  }
+
+  await rm(quarantinePath, { recursive: true, force: true });
+  await syncParentDirectory(quarantinePath);
+}
+
+async function writeFencedLockOwnerFile(
+  ownerPath: string,
+  token: string,
+  fence: LockOwnerDirectoryFence,
+): Promise<void> {
+  const tmp = `${ownerPath}.tmp-${process.pid}-${process.hrtime.bigint()}`;
+  try {
+    await assertLockOwnerDirectoryFence(fence);
+    await writeFileDurably(tmp, serializeLockOwner(createLockOwner(token)));
+    await assertLockOwnerDirectoryFence(fence);
+    await rename(tmp, ownerPath);
+    await syncParentDirectory(ownerPath);
+    await assertLockOwnerDirectoryFence(fence);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function refreshStoreLockOwner(
+  ownerPath: string,
+  token: string,
+  fence?: LockOwnerDirectoryFence,
+): Promise<void> {
+  // Store locks assume local-disk mtime and fsync semantics. Networked roots
+  // need an explicit platform guard before this heartbeat scheme is reused.
+  if (fence) await assertLockOwnerDirectoryFence(fence);
+  const handle = await open(ownerPath, "r+");
+  try {
+    const owner = parseLockOwner(await handle.readFile("utf8"));
+    if (owner?.token !== token) {
+      throw lockOwnershipLost();
+    }
+    const now = new Date();
+    await handle.utimes(now, now);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  if (fence) await assertLockOwnerDirectoryFence(fence);
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
+}
+
 async function isBlockedByStaleLock(
   lockDirPath: string,
   ownerPath: string,
   staleMs: number,
 ): Promise<boolean> {
+  const lockStats = await statIfExists(lockDirPath);
+  if (!lockStats) return false;
+  const ownerStats = await statIfExists(ownerPath);
+  const owner = await readLockOwnerBestEffort(ownerPath);
+  if (!owner) {
+    return Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
+  }
+  return Date.now() - Math.max(owner.heartbeatAtMs, ownerStats?.mtimeMs ?? 0) > staleMs;
+}
+
+async function readObservedStaleStoreLock(
+  lockDirPath: string,
+  ownerPath: string,
+  staleMs: number,
+): Promise<Stats | null> {
+  const lockStats = await statIfExists(lockDirPath);
+  if (!lockStats) return null;
+  const ownerStats = await statIfExists(ownerPath);
+  const owner = await readLockOwnerBestEffort(ownerPath);
+  const stale = owner
+    ? Date.now() - Math.max(owner.heartbeatAtMs, ownerStats?.mtimeMs ?? 0) > staleMs
+    : Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
+  return stale ? lockStats : null;
+}
+
+function storeLockReclaimerPath(lockDirPath: string): string {
+  return `${lockDirPath}.reclaimer`;
+}
+
+function storeLockReclaimerOwnerPath(reclaimerPath: string): string {
+  return join(reclaimerPath, "owner.json");
+}
+
+async function writeStoreLockReclaimerOwner(
+  reclaimerPath: string,
+  token: string,
+  reclaimerStats: Stats,
+): Promise<void> {
+  const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
+  await writeFencedLockOwnerFile(ownerPath, token, {
+    directoryPath: reclaimerPath,
+    directoryStats: reclaimerStats,
+  });
+}
+
+async function readStoreLockReclaimerLease(
+  reclaimerPath: string,
+  reclaimerStats: Stats,
+): Promise<{ owner: StoreLockOwner | null; freshnessMs: number }> {
+  const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
+  const ownerStats = await statIfExists(ownerPath);
+  const owner = await readLockOwnerBestEffort(ownerPath);
+  return {
+    owner,
+    freshnessMs: Math.max(
+      reclaimerStats.mtimeMs,
+      owner?.heartbeatAtMs ?? 0,
+      ownerStats?.mtimeMs ?? 0,
+    ),
+  };
+}
+
+async function removeStaleStoreLockReclaimer(
+  reclaimerPath: string,
+  reclaimerStaleMs: number,
+): Promise<boolean> {
+  const observed = await statIfExists(reclaimerPath);
+  if (!observed) return false;
+  const observedLease = await readStoreLockReclaimerLease(reclaimerPath, observed);
+  if (Date.now() - observedLease.freshnessMs <= reclaimerStaleMs) return false;
+  const quarantinePath = `${reclaimerPath}.stale-${process.pid}-${process.hrtime.bigint()}`;
   try {
-    const lockStats = await stat(lockDirPath);
-    const ownerText = await readFile(ownerPath, "utf8");
-    const owner = parseLockOwner(ownerText);
-    if (!owner) {
-      return Date.now() - lockStats.mtimeMs > staleMs;
-    }
-    return Date.now() - owner.heartbeatAtMs > staleMs;
+    await rename(reclaimerPath, quarantinePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      const lockStats = await stat(lockDirPath).catch(() => null);
-      return lockStats ? Date.now() - lockStats.mtimeMs > staleMs : false;
-    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
+  }
+  await syncParentDirectory(reclaimerPath);
+  const quarantined = await statIfExists(quarantinePath);
+  const restoreQuarantinedReclaimerBestEffort = async () => {
+    if (await statIfExists(reclaimerPath)) return;
+    try {
+      await rename(quarantinePath, reclaimerPath);
+      await syncParentDirectory(reclaimerPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "ENOTDIR") {
+        throw error;
+      }
+    }
+  };
+  if (!quarantined || !sameFileIdentity(observed, quarantined)) {
+    if (quarantined) await restoreQuarantinedReclaimerBestEffort();
+    return false;
+  }
+  const quarantinedLease = await readStoreLockReclaimerLease(quarantinePath, quarantined);
+  if (observedLease.owner && quarantinedLease.owner?.token !== observedLease.owner.token) {
+    await restoreQuarantinedReclaimerBestEffort();
+    return false;
+  }
+  if (Date.now() - quarantinedLease.freshnessMs <= reclaimerStaleMs) {
+    await restoreQuarantinedReclaimerBestEffort();
+    return false;
+  }
+  await rm(quarantinePath, { recursive: true, force: true });
+  await syncParentDirectory(quarantinePath);
+  return true;
+}
+
+async function isStoreLockReclaimerActive(
+  lockDirPath: string,
+  reclaimerStaleMs: number,
+): Promise<boolean> {
+  const reclaimerPath = storeLockReclaimerPath(lockDirPath);
+  const info = await stat(reclaimerPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!info) return false;
+  const lease = await readStoreLockReclaimerLease(reclaimerPath, info);
+  if (Date.now() - lease.freshnessMs > reclaimerStaleMs) {
+    if (await removeStaleStoreLockReclaimer(reclaimerPath, reclaimerStaleMs)) return false;
+    return (await statIfExists(reclaimerPath)) !== null;
+  }
+  return true;
+}
+
+interface StoreLockReclaimerLease {
+  assertHealthy: () => Promise<boolean>;
+  release: () => Promise<void>;
+}
+
+async function acquireStoreLockReclaimer(
+  lockDirPath: string,
+  deadlineAtMs: number,
+  reclaimerStaleMs: number,
+): Promise<StoreLockReclaimerLease> {
+  const reclaimerPath = storeLockReclaimerPath(lockDirPath);
+  while (true) {
+    if (Date.now() > deadlineAtMs) {
+      throw new VersionedTextStoreError(
+        "persist-failed",
+        `Timed out waiting for versioned text store lock reclaimer: ${reclaimerPath}`,
+      );
+    }
+    let createdReclaimer = false;
+    let acquiredReclaimer: Stats | null = null;
+    try {
+      const token = randomUUID();
+      await mkdir(reclaimerPath, { mode: 0o700 });
+      createdReclaimer = true;
+      const acquiredReclaimerStats = await stat(reclaimerPath);
+      acquiredReclaimer = acquiredReclaimerStats;
+      const reclaimerFence = {
+        directoryPath: reclaimerPath,
+        directoryStats: acquiredReclaimerStats,
+      };
+      await writeStoreLockReclaimerOwner(reclaimerPath, token, acquiredReclaimerStats);
+      await syncParentDirectory(reclaimerPath);
+      const ownerPath = storeLockReclaimerOwnerPath(reclaimerPath);
+      let released = false;
+      let heartbeatFailure: unknown = null;
+      let heartbeatWritePending = false;
+      const heartbeatWrites = new Set<Promise<void>>();
+      const heartbeatIntervalMs = lockHeartbeatIntervalMs(reclaimerStaleMs);
+      const trackHeartbeatWrite = (write: Promise<void>) => {
+        let tracked: Promise<void>;
+        tracked = write
+          .catch((error: unknown) => {
+            heartbeatFailure = error;
+          })
+          .finally(() => {
+            heartbeatWrites.delete(tracked);
+          });
+        heartbeatWrites.add(tracked);
+      };
+      const heartbeat = setInterval(() => {
+        if (released || heartbeatWritePending) return;
+        heartbeatWritePending = true;
+        trackHeartbeatWrite(
+          refreshStoreLockOwner(ownerPath, token, reclaimerFence)
+            .finally(() => {
+              heartbeatWritePending = false;
+            }),
+        );
+      }, heartbeatIntervalMs);
+      const assertHealthy = async () => {
+        if (heartbeatFailure) return false;
+        const current = await statIfExists(reclaimerPath);
+        if (!current || !sameFileIdentity(acquiredReclaimerStats, current)) return false;
+        const owner = await readLockOwnerIfExists(ownerPath);
+        return owner?.token === token;
+      };
+      return {
+        assertHealthy,
+        release: async () => {
+          released = true;
+          clearInterval(heartbeat);
+          while (heartbeatWrites.size > 0) {
+            await Promise.all([...heartbeatWrites]);
+          }
+          if (!(await assertHealthy())) return;
+          await removeDirectoryIfSameIdentity(reclaimerPath, acquiredReclaimerStats);
+        },
+      };
+    } catch (error) {
+      if (createdReclaimer && acquiredReclaimer) {
+        await removeDirectoryIfSameIdentity(reclaimerPath, acquiredReclaimer).catch(() => undefined);
+      }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (await removeStaleStoreLockReclaimer(reclaimerPath, reclaimerStaleMs)) continue;
+      if (Date.now() > deadlineAtMs) {
+        throw new VersionedTextStoreError(
+          "persist-failed",
+          `Timed out waiting for versioned text store lock reclaimer: ${reclaimerPath}`,
+        );
+      }
+      await delayMs(25);
+    }
+  }
+}
+
+async function reclaimStaleStoreLock(
+  lockDirPath: string,
+  ownerPath: string,
+  staleMs: number,
+  deadlineAtMs: number,
+): Promise<boolean> {
+  const reclaimer = await acquireStoreLockReclaimer(lockDirPath, deadlineAtMs, staleMs);
+  try {
+    if (!(await reclaimer.assertHealthy())) return false;
+    const observed = await readObservedStaleStoreLock(lockDirPath, ownerPath, staleMs);
+    if (!observed) return false;
+    const current = await stat(lockDirPath).catch(() => null);
+    if (!current || !sameFileIdentity(observed, current)) return false;
+    const quarantinePath = `${lockDirPath}.stale-${process.pid}-${process.hrtime.bigint()}`;
+    if (!(await reclaimer.assertHealthy())) return false;
+    try {
+      await rename(lockDirPath, quarantinePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    await syncParentDirectory(lockDirPath);
+
+    const quarantined = await stat(quarantinePath).catch(() => null);
+    const restoreQuarantinedLockBestEffort = async () => {
+      if (await stat(lockDirPath).catch(() => null)) return;
+      try {
+        await rename(quarantinePath, lockDirPath);
+        await syncParentDirectory(lockDirPath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (
+          code !== "ENOENT" &&
+          code !== "EEXIST" &&
+          code !== "ENOTEMPTY" &&
+          code !== "ENOTDIR"
+        ) {
+          throw error;
+        }
+      }
+    };
+    if (!quarantined || !sameFileIdentity(observed, quarantined)) {
+      if (quarantined) await restoreQuarantinedLockBestEffort();
+      return false;
+    }
+    let quarantinedLockIsStale: boolean;
+    try {
+      quarantinedLockIsStale = await isBlockedByStaleLock(
+        quarantinePath,
+        join(quarantinePath, "owner.json"),
+        staleMs,
+      );
+    } catch (error) {
+      await restoreQuarantinedLockBestEffort();
+      throw error;
+    }
+    if (!quarantinedLockIsStale) {
+      await restoreQuarantinedLockBestEffort();
+      return false;
+    }
+    if (!(await reclaimer.assertHealthy())) {
+      await restoreQuarantinedLockBestEffort();
+      return false;
+    }
+    await rm(quarantinePath, { recursive: true, force: true });
+    await syncParentDirectory(quarantinePath);
+    return true;
+  } finally {
+    await reclaimer.release();
   }
 }
 
@@ -950,11 +1503,45 @@ async function acquireStoreLock(
   const startedAt = Date.now();
   while (true) {
     try {
+      if (await isStoreLockReclaimerActive(lockDirPath, lockStaleMs)) {
+        await onLockBlocked?.();
+        if (Date.now() - startedAt > lockTimeoutMs) {
+          throw new VersionedTextStoreError(
+            "persist-failed",
+            "Versioned text store lock timed out.",
+          );
+        }
+        await delayMs(25);
+        continue;
+      }
       await mkdir(lockDirPath, { mode: 0o700 });
+      const acquiredBeforeReclaimerCheck = await stat(lockDirPath);
+      const storeLockFence = {
+        directoryPath: lockDirPath,
+        directoryStats: acquiredBeforeReclaimerCheck,
+      };
+      if (await isStoreLockReclaimerActive(lockDirPath, lockStaleMs)) {
+        const current = await statIfExists(lockDirPath);
+        if (current && sameFileIdentity(acquiredBeforeReclaimerCheck, current)) {
+          await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck).catch(
+            () => undefined,
+          );
+        }
+        await onLockBlocked?.();
+        if (Date.now() - startedAt > lockTimeoutMs) {
+          throw new VersionedTextStoreError(
+            "persist-failed",
+            "Versioned text store lock timed out.",
+          );
+        }
+        await delayMs(25);
+        continue;
+      }
       const token = randomUUID();
       let heartbeatFailure: unknown = null;
       let released = false;
       const heartbeatWrites = new Set<Promise<void>>();
+      const heartbeatIntervalMs = lockHeartbeatIntervalMs(lockStaleMs);
       const trackHeartbeatWrite = (write: Promise<void>) => {
         let tracked: Promise<void>;
         tracked = write
@@ -967,9 +1554,11 @@ async function acquireStoreLock(
         heartbeatWrites.add(tracked);
       };
       try {
-        await writeExistingFileAtomic(ownerPath, serializeLockOwner(createLockOwner(token)));
+        await writeFencedLockOwnerFile(ownerPath, token, storeLockFence);
       } catch (error) {
-        await rm(lockDirPath, { recursive: true, force: true }).catch(() => undefined);
+        await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck).catch(
+          () => undefined,
+        );
         throw error;
       }
       let heartbeatWritePending = false;
@@ -978,13 +1567,11 @@ async function acquireStoreLock(
         if (heartbeatWritePending) return;
         heartbeatWritePending = true;
         trackHeartbeatWrite(
-          writeExistingFileAtomic(ownerPath, serializeLockOwner(createLockOwner(token))).finally(
-            () => {
-              heartbeatWritePending = false;
-            },
-          ),
+          refreshStoreLockOwner(ownerPath, token, storeLockFence).finally(() => {
+            heartbeatWritePending = false;
+          }),
         );
-      }, 5_000);
+      }, heartbeatIntervalMs);
       return {
         assertHealthy: async () => {
           if (heartbeatFailure) {
@@ -994,6 +1581,10 @@ async function acquireStoreLock(
             );
             (wrapped as Error & { cause?: unknown }).cause = heartbeatFailure;
             throw wrapped;
+          }
+          const current = await statIfExists(lockDirPath);
+          if (!current || !sameFileIdentity(acquiredBeforeReclaimerCheck, current)) {
+            throw lockOwnershipLost();
           }
           let owner: StoreLockOwner | null;
           try {
@@ -1012,9 +1603,11 @@ async function acquireStoreLock(
             await Promise.all([...heartbeatWrites]);
           }
           try {
+            const current = await statIfExists(lockDirPath);
+            if (!current || !sameFileIdentity(acquiredBeforeReclaimerCheck, current)) return;
             const owner = parseLockOwner(await readFile(ownerPath, "utf8"));
             if (owner?.token === token) {
-              await rm(lockDirPath, { recursive: true, force: true });
+              await removeDirectoryIfSameIdentity(lockDirPath, acquiredBeforeReclaimerCheck);
             }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -1024,11 +1617,26 @@ async function acquireStoreLock(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       await onLockBlocked?.();
-      if (await isBlockedByStaleLock(lockDirPath, ownerPath, lockStaleMs)) {
-        throw new VersionedTextStoreError(
-          "persist-failed",
-          "Versioned text store lock is stale and requires manual recovery.",
+      let blockedByStaleLock: boolean;
+      try {
+        blockedByStaleLock = await isBlockedByStaleLock(lockDirPath, ownerPath, lockStaleMs);
+      } catch (inspectionError) {
+        throw lockInspectionFailed(
+          "Failed to inspect versioned text store lock owner.",
+          inspectionError,
         );
+      }
+      if (blockedByStaleLock) {
+        if (
+          await reclaimStaleStoreLock(
+            lockDirPath,
+            ownerPath,
+            lockStaleMs,
+            startedAt + lockTimeoutMs,
+          )
+        ) {
+          continue;
+        }
       }
       if (Date.now() - startedAt > lockTimeoutMs) {
         throw new VersionedTextStoreError(
@@ -1126,6 +1734,20 @@ function normalizeWriteText(text: string): string {
   if (typeof text !== "string") {
     throw new VersionedTextStoreError("invalid-text", "Text file contents must be a string.");
   }
+  const byteLength = Buffer.byteLength(text, "utf8");
+  if (byteLength > MAX_VERSIONED_TEXT_FILE_BYTES) {
+    throw new VersionedTextStoreError(
+      "invalid-text",
+      "Text file contents are too large for the versioned text store.",
+    );
+  }
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.toString("utf8") !== text) {
+    throw new VersionedTextStoreError(
+      "invalid-text",
+      "Text file contents must round-trip through UTF-8.",
+    );
+  }
   return text;
 }
 
@@ -1152,6 +1774,13 @@ function normalizeWriteMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutr
     );
   }
   return pickWriteMetadata(metadata);
+}
+
+function invalidRollbackSnapshot(): never {
+  throw new VersionedTextStoreError(
+    "invalid-input",
+    "Rollback snapshot does not match the target file.",
+  );
 }
 
 function rejectDuplicateId(kind: "moment" | "object" | "version", id: string): never {
@@ -1286,6 +1915,208 @@ function pathAliasesForVersion(
   return aliases;
 }
 
+function workspaceReferencesObject(
+  workspace: PersistedWorkspaceState,
+  objectId: WorkspaceObjectId,
+): boolean {
+  for (const aliases of Object.values(workspace.pathAliases)) {
+    if (Object.values(aliases).some((candidate) => candidate === objectId)) return true;
+  }
+  for (const snapshots of Object.values(workspace.snapshots)) {
+    if (getOwn(snapshots, objectId) !== undefined) return true;
+  }
+  return workspace.moments.some((moment) => moment.objectId === objectId);
+}
+
+function rollbackMomentHasDependents(
+  workspace: PersistedWorkspaceState,
+  versionId: VersionId,
+  momentId: VersionedTextMomentId,
+  momentIndex: number,
+  objectId: WorkspaceObjectId,
+): boolean {
+  const momentIndexById = new Map(
+    workspace.moments.map((moment, index) => [moment.id, index] as const),
+  );
+  const versionHasIndependentObjectMutationInRange = (
+    candidateVersionId: VersionId,
+    afterIndex: number,
+    atOrBeforeIndex: number,
+  ) =>
+    workspace.moments.some(
+      (moment, index) =>
+        index > afterIndex &&
+        index <= atOrBeforeIndex &&
+        moment.versionId === candidateVersionId &&
+        moment.objectId === objectId &&
+        moment.before !== undefined &&
+        moment.before !== null,
+    );
+  const lineageHasIndependentObjectMutation = (
+    candidateVersionId: VersionId,
+    afterIndex: number,
+  ): boolean => {
+    let cursor = getOwn(workspace.versions, candidateVersionId);
+    let atOrBeforeIndex = Number.POSITIVE_INFINITY;
+    const seen = new Set<VersionId>();
+    while (cursor) {
+      if (seen.has(cursor.id)) return false;
+      seen.add(cursor.id);
+      if (versionHasIndependentObjectMutationInRange(cursor.id, afterIndex, atOrBeforeIndex)) {
+        return true;
+      }
+      if (!cursor.forkPoint || cursor.forkPoint.versionId === versionId) return false;
+      atOrBeforeIndex =
+        cursor.forkPoint.momentId === undefined
+          ? -1
+          : (momentIndexById.get(cursor.forkPoint.momentId) ?? -1);
+      cursor = getOwn(workspace.versions, cursor.forkPoint.versionId);
+    }
+    return false;
+  };
+  const forkIndexFromVersion = (version: VersionRecord): number | null => {
+    let cursor: VersionRecord | undefined = version;
+    const seen = new Set<VersionId>();
+    while (cursor?.forkPoint) {
+      if (seen.has(cursor.id)) return null;
+      seen.add(cursor.id);
+      if (cursor.forkPoint.versionId === versionId) {
+        return cursor.forkPoint.momentId
+          ? (momentIndexById.get(cursor.forkPoint.momentId) ?? null)
+          : null;
+      }
+      cursor = getOwn(workspace.versions, cursor.forkPoint.versionId);
+    }
+    return null;
+  };
+
+  for (const version of Object.values(workspace.versions)) {
+    if (version.id !== versionId) {
+      const forkIndex = forkIndexFromVersion(version);
+      if (
+        forkIndex !== null &&
+        forkIndex >= momentIndex &&
+        (forkIndex === momentIndex || !lineageHasIndependentObjectMutation(version.id, forkIndex))
+      ) {
+        return true;
+      }
+    }
+  }
+  for (const [candidateVersionId, snapshots] of Object.entries(workspace.snapshots)) {
+    if (candidateVersionId === versionId) continue;
+    if (Object.values(snapshots).some((snapshot) => snapshot.latestMomentId === momentId)) {
+      return true;
+    }
+  }
+  if (
+    workspace.moments.some(
+      (candidate) =>
+        candidate.id !== momentId &&
+        candidate.objectId === objectId &&
+        candidate.before?.latestMomentId === momentId,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function previousObjectMoment(
+  workspace: PersistedWorkspaceState,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  beforeIndex: number,
+): VersionedTextMoment | null {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const moment = workspace.moments[index];
+    if (moment?.versionId === versionId && moment.objectId === objectId) return moment;
+  }
+  return null;
+}
+
+function latestObjectMomentAtOrBefore(
+  workspace: PersistedWorkspaceState,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  maxIndex: number,
+): VersionedTextMoment | null {
+  for (let index = maxIndex; index >= 0; index -= 1) {
+    const moment = workspace.moments[index];
+    if (moment?.versionId === versionId && moment.objectId === objectId) return moment;
+  }
+  return null;
+}
+
+function inheritedObjectMoment(
+  workspace: PersistedWorkspaceState,
+  versionId: VersionId,
+  objectId: WorkspaceObjectId,
+  seen = new Set<VersionId>(),
+): VersionedTextMoment | null {
+  if (seen.has(versionId)) {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+  seen.add(versionId);
+  const version = getOwn(workspace.versions, versionId);
+  if (!version?.forkPoint) return null;
+  const forkMomentId = version.forkPoint.momentId;
+  const forkIndex =
+    forkMomentId === undefined
+      ? -1
+      : workspace.moments.findIndex((moment) => moment.id === forkMomentId);
+  if (forkMomentId !== undefined && forkIndex < 0) {
+    throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+  }
+  return (
+    latestObjectMomentAtOrBefore(
+      workspace,
+      version.forkPoint.versionId,
+      objectId,
+      forkIndex,
+    ) ?? inheritedObjectMoment(workspace, version.forkPoint.versionId, objectId, seen)
+  );
+}
+
+function legacyRollbackBeforeSnapshot(input: {
+  workspace: PersistedWorkspaceState;
+  versionId: VersionId;
+  path: string;
+  moment: VersionedTextMoment;
+  momentIndex: number;
+  legacyBeforeText?: string;
+}): TextFileSnapshot | null {
+  const previous = previousObjectMoment(
+    input.workspace,
+    input.versionId,
+    input.moment.objectId,
+    input.momentIndex,
+  ) ?? inheritedObjectMoment(input.workspace, input.versionId, input.moment.objectId);
+  if (input.legacyBeforeText !== undefined) {
+    const legacyBeforeText = normalizeWriteText(input.legacyBeforeText);
+    if (!previous || previous.operation === "delete") {
+      throw new VersionedTextStoreError(
+        "invalid-input",
+        `Legacy mutation moment ${input.moment.id} has no earlier snapshot to restore.`,
+      );
+    }
+    const rollbackPath = input.moment.operation === "rename" ? previous.path : input.path;
+    return {
+      objectId: input.moment.objectId,
+      versionId: input.versionId,
+      path: rollbackPath,
+      text: legacyBeforeText,
+      updatedAtMs: previous.recordedAtMs,
+      latestMomentId: previous.id,
+      metadata: pickWriteMetadata(previous.metadata),
+    };
+  }
+  if (input.moment.operation === "write" && !previous) return null;
+  throw new VersionedTextStoreError(
+    "invalid-input",
+    `Legacy mutation moment ${input.moment.id} is missing a rollback preimage.`,
+  );
+}
+
 function createMoment(input: {
   id: VersionedTextMomentId;
   workspaceId: WorkspaceId;
@@ -1293,8 +2124,9 @@ function createMoment(input: {
   objectId: WorkspaceObjectId;
   path: string;
   recordedAtMs: number;
-  operation: "write" | "rename";
+  operation: "write" | "rename" | "delete";
   metadata: ActorNeutralWriteMetadata;
+  before: TextFileSnapshot | null;
 }): VersionedTextMoment {
   return {
     id: input.id,
@@ -1305,6 +2137,7 @@ function createMoment(input: {
     recordedAtMs: input.recordedAtMs,
     operation: input.operation,
     metadata: pickWriteMetadata(input.metadata),
+    before: input.before === null ? null : cloneSnapshot(input.before),
   };
 }
 
@@ -1348,8 +2181,11 @@ function createVersionedTextStoreWithHooks(
     return state;
   }
 
-  async function saveState(state: PersistedVersionedTextState): Promise<void> {
-    const normalized = normalizeState(cloneJson(state));
+  async function saveState(
+    state: PersistedVersionedTextState,
+    changedWorkspaceId: WorkspaceId,
+  ): Promise<void> {
+    const normalized = normalizeStateAfterWorkspaceMutation(state, changedWorkspaceId);
     const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
     try {
       await testHooks.beforePersist?.();
@@ -1359,8 +2195,12 @@ function createVersionedTextStoreWithHooks(
           "Versioned text store write lock is required.",
         );
       }
-      await activeLease.assertHealthy();
-      await writeFileAtomic(stateFilePath, serialized);
+      const lease = activeLease;
+      await lease.assertHealthy();
+      await writeFileAtomic(stateFilePath, serialized, async () => {
+        await testHooks.beforeAtomicPublish?.();
+        await lease.assertHealthy();
+      });
       cachedStateToken = await readStateToken(stateFilePath);
     } catch (error) {
       const wrapped = new VersionedTextStoreError(
@@ -1433,7 +2273,7 @@ function createVersionedTextStoreWithHooks(
           return cloneVersion(main);
         }
         const workspace = ensureWorkspace(state, workspaceId, readNowMs());
-        await saveState(state);
+        await saveState(state, workspaceId);
         return cloneVersion(workspace.versions[workspace.mainVersionId]);
       });
     },
@@ -1505,7 +2345,7 @@ function createVersionedTextStoreWithHooks(
             getOwn(workspace.pathAliases, source.id) ?? createDictionary<WorkspaceObjectId>(),
           ),
         );
-        await saveState(state);
+        await saveState(state, workspaceId);
         return cloneVersion(version);
       });
     },
@@ -1534,6 +2374,13 @@ function createVersionedTextStoreWithHooks(
         const state = await loadWritableState();
         const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
         const existingObjectId = findObjectIdByVersionPath(workspace, versionId, path);
+        const snapshots =
+          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
+        workspace.snapshots[versionId] = snapshots;
+        const before = existingObjectId ? (getOwn(snapshots, existingObjectId) ?? null) : null;
+        if (before && before.path !== path) {
+          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+        }
         const recordedAtMs = readNowMs();
         let objectId = existingObjectId;
         let newObject: FileObjectRecord | null = null;
@@ -1553,7 +2400,10 @@ function createVersionedTextStoreWithHooks(
           };
         }
 
-        const momentId = createGeneratedId("moment");
+        const momentId =
+          input.momentId === undefined
+            ? createGeneratedId("moment")
+            : normalizeGeneratedId("moment", input.momentId);
         if (workspace.moments.some((moment) => moment.id === momentId)) {
           rejectDuplicateId("moment", momentId);
         }
@@ -1573,6 +2423,7 @@ function createVersionedTextStoreWithHooks(
           recordedAtMs,
           operation: "write",
           metadata,
+          before,
         });
         const snapshot: TextFileSnapshot = {
           objectId,
@@ -1585,12 +2436,9 @@ function createVersionedTextStoreWithHooks(
         };
 
         pathAliasesForVersion(workspace, versionId)[path] = objectId;
-        const snapshots =
-          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
-        workspace.snapshots[versionId] = snapshots;
         snapshots[objectId] = snapshot;
         workspace.moments.push(moment);
-        await saveState(state);
+        await saveState(state, workspaceId);
         return {
           object: cloneFileObject(object),
           snapshot: cloneSnapshot(snapshot),
@@ -1680,6 +2528,7 @@ function createVersionedTextStoreWithHooks(
           recordedAtMs,
           operation: "rename",
           metadata,
+          before,
         });
         const after: TextFileSnapshot = {
           ...cloneSnapshot(before),
@@ -1699,13 +2548,186 @@ function createVersionedTextStoreWithHooks(
         aliases[toPath] = objectId;
         snapshots[objectId] = after;
         workspace.moments.push(moment);
-        await saveState(state);
+        await saveState(state, workspaceId);
         return {
           object: cloneFileObject(object),
           before: cloneSnapshot(before),
           after: cloneSnapshot(after),
           moment: cloneMoment(moment),
         };
+      });
+    },
+
+    deleteTextFile(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const path = normalizeWritePath(input.path);
+        const metadata = normalizeWriteMetadata(input.metadata);
+        const state = await loadWritableState();
+        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
+        const objectId = findObjectIdByVersionPath(workspace, versionId, path);
+        if (!objectId) {
+          throw new VersionedTextStoreError("file-not-found", `File ${path} was not found.`);
+        }
+        const snapshots =
+          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
+        workspace.snapshots[versionId] = snapshots;
+        const before = getOwn(snapshots, objectId);
+        if (!before || before.path !== path) {
+          throw new VersionedTextStoreError("file-not-found", `File ${path} was not found.`);
+        }
+
+        const recordedAtMs = readNowMs();
+        const momentId =
+          input.momentId === undefined
+            ? createGeneratedId("moment")
+            : normalizeGeneratedId("moment", input.momentId);
+        if (workspace.moments.some((moment) => moment.id === momentId)) {
+          rejectDuplicateId("moment", momentId);
+        }
+        const moment = createMoment({
+          id: momentId,
+          workspaceId,
+          versionId,
+          objectId,
+          path,
+          recordedAtMs,
+          operation: "delete",
+          metadata,
+          before,
+        });
+        const aliases = pathAliasesForVersion(workspace, versionId);
+        if (getOwn(aliases, path) === objectId) {
+          delete aliases[path];
+        }
+        delete snapshots[objectId];
+        workspace.moments.push(moment);
+        const object = getOwn(workspace.objects, objectId);
+        if (!object) {
+          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+        }
+        await saveState(state, workspaceId);
+        return {
+          object: cloneFileObject(object),
+          before: cloneSnapshot(before),
+          moment: cloneMoment(moment),
+        };
+      });
+    },
+
+    rollbackTextFileMutation(input) {
+      return serialize(async () => {
+        assertInputEnvelope(input);
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const versionId = normalizeVersionId(input.versionId);
+        const path = normalizeWritePath(input.path);
+        const mutationMomentId = normalizeGeneratedId("moment", input.mutationMomentId);
+        const state = await loadWritableState();
+        const { workspace } = requireWorkspaceVersion(state, workspaceId, versionId);
+        const momentIndex = workspace.moments.findIndex(
+          (moment) =>
+            moment.id === mutationMomentId &&
+            moment.workspaceId === workspaceId &&
+            moment.versionId === versionId &&
+            moment.path === path,
+        );
+        if (momentIndex < 0) {
+          throw new VersionedTextStoreError(
+            "file-not-found",
+            `Mutation moment ${mutationMomentId} was not found for ${path}.`,
+          );
+        }
+        const moment = workspace.moments[momentIndex];
+        if (!moment) {
+          throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
+        }
+        const before =
+          moment.before === undefined
+            ? legacyRollbackBeforeSnapshot({
+                workspace,
+                versionId,
+                path,
+                moment,
+                momentIndex,
+                legacyBeforeText: input.legacyBeforeText,
+              })
+            : moment.before;
+        if (before && before.versionId !== versionId) {
+          invalidRollbackSnapshot();
+        }
+        if (
+          workspace.moments.some(
+            (candidate, index) =>
+              index > momentIndex &&
+              candidate.workspaceId === workspaceId &&
+              candidate.versionId === versionId &&
+              candidate.objectId === moment.objectId,
+          )
+        ) {
+          throw new VersionedTextStoreError(
+            "invalid-input",
+            `Mutation moment ${mutationMomentId} is not the latest mutation for ${path}.`,
+          );
+        }
+        if (
+          rollbackMomentHasDependents(
+            workspace,
+            versionId,
+            mutationMomentId,
+            momentIndex,
+            moment.objectId,
+          )
+        ) {
+          throw new VersionedTextStoreError(
+            "invalid-input",
+            `Mutation moment ${mutationMomentId} has dependent versions and cannot be rolled back.`,
+          );
+        }
+        if (before && before.path !== path && moment.operation !== "rename") {
+          invalidRollbackSnapshot();
+        }
+        const aliases = pathAliasesForVersion(workspace, versionId);
+        const snapshots =
+          getOwn(workspace.snapshots, versionId) ?? createDictionary<TextFileSnapshot>();
+        workspace.snapshots[versionId] = snapshots;
+
+        if (before) {
+          if (before.objectId !== moment.objectId) {
+            invalidRollbackSnapshot();
+          }
+          const restorePathObjectId = getOwn(aliases, before.path);
+          if (restorePathObjectId !== undefined && restorePathObjectId !== before.objectId) {
+            throw new VersionedTextStoreError(
+              "target-path-exists",
+              `File ${before.path} already exists.`,
+            );
+          }
+        }
+
+        workspace.moments.splice(momentIndex, 1);
+        if (getOwn(aliases, path) === moment.objectId) {
+          delete aliases[path];
+        }
+        delete snapshots[moment.objectId];
+
+        if (before) {
+          const object = getOwn(workspace.objects, before.objectId);
+          if (!object) {
+            throw new VersionedTextStoreError(
+              "state-corrupt",
+              "Versioned text store is corrupt.",
+            );
+          }
+          aliases[before.path] = before.objectId;
+          snapshots[before.objectId] = cloneSnapshot(before);
+        }
+
+        if (!workspaceReferencesObject(workspace, moment.objectId)) {
+          delete workspace.objects[moment.objectId];
+        }
+        await saveState(state, workspaceId);
       });
     },
 

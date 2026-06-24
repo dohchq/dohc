@@ -37,6 +37,8 @@ describe("Postgres workspace schema scaffold", () => {
       "data_fragment_shares_recipient_created_idx",
       "workspace_events_share_revocation_pending_retry_idx",
       "workspace_events_share_revocation_claimed_retry_idx",
+      "workspace_events_share_revocation_active_backlog_idx",
+      "workspace_events_share_revocation_completed_cleanup_idx",
     ]);
   });
 });

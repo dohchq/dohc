@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { hasIgnoredSegment } from "@dohc/workspace-core";
+import { hasIgnoredSegment, isDatabaseSidecar } from "@dohc/workspace-core";
 import { assertSafeWorkspacePath, mediaTypeForPath, sha256 } from "./metadata";
 
 export const MAX_INLINE_FILE_SIZE = 10 * 1024 * 1024;
@@ -25,14 +25,15 @@ async function scanDir(rootDir: string, dir: string, files: ScannedWorkspaceFile
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
-    const relPath = relative(rootDir, fullPath).replace(/\\/g, "/");
-    if (hasIgnoredSegment(relPath)) continue;
+    const relativePath = relative(rootDir, fullPath).replace(/\\/g, "/");
+    if (hasIgnoredSegment(relativePath)) continue;
     if (entry.isDirectory()) {
       await scanDir(rootDir, fullPath, files);
       continue;
     }
     if (!entry.isFile()) continue;
-    const rel = assertSafeWorkspacePath(relPath);
+    if (isDatabaseSidecar(relativePath)) continue;
+    const rel = assertSafeWorkspacePath(relativePath);
     const size = await fileSize(fullPath);
     const bytes = size <= MAX_INLINE_FILE_SIZE ? await readFile(fullPath) : undefined;
     const mediaType = await mediaTypeForScannedFile(rel, fullPath, bytes);

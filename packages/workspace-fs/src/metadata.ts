@@ -168,6 +168,7 @@ export function isTextMediaType(mediaType: string, path = "") {
       isSiteSourcePath(path) ||
       lower.endsWith(".md") ||
       lower.endsWith(".markdown") ||
+      lower.endsWith(".sh") ||
       lower.endsWith(".txt"))
   );
 }

@@ -1,5 +1,6 @@
 import {
   Bot,
+  CircleHelp,
   Cloud,
   ExternalLink,
   FileText,
@@ -182,7 +183,7 @@ type UnifiedDiffLine = {
   newLineNumber: number | null;
 };
 
-type HistoryAuthorFilter = "all" | "user" | "agent";
+type HistoryAuthorFilter = "all" | ChangeSetRecord["author"]["kind"];
 
 const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 
@@ -500,8 +501,22 @@ type ActiveUndoHandler = {
 };
 
 function historyAuthorLabel(author: ChangeSetRecord["author"]): string {
-  if (author.kind === "agent") return `${author.agentId} for ${author.onBehalfOf}`;
-  return author.userId;
+  switch (author.kind) {
+    case "agent":
+      return `${author.agentId} for ${author.onBehalfOf}`;
+    case "local":
+      return author.label;
+    case "user":
+      return author.userId;
+    default: {
+      const exhaustive: never = author;
+      const kind =
+        typeof exhaustive === "object" && exhaustive && "kind" in exhaustive
+          ? String((exhaustive as { kind?: unknown }).kind)
+          : null;
+      return kind ? `Unknown author (${kind})` : "Unknown author";
+    }
+  }
 }
 
 function historyKindLabel(kind: ChangeSetRecord["kind"]): string {
@@ -1126,11 +1141,32 @@ function HistoryList({
           const showDayHeading = previousDayKey !== day.dateTime;
           const itemContent = (
             <span className="flex min-w-0 items-start gap-2">
-              {change.author.kind === "agent" ? (
-                <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              ) : (
-                <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              )}
+              {(() => {
+                switch (change.author.kind) {
+                  case "agent":
+                    return <Bot size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+                  case "local":
+                    return (
+                      <FileText size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                    );
+                  case "user":
+                    return <User size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+                  default: {
+                    const exhaustive: never = change.author;
+                    const kind =
+                      typeof exhaustive === "object" && exhaustive && "kind" in exhaustive
+                        ? String((exhaustive as { kind?: unknown }).kind)
+                        : "unknown";
+                    return (
+                      <CircleHelp
+                        size={12}
+                        aria-label={`Unknown author kind: ${kind}`}
+                        className="mt-0.5 shrink-0 text-subtle"
+                      />
+                    );
+                  }
+                }
+              })()}
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink">
@@ -1272,13 +1308,14 @@ function HistoryView(props: {
             </label>
             <div
               data-testid="history-author-filter"
-              className="mt-1.5 grid grid-cols-3 rounded border border-line bg-bg p-0.5"
+              className="mt-1.5 grid grid-cols-4 rounded border border-line bg-bg p-0.5"
             >
               {(
                 [
                   ["all", "All"],
                   ["user", "People"],
                   ["agent", "Agents"],
+                  ["local", "Local"],
                 ] as const
               ).map(([value, label]) => (
                 <button

@@ -1,8 +1,21 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { addFileChanges, createChangeSet, createLocalChangeAuthor } from "@dohc/workspace-core";
+import { createChangeSetStore } from "@dohc/workspace-history";
 import type { FetchLike } from "@dohc/workspace-sync";
 import {
   createWorkspaceDirectory,
@@ -54,6 +67,21 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
     return await fn({ root, home, sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH });
   } finally {
     await rm(base, { recursive: true, force: true });
+  }
+}
+
+async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    value: platform,
+  });
+  try {
+    return await fn();
+  } finally {
+    if (originalPlatform) {
+      Object.defineProperty(process, "platform", originalPlatform);
+    }
   }
 }
 
@@ -570,6 +598,131 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("refuses mutating tools before disk changes when durable history is unsupported", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
+      await mkdir(join(ctx.root, "drafts"), { recursive: true });
+      await writeFile(join(ctx.root, "drafts/todo.txt"), "move me\n");
+      await mkdir(join(ctx.root, "archive"), { recursive: true });
+      await writeFile(join(ctx.root, "archive/remove-me.txt"), "delete me\n");
+
+      await withProcessPlatform("darwin", async () => {
+        await expect(
+          writeWorkspaceFile(ctx, { path: "notes/nested/plan.txt", content: "draft\n" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readFile(join(ctx.root, "notes/nested/plan.txt"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(readdir(join(ctx.root, "notes"))).rejects.toMatchObject({ code: "ENOENT" });
+
+        await expect(createWorkspaceDirectory(ctx, { path: "new-folder" })).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readdir(join(ctx.root, "new-folder"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+
+        await expect(createSite(ctx, { path: "site" })).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readFile(join(ctx.root, "site/index.html"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(readdir(join(ctx.root, "site"))).rejects.toMatchObject({ code: "ENOENT" });
+
+        await expect(
+          importData(ctx, {
+            sourcePath: "people.csv",
+            databasePath: "imports/people.sqlite",
+            tableName: "people",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readFile(join(ctx.root, "imports/people.sqlite"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(readdir(join(ctx.root, "imports"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+
+        await expect(
+          moveWorkspacePath(ctx, {
+            fromPath: "drafts/todo.txt",
+            toPath: "archive/todo.txt",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe(
+          "move me\n",
+        );
+        await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+
+        await expect(deleteWorkspacePath(ctx, { path: "archive/remove-me.txt" })).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+        await expect(readFile(join(ctx.root, "archive/remove-me.txt"), "utf8")).resolves.toBe(
+          "delete me\n",
+        );
+      });
+    });
+  });
+
+  it("reads ephemeral watcher history when durable history is unsupported", async () => {
+    await withWorkspace(async (ctx) => {
+      await withProcessPlatform("darwin", async () => {
+        const store = createChangeSetStore(ctx.root, { ephemeralIfUnsupported: true });
+        const set = addFileChanges(
+          createChangeSet({
+            kind: "user-edit",
+            author: createLocalChangeAuthor("Local file edit"),
+            summary: "Edited note from watcher",
+            provenance: { source: "user-edit" },
+          }),
+          [{ path: "notes/watched.md", operation: "write" }],
+        );
+        await store.record(set, { id: "watcher-record-1", recordedAtMs: 1234 });
+
+        await expect(syncNow(ctx, { sinceMs: 0 })).resolves.toMatchObject({
+          clean: false,
+          pendingChangeCount: 1,
+          pending: [expect.objectContaining({ id: "watcher-record-1" })],
+        });
+        await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
+          count: 1,
+          changes: [
+            expect.objectContaining({
+              id: "watcher-record-1",
+              files: [{ path: "notes/watched.md", operation: "write" }],
+            }),
+          ],
+        });
+        await expect(readChange(ctx, { id: "watcher-record-1" })).resolves.toMatchObject({
+          ok: true,
+          change: expect.objectContaining({ id: "watcher-record-1" }),
+        });
+
+        await expect(
+          writeWorkspaceFile(ctx, { path: "notes/blocked.md", content: "blocked\n" }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("durable history recording is not supported"),
+        });
+      });
+    });
+  });
+
   it("searches visible paths and text content while hiding workspace internals", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "docs"), { recursive: true });
@@ -719,6 +872,40 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("preserves file modes and refuses symlink targets on workspace writes", async () => {
+    await withWorkspace(async (ctx) => {
+      const modePath = join(ctx.root, "scripts/run.sh");
+      await mkdir(dirname(modePath), { recursive: true });
+      await writeFile(modePath, "old\n");
+      await chmod(modePath, 0o744);
+
+      const overwritten = await writeWorkspaceFile(ctx, {
+        path: "scripts/run.sh",
+        content: "new\n",
+      });
+
+      expect(overwritten).toMatchObject({ ok: true });
+      expect((await stat(modePath)).mode & 0o777).toBe(0o744);
+
+      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-symlink-target-"));
+      try {
+        await writeFile(join(outside, "target.txt"), "outside\n");
+        await symlink(join(outside, "target.txt"), join(ctx.root, "linked.txt"));
+
+        const linked = await writeWorkspaceFile(ctx, {
+          path: "linked.txt",
+          content: "nope\n",
+        });
+
+        expect(linked).toMatchObject({ ok: false });
+        if (!linked.ok) expect(linked.reason).toContain("symlink");
+        await expect(readFile(join(outside, "target.txt"), "utf8")).resolves.toBe("outside\n");
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("moves paths and deletes recoverably while recording history", async () => {
     await withWorkspace(async (ctx) => {
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
@@ -731,21 +918,34 @@ describe("mcp tools operate on allowed paths", () => {
         fromPath: "drafts/todo.txt",
         toPath: "archive/todo.txt",
       });
-      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).resolves.toBe("ship\n");
 
       const deleted = await deleteWorkspacePath(ctx, { path: "archive/todo.txt" });
       expect(deleted).toMatchObject({ ok: true, path: "archive/todo.txt", trashed: true });
-      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       const trash = await readdir(join(ctx.root, ".dohc", "trash"));
       expect(trash.some((name) => name.endsWith("-todo.txt"))).toBe(true);
 
       const pending = await syncNow(ctx, { sinceMs: 0 });
-      expect(pending.pending.map((entry) => entry.fileCount)).toEqual([1, 2, 1]);
+      expect(pending.pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ summary: "MCP wrote drafts/todo.txt", fileCount: 1 }),
+          expect.objectContaining({
+            summary: "MCP moved drafts/todo.txt to archive/todo.txt",
+            fileCount: 2,
+          }),
+          expect.objectContaining({ summary: "MCP deleted archive/todo.txt", fileCount: 1 }),
+        ]),
+      );
     });
   });
 
-  it("rolls back move/delete mutations if the history record cannot be written", async () => {
+  it("retains move/delete mutations if the history record cannot be written", async () => {
     await withWorkspace(async (ctx) => {
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       await rm(join(ctx.root, ".dohc", "history", "index.json"), { force: true });
@@ -755,13 +955,114 @@ describe("mcp tools operate on allowed paths", () => {
         fromPath: "drafts/todo.txt",
         toPath: "archive/todo.txt",
       });
-      expect(moved).toMatchObject({ ok: false });
-      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe("ship\n");
-      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toThrow();
+      expect(moved).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).resolves.toBe("ship\n");
 
-      const deleted = await deleteWorkspacePath(ctx, { path: "drafts/todo.txt" });
-      expect(deleted).toMatchObject({ ok: false });
-      await expect(readFile(join(ctx.root, "drafts/todo.txt"), "utf8")).resolves.toBe("ship\n");
+      const deleted = await deleteWorkspacePath(ctx, { path: "archive/todo.txt" });
+      expect(deleted).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "archive/todo.txt"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  });
+
+  it("retains write/create/import mutations if the history record cannot be written", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, ".dohc", "history", "index.json"), { recursive: true });
+      await writeFile(join(ctx.root, "existing.txt"), "before\n");
+      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
+
+      const createdFile = await writeWorkspaceFile(ctx, {
+        path: "notes/nested/new.txt",
+        content: "new\n",
+      });
+      expect(createdFile).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "notes/nested/new.txt"), "utf8")).resolves.toBe(
+        "new\n",
+      );
+
+      const overwritten = await writeWorkspaceFile(ctx, {
+        path: "existing.txt",
+        content: "after\n",
+      });
+      expect(overwritten).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "existing.txt"), "utf8")).resolves.toBe("after\n");
+
+      const directory = await createWorkspaceDirectory(ctx, { path: "created-dir" });
+      expect(directory).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readdir(join(ctx.root, "created-dir"))).resolves.toEqual([]);
+
+      const site = await createSite(ctx, { path: "failed-site" });
+      expect(site).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "failed-site/index.html"), "utf8")).resolves.toContain(
+        "<!doctype html>",
+      );
+
+      const imported = await importData(ctx, {
+        sourcePath: "people.csv",
+        databasePath: "imports/people.sqlite",
+        tableName: "people",
+      });
+      expect(imported).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("visible mutation retained"),
+      });
+      await expect(readFile(join(ctx.root, "imports/people.sqlite"))).resolves.toBeInstanceOf(
+        Buffer,
+      );
+    });
+  });
+
+  it("does not report retained mutations when the visible write phase fails", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "blocked-parent"), "not a directory\n");
+      await writeFile(join(ctx.root, "people.csv"), "name\nAda\n");
+
+      const written = await writeWorkspaceFile(ctx, {
+        path: "blocked-parent/new.txt",
+        content: "new\n",
+      });
+      expect(written).toMatchObject({ ok: false });
+      if (!written.ok) expect(written.reason).not.toContain("visible mutation retained");
+
+      const directory = await createWorkspaceDirectory(ctx, {
+        path: "blocked-parent/created-dir",
+      });
+      expect(directory).toMatchObject({ ok: false });
+      if (!directory.ok) expect(directory.reason).not.toContain("visible mutation retained");
+
+      const site = await createSite(ctx, { path: "blocked-parent/site" });
+      expect(site).toMatchObject({ ok: false });
+      if (!site.ok) expect(site.reason).not.toContain("visible mutation retained");
+
+      const imported = await importData(ctx, {
+        sourcePath: "people.csv",
+        databasePath: "blocked-parent/people.sqlite",
+        tableName: "people",
+      });
+      expect(imported).toMatchObject({ ok: false });
+      if (!imported.ok) expect(imported.reason).not.toContain("visible mutation retained");
     });
   });
 
@@ -1049,6 +1350,28 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(queried).toMatchObject({ ok: true });
       if (queried.ok) expect(queried.rows.map((r) => r.name)).toEqual(["Ada", "Lin"]);
+    });
+  });
+
+  it("import_data returns a structured failure without replacing an existing database", async () => {
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
+      await writeFile(join(ctx.root, "people.sqlite"), "already here\n");
+
+      const imported = await importData(ctx, {
+        sourcePath: "people.csv",
+        databasePath: "people.sqlite",
+        tableName: "people",
+      });
+
+      expect(imported).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("EEXIST"),
+      });
+      await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe("already here\n");
+      await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({
+        changes: [],
+      });
     });
   });
 

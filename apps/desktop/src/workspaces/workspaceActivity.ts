@@ -8,6 +8,7 @@ import type {
 import type { CloudSyncEngine } from "./cloudSyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
+  DESKTOP_HISTORY_STORE_OPTIONS,
   createChangeSetStore,
   humanSummary,
   activeLocalOperationMatchesBatch,
@@ -268,7 +269,7 @@ export function createWorkspaceActivity(
   async function listChangeSets(
     workspace: CreatedWorkspace,
   ): Promise<ChangeSetRecord[]> {
-    const store = createChangeSetStore(workspace.rootPath);
+    const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
     const records = await store.list();
     return records.map((record) => ({
       id: record.id,
@@ -295,7 +296,7 @@ export function createWorkspaceActivity(
     workspace: CreatedWorkspace,
     id: string,
   ): Promise<ReadChangeSetResult> {
-    const store = createChangeSetStore(workspace.rootPath);
+    const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
     const record = await store.get(id);
     return {
       changeSet: record

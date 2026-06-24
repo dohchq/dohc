@@ -258,8 +258,8 @@ export async function createFolder(
 
 // ONE move engine for rename + drag-move (F2 and DnD both land here).
 // Rules, in order:
-//   1. BOTH sides pass validateUserWritePath — traversal/absolute/.dohc are
-//      refused on either side (isReservedPath inside; never special-cased).
+//   1. BOTH sides pass validateUserWritePath — traversal, absolute paths, and
+//      reserved/ignored internals are refused on either side.
 //   2. Folder into itself/descendant refused (mirrors planDrop's UI no-op).
 //   3. Source: realpath-contain the PARENT, then refuse a symlink source —
 //      the tree never lists symlinks, so no legitimate caller moves one.

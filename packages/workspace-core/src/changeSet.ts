@@ -15,9 +15,72 @@ export type BoundaryCrossing =
   | "private-to-shared"
   | "unmergeable-overwrite";
 
+declare const nonEmptyLocalAuthorLabelBrand: unique symbol;
+
+export type NonEmptyLocalAuthorLabel = string & {
+  readonly [nonEmptyLocalAuthorLabelBrand]: true;
+};
+
 export type ChangeAuthor =
   | { kind: "user"; userId: string }
-  | { kind: "agent"; agentId: string; onBehalfOf: string };
+  | { kind: "agent"; agentId: string; onBehalfOf: string }
+  | { kind: "local"; label: NonEmptyLocalAuthorLabel };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseCanonicalNonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+  if (!value || value.trim() !== value) {
+    throw new Error(`${label} must be canonical and non-empty.`);
+  }
+  return value;
+}
+
+export function parseLocalAuthorLabel(label: unknown): NonEmptyLocalAuthorLabel {
+  if (typeof label !== "string") {
+    throw new Error("Local change author label must be a string.");
+  }
+  const normalized = label.trim();
+  if (!normalized) throw new Error("Local change author label must be non-empty.");
+  return normalized as NonEmptyLocalAuthorLabel;
+}
+
+export function createLocalChangeAuthor(label: string): Extract<ChangeAuthor, { kind: "local" }> {
+  return { kind: "local", label: parseLocalAuthorLabel(label) };
+}
+
+export function parseChangeAuthor(value: unknown): ChangeAuthor {
+  if (!isRecord(value)) {
+    throw new Error("Change author is invalid.");
+  }
+  if (value.kind === "user") {
+    return {
+      kind: "user",
+      userId: parseCanonicalNonEmptyString(value.userId, "Change author user id"),
+    };
+  }
+  if (value.kind === "agent") {
+    return {
+      kind: "agent",
+      agentId: parseCanonicalNonEmptyString(value.agentId, "Change author agent id"),
+      onBehalfOf: parseCanonicalNonEmptyString(
+        value.onBehalfOf,
+        "Change author on-behalf-of id",
+      ),
+    };
+  }
+  if (value.kind === "local") {
+    if (typeof value.label !== "string") {
+      throw new Error("Local change author label must be a string.");
+    }
+    return createLocalChangeAuthor(value.label);
+  }
+  throw new Error("Change author kind is invalid.");
+}
 
 export interface FileChange {
   path: string;
@@ -44,7 +107,7 @@ export interface ChangeProvenance {
   importPath?: string;
   restoreOfChangeSetId?: string;
   restoreOfPath?: string;
-  restoreDirection?: "restore" | "undo";
+  restoreDirection?: "restore" | "undo" | "redo";
 }
 
 export interface ChangeSet {
@@ -69,7 +132,7 @@ export function createChangeSet(input: {
   }
   return {
     kind: input.kind,
-    author: input.author,
+    author: parseChangeAuthor(input.author),
     summary: input.summary,
     files: [],
     boundaryCrossings: [],

@@ -8,6 +8,9 @@ import { spawnSync } from "node:child_process";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const nativeTmpdir = process.platform === "win32" ? tmpdir() : "/tmp";
 const rustManifest = join(repoRoot, "crates/workspace-kernel-spike/Cargo.toml");
+const MAX_FILES = 100_000;
+const MAX_BYTES_PER_FILE = 1024 * 1024;
+const MAX_ITERATIONS = 100;
 const rustBin = join(
   repoRoot,
   `crates/workspace-kernel-spike/target/release/dohc-workspace-kernel-spike${
@@ -15,10 +18,49 @@ const rustBin = join(
   }`,
 );
 
-function arg(name, fallback) {
-  const index = process.argv.indexOf(name);
-  if (index < 0) return fallback;
-  return process.argv[index + 1] ?? fallback;
+function parseOptions(argv) {
+  const options = {
+    files: 1000,
+    bytesPerFile: 1024,
+    iterations: 3,
+    keepFixture: false,
+  };
+  const flags = new Map([
+    ["--files", ["files", MAX_FILES]],
+    ["--bytes-per-file", ["bytesPerFile", MAX_BYTES_PER_FILE]],
+    ["--iterations", ["iterations", MAX_ITERATIONS]],
+  ]);
+  for (let index = 2; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === "--keep-fixture") {
+      options.keepFixture = true;
+      continue;
+    }
+    const option = flags.get(value);
+    if (!option) throw new Error(`unknown argument: ${value}`);
+    const [key, max] = option;
+    const next = argv[index + 1];
+    if (next === undefined || next.startsWith("--")) {
+      throw new Error(`${value} requires a value`);
+    }
+    options[key] = parsePositiveInteger(value, next, max);
+    index += 1;
+  }
+  return options;
+}
+
+function parsePositiveInteger(name, value, max) {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`${name} must be an integer >= 1`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${name} must be <= ${Number.MAX_SAFE_INTEGER}`);
+  }
+  if (parsed > max) {
+    throw new Error(`${name} must be <= ${max}`);
+  }
+  return parsed;
 }
 
 function run(command, args, options = {}) {
@@ -75,10 +117,11 @@ function summarize(runs) {
   };
 }
 
-const files = Number(arg("--files", "1000"));
-const bytesPerFile = Number(arg("--bytes-per-file", "1024"));
-const iterations = Number(arg("--iterations", "3"));
-const keepFixture = process.argv.includes("--keep-fixture");
+const options = parseOptions(process.argv);
+const files = options.files;
+const bytesPerFile = options.bytesPerFile;
+const iterations = options.iterations;
+const keepFixture = options.keepFixture;
 
 if (!Number.isInteger(files) || files < 1) {
   throw new Error("--files must be an integer >= 1");

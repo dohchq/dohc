@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   MAX_UI_STATE_FILE_BYTES,
@@ -29,6 +29,7 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  vi.restoreAllMocks();
 });
 
 const STATE = {
@@ -152,6 +153,58 @@ describe("ui-state writes never reach history", () => {
 });
 
 describe("workspace watcher history snapshots", () => {
+  it("continues observing local edits when durable history recording is unsupported", async () => {
+    const root = await tempRoot();
+    const workspace = {
+      workspaceId: "ws-history-unsupported-platform-test",
+      rootPath: root,
+      kind: "personal",
+      mode: "local-first",
+    } as CreatedWorkspace;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    let warn: ReturnType<typeof vi.spyOn> | null = null;
+    let handle: ReturnType<typeof startWorkspaceWatch> | null = null;
+
+    try {
+      Object.defineProperty(process, "platform", {
+        configurable: true,
+        value: "darwin",
+      });
+      warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let recorded = 0;
+      let resolveFirst: (() => void) | null = null;
+      const firstRecord = new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      handle = startWorkspaceWatch(workspace, {
+        settleMs: 60,
+        onRecorded: () => {
+          recorded += 1;
+          resolveFirst?.();
+        },
+      });
+      await handle.ready;
+
+      await writeFile(join(root, "notes.md"), "# Notes\n");
+      await firstRecord;
+
+      expect(recorded).toBe(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("durable local history is unavailable"),
+      );
+    } finally {
+      await handle?.stop().catch(() => undefined);
+      warn?.mockRestore();
+      if (originalPlatform) {
+        Object.defineProperty(process, "platform", originalPlatform);
+      }
+    }
+
+    await expect(readFile(join(root, ".dohc/history/index.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("records bounded before and after text for readable file edits", async () => {
     const root = await tempRoot();
     await writeFile(join(root, "notes.md"), "# Notes\nBefore\n");

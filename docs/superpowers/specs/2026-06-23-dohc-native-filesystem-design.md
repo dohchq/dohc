@@ -69,7 +69,23 @@ workspace. They are not ordinary user-created folders.
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
 For raw local filesystem writes, exact process identity is not required; the
-write can be reconciled as a local/device/session change.
+write can be captured as a local/device/session change, but that label is
+provisional until the later fail-closed policy and lock revalidation succeeds.
+Provisional captures are quarantined or hidden from normal change reporting,
+search, notifications, and sync/export projections until revalidation passes;
+failed revalidation leaves an explainable rejected/quarantined event, not an
+accepted workspace change.
+
+Phase 0's TypeScript history writer requires descriptor-relative filesystem
+mutation support for fail-closed containment. Linux uses `/proc/self/fd`.
+macOS remains gated behind the fail-closed unsupported-platform path in Phase 0;
+it has not yet been wired to `/dev/fd`, because `/dev/fd` does not currently
+provide the verified descriptor-relative child mutation contract this writer
+expects. Platforms without an equivalent anchored mutation primitive must gate
+durable history recording. Any fallback must stay
+quarantine-only or preserve the same verified descriptor/handle binding before a
+write can become durable, so fail-closed TOCTOU and path-boundary guarantees
+remain intact until the native workspace kernel provides a durable path.
 
 Reserved namespace collisions fail closed. The importer evaluates the explicit
 source-backed policy allowlist before applying reserved-namespace quarantine:
@@ -263,6 +279,16 @@ move(workspaceId, versionId, fromPath, toPath, {
   destinationPrecondition: expectedAbsent,
   idempotencyKey
 })
+replace(workspaceId, versionId, fromPath, toPath, {
+  sourceObjectId,
+  sourcePrecondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
+  destinationObjectId,
+  destinationPrecondition: exactly one of expectedBaseVersion | expectedDestinationEtag | expectedDestinationContentHash,
+  idempotencyKey bound to validated server-derived auth context,
+    actor/session, workspace/version, operation type, sourceObjectId,
+    destinationObjectId, canonical fromPath, canonical toPath, both causal
+    preconditions, and replacement payload digest
+})
 list(workspaceId, versionId, path)
 stat(workspaceId, versionId, path)
 search(workspaceId, versionId, query)
@@ -282,16 +308,24 @@ restore(workspaceId, versionId, pointInTime, {
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. APIs may use a
 validated bound session instead of repeating `workspaceId`/`versionId` in every
-call, but every read, write, list, stat, search, watch, snapshot, diff, merge,
-and restore request must resolve inside exactly one workspace and, where
-content is versioned, exactly one version. Cross-workspace path or version
-references fail closed before filesystem or storage access.
+call, but every read, write, delete, rename, move, replace, list, stat, search,
+watch, snapshot, diff, merge, and restore request must resolve inside exactly
+one workspace, and every referenced version must belong to that workspace.
+Single-version operations resolve exactly one version; multi-version operations
+such as `diff(...)` and `merge(...)` may reference multiple versions only
+inside that same workspace. `replace(...)` is still a single-workspace,
+single-version operation: `workspaceId`/`versionId`, `sourceObjectId`,
+`destinationObjectId`, and both causal preconditions must be validated against
+that same workspace/version before any filesystem or storage access occurs.
+Cross-workspace path, version, source-object, or destination-object references
+fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
 version, etag, content hash, or an absence assertion for creates.
-Create and overwrite calls must be explicit: `expectedAbsent: true` means
-"create only if no object exists at this path" and must omit `targetObjectId`.
+Create and overwrite calls must be explicit: `precondition: expectedAbsent`
+means "create only if no object exists at this path" and must omit
+`targetObjectId`.
 Overwrite must provide `targetObjectId` for the intended existing object plus
 exactly one causal freshness precondition such as `expectedEtag`,
 `expectedContentHash`, or `expectedBaseVersion`. `targetObjectId` binds object
@@ -311,23 +345,62 @@ secret-backed bytes unless the server-side authorization path explicitly grants
 secret materialization for that caller and resolution session.
 
 `delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
-mutations. They require the source `targetObjectId` plus exactly one source
-freshness precondition and an idempotency key. Rename/move destination overwrite
-is not implicit: the first contract supports only `destinationPrecondition:
-expectedAbsent`; replace-style behavior must be modeled as an explicit
-write-producing operation with source and destination object ids.
+mutations. Delete requires `targetObjectId` plus exactly one freshness
+precondition for the object being deleted and an idempotency key. Rename and
+move require the source `targetObjectId` plus exactly one source freshness
+precondition and an idempotency key. Rename/move destination overwrite is not
+implicit: the first contract supports only
+`destinationPrecondition: expectedAbsent`; replace-style behavior must be
+modeled as an explicit write-producing operation with source and destination
+object ids.
+
+`replace(...)` is the explicit overwrite/move operation. It requires
+`sourceObjectId`, `destinationObjectId`, one source causal precondition, and one
+destination causal precondition. Non-self replacements emit a single
+history/provenance event for the replacement. A replace retry is idempotent only
+when the validated auth context, workspace/version, operation type, source and
+destination object ids, canonical `fromPath`, canonical `toPath`, both causal
+preconditions, and replacement payload digest match the original request.
+`sourceObjectId === destinationObjectId` is permitted only when the source and
+destination paths are the same canonical workspace path. That self-replace is an
+idempotent no-op replacement: it validates both causal preconditions, returns
+the existing state, records no new history/provenance event, and binds the
+idempotency key to the validated auth context, workspace/version, operation
+type, single object/path, both causal preconditions, and replacement payload
+digest.
+If the paths differ, or if the two ids are equal but either precondition observes
+a different object state, the request fails as a validation error rather than
+emitting two contradictory replacement events.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
 write-producing and must carry a causal precondition for the target version.
 If the target version changed since the caller's expected base, the merge
 returns a deterministic conflict response instead of applying stale output.
 
-All client-originated write-producing operations, including file-mount captured
-saves, must carry an idempotency key bound to the actor/session, workspace,
-version, operation type, target, and causal precondition. Duplicate delivery
-with the same idempotency key returns the original result or a deterministic
+All API-originated write-producing operations must carry an idempotency key
+bound to the server-derived actor/session from validated auth context,
+workspace, version, operation type, request payload digest, and causal
+precondition. Create-only writes bind the key to canonical path plus
+`expectedAbsent`; overwrite writes additionally bind target object identity and
+their causal preconditions. The client supplies the idempotency key, not the
+actor or session namespace. Raw filesystem saves do not use a client-supplied
+idempotency key; the engine mints or claims a workspace-scoped write observation
+token for the physical save and uses that token to dedupe capture, replay, and
+history emission. Multi-object API writes such as `replace(...)` bind the key to
+the source object, destination object, canonical `fromPath`, canonical `toPath`,
+both causal preconditions including symmetric `expectedBaseVersion` guards when
+used, and the replacement payload digest so retries cannot be applied to a
+different path/object pair. Duplicate API delivery with the same idempotency key
+and full operation context returns the original result or a deterministic
 equivalent without creating extra canonical mutations, history entries,
-projections, notifications, or search-index side effects.
+projections, notifications, or search-index side effects. A replay with the same
+key but different bytes, canonical create path, `expectedAbsent`, object
+identities, or causal preconditions must fail closed instead of reusing the
+earlier result.
+Merge API writes bind the key to both `sourceVersionId` and `targetVersionId`,
+the target causal precondition, merge strategy/options, and payload digest, so a
+retry for one merge pair cannot be replayed onto another source or target
+version.
 Idempotency records must be persisted for a documented minimum replay window of
 at least 24 hours after the operation reaches a terminal result. After that
 window, a retry with the same key must fail closed with an explicit

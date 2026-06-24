@@ -44,21 +44,60 @@ Use better primitives internally:
 
 All chat primitives are workspace-scoped data. `Channel`, `ChatThread`,
 `ThreadMessage`, `ThreadLink`, `ThreadActivity`, and `ThreadReadState` all carry
-`workspaceId`, and create/read/update/delete, lookup, projection, notification,
-and search paths must include `workspaceId` in their keys. Channels are unique
-within `(workspaceId, channelSlugOrId)`. Thread links must reference
-workspace-scoped source and target objects and reject cross-workspace links by
-default. Cross-workspace `ThreadLink` records are permitted only as explicit
-shared-channel exceptions: the link must carry the owning `workspaceId`, target
-workspace/resource identity, share/grant id, and visibility scope, and every
-read, projection, search result, notification, and export must re-authorize that
-grant. Missing, expired, revoked, or ambiguous shared-channel grants fail
-closed. Grant revoke/expiry also triggers cleanup: derived projections, search
-snippets, notification payloads, export artifacts, and other materialized chat
-context for that exception must be purged or reindexed so stale shared data does
-not remain exposed after access changes. Thread activity records are append-only
-events keyed by `(workspaceId, threadId, activityId)` or an equivalent
-workspace/thread scoped sequence.
+`workspaceId`, and create/read/update/delete, watch, lookup, projection,
+notification, search, and export paths must include `workspaceId` in their keys.
+Channels are stored and referenced by the composite key `(workspaceId, channelId)`, where
+`channelId` is immutable inside its workspace; slugs, names, and display labels
+are mutable metadata only. `ChatThread.channelId`, channel joins, permissions,
+search filters, and thread links must carry `workspaceId` plus that immutable
+`channelId` rather than resolving through a slug.
+Thread links must reference workspace-scoped source and target objects and
+reject cross-workspace links by default. Cross-workspace `ThreadLink` records are
+permitted only as explicit shared-channel exceptions: create/update must
+first verify server-side that the caller is authorized to write the link's
+owning `workspaceId`; browser/client-provided identity is never trusted. The
+server must then validate the share/grant id before storage and reject forged,
+stale, revoked, expired, or ambiguous grants. The link's owning `workspaceId` is
+the workspace that contains the chat/thread, while the shared target fields
+identify the target-side workspace, resource id, resource kind, and visibility
+scope. The server-side `ThreadLink` write path must derive that visibility
+scope from authoritative target identity data before grant validation; it must
+not trust a browser/client payload-provided scope. Grant lookup helpers must
+validate the grant against the authoritative target-side workspace/resource
+identity and server-derived visibility scope, not just the grant id: the
+authoritative grant must match the owner workspace, target workspace/resource,
+and visibility scope derived by the `ThreadLink` write path before the link is
+accepted. Mismatched, forged, stale, revoked, expired, or ambiguous target/grant
+pairs fail
+closed. Every read, watch subscription, projection, search result,
+notification, and export must
+re-authorize that grant. Missing, expired, revoked, or ambiguous
+shared-channel grants fail closed. Grant revoke/expiry is transactional: the
+authoritative store tombstone or version bump is the single committed boundary,
+and cleanup fanout may begin immediately after that tombstone/version bump
+commits in the authoritative store. Active watch streams, subscriptions, export
+jobs, cached artifacts, and other derived readers for that grant must consult
+the committed revoke/expiry state directly in their read, watch, and export
+paths instead of waiting for reader-visible replica or cache propagation. Active
+watch streams and subscriptions must terminate immediately, and derived
+projections, search snippets, notification payloads, export artifacts, and other
+materialized chat context for that exception must be deleted, denied, or
+reindexed according to artifact type. Derived artifact keys must include the
+authoritative grant id or an equivalent visibility-scope version, in addition to
+`workspaceId`, so projections, snippets, notification payloads, exports,
+previews, and cached context cannot be reused across grant changes. If an
+artifact type cannot include grant/visibility scope in its key, revoke/expiry
+must transactionally invalidate every derived artifact for that grant before any
+future read/watch/export can serve from cache. Live watch/subscription state,
+future export jobs, and server-side cached export artifacts for the revoked grant
+are not reusable and must be removed or denied outright; search indexes/snippets
+may be reindexed only if the rebuilt index excludes the revoked grant. Bytes already
+downloaded by a client cannot be
+clawed back, so revocation stops future access, invalidates server-held derived
+copies, and records the audit event rather than pretending delivered data can be
+erased. Thread activity records are append-only events keyed by
+`(workspaceId, threadId, activityId)` or an equivalent workspace/thread scoped
+sequence.
 
 The UI can say chat. The system should not inherit a stream-first data model.
 
@@ -744,12 +783,31 @@ A shared channel can expose selected workspace resources:
 - selected chat threads.
 
 The channel should not grant broad workspace access. Shared channel access must
-compose with normal file/folder/version visibility.
+compose with normal file/folder/version visibility and the same grant-aware
+authorization flow used to create the external share.
 Every message, link, and projected reference inside a shared channel must be
-re-authorized against normal workspace policy before exposure. An external
-viewer can see only the chat content and work artifacts explicitly shared with
-them; non-shared files, atoms, versions, app views, agent runs, and links remain
-hidden even if they are mentioned inside an otherwise shared thread.
+re-authorized against both the current external grant and normal workspace policy
+before exposure. Message bodies, thread titles, link previews, search snippets,
+notification payloads, export payloads, attachments, inline media, embedded
+binaries, and any non-shared resource metadata exposed to external viewers are
+delivered only after the grant is revalidated for the viewer, target resource,
+visibility scope, expiry/revocation state, and capability, then policy-filtered:
+mentions of non-shared files, atoms, versions, app views, agent runs, links,
+private resource names, derived preview content, or non-text payloads are
+redacted or substituted with an access-safe placeholder. Normal message-level
+thread fields needed to render the shared conversation, such as message author,
+timestamps, channel labels, and reaction counts, may remain visible when the
+thread itself is shared and the grant remains valid. Shared HTML atoms, embedded
+app views, rich previews, and other active rich payloads must still be sanitized
+and sandboxed before any chat delivery, rendering, export, or work-artifact
+exposure to an external viewer. An external viewer can see only the chat content
+and work artifacts explicitly shared with them through a live grant; non-shared
+files, atoms, versions, app views, agent runs, links, previews, exports,
+attachments, inline media, and non-shared resource metadata remain hidden even if
+they are mentioned or embedded inside an otherwise shared thread. Revoked,
+expired, stale, or mismatched grants block delivery before message bodies,
+snippets, notifications, exports, previews, attachments, or related payloads are
+computed or returned.
 
 User-facing preview before sharing:
 
