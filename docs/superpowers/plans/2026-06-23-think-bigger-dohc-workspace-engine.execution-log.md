@@ -522,6 +522,8 @@ Fifteenth pass:
     axes so durable capture cannot be confused with user-facing history.
   - Added workspace-unique DM participant-set keys and atomic create semantics
     to prevent duplicate DM threads under concurrent creates.
+  - Tightened execution-gate override wording to documented non-sensitive
+    non-blockers only.
   - Cleaned execution-log grammar and Markdown capitalization in the review
     findings/fixes list.
 - Overrides:
@@ -621,7 +623,7 @@ Gate evidence:
       attribution.
 - [ ] Agent chat replies display as `<User Name>'s agent`.
 - [ ] CodeRabbit approved every Phase 0 PR or user approved documented
-      overrides.
+      non-sensitive non-blocker overrides.
 - [ ] Architecture/security/QA subagent reviews complete.
 - [ ] Expansion roadmap has been revised with Phase 0 findings.
 
@@ -641,7 +643,8 @@ Gate evidence:
 - [ ] Typed events are workspace-scoped.
 - [ ] Effective policy resolver covers files, links, search, notifications,
       projections, and export.
-- [ ] CodeRabbit approved every PR or user approved documented overrides.
+- [ ] CodeRabbit approved every PR or user approved documented non-sensitive
+      non-blocker overrides.
 - [ ] Security subagent review complete.
 
 ### Filesystem / Version Proof
