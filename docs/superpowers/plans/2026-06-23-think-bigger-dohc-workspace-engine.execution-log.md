@@ -56,7 +56,7 @@ secret-handling, data-loss, or review-gate blockers.
 | P0E | Minimal Chat Linked To File | branch pushed; PR pending | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0F | Search And Policy Smoke | branch pushed; PR pending | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Open after PR00 clears and stack base is reconciled. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | branch pushed; PR pending | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Open after PR00 clears; agent CLI compatibility notes recorded. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Chat auth/E2E/path/log grammar fix applied; rerun pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Kickoff pre-read path fix applied; rerun pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -255,8 +255,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after chat auth/E2E/path/log grammar
-  fix.
+- Status: fixes applied; rerun pending after kickoff pre-read path fix.
 - Findings:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -700,6 +699,13 @@ Twenty-eighth pass:
     notifications, or cursor updates.
   - Required read-state cursor updates to resolve to an existing
     `ThreadMessage` in the same `(workspaceId, threadId)` before CAS advance.
+
+Twenty-ninth pass:
+
+- Fixed CodeRabbit follow-up finding:
+  - Added repo-mandated `apps/app/AGENTS.md` and
+    `apps/app/convex/_generated/ai/guidelines.md` kickoff checks alongside the
+    existing `apps/web/AGENTS.md` check, with execution-log recording required.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -707,8 +713,7 @@ Twenty-eighth pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the chat auth/E2E/path/log grammar
-  fix.
+- Pending the latest CodeRabbit rerun after the kickoff pre-read path fix.
 
 ### Subagent Reviews
 

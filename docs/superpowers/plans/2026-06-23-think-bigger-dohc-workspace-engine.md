@@ -1067,10 +1067,12 @@ Each implementation thread should start with:
 - CodeRabbit loop instructions.
 - if the scope touches `apps/web`, the thread must read `apps/web/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches Convex code, the thread must first check for an existing
-  `convex/_generated/ai/guidelines.md` under the touched app/package, read it
-  when present, and record the checked path or absence in its execution-log
-  entry before editing.
+- if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
+  before editing and record that in its execution-log entry.
+- if the scope touches Convex code under `apps/app`, the thread must first
+  check `apps/app/convex/_generated/ai/guidelines.md`, read it when present,
+  and record the checked path or absence in its execution-log entry before
+  editing.
 
 Separate implementation chats/threads are user-visible and should only be
 created when the user explicitly asks or approves. Subagents remain the default
