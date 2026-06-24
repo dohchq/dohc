@@ -79,7 +79,12 @@ Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
 recover. Humans, agents, imports, and sync processes all get the same guarantee:
 the change is not silently lost, but it also does not become canonical workspace
-state until protection checks pass.
+state until protection checks pass. This holding area follows the same
+secret-backed durability rules as canonical history: it must not persist
+plaintext secret values in payloads, indexes, logs, explanations, or retry
+metadata. Secret-bearing ingests are stored only as encrypted references,
+redacted forms, or broker metadata until an authorized read path reconstructs
+them.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,

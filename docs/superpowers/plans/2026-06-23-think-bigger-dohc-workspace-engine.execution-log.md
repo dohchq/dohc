@@ -448,12 +448,30 @@ git diff --check
   - Required fresh server/engine-derived authorization and policy context before
     raw local writes persist into durability/history.
   - Required denied/quarantined ingests to persist in durable non-canonical
-    holding state for retry/explanation.
+    holding state for retry/explanation while following secret-safe durability
+    rules.
   - Clarified that the durability log tracks every save/write, with
     secret-backed writes represented only as encrypted references, redacted
     markers, or broker metadata.
   - Added the Convex guidelines pre-read requirement for implementation threads
     touching Convex code.
+
+Twelfth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Required denied/quarantined ingest holding areas to avoid plaintext secrets
+    in payloads, indexes, logs, explanations, and retry metadata.
+  - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
+    sequence used with `createdAt` and `messageId` for read cursor advancement.
+  - Required `.dohc/chats/<thread-id>.md` projections to classify and redact
+    secrets before writing derived markdown.
+  - Made API writes explicit about create-vs-overwrite preconditions through
+    `expectedAbsent` and `expectedObjectId`.
+  - Clarified `tracked`/`versioned` invariants and corrected `.env`
+    materialization to the canonical `local` value.
+  - Consolidated duplicate CodeRabbit loop language and made auth, ownership,
+    isolation, secrets, privacy, data-loss, and permission-boundary blockers
+    non-overridable.
   - Scoped Never Skip E2E requirements to implemented, shipped, or in-scope
     surfaces.
   - Aligned branch naming examples with the actual Phase 0 worktree topology.

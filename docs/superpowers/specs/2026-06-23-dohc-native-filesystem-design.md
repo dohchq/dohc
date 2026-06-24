@@ -205,7 +205,7 @@ browser runtimes, in-memory sandboxes, and "no real filesystem" environments:
 
 ```text
 read(path)
-write(path, bytes, { expectedBaseVersion | expectedEtag | expectedContentHash })
+write(path, bytes, { expectedBaseVersion | expectedEtag | expectedContentHash | expectedAbsent | expectedObjectId })
 list(path)
 stat(path)
 search(query)
@@ -221,10 +221,13 @@ requirement. The file mount and the API are peer views over the same versioned
 workspace engine.
 
 `write(path, bytes, ...)` is never an unconditional overwrite. It must carry a
-causal precondition such as the expected base version, etag, or content hash.
-If that precondition does not match the current workspace/version/path state,
-the API returns a conflict response preserving current and incoming content
-rather than applying the mutation.
+causal precondition such as the expected base version, etag, content hash, an
+absence assertion for creates, or the expected existing object id for overwrites.
+Create and overwrite calls must be explicit: `expectedAbsent: true` means
+"create only if no object exists at this path"; `expectedObjectId` means
+"overwrite this known object only." If the precondition does not match the
+current workspace/version/path state, the API returns a conflict response
+preserving current and incoming content rather than applying the mutation.
 
 Every async watch/status/snapshot payload must include workspace identity,
 version identity, and a request token or equivalent correlation id before it can
@@ -268,10 +271,19 @@ Examples:
 | `dist/**` | no | no | local |
 | `.cache/**` | no | no | local |
 | `scratch/**` | optional | no | local |
-| `.env` | yes | yes | local for authorized actors |
+| `.env` | yes | yes | local |
 
 This avoids naive Dropbox behavior such as syncing `node_modules`, build output,
 and cache folders.
+Materialization describes storage shape only; authorization decides whether a
+specific actor can hydrate or read local plaintext for a protected path such as
+`.env`.
+
+`tracked` and `versioned` are related but not identical. `versioned = true`
+implies `tracked = true`; `tracked = false` implies `versioned = false`.
+`tracked = true, versioned = false` is allowed for local or synced artifacts
+that should be durable or observable without appearing in user-facing version
+history.
 
 ## Workspace file policy
 
@@ -351,6 +363,7 @@ searchable = false
 visibility = "private"
 public_export = "redact"
 agent_access = "explicit"
+materialized = "local"
 
 [[rule]]
 match = ".env.team"
@@ -361,6 +374,7 @@ encrypted = true
 searchable = false
 visibility = "team"
 agent_access = "ask"
+materialized = "local"
 ```
 
 The policy file is not blindly trusted as authorization. It expresses desired
@@ -459,6 +473,7 @@ searchable: false
 visibility: private
 publicExport: redact
 agentAccess: explicit
+materialized: local
 ```
 
 For an authorized user on their own machine, `.env` can look like a normal file:

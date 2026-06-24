@@ -73,6 +73,14 @@ is unique on `(workspaceId, threadId, actorId)` and writes are upserts, not
 inserts that can duplicate rows. Updating `lastReadCursor` must compare against
 the canonical comparator before advancing.
 
+`ThreadMessage.threadSequence` is the authoritative per-thread monotonic
+sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
+creation time. It is scoped to `(workspaceId, threadId)`, never reused, and used
+with `createdAt` and `messageId` only as the deterministic ordering tuple for
+cursor advancement. Projection builders, notification workers, search indexers,
+and read-state updates must all use that same
+`(threadSequence, createdAt, messageId)` tuple.
+
 ## Core model
 
 ```text
@@ -226,6 +234,7 @@ type ThreadMessage = {
   id: string
   workspaceId: string
   threadId: string
+  threadSequence: number
   parentMessageId?: string
   authorId: string
   authorKind: 'human' | 'agent' | 'system'
@@ -350,7 +359,11 @@ Agents should still get readable context projections:
 ```
 
 That projection is primarily for reading/reference/export. It should not be the
-canonical write path for posting.
+canonical write path for posting. Before any chat text is written to this
+projected markdown file, the projection pipeline must classify secret content
+and apply the same policy-aware redaction rules used by chat rendering, search,
+notifications, summaries, and export. Derived chat files must never persist
+plaintext secrets outside the authorized secret-backed read path.
 
 ## File projections
 
@@ -388,7 +401,8 @@ preserve the edited bytes as a local recovery artifact or status item, and
 regenerate the projection from canonical chat state. The user or agent should
 be directed to post through chat actions instead of editing the projection.
 Projection renderers must use the same body escaping/sanitization rules as the
-interactive chat UI.
+interactive chat UI, and must run secret classification/redaction before
+writing any message body into `.dohc/chats/<thread-id>.md`.
 
 ## Integration with files and versions
 

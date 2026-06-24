@@ -176,8 +176,8 @@ Those are engine-room concepts.
 
 - No giant unreviewable implementation PR.
 - Every PR must have targeted tests, regression tests, and relevant E2E.
-- Every PR must go through CodeRabbit review and a fix loop until approval or a
-  documented user override.
+- Every PR must go through the canonical CodeRabbit loop until approval or an
+  explicitly approved non-sensitive override.
 - Every security-sensitive PR must use subagent review.
 - Every UI PR must include Playwright/visual QA where applicable.
 - No weakening assertions or skipping tests to move forward.
@@ -1128,7 +1128,8 @@ Open PR
   -> document rejected findings with reason
   -> rerun targeted/full tests
   -> request/re-run review if needed
-  -> repeat until CodeRabbit approves or user override is explicit
+  -> repeat until CodeRabbit approves or the user explicitly approves a
+     documented non-sensitive override
 ```
 
 CodeRabbit findings must not be "resolved" by:
@@ -1137,7 +1138,13 @@ CodeRabbit findings must not be "resolved" by:
 - removing coverage.
 - bypassing auth.
 - hiding failed E2E.
-- marking security concerns as follow-up without user approval.
+- marking security concerns as follow-up.
+
+Authorization, ownership, workspace isolation, secrets, privacy, data-loss, and
+permission-boundary findings are non-overridable blockers for the relevant PR.
+Overrides are only allowed for documented non-blockers such as preference
+disagreements, false positives, or intentionally deferred polish, and only after
+explicit user approval is recorded in the PR and execution log.
 
 ### Execution Log
 
@@ -2361,20 +2368,12 @@ Reproduce
 
 ### CodeRabbit Loop
 
-```text
-Get review
-  -> classify findings
-  -> fix all valid findings
-  -> add tests where finding reveals missing coverage
-  -> rerun test matrix for touched area
-  -> ask for re-review
-```
-
-Do not move to the next PR with unresolved CodeRabbit findings unless:
-
-- finding is demonstrably false or not applicable.
-- reason is documented in PR and execution log.
-- user approves the override.
+Use the canonical CodeRabbit loop defined in `Review And QA Orchestration`
+above. Do not move to the next PR with unresolved CodeRabbit findings unless
+the finding is a documented non-sensitive non-blocker and the user explicitly
+approves the override in the PR and execution log. Authorization, ownership,
+workspace isolation, secrets, privacy, data-loss, and permission-boundary
+findings remain non-overridable blockers.
 
 ## Cross-System Acceptance Scenarios
 
