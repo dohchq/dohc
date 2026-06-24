@@ -466,8 +466,9 @@ pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 Twelfth pass:
 
 - Fixed CodeRabbit follow-up findings:
-  - Required denied/quarantined ingest holding areas to avoid plaintext secrets
-    in payloads, indexes, logs, explanations, and retry metadata.
+  - Required denied/quarantined ingest holding areas to be secret-safe and avoid
+    plaintext secrets in payloads, indexes, logs, explanations, and retry
+    metadata.
   - Defined `ThreadMessage.threadSequence` as the canonical per-thread monotonic
     sequence used with `createdAt` and `messageId` for read cursor advancement.
   - Required `.dohc/chats/<thread-id>.md` projections to classify and redact
@@ -537,6 +538,13 @@ Fifteenth pass:
     warning from the local shell.
   - Updated the Phase 0 lane status table to show P0A-P0G branches as pushed
     with PRs pending until PR00 clears and the stack base is reconciled.
+
+Sixteenth pass:
+
+- Fixed CodeRabbit follow-up findings:
+  - Replaced legacy chats wording with dohc Chats terminology.
+  - Cleaned the denied/quarantined ingest holding-area grammar in the execution
+    log while preserving the secret-safe durability requirement.
 - Overrides:
 
 ### Unresolved Findings

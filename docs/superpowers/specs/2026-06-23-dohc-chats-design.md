@@ -650,7 +650,7 @@ They will not see:
 - secret-backed files
 ```
 
-This connects Better Chats directly to the versioned workspace and native
+This connects dohc Chats directly to the versioned workspace and native
 filesystem designs.
 
 ## Resurfacing
