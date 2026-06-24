@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 in review; versioned async/provenance fix applied; rerun pending
+Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | fixes applied; rerun pending | docs sanity + brand guard | Versioned async/provenance fix applied; docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | CodeRabbit raised 0 issues on the latest committed diff; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -267,9 +267,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: fixes applied; rerun pending after versioned async/provenance fix.
-- Current findings: versioned async/provenance fix applied; pending latest
-  rerun.
+- Status: approved with 0 issues on the latest committed diff.
+- Current findings: none.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -928,6 +927,14 @@ Fifty-first pass:
   - Clarified that passive ordinary OS file edits may stay actor-neutral, but
     dohc-controlled agent/tool/skill-turn ingest cannot downgrade missing turn
     proof into unverified local provenance.
+
+Fifty-second pass:
+
+- CodeRabbit approved the latest committed diff with 0 issues after the
+  versioned async/provenance fixes.
+- Updated PR00 status, CodeRabbit status, and unresolved findings to record the
+  clean review while leaving the docs-only local-agent-CLI exception pending
+  human approval.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
@@ -935,7 +942,6 @@ Fifty-first pass:
 
 ### Unresolved Findings
 
-- Pending the latest CodeRabbit rerun after the versioned async/provenance fix.
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
 
