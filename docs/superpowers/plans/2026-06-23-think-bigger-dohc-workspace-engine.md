@@ -113,6 +113,8 @@ Those are engine-room concepts.
 - Stable object IDs are canonical. Paths are aliases.
 - Every version must have clear ancestry/fork-point metadata.
 - Meaningful state must be recoverable.
+- Async workspace-scoped responses must be gated by the active
+  workspace/request token or abort signal before mutating UI state.
 - Conflicts must preserve both sides.
 - No silent last-writer-wins for tracked workspace content.
 - No raw conflict markers as the primary UX.
@@ -148,9 +150,9 @@ Those are engine-room concepts.
 
 - Authorization is derived server-side or engine-side. Clients, browsers,
   agents, and projections never provide trusted identity claims.
-- Every object, event, projection, file, folder, version, chat, channel, DM,
-  message, share, app, database, secret reference, search index entry, and
-  export is scoped to a workspace.
+- Every atom, capture, object, event, projection, file, folder, version, history
+  moment, chat, channel, DM, message, share, app, database, secret reference,
+  search index entry, and export is scoped to a workspace.
 - Agent writes must respect user locks, protected paths, folder/file access,
   sharing boundaries, and skill-turn gates.
 - HTML atoms remain sandboxed and sanitized.

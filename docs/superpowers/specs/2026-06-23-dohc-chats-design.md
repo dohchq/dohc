@@ -381,9 +381,11 @@ If `parentMessageId` is present, it must reference an existing message in the
 same workspace and `threadId`, must not equal the message's own `id`, and must
 not introduce a cycle in the ancestry chain. `ThreadMessage.workspaceId` must
 match `ChatThread.workspaceId` wherever messages are written, read, indexed,
-notified, or projected. Message create/update paths must validate this before
-rendering nested replies, indexing, notification fanout, or projection
-generation.
+notified, or projected. Message create/update paths must reject the write before
+persistence unless the parent reference exists in the same workspace/thread, is
+not self-referential, and does not introduce a cycle. Rendering nested replies,
+indexing, notification fanout, and projection generation recheck the same
+invariant as downstream safeguards only.
 
 `ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
 text by default or sanitize through an allowlisted formatting subset before
@@ -588,8 +590,9 @@ projection path shape; the raw thread id must not be used as a projection
 filename. Projection writers must map the canonical thread id and visibility
 scope to a deterministic filename using one fixed algorithm across all runtimes.
 The projection scope is `owner` for the workspace-private internal projection,
-or a grant-aware value such as `shareGrant:<grantId>:<visibilityScopeHash>` for
-shared-channel/export materializations. Compute
+or a grant-aware value such as `shareGrant:<grantId>:<projectionScopeId>`, where
+`projectionScopeId` is a server-issued opaque identifier with one canonical
+serialization for shared-channel/export materializations. Compute
 `sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind + "\0" +
 projectionScope)`, where each field is first normalized to Unicode NFC and
 encoded as UTF-8 bytes. Then encode the digest as lowercase RFC 4648 base32 with

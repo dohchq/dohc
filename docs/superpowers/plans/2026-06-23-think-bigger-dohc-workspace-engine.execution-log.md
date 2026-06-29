@@ -57,11 +57,11 @@ own PR, tests, and CodeRabbit approval.
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR thread | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and CodeRabbit. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and CodeRabbit. |
 | P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR thread | not opened | blocked on CodeRabbit service hang after latest pushed fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes are pushed in `1f39e60`. Three reruns after that hung before findings/completion. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
-| P0D | Compare, Clean Merge, Conflict Preservation | restacked on P0C; not approved | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and CodeRabbit. |
-| P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
-| P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
-| P0G | Proof Arc QA And CodeRabbit Hardening | restacked on P0F; local validation passed; not approved | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | pending rerun after latest follow-up fixes | docs sanity + brand guard | Latest local fixes address the current CodeRabbit follow-up pass; rerun pending. Docs-only local-agent-CLI exception pending. |
+| P0D | Compare, Clean Merge, Conflict Preservation | current provisional stack after P0C; not opened; not approved | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR thread | not opened | not run for lane PR | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and CodeRabbit. |
+| P0E | Minimal Chat Linked To File | current provisional stack after P0D; not opened; not approved | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | not opened | not run for lane PR | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
+| P0F | Search And Policy Smoke | current provisional stack after P0E; not opened; not approved | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | not opened | not run for lane PR | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | current provisional stack after P0F; local validation passed; not opened; not approved | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | not opened | not run for lane PR | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR; latest follow-up fixes pending rerun | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | pending rerun after latest follow-up fixes | docs sanity + brand guard | Latest local fixes address the current CodeRabbit follow-up pass; rerun pending. Docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -273,7 +273,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 9 issues; local fixes are
   applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -1113,6 +1113,30 @@ Sixty-third pass:
     ARIA semantics, contrast, screen reader behavior, and WCAG regressions.
   - Replaced the later duplicate CodeRabbit guidance with a reference to the
     canonical CodeRabbit Loop section.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixty-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added source-side merge preconditions to freeze both source and target
+    versions before merge execution.
+  - Clarified local capture can be recorded in the local durability log while
+    promotion to shared version history waits for fresh authoritative validation.
+  - Replaced invalid optional scratch policy booleans with schema-valid `no`
+    values.
+  - Made chat parent-message validation a pre-persistence invariant for message
+    create/update paths.
+  - Standardized grant-aware chat projection scope on a server-issued opaque
+    `projectionScopeId`.
+  - Added async workspace-scoped response gating to the mega-plan robustness
+    invariants.
+  - Added atoms, captures, and history moments to the workspace-scoping
+    invariant.
+  - Synced the PR00 and P0D-P0G status table rows with the current provisional
+    stack and latest review state.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

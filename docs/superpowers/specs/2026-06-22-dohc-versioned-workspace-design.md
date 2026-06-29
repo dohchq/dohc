@@ -358,6 +358,7 @@ watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
 merge(workspaceId, sourceVersionId, targetVersionId, {
+  sourcePrecondition: exactly one of expectedSourceSnapshot | expectedSourceVersionEtag,
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
   idempotencyKey
 })
@@ -407,6 +408,9 @@ caller and resolution session.
 `rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
 write-producing operations and must use the same workspace/version scoping,
 causal guard, idempotency, and conflict-response rules as `write(...)`.
+Merge must guard both the source and target versions: the source snapshot/etag
+freezes what is being merged, and the target snapshot/etag freezes where it is
+being applied.
 Delete requires the path's `targetObjectId`. Rename and move require the source
 `sourceObjectId` plus exactly one source freshness precondition. Rename/move with
 `destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic overwrite uses

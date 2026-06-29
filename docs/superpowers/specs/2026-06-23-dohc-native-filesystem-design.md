@@ -116,12 +116,13 @@ Identity-light capture is allowed; identity-light commit is not. During
 reconciliation, each raw local write must be revalidated against workspace
 scope, active locks, folder/atom access, sharing boundaries, skill-turn gates,
 and effective policy before it is persisted into version history. Unauthorized
-or indeterminate writes must be quarantined or rejected rather than merged.
+or indeterminate writes must be quarantined rather than merged into canonical
+history. Local durability logging may still record the raw capture; promotion to
+shared history waits for fresh server/engine-derived validation.
 Authorization/policy resolution is fail-closed: if authoritative workspace
 membership, share state, lock state, or effective-policy inputs are stale,
-unavailable, or indeterminate, the write remains quarantined and is not
-persisted to durability/history until fresh server/engine-derived validation
-succeeds.
+unavailable, or indeterminate, the write remains quarantined and is not promoted
+into version history until fresh server/engine-derived validation succeeds.
 
 ## Same rules for humans and agents
 
@@ -279,6 +280,7 @@ watch(workspaceId, versionId, path)
 snapshot(workspaceId, versionId)
 diff(workspaceId, versionAId, versionBId)
 merge(workspaceId, sourceVersionId, targetVersionId, {
+  sourcePrecondition: exactly one of expectedSourceSnapshot | expectedSourceVersionEtag,
   precondition: exactly one of expectedTargetSnapshot | expectedTargetVersionEtag,
   idempotencyKey
 })
@@ -330,9 +332,10 @@ precondition, and idempotency key. That gives temp-file-then-rename saves a
 one-call atomic replace path without allowing a path-only overwrite.
 
 `merge(workspaceId, sourceVersionId, targetVersionId, ...)` is also
-write-producing and must carry a causal precondition for the target version.
-If the target version changed since the caller's expected base, the merge
-returns a deterministic conflict response instead of applying stale output.
+write-producing and must carry causal preconditions for both the source and
+target versions. If either version changed since the caller's expected source
+snapshot/etag or target base, the merge returns a deterministic conflict
+response instead of applying stale output.
 
 API-originated write-producing operations must carry an idempotency key bound to
 the actor/session, workspace, version, operation type, target, and causal
@@ -427,7 +430,7 @@ Examples:
 | `node_modules/**` | no | no | no | local | no |
 | `dist/**` | no | no | no | local | no |
 | `.cache/**` | no | no | no | local | no |
-| `scratch/**` | optional | optional | no | local | no |
+| `scratch/**` | no | no | no | local | no |
 | `.env` | yes | yes | yes | local | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
