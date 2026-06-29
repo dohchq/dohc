@@ -510,7 +510,7 @@ type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
 
 type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }
-  | { reactionId?: never; reactionKey: string; reactionActorId: string }
+  | { reactionId?: never; reactionKey: string; reactionActorId?: never }
 
 type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
   messageId: string
@@ -551,12 +551,17 @@ flows that cannot recover a prior body revision must map to
 snapshot, and is handled explicitly by history/export/replay as incomplete legacy
 evidence rather than a normal in-system delete. Reaction events must satisfy
 exactly one identity mode: either a
-stable `reactionId`, or the complete deterministic tuple `(messageId,
-reactionActorId, reactionKey)`. Authorized history and export paths reconstruct
-the revision trail from these events. Normal chat rendering, search,
-notifications, projections, and summaries use the current `ThreadMessage.body`
-unless policy explicitly materializes historical revisions. Legal erasure may
-replace `previousBody` with a redacted snapshot while retaining edit provenance.
+stable `reactionId`, or the complete deterministic tuple `(messageId, actorId,
+reactionKey)`. `ThreadActivityBase.actorId` is the authoritative reaction actor
+identity for authorization, replay, export, notification fanout, and idempotency.
+`ReactionIdentity` must not introduce a second reaction actor field; legacy
+imports that contain a mismatched reaction actor must normalize to the event
+`actorId` or fail closed before replay.
+Authorized history and export paths reconstruct the revision trail from these
+events. Normal chat rendering, search, notifications, projections, and summaries
+use the current `ThreadMessage.body` unless policy explicitly materializes
+historical revisions. Legal erasure may replace `previousBody` with a redacted
+snapshot while retaining edit provenance.
 For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
 `linkedWork` cache is rebuilt. Reaction add/remove replay affects one exact
@@ -620,8 +625,8 @@ enforce workspace scope on every entity and result:
 - `read_chat`
 - `create_chat`
 - `reply_to_chat`
-- `edit_message`
-- `delete_message`
+- `edit_chat_message`
+- `delete_chat_message`
 - `add_reaction`
 - `remove_reaction`
 - `mark_thread_read`

@@ -216,6 +216,8 @@ Date completed:
 
 ## PR 00 - Mega Plan And Readiness Scaffold
 
+> Historical entry; see Current PR Snapshot above for live status.
+
 Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: `<current checkout>`
@@ -1300,6 +1302,26 @@ Seventy-first pass:
   - Extended DM membership revocation fail-closed behavior to edits and deletes.
   - Closed chat `ThreadLink.targetType` through an enum and server-side resolver
     registry with fail-closed handling for unknown or unregistered target types.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Made accepted holding-record retention explicit: TTL, retry horizon,
+    compaction, and colder-storage policies cannot delete reconstructable
+    accepted payloads before canonicalization or explicit operator disposition.
+  - Added a negative-first Rust bridge acceptance gate requiring P0R/P0F/P0G to
+    reject or ignore forged client-supplied actor/workspace/version metadata.
+  - Added PR21 migration scope and tests for rebuilding, invalidating, or
+    reindexing workspace-scoped derived projections after migration and rollback.
+  - Marked the PR00 execution-log entry as historical-only, with Current PR
+    Snapshot remaining the live status source.
+  - Made `ThreadActivityBase.actorId` the authoritative reaction actor identity.
+  - Renamed chat edit/delete actions to `edit_chat_message` and
+    `delete_chat_message` for API consistency.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

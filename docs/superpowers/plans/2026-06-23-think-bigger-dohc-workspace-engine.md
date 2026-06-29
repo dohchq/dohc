@@ -669,6 +669,14 @@ daemons all must enforce channel binding plus server/engine-derived actor,
 workspace, and version resolution on every request. Localhost alone is not a
 security boundary.
 
+Rust spike acceptance is blocked unless this binding is proven negative-first:
+P0R must add a bridge test that sends forged client-supplied actor, workspace,
+and version metadata and verifies the bridge rejects or ignores those fields,
+resolving the actor, workspace, and version from the authenticated local channel
+and server/engine context instead. P0F and P0G must carry that same negative test
+through the policy/search and proof-arc gates so client-provided identity
+metadata never becomes a trusted input to the local kernel bridge.
+
 Adoption criteria after the spike:
 
 - Rust packaging is reliable across target OSes.
@@ -2290,6 +2298,11 @@ substrate without data loss.
 - Migrate atoms/docs into Main version.
 - Migrate apps/sites/data into file policy defaults.
 - Preserve existing shares.
+- Rebuild, invalidate, or reindex all workspace-scoped derived projections after
+  substrate migration, including search, activity, notifications, status, and
+  linked-work projections. Projection refresh must enforce the new workspace
+  scoping rules consistently for every migrated atom, folder, entity, share, and
+  capture before cutover.
 - Preserve current agent run history or map to moments where possible.
 - Add rollback for migration.
 
@@ -2298,6 +2311,7 @@ substrate without data loss.
 - representative old workspace fixtures.
 - migration idempotency.
 - migration rollback.
+- derived projection rebuild or invalidation after migration and rollback.
 - legacy share compatibility.
 - legacy chat membership/link/read-state compatibility.
 - legacy agent run/history compatibility.
