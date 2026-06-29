@@ -53,12 +53,12 @@ shared-channel exceptions: the link must carry the owning `workspaceId`, target
 workspace/resource identity, share/grant id, and visibility scope, and every
 read, projection, search result, notification, and export must re-authorize that
 grant. Missing, expired, revoked, or ambiguous shared-channel grants fail
-closed. Grant revoke/expiry also triggers cleanup: derived projections, search
-snippets, notification payloads, export artifacts, and other materialized chat
-context for that exception must be purged or reindexed so stale shared data does
-not remain exposed after access changes. Thread activity records are append-only
-events keyed by `(workspaceId, threadId, activityId)` or an equivalent
-workspace/thread scoped sequence.
+closed. Grant revoke/expiry also triggers cleanup of server-held derived
+projections, search snippets, notification caches, export staging artifacts, and
+other service-owned materialized chat context for that exception so stale shared
+data does not remain exposed after access changes. Thread activity records are
+append-only events keyed by `(workspaceId, threadId, activityId)` or an
+equivalent workspace/thread scoped sequence.
 
 The UI can say chat. The system should not inherit a stream-first data model.
 
@@ -254,6 +254,16 @@ type DmChatThread = ChatThreadBase & {
 
 type ChatThread = ChannelChatThread | DmChatThread
 ```
+
+`ThreadLink` records are the canonical source for linked work.
+`ChatThread.linkedWork` is a derived read model/cache of the current
+non-tombstoned links, and `ThreadActivity` `link_added`/`link_removed` events are
+append-only provenance. Link add/remove flows must update the canonical
+`ThreadLink` record and append the corresponding activity in the same transaction
+or serialized unit of work, then rebuild/invalidate `ChatThread.linkedWork`,
+projections, search, and notifications from canonical links. If the derived list
+disagrees with `ThreadLink`, the engine treats the derived list as stale and
+repairs it instead of using it for authorization or export.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same

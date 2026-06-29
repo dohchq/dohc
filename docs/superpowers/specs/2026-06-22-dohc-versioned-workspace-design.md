@@ -369,14 +369,17 @@ The filesystem is one interface. It should not be the only possible execution
 environment.
 
 Read-only API responses and streamed events must be bound to the requested
-`workspaceId`, `versionId`, and a request token, epoch, or equivalent
-correlation id. Async reads such as `list(...)`, `stat(...)`, `search(...)`,
-`snapshot(...)`, and `diff(...)` must accept abort semantics or an equivalent
-request-cancellation contract, and callers must ignore responses whose token,
-workspace, or version no longer matches the active view. `watch(...)` events
-must carry the same binding and must stop or no-op after abort, workspace
-switch, or version switch. A stale read or watch event from one workspace must
-never repaint or leak data into a newer workspace context.
+`workspaceId`, every requested version identifier, and a request token, epoch, or
+equivalent correlation id. Single-version reads bind `versionId`; pairwise reads
+bind the full requested pair such as `versionAId`/`versionBId`; merge/diff
+previews bind their source and target version identifiers. Async reads such as
+`list(...)`, `stat(...)`, `search(...)`, `snapshot(...)`, and `diff(...)` must
+accept abort semantics or an equivalent request-cancellation contract, and
+callers must ignore responses whose token, workspace, or any requested version
+identifier no longer matches the active view. `watch(...)` events must carry the
+same binding and must stop or no-op after abort, workspace switch, or version
+switch. A stale read or watch event from one workspace or version set must never
+repaint or leak data into a newer workspace context.
 
 API writes are never unconditional overwrites. Create and overwrite modes are
 explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.

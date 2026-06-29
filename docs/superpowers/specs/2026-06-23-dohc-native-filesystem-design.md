@@ -230,7 +230,9 @@ pin code/kernel/**
 ```
 
 Materialization state must be legible. Users and agents should be able to tell
-whether a subtree is local, lazy, remote-only, or pinned.
+whether a subtree is local, lazy, virtual, or pinned. Policy schema, status
+reporting, and UI must use `virtual` as the canonical label for a
+non-materialized path that remains addressable through dohc APIs.
 
 ## API-native access
 
@@ -332,19 +334,28 @@ write-producing and must carry a causal precondition for the target version.
 If the target version changed since the caller's expected base, the merge
 returns a deterministic conflict response instead of applying stale output.
 
-All client-originated write-producing operations, including file-mount captured
-saves, must carry an idempotency key bound to the actor/session, workspace,
-version, operation type, target, and causal precondition. Duplicate delivery
-with the same idempotency key returns the original result or a deterministic
-equivalent without creating extra canonical mutations, history entries,
-projections, notifications, or search-index side effects.
-Idempotency records must be persisted for a documented minimum replay window of
-at least 24 hours after the operation reaches a terminal result. After that
-window, a retry with the same key must fail closed with an explicit
+API-originated write-producing operations must carry an idempotency key bound to
+the actor/session, workspace, version, operation type, target, and causal
+precondition. Duplicate delivery with the same idempotency key returns the
+original result or a deterministic equivalent without creating extra canonical
+mutations, history entries, projections, notifications, or search-index side
+effects. Idempotency records must be persisted for a documented minimum replay
+window of at least 24 hours after the operation reaches a terminal result. After
+that window, an API retry with the same key must fail closed with an explicit
 `idempotency_expired` response or a deterministic conflict response; it must not
-silently apply as a new mutation. Implementations may garbage-collect expired
-key tombstones only after the documented maximum retry horizon has passed or the
+silently apply as a new mutation. Implementations may garbage-collect expired key
+tombstones only after the documented maximum retry horizon has passed or the
 operation namespace is rotated.
+
+Mounted-folder and file-watch captured saves cannot rely on caller-generated API
+idempotency keys, because native editors and shell tools do not provide them.
+Those paths use engine-side capture deduplication instead: bind the capture to
+the watcher/session id, workspace, version, path, observed filesystem event
+sequence when available, file size/mtime where trustworthy, content hash, and
+causal base token. Deduplication may collapse duplicate native events into one
+canonical mutation, but it must not be exposed as the API idempotency-key
+contract and must still preserve conflicts when the causal base no longer
+matches.
 
 `restore(workspaceId, versionId, pointInTime, ...)` is also write-producing, but
 it is never a destructive rollback. A successful restore records a new

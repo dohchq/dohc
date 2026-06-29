@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending; P0A-P0G stack restacked through P0G
+Status: PR 00 latest CodeRabbit follow-up fixes pending rerun; docs-only local-agent-CLI exception pending; P0A-P0G stack restacked through P0G
 Created: 2026-06-23
 
 Plan:
@@ -61,7 +61,7 @@ own PR, tests, and CodeRabbit approval.
 | P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
 | P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | restacked on P0F; local validation passed; not approved | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | not opened | pending | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
-| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved with 0 findings | docs sanity + brand guard | CodeRabbit approved the latest follow-up pass. Docs-only local-agent-CLI exception pending. |
+| 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | pending rerun after latest follow-up fixes | docs sanity + brand guard | Latest local fixes address the current CodeRabbit follow-up pass; rerun pending. Docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 03 | Snapshot And Restore Foundation | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -272,8 +272,9 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 
 ### CodeRabbit
 
-- Status: approved with 0 findings.
-- Current findings: none after the latest CodeRabbit follow-up pass.
+- Status: latest follow-up fixes pending rerun.
+- Current findings: latest CodeRabbit pass reported 5 issues; local fixes are
+  applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
     authorization, locks, protected paths, and visibility-boundary checks before
@@ -1017,6 +1018,25 @@ Fifty-eighth pass:
 - Updated PR00 status, CodeRabbit status, and unresolved findings to record the
   clean review while leaving the docs-only local-agent-CLI exception pending
   human approval.
+
+Fifty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the final confirmation rerun:
+  - Bound read/watch responses to every requested version identifier, including
+    diff/merge version pairs, plus workspace and request token/epoch.
+  - Limited shared-channel grant-revocation cleanup to server-held projections,
+    search snippets, notification caches, export staging artifacts, and other
+    service-owned materializations.
+  - Declared `ThreadLink` the canonical source for chat linked work,
+    `ChatThread.linkedWork` a derived read model/cache, and link activity events
+    append-only provenance.
+  - Standardized native filesystem materialization terminology on `virtual`.
+  - Scoped idempotency keys to API-originated write mutations and separated
+    mounted-folder/file-watch deduplication from API idempotency semantics.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
 
 ### Unresolved Findings
 
