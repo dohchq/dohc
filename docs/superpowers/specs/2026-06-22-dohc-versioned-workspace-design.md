@@ -422,7 +422,7 @@ caller and resolution session.
 
 `read(...)`, `list(...)`, `stat(...)`, `search(...)`, `watch(...)`,
 `snapshot(...)`, and `diff(...)` are read-only scoped views. `delete(...)`,
-`rename(...)`, `move(...)`, `merge(...)`, and `restore(...)` are
+`rename(...)`, `move(...)`, `replace(...)`, `merge(...)`, and `restore(...)` are
 write-producing operations and must use the same workspace/version scoping,
 causal guard, idempotency, and conflict-response rules as `write(...)`.
 Merge must guard both the source and target versions: the source snapshot/etag
@@ -709,9 +709,10 @@ The first proof should be small but real:
     TTL retention bounds, payload-size caps, ingest rate limits, and
     deterministic backpressure prevent storage exhaustion or canonical
     durability starvation without silently dropping accepted holding records.
-14. E2E proves `write(...)`, `merge(...)`, and `restore(...)` fail closed when
-    causal preconditions are missing or multiple/incompatible, and only proceed
-    when exactly one valid causal guard is supplied.
+14. E2E proves `write(...)`, `merge(...)`, `replace(...)`, and `restore(...)`
+    fail closed when required causal preconditions are missing or incompatible,
+    and only proceed when the operation-specific guard set is supplied and each
+    guard is individually valid.
 
 This proves the heart of the idea without forcing a full rewrite of every
 content type on day one.

@@ -320,6 +320,13 @@ projections, search, and notifications from active canonical links only. If the
 derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
+Active link creation is idempotent by canonical uniqueness key:
+`(workspaceId, threadId, targetWorkspaceId, targetType, targetId,
+targetVersionRef, shareGrantId, visibilityScope)`. A retry for the same key must
+upsert or no-op against the existing active `ThreadLink` and must not create a
+second active link or duplicate `link_added` fanout. `ChatThreadProjection.linkedWork`,
+projections, search, and export build from one active canonical link per
+uniqueness key.
 Links are never hard-deleted in normal operation: removal sets `deletedAt` and
 `deletedById`, and link visibility reads only non-tombstoned records. A link is
 uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
@@ -576,6 +583,12 @@ identity for authorization, replay, export, notification fanout, and idempotency
 `ReactionIdentity` must not introduce a second reaction actor field; legacy
 imports that contain a mismatched reaction actor must normalize to the event
 `actorId` or fail closed before replay.
+Reaction writes are idempotent by the chosen identity mode. A stable
+`reactionId` dedupes by that id; tuple mode treats `(messageId, actorId,
+reactionKey)` as one idempotent key. Repeated `reaction_added` or
+`reaction_removed` writes for the same key must return the existing result or a
+deterministic no-op and must not create duplicate activity, reactions,
+notifications, export entries, or replay effects.
 Authorized history and export paths reconstruct the revision trail from these
 events. Normal chat rendering, search, notifications, projections, and summaries
 use the current `ThreadMessage.body` unless policy explicitly materializes

@@ -26,7 +26,7 @@ append-only history.
 - **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
   CodeRabbit rerun must complete cleanly before completion or merge-readiness.
 - **P0D-P0G lane state:** current provisional stack after P0C/P0D/P0E/P0F,
-  respectively; lane PRs are not opened, not approved, and have not run
+  respectively; lane PRs are pending/opened, not approved, and have not run
   lane-specific CodeRabbit. P0G local validation has passed on the provisional
   integrated stack.
 
@@ -314,7 +314,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1405,6 +1405,26 @@ Seventy-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Seventy-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added `replace(...)` to the versioned workspace write-producing operation
+    list and to the E2E guard-set proof statement.
+  - Made PR 17 primary to the Search/Policy workstream and a reviewer/dependency
+    for Chats Product instead of assigning it to both lanes.
+  - Added idempotency/uniqueness rules for reaction writes by stable
+    `reactionId` or deterministic `(messageId, actorId, reactionKey)`.
+  - Added active `ThreadLink` uniqueness by canonical target tuple so retries
+    cannot create duplicate active links or fanout.
+  - Updated the current PR snapshot to reflect pending/opened provisional lane
+    PR state.
+  - Added holding records, durability-log entries, and idempotency tombstones to
+    the Phase 0 workspace-scoping checklist.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
@@ -1473,7 +1493,8 @@ Gate evidence:
 - [ ] Server/engine-derived actor identity is enforced for write paths; callers
       cannot assert trusted user identity.
 - [ ] Every atom, folder, entity, file, version, chat, share, capture, event,
-      search result, and projection is workspace-scoped.
+      search result, projection, holding record, durability-log entry, and
+      idempotency tombstone is workspace-scoped.
 - [ ] Agent writes respect user locks, protected paths, folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.

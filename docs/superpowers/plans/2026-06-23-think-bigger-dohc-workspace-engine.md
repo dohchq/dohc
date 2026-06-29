@@ -1094,7 +1094,8 @@ dohc chats:
 - **Rust Kernel Spike Workstream:** PR P0R.
 - **Versioned Store Workstream:** PR P0B/P0D if merge work stays tightly coupled.
 - **Filesystem Capture Workstream:** PR P0C and later PR 05/06/09/10.
-- **Chats Product Workstream:** PR P0E and later PR 12-17.
+- **Chats Product Workstream:** PR P0E and later PR 12-16, with PR 17 as a
+  required product reviewer/dependency.
 - **Search/Policy Workstream:** PR P0F and later PR 04/11/17/18.
 - **QA/Performance Hardening Workstream:** PR P0G and later release gates.
 
