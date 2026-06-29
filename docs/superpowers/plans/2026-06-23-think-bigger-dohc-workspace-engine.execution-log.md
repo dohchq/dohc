@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** 2026-06-30 PR00 review loop after commit `935bbd6`.
+- **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `935bbd6` reported 5 issues;
-  hundred-first pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `9997a28` reported 5 issues;
+  hundred-second pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1314,7 +1314,7 @@ Sixty-ninth pass:
   - Relaxed API version cardinality so operations resolve in exactly one
     workspace while supplying the version identifiers each operation needs.
   - Renamed implementation lane terminology to internal workstreams and reserved
-    explicit approval requirements for user-visible Codex chats.
+    explicit approval requirements for user-visible agent chats.
   - Tightened `ChatThreadProjection.linkedWork` to active non-tombstoned links
     only.
 - Overrides:
@@ -1900,6 +1900,27 @@ Hundred-first pass:
     any future reparenting requiring a dedicated replayed activity.
   - Added server-derived `authzScopeId` to mention notification activity and the
     deterministic `notificationId` key so shared/redacted scopes cannot collide.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Replaced legacy named-chat wording with neutral user-visible agent chats
+    terminology.
+  - Changed Current PR Snapshot `Last updated` to derive from the newest owning
+    pass entry instead of carrying a literal date that can become stale or
+    future-looking.
+  - Defined canonical `UInt64DecimalString` encoding and BigInt-safe comparison
+    for `WorkspaceAsyncPayload.sequence`.
+  - Clarified `.env` sync semantics so `synced` means encrypted/opaque secret
+    reference or blob replication, not plaintext replication or server-side
+    plaintext hydration.
+  - Made mention `notificationId` canonical across runtimes with percent-encoded
+    components, literal separators, canonical `bodyRevision`, canonical mention
+    actor JSON, and lowercase hex SHA-256 hashing.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

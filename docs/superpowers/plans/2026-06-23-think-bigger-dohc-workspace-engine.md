@@ -1159,7 +1159,7 @@ Each implementation workstream should start with:
   and record the checked path or absence in its execution-log entry before
   editing.
 
-Separate user-visible Codex chats are different from internal workstreams and
+Separate user-visible agent chats are different from internal workstreams and
 should only be created when the user explicitly asks or approves. Subagents
 remain the default for short bounded reviews inside the current thread.
 

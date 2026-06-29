@@ -687,18 +687,23 @@ same grant/scope resolver used by shared chat and linked-work projections, and
 client-supplied scope ids are ignored or rejected before enqueue.
 `notificationId` is deterministic for a mention notification lifecycle:
 `mention:<workspaceId>:<threadId>:<authzScopeId>:<messageId>:<bodyRevision>:<sha256(canonicalMentionedActorIdsJson)>`.
-`canonicalMentionedActorIdsJson` is the UTF-8 JSON array of the canonical,
-deduplicated, bytewise-sorted actor ID strings with no extra whitespace.
+Each non-hash component is UTF-8 percent-encoded with RFC 3986 unreserved
+characters left literal (`A-Z a-z 0-9 - . _ ~`) and all other bytes encoded as
+uppercase `%HH`, then joined with literal `:` separators. `bodyRevision` is the
+canonical `UInt64DecimalString`. `canonicalMentionedActorIdsJson` is the UTF-8
+JSON array of the canonical, deduplicated, bytewise-sorted actor ID strings with
+no extra whitespace. The hash is lowercase hex SHA-256 over those exact UTF-8
+JSON bytes and is always 64 ASCII hex characters.
 `bodyHash` is required audit evidence for the immutable persisted body revision,
 but it is not part of `notificationId` so redaction/sanitization views cannot
 change the notification identity.
 The enqueue path must upsert or no-op by that expanded id, and
-resolve/replay/fanout must dedupe by the same `notificationId`. Repeated
-enqueue or resolve attempts for the same authz scope, message revision, and
-canonical mention set return the existing result or a deterministic no-op; they
-must not append duplicate activities, duplicate queue rows, unstable
-unread/mention badges, duplicate notifications, or duplicate export/history
-records.
+resolve/replay/fanout must dedupe by the exact same canonical `notificationId`
+string. Repeated enqueue or resolve attempts for the same authz scope, message
+revision, and canonical mention set return the existing result or a
+deterministic no-op; they must not append duplicate activities, duplicate queue
+rows, unstable unread/mention badges, duplicate notifications, or duplicate
+export/history records.
 
 type ThreadActivity =
   | MessageCreateThreadActivity

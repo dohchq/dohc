@@ -419,7 +419,8 @@ version identity, a request token or equivalent correlation id, and a monotonic
 ordering guard before it can update UI state:
 
 ```ts
-type UInt64DecimalString = string // canonical base-10 unsigned 64-bit integer
+// Canonical base-10 unsigned 64-bit integer.
+type UInt64DecimalString = string
 
 type WorkspaceAsyncPayload = {
   workspaceId: string
@@ -429,13 +430,19 @@ type WorkspaceAsyncPayload = {
 }
 ```
 
+`WorkspaceAsyncPayload.sequence` uses `UInt64DecimalString`: ASCII base-10
+digits only, no sign, separators, decimal point, whitespace, locale/non-ASCII
+digits, or leading zeros except the literal `0`, with range
+`0..18446744073709551615`. Producers must serialize this canonical form, and
+clients must parse, range-check, and reserialize before freshness comparison.
 Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, status APIs, and filesystem loading must
 verify these fields before applying results. Each handler also compares the
 payload sequence or cursor against the latest applied value for the same
-workspace/version/request stream using BigInt-safe decimal-string comparison,
-and applies only newer responses. Server timestamps are metadata only and must
-not decide freshness unless they are explicitly defined as a monotonic
+workspace/version/request stream using BigInt-safe comparison of canonical
+`UInt64DecimalString` values, never floating-point numbers, locale string
+collation, or non-canonical decimal strings. Server timestamps are metadata only
+and must not decide freshness unless they are explicitly defined as a monotonic
 per-stream counter. A stale response from one workspace/version/session must
 never repaint another or regress current UI state.
 
@@ -481,7 +488,7 @@ Examples:
 | `dist/**` | no | no | no | local | no | no |
 | `.cache/**` | no | no | no | local | no | no |
 | `scratch/**` | no | no | no | local | no | no |
-| `.env` | yes | yes | yes | local | no | yes |
+| `.env` | yes | yes | encrypted/opaque only | protected/ephemeral | no | yes |
 
 This avoids naive folder-sync behavior such as syncing `node_modules`, build
 output, and cache folders.
@@ -489,12 +496,15 @@ Materialization describes storage shape only; authorization decides whether a
 specific actor can hydrate or read local plaintext for a protected path such as
 `.env`.
 
-Secret-backed paths are never ordinary synced text. Their historical state,
-exports, search results, conflict envelopes, projections, and agent-readable
-views store opaque handles, hashes, and redacted status by default. Plaintext
-hydration requires explicit server-side materialization permission and must be
-recorded separately from normal materialization so `.env` does not become a
-plain history blob or search document.
+Secret-backed paths are never ordinary synced text. For `.env`, `synced` means
+encrypted/opaque sync of secret references, encrypted blobs, hashes, and redacted
+status, not plaintext replication or server-side plaintext hydration. Historical
+state, exports, search results, conflict envelopes, projections, and
+agent-readable views store opaque handles, hashes, and redacted status by
+default. Plaintext hydration requires explicit server-side materialization
+permission and must be recorded separately from normal materialization so `.env`
+does not become a plain history blob, search document, or cloud-readable text
+payload.
 
 `tracked` and `versioned` are related but not identical. `versioned = true`
 implies `tracked = true`; `tracked = false` implies `versioned = false`.
