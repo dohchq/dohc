@@ -57,6 +57,9 @@ shared-channel exceptions: the link must carry the owning `workspaceId`, target
 workspace/resource identity, share/grant id, and visibility scope, and every
 read path, projection, search result, notification, export, replay job, history
 reconstruction, or other reconstruction consumer must re-authorize that grant.
+For `scopeKind: 'internal'`, `targetWorkspaceId` must equal `workspaceId`; any
+internal link with a different target workspace is rejected before persistence,
+activity fanout, projection, search, notification, export, or replay.
 Missing, expired, revoked, or ambiguous shared-channel grants fail closed for
 all of those paths. Grant revoke/expiry also triggers cleanup of server-held derived
 projections, search snippets, notification caches, export staging artifacts, and

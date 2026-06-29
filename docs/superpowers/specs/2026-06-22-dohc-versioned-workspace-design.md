@@ -10,9 +10,11 @@ source-control concepts with new labels.
 
 The user-facing promise is simple:
 
-> Use normal files. Humans and agents can edit them. Authorized writes save
-> immediately. dohc remembers what happened, preserves recovery, supports
-> parallel versions, and helps reconcile conflicts.
+> Use normal files. Humans and agents can edit them. Authorized writes are
+> durably accepted immediately; writes that pass protection checks become
+> canonical immediately, while pending or denied writes keep recovery handles.
+> dohc remembers what happened, supports parallel versions, and helps reconcile
+> conflicts.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -155,8 +157,18 @@ and `operatorDispositionDueAt`; when the deadline is reached, the record must be
 escalated into an explicit disposition queue, marked overdue in status APIs, and
 compacted or moved to colder durable storage according to policy. Garbage
 collection may remove only derived retry/index metadata after the disposition
-deadline; the reconstructable payload remains until canonicalization succeeds or
-an explicit operator disposition record retires it.
+deadline while the operator window is open; the reconstructable payload remains
+until canonicalization succeeds, an explicit operator disposition record retires
+it, or the non-overrideable terminal retention bound is reached. The terminal
+bound is derived from `operatorDispositionDueAt` plus
+`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs` unless Phase 0 sets a
+shorter global safety limit. At that bound, a still-unresolved accepted record
+must be automatically retired with an operator-visible
+`auto_retired_payload_retention_expired` disposition: reconstructable payload
+bytes are deleted, cryptoshredded, or compacted into a non-reconstructable
+evidence record, while minimal metadata needed for audit, idempotency expiry,
+abuse controls, and user-facing explanation is retained. Workspace policy cannot
+extend or disable this terminal payload-retention rule.
 Retries using the same idempotency key and matching replay metadata before the
 record's retry horizon return the same addressable result for the same
 `holdingRecordId`: `durable-pending` before `replayUntil`, or `denied` before

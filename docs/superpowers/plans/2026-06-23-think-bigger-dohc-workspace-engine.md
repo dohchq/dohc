@@ -1276,8 +1276,10 @@ mandatory for that PR and future release gates.
 - filesystem/API parity for the same version.
 - workspace switch while files/chats/search are loading; old workspace data must
   never repaint the new workspace.
-- secret-backed content must not appear in UI, search, history, diff, export,
-  logs, chat summaries, notifications, agent context, or public projections.
+- unauthorized or public surfaces must not expose secret-backed content in UI,
+  search, history, diff, export, logs, chat summaries, notifications, agent
+  context, or public projections; permitted users may view plaintext locally
+  through the authorized secret-backed path.
 - crash or kill during file write/capture does not corrupt recoverable state.
 - missed watcher event is recovered by startup reconciliation or periodic audit.
 - two actors writing the same path/version concurrently preserve both states or

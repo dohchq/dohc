@@ -23,7 +23,8 @@ append-only history.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
 - **PR00 CodeRabbit:** pending rerun after the latest follow-up fixes.
-- **PR00 tests:** docs sanity plus `@dohc/web` brand guard.
+- **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
+  guard.
 - **Open PR00 items:** docs-only local-agent-CLI exception needs human approval;
   CodeRabbit rerun must complete cleanly before completion or merge-readiness.
 - **P0D-P0G lane state:** current provisional stack after P0C/P0D/P0E/P0F,
@@ -1625,6 +1626,24 @@ Eighty-seventh pass:
   - Replaced ambiguous active chat link uniqueness with a normalized
     `CanonicalThreadLinkKey` contract and reserved sentinels shared by link
     creation, projections, search, and export.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Reframed the versioned workspace promise around immediate durable acceptance
+    plus immediate canonicalization only after protection checks pass.
+  - Added a non-overrideable terminal retention bound for accepted holding
+    records so unresolved payload bytes cannot persist indefinitely.
+  - Required internal chat links to keep `targetWorkspaceId === workspaceId`
+    before persistence, fanout, projection, search, notification, export, or
+    replay.
+  - Scoped the secret-backed content restriction to unauthorized/public surfaces
+    while preserving authorized local plaintext materialization.
+  - Updated the PR00 live test status to include the docs link/anchor check.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
