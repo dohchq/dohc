@@ -246,28 +246,37 @@ describeAnchoredHistory("changeSetStore persistence", () => {
   it("lists display-ordered records with their durable append index", async () => {
     const store = createChangeSetStore(root);
     await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });
-    await store.record(agentImport(), { id: "same-b", recordedAtMs: 2000 });
-    await store.record(userEdit(), { id: "same-a", recordedAtMs: 2000 });
-    await store.record(userEdit(), { id: "clock-skewed", recordedAtMs: 1500 });
+    await store.record(agentImport(), { id: "second", recordedAtMs: 2000 });
+    await store.record(userEdit(), { id: "third", recordedAtMs: 3000 });
 
     const indexed = await store.listIndexed();
-    expect(indexed.map((entry) => entry.record.id)).toEqual([
-      "same-b",
-      "same-a",
-      "clock-skewed",
-      "first",
-    ]);
-    expect(indexed.map((entry) => entry.index)).toEqual([1, 2, 3, 0]);
+    expect(indexed.map((entry) => entry.record.id)).toEqual(["third", "second", "first"]);
+    expect(indexed.map((entry) => entry.index)).toEqual([2, 1, 0]);
   });
 
   it("reports the max recorded timestamp from the durable index", async () => {
     const store = createChangeSetStore(root);
     await expect(store.maxRecordedAtMs()).resolves.toBe(0);
     await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });
-    await store.record(agentImport(), { id: "second", recordedAtMs: 3000 });
-    await store.record(userEdit(), { id: "clock-skewed", recordedAtMs: 2000 });
+    await store.record(agentImport(), { id: "second", recordedAtMs: 2000 });
+    await store.record(userEdit(), { id: "third", recordedAtMs: 3000 });
 
     await expect(store.maxRecordedAtMs()).resolves.toBe(3000);
+  });
+
+  it("rejects stale or equal recorded timestamps after the durable index advances", async () => {
+    const store = createChangeSetStore(root);
+    await store.record(userEdit(), { id: "first", recordedAtMs: 1000 });
+
+    await expect(
+      store.record(agentImport(), { id: "same-timestamp", recordedAtMs: 1000 }),
+    ).rejects.toThrow(/not newer than the latest committed timestamp/i);
+    await expect(
+      store.record(userEdit(), { id: "clock-skewed", recordedAtMs: 999 }),
+    ).rejects.toThrow(/not newer than the latest committed timestamp/i);
+
+    await expect(store.list()).resolves.toMatchObject([{ id: "first" }]);
+    await expect(store.maxRecordedAtMs()).resolves.toBe(1000);
   });
 
   it("appends to an ordered index.json carrying lightweight summaries", async () => {
@@ -552,6 +561,71 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining(
           "[workspace-history] skipping unreadable index entry corrupt-index:",
+        ),
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("skips corrupt index entries with unsafe timestamps before reading records", async () => {
+    const historyDir = join(root, ".dohc", "history");
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(
+      join(historyDir, "index.json"),
+      `${JSON.stringify(
+        [
+          {
+            id: "corrupt-time",
+            recordedAtMs: Number.MAX_SAFE_INTEGER,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Corrupt timestamp",
+            fileCount: 1,
+          },
+          {
+            id: "valid",
+            recordedAtMs: 2000,
+            kind: "user-edit",
+            author: userAuthor,
+            summary: "Valid record",
+            fileCount: 1,
+          },
+        ],
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(historyDir, "2000-valid.json"),
+      `${JSON.stringify(
+        {
+          id: "valid",
+          recordedAtMs: 2000,
+          kind: "user-edit",
+          author: userAuthor,
+          summary: "Valid record",
+          files: [{ path: "notes/today.md", operation: "write" }],
+          boundaryCrossings: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = createChangeSetStore(root);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(store.get("corrupt-time")).resolves.toBeNull();
+      await expect(store.list()).resolves.toMatchObject([{ id: "valid", kind: "user-edit" }]);
+      await expect(store.listSince(0)).resolves.toMatchObject([
+        { id: "valid", kind: "user-edit" },
+      ]);
+      await expect(store.maxRecordedAtMs()).resolves.toBe(2000);
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "[workspace-history] skipping unreadable index entry corrupt-time:",
         ),
         expect.any(Error),
       );

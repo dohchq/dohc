@@ -17,7 +17,11 @@ import {
   readUiStateFile,
   writeUiStateFile,
 } from "./workspaceUiState";
-import { createChangeSetStore, startWorkspaceWatch } from "./workspaceWatcher";
+import {
+  DESKTOP_HISTORY_STORE_OPTIONS,
+  createChangeSetStore,
+  startWorkspaceWatch,
+} from "./workspaceWatcher";
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -192,9 +196,10 @@ describe("workspace watcher history snapshots", () => {
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("durable local history is unavailable"),
       );
-      const fallbackRecords = await createChangeSetStore(root, {
-        ephemeralIfUnsupported: true,
-      }).list();
+      const fallbackRecords = await createChangeSetStore(
+        root,
+        DESKTOP_HISTORY_STORE_OPTIONS,
+      ).list();
       expect(fallbackRecords).toHaveLength(1);
       expect(fallbackRecords[0]).toMatchObject({
         author: { kind: "local", label: "Local file edit" },

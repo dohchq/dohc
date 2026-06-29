@@ -1337,6 +1337,50 @@ describe("versioned file workspace", () => {
     await expect(readFile(backupPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  itAnchoredFilesystem("recovers from an inline preimage when a pending backup file is missing", async () => {
+    const counters = createWorkspaceTestCounters();
+    const ws = workspace(counters);
+    const written = await ws.writeTextFile({
+      path: "notes/inline-preimage.md",
+      text: "Original\n",
+    });
+    const crashedVersionWrite = await ws.unsafeInternals.versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: written.versionId,
+      path: "notes/inline-preimage.md",
+      text: "Crashed\n",
+      metadata: { origin: "local-file" },
+    });
+    await writeFile(join(root, "notes/inline-preimage.md"), "Crashed\n", "utf8");
+    const backupPath = join(root, ".dohc", "tmp", "missing-inline-preimage.bak");
+    await writePendingMutationJournalForTest({
+      id: "pending_00000000-0000-4000-8000-000000000019",
+      versionId: written.versionId,
+      path: "notes/inline-preimage.md",
+      phase: "version-recorded",
+      backupPath,
+      beforeText: "Original\n",
+      afterText: "Crashed\n",
+      historyId: "history_missing_inline_backup",
+      versionMutationMomentId: crashedVersionWrite.moment.id,
+    });
+
+    const restarted = workspace(counters);
+
+    await expect(restarted.readTextFile({ path: "notes/inline-preimage.md" })).resolves.toBe(
+      "Original\n",
+    );
+    await expect(
+      restarted.versions.readTextFile({
+        versionId: written.versionId,
+        path: "notes/inline-preimage.md",
+      }),
+    ).resolves.toMatchObject({ text: "Original\n" });
+    await expectHistoryIds(restarted, [written.history.id]);
+    expect(await readPendingMutationEntries()).toEqual([]);
+    await expect(readFile(backupPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   itAnchoredFilesystem("fails closed when a pending rollback backup no longer matches the preimage", async () => {
     const counters = createWorkspaceTestCounters();
     const ws = workspace(counters);
@@ -1524,14 +1568,15 @@ describe("versioned file workspace", () => {
       path: "notes/workspace-b.md",
       text: "Workspace B committed\n",
     });
+    const workspaceBChange = workspaceBWrite.history.files[0];
     await writePendingMutationJournalForTest({
       id: "pending_00000000-0000-4000-8000-000000000010",
       workspaceId: "workspace-b",
       versionId: workspaceBWrite.versionId,
       path: "notes/workspace-b.md",
       phase: "history-recorded",
-      before: null,
-      afterText: "Workspace B committed\n",
+      before: workspaceBChange?.before ?? null,
+      after: workspaceBChange?.after ?? null,
       historyId: workspaceBWrite.history.id,
       historyRecordedAtMs: workspaceBWrite.history.recordedAtMs,
       expectedChangeSet: {
@@ -1586,6 +1631,43 @@ describe("versioned file workspace", () => {
     ]);
   });
 
+  itAnchoredFilesystem("fails closed on pending journals with mismatched expected change sets", async () => {
+    await writeFixture("notes/expected.md", "After\n");
+    await writePendingMutationJournalForTest({
+      id: "pending_00000000-0000-4000-8000-000000000020",
+      versionId: "main",
+      path: "notes/expected.md",
+      phase: "history-recorded",
+      beforeText: "Before\n",
+      afterText: "After\n",
+      historyId: "history_mismatched_expected_change",
+      expectedChangeSet: {
+        kind: "user-edit",
+        author: LOCAL_FILE_AUTHOR,
+        summary: "Crafted expected change",
+        files: [
+          {
+            path: "notes/expected.md",
+            operation: "write",
+            before: { text: "Before\n" },
+            after: { text: "Different\n" },
+          },
+        ],
+        boundaryCrossings: [],
+      },
+    });
+
+    const restarted = workspace();
+
+    await expect(restarted.readTextFile({ path: "notes/expected.md" })).rejects.toMatchObject({
+      code: "recovery-failed",
+    });
+    await expect(readFile(join(root, "notes/expected.md"), "utf8")).resolves.toBe("After\n");
+    expect(await readPendingMutationEntries()).toEqual([
+      "pending_00000000-0000-4000-8000-000000000020.json",
+    ]);
+  });
+
   itAnchoredFilesystem("fails closed on malformed root pending journals", async () => {
     await writeFixture("notes/shared.md", "Workspace A live\n");
     await writePendingMutationJournalForTest({
@@ -1619,6 +1701,7 @@ describe("versioned file workspace", () => {
       text: "Committed\n",
       versionId: written.versionId,
     });
+    const committedChange = committed.history.files[0];
     const backupPath = join(root, ".dohc", "tmp", "backup-history-committed.bak");
     await mkdir(dirname(backupPath), { recursive: true });
     await writeFile(backupPath, "Original\n", "utf8");
@@ -1628,6 +1711,8 @@ describe("versioned file workspace", () => {
       path: "notes/today.md",
       phase: "history-recorded",
       backupPath,
+      before: committedChange?.before ?? null,
+      after: committedChange?.after ?? null,
       historyId: committed.history.id,
       historyRecordedAtMs: committed.history.recordedAtMs,
       expectedChangeSet: {
@@ -2095,6 +2180,30 @@ describe("versioned file workspace", () => {
     });
     expect(await readPendingMutationEntries()).toEqual([
       "pending_00000000-0000-4000-8000-000000000007.json",
+    ]);
+  });
+
+  itAnchoredFilesystem("rejects pending journals with invalid disk backup modes", async () => {
+    await writeFixture("notes/bad-mode.md", "After\n");
+    await writePendingMutationJournalForTest({
+      id: "pending_00000000-0000-4000-8000-000000000021",
+      versionId: "main",
+      path: "notes/bad-mode.md",
+      phase: "disk-mutated",
+      beforeText: "Before\n",
+      afterText: "After\n",
+      mode: 0o1000,
+      historyId: "history_bad_mode",
+    });
+
+    const restarted = workspace();
+
+    await expect(restarted.readTextFile({ path: "notes/bad-mode.md" })).rejects.toMatchObject({
+      code: "recovery-failed",
+    });
+    await expect(readFile(join(root, "notes/bad-mode.md"), "utf8")).resolves.toBe("After\n");
+    expect(await readPendingMutationEntries()).toEqual([
+      "pending_00000000-0000-4000-8000-000000000021.json",
     ]);
   });
 

@@ -211,7 +211,7 @@ function assertSafeHistoryNamespace(namespace: string): string {
 }
 
 function recordFileName(opts: { id: string; recordedAtMs: number }): string {
-  return `${opts.recordedAtMs}-${assertSafeHistoryId(opts.id)}.json`;
+  return `${assertSafeRecordedAtMs(opts.recordedAtMs)}-${assertSafeHistoryId(opts.id)}.json`;
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
@@ -259,6 +259,8 @@ function normalizeHistoryRecord(record: HistoryRecord): HistoryRecord {
 function normalizeIndexEntry(entry: IndexEntry): IndexEntry {
   return {
     ...entry,
+    id: assertSafeHistoryId(entry.id),
+    recordedAtMs: assertSafeRecordedAtMs(entry.recordedAtMs),
     kind: normalizeKind(entry.kind),
   };
 }
@@ -1186,6 +1188,15 @@ export function createChangeSetStore(
           const index = await readIndex();
           if (index.some((entry) => entry.id === record.id)) {
             throw new Error(`History record ${record.id} already exists.`);
+          }
+          const maxRecordedAtMs = index.reduce(
+            (max, entry) => Math.max(max, entry.recordedAtMs),
+            -1,
+          );
+          if (record.recordedAtMs <= maxRecordedAtMs) {
+            throw new Error(
+              `History record ${record.id} timestamp ${record.recordedAtMs} is not newer than the latest committed timestamp ${maxRecordedAtMs}.`,
+            );
           }
           // Pretty JSON: history is meant to be opened and read by a person.
           await lockLease.assertStillOwnsLock();

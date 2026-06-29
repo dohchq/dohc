@@ -2573,6 +2573,14 @@ function assertNumber(value: unknown, label: string): number {
   return value;
 }
 
+function assertFileMode(value: unknown, label: string): number {
+  const mode = assertNumber(value, label);
+  if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
+    throw recoveryFailed(`${label} is invalid in a pending file mutation.`);
+  }
+  return mode;
+}
+
 function normalizePendingPhase(value: unknown): PendingFileMutationPhase {
   if (
     value === "prepared" ||
@@ -2636,6 +2644,26 @@ function normalizePendingChangeSet(value: unknown): ChangeSet | undefined {
   };
 }
 
+function assertPendingChangeSetMatchesJournal(input: {
+  expectedChangeSet: ChangeSet;
+  path: string;
+  operation: "write" | "delete";
+  before: FileChangeSnapshot | null;
+  after: FileChangeSnapshot | null;
+}): void {
+  const [file] = input.expectedChangeSet.files;
+  if (
+    input.expectedChangeSet.files.length !== 1 ||
+    !file ||
+    file.path !== input.path ||
+    file.operation !== input.operation ||
+    !jsonEquivalent(file.before, input.before) ||
+    !jsonEquivalent(file.after, input.after)
+  ) {
+    throw recoveryFailed("Pending file mutation expected change set does not match its journal.");
+  }
+}
+
 function normalizePendingBackup(value: unknown): DiskPreimageBackup {
   if (!isRecord(value)) {
     throw recoveryFailed("Pending file mutation disk backup is invalid.");
@@ -2646,7 +2674,7 @@ function normalizePendingBackup(value: unknown): DiskPreimageBackup {
       ? undefined
       : assertString(value.backupPath, "Pending disk backup path");
   const mode =
-    value.mode === undefined ? undefined : assertNumber(value.mode, "Pending disk backup mode");
+    value.mode === undefined ? undefined : assertFileMode(value.mode, "Pending disk backup mode");
   return {
     targetPath,
     ...(backupPath ? { backupPath } : {}),
@@ -2719,6 +2747,10 @@ function normalizePendingJournal(raw: unknown): PendingFileMutationJournal {
   const operation = normalizePendingOperation(raw.operation);
   const before = normalizePendingBefore(raw.before);
   const after = normalizePendingAfter(raw.after);
+  const expectedChangeSet =
+    raw.expectedChangeSet === undefined
+      ? undefined
+      : normalizePendingChangeSet(raw.expectedChangeSet);
   if (operation === "write" && (after === null || after.unavailableReason === "missing")) {
     throw recoveryFailed("Pending write mutation postimage is invalid.");
   }
@@ -2727,6 +2759,15 @@ function normalizePendingJournal(raw: unknown): PendingFileMutationJournal {
   }
   if (operation === "delete" && after !== null) {
     throw recoveryFailed("Pending delete mutation postimage is invalid.");
+  }
+  if (expectedChangeSet) {
+    assertPendingChangeSetMatchesJournal({
+      expectedChangeSet,
+      path,
+      operation,
+      before,
+      after,
+    });
   }
   return {
     schemaVersion: 1,
@@ -2746,9 +2787,7 @@ function normalizePendingJournal(raw: unknown): PendingFileMutationJournal {
       raw.historyRecordedAtMs,
       "Pending mutation history timestamp",
     ),
-    ...(raw.expectedChangeSet !== undefined
-      ? { expectedChangeSet: normalizePendingChangeSet(raw.expectedChangeSet) }
-      : {}),
+    ...(expectedChangeSet ? { expectedChangeSet } : {}),
     ...(raw.versionMutationMomentId !== undefined
       ? {
           versionMutationMomentId: assertString(
@@ -3105,7 +3144,16 @@ async function restoreBackupForJournal(
   const targetPath = await resolveContainedWorkspacePath(rootDir, journal.path);
   let backupPath: string | undefined;
   if (journal.diskBackup.backupPath) {
-    backupPath = await resolveDiskPreimageBackupPath(rootDir, journal.diskBackup.backupPath);
+    try {
+      backupPath = await resolveDiskPreimageBackupPath(rootDir, journal.diskBackup.backupPath);
+    } catch (error) {
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+        typeof journal.before?.text !== "string"
+      ) {
+        throw error;
+      }
+    }
   }
   await restoreDiskPreimage(rootDir, journal.path, journal.before, {
     targetPath,
