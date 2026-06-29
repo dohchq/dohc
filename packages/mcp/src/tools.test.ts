@@ -950,7 +950,22 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("retains move/delete mutations if the history record cannot be written", async () => {
+  itDurableHistory("does not record unchanged directory creates", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "docs"), { recursive: true });
+
+      const created = await createWorkspaceDirectory(ctx, { path: "docs" });
+
+      expect(created).toMatchObject({ ok: true, path: "docs", unchanged: true });
+      expect("changeSetId" in created).toBe(false);
+      await expect(listChanges(ctx)).resolves.toMatchObject({
+        count: 0,
+        totalAvailable: 0,
+      });
+    });
+  });
+
+  itDurableHistory("retains move/delete mutations if the history record cannot be written", async () => {
     await withWorkspace(async (ctx) => {
       await writeWorkspaceFile(ctx, { path: "drafts/todo.txt", content: "ship\n" });
       await rm(join(ctx.root, ".dohc", "history", "index.json"), { force: true });

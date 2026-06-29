@@ -772,7 +772,7 @@ async function assertFileMutationLockStillOwned(input: {
     throw recoveryFailed(`Lost file mutation lock ${input.lockDir}.`);
   }
   const owner = await readCurrentFileMutationLockOwner(input.ownerPath);
-  if (owner?.token !== input.token || owner.pid !== process.pid) {
+  if (!owner || owner.token !== input.token || owner.pid !== process.pid) {
     throw recoveryFailed(`Lost file mutation lock ${input.lockDir}.`);
   }
   const verifiedOwnerDirInfo = await lstat(input.ownerDir).catch(
@@ -963,13 +963,12 @@ async function acquireDirectoryLock(input: {
             ) {
               return;
             }
-            const ownerText = await readFile(ownerPath, "utf8").catch(
+            const owner = await readCurrentFileMutationLockOwner(ownerPath).catch(
               (error: NodeJS.ErrnoException) => {
                 if (error.code === "ENOENT") return null;
                 throw error;
               },
             );
-            const owner = ownerText === null ? null : parseFileMutationLockOwner(ownerText);
             if (owner?.token === token) {
               await rm(ownerDir, { recursive: true, force: true });
               await syncParentDirectoryBestEffort(ownerDir);

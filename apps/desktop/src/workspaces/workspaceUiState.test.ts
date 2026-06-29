@@ -192,6 +192,14 @@ describe("workspace watcher history snapshots", () => {
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("durable local history is unavailable"),
       );
+      const fallbackRecords = await createChangeSetStore(root, {
+        ephemeralIfUnsupported: true,
+      }).list();
+      expect(fallbackRecords).toHaveLength(1);
+      expect(fallbackRecords[0]).toMatchObject({
+        author: { kind: "local", label: "Local file edit" },
+        files: [{ path: "notes.md", operation: "write" }],
+      });
     } finally {
       await handle?.stop().catch(() => undefined);
       warn?.mockRestore();

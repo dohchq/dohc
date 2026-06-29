@@ -193,6 +193,17 @@ async function safeResolve(
   return { ok: true, absolute, normalized: validated.normalized };
 }
 
+async function safeResolveForMutation(
+  ctx: ToolContext,
+  normalizedPath: string,
+): Promise<{ absolute: string; normalized: string }> {
+  const resolved = await safeResolve(ctx, normalizedPath);
+  if (!resolved.ok) {
+    throw Object.assign(new Error(resolved.reason), { code: "EINVAL" });
+  }
+  return resolved;
+}
+
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -310,16 +321,28 @@ function mutationRetainedReason(error: unknown, fallback: string): string {
 }
 
 async function writeFileAtomicallyForTool(
-  absolutePath: string,
+  ctx: ToolContext,
+  normalizedPath: string,
   data: string | Buffer,
   options: { overwrite?: boolean } = {},
 ): Promise<void> {
-  const parentDir = dirname(absolutePath);
+  const target = await safeResolveForMutation(ctx, normalizedPath);
+  const absolutePath = target.absolute;
+  const parentDir = dirname(target.absolute);
   const tempPath = join(parentDir, `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
   let published = false;
   let existingMode: number | undefined;
+  const publishTarget = async (): Promise<string> => {
+    const current = await safeResolveForMutation(ctx, normalizedPath);
+    if (current.absolute !== absolutePath) {
+      throw Object.assign(new Error(`path changed before publish: ${normalizedPath}`), {
+        code: "EINVAL",
+      });
+    }
+    return current.absolute;
+  };
   if (options.overwrite !== false) {
-    const existing = await lstat(absolutePath).catch((error: NodeJS.ErrnoException) => {
+    const existing = await lstat(await publishTarget()).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
@@ -338,12 +361,13 @@ async function writeFileAtomicallyForTool(
   try {
     await writeFile(tempPath, data, { flag: "wx" });
     if (existingMode !== undefined) await chmod(tempPath, existingMode);
+    const finalPath = await publishTarget();
     if (options.overwrite === false) {
-      await link(tempPath, absolutePath);
+      await link(tempPath, finalPath);
       published = true;
       await rm(tempPath, { force: true }).catch(() => undefined);
     } else {
-      await rename(tempPath, absolutePath);
+      await rename(tempPath, finalPath);
       published = true;
     }
   } finally {
@@ -773,7 +797,7 @@ export async function writeWorkspaceFile(
   const parentDir = dirname(resolved.absolute);
   try {
     await mkdir(parentDir, { recursive: true });
-    await writeFileAtomicallyForTool(resolved.absolute, bytes);
+    await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes);
   } catch (error) {
     return {
       ok: false as const,
@@ -811,7 +835,23 @@ export async function createWorkspaceDirectory(
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
   try {
-    await mkdir(resolved.absolute, { recursive: true });
+    const existing = await lstat(resolved.absolute).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing) {
+      if (existing.isDirectory()) {
+        return { ok: true as const, path: resolved.normalized, unchanged: true as const };
+      }
+      return {
+        ok: false as const,
+        reason: `path already exists and is not a directory: ${args.path}`,
+      };
+    }
+    const createdPath = await mkdir(resolved.absolute, { recursive: true });
+    if (!createdPath) {
+      return { ok: true as const, path: resolved.normalized, unchanged: true as const };
+    }
   } catch (error) {
     return {
       ok: false as const,
@@ -1851,7 +1891,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     for (const file of resolvedFiles) {
       const parentDir = dirname(file.absolute);
       await mkdir(parentDir, { recursive: true });
-      await writeFileAtomicallyForTool(file.absolute, file.content, { overwrite: false });
+      await writeFileAtomicallyForTool(ctx, file.normalized, file.content, { overwrite: false });
       visibleMutationStarted = true;
     }
   } catch (error) {
@@ -2196,7 +2236,7 @@ export async function importData(
     const parentDir = dirname(dbRel.absolute);
     await mkdir(parentDir, { recursive: true });
     const dbBytes = Buffer.from(result.bytesBase64, "base64");
-    await writeFileAtomicallyForTool(dbRel.absolute, dbBytes, { overwrite: false });
+    await writeFileAtomicallyForTool(ctx, dbRel.normalized, dbBytes, { overwrite: false });
   } catch (error) {
     return {
       ok: false as const,

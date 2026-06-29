@@ -275,24 +275,6 @@ async function readPendingMutationJournalsForTest(): Promise<
   );
 }
 
-async function expectDeferredRollback(
-  action: Promise<unknown>,
-): Promise<VersionedFileWorkspaceError & { rollbackError?: unknown }> {
-  let caught: unknown;
-  try {
-    await action;
-  } catch (error) {
-    caught = error;
-  }
-  expect(caught).toBeInstanceOf(VersionedFileWorkspaceError);
-  expect(caught).toMatchObject({
-    name: "VersionedFileWorkspaceError",
-    code: "history-record-failed",
-  });
-  expect((caught as { rollbackError?: unknown }).rollbackError).toBeDefined();
-  return caught as VersionedFileWorkspaceError & { rollbackError?: unknown };
-}
-
 async function writePendingMutationJournalForTest(input: {
   id: string;
   workspaceId?: string;

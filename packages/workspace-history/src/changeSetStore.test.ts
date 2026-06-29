@@ -1037,6 +1037,7 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
       "utf8",
     );
     await symlink(symlinkedOwnerTargetPath, ownerPath);
+    await utimes(ownerDir, staleDate, staleDate);
     await utimes(lockDir, staleDate, staleDate);
     const store = createChangeSetStore(root);
     const reclaimShouldNotWaitForSymlinkedOwnerMs = 5_000;

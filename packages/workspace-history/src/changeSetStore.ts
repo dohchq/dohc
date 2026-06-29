@@ -1185,7 +1185,7 @@ export function createChangeSetStore(
           // Pretty JSON: history is meant to be opened and read by a person.
           await lockLease.assertStillOwnsLock();
           await writeHistoryFile(
-            join(historyDir, recordFileName(opts)),
+            join(historyDir, recordFileName(record)),
             `${JSON.stringify(record, null, 2)}\n`,
           );
 
