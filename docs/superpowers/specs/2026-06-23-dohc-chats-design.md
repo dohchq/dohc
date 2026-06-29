@@ -226,11 +226,10 @@ Required surfaces:
 - quick handoff from a DM into a linked work chat.
 - ability to mention an agent in a DM.
 
-DM-backed thread create/update paths enforce the same hard cap everywhere: both
-the raw submitted list and the canonicalized `dmParticipantIds` set must contain
-2-16 unique participants. Oversized raw or canonical participant lists fail
-closed before persistence. Larger conversations should use channels or shared
-channels.
+After canonicalization/deduplication, `dmParticipantIds` must contain 2-16 unique
+participants. Raw duplicates are removed or rejected before persistence.
+Oversized canonical participant lists fail closed before persistence. Larger
+conversations should use channels or shared channels.
 
 DMs should still be source-aware when needed:
 
@@ -397,11 +396,12 @@ A thread must have exactly one owner shape: channel-backed or DM-backed. It
 must never have both `channelId` and `dmParticipantIds`, and it must never have
 neither. Creation and update paths must validate this XOR before routing,
 authorization checks, notifications, search indexing, or projection handling.
-DM-backed threads require at least two unique participants; a one-person DM is
-invalid, and both the raw submitted list and canonicalized list must stay at or
-below 16 participants. Oversized participant lists are rejected before
-persistence, routing, key generation, indexing, ACL checks, fanout, or atomic
-create logic. Before the remaining write path runs, `dmParticipantIds` must be
+DM-backed threads require at least two unique participants after
+canonicalization; a one-person DM is invalid, and the canonicalized
+`dmParticipantIds` set must stay at or below 16 participants. Oversized
+canonical participant sets are rejected before persistence, routing, key
+generation, indexing, ACL checks, fanout, or atomic create logic. Before the
+remaining write path runs, `dmParticipantIds` must be
 canonicalized with one deterministic algorithm shared across runtimes:
 normalize actor IDs to their canonical persisted form, deduplicate by exact
 canonical ID match, then sort by bytewise ascending UTF-8 encoding of the
@@ -592,14 +592,23 @@ type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
 type LinkThreadActivity = ThreadActivityBase & {
   kind: 'link_added' | 'link_removed'
   linkId: string
-  linkTarget: {
-    targetWorkspaceId: string
-    targetType: ThreadLinkTargetType
-    targetId: string
-    targetVersionRef?: VersionRef
-    shareGrantId?: string
-    visibilityScope?: string
-  }
+  linkTarget:
+    | {
+        targetType: 'share'
+        targetWorkspaceId: string
+        targetId: string
+        targetVersionRef?: VersionRef
+        shareGrantId: string
+        visibilityScope: string
+      }
+    | {
+        targetType: Exclude<ThreadLinkTargetType, 'share'>
+        targetWorkspaceId: string
+        targetId: string
+        targetVersionRef?: VersionRef
+        shareGrantId?: never
+        visibilityScope?: never
+      }
 }
 
 type MentionNotificationThreadActivity = ThreadActivityBase & {

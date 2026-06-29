@@ -161,7 +161,7 @@ Date completed:
 - Other required instructions reviewed:
 
 - `DOHC_TEST_AGENT_CLI`:
-- Codex result:
+- Local agent result:
 - Claude result, if available:
 - Transcript/artifact path:
 - Secret redaction notes:
@@ -282,7 +282,7 @@ tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-lin
 /tmp/dohc-node-v24.18.0-linux-x64/bin/node -v
 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --version
 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
-env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" node <<'NODE'
+env "PATH=/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" node <<'NODE'
 const fs = require('fs')
 const path = require('path')
 const files = [
@@ -347,7 +347,7 @@ NODE
   sandbox remains the intended path.
 - Open follow-up: restore default safe-sandbox validation when `bubblewrap` or
   Codex's bundled sandbox helper is available locally.
-- Codex result: not run for PR00 docs-only scaffold; exception pending.
+- Local agent result: not run for PR00 docs-only scaffold; exception pending.
 - Claude result, if available: not run for PR00 docs-only scaffold; exception
   pending.
 - Transcript/artifact path: not applicable.
@@ -356,7 +356,7 @@ NODE
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 1 issue; local fixes are
+- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1542,6 +1542,29 @@ Eighty-second pass:
 - Fixed CodeRabbit follow-up finding from the latest rerun:
   - Marked `delete(...)` `targetObjectId` as explicitly required in the native
     filesystem API signature, matching the later delete prose.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-third pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Corrected the logged docs-link checker `PATH` to the extracted Node
+    v24.18.0 directory used by the workspace.
+  - Replaced the local QA result label with `Local agent result` while preserving
+    the one-off unsafe sandbox exception note.
+  - Narrowed PR 01 to core workspace/version/event/projection contracts and
+    deferred chat/share/external-channel/secret-specific schemas to their first
+    consuming PRs.
+  - Made `LinkThreadActivity.linkTarget` require `shareGrantId` and
+    `visibilityScope` for share targets and forbid them for non-share targets.
+  - Changed DM participant cap wording to treat the canonicalized
+    `dmParticipantIds` set as source of truth.
+  - Clarified raw local writes are durability capture only until promotion gets a
+    server/engine-derived principal and policy decision.
+  - Extended TOCTOU-safe path canonicalization to API path handling before
+    storage access.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

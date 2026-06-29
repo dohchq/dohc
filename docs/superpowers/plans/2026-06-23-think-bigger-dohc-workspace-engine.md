@@ -1479,26 +1479,32 @@ must use.
 **Scope:**
 
 - Add or extend shared package for workspace engine contracts.
-- Define `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
+- Define only the core workspace/version/event/projection substrate here:
+  `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ConflictRecord`, `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`,
-  `Share`, `ShareGrant`, `ExternalChannel`, and `SecretReference`.
+  and `ConflictRecord`.
+- Defer `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
+  `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
+  that consume them: chat contracts in PR 12, secret-reference contracts in PR
+  08, and share/external-channel contracts in PR 18. Those PRs must extend the
+  same shared package instead of defining local-only shapes.
 - Define link dereference shape: target type, stable target ID, optional
   `VersionRef`, display path/title at link time, ACL degrade behavior.
-- Define one canonical share/external-channel shape with stable share ID, grant
+- Defer the canonical share/external-channel shape with stable share ID, grant
   ID, owning workspace, target resource identity, visibility scope, participant
-  boundary, expiry/revocation state, and policy/export/search/notification
-  fields. Export, search, notifications, and shared channels must consume this
+  boundary, expiry/revocation state, and policy/export/search/notification fields
+  to PR 18. Export, search, notifications, and shared channels must consume that
   validated shape instead of inventing local share models.
 - Define projection writeability values: `canonical`, `writable`, `readOnly`,
   `lossy`, `redacted`.
-- Define one effective policy input/output type for filesystem, chats, search,
-  notifications, export, and external shares.
+- Define one core effective policy input/output type for filesystem, search, and
+  export substrate. Chat, notification, secret, and external-share policy
+  extensions land with their consuming PRs and must compose with the core type.
 - Add mandatory zod/valibot-style runtime validation for all shared boundary
-  types carrying workspace, version, and policy data across filesystem, chats,
-  search, notifications, export, and external shares.
-- Add fixtures for personal, team, external shared, and agent-authored cases.
+  types carrying workspace, version, and policy data across the core substrate.
+- Add fixtures for personal, team, and agent-authored core cases. External shared
+  fixtures land with PR 18.
 
 **Tests:**
 

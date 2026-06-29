@@ -68,8 +68,10 @@ workspace. They are not ordinary user-created folders.
 
 The path is an affordance, not the security boundary. The engine still resolves
 the active workspace, version, and effective file policy for captured writes.
-For raw local filesystem writes, exact process identity is not required; the
-write can be reconciled as a local/device/session change.
+For raw local filesystem writes, exact process identity is not required for local
+durability capture only; promotion into canonical history still requires a
+server/engine-derived principal, workspace/version resolution, and policy
+validation before the captured write can leave quarantine.
 
 Reserved namespace collisions fail closed. The importer evaluates the explicit
 source-backed policy allowlist before applying reserved-namespace quarantine:
@@ -94,17 +96,18 @@ manual resolution.
 Internal non-allowlisted `.dohc/**` state is never re-ingested as user content,
 and unmanaged `.versions` content is never silently promoted into a named version.
 
-Path canonicalization must happen before import, attach, sync, raw filesystem
-scan, watcher reconciliation, or policy evaluation. Symlinks, hardlinks,
-junctions, bind mounts, aliases, or any equivalent filesystem indirection that
-resolves outside the active workspace, crosses into another workspace, or enters
-reserved engine state such as `.dohc/**` or unmanaged `.versions/**` must be
-rejected or quarantined before capture. Managed `.versions/<version>/` roots are
-valid only when the path is already bound to that workspace/version by the
-engine. If the engine cannot prove the resolved target and
-file identity are inside the active workspace boundary, it fails closed. This
-path boundary applies to every file capture that may back an atom, folder,
-entity, share, or capture record.
+Path canonicalization must happen before API path handling, import, attach,
+sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
+before any storage access. Symlinks, hardlinks, junctions, bind mounts, aliases,
+or any equivalent filesystem indirection that resolves outside the active
+workspace, crosses into another workspace, or enters reserved engine state such
+as `.dohc/**` or unmanaged `.versions/**` must be rejected or quarantined before
+capture or API dispatch. Managed `.versions/<version>/` roots are valid only
+when the path is already bound to that workspace/version by the engine. If the
+engine cannot prove the resolved target and file identity are inside the active
+workspace boundary, it fails closed. This path boundary applies to every API path
+operation and file capture that may back an atom, folder, entity, share, or
+capture record.
 Canonicalization must also be TOCTOU-safe: after a path is resolved, subsequent
 stat/read/write/capture work must use the same verified descriptor, handle,
 inode/file-id binding, or equivalent identity-bound mechanism. The engine must
