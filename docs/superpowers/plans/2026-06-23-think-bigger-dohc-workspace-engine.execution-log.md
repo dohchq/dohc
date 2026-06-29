@@ -356,7 +356,7 @@ NODE
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 1 issue; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1532,6 +1532,16 @@ Eighty-first pass:
   - Added durable `MentionNotificationThreadActivity` records so notification,
     mention, search, export, and replay rebuilds have a canonical activity source.
   - Ran and recorded a docs link/anchor checker over the five PR00 plan/spec docs.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-second pass:
+
+- Fixed CodeRabbit follow-up finding from the latest rerun:
+  - Marked `delete(...)` `targetObjectId` as explicitly required in the native
+    filesystem API signature, matching the later delete prose.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

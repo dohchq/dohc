@@ -264,7 +264,7 @@ write(workspaceId, versionId, path, bytes, {
 })
 delete(workspaceId, versionId, path, {
   precondition: exactly one of expectedBaseVersion | expectedEtag | expectedContentHash,
-  targetObjectId,
+  targetObjectId: required,
   idempotencyKey
 })
 rename(workspaceId, versionId, fromPath, toPath, {
