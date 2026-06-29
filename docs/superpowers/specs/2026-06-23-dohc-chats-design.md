@@ -226,8 +226,11 @@ Required surfaces:
 - quick handoff from a DM into a linked work chat.
 - ability to mention an agent in a DM.
 
-DM-backed threads have a hard cap of 16 unique participants. Larger
-conversations should use channels or shared channels.
+DM-backed thread create/update paths enforce the same hard cap everywhere: both
+the raw submitted list and the canonicalized `dmParticipantIds` set must contain
+2-16 unique participants. Oversized raw or canonical participant lists fail
+closed before persistence. Larger conversations should use channels or shared
+channels.
 
 DMs should still be source-aware when needed:
 

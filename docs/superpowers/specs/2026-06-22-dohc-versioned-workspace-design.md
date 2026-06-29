@@ -77,6 +77,14 @@ through the same protection checks before a write can land. The write path is
 fail-closed: if any authorization, policy, visibility, protected-path,
 user-lock, version-access, or skill-turn evaluator is unavailable or
 indeterminate, the save is denied rather than applied.
+Canonical save success is acknowledged only after the mutation is promoted to
+canonical workspace state and is visible to normal `read`, `watch`, and `search`
+semantics for that version. If the durability path accepts a non-canonical
+holding record, the response is a distinct durable-pending result, not a
+successful immediate save. UIs may show that pending record only in explicit
+ingest/recovery/status surfaces marked non-canonical. In this spec, "files save
+immediately" means authorized writes that pass protection checks become
+canonical without an extra human apply/review step.
 Denied or quarantined ingests must still be durable in a non-canonical holding
 area with enough metadata to retry or explain the decision after evaluators
 recover. The holding area separates rejected-before-acceptance items from
@@ -436,10 +444,15 @@ source precondition, one destination precondition, and one idempotency key. This
 models temp-file-then-rename saves without an extra read/round trip and without
 allowing a path-only delete/recreate substitution.
 API-originated write-producing operations must carry an idempotency key bound to
-the actor/session, workspace, version, operation type, target, and causal
-precondition. Duplicate delivery with the same idempotency key must return the
-original result or a deterministic equivalent and must not create additional
-canonical mutations, duplicate history events, duplicate projections, or repeated
+the actor/session, workspace, version context, operation type, target, full
+operation operand tuple, and causal precondition set. The operand tuple includes
+materially distinguishing values such as source/destination paths,
+sourceVersionId, targetVersionId, versionA/versionB identifiers, pointInTime,
+snapshot ids, merge inputs, and restore targets as applicable, so different
+`merge(...)`, `replace(...)`, or `restore(...)` requests cannot collide under one
+key. Duplicate delivery with the same idempotency key must return the original
+result or a deterministic equivalent and must not create additional canonical
+mutations, duplicate history events, duplicate projections, or repeated
 notification/search side effects. Idempotency records must be persisted through
 the documented maximum retry horizon for that operation type and transport after
 the operation reaches a terminal result. The idempotency record/tombstone must be

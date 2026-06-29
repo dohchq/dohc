@@ -265,7 +265,7 @@ gh auth status
 rg -n "Execution Topology|worktree|implementation thread|one implementation PR|Rust Kernel Spike|Phase 0 branch/worktree/chat ownership" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md
 git diff --cached --check
 git push -u origin codex/think-bigger-00-readiness-scaffold
-gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "[codex] Add Think Bigger workspace engine plan"
+gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "Add dohc Think Bigger workspace engine plan"
 coderabbit review --agent -t committed -c AGENTS.md
 rg -n "<workspace-root>|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
@@ -301,11 +301,13 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 - `DOHC_TEST_AGENT_CLI`: not applicable for docs-only scaffold.
 - Docs-only exception approval: pending human approval before PR00 is marked
   complete or merge-ready.
-- Current implementation evidence exists in P0G, where the local agent CLI
-  smoke passed with a real Codex child process in a disposable workspace using
-  `DOHC_CODEX_SANDBOX=danger-full-access`; the default Codex safe sandbox is
-  blocked locally until `bubblewrap` or Codex's bundled sandbox helper is
-  available.
+- Current implementation evidence exists in P0G, where the local agent CLI smoke
+  passed with a real Codex child process in a disposable workspace using
+  `DOHC_CODEX_SANDBOX=danger-full-access` as a one-off temporary QA exception.
+  This unsafe sandbox mode is not baseline behavior; the default Codex safe
+  sandbox remains the intended path.
+- Open follow-up: restore default safe-sandbox validation when `bubblewrap` or
+  Codex's bundled sandbox helper is available locally.
 - Codex result: not run for PR00 docs-only scaffold; exception pending.
 - Claude result, if available: not run for PR00 docs-only scaffold; exception
   pending.
@@ -1006,8 +1008,9 @@ Fifty-fifth pass:
   passed on the integrated proof arc.
 - Recorded the current local-agent evidence boundary: PR00 remains docs-only,
   while P0G proves the real Codex child-process file edit in a disposable
-  workspace with `DOHC_CODEX_SANDBOX=danger-full-access`; default Codex
-  `workspace-write` remains blocked locally by the missing sandbox helper.
+  workspace using `DOHC_CODEX_SANDBOX=danger-full-access` as a one-off temporary
+  QA exception. Default safe-sandbox validation remains the intended path and is
+  blocked locally by the missing sandbox helper.
 
 Fifty-sixth pass:
 
@@ -1460,6 +1463,23 @@ Seventy-ninth pass:
     by schema.
   - Defined message `bodyRevision` initial value and exact-by-one CAS advancement
     for successful edits.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eightieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Distinguished canonical save success from durable-pending holding records so
+    normal `read`/`watch`/`search` visibility matches ACK semantics.
+  - Expanded idempotency keys to include full operation operands for merge,
+    replace, restore, and other write-producing operations.
+  - Removed the old PR title prefix from the recorded PR creation command.
+  - Labeled `DOHC_CODEX_SANDBOX=danger-full-access` as a one-off QA exception and
+    kept default safe-sandbox validation as the intended open follow-up.
+  - Aligned DM participant-cap wording with the raw-submission and canonicalized
+    list enforcement rule.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
