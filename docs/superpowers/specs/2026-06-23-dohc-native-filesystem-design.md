@@ -98,20 +98,19 @@ and unmanaged `.versions` content is never silently promoted into a named versio
 
 Path canonicalization must happen before API path handling, import, attach,
 sync, raw filesystem scan, watcher reconciliation, or policy evaluation, and
-before any storage access. Symlinks, hardlinks, junctions, bind mounts, aliases,
-or any equivalent filesystem indirection that resolves outside the active
-workspace, crosses into another workspace, or enters reserved engine state must
-be rejected or quarantined before capture or API dispatch. The only `.dohc/**`
-inputs that may pass this boundary as source-backed policy requests are the
-trusted importer allowlist above: `.dohc/files.toml`,
-`.dohc/visibility.toml`, and optional workspace-root `.dohcignore`. All other
-`.dohc/**` content remains reserved engine state. Managed
-`.versions/<version>/` roots are valid only when the path is already bound to
-that workspace/version by the engine; unmanaged `.versions/**` is rejected or
-quarantined. If the engine cannot prove the resolved target and file identity
-are inside the active workspace boundary, it fails closed. This path boundary
-applies to every API path operation and file capture that may back an atom,
-folder, entity, share, or capture record.
+before any storage access. After canonicalization, reserved namespace handling is
+defined only by the reserved-namespace collision contract above: the allowlisted
+policy inputs are `.dohc/files.toml`, `.dohc/visibility.toml`, and optional
+workspace-root `.dohcignore`; all other `.dohc/**` content and unmanaged
+`.versions/**` fail closed into rejection, quarantine, safe rename proposal, or
+manual resolution. Symlinks, hardlinks, junctions, bind mounts, aliases, or any
+equivalent filesystem indirection that resolves outside the active workspace,
+crosses into another workspace, or enters a disallowed reserved namespace must
+be rejected or quarantined before capture or API dispatch. If the engine cannot
+prove the resolved target and file identity are inside the active workspace
+boundary, it fails closed. This path boundary applies to every API path
+operation and file capture that may back an atom, folder, entity, share, or
+capture record.
 Canonicalization must also be TOCTOU-safe: after a path is resolved, subsequent
 stat/read/write/capture work must use the same verified descriptor, handle,
 inode/file-id binding, or equivalent identity-bound mechanism. The engine must
@@ -710,7 +709,7 @@ dohc should allow:
 to exist as real files in the workspace, while treating them as secret-backed
 files with stricter policy.
 
-Example policy:
+Example opt-in policy for an already-authorized protected local projection:
 
 ```yaml
 path: ".env"
@@ -721,10 +720,12 @@ searchable: false
 visibility: private
 publicExport: redact
 agentAccess: explicit
-materialized: local
+materialized: local # protected/explicit local projection, not default exposure
 ```
 
-For an authorized user on their own machine, `.env` can look like a normal file:
+For an authorized user on their own machine, `.env` can look like a normal file
+only after explicit materialization permission grants that protected local
+projection:
 
 ```text
 DATABASE_URL=postgres://...

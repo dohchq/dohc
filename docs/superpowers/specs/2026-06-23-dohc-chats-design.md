@@ -229,10 +229,12 @@ Required surfaces:
 - quick handoff from a DM into a linked work chat.
 - ability to mention an agent in a DM.
 
-After canonicalization/deduplication, `dmParticipantIds` must contain 2-16 unique
-participants. Raw duplicates are removed or rejected before persistence.
+After canonicalization, `dmParticipantIds` must contain 2-16 unique
+participants. Raw duplicates are rejected before uniqueness-key generation or
+persistence; implementations must not silently dedupe duplicate participants.
 Oversized canonical participant lists fail closed before persistence. Larger
-conversations should use channels or shared channels.
+conversations should use channels or shared channels. Every service that builds
+the canonical participant set uses this same reject-duplicates policy.
 
 DMs should still be source-aware when needed:
 
@@ -344,17 +346,19 @@ type ActiveThreadLink = ThreadLink & {
   deletedById?: never
 }
 
-type CanonicalThreadLinkKey = {
+type CanonicalThreadLinkKeyParts = {
   workspaceId: string
   threadId: string
   scopeKind: 'internal' | 'shared'
   targetWorkspaceId: string
   targetType: ThreadLinkTargetType
   targetId: string
-  versionKey: string
-  shareGrantKey: string
-  visibilityKey: string
+  targetVersionRef: VersionRef | null
+  shareGrantId: string | null
+  visibilityScope: string | null
 }
+
+type CanonicalThreadLinkKey = string // thread-link:v1:<lowercase-sha256-hex>
 ```
 
 For `ChannelChatThread`, `channelId` and `channelConversationId` are immutable
@@ -381,21 +385,27 @@ derived from `(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType,
 targetId, targetVersionRef, shareGrantId, visibilityScope)` after canonical
 normalization:
 
-- `versionKey` is the stable serialized `VersionRef` for versioned targets; for
-  target types that forbid `targetVersionRef`, it is the reserved sentinel
-  `version:none`; for share targets without a version ref, it is the reserved
-  sentinel `version:share-current`.
-- `shareGrantKey` is `share:<shareGrantId>` for shared-scope links and the
-  reserved sentinel `share:none` for internal links.
-- `visibilityKey` is `visibility:<visibilityScope>` for shared-scope links and
-  the reserved sentinel `visibility:internal` for internal links.
+- Build `CanonicalThreadLinkKeyParts` with `null` for absent
+  `targetVersionRef`, `shareGrantId`, or `visibilityScope`; do not use reserved
+  sentinel strings or prefix-concatenated fields.
+- Encode the parts as a framed tuple in fixed field order:
+  `[["workspaceId", value], ["threadId", value], ["scopeKind", value],
+  ["targetWorkspaceId", value], ["targetType", value], ["targetId", value],
+  ["targetVersionRef", versionRefTupleOrNull], ["shareGrantId", valueOrNull],
+  ["visibilityScope", valueOrNull]]`.
+- Serialize that tuple with canonical JSON: UTF-8, no insignificant whitespace,
+  object keys inside nested `VersionRef` tuples sorted bytewise, and numbers
+  represented only as canonical decimal strings.
+- The stored key is `thread-link:v1:<lowercase-sha256-hex>` over those exact
+  bytes.
 
-Reserved sentinels are not legal user/object identifiers. A retry for the same
-normalized key must upsert or no-op against the existing active `ThreadLink` and
-must not create a second active link or duplicate `link_added` fanout.
+A retry for the same normalized key must upsert or no-op against the existing
+active `ThreadLink` and must not create a second active link or duplicate
+`link_added` fanout.
 `ChatThreadProjection.linkedWork`, projections, search, and export all build
 from one active canonical link per normalized uniqueness key and must use the
-same normalization helper as link creation.
+same `canonicalThreadLinkKey(parts)` helper as link creation and `ThreadLink`
+upserts.
 The uniqueness key applies only to active links where `deletedAt` is absent.
 Tombstoned links remain historical records and do not block a future relink with
 the same target tuple; relinking creates a new active `ThreadLink` and a new
@@ -671,7 +681,7 @@ type MentionNotificationThreadActivity = ThreadActivityBase & {
   authzScopeId: string
   mentionedActorIds: string[]
   notificationId: string
-  notificationStatus?: 'queued' | 'sent' | 'suppressed' | 'resolved'
+  notificationStatus: 'queued' | 'sent' | 'suppressed' | 'resolved'
   bodyHash: string
 }
 
@@ -681,6 +691,10 @@ canonical ID match, then sort by bytewise ascending UTF-8 encoding. Enqueue,
 resolve, replay, export, and notification fanout paths all use that canonical
 array so duplicate mentions or runtime-specific ordering cannot create duplicate
 notifications or unstable history.
+`notificationStatus` is required on every mention notification activity.
+`mention_notification_enqueued` uses `queued`, `sent`, or `suppressed`;
+`mention_notification_resolved` uses `resolved`. Replay, export, and fanout must
+not infer lifecycle state from activity kind alone.
 `authzScopeId` is the exact server-issued authorization/redaction context for
 the mention notification projection. It must be derived server-side from the
 same grant/scope resolver used by shared chat and linked-work projections, and

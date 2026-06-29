@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `2eefeb9` reported 3 issues;
-  hundred-fourth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `a160df8` reported 7 issues;
+  hundred-fifth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1953,6 +1953,30 @@ Hundred-fourth pass:
   - Narrowed shared-channel redaction so unshared links are hidden, while
     explicitly shared links and work references stay visible only while their
     server-side grant remains valid for the viewer and redaction scope.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Trimmed Phase 0 proof-arc identities to the file/version/chat loop and moved
+    channels, agent runs, and shares back to deferred substrate identities.
+  - Clarified P0E chat contracts as shared substrate package contracts and the
+    first cut of the final `ChatThread`, `ThreadMessage`, and `ThreadLink`
+    shapes.
+  - Consolidated reserved namespace handling into the first canonical block and
+    made path canonicalization cross-reference that contract.
+  - Marked `.env` `materialized: local` as an opt-in protected local projection,
+    not default secret exposure.
+  - Standardized DM duplicate handling to reject duplicate participants before
+    canonical participant set/key generation.
+  - Replaced sentinel/prefix `CanonicalThreadLinkKey` serialization with a
+    collision-free framed tuple plus canonical JSON and SHA-256 helper used by
+    link creation, upserts, and projections.
+  - Made mention notification lifecycle state required on every mention
+    notification activity.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

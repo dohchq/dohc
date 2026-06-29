@@ -263,14 +263,15 @@ proof-arc identities required for the file/version/chat loop:
 - versions.
 - history moments.
 - chats.
-- channels.
 - messages.
-- agent runs.
-- shares.
+- thread links.
 
 Deferred substrate identities stay in the expansion backlog until their
 contracts are mounted into the product surface:
 
+- channels.
+- agent runs.
+- shares.
 - apps.
 - databases.
 - rows where row-level links are needed.
@@ -1003,7 +1004,8 @@ history.
 - One chat thread linked to a stable file object ID.
 - Message send.
 - Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
-  for this proof slice only.
+  defined in the shared substrate package as the first cut of the final
+  contracts; PR 12 extends them for channels, DMs, and full chat schema.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
