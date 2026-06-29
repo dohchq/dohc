@@ -216,9 +216,10 @@ deadline while the operator window is open; the reconstructable payload remains
 until canonicalization succeeds, an explicit operator disposition record retires
 it, or the non-overrideable terminal retention bound is reached. The terminal
 bound is derived from `operatorDispositionDueAt` plus
-`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs` unless Phase 0 sets a
-shorter global safety limit. At that bound, a still-unresolved accepted record
-must be automatically retired with an operator-visible
+`AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`. Any shorter global
+safety limit may apply only after the record has already been explicitly
+dispositioned or converted to evidence-only metadata. At that bound, a
+still-unresolved accepted record must be automatically retired with an operator-visible
 `auto_retired_payload_retention_expired` disposition: reconstructable payload
 bytes are deleted, cryptoshredded, or compacted into a non-reconstructable
 evidence record, while minimal metadata needed for audit, idempotency expiry,

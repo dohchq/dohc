@@ -533,6 +533,9 @@ better answer.
    - dohc Cloud syncs and replicates engine state. It never becomes
      authoritative over local writes, object identity, version membership,
      history, conflicts, policy, or projections.
+   - PR 21R owns the local-to-cloud and machine-to-machine replication protocol,
+     offline edit queues, replay ordering, conflict handling, and offline rejoin
+     behavior so this promise has one accountable workstream.
 
 2. **Filesystem surface:** watcher-backed folder for Phase 0, managed
    filesystem projection long-term.
@@ -729,6 +732,7 @@ contracts
   -> workspace object/version/event core
   -> file policy and projection contracts
   -> filesystem/API parity
+  -> sync replication and offline rejoin
   -> chats data/actions
   -> UI integration
   -> external sharing/search/hardening
@@ -2400,6 +2404,52 @@ substrate without data loss.
 **Acceptance:**
 
 - existing user work remains accessible and correct.
+
+### PR 21R - Sync Replication And Offline Rejoin
+
+**Goal:** Make the same workspace appear across machines and agents without
+turning dohc Cloud into the source of truth.
+
+**Workstream owner:** Replication and offline reconciliation.
+
+**Scope:**
+
+- Define local-engine to cloud replication protocol.
+- Define machine-to-machine state replication through dohc Cloud.
+- Preserve stable object IDs, workspace versions, history moments, policy,
+  conflict records, chat activity, and projection invalidation across replicas.
+- Queue local writes while offline and replay them with causal/idempotency
+  guards on rejoin.
+- Reconcile divergent offline edits with the same conflict-preservation model as
+  local concurrent writes.
+- Batch and backpressure replication so watcher bursts do not become sync floods.
+
+**Tests:**
+
+- offline edit on machine A rejoins and appears on machine B.
+- offline divergent edits preserve both sides or merge deterministically.
+- stale replica cannot overwrite newer canonical state.
+- replicated secret-backed files preserve redaction/materialization policy.
+- chat activity, unread/mention projections, and linked-work invalidations
+  rebuild consistently after rejoin.
+
+**E2E:**
+
+- "Edit offline on laptop, edit online on desktop, reconnect laptop" full path
+  with file history, conflict handling, search, and chat side rail verified.
+
+**CodeRabbit focus:**
+
+- data loss.
+- idempotency and replay ordering.
+- cross-workspace leakage.
+- offline conflict preservation.
+- sync flood and backpressure.
+
+**Acceptance:**
+
+- workspace continuity works across machines without making cloud authoritative
+  over local writes.
 
 ### PR 22 - Full QA Hardening And Release Readiness
 

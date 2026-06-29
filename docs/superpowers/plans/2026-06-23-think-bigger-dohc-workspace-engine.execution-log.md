@@ -81,7 +81,7 @@ worktree, and planned validation shape.
 | P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR workstream | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
-| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | docs sanity + brand guard | Scaffold lane. |
+| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main orchestration workstream | docs link/anchor check + brand guard | Scaffold lane. |
 | 01 | Workspace Engine Contracts And Substrate | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 02 | Version Registry And Typed Event Skeleton | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 03 | Snapshot And Restore Foundation | TBD | TBD | TBD | TBD | Roadmap lane. |
@@ -103,6 +103,7 @@ worktree, and planned validation shape.
 | 19 | Versioned Workspace UX Integration | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 20 | Agent End-To-End Work Loop | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 21 | Migration And Backwards Compatibility | TBD | TBD | TBD | TBD | Roadmap lane. |
+| 21R | Sync Replication And Offline Rejoin | TBD | TBD | Replication and offline reconciliation | TBD | Roadmap lane. |
 | 22 | Full QA Hardening And Release Readiness | TBD | TBD | TBD | TBD | Roadmap lane. |
 
 ## Entry Template
@@ -1735,6 +1736,28 @@ Ninety-third pass:
   - Changed the PR00 execution-log "Tests Added Or Updated" note to say no new
     code tests were added while preserving validation evidence below.
   - Updated Current PR Snapshot to reflect the latest 5-issue CodeRabbit rerun.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Removed the shorter global safety-limit escape hatch from accepted holding
+    record payload retirement; terminal retention is derived from
+    `operatorDispositionDueAt` plus
+    `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`.
+  - Added PR 21R, Sync Replication And Offline Rejoin, as the dedicated
+    replication/offline reconciliation workstream and pointed the source-of-truth
+    default plus package boundary order at it.
+  - Required atomic `ThreadMessage` creation with matching `message_created`
+    activity visibility for replay/export/projection consistency.
+  - Made mention notification `notificationId` deterministic from message
+    revision/body hash/canonical mention set and required enqueue/resolve/replay
+    dedupe by that id.
+  - Aligned the PR00 lane inventory row with the actual docs link/anchor and
+    brand-guard validation evidence.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

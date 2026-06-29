@@ -521,6 +521,12 @@ equivalent message version, then advances `bodyRevision` by exactly one decimal
 integer in the same atomic unit that appends the matching `ThreadActivity`.
 Concurrent edits with a stale revision fail closed or retry; they must not skip
 revision numbers, overwrite each other, or duplicate revision history.
+Message creation is also atomic: the initial `ThreadMessage` row and its
+`message_created` `ThreadActivity` must be written in the same transaction or
+serialized unit of work and become visible together. The activity is the
+canonical creation event for replay, projections, exports, and audit; the
+message row must not become visible without it, and a creation activity must not
+be exposed without the corresponding row.
 
 `ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
 text by default or sanitize through an allowlisted formatting subset before
@@ -653,6 +659,14 @@ canonical ID match, then sort by bytewise ascending UTF-8 encoding. Enqueue,
 resolve, replay, export, and notification fanout paths all use that canonical
 array so duplicate mentions or runtime-specific ordering cannot create duplicate
 notifications or unstable history.
+`notificationId` is deterministic for a mention notification lifecycle:
+`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<bodyHash>:<sha256(canonicalMentionedActorIds)>`.
+The enqueue path must upsert or no-op by that id, and resolve/replay/fanout must
+dedupe by the same `notificationId`. Repeated enqueue or resolve attempts for
+the same message revision and canonical mention set return the existing result
+or a deterministic no-op; they must not append duplicate activities, duplicate
+queue rows, unstable unread/mention badges, duplicate notifications, or duplicate
+export/history records.
 
 type ThreadActivity =
   | MessageCreateThreadActivity
