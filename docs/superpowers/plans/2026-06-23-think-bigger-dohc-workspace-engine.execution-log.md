@@ -19,6 +19,7 @@ This block is the canonical live status for PR00 and the provisional Phase 0
 lane stack. The PR status table is lane inventory, and the pass log below is
 append-only history.
 
+- **Last updated:** 2026-06-30 01:04 PST.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
 - **PR00 CodeRabbit:** pending rerun after the latest follow-up fixes.
@@ -113,7 +114,7 @@ Status:
 Branch:
 Worktree:
 Implementation workstream, if used:
-PR:
+PR Link:
 Date started:
 Date completed:
 
@@ -226,7 +227,7 @@ Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: `<current checkout>`
 Implementation workstream, if used: main orchestration workstream
-PR: https://github.com/dohc-ai/dohc/pull/46
+PR Link: https://github.com/dohc-ai/dohc/pull/46
 Date started: 2026-06-24
 Date completed:
 
@@ -1420,6 +1421,27 @@ Seventy-seventh pass:
     PR state.
   - Added holding records, durability-log entries, and idempotency tombstones to
     the Phase 0 workspace-scoping checklist.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added a canonical `Idempotency Retry Horizons` source of truth in the Phase 0
+    decision note and PR 01 `WorkspaceIdempotencyPolicy`, referenced by both
+    versioned workspace and native filesystem specs.
+  - Strengthened P0A testing so inventory must include a minimal smoke/contract
+    validation for the chosen storage and filesystem baseline.
+  - Replaced the PR00 `rg` link/path smoke with a docs link checker or equivalent
+    link/anchor validation requirement.
+  - Added a `Last updated` marker to Current PR Snapshot and renamed the reusable
+    entry-template field to `PR Link`.
+  - Made active `ThreadLink` uniqueness tombstone-aware so deleted links do not
+    block future relinks.
+  - Added fail-closed `chat_thread` self-link and cycle rejection before
+    `link_added` or projection/search/export fanout.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

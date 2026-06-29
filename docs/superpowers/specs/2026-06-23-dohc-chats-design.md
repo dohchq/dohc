@@ -327,6 +327,10 @@ upsert or no-op against the existing active `ThreadLink` and must not create a
 second active link or duplicate `link_added` fanout. `ChatThreadProjection.linkedWork`,
 projections, search, and export build from one active canonical link per
 uniqueness key.
+The uniqueness key applies only to active links where `deletedAt` is absent.
+Tombstoned links remain historical records and do not block a future relink with
+the same target tuple; relinking creates a new active `ThreadLink` and a new
+`link_added` activity after validation succeeds.
 Links are never hard-deleted in normal operation: removal sets `deletedAt` and
 `deletedById`, and link visibility reads only non-tombstoned records. A link is
 uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
@@ -342,6 +346,10 @@ link creation, resolution, search projection, export, notification fanout, or UI
 rendering. Each resolver enforces workspace scope and target ACLs; adding a new
 target kind requires extending the enum, registering a resolver, and adding
 authorization, projection, export, and replay tests for that kind.
+`chat_thread` links must be acyclic. A thread cannot link to itself, and link
+creation must reject any target that would introduce a cycle in the thread-link
+graph before `link_added` is recorded or linked-work projection, search,
+notification, or export fanout runs.
 
 Thread create/update paths must ignore or reject client-provided
 `lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from

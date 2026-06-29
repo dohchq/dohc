@@ -365,6 +365,12 @@ closed with an explicit `idempotency_expired` response or a deterministic
 conflict response; it must not silently apply as a new mutation. Implementations
 may garbage-collect expired key tombstones only after the same maximum retry
 horizon has passed or the operation namespace is rotated.
+Retry-horizon values come from the same Phase 0 decision note and PR 01 shared
+`WorkspaceIdempotencyPolicy` contract as the versioned workspace spec:
+`apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
+`filesystemCaptureDedupHorizonMs`, and
+`filesystemCaptureTombstoneRetentionMs`. The native filesystem layer must not
+define or copy independent horizon values.
 
 Mounted-folder and file-watch captured saves cannot rely on caller-generated API
 idempotency keys, because native editors and shell tools do not provide them.

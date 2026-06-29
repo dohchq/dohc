@@ -821,8 +821,12 @@ blockers in the execution log.
 
 **Tests:**
 
-- No production tests required unless inventory reveals broken existing tests.
-- Run docs/link smoke if available.
+- Add at least one minimal smoke/contract validation that codifies the chosen
+  Phase 0 storage baseline and filesystem-interposition assumption, such as a
+  small script or test that asserts selected packages, tables, adapters, and
+  watcher/projection paths exist or are explicitly absent.
+- Run the PR00 docs link checker or equivalent docs tooling so the inventory
+  links and anchors are validated against the same plan artifacts.
 
 **Acceptance:**
 
@@ -1451,7 +1455,9 @@ Foundation alpha and the relevant surface proof are complete.
 **Tests:**
 
 - docs lint if available.
-- link/path smoke via `rg` or docs tooling.
+- docs link checker or equivalent docs tooling that validates relative links and
+  anchors. A plain `rg` text-presence check is not sufficient as the only link
+  validation.
 
 **CodeRabbit focus:**
 

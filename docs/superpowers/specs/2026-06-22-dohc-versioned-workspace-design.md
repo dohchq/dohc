@@ -454,6 +454,15 @@ horizon, an API retry with the same key must fail closed with an explicit
 silently apply as a new mutation. Implementations may garbage-collect expired key
 tombstones only after the same maximum retry horizon has passed or the operation
 namespace is rotated.
+The canonical retry-horizon values are defined once by the Phase 0 decision note
+under `Idempotency Retry Horizons`, then promoted into the PR 01 shared
+`WorkspaceIdempotencyPolicy` contract. This spec and the native filesystem spec
+both reference those policy names instead of duplicating values:
+`apiWriteTerminalRetryHorizonMs`, `apiWriteTombstoneRetentionMs`,
+`filesystemCaptureDedupHorizonMs`, and
+`filesystemCaptureTombstoneRetentionMs`. Any PR that changes the values must
+update the shared contract and execution log before changing implementation
+behavior.
 
 Filesystem-captured saves cannot rely on caller-generated API idempotency keys.
 Those paths use an engine-generated capture token and engine-side deduplication
