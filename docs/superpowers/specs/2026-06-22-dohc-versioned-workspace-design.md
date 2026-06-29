@@ -10,11 +10,11 @@ source-control concepts with new labels.
 
 The user-facing promise is simple:
 
-> Use normal files. Humans and agents can edit them. Authorized writes are
-> durably accepted immediately; writes that pass protection checks become
-> canonical immediately, while pending or denied writes keep recovery handles.
-> dohc remembers what happened, supports parallel versions, and helps reconcile
-> conflicts.
+> Use normal files. Humans and agents can edit them. Accepted writes are durably
+> recorded immediately. Writes that pass protection checks become canonical
+> immediately; writes that cannot yet become canonical return `durable-pending`,
+> and denied writes keep durable recovery/audit handles. dohc remembers what
+> happened, supports parallel versions, and helps reconcile conflicts.
 
 This keeps the dohc philosophy intact: the workspace should still feel like
 files on the user's computer. Agents should not need to know dohc-specific
@@ -65,18 +65,21 @@ Each version behaves like a live file workspace:
 - dohc records who or what changed the workspace.
 - dohc can restore earlier states.
 
-There is no special rule that agents cannot edit Main. dohc should not make
-agents second-class writers. Safety comes from snapshots, permissions, history,
-conflict preservation, and recovery, not from forcing all agent work through a
-separate approval flow.
+There is no special rule that agents cannot edit Main, but Main still uses the
+same ownership, authorization, and review gates as any other protected write.
+dohc should not make agents second-class writers. Safety comes from snapshots,
+permissions, review gates where policy requires them, history, conflict
+preservation, and recovery, not from forcing all agent work through a separate
+approval flow.
 
 Immediate save is not permission bypass. Every save path must enforce
-workspace-scoped authorization, protected-path rules, user locks, version
-access, visibility boundaries, and skill-turn gates before applying a change.
-Authenticated actor identity is derived by the server/engine, never trusted from
-the caller. Humans, agents, automations, imports, and sync processes all pass
-through the same protection checks before a write can land. The write path is
-fail-closed: if any authorization, policy, visibility, protected-path,
+workspace-scoped authorization, ownership/review gates required by policy,
+protected-path rules, user locks, version access, visibility boundaries, and
+skill-turn gates before applying a change. Authenticated actor identity is
+derived by the server/engine, never trusted from the caller. Humans, agents,
+automations, imports, and sync processes all pass through the same protection
+checks before a write can land. The write path is fail-closed: if any
+authorization, ownership/review gate, policy, visibility, protected-path,
 user-lock, version-access, or skill-turn evaluator is unavailable or
 indeterminate, the save is denied rather than applied.
 Canonical save success is acknowledged only after the mutation is durably

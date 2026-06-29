@@ -498,6 +498,7 @@ type ThreadMessage = {
   createdAt: UnixMsDecimalString
   editedAt?: UnixMsDecimalString
   editedById?: string
+  // Derived cache from the canonical message_deleted activity.
   deletedAt?: UnixMsDecimalString
   deletedById?: string
   deleteReason?: string
@@ -529,15 +530,22 @@ references; raw HTML, scriptable URLs, event handlers, and embedded active
 content are not allowed. The same sanitization contract applies to chat
 projections, search snippets, notifications, and summaries.
 
-Deletes are tombstones, not hard deletes. If `deletedAt` is present,
-`tombstone` must be true, `body` must render as a deletion placeholder, and the
-original body must remain available only through authorized audit/history paths.
+Deletes are tombstones, not hard deletes. The append-only
+`MessageDeleteThreadActivity` is the canonical deletion state. `ThreadMessage`
+`deletedAt`, `deletedById`, `deleteReason`, and `tombstone` are derived cache
+fields copied from the canonical delete activity in the same atomic unit; they
+must not be written independently, mutated after delete, or treated as a second
+source of truth. If `deletedAt` is present, `tombstone` must be true, `body` must
+render as a deletion placeholder, and the original body must remain available
+only through authorized audit/history paths.
 If the original body contains or may contain secrets, audit/history retention
 must store secret-backed references, encrypted payloads, or redacted forms, not
 plaintext secret content.
-Projections, search, notifications, and summaries all read the same
-`ThreadMessage` deletion state and must not invent ad hoc redaction behavior or
-retain plaintext secrets in history, audit, search, export, or agent-log flows.
+Replay, export, audit, projections, search, notifications, and summaries all
+read the canonical delete activity, or a verified `ThreadMessage` cache derived
+from it, and must repair or reject drift between the activity and row fields.
+They must not invent ad hoc redaction behavior or retain plaintext secrets in
+history, audit, search, export, or agent-log flows.
 Authorized legal erasure is the exception to original-body retention: when a
 GDPR/CCPA or equivalent request is approved through policy, the engine may
 cryptographically purge, destroy keys for, or irreversibly redact the original

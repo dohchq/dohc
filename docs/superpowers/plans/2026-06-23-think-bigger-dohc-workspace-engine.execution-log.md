@@ -1704,6 +1704,23 @@ Ninety-first pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Ninety-second pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Clarified the opening versioned-workspace promise so durable recording,
+    `durable-pending`, canonical promotion, and denied audit handles are separate.
+  - Added explicit ownership/review gate language to Main write handling and the
+    immediate-save enforcement path.
+  - Made `MessageDeleteThreadActivity` the canonical chat deletion source, with
+    `ThreadMessage` deletion fields only a derived cache that replay/export must
+    verify or repair.
+  - Kept the Current PR Snapshot aligned with the latest 4-issue rerun while
+    follow-up fixes await the next CodeRabbit pass.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live only in Current PR Snapshot. This section is an
