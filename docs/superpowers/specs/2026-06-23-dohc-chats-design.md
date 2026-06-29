@@ -262,11 +262,21 @@ type DmChatThread = ChatThreadBase & {
 
 type ChatThread = ChannelChatThread | DmChatThread
 
+type ThreadLinkTargetType =
+  | 'atom'
+  | 'file'
+  | 'folder'
+  | 'version'
+  | 'history_moment'
+  | 'agent_run'
+  | 'share'
+  | 'chat_thread'
+
 type ThreadLink = {
   id: string
   workspaceId: string
   threadId: string
-  targetType: string
+  targetType: ThreadLinkTargetType
   targetWorkspaceId: string
   targetId: string
   targetVersionRef?: VersionRef
@@ -303,6 +313,12 @@ shareGrantId, visibilityScope)` captured on the activity event.
 after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there
 is no in-place link update path for replay/export to miss.
+Target types resolve through a server-side resolver registry keyed by
+`ThreadLinkTargetType`. Unknown or unregistered target types fail closed before
+link creation, resolution, search projection, export, notification fanout, or UI
+rendering. Each resolver enforces workspace scope and target ACLs; adding a new
+target kind requires extending the enum, registering a resolver, and adding
+authorization, projection, export, and replay tests for that kind.
 
 Thread create/update paths must ignore or reject client-provided
 `lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from
@@ -334,12 +350,13 @@ must be included in the canonical participant set, and must be authorized to
 message every participant before routing, key generation, indexing, ACL checks,
 persistence, fanout, or atomic create logic. The same server-derived membership
 rule applies to every DM read/write path: `read_chat`, `reply_to_chat`,
-reactions, notifications, and read-state updates. Membership must be verified
-against the canonical participant set before routing, indexing, persistence,
-fanout, notification generation, search snippet exposure, or cursor
-advancement. If membership changes or is revoked, new reads, replies,
-reactions, notifications, and read-state updates for that actor fail closed
-unless an explicit retained-history policy grants narrower access. For
+`edit_chat_message`, `delete_chat_message`, reactions, notifications, and
+read-state updates. Membership must be verified against the canonical participant
+set before routing, indexing, persistence, fanout, notification generation,
+search snippet exposure, or cursor advancement. If membership changes or is
+revoked, new reads, replies, edits, deletes, reactions, notifications, and
+read-state updates for that actor fail closed unless an explicit retained-history
+policy grants narrower access. For
 DM-backed threads, the canonical participant set must derive a collision-safe
 unique persistence key
 within the workspace by using an exact canonical participant-set value, or a
@@ -351,9 +368,10 @@ DM participant sets are immutable after thread creation. Any membership change
 creates or resolves a new canonical DM-backed `ChatThread` for the new exact
 participant set and records a linkage event from the prior thread, rather than
 mutating `dmParticipantIds` in place. `read_chat`, `reply_to_chat`, reactions,
-notifications, and read-state updates continue to authorize against the
-canonical participant set of the specific thread being accessed, so membership
-changes cannot silently merge, split, or reassign thread history.
+`edit_chat_message`, `delete_chat_message`, notifications, and read-state
+updates continue to authorize against the canonical participant set of the
+specific thread being accessed, so membership changes cannot silently merge,
+split, or reassign thread history.
 
 Threads can start titleless for speed, then dohc or the user can name them once
 they become durable.
@@ -504,7 +522,7 @@ type LinkThreadActivity = ThreadActivityBase & {
   linkId: string
   linkTarget: {
     targetWorkspaceId: string
-    targetType: string
+    targetType: ThreadLinkTargetType
     targetId: string
     targetVersionRef?: VersionRef
     shareGrantId?: string

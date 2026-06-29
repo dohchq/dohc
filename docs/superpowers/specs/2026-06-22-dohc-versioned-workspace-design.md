@@ -84,13 +84,17 @@ per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
 deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. Eviction applies only to rejected-before-acceptance
 items. Accepted holding records must remain recoverable until protection checks
-succeed and canonicalization completes. Accepted holding records must also have a
-bounded expiry/compaction policy once the retry horizon or operator-approved
-escalation window is exceeded. If a record is eventually retired through that
-documented escalation path, the engine preserves durable rejection or expiration
-evidence. Humans, agents, imports, and sync processes all get the same guarantee:
-an accepted change is not silently lost, but it also does not become canonical
-workspace state until protection checks pass.
+succeed and canonicalization completes, or until explicit operator disposition is
+recorded for a record that cannot safely become canonical. Bounded retry,
+expiry, and compaction policies may move accepted records to colder durable
+storage after a retry horizon or operator-approved escalation window, but they
+must not discard the reconstructable payload before canonicalization succeeds or
+explicit disposition is recorded. If a rejected-before-acceptance item expires,
+or if an accepted record is retired through explicit disposition, the engine
+preserves durable rejection, disposition, or expiration evidence. Humans, agents,
+imports, and sync processes all get the same guarantee: an accepted change is
+not silently lost, but it also does not become canonical workspace state until
+protection checks pass.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as

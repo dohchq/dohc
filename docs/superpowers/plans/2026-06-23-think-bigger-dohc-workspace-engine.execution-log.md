@@ -68,16 +68,16 @@ unattended Phase 0 execution on 2026-06-24. Current live state is recorded only
 in Current PR Snapshot above. This table records static lane ownership, branch,
 worktree, and planned validation shape.
 
-| PR ID | Title | Branch | Worktree | Implementation Thread | Planned Tests | Static Notes |
+| PR ID | Title | Branch | Worktree | Implementation Workstream | Planned Tests | Static Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR thread | docs + focused package tests | Provisional lane. |
-| P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR thread | cargo test + perf | Provisional lane. |
-| P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
-| P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR thread | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
-| P0D | Compare, Clean Merge, Conflict Preservation | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR thread | workspace-engine + workspace-history + typecheck | Provisional lane. |
-| P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
-| P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR thread | workspace-engine + typecheck | Provisional lane. |
-| P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR thread | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
+| P0A | Current System Inventory And Decisions | codex/think-bigger-p0a-inventory | provisional sibling worktree | TBD lane PR workstream | docs + focused package tests | Provisional lane. |
+| P0R | Rust Workspace Kernel Spike | codex/think-bigger-p0r-rust-kernel | provisional sibling worktree | TBD lane PR workstream | cargo test + perf | Provisional lane. |
+| P0B | Minimal Versioned Text Store | codex/think-bigger-p0b-versioned-store | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
+| P0C | File/API Write Capture And History | codex/think-bigger-p0c-file-history | provisional sibling worktree | TBD lane PR workstream | workspace-engine/history/mcp/desktop + feasible matrix | Provisional lane. |
+| P0D | Compare, Clean Merge, Conflict Preservation | codex/think-bigger-p0d-merge-conflicts | provisional sibling worktree | TBD lane PR workstream | workspace-engine + workspace-history + typecheck | Provisional lane. |
+| P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
+| P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR workstream | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
 | 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | docs sanity + brand guard | Scaffold lane. |
 | 01 | Workspace Engine Contracts And Substrate | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 02 | Version Registry And Typed Event Skeleton | TBD | TBD | TBD | TBD | Roadmap lane. |
@@ -112,7 +112,7 @@ Copy this section for each PR.
 Status:
 Branch:
 Worktree:
-Implementation chat/thread:
+Implementation workstream, if used:
 PR:
 Date started:
 Date completed:
@@ -139,12 +139,23 @@ Date completed:
 
 - ...
 
+### Phase 0 Decision Note
+
+- Storage baseline:
+- Filesystem interposition:
+- Secret boundary:
+- Merge scope:
+- Chat/file philosophy:
+- Rust kernel boundary:
+- Approval/status:
+
 ### Local Agent CLI QA
 
 #### Pre-Edit Checks
 
 - Root `AGENTS.md` reviewed:
 - `apps/app/AGENTS.md` reviewed when working in `apps/app`:
+- `apps/web/AGENTS.md` reviewed when working in `apps/web`:
 - `apps/app/convex/_generated/ai/guidelines.md` reviewed when touching Convex:
 - Other required instructions reviewed:
 
@@ -208,7 +219,7 @@ Date completed:
 Status: draft PR
 Branch: codex/think-bigger-00-readiness-scaffold
 Worktree: `<current checkout>`
-Implementation chat/thread: main orchestration thread
+Implementation workstream, if used: main orchestration workstream
 PR: https://github.com/dohc-ai/dohc/pull/46
 Date started: 2026-06-24
 Date completed:
@@ -1269,6 +1280,26 @@ Seventieth pass:
   - Added length-prefixed digest framing for chat projection filenames.
   - Added explicit `message_deleted_legacy` activity for legacy import fallback
     deletes.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added a first-class Phase 0 decision-note section to the execution log
+    template covering storage baseline, filesystem interposition, secret
+    boundary, merge scope, chat/file philosophy, and Rust kernel boundary.
+  - Labeled the safe `.env` scenario as post-Phase 0 / PR 08+ to match the
+    deferred secret-backed file milestone.
+  - Clarified that accepted holding records remain recoverable until
+    canonicalization succeeds or explicit operator disposition is recorded, and
+    that compaction cannot discard reconstructable payload before then.
+  - Added `apps/web/AGENTS.md` to the reusable pre-edit check template.
+  - Extended DM membership revocation fail-closed behavior to edits and deletes.
+  - Closed chat `ThreadLink.targetType` through an enum and server-side resolver
+    registry with fail-closed handling for unknown or unregistered target types.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

@@ -1049,7 +1049,7 @@ Do not include these in Phase 0 unless the user explicitly expands scope:
 
 ## Agent And Review Workflow
 
-### Execution Topology: Worktrees And Focused Implementation Threads
+### Execution Topology: Worktrees And Focused Implementation Workstreams
 
 Use this main thread as the orchestration thread. It owns the mega plan,
 execution log, cross-lane decisions, and final reconciliation.
@@ -1095,11 +1095,11 @@ Each implementation workstream should start with:
 - the branch/worktree path.
 - required tests and performance budgets.
 - CodeRabbit loop instructions.
-- if the scope touches `apps/web`, the thread must read `apps/web/AGENTS.md`
+- if the scope touches `apps/web`, the workstream must read `apps/web/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches `apps/app`, the thread must read `apps/app/AGENTS.md`
+- if the scope touches `apps/app`, the workstream must read `apps/app/AGENTS.md`
   before editing and record that in its execution-log entry.
-- if the scope touches Convex code under `apps/app`, the thread must first
+- if the scope touches Convex code under `apps/app`, the workstream must first
   check `apps/app/convex/_generated/ai/guidelines.md`, read it when present,
   and record the checked path or absence in its execution-log entry before
   editing.
@@ -2456,7 +2456,7 @@ These are the product-level scenarios the full initiative must eventually pass.
 4. UI shows a simple choice, not raw conflict markers.
 5. Both states remain recoverable.
 
-### Scenario E - Safe `.env`
+### Scenario E - Safe `.env` (post-Phase 0 / PR 08+)
 
 1. User creates `.env`.
 2. Policy marks it tracked, encrypted, searchable false, private.
