@@ -273,7 +273,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 9 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
   applied below and need a clean rerun.
 - Historical findings fixed:
   - Major: versioned workspace spec needed explicit server/engine-derived
@@ -1028,8 +1028,8 @@ Fifty-ninth pass:
     search snippets, notification caches, export staging artifacts, and other
     service-owned materializations.
   - Declared `ThreadLink` the canonical source for chat linked work,
-    `ChatThread.linkedWork` a derived read model/cache, and link activity events
-    append-only provenance.
+    `ChatThreadProjection.linkedWork` a derived read model/cache, and link
+    activity events append-only provenance.
   - Standardized native filesystem materialization terminology on `virtual`.
   - Scoped idempotency keys to API-originated write mutations and separated
     mounted-folder/file-watch deduplication from API idempotency semantics.
@@ -1142,10 +1142,26 @@ Sixty-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Sixty-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Moved linked work out of canonical `ChatThread` state into
+    `ChatThreadProjection.linkedWork` so `ThreadLink` remains the source of
+    truth.
+  - Added a `ReactionIdentity` XOR so reaction activity must carry either a
+    stable `reactionId` or a complete deterministic reaction tuple.
+  - Added the pending CodeRabbit rerun to unresolved findings while preserving
+    the docs-only local-agent-CLI exception note.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
   completion or merge-readiness.
+- Pending CodeRabbit rerun after the latest follow-up fixes.
 
 ### Subagent Reviews
 

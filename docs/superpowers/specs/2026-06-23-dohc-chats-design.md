@@ -243,8 +243,11 @@ type ChatThreadBase = {
   createdBy: string
   createdAt: UnixMsDecimalString
   lastActivityAt: UnixMsDecimalString
-  linkedWork: ThreadLink[]
   pinned: boolean
+}
+
+type ChatThreadProjection = ChatThreadBase & {
+  linkedWork: ThreadLink[]
 }
 
 type ChannelChatThread = ChatThreadBase & {
@@ -277,11 +280,11 @@ type ThreadLink = {
 ```
 
 `ThreadLink` records are the canonical source for linked work.
-`ChatThread.linkedWork` is a derived read model/cache of the current
+`ChatThreadProjection.linkedWork` is a derived read model/cache of the current
 non-tombstoned links, and `ThreadActivity` `link_added`/`link_removed` events are
 append-only provenance. Link add/remove flows must update the canonical
 `ThreadLink` record and append the corresponding activity in the same transaction
-or serialized unit of work, then rebuild/invalidate `ChatThread.linkedWork`,
+or serialized unit of work, then rebuild/invalidate `ChatThreadProjection.linkedWork`,
 projections, search, and notifications from canonical links. If the derived list
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
@@ -435,20 +438,24 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString
 }
 
-type MessageThreadActivity = ThreadActivityBase & {
+type MessageBodyThreadActivity = ThreadActivityBase & {
   messageId: string
   kind:
     | 'message_created'
     | 'message_edited'
     | 'message_deleted'
-    | 'reaction_added'
-    | 'reaction_removed'
   previousBody?: ChatBodySnapshot
   previousBodyRevision?: UInt64DecimalString
   nextBodyHash?: string
-  reactionId?: string
-  reactionKey?: string
-  reactionActorId?: string
+}
+
+type ReactionIdentity =
+  | { reactionId: string; reactionKey?: never; reactionActorId?: never }
+  | { reactionId?: never; reactionKey: string; reactionActorId: string }
+
+type ReactionThreadActivity = ThreadActivityBase & ReactionIdentity & {
+  messageId: string
+  kind: 'reaction_added' | 'reaction_removed'
 }
 
 type LinkThreadActivity = ThreadActivityBase & {
@@ -464,23 +471,26 @@ type LinkThreadActivity = ThreadActivityBase & {
   }
 }
 
-type ThreadActivity = MessageThreadActivity | LinkThreadActivity
+type ThreadActivity =
+  | MessageBodyThreadActivity
+  | ReactionThreadActivity
+  | LinkThreadActivity
 ```
 
 For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
 and `reaction_removed`, `messageId`, `actorId`, `actorKind`, and `createdAt` are
 required. For `message_edited`, `previousBody` and `previousBodyRevision` are
-also required. Authorized history and export paths reconstruct the revision trail
-from these events. Normal chat rendering, search, notifications, projections,
-and summaries use the current `ThreadMessage.body` unless policy explicitly
-materializes historical revisions. Legal erasure may replace `previousBody` with
-a redacted snapshot while retaining edit provenance.
+also required. Reaction events must satisfy exactly one identity mode: either a
+stable `reactionId`, or the complete deterministic tuple `(messageId,
+reactionActorId, reactionKey)`. Authorized history and export paths reconstruct
+the revision trail from these events. Normal chat rendering, search,
+notifications, projections, and summaries use the current `ThreadMessage.body`
+unless policy explicitly materializes historical revisions. Legal erasure may
+replace `previousBody` with a redacted snapshot while retaining edit provenance.
 For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
-`linkedWork` cache is rebuilt. For `reaction_added` and `reaction_removed`,
-events must carry either a stable `reactionId` or the deterministic reaction
-tuple `(messageId, reactionActorId, reactionKey)` so add/remove replay affects
-one exact reaction.
+`linkedWork` cache is rebuilt. Reaction add/remove replay affects one exact
+reaction through the `ReactionIdentity` XOR above.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.
