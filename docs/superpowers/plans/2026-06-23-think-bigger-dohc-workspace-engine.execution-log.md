@@ -38,7 +38,7 @@ Required evidence:
 
 - branch name.
 - worktree path.
-- implementation chat/thread, if used.
+- implementation workstream, if used.
 - PR link.
 - scope completed.
 - files changed.
@@ -297,7 +297,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1235,6 +1235,22 @@ Sixty-eighth pass:
   - Consolidated live PR status into Current PR Snapshot and converted the table
     into static lane inventory.
   - Added reusable pre-edit check fields to the local-agent QA template.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Clarified that sync/import ingests carrying agent/run metadata cannot
+    downgrade to unverified local/session provenance when proof is absent.
+  - Relaxed API version cardinality so operations resolve in exactly one
+    workspace while supplying the version identifiers each operation needs.
+  - Renamed implementation lane terminology to internal workstreams and reserved
+    explicit approval requirements for user-visible Codex chats.
+  - Tightened `ChatThreadProjection.linkedWork` to active non-tombstoned links
+    only.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

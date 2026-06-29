@@ -301,10 +301,12 @@ restore(workspaceId, versionId, pointInTime, {
 This answers the API-native workspace requirement. The file mount and the API
 are peer views over the same versioned workspace engine. APIs may use a
 validated bound session instead of repeating `workspaceId`/`versionId` in every
-call, but every read, write, list, stat, search, watch, snapshot, diff, merge,
-and restore request must resolve inside exactly one workspace and, where
-content is versioned, exactly one version. Cross-workspace path or version
-references fail closed before filesystem or storage access.
+call, but every request must resolve inside exactly one workspace. Each
+operation supplies the version identifiers it actually needs: single-version
+operations such as read/write/list/stat/search/watch/snapshot/restore bind one
+version, while diff and merge bind the required source/target or versionA/versionB
+pair inside that same workspace. Cross-workspace path or version references fail
+closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base

@@ -247,7 +247,7 @@ type ChatThreadBase = {
 }
 
 type ChatThreadProjection = ChatThreadBase & {
-  linkedWork: ThreadLink[]
+  linkedWork: ActiveThreadLink[]
 }
 
 type ChannelChatThread = ChatThreadBase & {
@@ -277,6 +277,11 @@ type ThreadLink = {
   deletedAt?: UnixMsDecimalString
   deletedById?: string
 }
+
+type ActiveThreadLink = ThreadLink & {
+  deletedAt?: never
+  deletedById?: never
+}
 ```
 
 `ThreadLink` records are the canonical source for linked work.
@@ -285,7 +290,8 @@ non-tombstoned links, and `ThreadActivity` `link_added`/`link_removed` events ar
 append-only provenance. Link add/remove flows must update the canonical
 `ThreadLink` record and append the corresponding activity in the same transaction
 or serialized unit of work, then rebuild/invalidate `ChatThreadProjection.linkedWork`,
-projections, search, and notifications from canonical links. If the derived list
+projections, search, and notifications from active canonical links only. If the
+derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
 Links are never hard-deleted in normal operation: removal sets `deletedAt` and

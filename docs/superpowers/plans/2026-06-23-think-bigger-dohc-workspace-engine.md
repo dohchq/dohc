@@ -1068,24 +1068,25 @@ main planning checkout
 Default rule:
 
 - one implementation PR = one branch = one worktree.
-- one focused implementation chat/thread may own that worktree when the lane is
-  substantial.
+- one focused internal implementation workstream may own that worktree when the
+  lane is substantial.
 - no two agents edit the same worktree at the same time.
 - shared decisions flow back into this main thread and the execution log.
 - generated artifacts, perf measurements, review notes, and migration notes
   must be copied back into the PR entry before the lane is considered done.
 
-Create separate focused implementation chats/threads for major lanes, not for
-tiny edits:
+Create separate focused internal implementation workstreams for major lanes, not
+for tiny edits. These are worktree-owned coordination lanes, not product-visible
+dohc chats:
 
-- **Rust Kernel Spike Thread:** PR P0R.
-- **Versioned Store Thread:** PR P0B/P0D if merge work stays tightly coupled.
-- **Filesystem Capture Thread:** PR P0C and later PR 05/06/09/10.
-- **Chats Product Thread:** PR P0E and later PR 12-17.
-- **Search/Policy Thread:** PR P0F and later PR 04/11/17/18.
-- **QA/Performance Hardening Thread:** PR P0G and later release gates.
+- **Rust Kernel Spike Workstream:** PR P0R.
+- **Versioned Store Workstream:** PR P0B/P0D if merge work stays tightly coupled.
+- **Filesystem Capture Workstream:** PR P0C and later PR 05/06/09/10.
+- **Chats Product Workstream:** PR P0E and later PR 12-17.
+- **Search/Policy Workstream:** PR P0F and later PR 04/11/17/18.
+- **QA/Performance Hardening Workstream:** PR P0G and later release gates.
 
-Each implementation thread should start with:
+Each implementation workstream should start with:
 
 - this mega plan.
 - the execution log.
@@ -1103,9 +1104,9 @@ Each implementation thread should start with:
   and record the checked path or absence in its execution-log entry before
   editing.
 
-Separate implementation chats/threads are user-visible and should only be
-created when the user explicitly asks or approves. Subagents remain the default
-for short bounded reviews inside the current thread.
+Separate user-visible Codex chats are different from internal workstreams and
+should only be created when the user explicitly asks or approves. Subagents
+remain the default for short bounded reviews inside the current thread.
 
 Worktree hygiene:
 

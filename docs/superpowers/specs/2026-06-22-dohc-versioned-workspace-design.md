@@ -169,9 +169,10 @@ sync/import channels that carry agent/run metadata must supply verifiable
 skill-turn context before becoming canonical state. If that proof is missing,
 stale, or indeterminate, the ingest is quarantined or rejected; it must not be
 downgraded into unverified local/session provenance. Sync/import flows must
-preserve the original provenance class; only truly passive ordinary OS writes
-with no dohc-controlled agent/run context may remain
-local/device/session/import provenance when proof is absent.
+preserve their original provenance class. Only truly passive ordinary OS writes
+with no dohc-controlled agent/run context may remain local/device/session
+provenance when proof is absent; import/sync ingests without proof stay
+quarantined until they can be attributed or rejected.
 Unverified local, device, or session edits still pass through server/engine-side
 workspace ownership, lock, protected-path, and visibility checks before they
 become canonical workspace state. If the engine cannot prove the required access
