@@ -98,6 +98,10 @@ type DeniedOrQuarantinedStatus =
   | 'quarantined_attribution'
   | 'quarantined_policy'
 
+type TerminalRetirementReason =
+  | 'auto_retired_payload_retention_expired'
+  | 'operator_disposition_retired'
+
 type WriteResult =
   | { kind: 'canonical'; versionId: string; historyMomentId: string; objectId: string }
   | {
@@ -121,6 +125,16 @@ type WriteResult =
       rejectedAt: UnixMsDecimalString
       retentionUntil: UnixMsDecimalString
       status: DeniedOrQuarantinedStatus
+    }
+  | {
+      kind: 'terminal-retired'
+      holdingRecordId: string
+      workspaceId: string
+      versionId?: string
+      idempotencyKey: string
+      retiredAt: UnixMsDecimalString
+      reasonCode: TerminalRetirementReason
+      retainedMetadata: 'minimal_audit_idempotency_and_explanation_only'
     }
   | { kind: 'conflict'; conflictId: string }
 ```
@@ -169,13 +183,17 @@ bytes are deleted, cryptoshredded, or compacted into a non-reconstructable
 evidence record, while minimal metadata needed for audit, idempotency expiry,
 abuse controls, and user-facing explanation is retained. Workspace policy cannot
 extend or disable this terminal payload-retention rule.
+Status APIs and retry tooling represent that state as a `terminal-retired`
+`WriteResult` for the same `holdingRecordId`; they must not collapse it into
+`denied`, quarantine, conflict, or generic expiration.
 Retries using the same idempotency key and matching replay metadata before the
 record's retry horizon return the same addressable result for the same
 `holdingRecordId`: `durable-pending` before `replayUntil`, or `denied` before
 `retentionUntil` for rejected/quarantined records. After the relevant horizon,
-a retry with the same key fails closed with `idempotency_expired` or resolves
-through the explicit operator disposition/expiration record; it must not
-silently create a second accepted holding record or an uncorrelated denial.
+a retry with the same key fails closed with `idempotency_expired`, returns the
+stable `terminal-retired` result, or resolves through the explicit operator
+disposition/expiration record; it must not silently create a second accepted
+holding record or an uncorrelated denial.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

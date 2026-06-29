@@ -1649,6 +1649,18 @@ Eighty-eighth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Eighty-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added a dedicated `terminal-retired` `WriteResult` for accepted holding
+    records whose payloads are retired by operator disposition or hard retention.
+  - Changed `ChatThreadProjection` to extend `ChatThread` so channel and DM
+    ownership discriminators remain available to projection consumers.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live only in Current PR Snapshot. This section is an

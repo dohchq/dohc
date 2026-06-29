@@ -267,7 +267,7 @@ type ChatThreadBase = {
   pinned: boolean
 }
 
-type ChatThreadProjection = ChatThreadBase & {
+type ChatThreadProjection = ChatThread & {
   linkedWork: ActiveThreadLink[]
 }
 
