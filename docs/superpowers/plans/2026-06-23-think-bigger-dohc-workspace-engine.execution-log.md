@@ -356,7 +356,7 @@ NODE
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1565,6 +1565,22 @@ Eighty-third pass:
     server/engine-derived principal and policy decision.
   - Extended TOCTOU-safe path canonicalization to API path handling before
     storage access.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-fourth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added bounded accepted-holding-record lifecycle fields and operator-visible
+    overdue disposition handling while preserving reconstructable payloads.
+  - Standardized native filesystem non-materialized state on `virtual`, with
+    on-demand hydration treated as behavior rather than a separate state label.
+  - Narrowed PR 04 policy resolver scope to file/version/search/export substrate
+    and neutral extension hooks, deferring later chat bindings to PR 12/14/16.
+  - Added chat read-state cursors, unread/mention projections, and cursor-derived
+    notification state to PR 21 migration rebuild/invalidation scope.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

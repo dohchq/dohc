@@ -107,6 +107,14 @@ engine preserves durable rejection, disposition, or expiration evidence. Humans,
 agents, imports, and sync processes all get the same guarantee: an accepted
 change is not silently lost, but it also does not become canonical workspace
 state until protection checks pass.
+Accepted records still have a bounded operator-visible lifecycle. The Phase 0
+decision note defines `AcceptedHoldingRecordPolicy.maxPendingCanonicalizationMs`
+and `operatorDispositionDueAt`; when the deadline is reached, the record must be
+escalated into an explicit disposition queue, marked overdue in status APIs, and
+compacted or moved to colder durable storage according to policy. Garbage
+collection may remove only derived retry/index metadata after the disposition
+deadline; the reconstructable payload remains until canonicalization succeeds or
+an explicit operator disposition record retires it.
 Accepted holding records are not visible through normal `read`, `watch`, or
 `search` as workspace content before canonicalization. Those paths expose the
 last canonical workspace state only. Holding records may be surfaced only through

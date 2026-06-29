@@ -328,7 +328,7 @@ workspace defaults
   + actor permissions
   + version visibility
   + path/object policy
-  + channel/chat membership
+  + object-family policy facts
   + share/export context
   + projection contract
   = effective behavior
@@ -1618,8 +1618,7 @@ default user behavior.
 ### PR 04 - Effective Policy And File Policy Resolver
 
 **Goal:** Implement `.dohc/files.toml` parsing and one effective policy
-resolver used by files, versions, chats, links, search, notifications, and
-exports.
+resolver used by files, versions, search, and exports.
 
 **Scope:**
 
@@ -1628,8 +1627,9 @@ exports.
   and `.env`.
 - Resolve tracked/synced/materialized/encrypted/searchable/visibility/export
   policy.
-- Resolve channel/chat membership and linked-work visibility into the same
-  effective policy shape.
+- Add neutral extension hooks for later object families to provide policy facts
+  without introducing chat/share-specific types in PR 04. PR 12/14 bind chat and
+  linked-work visibility to those hooks after chat schemas exist.
 - Add projection writeability checks.
 - Add UI/API-safe status shape.
 
@@ -1640,14 +1640,15 @@ exports.
 - path glob tests.
 - malformed policy tests.
 - unauthorized policy escalation denied.
-- private linked object hidden from chat link/search/notification fixtures.
+- private linked object hidden from generic link/search/export fixtures.
 - projection writeability enforced.
 
 **Security tests:**
 
 - local policy cannot grant external access beyond server/engine auth.
-- a user cannot infer hidden file/version/chat/secret existence through links,
-  search, notification, export, or status APIs.
+- a user cannot infer hidden file/version/secret existence through links, search,
+  export, or status APIs. Chat and notification inference tests land with PR 12
+  and PR 16 after those schemas exist.
 
 **CodeRabbit focus:**
 
@@ -1659,8 +1660,8 @@ exports.
 **Acceptance:**
 
 - effective policy can be computed for any path.
-- effective policy can be computed for any link/projection/search/export
-  request.
+- effective policy can be computed for any file/version/link/projection/search/export
+  request using neutral extension hooks for future object families.
 
 ### PR 05 - Native Filesystem Capture MVP
 
@@ -2327,13 +2328,16 @@ substrate without data loss.
 **Scope:**
 
 - Migrate current chat threads if any, including messages, read state,
-  membership/visibility, links, and shared-channel metadata.
+  membership/visibility, links, read-state cursors, unread/mention projections,
+  and shared-channel metadata.
 - Migrate atoms/docs into Main version.
 - Migrate apps/sites/data into file policy defaults.
 - Preserve existing shares.
 - Rebuild, invalidate, or reindex all workspace-scoped derived projections after
   substrate migration, including search, activity, notifications, status, and
-  linked-work projections. Projection refresh must enforce the new workspace
+  linked-work projections. Chat unread/read-state projections, mention badges,
+  thread cursors, and cursor-derived notification state must be rebuilt or
+  invalidated before cutover. Projection refresh must enforce the new workspace
   scoping rules consistently for every migrated atom, folder, entity, share, and
   capture before cutover.
 - Preserve current agent run history or map to moments where possible.

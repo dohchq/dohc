@@ -13,7 +13,7 @@ should be backed by a versioned workspace engine.
 The user-facing promise:
 
 > Your workspace is just files. Humans and agents can use normal editors,
-> terminals, and tools. dohc quietly adds versions, history, sync, lazy
+> terminals, and tools. dohc quietly adds versions, history, sync, virtual
 > hydration, permissions, conflict recovery, and safe secrets.
 
 This is the dohc-native version of workspace sync for humans and agents: one
@@ -247,9 +247,11 @@ pin code/kernel/**
 ```
 
 Materialization state must be legible. Users and agents should be able to tell
-whether a subtree is local, lazy, virtual, or pinned. Policy schema, status
-reporting, and UI must use `virtual` as the canonical label for a
-non-materialized path that remains addressable through dohc APIs.
+whether a subtree is local, virtual, or pinned. Policy schema, status reporting,
+and UI must use `virtual` as the canonical label for a non-materialized path that
+remains addressable through dohc APIs. On-demand hydration is behavior of a
+`virtual` path, not a separate persisted state; legacy/imported `lazy` labels map
+to `virtual` before validation or status output.
 
 ## API-native access
 
@@ -444,7 +446,8 @@ At least five independent dimensions are needed:
    - Should contents sync to dohc Cloud or another remote?
 
 4. **Materialized locally**
-   - Should contents exist on local disk, hydrate lazily, or remain virtual?
+   - Should contents exist on local disk, hydrate on demand from `virtual`, or
+     remain virtual?
 
 5. **Secret-backed/protected**
    - Are bytes stored or referenced as secret material that needs encrypted
@@ -455,9 +458,9 @@ Examples:
 
 | Path | Tracked | Versioned | Synced | Materialized | Secret-backed |
 | --- | --- | --- | --- | --- | --- |
-| `docs/**` | yes | yes | yes | lazy or pinned | no |
-| `apps/**` | yes | yes | yes | lazy or pinned | no |
-| `data/raw/**` | yes | yes | yes | lazy | no |
+| `docs/**` | yes | yes | yes | virtual or pinned | no |
+| `apps/**` | yes | yes | yes | virtual or pinned | no |
+| `data/raw/**` | yes | yes | yes | virtual | no |
 | `node_modules/**` | no | no | no | local | no |
 | `dist/**` | no | no | no | local | no |
 | `.cache/**` | no | no | no | local | no |
@@ -556,7 +559,7 @@ match = "docs/**"
 tracked = true
 versioned = true
 synced = true
-materialized = "lazy"
+materialized = "virtual"
 
 [[rule]]
 match = ".env"
@@ -642,7 +645,7 @@ type FilePolicy = {
   visibility: 'private' | 'workspace' | 'team' | 'shared' | 'public'
   publicExport: 'include' | 'redact' | 'exclude'
   agentAccess: 'allow' | 'ask' | 'explicit' | 'deny' // dohc-controlled access
-  materialized: 'local' | 'lazy' | 'pinned' | 'virtual'
+  materialized: 'local' | 'pinned' | 'virtual'
 }
 ```
 
@@ -844,7 +847,7 @@ conflict artifact.
 The system should expose:
 
 - what is local vs remote.
-- what is pinned vs lazy.
+- what is pinned vs virtual.
 - what is tracked vs ignored.
 - what is synced vs local-only.
 - what is conflicted.
