@@ -35,8 +35,12 @@ normal files and folders
   -> history, merge, sync, permissions, recovery
 ```
 
-Editing a file saves immediately to the version represented by that folder or
-mount. No commit step. No apply step. No special agent protocol.
+Editing a file is captured immediately for the version represented by that
+folder or mount. Local capture is not the same as canonical history: the write
+becomes canonical only after the quarantine/reconcile/promote path validates
+workspace, version, policy, and conflict rules. For allowed canonical writes
+there is still no user-visible commit step, apply step, or special agent
+protocol.
 
 ## Filesystem shape
 
@@ -686,6 +690,11 @@ type FilePolicy = {
 or represented virtually. `pinned` is the independent offline-retention request
 that asks dohc to keep local bytes hydrated when policy allows; pinning does not
 change tracking, versioning, searchability, export behavior, or visibility.
+When a subtree is both pinned and currently non-materialized, policy, status
+APIs, and UI represent it as `materialized: 'virtual'` plus `pinned: true`.
+`virtual` remains the canonical non-materialized label; pinned is shown as an
+offline-retention request or pending hydration state, not as a third
+materialization value.
 
 The key rule:
 

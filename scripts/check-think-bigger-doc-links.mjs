@@ -20,6 +20,45 @@ const slug = (heading) => heading
   .replace(/\s+/g, '-')
   .replace(/-+/g, '-')
 
+const collectAnchors = (markdown) => {
+  const anchors = new Set()
+  const seen = new Map()
+  let inFence = false
+  let fenceChar = null
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const fence = line.match(/^\s{0,3}(```+|~~~+)/)
+
+    if (fence) {
+      const marker = fence[1][0]
+      if (!inFence) {
+        inFence = true
+        fenceChar = marker
+      } else if (marker === fenceChar) {
+        inFence = false
+        fenceChar = null
+      }
+      continue
+    }
+
+    if (inFence) {
+      continue
+    }
+
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/)
+    if (!heading) {
+      continue
+    }
+
+    const base = slug(heading[1])
+    const count = seen.get(base) ?? 0
+    seen.set(base, count + 1)
+    anchors.add(count === 0 ? base : `${base}-${count}`)
+  }
+
+  return anchors
+}
+
 const failures = []
 
 for (const file of files) {
@@ -48,9 +87,7 @@ for (const file of files) {
     }
 
     const targetText = fs.readFileSync(targetPath, 'utf8')
-    const anchors = new Set(
-      [...targetText.matchAll(/^#{1,6}\s+(.+)$/gm)].map((heading) => slug(heading[1])),
-    )
+    const anchors = collectAnchors(targetText)
 
     if (!anchors.has(anchorRaw.toLowerCase())) {
       failures.push(`${file}: missing anchor ${raw}`)

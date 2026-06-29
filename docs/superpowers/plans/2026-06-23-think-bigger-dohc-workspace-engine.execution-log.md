@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `b98870b` reported 6 issues;
-  hundred-seventh pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `8110518` reported 6 issues;
+  hundred-eighth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2012,6 +2012,26 @@ Hundred-seventh pass:
     `node scripts/check-think-bigger-doc-links.mjs` command.
   - Updated Remaining Risk to reflect pending lane approval/reruns rather than
     unassigned P0 ownership.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Made the docs link checker skip fenced code blocks and generate duplicate
+    heading anchors as `base`, `base-1`, `base-2`, matching markdown behavior.
+  - Added conflict replay tokens and durable idempotency handling for
+    `WriteResult.kind: 'conflict'`.
+  - Froze the P0E provisional chat schema as a versioned shared-substrate
+    boundary before PR 12/18 consumption.
+  - Clarified that pinned non-materialized subtrees are represented as
+    `materialized: 'virtual'` plus `pinned: true`.
+  - Reworded native filesystem saves as immediate local capture followed by
+    canonical quarantine/reconcile/promote validation.
+  - Made thread-link target resolution scope-aware by keying resolvers on
+    `(scopeKind, ThreadLinkTargetType)` or the full canonical link tuple.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

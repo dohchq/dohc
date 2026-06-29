@@ -422,11 +422,14 @@ after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there
 is no in-place link update path for replay/export to miss.
 Target types resolve through a server-side resolver registry keyed by
-`ThreadLinkTargetType`. Unknown or unregistered target types fail closed before
-link creation, resolution, search projection, export, notification fanout, or UI
-rendering. Each resolver enforces workspace scope and target ACLs; adding a new
-target kind requires extending the enum, registering a resolver, and adding
-authorization, projection, export, and replay tests for that kind.
+`(scopeKind, ThreadLinkTargetType)`, or through an entrypoint that consumes the
+full `CanonicalThreadLinkKeyParts` tuple. Unknown or unregistered scope/type
+pairs fail closed before link creation, resolution, search projection, export,
+notification fanout, or UI rendering. Each resolver enforces workspace scope,
+target ACLs, and shared-grant/redaction policy for its scope; adding a new
+target kind requires extending the enum, registering internal and shared
+resolver behavior where applicable, and adding authorization, projection, export,
+and replay tests for that kind.
 `chat_thread` links must be acyclic. A thread cannot link to itself, and link
 creation must reject any target that would introduce a cycle in the thread-link
 graph before `link_added` is recorded or linked-work projection, search,

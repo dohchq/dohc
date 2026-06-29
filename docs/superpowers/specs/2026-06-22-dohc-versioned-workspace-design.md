@@ -198,6 +198,9 @@ type WriteResult =
       workspaceId: string
       versionId: string
       conflictId: string
+      idempotencyKey: string
+      conflictReplayToken: string
+      recordedAt: UnixMsDecimalString
       operationKind: 'write' | 'delete' | 'rename' | 'move' | 'replace' | 'merge' | 'restore'
       targetObjectId?: string
       baseObjectId?: string
@@ -644,6 +647,12 @@ requests cannot collide under one key. Duplicate delivery with the same
 idempotency key must return the original result or a deterministic equivalent
 and must not create additional canonical mutations, duplicate history events,
 duplicate projections, or repeated notification/search side effects.
+Conflict results are replay-guaranteed too. Before returning `kind: 'conflict'`,
+the engine persists the conflict envelope, `conflictReplayToken`, and
+idempotency result for the same workspace/version/idempotency identity. A retry
+with matching replay metadata returns that same conflict envelope even if later
+workspace state changes. If the engine cannot persist the conflict envelope and
+idempotency tombstone durably, it must not acknowledge the conflict response.
 Idempotency records must be persisted through the documented maximum retry
 horizon for that operation type and transport after the operation reaches a
 terminal result. The idempotency record/tombstone must be committed in the same

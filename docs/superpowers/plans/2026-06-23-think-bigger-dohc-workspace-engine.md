@@ -1008,6 +1008,9 @@ history.
   contracts; PR 12 extends them for channels, DMs, and full chat schema.
   These provisional shapes must remain forward-compatible with PR 12, or PR 12
   must include a migration/backfill step that preserves existing chat data.
+  P0E must freeze this provisional schema as a versioned shared-substrate
+  boundary before PR 12 or PR 18 consume it; temporary fields must either carry a
+  schema version or have an explicit migration/backfill boundary.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
