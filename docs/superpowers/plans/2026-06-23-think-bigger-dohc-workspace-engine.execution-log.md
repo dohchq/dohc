@@ -22,7 +22,7 @@ append-only history.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 6 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -511,7 +511,7 @@ NODE
   - Replaced the duplicate PR loop with a reference to the canonical CodeRabbit
     loop.
   - Added fail-closed write-path authorization language.
-  - Added write-ack boundary after durable persistence.
+  - Added durability-ack boundary after durable persistence.
   - Required DM-backed chat threads to have at least two unique participants.
   - Scoped process-level secret gating to dohc-controlled execution paths.
   - Normalized public export enum examples to `redact`.
@@ -1758,6 +1758,25 @@ Ninety-fourth pass:
     dedupe by that id.
   - Aligned the PR00 lane inventory row with the actual docs link/anchor and
     brand-guard validation evidence.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Split durability acknowledgments from canonical write success in the
+    versioned-workspace history/write-ack language.
+  - Expanded conflict `WriteResult` with workspace/version, operation kind,
+    opaque object handles, hashes, and minimal status.
+  - Made equal `lastReadCursor` retries idempotent after authorization without
+    requiring another message-existence lookup.
+  - Required Phase 0 filesystem interposition to use watcher-backed normal
+    folders; API-only simulated-folder adapters cannot satisfy P0C/P0F gates.
+  - Made mention notification `bodyHash` required and defined the exact canonical
+    mentioned-actor JSON encoding used by `notificationId`.
+  - Updated Current PR Snapshot to reflect the latest 6-issue CodeRabbit rerun.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

@@ -173,7 +173,20 @@ type WriteResult =
       recordKind: ExpiredRetryRecordKind
       reasonCode: 'idempotency_expired'
     }
-  | { kind: 'conflict'; workspaceId: string; conflictId: string }
+  | {
+      kind: 'conflict'
+      workspaceId: string
+      versionId: string
+      conflictId: string
+      operationKind: 'write' | 'replace' | 'merge' | 'restore'
+      targetObjectId?: string
+      baseObjectId?: string
+      currentObjectId?: string
+      incomingObjectId?: string
+      currentContentHash?: string
+      incomingContentHash?: string
+      status: 'unresolved' | 'manual_resolution_required'
+    }
 ```
 
 Public `reasonCode` fields are safe closed enums only. Rich evaluator traces,
@@ -391,9 +404,15 @@ dohc should track two levels:
    - secret-backed writes are recovery-tracked only as encrypted references,
      redacted markers, or broker metadata instead of raw secret bytes.
    - crash-safe and time-travel friendly.
-   - write-ack boundary: a save is acknowledged only after the durability-log
-     record is persisted to recoverable storage, or after an equivalent
-     durability guarantee, so acknowledged writes survive process crash/restart.
+   - durability-ack boundary: no write result is acknowledged until the
+     durability-log record is persisted to recoverable storage, or an equivalent
+     durability guarantee exists, so acknowledged writes survive process
+     crash/restart.
+   - canonical-write-success boundary: an immediate-save success is acknowledged
+     only after the canonical mutation is durable and visible through `read` and
+     `watch`. A durability ack without canonical visibility can return only
+     `durable-pending`, `denied`, `idempotency-expired`, `terminal-retired`, or
+     `conflict`, never `canonical`.
    - not necessarily the main visible timeline.
 
 2. **Meaningful moments**

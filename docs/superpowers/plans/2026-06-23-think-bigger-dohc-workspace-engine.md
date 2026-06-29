@@ -797,9 +797,13 @@ execution log covering:
      moments, and conflicts?
 
 2. **Filesystem interposition**
-   - Is Phase 0 watcher-backed over normal folders, virtual filesystem-backed,
-     or API-only with a simulated folder adapter?
-   - What safety guarantees does that choice provide and not provide?
+   - Phase 0 must be watcher-backed over normal folders so ordinary local files
+     and external editors/agents are exercised.
+   - Virtual filesystem and API-only simulated-folder adapters are later
+     experiments; they cannot satisfy P0C, P0F, local-agent, or performance
+     gates.
+   - What safety guarantees does the watcher-backed normal-folder path provide
+     and not provide?
 
 3. **Secret boundary**
    - Phase 0 must not promise unenforceable secret guarantees.
@@ -947,7 +951,7 @@ history.
 - temp-file/rename save sequence if watcher-backed.
 - multiple rapid writes coalesce into a readable moment.
 - restore creates forward history.
-- API and filesystem/simulated filesystem agree.
+- API and watcher-backed filesystem agree.
 
 **E2E:**
 

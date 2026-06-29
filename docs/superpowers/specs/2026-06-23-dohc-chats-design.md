@@ -131,17 +131,17 @@ that advances `lastReadCursor` only when the incoming
 Before CAS evaluation or any tuple-to-message existence lookup, the caller must
 be authorized for the target workspace/thread using server-derived identity:
 workspace scope, thread visibility, and channel/DM membership must pass first.
-Only after authorization succeeds may the incoming tuple resolve against
-`ThreadMessage` in the same `(workspaceId, threadId)` and match that message's
-canonical persisted ordering fields. If authorization fails, no message
-existence signal is returned. If no such message exists after authorization,
-the workspace or thread does not match, or the tuple is forged/stale relative to
+If the incoming tuple exactly equals the stored `lastReadCursor`, the operation
+is an idempotent success with no state change after authorization; it does not
+re-check `ThreadMessage` existence. Only after authorization succeeds and the
+incoming tuple is strictly greater than the stored cursor may the tuple resolve
+against `ThreadMessage` in the same `(workspaceId, threadId)` and match that
+message's canonical persisted ordering fields. If authorization fails, no message
+existence signal is returned. If no such message exists after authorization, the
+workspace or thread does not match, or the tuple is forged/stale relative to
 persisted message state, the read-state update is rejected fail-closed.
 Concurrent stale updates must no-op or retry, never overwrite a newer cursor
 with an older one.
-If the incoming tuple exactly equals the stored `lastReadCursor`, the operation
-is an idempotent success with no state change after the same message-existence
-validation. Only strictly greater tuples advance the cursor.
 
 `ThreadMessage.threadSequence` is the authoritative per-thread monotonic
 sequence assigned by the canonical `ChatThread`/`ThreadMessage` store at message
@@ -650,7 +650,7 @@ type MentionNotificationThreadActivity = ThreadActivityBase & {
   mentionedActorIds: string[]
   notificationId: string
   notificationStatus?: 'queued' | 'sent' | 'suppressed' | 'resolved'
-  bodyHash?: string
+  bodyHash: string
 }
 
 `MentionNotificationThreadActivity.mentionedActorIds` must be canonical before
@@ -660,7 +660,9 @@ resolve, replay, export, and notification fanout paths all use that canonical
 array so duplicate mentions or runtime-specific ordering cannot create duplicate
 notifications or unstable history.
 `notificationId` is deterministic for a mention notification lifecycle:
-`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<bodyHash>:<sha256(canonicalMentionedActorIds)>`.
+`mention:<workspaceId>:<threadId>:<messageId>:<bodyRevision>:<bodyHash>:<sha256(canonicalMentionedActorIdsJson)>`.
+`canonicalMentionedActorIdsJson` is the UTF-8 JSON array of the canonical,
+deduplicated, bytewise-sorted actor ID strings with no extra whitespace.
 The enqueue path must upsert or no-op by that id, and resolve/replay/fanout must
 dedupe by the same `notificationId`. Repeated enqueue or resolve attempts for
 the same message revision and canonical mention set return the existing result
