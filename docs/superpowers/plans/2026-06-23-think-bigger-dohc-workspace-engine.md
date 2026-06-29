@@ -997,6 +997,8 @@ history.
 - Minimal channel or workspace chat.
 - One chat thread linked to a stable file object ID.
 - Message send.
+- Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
+  for this proof slice only.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
@@ -1517,11 +1519,13 @@ must use.
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
   `ProjectionValidation`, and `ConflictRecord`.
-- Defer `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
+- Defer full `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`, `Share`,
   `ShareGrant`, `ExternalChannel`, and `SecretReference` schemas to the first PRs
-  that consume them: chat contracts in PR 12, secret-reference contracts in PR
-  08, and share/external-channel contracts in PR 18. Those PRs must extend the
-  same shared package instead of defining local-only shapes.
+  that consume them: P0E may introduce minimal provisional chat/link contracts
+  for the proof slice, PR 12 formalizes full chat contracts, PR 08 owns
+  secret-reference contracts, and PR 18 owns share/external-channel contracts.
+  Those PRs must extend the same shared package instead of defining local-only
+  shapes.
 - Define link dereference shape: source/owning workspace ID, target type, target
   workspace ID, stable target ID, optional `VersionRef`, display path/title at
   link time, ACL degrade behavior.

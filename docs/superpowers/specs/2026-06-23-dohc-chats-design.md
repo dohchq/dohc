@@ -273,6 +273,7 @@ type ChatThreadProjection = ChatThread & {
 
 type ChannelChatThread = ChatThreadBase & {
   channelId: string
+  channelConversationId: string
   dmParticipantIds?: never
 }
 
@@ -355,6 +356,15 @@ type CanonicalThreadLinkKey = {
   visibilityKey: string
 }
 ```
+
+For `ChannelChatThread`, `channelId` and `channelConversationId` are immutable
+after creation. The active uniqueness key is
+`(workspaceId, channelId, channelConversationId)`, with
+`channelConversationId: "default"` for the default channel stream conversation.
+Renaming or moving a channel changes channel metadata, not this key. Changing the
+channel association requires tombstoning/archiving the old thread and creating a
+new thread, so one conversation cannot fork into multiple active `ChatThread`
+records for the same channel identity.
 
 `ThreadLink` records are the canonical source for linked work.
 `ChatThreadProjection.linkedWork` is a derived read model/cache of the current
@@ -995,10 +1005,10 @@ the object that survives and resurfaces. A channel send maps to a
 `ThreadMessage` inside exactly one `ChatThread` for that conversation.
 `channelId` is a container/context identifier, not the durable thread identity.
 Resolving or creating the channel-backed `ChatThread` must be an atomic
-get-or-create operation before the `ThreadMessage` is written, so concurrent
-sends cannot create duplicate threads for the same conversation. There is no
-separate durable `ChannelMessage` entity outside the canonical
-`ChatThread -> ThreadMessage` model.
+get-or-create by `(workspaceId, channelId, channelConversationId)` before the
+`ThreadMessage` is written, so concurrent sends cannot create duplicate threads
+for the same conversation. There is no separate durable `ChannelMessage` entity
+outside the canonical `ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 

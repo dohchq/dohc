@@ -23,7 +23,7 @@ entry for quick orientation.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 7 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -1801,6 +1801,22 @@ Ninety-sixth pass:
     `authzScopeId` authorization/redaction context.
   - Expanded the workspace-scope checklist to list concrete persisted chat
     primitives: thread, message, link, read state, notification, and activity.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Ninety-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Clarified that review gates apply to ordinary writes whenever policy requires
+    them; boundary-crossing cases are additional examples, not the only triggers.
+  - Added `delete`, `rename`, and `move` to conflict `operationKind`.
+  - Aligned Phase 0 chat proof with schema ownership by making P0E own minimal
+    provisional chat/link contracts and PR 12 own the full chat schema.
+  - Made channel-backed thread association immutable and unique by
+    `(workspaceId, channelId, channelConversationId)`.
+  - Updated Current PR Snapshot to reflect the latest 5-issue CodeRabbit rerun.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

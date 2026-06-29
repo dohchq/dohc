@@ -178,7 +178,7 @@ type WriteResult =
       workspaceId: string
       versionId: string
       conflictId: string
-      operationKind: 'write' | 'replace' | 'merge' | 'restore'
+      operationKind: 'write' | 'delete' | 'rename' | 'move' | 'replace' | 'merge' | 'restore'
       targetObjectId?: string
       baseObjectId?: string
       currentObjectId?: string
@@ -276,7 +276,10 @@ durability-log entry, and idempotency tombstone carries `workspaceId`. Write,
 read, query, search, import, sync, and projection boundaries reject
 cross-workspace references by default, even when an actor is otherwise valid.
 
-Review appears only when crossing a real boundary:
+Review gates are enforced whenever workspace policy, protected-path rules,
+ownership rules, skill-turn policy, or visibility policy requires them, including
+ordinary writes. Boundary-crossing cases add more review points; they are not the
+only review triggers:
 
 - merging one version into another.
 - sharing private work.
