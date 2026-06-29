@@ -245,11 +245,13 @@ VersionRef
 Projection
   a file, UI, API, search, export, or chat-readable view over an object
 
-Event
-  typed record of something that happened
+WorkspaceEvent / DurabilityEvent
+  typed workspace-scoped record of something that happened, or a fine-grained
+  recovery/durability record
 
-Policy
-  effective access/materialization/export/search behavior
+FilePolicy / effective policy
+  source-backed desired file behavior plus resolved engine enforcement for
+  access, materialization, export, search, and visibility
 ```
 
 Everything meaningful eventually gets a stable ID, but Phase 0 starts with the
@@ -1992,6 +1994,8 @@ links, activity, read state, and reactions.
 - Add channel membership/visibility.
 - Add DMs and small group chat primitives.
 - Add message authorship with human/agent display.
+- Define `ThreadReadState` shape, monotonic cursor semantics, and read-state API
+  upserts alongside thread/message models.
 - Store chat links through the canonical `ThreadLink` shape: stable link id,
   source workspace/thread, target type, target workspace, stable target id,
   optional `VersionRef`, display path/title captured at link time,

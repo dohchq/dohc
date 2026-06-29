@@ -23,7 +23,7 @@ entry for quick orientation.
 - **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun reported 5 issues; follow-up fixes
+- **PR00 CodeRabbit:** latest completed rerun reported 6 issues; follow-up fixes
   are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard.
@@ -82,7 +82,7 @@ worktree, and planned validation shape.
 | P0E | Minimal Chat Linked To File | codex/think-bigger-p0e-linked-chat | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0F | Search And Policy Smoke | codex/think-bigger-p0f-search-policy | provisional sibling worktree | TBD lane PR workstream | workspace-engine + typecheck | Provisional lane. |
 | P0G | Proof Arc QA And CodeRabbit Hardening | codex/think-bigger-p0g-proof-qa | provisional sibling worktree | TBD lane PR workstream | workspace-engine + history + typechecks + local agent smoke | Provisional lane. |
-| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main orchestration workstream | docs link/anchor check + brand guard | Scaffold lane. |
+| 00 | Mega Plan And Readiness Scaffold | codex/think-bigger-00-readiness-scaffold | /home/ice/dev/dohc | main orchestration workstream | docs link/anchor check + brand guard | Scaffold lane. |
 | 01 | Workspace Engine Contracts And Substrate | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 02 | Version Registry And Typed Event Skeleton | TBD | TBD | TBD | TBD | Roadmap lane. |
 | 03 | Snapshot And Restore Foundation | TBD | TBD | TBD | TBD | Roadmap lane. |
@@ -1822,6 +1822,26 @@ Ninety-seventh pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Ninety-eighth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Removed `watch` from canonical save success/write-critical-path language;
+    `watch` now catches up asynchronously after durable canonical commit and
+    `read` visibility.
+  - Added mandatory policy-review evaluation to the actor-neutral write decision
+    tree before immediate canonical save.
+  - Replaced the PR00 lane inventory worktree placeholder with
+    `/home/ice/dev/dohc`.
+  - Added PR 21R to the Collaboration Expansion milestone list.
+  - Aligned shared substrate vocabulary with `WorkspaceObject`, `VersionRef`,
+    `Projection`, `WorkspaceEvent`, `DurabilityEvent`, `FilePolicy`, and
+    effective policy terms.
+  - Added `ThreadReadState` shape, cursor, and API scope to PR 12.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live only in Current PR Snapshot. This section is an
@@ -2000,6 +2020,7 @@ PRs:
 - 19
 - 20
 - 21
+- 21R
 - 22
 
 Gate evidence:

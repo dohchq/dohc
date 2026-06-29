@@ -83,10 +83,10 @@ authorization, ownership/review gate, policy, visibility, protected-path,
 user-lock, version-access, or skill-turn evaluator is unavailable or
 indeterminate, the save is denied rather than applied.
 Canonical save success is acknowledged only after the mutation is durably
-committed to canonical workspace state and is visible to normal `read` and
-`watch` semantics for that version. Search indexing is eventually consistent
-from canonical state and must not gate write acknowledgment. If the durability
-path accepts a non-canonical
+committed to canonical workspace state and is visible to normal `read` semantics
+for that version. `watch` propagation and search indexing are eventually
+consistent from canonical state and must not gate write acknowledgment. If the
+durability path accepts a non-canonical
 holding record, the response is a distinct durable-pending result, not a
 successful immediate save. UIs may show that pending record only in explicit
 ingest/recovery/status surfaces marked non-canonical. In this spec, "files save
@@ -320,9 +320,10 @@ It should ask only:
    boundary?
 4. Is the write allowed by the active skill-turn gate, when the actor is an
    agent/tool/action running inside a delegated turn?
-5. Can the change be recorded durably?
-6. Can the system preserve recovery and honest provenance?
-7. Does the change create a conflict or cross a visibility boundary?
+5. Does policy require mandatory review before this write can become canonical?
+6. Can the change be recorded durably?
+7. Can the system preserve recovery and honest provenance?
+8. Does the change create a conflict or cross a visibility boundary?
 
 If the actor can write and the change does not create a conflict or cross a
 visibility boundary, the change saves immediately to that version. If the change
@@ -416,10 +417,11 @@ dohc should track two levels:
      durability guarantee exists, so acknowledged writes survive process
      crash/restart.
    - canonical-write-success boundary: an immediate-save success is acknowledged
-     only after the canonical mutation is durable and visible through `read` and
-     `watch`. A durability ack without canonical visibility can return only
-     `durable-pending`, `denied`, `idempotency-expired`, `terminal-retired`, or
-     `conflict`, never `canonical`.
+     only after the canonical mutation is durable and visible through `read`.
+     `watch` catches up asynchronously. A durability ack without canonical
+     visibility can return only `durable-pending`, `denied`,
+     `idempotency-expired`, `terminal-retired`, or `conflict`, never
+     `canonical`.
    - not necessarily the main visible timeline.
 
 2. **Meaningful moments**
