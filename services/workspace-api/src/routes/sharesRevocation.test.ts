@@ -141,7 +141,8 @@ describe("revokeShare admin disconnect", () => {
 
     await expect(revokeShare(deps, "sharer-1", "share-1")).resolves.toEqual({
       ok: true,
-      revoked: true,
+      revoked: false,
+      disconnectDeferred: true,
     });
 
     expect(events).toEqual([
@@ -203,7 +204,8 @@ describe("revokeShare admin disconnect", () => {
 
     await expect(revokeShare(deps, "sharer-1", "share-1")).resolves.toEqual({
       ok: true,
-      revoked: true,
+      revoked: false,
+      disconnectDeferred: true,
     });
 
     expect(events).toEqual(["connect", "begin", "select", "update", "insert", "commit", "release"]);

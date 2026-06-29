@@ -374,6 +374,22 @@ describe("versioned file workspace", () => {
     });
   });
 
+  itAnchoredFilesystem("journals text writes whose snapshots expand when serialized as JSON", async () => {
+    const ws = workspace(createWorkspaceTestCounters());
+    const escapedText = "\u0001".repeat(32 * 1024);
+
+    const result = await ws.writeTextFile({
+      path: "notes/json-expanded.md",
+      text: escapedText,
+    });
+
+    await expect(ws.readTextFile({ path: "notes/json-expanded.md" })).resolves.toBe(
+      escapedText,
+    );
+    expect(result.history.files[0]?.after?.text).toBe(escapedText);
+    expect(await readPendingMutationEntries()).toEqual([]);
+  });
+
   itAnchoredFilesystem("rejects invalid configured authors before journaling", async () => {
     const ws = createTestableVersionedFileWorkspace(
       {
@@ -388,6 +404,10 @@ describe("versioned file workspace", () => {
       ws.writeTextFile({ path: "notes/invalid-author.md", text: "nope\n" }),
     ).rejects.toThrow(/non-empty/i);
     await expect(ws.history.list()).resolves.toEqual([]);
+    await expect(readFile(join(root, "notes/invalid-author.md"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readPendingMutationEntries()).toEqual([]);
   });
 
   itAnchoredFilesystem("rejects invalid workspace ids before storage setup", async () => {

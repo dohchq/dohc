@@ -289,6 +289,7 @@ export function startWorkspaceWatch(
   const now = options.now ?? (() => Date.now());
   let snapshotCache = new Map<string, HistorySnapshotEntry>();
   let warnedDurableHistoryUnavailable = false;
+  let lastRecordedAtMs = 0;
 
   function warnDurableHistoryUnavailable(): void {
     if (warnedDurableHistoryUnavailable) return;
@@ -300,6 +301,16 @@ export function startWorkspaceWatch(
 
   if (!isDurableChangeSetRecordingSupported()) {
     warnDurableHistoryUnavailable();
+  }
+
+  async function nextRecordedAtMs(): Promise<number> {
+    const recordedAtMs = Math.max(
+      now(),
+      (await store.maxRecordedAtMs()) + 1,
+      lastRecordedAtMs + 1,
+    );
+    lastRecordedAtMs = recordedAtMs;
+    return recordedAtMs;
   }
 
   async function recordBatch(paths: string[]): Promise<void> {
@@ -350,7 +361,7 @@ export function startWorkspaceWatch(
       }),
     );
     try {
-      await store.record(changeSet, { id: randomUUID(), recordedAtMs: now() });
+      await store.record(changeSet, { id: randomUUID(), recordedAtMs: await nextRecordedAtMs() });
     } catch (error) {
       if (!isDurableChangeSetRecordingUnsupportedError(error)) throw error;
       warnDurableHistoryUnavailable();

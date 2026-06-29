@@ -159,11 +159,15 @@ export async function createShare(
 // Fellow members get a 403; callers with NO relationship to the share's
 // workspace get the same 404 as a missing id, so the response never confirms
 // a foreign shareId exists (security review P3 cross-tenant oracle).
+export type RevokeShareResult =
+  | { ok: true; revoked: true }
+  | { ok: true; revoked: false; disconnectDeferred: true };
+
 export async function revokeShare(
   deps: SharedAtomDeps | undefined,
   userId: string,
   shareId: string,
-): Promise<{ ok: true; revoked: true }> {
+): Promise<RevokeShareResult> {
   const pool = requirePool(deps);
   const client = await pool.connect();
   let destroyClient = false;
@@ -252,15 +256,15 @@ export async function revokeShare(
     // The pending event above is the durable queue; deployments can start the
     // retry worker after Hocuspocus admin disconnect is configured. Ops should
     // alert on getShareRevocationDisconnectBacklogStats() count/age growth.
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: false, disconnectDeferred: true };
   }
   let claimId: string | undefined;
   try {
     claimId = await claimRevocationDisconnectEvent(pool, disconnect.eventId, disconnect.userId);
   } catch {
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: false, disconnectDeferred: true };
   }
-  if (!claimId) return { ok: true, revoked: true };
+  if (!claimId) return { ok: true, revoked: false, disconnectDeferred: true };
   try {
     await disconnectWorkspaceUserWithinLease(disconnect.hocuspocusAdmin, {
       workspaceId: disconnect.workspaceId,
@@ -268,7 +272,7 @@ export async function revokeShare(
     });
   } catch {
     await requeueRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
-    return { ok: true, revoked: true };
+    return { ok: true, revoked: false, disconnectDeferred: true };
   }
   await completeRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
   return { ok: true, revoked: true };

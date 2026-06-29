@@ -140,6 +140,7 @@ const MCP_AUTHOR: ChangeAuthor = {
   agentId: "dohc-mcp",
   onBehalfOf: "local",
 };
+const historyRecordedAtMsByRoot = new Map<string, number>();
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
 const HARD_READ_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SEARCH_MAX_RESULTS = 100;
@@ -256,6 +257,7 @@ async function recordChange(
   },
 ) {
   await safeMetadataDir(ctx);
+  const store = historyWriteStoreFor(ctx);
   const set = addFileChanges(
     createChangeSet({
       kind: input.kind ?? "agent-run",
@@ -265,9 +267,15 @@ async function recordChange(
     }),
     input.files,
   );
-  return historyWriteStoreFor(ctx).record(set, {
+  const recordedAtMs = Math.max(
+    Date.now(),
+    (await store.maxRecordedAtMs()) + 1,
+    (historyRecordedAtMsByRoot.get(ctx.root) ?? 0) + 1,
+  );
+  historyRecordedAtMsByRoot.set(ctx.root, recordedAtMs);
+  return store.record(set, {
     id: randomUUID(),
-    recordedAtMs: Date.now(),
+    recordedAtMs,
   });
 }
 
@@ -1890,7 +1898,8 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
     if (!existing) visibleMutationStarted = true;
     for (const file of resolvedFiles) {
       const parentDir = dirname(file.absolute);
-      await mkdir(parentDir, { recursive: true });
+      const createdParent = await mkdir(parentDir, { recursive: true });
+      if (createdParent) visibleMutationStarted = true;
       await writeFileAtomicallyForTool(ctx, file.normalized, file.content, { overwrite: false });
       visibleMutationStarted = true;
     }

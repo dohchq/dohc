@@ -62,7 +62,7 @@ import {
 
 const MAX_HISTORY_TEXT_SNAPSHOT_BYTES = 128 * 1024;
 const MAX_READ_TEXT_FILE_BYTES = 10 * 1024 * 1024;
-const MAX_PENDING_FILE_MUTATION_JOURNAL_BYTES = 128 * 1024;
+const MAX_PENDING_FILE_MUTATION_JOURNAL_BYTES = 4 * 1024 * 1024;
 const FILE_MUTATION_LOCK_OWNER_MAX_BYTES = 4 * 1024;
 const PENDING_FILE_MUTATIONS_RELATIVE_DIR = ".dohc/engine/pending-file-mutations";
 const HISTORY_BLOBS_RELATIVE_DIR = ".dohc/engine/history-blobs";
@@ -2806,7 +2806,15 @@ async function writePendingMutationJournal(
   journal: PendingFileMutationJournal,
 ): Promise<void> {
   const dir = await ensurePendingMutationDir(rootDir);
-  await writeInternalJsonAtomic(rootDir, join(dir, pendingMutationFileName(journal.id)), journal);
+  const serialized = `${JSON.stringify(journal, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PENDING_FILE_MUTATION_JOURNAL_BYTES) {
+    throw recoveryFailed(`Pending mutation file ${journal.id} exceeds the maximum supported size.`);
+  }
+  await writeInternalBytesAtomic(
+    rootDir,
+    join(dir, pendingMutationFileName(journal.id)),
+    serialized,
+  );
 }
 
 async function removePendingMutationJournal(

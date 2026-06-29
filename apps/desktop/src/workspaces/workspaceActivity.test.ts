@@ -121,4 +121,49 @@ describe("workspaceActivity history", () => {
       unavailableFileCount: 2,
     });
   });
+
+  it("merges durable and ephemeral history when durable recording is unsupported", async () => {
+    const durable = createChangeSetStore(root);
+    await durable.record(
+      addFileChanges(
+        createChangeSet({
+          kind: "user-edit",
+          author: { kind: "user", userId: "ice" },
+          summary: "Durable edit",
+        }),
+        [{ path: "notes/durable.md", operation: "write" }],
+      ),
+      { id: "durable-record", recordedAtMs: 1000 },
+    );
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const ephemeral = createChangeSetStore(root, { ephemeralIfUnsupported: true });
+      await ephemeral.record(
+        addFileChanges(
+          createChangeSet({
+            kind: "user-edit",
+            author: { kind: "user", userId: "ice" },
+            summary: "Ephemeral edit",
+          }),
+          [{ path: "notes/ephemeral.md", operation: "write" }],
+        ),
+        { id: "ephemeral-record", recordedAtMs: 1001 },
+      );
+      const activity = createWorkspaceActivity(() => {});
+
+      await expect(activity.listChangeSets(workspace())).resolves.toMatchObject([
+        { id: "ephemeral-record" },
+        { id: "durable-record" },
+      ]);
+      await expect(activity.readChangeSet(workspace(), "durable-record")).resolves.toMatchObject({
+        changeSet: { id: "durable-record" },
+      });
+      await expect(activity.readChangeSet(workspace(), "ephemeral-record")).resolves.toMatchObject({
+        changeSet: { id: "ephemeral-record" },
+      });
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+    }
+  });
 });

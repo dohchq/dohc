@@ -1,4 +1,5 @@
 import { deriveSyncStatus, type FileChange } from "@dohc/workspace-core";
+import type { HistoryRecord } from "@dohc/workspace-history";
 import type {
   ChangeSetLineStats,
   ReadChangeSetResult,
@@ -124,6 +125,37 @@ export interface WorkspaceActivityOptions {
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   engineFor?: (workspace: CreatedWorkspace) => CloudSyncEngine | null;
+}
+
+function mergeHistoryRecords(
+  records: HistoryRecord[],
+  order: "newest-first" | "oldest-first",
+): HistoryRecord[] {
+  const unique = new Map<string, HistoryRecord>();
+  for (const record of records) {
+    if (!unique.has(record.id)) unique.set(record.id, record);
+  }
+  return [...unique.values()].sort((a, b) => {
+    const time = a.recordedAtMs - b.recordedAtMs;
+    const id = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    return order === "oldest-first" ? time || id : -(time || id);
+  });
+}
+
+function historyReadStores(rootPath: string) {
+  const durable = createChangeSetStore(rootPath);
+  const fallback = createChangeSetStore(rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+  return {
+    async list() {
+      return mergeHistoryRecords(
+        [...(await fallback.list()), ...(await durable.list())],
+        "newest-first",
+      );
+    },
+    async get(id: string) {
+      return (await fallback.get(id)) ?? (await durable.get(id));
+    },
+  };
 }
 
 // Owns the live file-watch → history pipeline per workspace, the optional
@@ -269,7 +301,7 @@ export function createWorkspaceActivity(
   async function listChangeSets(
     workspace: CreatedWorkspace,
   ): Promise<ChangeSetRecord[]> {
-    const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+    const store = historyReadStores(workspace.rootPath);
     const records = await store.list();
     return records.map((record) => ({
       id: record.id,
@@ -296,7 +328,7 @@ export function createWorkspaceActivity(
     workspace: CreatedWorkspace,
     id: string,
   ): Promise<ReadChangeSetResult> {
-    const store = createChangeSetStore(workspace.rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+    const store = historyReadStores(workspace.rootPath);
     const record = await store.get(id);
     return {
       changeSet: record

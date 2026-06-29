@@ -2061,7 +2061,7 @@ describe("versioned text store", () => {
       snapshotReload.getMainVersion({ workspaceId: "workspace-a" }),
     ).rejects.toMatchObject({ code: "state-corrupt" });
 
-    raw.workspaces["workspace-a"].snapshots.main[write.object.id].text = "Safe text\n";
+    raw.workspaces["workspace-a"].snapshots.main[write.object.id].text = "Rewritten text\n";
     const rawRewriteMoment = raw.workspaces["workspace-a"].moments.find(
       (moment: { id: string }) => moment.id === rewrite.moment.id,
     );

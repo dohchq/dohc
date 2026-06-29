@@ -38,6 +38,35 @@ const hasAnchoredHistoryMutation = process.platform === "linux";
 const describeAnchoredHistory = hasAnchoredHistoryMutation ? describe : describe.skip;
 const itLinux = process.platform === "linux" ? it : it.skip;
 
+function historyLockPaths(token: string) {
+  const historyDir = join(root, ".dohc", "history");
+  const lockDir = join(historyDir, "index.json.lock");
+  const ownerDir = join(lockDir, token);
+  const ownerPath = join(ownerDir, "owner.json");
+  return { historyDir, lockDir, ownerDir, ownerPath };
+}
+
+async function writeHistoryLockOwner(input: {
+  token: string;
+  pid: number;
+  createdAtMs: number;
+  heartbeatAtMs: number;
+}) {
+  const paths = historyLockPaths(input.token);
+  await mkdir(paths.ownerDir, { recursive: true });
+  await writeFile(
+    paths.ownerPath,
+    `${JSON.stringify({
+      token: input.token,
+      pid: input.pid,
+      createdAtMs: input.createdAtMs,
+      heartbeatAtMs: input.heartbeatAtMs,
+    })}\n`,
+    "utf8",
+  );
+  return paths;
+}
+
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "dohc-history-"));
 });
@@ -944,23 +973,14 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
   });
 
   it("waits for the filesystem history lock before recording", async () => {
-    const historyDir = join(root, ".dohc", "history");
-    const lockDir = join(historyDir, "index.json.lock");
     const token = "active-history-lock";
-    const ownerDir = join(lockDir, token);
-    const ownerPath = join(ownerDir, "owner.json");
     const lockedAtMs = Date.now();
-    await mkdir(ownerDir, { recursive: true });
-    await writeFile(
-      ownerPath,
-      `${JSON.stringify({
-        token,
-        pid: process.pid,
-        createdAtMs: lockedAtMs,
-        heartbeatAtMs: lockedAtMs,
-      })}\n`,
-      "utf8",
-    );
+    const { lockDir } = await writeHistoryLockOwner({
+      token,
+      pid: process.pid,
+      createdAtMs: lockedAtMs,
+      heartbeatAtMs: lockedAtMs,
+    });
     const store = createChangeSetStore(root);
     let settled = false;
     let pending: Promise<void> | undefined;
@@ -985,23 +1005,14 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
   });
 
   it("reclaims a stale filesystem history lock before recording", async () => {
-    const historyDir = join(root, ".dohc", "history");
-    const lockDir = join(historyDir, "index.json.lock");
     const token = "stale-history-lock";
-    const ownerDir = join(lockDir, token);
-    const ownerPath = join(ownerDir, "owner.json");
     const staleAtMs = Date.now() - 60_000;
-    await mkdir(ownerDir, { recursive: true });
-    await writeFile(
-      ownerPath,
-      `${JSON.stringify({
-        token,
-        pid: -1,
-        createdAtMs: staleAtMs,
-        heartbeatAtMs: staleAtMs,
-      })}\n`,
-      "utf8",
-    );
+    await writeHistoryLockOwner({
+      token,
+      pid: -1,
+      createdAtMs: staleAtMs,
+      heartbeatAtMs: staleAtMs,
+    });
     const store = createChangeSetStore(root);
 
     await store.record(userEdit(), { id: "stale-lock", recordedAtMs: 3000 });
@@ -1010,23 +1021,14 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
   });
 
   it("does not reclaim a future-dated filesystem history lock before recording", async () => {
-    const historyDir = join(root, ".dohc", "history");
-    const lockDir = join(historyDir, "index.json.lock");
     const token = "future-history-lock";
-    const ownerDir = join(lockDir, token);
-    const ownerPath = join(ownerDir, "owner.json");
     const futureAtMs = Date.now() + 60_000;
-    await mkdir(ownerDir, { recursive: true });
-    await writeFile(
-      ownerPath,
-      `${JSON.stringify({
-        token,
-        pid: -1,
-        createdAtMs: futureAtMs,
-        heartbeatAtMs: futureAtMs,
-      })}\n`,
-      "utf8",
-    );
+    const { lockDir } = await writeHistoryLockOwner({
+      token,
+      pid: -1,
+      createdAtMs: futureAtMs,
+      heartbeatAtMs: futureAtMs,
+    });
     const store = createChangeSetStore(root);
     let settled = false;
     let pending: Promise<void> | undefined;
@@ -1051,23 +1053,14 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
   });
 
   it("does not reclaim a stale filesystem history lock while the owner pid is live", async () => {
-    const historyDir = join(root, ".dohc", "history");
-    const lockDir = join(historyDir, "index.json.lock");
     const token = "stale-live-pid-history-lock";
-    const ownerDir = join(lockDir, token);
-    const ownerPath = join(ownerDir, "owner.json");
     const staleAtMs = Date.now() - 60_000;
-    await mkdir(ownerDir, { recursive: true });
-    await writeFile(
-      ownerPath,
-      `${JSON.stringify({
-        token,
-        pid: process.pid,
-        createdAtMs: staleAtMs,
-        heartbeatAtMs: staleAtMs,
-      })}\n`,
-      "utf8",
-    );
+    const { lockDir } = await writeHistoryLockOwner({
+      token,
+      pid: process.pid,
+      createdAtMs: staleAtMs,
+      heartbeatAtMs: staleAtMs,
+    });
     const store = createChangeSetStore(root);
     let settled = false;
     let pending: Promise<void> | undefined;
@@ -1092,11 +1085,8 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
   });
 
   itLinux("ignores symlinked history lock owners before reclaiming stale locks", async () => {
-    const historyDir = join(root, ".dohc", "history");
-    const lockDir = join(historyDir, "index.json.lock");
     const token = "symlink-owner-lock";
-    const ownerDir = join(lockDir, token);
-    const ownerPath = join(ownerDir, "owner.json");
+    const { lockDir, ownerDir, ownerPath } = historyLockPaths(token);
     const symlinkedOwnerTargetPath = join(root, "fresh-owner.json");
     const freshAtMs = Date.now();
     const staleDate = new Date(freshAtMs - 60_000);
