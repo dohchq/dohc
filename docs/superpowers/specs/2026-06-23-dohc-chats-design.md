@@ -99,14 +99,14 @@ the declared range. `UInt64DecimalString` is `0` through
 milliseconds through `8640000000000000` unless a narrower shared-schema range is
 declared. All boundary readers must parse, range-check, and reserialize to the
 canonical form before storing, comparing, indexing, or projecting
-`threadSequence`, `createdAt`, `editedAt`, `deletedAt`, `lastActivityAt`,
-`updatedAt`, or read-state cursor fields.
+`threadSequence`, `bodyRevision`, `createdAt`, `editedAt`, `deletedAt`,
+`lastActivityAt`, `updatedAt`, or read-state cursor fields.
 
-`threadSequence`, `createdAt`, `editedAt`, `deletedAt`, `lastActivityAt`, and
-`updatedAt` use these canonical decimal-string encodings at storage, API,
-projection, and worker boundaries. Implementations compare them as integer
-values using a 64-bit/BigInt-safe path, never as floating-point JavaScript
-numbers and never with locale string collation.
+`threadSequence`, `bodyRevision`, `createdAt`, `editedAt`, `deletedAt`,
+`lastActivityAt`, and `updatedAt` use these canonical decimal-string encodings at
+storage, API, projection, and worker boundaries. Implementations compare them as
+integer values using a 64-bit/BigInt-safe path, never as floating-point
+JavaScript numbers and never with locale string collation.
 
 The canonical read cursor is sequence-based, not timestamp-based. No row means
 nothing in the thread has been read by that actor. Updates are monotonic: read
@@ -602,6 +602,16 @@ type LinkThreadActivity = ThreadActivityBase & {
   }
 }
 
+type MentionNotificationThreadActivity = ThreadActivityBase & {
+  kind: 'mention_notification_enqueued' | 'mention_notification_resolved'
+  messageId: string
+  bodyRevision: UInt64DecimalString
+  mentionedActorIds: string[]
+  notificationId: string
+  notificationStatus?: 'queued' | 'sent' | 'suppressed' | 'resolved'
+  bodyHash?: string
+}
+
 type ThreadActivity =
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
@@ -609,6 +619,7 @@ type ThreadActivity =
   | MessageDeleteLegacyThreadActivity
   | ReactionThreadActivity
   | LinkThreadActivity
+  | MentionNotificationThreadActivity
 ```
 
 For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
@@ -644,6 +655,12 @@ For `link_added` and `link_removed`, `linkId` and `linkTarget` are required so
 audit/replay can identify the exact affected link even after the derived
 `linkedWork` cache is rebuilt. Reaction add/remove replay affects one exact
 reaction through the `ReactionIdentity` XOR above.
+Mention and notification rebuilds use
+`MentionNotificationThreadActivity` as the durable source of truth. Notification
+queues, search snippets, unread/mention badges, exports, and replay jobs rebuild
+from these activity records plus the current policy view; they must not rely on
+ephemeral queue rows as the only record that a mention notification was enqueued,
+suppressed, sent, or resolved.
 
 Nested replies should be supported, but the UI should avoid becoming a maze.
 Most conversations should read linearly, with targeted replies when useful.

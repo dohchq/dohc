@@ -282,6 +282,43 @@ tar -xJf /tmp/dohc-node-v24.18.0-linux-x64.tar.xz -C /tmp/dohc-node-v24.18.0-lin
 /tmp/dohc-node-v24.18.0-linux-x64/bin/node -v
 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --version
 PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux-x64/bin/corepack pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
+env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" node <<'NODE'
+const fs = require('fs')
+const path = require('path')
+const files = [
+  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md',
+  'docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md',
+  'docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md',
+  'docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md',
+  'docs/superpowers/specs/2026-06-23-dohc-chats-design.md',
+]
+const slug = (s) => s.trim().toLowerCase().replace(/`([^`]*)`/g, '$1').replace(/<[^>]+>/g, '').replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-')
+const failures = []
+for (const file of files) {
+  const text = fs.readFileSync(file, 'utf8')
+  const re = /!?\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
+  for (const match of text.matchAll(re)) {
+    const raw = match[1]
+    if (/^(https?:|mailto:|app:|#)/.test(raw)) continue
+    const [targetRaw, anchorRaw] = raw.split('#')
+    const targetPath = path.normalize(path.resolve(path.dirname(file), decodeURIComponent(targetRaw || file)))
+    if (!fs.existsSync(targetPath)) {
+      failures.push(`${file}: missing link target ${raw}`)
+      continue
+    }
+    if (anchorRaw) {
+      const targetText = fs.readFileSync(targetPath, 'utf8')
+      const anchors = new Set([...targetText.matchAll(/^#{1,6}\s+(.+)$/gm)].map((h) => slug(h[1])))
+      if (!anchors.has(anchorRaw.toLowerCase())) failures.push(`${file}: missing anchor ${raw}`)
+    }
+  }
+}
+if (failures.length) {
+  console.error(failures.join('\n'))
+  process.exit(1)
+}
+console.log(`docs link/anchor check passed for ${files.length} files`)
+NODE
 ```
 
 ### E2E / Visual / Manual QA
@@ -295,6 +332,8 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
   `pnpm@10.24.0`.
 - Earlier Node 18.19.1 run is retained only as exploratory output and is not
   counted as gate evidence because it does not satisfy the repo engine field.
+- Docs link/anchor checker passed over the five PR00 plan/spec docs with result:
+  `docs link/anchor check passed for 5 files`.
 
 ### Local Agent CLI QA
 
@@ -317,7 +356,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 5 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1480,6 +1519,19 @@ Eightieth pass:
     kept default safe-sandbox validation as the intended open follow-up.
   - Aligned DM participant-cap wording with the raw-submission and canonicalized
     list enforcement rule.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Eighty-first pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added `bodyRevision` to canonical numeric-string validation and boundary
+    normalization rules.
+  - Added durable `MentionNotificationThreadActivity` records so notification,
+    mention, search, export, and replay rebuilds have a canonical activity source.
+  - Ran and recorded a docs link/anchor checker over the five PR00 plan/spec docs.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
