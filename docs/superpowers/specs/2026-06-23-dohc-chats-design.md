@@ -90,7 +90,7 @@ type ThreadReadState = {
     createdAt: UnixMsDecimalString
     messageId: string
   }
-  updatedAt: UnixMsDecimalString
+  updatedAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 ```
 
@@ -100,6 +100,10 @@ digits, empty strings, leading zeros except the literal `0`, and values outside
 the declared range. `UInt64DecimalString` is `0` through
 `18446744073709551615`. `UnixMsDecimalString` is non-negative Unix epoch
 milliseconds through `8640000000000000` unless a narrower shared-schema range is
+required by the implementation. `ThreadReadState.updatedAt`,
+`ThreadMessage.createdAt`, `ThreadMessage.editedAt`, and
+`ThreadActivityBase.createdAt` are pinned to server time and must not be
+accepted from client payloads.
 declared. All boundary readers must parse, range-check, and reserialize to the
 canonical form before storing, comparing, indexing, or projecting
 `threadSequence`, `bodyRevision`, `createdAt`, `editedAt`, `deletedAt`,
@@ -532,8 +536,8 @@ type ThreadMessage = {
   authorKind: 'human' | 'agent' | 'system'
   body: string
   bodyRevision: UInt64DecimalString
-  createdAt: UnixMsDecimalString
-  editedAt?: UnixMsDecimalString
+  createdAt: UnixMsDecimalString // server-assigned; client values rejected
+  editedAt?: UnixMsDecimalString // server-assigned; client values rejected
   editedById?: string
   // Derived cache from the canonical message_deleted activity.
   deletedAt?: UnixMsDecimalString
@@ -630,7 +634,7 @@ type ThreadActivityBase = {
   threadId: string
   readonly actorId: string // server-owned immutable activity actor id
   actorKind: 'human' | 'agent' | 'system'
-  createdAt: UnixMsDecimalString
+  createdAt: UnixMsDecimalString // server-assigned; client values rejected
 }
 
 type MessageCreateThreadActivity = ThreadActivityBase & {
@@ -1322,9 +1326,10 @@ The first useful version should prove dohc-native collaboration:
 
 1. Chats top-level navigation exists.
 2. Users can create channels.
-3. Users can send fast messages in a channel, and each send creates or resolves
-   a durable `ChatThread` and persists a `ThreadMessage`.
-4. A burst of messages can become or belong to a durable chat thread without
+3. Users can send fast messages in a channel; each send resolves the
+   channel-conversation `ChatThread` through get-or-create and persists a
+   `ThreadMessage`.
+4. A burst of messages stays attached to that same durable chat thread without
    introducing a separate canonical channel-stream message model.
 5. Users can create a DM or small group chat.
 6. Users can link a chat to a file.

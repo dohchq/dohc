@@ -118,8 +118,10 @@ for (const file of files) {
     const targetRaw = hashIndex === -1 ? raw : raw.slice(0, hashIndex)
     const anchorRaw = hashIndex === -1 ? '' : raw.slice(hashIndex + 1)
     let decodedTarget
+    let decodedAnchor
     try {
       decodedTarget = targetRaw === '' ? '' : decodeURIComponent(targetRaw)
+      decodedAnchor = anchorRaw === '' ? '' : decodeURIComponent(anchorRaw)
     } catch {
       failures.push(`${file}: invalid link target ${raw}`)
       continue
@@ -131,19 +133,27 @@ for (const file of files) {
         : path.resolve(path.dirname(file), decodedTarget),
     )
 
-    if (!fs.existsSync(targetPath)) {
+    let targetStat
+    try {
+      targetStat = fs.statSync(targetPath)
+    } catch {
       failures.push(`${file}: missing link target ${raw}`)
       continue
     }
 
-    if (!anchorRaw) {
+    if (!targetStat.isFile()) {
+      failures.push(`${file}: link target is not a file ${raw}`)
+      continue
+    }
+
+    if (!decodedAnchor) {
       continue
     }
 
     const targetText = fs.readFileSync(targetPath, 'utf8')
     const anchors = collectAnchors(targetText)
 
-    if (!anchors.has(anchorRaw.toLowerCase())) {
+    if (!anchors.has(decodedAnchor.toLowerCase())) {
       failures.push(`${file}: missing anchor ${raw}`)
     }
   }

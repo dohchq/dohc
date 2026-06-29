@@ -595,12 +595,13 @@ equivalent correlation id. Single-version reads bind `versionId`; pairwise reads
 bind the full requested pair such as `versionAId`/`versionBId`; merge/diff
 previews bind their source and target version identifiers. Async reads such as
 `list(...)`, `stat(...)`, `search(...)`, `snapshot(...)`, and `diff(...)` must
-accept abort semantics or an equivalent request-cancellation contract, and
-callers must ignore responses whose token, workspace, or any requested version
-identifier no longer matches the active view. `watch(...)` events must carry the
-same binding and must stop or no-op after abort, workspace switch, or version
-switch. A stale read or watch event from one workspace or version set must never
-repaint or leak data into a newer workspace context.
+accept abort semantics or an equivalent request-cancellation contract, and the
+server must abort or drop any in-flight response whose token, workspace, or
+requested version no longer matches the active request; callers should still
+ignore late responses defensively. `watch(...)` events must carry the same
+binding and must stop or no-op after abort, workspace switch, or version switch.
+A stale read or watch event from one workspace or version set must never repaint
+or leak data into a newer workspace context.
 
 API writes are never unconditional overwrites. Create and overwrite modes are
 explicit: `expectedAbsent` is create-only and must omit `targetObjectId`.

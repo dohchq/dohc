@@ -976,6 +976,16 @@ history.
 - Clean merge from named version into Main.
 - Preserve base/current/incoming on conflict.
 - Minimal conflict UI or API.
+- Minimal provisional `ConflictRecord` contract in the shared substrate scaffold,
+  aligned with PR 01's future formal `ConflictRecord` boundary:
+  `id`, `workspaceId`, `targetVersionId`, `sourceVersionId`, `objectId`,
+  `pathAtConflict`, `driver`, `base`, `current`, `incoming`, `createdAt`,
+  `resolvedAt?`, `resolutionHistoryMomentId?`, and
+  `schemaVersion: 'conflict-record:p0d:v1'`. `base`, `current`, and `incoming`
+  each preserve `{ versionRef, contentHash, bodySnapshot }` so the proof slice
+  does not lose merge evidence or need a later backfill. PR 01 may rename or
+  extend fields only through an explicit migration boundary that preserves every
+  P0D conflict record.
 
 **Tests:**
 

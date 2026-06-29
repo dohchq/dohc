@@ -20,11 +20,11 @@ provisional Phase 0 lane stack. The newest owning PR00 pass entry in the
 append-only history below is the source of truth if this summary drifts; this
 block is only a quick pointer into that latest entry.
 
-- **Last updated:** derived from the newest owning PR00 pass entry below.
+- **Last updated:** current through the Hundred-twelfth pass below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `4b97abd` reported 2 minor
-  issues; hundred-eleventh pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `84a6bda` reported 7 issues;
+  hundred-twelfth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -2097,6 +2097,29 @@ Hundred-eleventh pass:
     creates false link/anchor failures.
   - Normalized the recorded Node 24 extraction directory and validation PATH to
     `/tmp/dohc-node-v24.18.0`.
+- Validation:
+  - `git diff --check` passed.
+  - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
+  - `env "PATH=/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts`
+    passed with 1 file and 2 tests.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-twelfth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest seven-issue rerun:
+  - Required docs link targets to resolve to regular files and decoded link
+    fragments before anchor comparison.
+  - Added the P0D provisional `ConflictRecord` shape with preserved
+    base/current/incoming snapshots and an explicit PR 01 migration boundary.
+  - Tightened async read/watch contracts so stale responses are aborted or
+    dropped server-side, with callers still defending against late responses.
+  - Pinned chat message, activity, and read-state timestamps to server time.
+  - Clarified the chat proof slice as channel-thread get-or-create plus
+    `ThreadMessage` persistence, not one new `ChatThread` per send.
+  - Updated the Current PR Snapshot to the `84a6bda` seven-issue rerun.
 - Validation:
   - `git diff --check` passed.
   - `node scripts/check-think-bigger-doc-links.mjs` passed for 5 files.
