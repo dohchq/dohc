@@ -430,62 +430,42 @@ export async function retryPendingShareRevocationDisconnects(
       target_id: string;
       payload: unknown;
     }>(
-	      `select workspace_events.id,
-	              workspace_events.workspace_id,
-	              workspace_events.target_id,
-	              workspace_events.payload
-	       from workspace_events
-	       where (
-	            workspace_events.kind = 'share.revocation.disconnect_pending'
-	            and (
-	              workspace_events.payload->>'retryAfter' is null
-	              or workspace_events.payload->>'retryAfter' !~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	              or workspace_events.payload->>'retryAfter' <= ${POSTGRES_UTC_ISO_NOW_SQL}
-	            )
-	          )
-	          or (
-	            workspace_events.kind = 'share.revocation.disconnect_claimed'
-	            and (
-	              (
-	                workspace_events.payload->>'claimExpiresAt' is not null
-	                and (
-	                  workspace_events.payload->>'claimExpiresAt' !~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	                  or workspace_events.payload->>'claimExpiresAt' <= ${POSTGRES_UTC_ISO_NOW_SQL}
-	                )
-	              )
-	              or (
-	                workspace_events.payload->>'claimExpiresAt' is null
-	                and (
-	                  workspace_events.payload->>'claimedAt' is null
-	                  or workspace_events.payload->>'claimedAt' !~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	                  or workspace_events.payload->>'claimedAt' <=
-	                    to_char(
-	                      (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
-	                      '${POSTGRES_UTC_ISO_FORMAT}'
-	                    )
-	                )
-              )
-            )
-          )
-	       order by
-	         case
-	           when workspace_events.kind = 'share.revocation.disconnect_pending' then
-	             case
-	               when workspace_events.payload->>'retryAfter' ~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	                 then workspace_events.payload->>'retryAfter'
-	               else ''
-	             end
-	           when workspace_events.kind = 'share.revocation.disconnect_claimed' then
-	             case
-	               when workspace_events.payload->>'claimExpiresAt' ~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	                 then workspace_events.payload->>'claimExpiresAt'
-	               when workspace_events.payload->>'claimedAt' ~ '${POSTGRES_UTC_ISO_TEXT_RE}'
-	                 then workspace_events.payload->>'claimedAt'
-	               else ''
-	             end
-	           else ''
-	         end asc,
-         workspace_events.created_at asc
+      `select workspace_events.id,
+              workspace_events.workspace_id,
+              workspace_events.target_id,
+              workspace_events.payload
+       from workspace_events
+       join (
+         select id,
+                coalesce(payload->>'retryAfter', '') as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_pending'
+           and coalesce(payload->>'retryAfter', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
+         union all
+         select id,
+                coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_claimed'
+           and payload->>'claimExpiresAt' is not null
+           and coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <= ${POSTGRES_UTC_ISO_NOW_SQL}
+         union all
+         select id,
+                coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') as sort_at,
+                created_at
+         from workspace_events
+         where kind = 'share.revocation.disconnect_claimed'
+           and payload->>'claimExpiresAt' is null
+           and coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <=
+             to_char(
+               (clock_timestamp() - $2::integer * interval '1 second') at time zone 'UTC',
+               '${POSTGRES_UTC_ISO_FORMAT}'
+             )
+       ) as due_revocation_disconnects
+         on due_revocation_disconnects.id = workspace_events.id
+       order by due_revocation_disconnects.sort_at asc,
+                due_revocation_disconnects.created_at asc
        limit $1
        for update of workspace_events skip locked`,
       [boundedLimit, SHARE_REVOCATION_CLAIM_STALE_SECONDS],

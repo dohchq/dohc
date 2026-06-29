@@ -91,6 +91,7 @@ const HISTORY_LOCK_OWNER_MAX_BYTES = 4 * 1024;
 const ephemeralHistoryStores = new Map<string, { records: HistoryRecord[] }>();
 const DURABLE_HISTORY_RECORDING_UNSUPPORTED_MESSAGE =
   "Durable history recording is not supported on this platform.";
+const HISTORY_LOCK_FUTURE_SKEW_MS = 5_000;
 let descriptorRelativeFdDirCache:
   | {
       platform: NodeJS.Platform;
@@ -100,6 +101,9 @@ let descriptorRelativeFdDirCache:
 
 function historyLockAgeMs(timestampMs: number, nowMs = Date.now()): number {
   if (!Number.isFinite(timestampMs)) return Number.POSITIVE_INFINITY;
+  if (timestampMs > nowMs + HISTORY_LOCK_FUTURE_SKEW_MS) {
+    return Number.POSITIVE_INFINITY;
+  }
   if (timestampMs > nowMs) return 0;
   return nowMs - timestampMs;
 }
@@ -1060,6 +1064,15 @@ function createEphemeralChangeSetStore(key: string): ChangeSetStore {
       const record = cloneHistoryRecord(historyRecordFromChangeSet(set, opts));
       if (state.records.some((candidate) => candidate.id === record.id)) {
         throw new Error(`History record ${record.id} already exists.`);
+      }
+      const maxRecordedAtMs = state.records.reduce(
+        (max, candidate) => Math.max(max, candidate.recordedAtMs),
+        -1,
+      );
+      if (record.recordedAtMs <= maxRecordedAtMs) {
+        throw new Error(
+          `History record ${record.id} timestamp ${record.recordedAtMs} is not newer than the latest committed timestamp ${maxRecordedAtMs}.`,
+        );
       }
       state.records.push(record);
       return cloneHistoryRecord(record);

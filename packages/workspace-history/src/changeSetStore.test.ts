@@ -408,6 +408,9 @@ describeAnchoredHistory("changeSetStore persistence", () => {
       await expect(
         store.record(userEdit(), { id: "ephemeral-record", recordedAtMs: 2000 }),
       ).resolves.toMatchObject({ id: "ephemeral-record" });
+      await expect(
+        store.record(userEdit(), { id: "stale-ephemeral", recordedAtMs: 2000 }),
+      ).rejects.toThrow(/not newer than the latest committed timestamp/i);
       await expect(store.list()).resolves.toMatchObject([{ id: "ephemeral-record" }]);
     } finally {
       if (originalPlatform) {
@@ -1020,7 +1023,7 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     await expect(store.list()).resolves.toHaveLength(1);
   });
 
-  it("does not reclaim a future-dated filesystem history lock before recording", async () => {
+  it("reclaims an impossible future-dated filesystem history lock before recording", async () => {
     const token = "future-history-lock";
     const futureAtMs = Date.now() + 60_000;
     const { lockDir } = await writeHistoryLockOwner({
@@ -1030,26 +1033,11 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
       heartbeatAtMs: futureAtMs,
     });
     const store = createChangeSetStore(root);
-    let settled = false;
-    let pending: Promise<void> | undefined;
-    try {
-      pending = store
-        .record(userEdit(), { id: "future-lock", recordedAtMs: 3000 })
-        .then(() => {
-          settled = true;
-        });
 
-      await new Promise((resolve) => setTimeout(resolve, 75));
-      await expect(readdir(lockDir)).resolves.toContain(token);
-      expect(settled).toBe(false);
-      await rm(lockDir, { recursive: true, force: true });
-      await pending;
-    } finally {
-      await rm(lockDir, { recursive: true, force: true });
-      await pending?.catch(() => undefined);
-    }
+    await store.record(userEdit(), { id: "future-lock", recordedAtMs: 3000 });
 
     await expect(store.list()).resolves.toHaveLength(1);
+    await expect(readdir(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not reclaim a stale filesystem history lock while the owner pid is live", async () => {

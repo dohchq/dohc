@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 5 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest review attempt timed out after streaming 5 issues; all 5 streamed issues fixed locally and rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -1825,6 +1825,8 @@ Date completed:
     counts without assuming timestamp-tie ordering.
   - file and import writes stage bytes through same-directory temp files before
     atomic rename, avoiding partial direct-write results.
+  - concurrent MCP writes under a frozen wall clock still produce distinct
+    monotonic history timestamps.
 - `packages/workspace-fs/src/scan.test.ts`
   - scan skips `.dohc`, `.git`, `node_modules`, nested `.dohc`, and SQLite
     sidecars while preserving the visible base SQLite file.
@@ -1872,6 +1874,10 @@ Date completed:
     advances.
   - persisted index entries with unsafe timestamps are skipped before filenames,
     cursor reads, or max timestamp calculations consume them.
+  - ephemeral fallback history rejects equal or stale timestamps using the same
+    cursor-ordering invariant as durable history.
+  - impossible future-dated history lock heartbeats are reclaimed instead of
+    making dead locks look fresh forever.
 - `services/workspace-api/src/routes/sharesRevocation.test.ts`
   - terminal completed disconnect-event cleanup excludes active pending/claimed
     rows while backlog stats remain available for alerting.
@@ -1879,10 +1885,12 @@ Date completed:
     parameters instead of interpolating them into the query text.
   - share revocation backlog stats age claimed events by valid `claimedAt`
     values with `created_at` fallback.
-  - malformed retry and claim timestamps sort as immediately due during
-    revocation claiming.
+  - malformed revocation payload recovery still validates recipient lookup from
+    the revoked share row once a row is selected.
   - revoke-share results keep the share revoked while distinguishing completed
     admin disconnects from deferred queued/requeued disconnects.
+  - the retry worker selector uses index-aligned pending/claimed timestamp
+    branches for the main backlog path.
 - `packages/workspace-postgres/src/db/schema.test.ts`
   - schema metadata includes the pending and claimed share-revocation retry
     expression indexes already present in migrations `0007` and `0008`.
@@ -2966,6 +2974,14 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typ
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
 git diff --check
+# automated review follow-up fixes after timed-out e268a03 review attempt streamed 5 issues
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test src/changeSetStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+git diff --check
 ```
 
 ### E2E / Visual / Manual QA
@@ -2991,23 +3007,36 @@ git diff --check
 
 ### automated review
 
-- Status: fix loop active; latest local fixes against `97529b0` complete and
-  rerun pending.
-- Findings: latest completed pass raised 5 issues against commit `97529b0`.
-  Previous completed passes raised 8 issues against commit `f156b22`, 6 issues
-  against commit `a8ba2a3`, 9 issues against commit `5d097ed`, 10 issues
-  against commit `5805eae`, 9 issues against commit `bfc0ccc`, 8 issues
-  against commit `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues
-  against commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues
-  against commit `fa05e4f`, 7 issues against commit `d37c106`, 7 issues
-  against commit `3b3b575`, 14 issues against commit `db9d04a`, 10 issues
-  against commit `d4d734a`, 8 issues against commit `f57278b`, 12 issues
-  against commit `16362a9`, 10 issues against commit `4288332`, 12 issues
-  against commit `36aa361`, 15 issues against commit `4b91836`, 8 issues
-  against commit `112a935`, 10 issues against commit `dd77390`, 5 issues
-  against commit `1c49720`, 10 issues against commit `28e093d`, and 9 issues
-  against commit `8e1fa68`.
-- Latest fixes against commit `97529b0`:
+- Status: fix loop active; latest local fixes after the timed-out `e268a03`
+  review attempt are complete and rerun pending.
+- Findings: latest review attempt against commit `e268a03` timed out before a
+  `complete` event, but streamed 5 issues that are fixed locally here. Previous
+  completed passes raised 5 issues against commit `97529b0`, 8 issues against
+  commit `f156b22`, 6 issues against commit `a8ba2a3`, 9 issues against commit
+  `5d097ed`, 10 issues against commit `5805eae`, 9 issues against commit
+  `bfc0ccc`, 8 issues against commit `52e9a9c`, 7 issues against commit
+  `8fe4727`, 6 issues against commit `7bfd8e6`, 8 issues against commit
+  `db2c93e`, 10 issues against commit `fa05e4f`, 7 issues against commit
+  `d37c106`, 7 issues against commit `3b3b575`, 14 issues against commit
+  `db9d04a`, 10 issues against commit `d4d734a`, 8 issues against commit
+  `f57278b`, 12 issues against commit `16362a9`, 10 issues against commit
+  `4288332`, 12 issues against commit `36aa361`, 15 issues against commit
+  `4b91836`, 8 issues against commit `112a935`, 10 issues against commit
+  `dd77390`, 5 issues against commit `1c49720`, 10 issues against commit
+  `28e093d`, and 9 issues against commit `8e1fa68`.
+- Latest fixes after timed-out review attempt against commit `e268a03`:
+  - P0A ledger docs now consistently define the pre-mint claim key as a
+    deterministic workspace/object identity fingerprint; UUIDs/sequences apply
+    only to the minted durable `writeObservationId`.
+  - MCP history writes retry stale timestamp races with a fresh durable max
+    timestamp and stable record id.
+  - History lock age handling treats impossible future heartbeats as stale while
+    still tolerating small clock skew and live owner PIDs.
+  - Ephemeral history fallback recording now rejects equal or stale timestamps,
+    matching durable store cursor ordering.
+  - Share revocation worker selection now uses index-aligned pending/claimed
+    timestamp branches instead of hot-path regex/nullable OR fallback predicates.
+- Previous pass fixes against commit `97529b0`:
   - Share revocation results keep `revoked: true` for the persisted soft-delete
     and expose deferred live disconnects via `disconnectDeferred: true`.
   - MCP and desktop merged history readers tolerate durable read failures and
@@ -4573,6 +4602,13 @@ git diff --check
     `sharesRevocation.test.ts` 18 tests in 1.09s.
   - Latest `97529b0` follow-up typechecks passed for workspace-engine, MCP,
     desktop, and workspace-api; `git diff --check` also passed.
+  - Latest timed-out `e268a03` review follow-up focused reruns with Node v24.18.0
+    and `TMPDIR=/tmp`: workspace-history `changeSetStore.test.ts` 37 tests in
+    8.22s; MCP `tools.test.ts` 50 tests in 4.74s; workspace-api
+    `sharesRevocation.test.ts` 18 tests in 0.360s after updating selector
+    assertions.
+  - Latest timed-out `e268a03` review follow-up typechecks passed for
+    workspace-history, MCP, and workspace-api; `git diff --check` also passed.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   same local Node v24.18.0 toolchain with pnpm. Filesystem-heavy engine tests used

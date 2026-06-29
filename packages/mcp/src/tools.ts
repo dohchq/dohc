@@ -158,6 +158,13 @@ function historyReadStoreFor(ctx: ToolContext) {
   );
 }
 
+function isStaleRecordedAtError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("is not newer than the latest committed timestamp")
+  );
+}
+
 const MCP_AUTHOR: ChangeAuthor = {
   kind: "agent",
   agentId: "dohc-mcp",
@@ -290,16 +297,23 @@ async function recordChange(
     }),
     input.files,
   );
-  const recordedAtMs = Math.max(
-    Date.now(),
-    (await store.maxRecordedAtMs()) + 1,
-    (historyRecordedAtMsByRoot.get(ctx.root) ?? 0) + 1,
-  );
-  historyRecordedAtMsByRoot.set(ctx.root, recordedAtMs);
-  return store.record(set, {
-    id: randomUUID(),
-    recordedAtMs,
-  });
+  const id = randomUUID();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const recordedAtMs = Math.max(
+      Date.now(),
+      (await store.maxRecordedAtMs()) + 1,
+      (historyRecordedAtMsByRoot.get(ctx.root) ?? 0) + 1,
+    );
+    historyRecordedAtMsByRoot.set(ctx.root, recordedAtMs);
+    try {
+      return await store.record(set, { id, recordedAtMs });
+    } catch (error) {
+      if (!isStaleRecordedAtError(error)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 function failureReason(error: unknown, fallback: string): string {

@@ -471,11 +471,9 @@ describe("revokeShare admin disconnect", () => {
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
           expect(text).toContain("retryAfter");
-          expect(text).toContain("workspace_events.payload->>'retryAfter' is null");
-          expect(text).toContain("workspace_events.payload->>'retryAfter' !~");
-          expect(text).toContain("workspace_events.payload->>'retryAfter' ~");
-          expect(text).toContain("then workspace_events.payload->>'retryAfter'");
-          expect(text).toContain("else ''");
+          expect(text).toContain("as due_revocation_disconnects");
+          expect(text).toContain("coalesce(payload->>'retryAfter', '') <=");
+          expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
           expect(params).toEqual([100, 300]);
@@ -639,14 +637,13 @@ describe("revokeShare admin disconnect", () => {
           expect(params).toEqual([100, 300]);
           expect(text).toContain("share.revocation.disconnect_claimed");
           expect(text).toContain("claimExpiresAt");
-          expect(text).toContain("workspace_events.payload->>'claimExpiresAt' !~");
-          expect(text).toContain("workspace_events.payload->>'claimedAt' is null");
-          expect(text).toContain("workspace_events.payload->>'claimedAt' !~");
-          expect(text).toContain("workspace_events.payload->>'claimExpiresAt' ~");
-          expect(text).toContain("workspace_events.payload->>'claimedAt' ~");
-          expect(text).toContain("then workspace_events.payload->>'claimExpiresAt'");
-          expect(text).toContain("then workspace_events.payload->>'claimedAt'");
-          expect(text).toContain("else ''");
+          expect(text).toContain("as due_revocation_disconnects");
+          expect(text).toContain("payload->>'claimExpiresAt' is not null");
+          expect(text).toContain("payload->>'claimExpiresAt' is null");
+          expect(text).toContain(
+            "coalesce(payload->>'claimExpiresAt', payload->>'claimedAt', '') <=",
+          );
+          expect(text).toContain("due_revocation_disconnects.sort_at");
           expect(text).toContain("clock_timestamp()");
           expect(text).toContain("order by");
           return {
@@ -739,7 +736,7 @@ describe("revokeShare admin disconnect", () => {
         events.push(normalized.split(/\s+/u)[0] ?? "query");
         if (normalized.startsWith("select")) {
           expect(params).toEqual([100, 300]);
-          expect(text).toContain("workspace_events.payload->>'claimExpiresAt' is null");
+          expect(text).toContain("payload->>'claimExpiresAt' is null");
           expect(text).toContain("clock_timestamp() - $2::integer * interval '1 second'");
           return { rows: [] };
         }

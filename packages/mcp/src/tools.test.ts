@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { addFileChanges, createChangeSet, createLocalChangeAuthor } from "@dohc/workspace-core";
 import {
   createChangeSetStore,
@@ -725,6 +725,32 @@ describe("mcp tools operate on allowed paths", () => {
           reason: expect.stringContaining("durable history recording is not supported"),
         });
       });
+    });
+  });
+
+  itDurableHistory("retries stale history timestamps during concurrent writes", async () => {
+    await withWorkspace(async (ctx) => {
+      const now = vi.spyOn(Date, "now").mockReturnValue(1234);
+      try {
+        await expect(
+          Promise.all([
+            writeWorkspaceFile(ctx, { path: "notes/a.md", content: "A\n" }),
+            writeWorkspaceFile(ctx, { path: "notes/b.md", content: "B\n" }),
+          ]),
+        ).resolves.toEqual([
+          expect.objectContaining({ ok: true, path: "notes/a.md" }),
+          expect.objectContaining({ ok: true, path: "notes/b.md" }),
+        ]);
+      } finally {
+        now.mockRestore();
+      }
+
+      const records = await createChangeSetStore(ctx.root).list();
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.recordedAtMs).sort((a, b) => a - b)).toEqual([
+        1234,
+        1235,
+      ]);
     });
   });
 
