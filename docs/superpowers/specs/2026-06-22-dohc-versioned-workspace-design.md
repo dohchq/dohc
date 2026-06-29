@@ -84,12 +84,13 @@ per-actor quotas, bounded retention/TTL, payload size caps, rate limits, and
 deterministic backpressure so ingest floods cannot exhaust storage or starve
 canonical durability paths. Eviction applies only to rejected-before-acceptance
 items. Accepted holding records must remain recoverable until protection checks
-succeed and canonicalization completes, or until an explicit operator-approved
-escalation path resolves the record. If a record is eventually retired through
-that documented escalation path, the engine preserves durable rejection or
-expiration evidence. Humans, agents, imports, and sync processes all get the same
-guarantee: an accepted change is not silently lost, but it also does not become
-canonical workspace state until protection checks pass.
+succeed and canonicalization completes. Accepted holding records must also have a
+bounded expiry/compaction policy once the retry horizon or operator-approved
+escalation window is exceeded. If a record is eventually retired through that
+documented escalation path, the engine preserves durable rejection or expiration
+evidence. Humans, agents, imports, and sync processes all get the same guarantee:
+an accepted change is not silently lost, but it also does not become canonical
+workspace state until protection checks pass.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as
@@ -106,8 +107,9 @@ stays quarantined instead of becoming canonical state.
 
 Workspace scoping is a required data-model invariant, not just an authorization
 check. Every persisted atom, folder, entity, share, capture, file object,
-version, event, chat link, projection, and history record carries `workspaceId`.
-Write, read, query, search, import, sync, and projection boundaries reject
+version, event, chat link, projection, history record, holding record,
+durability-log entry, and idempotency tombstone carries `workspaceId`. Write,
+read, query, search, import, sync, and projection boundaries reject
 cross-workspace references by default, even when an actor is otherwise valid.
 
 Review appears only when crossing a real boundary:

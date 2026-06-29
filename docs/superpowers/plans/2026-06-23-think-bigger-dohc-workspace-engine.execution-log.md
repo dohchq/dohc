@@ -297,7 +297,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1251,6 +1251,24 @@ Sixty-ninth pass:
     explicit approval requirements for user-visible Codex chats.
   - Tightened `ChatThreadProjection.linkedWork` to active non-tombstoned links
     only.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventieth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Added holding records, durability-log entries, and idempotency tombstones to
+    the versioned workspace `workspaceId` scoping invariant.
+  - Added bounded accepted-record expiry/compaction semantics through
+    operator-approved escalation after retry windows are exceeded.
+  - Made native filesystem delete prose explicitly require an idempotency key.
+  - Marked `ChatThreadBase.lastActivityAt` server-managed from canonical activity
+    writes and rejected client ownership of that field.
+  - Added length-prefixed digest framing for chat projection filenames.
+  - Added explicit `message_deleted_legacy` activity for legacy import fallback
+    deletes.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

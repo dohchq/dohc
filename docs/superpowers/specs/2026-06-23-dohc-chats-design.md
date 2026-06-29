@@ -242,7 +242,7 @@ type ChatThreadBase = {
   status: 'open' | 'closed' | 'decided' | 'archived'
   createdBy: string
   createdAt: UnixMsDecimalString
-  lastActivityAt: UnixMsDecimalString
+  lastActivityAt: UnixMsDecimalString // server-managed from canonical activity writes
   pinned: boolean
 }
 
@@ -303,6 +303,11 @@ shareGrantId, visibilityScope)` captured on the activity event.
 after creation. Changing a link means tombstoning the old link with
 `link_removed` activity and creating a new link with `link_added` activity; there
 is no in-place link update path for replay/export to miss.
+
+Thread create/update paths must ignore or reject client-provided
+`lastActivityAt`. The server updates `ChatThreadBase.lastActivityAt` only from
+canonical `ThreadActivity` writes, using the same ordering source that drives
+thread activity feeds and read-state updates.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -476,6 +481,15 @@ type MessageDeleteThreadActivity = ThreadActivityBase & {
   tombstoneHash?: string
 }
 
+type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
+  messageId: string
+  kind: 'message_deleted_legacy'
+  legacyImportId: string
+  previousBody?: ChatBodySnapshot
+  deleteReason?: string
+  tombstoneHash?: string
+}
+
 type ReactionIdentity =
   | { reactionId: string; reactionKey?: never; reactionActorId?: never }
   | { reactionId?: never; reactionKey: string; reactionActorId: string }
@@ -502,6 +516,7 @@ type ThreadActivity =
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
   | MessageDeleteThreadActivity
+  | MessageDeleteLegacyThreadActivity
   | ReactionThreadActivity
   | LinkThreadActivity
 ```
@@ -512,9 +527,12 @@ required. For `message_edited`, `previousBody` and `previousBodyRevision` are
 also required. For in-system `message_deleted` events, `previousBody` and
 `previousBodyRevision` are required and must preserve the deleted body as
 plaintext, redacted, or secret-backed snapshot according to policy. Legacy import
-flows that cannot recover a prior body revision must use an explicit legacy
-fallback event outside the normal in-system delete contract. Reaction events
-must satisfy exactly one identity mode: either a
+flows that cannot recover a prior body revision must map to
+`message_deleted_legacy`, which renders as a tombstone, preserves
+`legacyImportId`, `deleteReason`, and any available redacted/secret-backed body
+snapshot, and is handled explicitly by history/export/replay as incomplete legacy
+evidence rather than a normal in-system delete. Reaction events must satisfy
+exactly one identity mode: either a
 stable `reactionId`, or the complete deterministic tuple `(messageId,
 reactionActorId, reactionKey)`. Authorized history and export paths reconstruct
 the revision trail from these events. Normal chat rendering, search,
@@ -649,17 +667,20 @@ digest tuple changes incompatibly, use a new filename prefix such as `v2-`.
 The projection scope is `owner` for the workspace-private internal projection,
 or a grant-aware value such as `shareGrant:<grantId>:<projectionScopeId>`, where
 `projectionScopeId` is a server-issued opaque identifier with one canonical
-serialization for shared-channel/export materializations. Compute
-`sha256("v1\0" + workspaceId + "\0" + threadId + "\0" + projectionKind + "\0" +
-projectionScope)`, where each field is first normalized to Unicode NFC and
-encoded as UTF-8 bytes. Then encode the digest as lowercase RFC 4648 base32 with
-no padding, and write `.dohc/chats/v1-<digest>.md`. The input framing, Unicode
-normalization, UTF-8 encoding, hash, lowercase digest encoding, no-padding rule,
-grant-aware projection scope, and `v1-` prefix are the canonical contract and
-must not vary by implementation. The projection must store or otherwise verify
-the exact canonical thread id, workspace id, projection kind, projection scope,
-and derived filename in metadata before writing, and must reject ambiguous ids or
-any computed filename that already maps to a different canonical tuple. Projection
+serialization for shared-channel/export materializations. Compute the digest
+over a length-prefixed tuple with fields in this exact order: `workspaceId`,
+`threadId`, `projectionKind`, and `projectionScope`. Each field is first
+normalized to Unicode NFC, encoded as UTF-8 bytes, then framed as
+`uint32-be-byte-length || bytes`; the concatenated framed tuple is hashed with
+`sha256`. Then encode the digest as lowercase RFC 4648 base32 with no padding,
+and write `.dohc/chats/v1-<digest>.md`. The field order, length-prefix framing,
+Unicode normalization, UTF-8 encoding, hash, lowercase digest encoding,
+no-padding rule, grant-aware projection scope, and `v1-` prefix are the canonical
+contract and must not vary by implementation. The projection must store or
+otherwise verify the exact canonical thread id, workspace id, projection kind,
+projection scope, and derived filename in metadata before writing, and must
+reject ambiguous ids or any computed filename that already maps to a different
+canonical tuple. Projection
 writers must reject path separators, relative path segments, control characters,
 reserved names, and any other unsafe input before constructing the projection
 path, so a crafted thread id cannot traverse directories or overwrite another

@@ -332,8 +332,9 @@ current/incoming/restored/secret-backed bytes are materialized only through the
 server-side authorization path for that caller and resolution session.
 
 `delete(...)`, `rename(...)`, and `move(...)` are write-producing filesystem
-mutations. Delete requires the path's `targetObjectId`. Rename and move require
-the source `sourceObjectId` plus exactly one source freshness precondition and an
+mutations. Delete requires the path's `targetObjectId`, exactly one freshness
+precondition, and an idempotency key. Rename and move require the source
+`sourceObjectId` plus exactly one source freshness precondition and an
 idempotency key. Rename/move with
 `destinationPrecondition: expectedAbsent` is create-at-destination only. Atomic
 overwrite uses `replace(...)`, which carries `sourceObjectId`,
