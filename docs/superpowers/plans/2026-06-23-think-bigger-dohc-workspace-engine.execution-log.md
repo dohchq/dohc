@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `a02476d` reported 3 issues;
-  hundred-sixth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `b98870b` reported 6 issues;
+  hundred-seventh pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1997,6 +1997,26 @@ Hundred-sixth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Hundred-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest six-issue rerun:
+  - Added stable `ChatThreadBase.createdById` and clarified `createdBy` as a
+    display label only.
+  - Made `nextBodyHash` and `tombstoneHash` required on normal message
+    create/edit/delete activities.
+  - Added retry-safe idempotency rules for `create_chat`, `reply_to_chat`,
+    `edit_chat_message`, `delete_chat_message`, and `link_chat_to_work`.
+  - Added the PR 12 migration/backfill requirement for provisional shared
+    substrate chat contracts.
+  - Replaced vague docs link tooling guidance with the mandatory
+    `node scripts/check-think-bigger-doc-links.mjs` command.
+  - Updated Remaining Risk to reflect pending lane approval/reruns rather than
+    unassigned P0 ownership.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 Mutable active blockers live in the newest PR00 pass entry and are mirrored only
@@ -2034,7 +2054,8 @@ additional historical categories beyond the pass log above.
 ### Remaining Risk
 
 - Phase 0 scope is large and must be split into lane PRs before implementation.
-- Worktree/implementation-thread ownership is not yet assigned for P0 lanes.
+- P0 lanes are provisionally assigned, but final staffing/approval and
+  lane-specific CodeRabbit reruns are still pending.
 
 ### Follow-Up / Deletion Conditions
 

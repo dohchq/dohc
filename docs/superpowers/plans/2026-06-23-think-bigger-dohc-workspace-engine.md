@@ -1006,6 +1006,8 @@ history.
 - Minimal provisional `ChatThread`, `ThreadMessage`, and `ThreadLink` contracts
   defined in the shared substrate package as the first cut of the final
   contracts; PR 12 extends them for channels, DMs, and full chat schema.
+  These provisional shapes must remain forward-compatible with PR 12, or PR 12
+  must include a migration/backfill step that preserves existing chat data.
 - Read-only text projection for agent context.
 - Related chat appears beside the file in a simple side rail or equivalent UI.
 
@@ -1496,10 +1498,8 @@ Foundation alpha and the relevant surface proof are complete.
 
 **Tests:**
 
-- docs lint if available.
-- docs link checker or equivalent docs tooling that validates relative links and
-  anchors. A plain `rg` text-presence check is not sufficient as the only link
-  validation.
+- mandatory docs link/anchor check:
+  `node scripts/check-think-bigger-doc-links.mjs`.
 
 **CodeRabbit focus:**
 

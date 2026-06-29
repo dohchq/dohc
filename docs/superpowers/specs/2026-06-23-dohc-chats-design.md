@@ -263,6 +263,7 @@ type ChatThreadBase = {
   workspaceId: string
   title?: string
   status: 'open' | 'closed' | 'decided' | 'archived'
+  readonly createdById: string // server-owned immutable creator actor id
   readonly createdBy: string // server-owned immutable creator label
   createdAt: UnixMsDecimalString
   lastActivityAt: UnixMsDecimalString // server-managed from canonical activity writes
@@ -440,7 +441,9 @@ Chat provenance fields are server-owned and immutable. `createdBy`,
 server/engine identity at write time, never accepted from browser/client
 payloads, and cannot be changed by edit, replay, import, or projection paths
 except through an explicit trusted migration that preserves original provenance
-evidence.
+evidence. `ChatThreadBase.createdById` is the audit/replay identity;
+`ChatThreadBase.createdBy` is a presentation label only and must not be used for
+authorization, replay, export identity, or dedupe.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -626,7 +629,7 @@ type ThreadActivityBase = {
 type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
   kind: 'message_created'
-  nextBodyHash?: string
+  nextBodyHash: string
 }
 
 type MessageEditThreadActivity = ThreadActivityBase & {
@@ -634,7 +637,7 @@ type MessageEditThreadActivity = ThreadActivityBase & {
   kind: 'message_edited'
   previousBody: ChatBodySnapshot
   previousBodyRevision: UInt64DecimalString
-  nextBodyHash?: string
+  nextBodyHash: string
 }
 
 type MessageDeleteThreadActivity = ThreadActivityBase & {
@@ -643,7 +646,7 @@ type MessageDeleteThreadActivity = ThreadActivityBase & {
   previousBody: ChatBodySnapshot
   previousBodyRevision: UInt64DecimalString
   deleteReason?: string
-  tombstoneHash?: string
+  tombstoneHash: string
 }
 
 type MessageDeleteLegacyThreadActivity = ThreadActivityBase & {
@@ -841,6 +844,23 @@ Callers must not be able to assert user/workspace identity, widen chat
 visibility, or link a chat to work they cannot access. Agent messages use the
 same authorization model as human messages; the display label is different, not
 the authority model.
+Chat mutation handlers are idempotent by stable request and target identifiers:
+
+- `create_chat` requires an `idempotencyKey` and proposed `threadId`.
+- `reply_to_chat` requires an `idempotencyKey` and proposed `messageId`.
+- `edit_chat_message` requires an `idempotencyKey`, `messageId`, and expected
+  `bodyRevision`.
+- `delete_chat_message` requires an `idempotencyKey`, `messageId`, and expected
+  `bodyRevision`.
+- `link_chat_to_work` requires an `idempotencyKey` and the
+  `CanonicalThreadLinkKey`.
+
+Before persisting or emitting side effects, each handler checks the
+workspace-scoped idempotency record for the same actor, operation, key, and
+canonical operands. A matching retry returns the existing result without
+creating duplicate messages, activities, notifications, links, projection
+invalidations, or fanout jobs. A key reused with different operands fails closed
+with `replay_metadata_mismatch`.
 All chat API and worker mutation paths, including edits, deletes, reactions,
 read-state updates, links, notifications, summaries, and projections, must also
 respect user locks, folder/atom/file sharing boundaries, protected work, and
