@@ -1,6 +1,6 @@
 # Think Bigger dohc Workspace Engine Execution Log
 
-Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending
+Status: PR 00 CodeRabbit approved; docs-only local-agent-CLI exception pending; P0A-P0G stack restacked through P0G
 Created: 2026-06-23
 
 Plan:
@@ -48,19 +48,19 @@ secret-handling, data-loss, or review-gate blockers.
 
 P0A-P0G branches are provisional throughput work started after user approval for
 unattended Phase 0 execution on 2026-06-24. They are not approved, complete, or
-merge-ready. Do not open or merge them until PR00 clears, the stack base is
-reconciled, and each lane gets its own PR, tests, and CodeRabbit approval.
+merge-ready. Do not open or merge them until PR00 clears and each lane gets its
+own PR, tests, and CodeRabbit approval.
 
 | PR ID | Title | Status | Branch | Worktree | Implementation Thread | PR Link | CodeRabbit | Tests | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P0A | Current System Inventory And Decisions | provisional branch pushed; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending | docs/inventory | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0R | Rust Workspace Kernel Spike | provisional branch pushed; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | rust spike + perf | Rust scanner proof is provisional; blocked on PR00 approval and lane PR. |
-| P0B | Minimal Versioned Text Store | provisional branch pushed; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0C | File/API Write Capture And History | provisional branch pushed; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending | workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
-| P0G | Proof Arc QA And CodeRabbit Hardening | provisional branch pushed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck + agent CLI smoke | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and CodeRabbit. |
+| P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | Blocked on PR00 docs-only exception approval, lane PR, and final approval. |
+| P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and CodeRabbit. |
+| P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and CodeRabbit. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | blocked on CodeRabbit service hang after latest pushed fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes are pushed in `1f39e60`. Three reruns after that hung before findings/completion. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0D | Compare, Clean Merge, Conflict Preservation | restacked on P0C; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0D lane PR, tests, and CodeRabbit. |
+| P0E | Minimal Chat Linked To File | restacked on P0D; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0E lane PR, tests, and CodeRabbit. |
+| P0F | Search And Policy Smoke | restacked on P0E; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only exception approval, upstream lane PRs, P0F lane PR, tests, and CodeRabbit. |
+| P0G | Proof Arc QA And CodeRabbit Hardening | restacked on P0F; local validation passed; not approved | codex/think-bigger-p0g-proof-qa | sibling worktree | main/orchestrated | not opened | pending | workspace-engine 177 + history 8 + typechecks + Codex agent smoke | Default Codex `workspace-write` sandbox blocked locally by missing bubblewrap; disposable full-access Codex smoke passed. Blocked on PR00 docs-only exception approval, upstream lane PRs, P0G lane PR, and CodeRabbit. |
 | 00 | Mega Plan And Readiness Scaffold | draft PR | codex/think-bigger-00-readiness-scaffold | `<current checkout>` | main | https://github.com/dohc-ai/dohc/pull/46 | approved | docs sanity + brand guard | CodeRabbit raised 0 issues on the latest committed diff; docs-only local-agent-CLI exception pending. |
 | 01 | Workspace Engine Contracts And Substrate | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
 | 02 | Version Registry And Typed Event Skeleton | not started | TBD | TBD | TBD | TBD | TBD | TBD |  |
@@ -259,6 +259,11 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 - `DOHC_TEST_AGENT_CLI`: not applicable for docs-only scaffold.
 - Docs-only exception approval: pending human approval before PR00 is marked
   complete or merge-ready.
+- Current implementation evidence exists in P0G, where the local agent CLI
+  smoke passed with a real Codex child process in a disposable workspace using
+  `DOHC_CODEX_SANDBOX=danger-full-access`; the default Codex safe sandbox is
+  blocked locally until `bubblewrap` or Codex's bundled sandbox helper is
+  available.
 - Codex result: not run for PR00 docs-only scaffold; exception pending.
 - Claude result, if available: not run for PR00 docs-only scaffold; exception
   pending.
@@ -949,6 +954,16 @@ Fifty-fourth pass:
 - Updated PR00 status, CodeRabbit status, and unresolved findings to record the
   clean review while leaving the docs-only local-agent-CLI exception pending
   human approval.
+
+Fifty-fifth pass:
+
+- Updated the PR00 status table to reflect the current pushed P0A-P0G stack:
+  P0D-P0G are now restacked on the latest P0C line, and P0G local validation
+  passed on the integrated proof arc.
+- Recorded the current local-agent evidence boundary: PR00 remains docs-only,
+  while P0G proves the real Codex child-process file edit in a disposable
+  workspace with `DOHC_CODEX_SANDBOX=danger-full-access`; default Codex
+  `workspace-write` remains blocked locally by the missing sandbox helper.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
