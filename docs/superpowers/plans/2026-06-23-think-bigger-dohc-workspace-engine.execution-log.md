@@ -242,7 +242,7 @@ git diff --cached --check
 git push -u origin codex/think-bigger-00-readiness-scaffold
 gh pr create --draft --base main --head codex/think-bigger-00-readiness-scaffold --title "[codex] Add Think Bigger workspace engine plan"
 coderabbit review --agent -t committed -c AGENTS.md
-rg -n "/home/ice/dev/dohc|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
+rg -n "<workspace-root>|\| PR \||Ice's agent|server/engine-derived actor|secret-backed conflicts|workspace/request token|HTML atoms|Canonical Y.Doc" docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.md docs/superpowers/plans/2026-06-23-think-bigger-dohc-workspace-engine.execution-log.md docs/superpowers/specs/2026-06-22-dohc-versioned-workspace-design.md docs/superpowers/specs/2026-06-23-dohc-native-filesystem-design.md docs/superpowers/specs/2026-06-23-dohc-chats-design.md
 git diff --check
 pnpm --filter @dohc/web test src/__tests__/brandNoLegacy.test.ts
 curl -fsSL https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz -o /tmp/dohc-node-v24.18.0-linux-x64.tar.xz
@@ -290,7 +290,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 8 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1184,6 +1184,31 @@ Sixty-sixth pass:
     atomic at commit.
   - Added a canonical Current PR Snapshot block and changed live status fields in
     the PR table to reference it instead of duplicating the same state.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Sixty-seventh pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Normalized the logged workspace path in the commands block to a placeholder.
+  - Bound managed local filesystem capture and dohc-controlled agent launches to
+    an active server/engine-derived principal before history promotion.
+  - Required async filesystem/watch/status handlers to apply only monotonic
+    sequence or cursor freshness, treating server timestamps as metadata unless
+    explicitly defined as per-stream counters.
+  - Narrowed `.env` acceptance to encrypted-at-rest, redacted/excluded derived
+    surfaces, and authorized dohc-controlled plaintext materialization.
+  - Made rename/move stable-object-ID preservation unconditional, with
+    reconciliation fallback when the platform cannot surface the move atomically.
+  - Removed older conditional qualifiers from stable-ID preservation test
+    criteria.
+  - Made `ThreadLink` target/grant/scope fields immutable after creation and
+    required remove+add for link changes.
+  - Added deletion body snapshots to `message_deleted` activity.
+  - Defined the v1 `ChatProjectionKind` enum and compatibility rule for future
+    projection kinds.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

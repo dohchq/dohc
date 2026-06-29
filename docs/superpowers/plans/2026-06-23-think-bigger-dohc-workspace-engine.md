@@ -873,7 +873,8 @@ implementation.
 - create Main.
 - create named version from Main.
 - write same path in both versions and prove isolation.
-- path rename keeps stable object ID where supported.
+- path rename keeps stable object ID, with reconciliation reconnecting the same
+  object if the platform cannot surface the move atomically.
 - wrong workspace/version denied.
 
 **Acceptance:**
@@ -951,7 +952,7 @@ history.
 **Tests:**
 
 - create chat linked to file object.
-- link survives file path display change where supported.
+- link survives file path display change through the stable file object ID.
 - message send.
 - projection is read-only.
 - unauthorized linked file degrades without metadata leak.
@@ -1640,7 +1641,9 @@ event a visible history item.
 - delete/recreate.
 - edit while dohc is closed, then launch and reconcile.
 - missed watcher event recovered by audit.
-- rename/move preserves or reconnects stable object ID where supported.
+- rename/move preserves stable object ID; if the platform cannot surface the move
+  atomically, reconciliation must reconnect the same object before this criterion
+  passes.
 - local change and same-workspace concurrent change compare against common base.
 - batch many writes into one moment.
 - ignored files do not enter tracked history.
@@ -1774,7 +1777,9 @@ encryption, redaction, and controlled materialization.
 
 **Acceptance:**
 
-- dohc can "commit env files" safely.
+- dohc can version `.env` files through the defined secret boundary: encrypted at
+  rest, redacted or excluded from history, search, export, and logs, and
+  plaintext only via authorized dohc-controlled materialization.
 
 ### PR 09 - Lazy Hydration And Pinning
 

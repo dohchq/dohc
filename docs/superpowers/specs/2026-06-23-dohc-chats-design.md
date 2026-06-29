@@ -293,6 +293,10 @@ Links are never hard-deleted in normal operation: removal sets `deletedAt` and
 uniquely auditable by `ThreadLink.id`; replay systems may additionally validate
 the target tuple `(targetWorkspaceId, targetType, targetId, targetVersionRef,
 shareGrantId, visibilityScope)` captured on the activity event.
+`ThreadLink` target fields, `shareGrantId`, and `visibilityScope` are immutable
+after creation. Changing a link means tombstoning the old link with
+`link_removed` activity and creating a new link with `link_added` activity; there
+is no in-place link update path for replay/export to miss.
 
 `ChatThread.title` and any other user/agent-authored thread metadata are
 untrusted text. They must be escaped by default or sanitized through the same
@@ -443,15 +447,27 @@ type ThreadActivityBase = {
   createdAt: UnixMsDecimalString
 }
 
-type MessageBodyThreadActivity = ThreadActivityBase & {
+type MessageCreateThreadActivity = ThreadActivityBase & {
   messageId: string
-  kind:
-    | 'message_created'
-    | 'message_edited'
-    | 'message_deleted'
-  previousBody?: ChatBodySnapshot
-  previousBodyRevision?: UInt64DecimalString
+  kind: 'message_created'
   nextBodyHash?: string
+}
+
+type MessageEditThreadActivity = ThreadActivityBase & {
+  messageId: string
+  kind: 'message_edited'
+  previousBody: ChatBodySnapshot
+  previousBodyRevision: UInt64DecimalString
+  nextBodyHash?: string
+}
+
+type MessageDeleteThreadActivity = ThreadActivityBase & {
+  messageId: string
+  kind: 'message_deleted'
+  previousBody: ChatBodySnapshot
+  previousBodyRevision?: UInt64DecimalString
+  deleteReason?: string
+  tombstoneHash?: string
 }
 
 type ReactionIdentity =
@@ -477,7 +493,9 @@ type LinkThreadActivity = ThreadActivityBase & {
 }
 
 type ThreadActivity =
-  | MessageBodyThreadActivity
+  | MessageCreateThreadActivity
+  | MessageEditThreadActivity
+  | MessageDeleteThreadActivity
   | ReactionThreadActivity
   | LinkThreadActivity
 ```
@@ -485,7 +503,10 @@ type ThreadActivity =
 For `message_created`, `message_edited`, `message_deleted`, `reaction_added`,
 and `reaction_removed`, `messageId`, `actorId`, `actorKind`, and `createdAt` are
 required. For `message_edited`, `previousBody` and `previousBodyRevision` are
-also required. Reaction events must satisfy exactly one identity mode: either a
+also required. For `message_deleted`, `previousBody` is required and must preserve
+the deleted body as plaintext, redacted, or secret-backed snapshot according to
+policy; `previousBodyRevision` is required when the deleted message had a known
+body revision. Reaction events must satisfy exactly one identity mode: either a
 stable `reactionId`, or the complete deterministic tuple `(messageId,
 reactionActorId, reactionKey)`. Authorized history and export paths reconstruct
 the revision trail from these events. Normal chat rendering, search,
@@ -604,6 +625,19 @@ The displayed `v1-<digest>.md` filename is the canonical deterministic
 projection path shape; the raw thread id must not be used as a projection
 filename. Projection writers must map the canonical thread id and visibility
 scope to a deterministic filename using one fixed algorithm across all runtimes.
+For v1, `projectionKind` is an explicit canonical enum with these exact values:
+
+```ts
+type ChatProjectionKind =
+  | 'agent_context'
+  | 'export'
+  | 'search_index'
+  | 'notification_context'
+```
+
+Writers and readers must not invent aliases, fallbacks, or implementation-local
+strings. New projection kinds require a documented compatibility rule; if the
+digest tuple changes incompatibly, use a new filename prefix such as `v2-`.
 The projection scope is `owner` for the workspace-private internal projection,
 or a grant-aware value such as `shareGrant:<grantId>:<projectionScopeId>`, where
 `projectionScopeId` is a server-issued opaque identifier with one canonical

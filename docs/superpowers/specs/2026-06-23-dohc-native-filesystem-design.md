@@ -146,6 +146,14 @@ or text editor at the dohc folder without teaching that tool dohc identity
 rules. dohc captures the file change; explicit agent authorship is only
 required when the agent performs a social/action-native operation such as
 posting a chat message.
+Managed mounts and dohc-controlled agent launches must bind the capture session
+to an active server/engine-derived principal before writes can promote to
+version history. Capture-time policy checks use that principal plus workspace
+scope, user locks, folder/atom access, sharing boundaries, protected paths, and
+skill-turn gates. If a raw OS write arrives without a resolvable active
+principal, dohc may record device/session provenance in the local durability log,
+but promotion to canonical history stays quarantined until a valid principal and
+policy decision are established.
 
 ## Local capture and reconciliation
 
@@ -388,11 +396,12 @@ type WorkspaceAsyncPayload = {
 Handlers for `watch(workspaceId, versionId, path)`,
 `snapshot(workspaceId, versionId)`, status APIs, and filesystem loading must
 verify these fields before applying results. Each handler also compares the
-payload sequence, cursor, or server timestamp against the latest applied value
-for the same workspace/version/request stream using BigInt-safe decimal-string
-comparison, and applies only newer responses. A stale response from one
-workspace/version/session must never repaint another or regress current UI
-state.
+payload sequence or cursor against the latest applied value for the same
+workspace/version/request stream using BigInt-safe decimal-string comparison,
+and applies only newer responses. Server timestamps are metadata only and must
+not decide freshness unless they are explicitly defined as a monotonic
+per-stream counter. A stale response from one workspace/version/session must
+never repaint another or regress current UI state.
 
 ## File state axes
 
