@@ -356,7 +356,7 @@ NODE
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 4 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1586,11 +1586,25 @@ Eighty-fourth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Eighty-fifth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Removed mutable active-status duplication from Unresolved Findings; Current
+    PR Snapshot remains the only active status source.
+  - Added atomic channel `ChatThread` get-or-create by `(workspaceId, channelId)`
+    before channel sends create `ThreadMessage` records.
+  - Required `MentionNotificationThreadActivity.mentionedActorIds` to be
+    deduplicated and bytewise sorted before storage.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
-- Pending human approval for the PR00 docs-only local-agent-CLI exception before
-  completion or merge-readiness.
-- Pending CodeRabbit rerun after the latest follow-up fixes.
+Mutable active blockers live only in Current PR Snapshot. This section is an
+append-only derived summary for historical unresolved-finding categories; there
+are no additional historical categories beyond the pass log above.
 
 ### Subagent Reviews
 

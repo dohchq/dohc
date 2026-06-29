@@ -621,6 +621,13 @@ type MentionNotificationThreadActivity = ThreadActivityBase & {
   bodyHash?: string
 }
 
+`MentionNotificationThreadActivity.mentionedActorIds` must be canonical before
+storage: normalize each actor ID to its persisted form, deduplicate by exact
+canonical ID match, then sort by bytewise ascending UTF-8 encoding. Enqueue,
+resolve, replay, export, and notification fanout paths all use that canonical
+array so duplicate mentions or runtime-specific ordering cannot create duplicate
+notifications or unstable history.
+
 type ThreadActivity =
   | MessageCreateThreadActivity
   | MessageEditThreadActivity
@@ -938,9 +945,12 @@ Pinned
 
 The channel may support lightweight stream messages, but durable chats should be
 the object that survives and resurfaces. A channel send always maps to a
-`ThreadMessage` inside a `ChatThread`, creating or resolving that thread
-implicitly when needed. There is no separate durable `ChannelMessage` entity
-outside the canonical `ChatThread -> ThreadMessage` model.
+`ThreadMessage` inside exactly one `ChatThread` identified by
+`(workspaceId, channelId)`. Resolving or creating that channel-backed
+`ChatThread` must be an atomic get-or-create operation before the
+`ThreadMessage` is written, so concurrent sends cannot create multiple durable
+threads for the same channel. There is no separate durable `ChannelMessage`
+entity outside the canonical `ChatThread -> ThreadMessage` model.
 
 ## Side rail integration
 
