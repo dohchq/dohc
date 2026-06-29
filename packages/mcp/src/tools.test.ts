@@ -1373,7 +1373,7 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("import_data returns a structured failure without replacing an existing database", async () => {
+  itDurableHistory("import_data returns a structured failure without replacing an existing database", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
       await writeFile(join(ctx.root, "people.sqlite"), "already here\n");

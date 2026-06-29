@@ -134,6 +134,7 @@ describeAnchoredHistory("changeSetStore persistence", () => {
     for (const [index, recordedAtMs] of [
       -1,
       1.5,
+      Number.MAX_SAFE_INTEGER,
       Number.POSITIVE_INFINITY,
       Number.NaN,
     ].entries()) {
@@ -1061,7 +1062,7 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     } finally {
       if (timeout) clearTimeout(timeout);
       await rm(lockDir, { recursive: true, force: true });
-      void record.catch(() => undefined);
+      await record.catch(() => undefined);
     }
 
     await expect(store.list()).resolves.toHaveLength(1);

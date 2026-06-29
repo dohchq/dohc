@@ -1124,11 +1124,37 @@ async function removeDirectoryIfSameIdentity(path: string, expected: Stats): Pro
 
   const quarantined = await statIfExists(quarantinePath);
   if (!quarantined || !sameFileIdentity(expected, quarantined)) {
+    if (quarantined) {
+      await restoreQuarantinedDirectoryBestEffort({
+        quarantinePath,
+        targetPath: path,
+        expected: quarantined,
+      });
+    }
     return;
   }
 
   await rm(quarantinePath, { recursive: true, force: true });
   await syncParentDirectory(quarantinePath);
+}
+
+async function restoreQuarantinedDirectoryBestEffort(input: {
+  quarantinePath: string;
+  targetPath: string;
+  expected: Stats;
+}): Promise<void> {
+  const currentQuarantine = await statIfExists(input.quarantinePath);
+  if (!currentQuarantine || !sameFileIdentity(input.expected, currentQuarantine)) return;
+  if (await statIfExists(input.targetPath)) return;
+  try {
+    await rename(input.quarantinePath, input.targetPath);
+    await syncParentDirectory(input.targetPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "ENOTDIR") {
+      throw error;
+    }
+  }
 }
 
 async function writeFencedLockOwnerFile(
@@ -1261,21 +1287,17 @@ async function removeStaleStoreLockReclaimer(
   }
   await syncParentDirectory(reclaimerPath);
   const quarantined = await statIfExists(quarantinePath);
-  const restoreQuarantinedReclaimerBestEffort = async () => {
-    const currentQuarantine = await statIfExists(quarantinePath);
-    if (!currentQuarantine || !sameFileIdentity(observed, currentQuarantine)) return;
-    if (await statIfExists(reclaimerPath)) return;
-    try {
-      await rename(quarantinePath, reclaimerPath);
-      await syncParentDirectory(reclaimerPath);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "ENOTDIR") {
-        throw error;
-      }
-    }
-  };
-  if (!quarantined || !sameFileIdentity(observed, quarantined)) {
+  if (!quarantined) {
+    return false;
+  }
+  const restoreQuarantinedReclaimerBestEffort = () =>
+    restoreQuarantinedDirectoryBestEffort({
+      quarantinePath,
+      targetPath: reclaimerPath,
+      expected: quarantined,
+    });
+  if (!sameFileIdentity(observed, quarantined)) {
+    await restoreQuarantinedReclaimerBestEffort();
     return false;
   }
   const quarantinedLease = await readStoreLockReclaimerLease(quarantinePath, quarantined);
@@ -1429,26 +1451,17 @@ async function reclaimStaleStoreLock(
     await syncParentDirectory(lockDirPath);
 
     const quarantined = await stat(quarantinePath).catch(() => null);
-    const restoreQuarantinedLockBestEffort = async () => {
-      const currentQuarantine = await stat(quarantinePath).catch(() => null);
-      if (!currentQuarantine || !sameFileIdentity(observed, currentQuarantine)) return;
-      if (await stat(lockDirPath).catch(() => null)) return;
-      try {
-        await rename(quarantinePath, lockDirPath);
-        await syncParentDirectory(lockDirPath);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (
-          code !== "ENOENT" &&
-          code !== "EEXIST" &&
-          code !== "ENOTEMPTY" &&
-          code !== "ENOTDIR"
-        ) {
-          throw error;
-        }
-      }
-    };
-    if (!quarantined || !sameFileIdentity(observed, quarantined)) {
+    if (!quarantined) {
+      return false;
+    }
+    const restoreQuarantinedLockBestEffort = () =>
+      restoreQuarantinedDirectoryBestEffort({
+        quarantinePath,
+        targetPath: lockDirPath,
+        expected: quarantined,
+      });
+    if (!sameFileIdentity(observed, quarantined)) {
+      await restoreQuarantinedLockBestEffort();
       return false;
     }
     let quarantinedLockIsStale: boolean;

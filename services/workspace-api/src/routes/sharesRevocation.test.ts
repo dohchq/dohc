@@ -220,7 +220,7 @@ describe("revokeShare admin disconnect", () => {
               pending_count: "2",
               claimed_count: "1",
               oldest_pending_age_seconds: "120.5",
-              oldest_claimed_age_seconds: null,
+              oldest_claimed_age_seconds: "360",
             },
           ],
         };
@@ -231,7 +231,7 @@ describe("revokeShare admin disconnect", () => {
       pendingCount: 2,
       claimedCount: 1,
       oldestPendingAgeSeconds: 120.5,
-      oldestClaimedAgeSeconds: null,
+      oldestClaimedAgeSeconds: 360,
     });
 
     expect(queries).toHaveLength(1);
@@ -241,6 +241,9 @@ describe("revokeShare admin disconnect", () => {
     expect(queries[0]?.text).toContain("oldest_claimed_age_seconds");
     expect(queries[0]?.text).toContain("payload->>'claimedAt' ~");
     expect(queries[0]?.text).toContain("(payload->>'claimedAt')::timestamptz");
+    expect(queries[0]?.text).toContain(
+      "when kind = 'share.revocation.disconnect_claimed' then created_at",
+    );
   });
 
   it("does not let a former workspace member revoke a share they created", async () => {

@@ -183,6 +183,7 @@ const VALID_BOUNDARY_CROSSINGS = new Set<BoundaryCrossing>(VALID_BOUNDARY_CROSSI
 // constants for backward-compatible normalization of persisted history records.
 const LEGACY_CHANGE_SET_KIND_APP_BUILD = `${"app"}-${"build"}`;
 const LEGACY_BOUNDARY_CROSSING_APP_TRUST = `${"app"}-${"trust"}`;
+const MAX_SAFE_RECORDED_AT_MS = Number.MAX_SAFE_INTEGER - 1;
 
 function assertSafeHistoryId(id: string): string {
   if (!HISTORY_ID_RE.test(id)) {
@@ -192,7 +193,11 @@ function assertSafeHistoryId(id: string): string {
 }
 
 function assertSafeRecordedAtMs(recordedAtMs: number): number {
-  if (!Number.isSafeInteger(recordedAtMs) || recordedAtMs < 0) {
+  if (
+    !Number.isSafeInteger(recordedAtMs) ||
+    recordedAtMs < 0 ||
+    recordedAtMs > MAX_SAFE_RECORDED_AT_MS
+  ) {
     throw new Error(`Invalid history record timestamp: ${recordedAtMs}`);
   }
   return recordedAtMs;

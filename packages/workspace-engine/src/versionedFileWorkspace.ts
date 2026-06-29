@@ -9,7 +9,6 @@ import {
   type Dirent,
 } from "node:fs";
 import {
-  copyFile,
   lstat,
   mkdir,
   open,
@@ -872,10 +871,13 @@ async function reclaimStaleFileMutationLock(
     const currentHeartbeatAgeMs = currentOwner
       ? fileMutationLockHeartbeatAgeMs(currentOwner)
       : null;
-    if (
-      currentOwner?.token !== generation.token ||
-      (currentHeartbeatAgeMs !== null && currentHeartbeatAgeMs <= staleMs)
-    ) {
+    if (currentOwner?.token !== generation.token) {
+      return false;
+    }
+    if (currentHeartbeatAgeMs === null && isProcessAlive(currentOwner.pid)) {
+      return false;
+    }
+    if (currentHeartbeatAgeMs !== null && currentHeartbeatAgeMs <= staleMs) {
       return false;
     }
     const currentOwnerDirInfo = await lstat(generation.ownerDir).catch(
@@ -1674,19 +1676,46 @@ async function copyFileExclusiveIntoVerifiedParent(input: {
     input.parentIdentity,
     input.workspacePath,
   );
+  let sourceHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let targetDescriptorPath: string | undefined;
+  let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let createdTarget = false;
+  let committedTarget = false;
   try {
+    sourceHandle = await open(input.sourcePath, OPEN_READ_NOFOLLOW_FLAGS);
     await assertResolvedWorkspacePath(input.rootDir, input.workspacePath, input.targetPath);
     await assertDirectoryIdentity(input.parentDir, input.parentIdentity, input.workspacePath);
-    const targetDescriptorPath = await pathInVerifiedOpenDirectory({
+    targetDescriptorPath = await pathInVerifiedOpenDirectory({
       rootDir: input.rootDir,
       directory: parentHandle,
       targetPath: input.targetPath,
       workspacePath: input.workspacePath,
     });
-    await copyFile(input.sourcePath, targetDescriptorPath, fsConstants.COPYFILE_EXCL);
-    await syncFileDurably(targetDescriptorPath, input.mode);
+    targetHandle = await open(
+      targetDescriptorPath,
+      OPEN_EXCLUSIVE_WRITE_NOFOLLOW_FLAGS,
+      (input.mode ?? 0o666) | 0o600,
+    );
+    createdTarget = true;
+    await pipeline(
+      sourceHandle.createReadStream({ start: 0, autoClose: false }),
+      targetHandle.createWriteStream({ autoClose: false }),
+    );
+    if (input.mode !== undefined) await targetHandle.chmod(input.mode);
+    await targetHandle.sync();
+    committedTarget = true;
     await syncDirectoryHandleBestEffort(parentHandle);
+  } catch (error) {
+    await targetHandle?.close().catch(() => undefined);
+    targetHandle = undefined;
+    if (createdTarget && !committedTarget && targetDescriptorPath) {
+      await rm(targetDescriptorPath, { force: true }).catch(() => undefined);
+      await syncDirectoryHandleBestEffort(parentHandle).catch(() => undefined);
+    }
+    throw error;
   } finally {
+    await sourceHandle?.close();
+    await targetHandle?.close();
     await parentHandle?.close();
   }
 }

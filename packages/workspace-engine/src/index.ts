@@ -3,6 +3,7 @@ export {
   VersionedTextStoreError,
   createVersionedTextStore,
 } from "./versionedTextStore";
+export { VersionedFileWorkspaceError } from "./versionedFileWorkspace";
 export type {
   ActorNeutralWriteMetadata,
   ActorNeutralWriteOrigin,

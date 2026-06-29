@@ -558,13 +558,15 @@ Phase 0 implementation requirement:
   implement a shared `writeObservationId` insert/claim/reclaim flow.
 - Startup reconciliation, MCP direct-history recording, and watcher observation
   need one shared persisted mutation ledger per workspace with one owner per
-  physical write. The authoritative mutation/event ID is created from a
-  per-write observation token, either a UUID or durable monotonic sequence, by a
-  single atomic insert-or-claim step on the unique workspace-scoped key
-  `(workspaceId, writeObservationId)`. For dohc-controlled writes, including MCP
-  tool writes and any future direct engine write path, that pending ledger row
-  must be inserted or claimed before the disk mutation is committed; the write
-  proceeds only with the reserved workspace-scoped `writeObservationId`.
+  physical write. The first observer claims a pending row with an internal
+  pre-mint claim key, either a UUID or durable monotonic sequence, by a single
+  atomic insert-or-claim step on the unique workspace-scoped key
+  `(workspaceId, preMintClaimKey)`. Only the winner of that claim mints or
+  reserves the durable `writeObservationId` on the row. For dohc-controlled
+  writes, including MCP tool writes and any future direct engine write path, that
+  pending ledger row must be inserted or claimed before the disk mutation is
+  committed; the write proceeds only with the reserved workspace-scoped
+  `writeObservationId`.
   `createChangeSetStore` records the supplied token and must not mint one after a
   physical write already happened. For external writes from Notepad, shell tools,
   or agents that occur outside dohc, startup reconciliation and

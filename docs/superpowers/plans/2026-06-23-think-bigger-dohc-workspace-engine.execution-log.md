@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 10 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 9 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -2902,6 +2902,16 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspa
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
+# automated review follow-up fixes against 5d097ed
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedTextStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test src/changeSetStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
 ```
 
 ### E2E / Visual / Manual QA
@@ -2927,21 +2937,39 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop
 
 ### automated review
 
-- Status: fix loop active; latest local fixes against `5805eae` complete and
+- Status: fix loop active; latest local fixes against `5d097ed` complete and
   rerun pending.
-- Findings: latest completed pass raised 10 issues against commit `5805eae`.
-  Previous completed passes raised 9 issues against commit `bfc0ccc`, 8 issues
-  against commit `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues against
-  commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues against commit
-  `fa05e4f`, 7 issues against commit `d37c106`, 7 issues against commit
-  `3b3b575`, 14 issues against commit `db9d04a`, 10 issues against commit
-  `d4d734a`, 8 issues against commit `f57278b`, 12 issues against commit
-  `16362a9`, 10 issues against commit `4288332`, 12 issues against commit
-  `36aa361`, 15 issues against commit `4b91836`, 8 issues against commit
-  `112a935`, 10 issues against commit `dd77390`, 5 issues against commit
-  `1c49720`, 10 issues against commit `28e093d`, and 9 issues against commit
-  `8e1fa68`.
+- Findings: latest completed pass raised 9 issues against commit `5d097ed`.
+  Previous completed passes raised 10 issues against commit `5805eae`, 9 issues
+  against commit `bfc0ccc`, 8 issues against commit `52e9a9c`, 7 issues against
+  commit `8fe4727`, 6 issues against commit `7bfd8e6`, 8 issues against commit
+  `db2c93e`, 10 issues against commit `fa05e4f`, 7 issues against commit
+  `d37c106`, 7 issues against commit `3b3b575`, 14 issues against commit
+  `db9d04a`, 10 issues against commit `d4d734a`, 8 issues against commit
+  `f57278b`, 12 issues against commit `16362a9`, 10 issues against commit
+  `4288332`, 12 issues against commit `36aa361`, 15 issues against commit
+  `4b91836`, 8 issues against commit `112a935`, 10 issues against commit
+  `dd77390`, 5 issues against commit `1c49720`, 10 issues against commit
+  `28e093d`, and 9 issues against commit `8e1fa68`.
 - Latest fixes:
+  - Exported `VersionedFileWorkspaceError` from the workspace-engine root entry.
+  - Share revocation backlog stats test now covers claimed-event fallback from
+    invalid/missing `claimedAt` to `created_at`.
+  - History `recordedAtMs` validation now rejects `Number.MAX_SAFE_INTEGER`,
+    keeping one safe increment of headroom for max+1 timestamp generation.
+  - The symlink-owner history lock test now awaits the pending record promise in
+    cleanup.
+  - MCP existing-database import failure coverage is gated on durable history
+    support.
+  - P0A inventory ledger wording now separates the pre-mint claim key from the
+    durable `writeObservationId`.
+  - Versioned-text quarantine mismatch handling restores the exact moved
+    directory only after rechecking that quarantine identity and target absence.
+  - Preserved-preimage restore copies through a single exclusive no-follow target
+    file descriptor and syncs that fd instead of reopening after `copyFile`.
+  - File mutation lock reclaim treats future-heartbeat locks with live owner PIDs
+    as active rather than reclaimable.
+- Previous pass fixes against commit `5805eae`:
   - File mutation lock ownership checks now guard missing owner metadata instead
     of dereferencing null, and release cleanup reuses the no-follow bounded owner
     reader.
@@ -4345,6 +4373,9 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop
   opened owner file before writing.
 - Versioned-text quarantined lock/reclaimer restore is identity-fenced before
   renaming a quarantine back into the live lock path.
+- Versioned-text quarantine mismatch restore now rechecks the moved quarantine
+  identity so a raced live lock is restored without trusting a replaced
+  quarantine path.
 - Malformed pending journal JSON is reported as a typed recovery failure.
 - Shared-channel specs now require authoritative revocation before cleanup and
   access-safe placeholders across bodies, titles, previews, exports, and
@@ -4357,8 +4388,12 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop
   provides portable descriptor-relative mutation support.
 - File workspace creation now also verifies that `/proc/self/fd` exists and is
   accessible before enabling anchored descriptor-relative mutation.
+- File mutation locks with future heartbeats and live owner PIDs are treated as
+  active, preventing clock rollback from making an active lock reclaimable.
 - MCP file publish revalidates the workspace-contained path before final publish
   and unchanged directory creates do not synthesize history records.
+- Preserved file preimage restore copies and syncs through one exclusive
+  no-follow target descriptor instead of reopening the target after copy.
 - File write publish now creates the target with exclusive no-follow open under
   a verified parent fd instead of linking a temp file into place; completed
   writes do not leave an extra hard link to the live file.
@@ -4409,6 +4444,14 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop
     tests in 2.58s.
   - Latest `5805eae` follow-up typechecks passed for workspace-engine,
     workspace-history, MCP, and desktop.
+  - Latest `5d097ed` follow-up focused reruns with Node v24.18.0 and
+    `TMPDIR=/tmp`: workspace-engine `versionedFileWorkspace.test.ts` 78 tests
+    in 32.15s; workspace-engine `versionedTextStore.test.ts` 66 tests in
+    12.16s; workspace-history `changeSetStore.test.ts` 35 tests in 12.48s; MCP
+    `tools.test.ts` 49 tests in 6.71s; workspace-api `sharesRevocation.test.ts`
+    18 tests in 1.23s.
+  - Latest `5d097ed` follow-up typechecks passed for workspace-engine,
+    workspace-history, MCP, and workspace-api.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   repository pnpm toolchain under Node v18.19.1 / pnpm 10.24.0, which emits the
