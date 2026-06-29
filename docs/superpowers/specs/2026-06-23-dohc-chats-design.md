@@ -288,21 +288,50 @@ type ThreadLinkTargetType =
   | 'share'
   | 'chat_thread'
 
-type ThreadLink = {
+type ThreadLinkScope =
+  | { scopeKind: 'internal'; shareGrantId?: never; visibilityScope?: never }
+  | { scopeKind: 'shared'; shareGrantId: string; visibilityScope: string }
+
+type ThreadLinkBase = ThreadLinkScope & {
   id: string
   workspaceId: string
   threadId: string
-  targetType: ThreadLinkTargetType
   targetWorkspaceId: string
   targetId: string
-  targetVersionRef?: VersionRef
-  shareGrantId?: string
-  visibilityScope?: string
   createdById: string
   createdAt: UnixMsDecimalString
   deletedAt?: UnixMsDecimalString
   deletedById?: string
 }
+
+type VersionedObjectThreadLink = ThreadLinkBase & {
+  targetType: 'atom' | 'file' | 'folder' | 'version' | 'history_moment'
+  targetVersionRef: VersionRef
+}
+
+type AgentRunThreadLink = ThreadLinkBase & {
+  targetType: 'agent_run'
+  targetVersionRef?: never
+}
+
+type ShareThreadLink = ThreadLinkBase & {
+  targetType: 'share'
+  scopeKind: 'shared'
+  shareGrantId: string
+  visibilityScope: string
+  targetVersionRef?: VersionRef
+}
+
+type ChatThreadThreadLink = ThreadLinkBase & {
+  targetType: 'chat_thread'
+  targetVersionRef?: never
+}
+
+type ThreadLink =
+  | VersionedObjectThreadLink
+  | AgentRunThreadLink
+  | ShareThreadLink
+  | ChatThreadThreadLink
 
 type ActiveThreadLink = ThreadLink & {
   deletedAt?: never
@@ -321,7 +350,7 @@ derived list includes a tombstoned link, omits an active link, or otherwise
 disagrees with `ThreadLink`, the engine treats the derived list as stale and
 repairs it instead of using it for authorization or export.
 Active link creation is idempotent by canonical uniqueness key:
-`(workspaceId, threadId, targetWorkspaceId, targetType, targetId,
+`(workspaceId, threadId, scopeKind, targetWorkspaceId, targetType, targetId,
 targetVersionRef, shareGrantId, visibilityScope)`. A retry for the same key must
 upsert or no-op against the existing active `ThreadLink` and must not create a
 second active link or duplicate `link_added` fanout. `ChatThreadProjection.linkedWork`,
@@ -453,6 +482,12 @@ persistence unless the parent reference exists in the same workspace/thread, is
 not self-referential, and does not introduce a cycle. Rendering nested replies,
 indexing, notification fanout, and projection generation recheck the same
 invariant as downstream safeguards only.
+New `ThreadMessage` bodies start at `bodyRevision: "1"`. Every successful edit
+must use a CAS-style update that verifies the current `bodyRevision` or
+equivalent message version, then advances `bodyRevision` by exactly one decimal
+integer in the same atomic unit that appends the matching `ThreadActivity`.
+Concurrent edits with a stale revision fail closed or retry; they must not skip
+revision numbers, overwrite each other, or duplicate revision history.
 
 `ThreadMessage.body` is untrusted user/agent input. Rendering must escape plain
 text by default or sanitize through an allowlisted formatting subset before

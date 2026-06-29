@@ -19,7 +19,7 @@ This block is the canonical live status for PR00 and the provisional Phase 0
 lane stack. The PR status table is lane inventory, and the pass log below is
 append-only history.
 
-- **Last updated:** 2026-06-30 01:04 PST.
+- **Last updated:** 2026-06-29 PR00 review loop.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
 - **PR00 CodeRabbit:** pending rerun after the latest follow-up fixes.
@@ -315,7 +315,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 7 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 5 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1447,6 +1447,24 @@ Seventy-eighth pass:
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending
   human approval before completion or merge-readiness.
 
+Seventy-ninth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Replaced the future-looking `Last updated` timestamp with a date-only PR00
+    review-loop marker.
+  - Added atom access to the Phase 0 agent-write authorization checklist.
+  - Added `workspaceId` and source mount binding to native filesystem capture and
+    restart reconciliation promotion rules.
+  - Converted `ThreadLink` into target/scope variants so required
+    `targetVersionRef`, `shareGrantId`, and `visibilityScope` fields are encoded
+    by schema.
+  - Defined message `bodyRevision` initial value and exact-by-one CAS advancement
+    for successful edits.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
 ### Unresolved Findings
 
 - Pending human approval for the PR00 docs-only local-agent-CLI exception before
@@ -1517,7 +1535,7 @@ Gate evidence:
 - [ ] Every atom, folder, entity, file, version, chat, share, capture, event,
       search result, projection, holding record, durability-log entry, and
       idempotency tombstone is workspace-scoped.
-- [ ] Agent writes respect user locks, protected paths, folder/file access,
+- [ ] Agent writes respect user locks, protected paths, atom/folder/file access,
       sharing boundaries, and skill-turn gates.
 - [ ] HTML atoms remain sandboxed and sanitized.
 - [ ] Canonical Y.Doc state takes precedence over derived Markdown/body caches

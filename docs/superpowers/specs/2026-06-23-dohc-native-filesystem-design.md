@@ -168,16 +168,18 @@ Phase 0 should use a normal folder plus reconciliation:
    - Walk the materialized workspace tree.
    - Apply file policy.
    - Assign stable object IDs.
-   - Store path, file identity where available, size, mtime, content hash, and
-     version/base metadata.
+   - Store `workspaceId`, source mount binding, path, file identity where
+     available, size, mtime, content hash, and version/base metadata.
 
 2. **While dohc is running**
    - Use OS file watching for create/modify/delete/rename events.
    - Debounce noisy save sequences.
    - Stat and hash changed candidates.
-   - Append captured tracked changes to the durability log. Secret-backed
-     writes are included only as encrypted references/envelopes or broker
-     metadata, never plaintext secret content.
+   - Append captured tracked changes to the durability log with `workspaceId`,
+     source mount binding, path, version/base metadata, capture token, and
+     actor/device/session provenance. Secret-backed writes are included only as
+     encrypted references/envelopes or broker metadata, never plaintext secret
+     content.
    - Coalesce them into meaningful history moments.
 
 3. **When dohc starts after being closed**
@@ -186,11 +188,14 @@ Phase 0 should use a normal folder plus reconciliation:
    - Compare against the last known index.
    - Hash only files whose metadata or identity changed, plus suspicious cases.
    - Detect creates, edits, deletes, and likely renames/moves.
+   - Promote a captured result only when the persisted `workspaceId` and source
+     mount binding match the workspace and mount being reconciled.
    - Record each result as a local/device/session change in the version bound to
      the edited path or mount at capture time, or deterministically inferred
      from persisted mount metadata during restart reconciliation.
-   - If version binding is ambiguous, quarantine and require explicit user
-     resolution; never fall back to the current active version.
+   - If workspace binding, mount binding, or version binding is ambiguous,
+     quarantine and require explicit user resolution; never fall back to the
+     current active workspace or version.
 
 4. **Periodic audit**
    - Recheck parts of the tree over time to recover from missed watcher events,
