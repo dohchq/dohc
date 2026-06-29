@@ -136,7 +136,7 @@ describe("workspaceActivity history", () => {
       { id: "durable-record", recordedAtMs: 1000 },
     );
     const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", { value: "win32" });
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
     try {
       const ephemeral = createChangeSetStore(root, { ephemeralIfUnsupported: true });
       await ephemeral.record(

@@ -1644,8 +1644,8 @@ async function writeFileExclusiveIntoVerifiedParent(input: {
     }
     if (input.mode !== undefined) await targetHandle.chmod(input.mode);
     await targetHandle.sync();
-    committedTarget = true;
     await syncDirectoryHandleBestEffort(parentHandle);
+    committedTarget = true;
   } catch (error) {
     await targetHandle?.close().catch(() => undefined);
     targetHandle = undefined;
@@ -1703,8 +1703,8 @@ async function copyFileExclusiveIntoVerifiedParent(input: {
     );
     if (input.mode !== undefined) await targetHandle.chmod(input.mode);
     await targetHandle.sync();
-    committedTarget = true;
     await syncDirectoryHandleBestEffort(parentHandle);
+    committedTarget = true;
   } catch (error) {
     await targetHandle?.close().catch(() => undefined);
     targetHandle = undefined;
@@ -3325,6 +3325,9 @@ async function rollbackPendingFileMutation(input: {
   }
 
   if (journal.phase === "disk-mutating") {
+    if (!(await diskPostimageStillMatches(rootDir, journal))) {
+      await failPendingMutationRecoveryConflict(rootDir, journal, fence);
+    }
     await restoreBackupForJournal(rootDir, journal, fence);
   } else if (phaseHasCompletedDiskMutation(journal.phase)) {
     if (!(await diskPostimageStillMatches(rootDir, journal))) {

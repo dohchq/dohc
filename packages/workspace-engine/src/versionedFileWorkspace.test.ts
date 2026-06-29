@@ -1495,7 +1495,7 @@ describe("versioned file workspace", () => {
     await expect(readFile(backupPath, "utf8")).resolves.toBe("Original\n");
   });
 
-  itAnchoredFilesystem("rolls back an incomplete disk-mutating journal from its backup", async () => {
+  itAnchoredFilesystem("rolls back a disk-mutating journal whose postimage reached disk", async () => {
     const counters = createWorkspaceTestCounters();
     const ws = workspace(counters);
     const written = await ws.writeTextFile({
@@ -1513,7 +1513,7 @@ describe("versioned file workspace", () => {
       phase: "disk-mutating",
       backupPath,
       beforeText: "Original\n",
-      afterText: "Crashed\n",
+      afterText: "Partial crash\n",
       historyId: "history_disk_mutating_crash",
     });
 
@@ -1531,6 +1531,46 @@ describe("versioned file workspace", () => {
     await expectHistoryIds(restarted, [written.history.id]);
     expect(await readPendingMutationEntries()).toEqual([]);
     await expect(readFile(backupPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  itAnchoredFilesystem("preserves a disk-mutating journal as a conflict when live disk diverges", async () => {
+    const counters = createWorkspaceTestCounters();
+    const ws = workspace(counters);
+    const written = await ws.writeTextFile({
+      path: "notes/disk-mutating-conflict.md",
+      text: "Original\n",
+    });
+    await writeFile(join(root, "notes/disk-mutating-conflict.md"), "External edit\n", "utf8");
+    const backupPath = join(root, ".dohc", "tmp", "backup-disk-mutating-conflict.bak");
+    await mkdir(dirname(backupPath), { recursive: true });
+    await writeFile(backupPath, "Original\n", "utf8");
+    await writePendingMutationJournalForTest({
+      id: "pending_00000000-0000-4000-8000-000000000022",
+      versionId: written.versionId,
+      path: "notes/disk-mutating-conflict.md",
+      phase: "disk-mutating",
+      backupPath,
+      beforeText: "Original\n",
+      afterText: "Crashed\n",
+      historyId: "history_disk_mutating_conflict",
+    });
+
+    const restarted = workspace(counters);
+
+    await expect(
+      restarted.readTextFile({ path: "notes/disk-mutating-conflict.md" }),
+    ).rejects.toMatchObject({ code: "recovery-failed" });
+    await expect(readFile(join(root, "notes/disk-mutating-conflict.md"), "utf8")).resolves.toBe(
+      "External edit\n",
+    );
+    expect(await readPendingMutationJournalsForTest()).toMatchObject([
+      {
+        path: "notes/disk-mutating-conflict.md",
+        phase: "recovery-conflict",
+        after: { text: "Crashed\n" },
+      },
+    ]);
+    await expect(readFile(backupPath, "utf8")).resolves.toBe("Original\n");
   });
 
   itAnchoredFilesystem("recovers a pending write journal with an empty text preimage", async () => {

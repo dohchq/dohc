@@ -94,32 +94,55 @@ function mergeHistoryRecords(
 }
 
 function mergedReadStore(durable: ChangeSetStore, ephemeral: ChangeSetStore): ChangeSetStore {
+  const durableRecordsOrEmpty = async (
+    read: () => Promise<HistoryRecord[]>,
+  ): Promise<HistoryRecord[]> => {
+    try {
+      return await read();
+    } catch {
+      return [];
+    }
+  };
+
   return {
     record: durable.record,
     async listIndexed() {
       const records = mergeHistoryRecords(
-        [...(await ephemeral.list()), ...(await durable.list())],
+        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
         "newest-first",
       );
       return records.map((record, index) => ({ index, record }));
     },
     async list() {
       return mergeHistoryRecords(
-        [...(await ephemeral.list()), ...(await durable.list())],
+        [...(await ephemeral.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
         "newest-first",
       );
     },
     async listSince(afterMs) {
       return mergeHistoryRecords(
-        [...(await ephemeral.listSince(afterMs)), ...(await durable.listSince(afterMs))],
+        [
+          ...(await ephemeral.listSince(afterMs)),
+          ...(await durableRecordsOrEmpty(() => durable.listSince(afterMs))),
+        ],
         "oldest-first",
       );
     },
     async maxRecordedAtMs() {
-      return Math.max(await ephemeral.maxRecordedAtMs(), await durable.maxRecordedAtMs());
+      try {
+        return Math.max(await ephemeral.maxRecordedAtMs(), await durable.maxRecordedAtMs());
+      } catch {
+        return ephemeral.maxRecordedAtMs();
+      }
     },
     async get(id) {
-      return (await ephemeral.get(id)) ?? (await durable.get(id));
+      const ephemeralRecord = await ephemeral.get(id);
+      if (ephemeralRecord) return ephemeralRecord;
+      try {
+        return await durable.get(id);
+      } catch {
+        return null;
+      }
     },
   };
 }

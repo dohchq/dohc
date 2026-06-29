@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 8 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest 5 automated-review findings fixed locally; rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -1758,6 +1758,8 @@ Date completed:
   - pending recovery rejects invalid disk backup chmod modes.
   - pending recovery rejects expected change sets whose file path, operation,
     preimage, or postimage does not match the journal.
+  - disk-mutating recovery only restores when the live file reached the expected
+    postimage; divergent live files become recovery conflicts.
   - text writes whose snapshots expand heavily under JSON escaping still journal
     and recover under the pending journal size cap.
   - invalid configured authors leave no user file, history record, or pending
@@ -1879,8 +1881,8 @@ Date completed:
     values with `created_at` fallback.
   - malformed retry and claim timestamps sort as immediately due during
     revocation claiming.
-  - revoke-share results distinguish completed admin disconnects from deferred
-    queued/requeued disconnects.
+  - revoke-share results keep the share revoked while distinguishing completed
+    admin disconnects from deferred queued/requeued disconnects.
 - `packages/workspace-postgres/src/db/schema.test.ts`
   - schema metadata includes the pending and claimed share-revocation retry
     expression indexes already present in migrations `0007` and `0008`.
@@ -2954,6 +2956,16 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typ
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
 git diff --check
+# automated review follow-up fixes against 97529b0
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop test src/workspaces/workspaceActivity.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+git diff --check
 ```
 
 ### E2E / Visual / Manual QA
@@ -2979,22 +2991,34 @@ git diff --check
 
 ### automated review
 
-- Status: fix loop active; latest local fixes against `f156b22` complete and
+- Status: fix loop active; latest local fixes against `97529b0` complete and
   rerun pending.
-- Findings: latest completed pass raised 8 issues against commit `f156b22`.
-  Previous completed passes raised 6 issues against commit `a8ba2a3`, 9 issues
-  against commit `5d097ed`, 10 issues against commit `5805eae`, 9 issues
-  against commit `bfc0ccc`, 8 issues against commit `52e9a9c`, 7 issues against
-  commit `8fe4727`, 6 issues against commit `7bfd8e6`, 8 issues against commit
-  `db2c93e`, 10 issues against commit `fa05e4f`, 7 issues against commit
-  `d37c106`, 7 issues against commit `3b3b575`, 14 issues against commit
-  `db9d04a`, 10 issues against commit `d4d734a`, 8 issues against commit
-  `f57278b`, 12 issues against commit `16362a9`, 10 issues against commit
-  `4288332`, 12 issues against commit `36aa361`, 15 issues against commit
-  `4b91836`, 8 issues against commit `112a935`, 10 issues against commit
-  `dd77390`, 5 issues against commit `1c49720`, 10 issues against commit
-  `28e093d`, and 9 issues against commit `8e1fa68`.
-- Latest fixes against commit `f156b22`:
+- Findings: latest completed pass raised 5 issues against commit `97529b0`.
+  Previous completed passes raised 8 issues against commit `f156b22`, 6 issues
+  against commit `a8ba2a3`, 9 issues against commit `5d097ed`, 10 issues
+  against commit `5805eae`, 9 issues against commit `bfc0ccc`, 8 issues
+  against commit `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues
+  against commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues
+  against commit `fa05e4f`, 7 issues against commit `d37c106`, 7 issues
+  against commit `3b3b575`, 14 issues against commit `db9d04a`, 10 issues
+  against commit `d4d734a`, 8 issues against commit `f57278b`, 12 issues
+  against commit `16362a9`, 10 issues against commit `4288332`, 12 issues
+  against commit `36aa361`, 15 issues against commit `4b91836`, 8 issues
+  against commit `112a935`, 10 issues against commit `dd77390`, 5 issues
+  against commit `1c49720`, 10 issues against commit `28e093d`, and 9 issues
+  against commit `8e1fa68`.
+- Latest fixes against commit `97529b0`:
+  - Share revocation results keep `revoked: true` for the persisted soft-delete
+    and expose deferred live disconnects via `disconnectDeferred: true`.
+  - MCP and desktop merged history readers tolerate durable read failures and
+    still serve ephemeral records.
+  - Desktop activity platform mocking keeps `process.platform` configurable so
+    the original descriptor can be restored.
+  - Exclusive copy recovery marks a target committed only after the parent
+    directory sync completes.
+  - `disk-mutating` recovery now conflicts instead of restoring over a live file
+    that is neither the preimage nor the expected postimage.
+- Previous pass fixes against commit `f156b22`:
   - Desktop watcher and MCP history writers now derive `recordedAtMs` from the
     durable max plus a per-process high-water mark before calling the strict
     monotonic history store.
@@ -4542,6 +4566,13 @@ git diff --check
   - Latest `f156b22` follow-up typechecks passed for workspace-history,
     workspace-engine, MCP, desktop, and workspace-api; `git diff --check` also
     passed.
+  - Latest `97529b0` follow-up focused reruns with Node v24.18.0 and
+    `TMPDIR=/tmp`: workspace-engine `versionedFileWorkspace.test.ts` 83 tests
+    in 32.85s; MCP `tools.test.ts` 49 tests in 5.84s; desktop
+    `workspaceActivity.test.ts` 3 tests in 1.76s; workspace-api
+    `sharesRevocation.test.ts` 18 tests in 1.09s.
+  - Latest `97529b0` follow-up typechecks passed for workspace-engine, MCP,
+    desktop, and workspace-api; `git diff --check` also passed.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   same local Node v24.18.0 toolchain with pnpm. Filesystem-heavy engine tests used

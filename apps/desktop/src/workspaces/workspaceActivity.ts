@@ -145,15 +145,30 @@ function mergeHistoryRecords(
 function historyReadStores(rootPath: string) {
   const durable = createChangeSetStore(rootPath);
   const fallback = createChangeSetStore(rootPath, DESKTOP_HISTORY_STORE_OPTIONS);
+  const durableRecordsOrEmpty = async (
+    read: () => Promise<HistoryRecord[]>,
+  ): Promise<HistoryRecord[]> => {
+    try {
+      return await read();
+    } catch {
+      return [];
+    }
+  };
   return {
     async list() {
       return mergeHistoryRecords(
-        [...(await fallback.list()), ...(await durable.list())],
+        [...(await fallback.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
         "newest-first",
       );
     },
     async get(id: string) {
-      return (await fallback.get(id)) ?? (await durable.get(id));
+      const fallbackRecord = await fallback.get(id);
+      if (fallbackRecord) return fallbackRecord;
+      try {
+        return await durable.get(id);
+      } catch {
+        return null;
+      }
     },
   };
 }

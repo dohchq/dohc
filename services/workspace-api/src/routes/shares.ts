@@ -161,7 +161,7 @@ export async function createShare(
 // a foreign shareId exists (security review P3 cross-tenant oracle).
 export type RevokeShareResult =
   | { ok: true; revoked: true }
-  | { ok: true; revoked: false; disconnectDeferred: true };
+  | { ok: true; revoked: true; disconnectDeferred: true };
 
 export async function revokeShare(
   deps: SharedAtomDeps | undefined,
@@ -256,15 +256,15 @@ export async function revokeShare(
     // The pending event above is the durable queue; deployments can start the
     // retry worker after Hocuspocus admin disconnect is configured. Ops should
     // alert on getShareRevocationDisconnectBacklogStats() count/age growth.
-    return { ok: true, revoked: false, disconnectDeferred: true };
+    return { ok: true, revoked: true, disconnectDeferred: true };
   }
   let claimId: string | undefined;
   try {
     claimId = await claimRevocationDisconnectEvent(pool, disconnect.eventId, disconnect.userId);
   } catch {
-    return { ok: true, revoked: false, disconnectDeferred: true };
+    return { ok: true, revoked: true, disconnectDeferred: true };
   }
-  if (!claimId) return { ok: true, revoked: false, disconnectDeferred: true };
+  if (!claimId) return { ok: true, revoked: true, disconnectDeferred: true };
   try {
     await disconnectWorkspaceUserWithinLease(disconnect.hocuspocusAdmin, {
       workspaceId: disconnect.workspaceId,
@@ -272,7 +272,7 @@ export async function revokeShare(
     });
   } catch {
     await requeueRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
-    return { ok: true, revoked: false, disconnectDeferred: true };
+    return { ok: true, revoked: true, disconnectDeferred: true };
   }
   await completeRevocationDisconnectEvent(pool, disconnect.eventId, claimId);
   return { ok: true, revoked: true };
