@@ -23,8 +23,8 @@ block is only a quick pointer into that latest entry.
 - **Last updated:** derived from the newest owning PR00 pass entry below.
 - **PR00:** draft PR on `codex/think-bigger-00-readiness-scaffold` at
   https://github.com/dohc-ai/dohc/pull/46.
-- **PR00 CodeRabbit:** latest completed rerun on `a160df8` reported 7 issues;
-  hundred-fifth pass fixes are being applied and are pending rerun.
+- **PR00 CodeRabbit:** latest completed rerun on `a02476d` reported 3 issues;
+  hundred-sixth pass fixes are being applied and are pending rerun.
 - **PR00 tests:** docs sanity, docs link/anchor check, and `@dohc/web` brand
   guard are required before each push; latest evidence belongs in the newest
   pass entry below.
@@ -1977,6 +1977,21 @@ Hundred-fifth pass:
     link creation, upserts, and projections.
   - Made mention notification lifecycle state required on every mention
     notification activity.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Hundred-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest three-issue rerun:
+  - Made `terminal-retired` and `idempotency-expired` `WriteResult` variants
+    carry required `versionId` for deterministic routing and audit.
+  - Aligned DM participant canonicalization so duplicate canonical participants
+    are always rejected rather than silently deduped.
+  - Split PR 21R into independently reviewable milestones for replication
+    transport/replay ordering, machine-to-machine state replication, projection
+    invalidation/rebuilds, offline rejoin conflicts, and secret redaction.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

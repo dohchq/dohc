@@ -2429,32 +2429,49 @@ turning dohc Cloud into the source of truth.
 
 **Workstream owner:** Replication and offline reconciliation.
 
-**Scope:**
+**Milestones:**
+
+21R-A - Replication Transport And Replay Ordering
 
 - Define local-engine to cloud replication protocol.
-- Define machine-to-machine state replication through dohc Cloud.
-- Preserve stable object IDs, workspace versions, history moments, policy,
-  conflict records, share grants/revocations, membership/visibility,
-  read-state/unread cursors, chat activity, and projection invalidation across
-  replicas.
-- Replay replicated engine state through server-authenticated workspace scope;
-  if membership, visibility, grants, read cursors, or notifications cannot be
-  reconstructed exactly from the local-engine to cloud replication protocol,
-  they must replicate as first-class machine-to-machine state records.
 - Queue local writes while offline and replay them with causal/idempotency
   guards on rejoin.
+- Batch and backpressure replication so watcher bursts do not become sync floods.
+- Tests: offline edit on machine A rejoins and appears on machine B; stale
+  replica cannot overwrite newer canonical state; watcher bursts are batched.
+
+21R-B - Machine-To-Machine State Replication
+
+- Define machine-to-machine state replication through dohc Cloud.
+- Preserve stable object IDs, workspace versions, history moments, policy,
+  share grants/revocations, membership/visibility, read-state/unread cursors,
+  and chat activity across replicas.
+- Replay replicated engine state through server-authenticated workspace scope.
+- Tests: replicated grants, memberships, read cursors, and chat activity rebuild
+  consistently after rejoin.
+
+21R-C - Projection Invalidation And Rebuilds
+
+- Replicate projection invalidation records without making projections the
+  source of truth.
+- Rebuild linked-work, unread/mention, search, and file side-rail projections
+  from canonical replicated state.
+- Tests: linked-work invalidations, unread/mention projections, and search
+  indexes rebuild consistently after rejoin.
+
+21R-D - Offline Rejoin Conflict Preservation
+
 - Reconcile divergent offline edits with the same conflict-preservation model as
   local concurrent writes.
-- Batch and backpressure replication so watcher bursts do not become sync floods.
+- Preserve conflict records and history moments across replicas.
+- Tests: offline divergent edits preserve both sides or merge deterministically.
 
-**Tests:**
+21R-E - Secret Redaction During Replication
 
-- offline edit on machine A rejoins and appears on machine B.
-- offline divergent edits preserve both sides or merge deterministically.
-- stale replica cannot overwrite newer canonical state.
-- replicated secret-backed files preserve redaction/materialization policy.
-- chat activity, unread/mention projections, and linked-work invalidations
-  rebuild consistently after rejoin.
+- Keep replicated secret-backed files in encrypted/opaque form and preserve
+  redaction/materialization policy.
+- Tests: replicated secret-backed files preserve redaction/materialization policy
+  and never hydrate plaintext through normal sync.
 
 **E2E:**
 

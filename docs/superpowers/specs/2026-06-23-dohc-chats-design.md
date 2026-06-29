@@ -458,11 +458,12 @@ canonical participant sets are rejected before persistence, routing, key
 generation, indexing, ACL checks, fanout, or atomic create logic. Before the
 remaining write path runs, `dmParticipantIds` must be
 canonicalized with one deterministic algorithm shared across runtimes:
-normalize actor IDs to their canonical persisted form, deduplicate by exact
-canonical ID match, then sort by bytewise ascending UTF-8 encoding of the
-canonical ID, not locale collation and not runtime-native UTF-16 code-unit
-order. All services must use this comparator before key generation. The XOR
-ownership rule is enforced after canonicalization. For DM-backed thread
+normalize actor IDs to their canonical persisted form, reject the request if two
+raw entries map to the same canonical actor, then sort by bytewise ascending
+UTF-8 encoding of the canonical ID, not locale collation and not runtime-native
+UTF-16 code-unit order. All services must use this reject-duplicates policy and
+comparator before key generation. The XOR ownership rule is enforced after
+canonicalization. For DM-backed thread
 create/update, the authenticated actor identity must be derived server-side,
 must be included in the canonical participant set, and must be authorized to
 message every participant before routing, key generation, indexing, ACL checks,

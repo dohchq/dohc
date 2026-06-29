@@ -177,7 +177,7 @@ type WriteResult =
       kind: 'terminal-retired'
       holdingRecordId: string
       workspaceId: string
-      versionId?: string
+      versionId: string
       idempotencyKey: string
       retiredAt: UnixMsDecimalString
       reasonCode: TerminalRetirementReason
@@ -187,6 +187,7 @@ type WriteResult =
       kind: 'idempotency-expired'
       holdingRecordId: string
       workspaceId: string
+      versionId: string
       idempotencyKey: string
       expiredAt: UnixMsDecimalString
       recordKind: ExpiredRetryRecordKind
