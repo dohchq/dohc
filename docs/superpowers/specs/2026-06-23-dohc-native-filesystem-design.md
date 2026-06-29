@@ -299,14 +299,16 @@ restore(workspaceId, versionId, pointInTime, {
 ```
 
 This answers the API-native workspace requirement. The file mount and the API
-are peer views over the same versioned workspace engine. APIs may use a
-validated bound session instead of repeating `workspaceId`/`versionId` in every
-call, but every request must resolve inside exactly one workspace. Each
-operation supplies the version identifiers it actually needs: single-version
-operations such as read/write/list/stat/search/watch/snapshot/restore bind one
-version, while diff and merge bind the required source/target or versionA/versionB
-pair inside that same workspace. Cross-workspace path or version references fail
-closed before filesystem or storage access.
+are peer views over the same versioned workspace engine. The canonical wire
+examples below use explicit `workspaceId` and required version identifiers. A
+validated bound session may be an authentication shortcut, but it is a separate
+request wrapper that resolves or injects the same explicit workspace/version
+context server-side before dispatch; it must not create a second ambiguous call
+shape. Each operation supplies the version identifiers it actually needs:
+single-version operations such as read/write/list/stat/search/watch/snapshot/restore
+bind one version, while diff and merge bind the required source/target or
+versionA/versionB pair inside that same workspace. Cross-workspace path or
+version references fail closed before filesystem or storage access.
 
 `write(workspaceId, versionId, path, bytes, ...)` is never an unconditional
 overwrite. It must carry a causal precondition such as the expected base
@@ -600,9 +602,10 @@ Resolution order is deterministic:
 7. Intersect with sharing/export context.
 
 Deny/restrictive outcomes win when two rules conflict. For equal specificity,
-rules sort by explicit priority when present, then by stable source order, then
-by lexical rule id. Exact paths are more specific than globs; longer literal
-prefixes are more specific than shorter prefixes.
+rules sort by explicit priority when present, then by canonical policy source
+ordinal, then by explicit rule index within that source, then by lexical rule id.
+Exact paths are more specific than globs; longer literal prefixes are more
+specific than shorter prefixes.
 
 Internal policy keys are canonical camelCase. Human-authored policy files may
 use snake_case aliases, but parsers must normalize them into canonical camelCase

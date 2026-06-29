@@ -99,6 +99,12 @@ engine preserves durable rejection, disposition, or expiration evidence. Humans,
 agents, imports, and sync processes all get the same guarantee: an accepted
 change is not silently lost, but it also does not become canonical workspace
 state until protection checks pass.
+Accepted holding records are not visible through normal `read`, `watch`, or
+`search` as workspace content before canonicalization. Those paths expose the
+last canonical workspace state only. Holding records may be surfaced only through
+explicit ingest/recovery/status views that are policy-authorized for the actor,
+marked non-canonical, and scoped to the relevant workspace/version so previews do
+not masquerade as committed file, history, search, or watch results.
 This holding area follows the same secret-backed durability rules as canonical
 history: it must not persist plaintext secret values in payloads, indexes, logs,
 explanations, or retry metadata. Secret-bearing ingests are stored only as

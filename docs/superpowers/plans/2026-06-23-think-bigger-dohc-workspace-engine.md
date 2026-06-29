@@ -262,6 +262,7 @@ proof-arc identities required for the file/version/chat loop:
 - messages.
 - agent runs.
 - shares.
+- secret references, with secret-backed file materialization deferred to PR 08.
 
 Deferred substrate identities stay in the expansion backlog until their
 contracts are mounted into the product surface:
@@ -269,7 +270,8 @@ contracts are mounted into the product surface:
 - apps.
 - databases.
 - rows where row-level links are needed.
-- secrets.
+- secret-backed file drivers and secret value materialization beyond stable
+  secret references.
 - higher-level derived projections that are not part of the core `Projection`
   contract.
 
@@ -1473,9 +1475,15 @@ must use.
 - Define `WorkspaceObject`, `StableObjectId`, `WorkspaceVersion`,
   `VersionRef`, `WorkspacePath`, `HistoryMoment`, `DurabilityEvent`,
   `WorkspaceEvent`, `FilePolicy`, `Projection`, `ProjectionWriteability`,
-  `ConflictRecord`, `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`.
+  `ConflictRecord`, `ChatThread`, `Channel`, `ThreadMessage`, `ThreadLink`,
+  `Share`, `ShareGrant`, `ExternalChannel`, and `SecretReference`.
 - Define link dereference shape: target type, stable target ID, optional
   `VersionRef`, display path/title at link time, ACL degrade behavior.
+- Define one canonical share/external-channel shape with stable share ID, grant
+  ID, owning workspace, target resource identity, visibility scope, participant
+  boundary, expiry/revocation state, and policy/export/search/notification
+  fields. Export, search, notifications, and shared channels must consume this
+  validated shape instead of inventing local share models.
 - Define projection writeability values: `canonical`, `writable`, `readOnly`,
   `lossy`, `redacted`.
 - Define one effective policy input/output type for filesystem, chats, search,

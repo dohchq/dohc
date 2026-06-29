@@ -314,7 +314,7 @@ PATH="/tmp/dohc-node-v24.18.0-linux-x64/bin:$PATH" /tmp/dohc-node-v24.18.0-linux
 ### CodeRabbit
 
 - Status: latest follow-up fixes pending rerun.
-- Current findings: latest CodeRabbit pass reported 3 issues; local fixes are
+- Current findings: latest CodeRabbit pass reported 6 issues; local fixes are
   applied below and need a clean rerun. Current live review state is tracked in
   Current PR Snapshot.
 - Historical findings fixed:
@@ -1378,6 +1378,28 @@ Seventy-fifth pass:
     reconstruction consumers.
   - Required message edits to verify the current `bodyRevision` or equivalent
     message version inside the same atomic edit unit.
+- Overrides:
+
+- None approved. The PR00 docs-only local-agent-CLI exception remains pending
+  human approval before completion or merge-readiness.
+
+Seventy-sixth pass:
+
+- Fixed CodeRabbit follow-up findings from the latest rerun:
+  - Treated stable secret references as first-class substrate identities while
+    keeping secret-backed file materialization deferred to PR 08.
+  - Added `Share`, `ShareGrant`, `ExternalChannel`, and `SecretReference` to the
+    shared contract set, with one canonical share/external-channel shape for
+    export, search, notifications, and shared channels.
+  - Clarified that bound sessions are an authentication wrapper around the same
+    explicit workspace/version request shape, not a second ambiguous API shape.
+  - Replaced the vague policy source-order tie-break with canonical policy
+    source ordinal plus explicit rule index.
+  - Made channels persist by stable `(workspaceId, channelId)`, with slugs as
+    lookup aliases only.
+  - Clarified that accepted holding records stay hidden from normal
+    `read`/`watch`/`search` until canonicalization, except for explicit
+    authorized non-canonical ingest/recovery/status views.
 - Overrides:
 
 - None approved. The PR00 docs-only local-agent-CLI exception remains pending

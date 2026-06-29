@@ -45,10 +45,14 @@ Use better primitives internally:
 All chat primitives are workspace-scoped data. `Channel`, `ChatThread`,
 `ThreadMessage`, `ThreadLink`, `ThreadActivity`, and `ThreadReadState` all carry
 `workspaceId`, and create/read/update/delete, lookup, projection, notification,
-and search paths must include `workspaceId` in their keys. Channels are unique
-within `(workspaceId, channelSlugOrId)`. Thread links must reference
-workspace-scoped source and target objects and reject cross-workspace links by
-default. Cross-workspace `ThreadLink` records are permitted only as explicit
+and search paths must include `workspaceId` in their keys. Channels are persisted
+and keyed by stable `(workspaceId, channelId)`. Slugs are lookup aliases only:
+channel APIs may resolve `(workspaceId, channelSlug)` to `channelId`, but durable
+threads, messages, links, activity, read state, projections, notifications, and
+search indexes must use `channelId` so slug changes cannot fork or duplicate
+channel state. Thread links must reference workspace-scoped source and target
+objects and reject cross-workspace links by default. Cross-workspace `ThreadLink`
+records are permitted only as explicit
 shared-channel exceptions: the link must carry the owning `workspaceId`, target
 workspace/resource identity, share/grant id, and visibility scope, and every
 read path, projection, search result, notification, export, replay job, history
