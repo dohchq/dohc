@@ -365,11 +365,27 @@ function mutationRetainedReason(error: unknown, fallback: string): string {
   return `${failureReason(error, fallback)}; visible mutation retained because rollback cannot be made atomic`;
 }
 
+function expectedSha256Mismatch(currentSha256: string): Error & { currentSha256: string } {
+  return Object.assign(new Error("expectedSha256 does not match current file"), {
+    code: "ESTALE",
+    currentSha256,
+  });
+}
+
+function isExpectedSha256Mismatch(
+  error: unknown,
+): error is Error & { currentSha256: string } {
+  return (
+    error instanceof Error &&
+    typeof (error as { currentSha256?: unknown }).currentSha256 === "string"
+  );
+}
+
 async function writeFileAtomicallyForTool(
   ctx: ToolContext,
   normalizedPath: string,
   data: string | Buffer,
-  options: { overwrite?: boolean } = {},
+  options: { expectedSha256?: string; overwrite?: boolean } = {},
 ): Promise<void> {
   const target = await safeResolveForMutation(ctx, normalizedPath);
   const absolutePath = target.absolute;
@@ -385,6 +401,29 @@ async function writeFileAtomicallyForTool(
       });
     }
     return current.absolute;
+  };
+  const assertExpectedCurrent = async (): Promise<void> => {
+    if (options.expectedSha256 === undefined) return;
+    const finalPath = await publishTarget();
+    const existing = await lstat(finalPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing?.isSymbolicLink()) {
+      throw Object.assign(new Error(`refusing to overwrite symlink: ${absolutePath}`), {
+        code: "ELOOP",
+      });
+    }
+    if (existing && !existing.isFile()) {
+      throw Object.assign(new Error(`refusing to overwrite non-file: ${absolutePath}`), {
+        code: "EISDIR",
+      });
+    }
+    const currentBytes = existing ? await readFile(finalPath) : Buffer.alloc(0);
+    const currentSha256 = sha256(currentBytes);
+    if (currentSha256 !== options.expectedSha256) {
+      throw expectedSha256Mismatch(currentSha256);
+    }
   };
   if (options.overwrite !== false) {
     const existing = await lstat(await publishTarget()).catch((error: NodeJS.ErrnoException) => {
@@ -406,6 +445,7 @@ async function writeFileAtomicallyForTool(
   try {
     await writeFile(tempPath, data, { flag: "wx" });
     if (existingMode !== undefined) await chmod(tempPath, existingMode);
+    await assertExpectedCurrent();
     const finalPath = await publishTarget();
     if (options.overwrite === false) {
       await link(tempPath, finalPath);
@@ -815,26 +855,6 @@ export async function writeWorkspaceFile(
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
-  let existing: Buffer | null;
-  try {
-    existing = await readFile(resolved.absolute).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    });
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: failureReason(error, `failed to read current file: ${args.path}`),
-    };
-  }
-  if (args.expectedSha256 && sha256(existing ?? new Uint8Array()) !== args.expectedSha256) {
-    return {
-      ok: false as const,
-      reason: "expectedSha256 does not match current file",
-      currentSha256: existing ? sha256(existing) : sha256(new Uint8Array()),
-    };
-  }
-
   const bytes =
     args.encoding === "base64"
       ? Buffer.from(args.content, "base64")
@@ -844,9 +864,18 @@ export async function writeWorkspaceFile(
   try {
     const createdParent = await mkdir(parentDir, { recursive: true });
     if (createdParent) visibleMutationStarted = true;
-    await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes);
+    await writeFileAtomicallyForTool(ctx, resolved.normalized, bytes, {
+      expectedSha256: args.expectedSha256,
+    });
     visibleMutationStarted = true;
   } catch (error) {
+    if (isExpectedSha256Mismatch(error)) {
+      return {
+        ok: false as const,
+        reason: error.message,
+        currentSha256: error.currentSha256,
+      };
+    }
     return {
       ok: false as const,
       reason: visibleMutationStarted

@@ -123,21 +123,23 @@ describe("workspaceActivity history", () => {
   });
 
   it("merges durable and ephemeral history when durable recording is unsupported", async () => {
-    const durable = createChangeSetStore(root);
-    await durable.record(
-      addFileChanges(
-        createChangeSet({
-          kind: "user-edit",
-          author: { kind: "user", userId: "ice" },
-          summary: "Durable edit",
-        }),
-        [{ path: "notes/durable.md", operation: "write" }],
-      ),
-      { id: "durable-record", recordedAtMs: 1000 },
-    );
     const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
-    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
     try {
+      Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+      const durable = createChangeSetStore(root);
+      await durable.record(
+        addFileChanges(
+          createChangeSet({
+            kind: "user-edit",
+            author: { kind: "user", userId: "ice" },
+            summary: "Durable edit",
+          }),
+          [{ path: "notes/durable.md", operation: "write" }],
+        ),
+        { id: "durable-record", recordedAtMs: 1000 },
+      );
+
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
       const ephemeral = createChangeSetStore(root, { ephemeralIfUnsupported: true });
       await ephemeral.record(
         addFileChanges(

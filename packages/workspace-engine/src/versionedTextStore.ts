@@ -6,6 +6,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 
 export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/versioned-text-store.json";
 export const MAX_VERSIONED_TEXT_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_WRITE_METADATA_FIELD_BYTES = 16 * 1024;
 
 export type WorkspaceObjectId = string;
 export type VersionId = string;
@@ -286,7 +287,7 @@ function assertWriteMetadata(value: unknown): asserts value is ActorNeutralWrite
 
 function assertPersistedWritePath(value: unknown): asserts value is string {
   assertString(value);
-  const result = validateUserWritePath(value);
+  const result = validateUserWritePath(value, { allowIgnoredSegments: true });
   if (!result.ok || result.normalized !== value) {
     throw new VersionedTextStoreError("state-corrupt", "Versioned text store is corrupt.");
   }
@@ -1215,7 +1216,7 @@ async function isBlockedByStaleLock(
   if (!owner) {
     return Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
   }
-  return Date.now() - Math.max(owner.heartbeatAtMs, ownerStats?.mtimeMs ?? 0) > staleMs;
+  return Date.now() - (ownerStats?.mtimeMs ?? owner.heartbeatAtMs) > staleMs;
 }
 
 async function readObservedStaleStoreLock(
@@ -1228,7 +1229,7 @@ async function readObservedStaleStoreLock(
   const ownerStats = await statIfExists(ownerPath);
   const owner = await readLockOwnerBestEffort(ownerPath);
   const stale = owner
-    ? Date.now() - Math.max(owner.heartbeatAtMs, ownerStats?.mtimeMs ?? 0) > staleMs
+    ? Date.now() - (ownerStats?.mtimeMs ?? owner.heartbeatAtMs) > staleMs
     : Date.now() - Math.max(lockStats.mtimeMs, ownerStats?.mtimeMs ?? 0) > staleMs;
   return stale ? lockStats : null;
 }
@@ -1771,13 +1772,28 @@ function normalizeWriteMetadata(metadata: ActorNeutralWriteMetadata): ActorNeutr
   if (metadata.summary !== undefined && typeof metadata.summary !== "string") {
     throw new VersionedTextStoreError("invalid-metadata", "Write metadata summary is invalid.");
   }
+  if (metadata.summary !== undefined) {
+    assertWriteMetadataFieldSize(metadata.summary, "summary");
+  }
   if (metadata.correlationId !== undefined && typeof metadata.correlationId !== "string") {
     throw new VersionedTextStoreError(
       "invalid-metadata",
       "Write metadata correlation id is invalid.",
     );
   }
+  if (metadata.correlationId !== undefined) {
+    assertWriteMetadataFieldSize(metadata.correlationId, "correlation id");
+  }
   return pickWriteMetadata(metadata);
+}
+
+function assertWriteMetadataFieldSize(value: string, label: string): void {
+  if (Buffer.byteLength(value, "utf8") > MAX_WRITE_METADATA_FIELD_BYTES) {
+    throw new VersionedTextStoreError(
+      "invalid-metadata",
+      `Write metadata ${label} is too large.`,
+    );
+  }
 }
 
 function invalidRollbackSnapshot(): never {

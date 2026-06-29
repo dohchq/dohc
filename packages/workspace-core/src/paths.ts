@@ -83,7 +83,10 @@ export type WritePathValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: "traversal" | "absolute" | "reserved" | "invalid" };
 
-export function validateUserWritePath(relativePath: string): WritePathValidation {
+export function validateUserWritePath(
+  relativePath: string,
+  options: { allowIgnoredSegments?: boolean } = {},
+): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
   if (isAbsolutePathLike(relativePath)) return { ok: false, reason: "absolute" };
   // Percent-encoded dots/separators are traversal in disguise; decode until
@@ -120,7 +123,9 @@ export function validateUserWritePath(relativePath: string): WritePathValidation
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
   if (isReservedPath(normalized)) return { ok: false, reason: "reserved" };
-  if (hasIgnoredSegment(normalized)) return { ok: false, reason: "reserved" };
+  if (!options.allowIgnoredSegments && hasIgnoredSegment(normalized)) {
+    return { ok: false, reason: "reserved" };
+  }
   return { ok: true, normalized };
 }
 

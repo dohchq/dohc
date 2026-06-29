@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -49,6 +50,7 @@ function historyLockPaths(token: string) {
 async function writeHistoryLockOwner(input: {
   token: string;
   pid: number;
+  processIdentity?: { kind: "linux-proc-starttime"; value: string };
   createdAtMs: number;
   heartbeatAtMs: number;
 }) {
@@ -59,12 +61,29 @@ async function writeHistoryLockOwner(input: {
     `${JSON.stringify({
       token: input.token,
       pid: input.pid,
+      ...(input.processIdentity ? { processIdentity: input.processIdentity } : {}),
       createdAtMs: input.createdAtMs,
       heartbeatAtMs: input.heartbeatAtMs,
     })}\n`,
     "utf8",
   );
   return paths;
+}
+
+function currentProcessIdentityForTest(): { kind: "linux-proc-starttime"; value: string } | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const text = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+    const commandEnd = text.lastIndexOf(")");
+    if (commandEnd < 0) return undefined;
+    const fields = text.slice(commandEnd + 2).trim().split(/\s+/u);
+    const value = fields[19];
+    return value !== undefined && /^[0-9]+$/u.test(value)
+      ? { kind: "linux-proc-starttime", value }
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 beforeEach(async () => {
@@ -1063,6 +1082,7 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     const { lockDir } = await writeHistoryLockOwner({
       token,
       pid: process.pid,
+      processIdentity: currentProcessIdentityForTest(),
       createdAtMs: staleAtMs,
       heartbeatAtMs: staleAtMs,
     });
@@ -1087,6 +1107,24 @@ describeAnchoredHistory("changeSetStore concurrency and locks", () => {
     }
 
     await expect(store.list()).resolves.toHaveLength(1);
+  });
+
+  it("reclaims a stale filesystem history lock when a live pid has a mismatched identity", async () => {
+    const token = "reused-pid-history-lock";
+    const staleAtMs = Date.now() - 60_000;
+    const { lockDir } = await writeHistoryLockOwner({
+      token,
+      pid: process.pid,
+      processIdentity: { kind: "linux-proc-starttime", value: "0" },
+      createdAtMs: staleAtMs,
+      heartbeatAtMs: staleAtMs,
+    });
+    const store = createChangeSetStore(root);
+
+    await store.record(userEdit(), { id: "reused-pid-lock", recordedAtMs: 3000 });
+
+    await expect(store.list()).resolves.toHaveLength(1);
+    await expect(readdir(lockDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   itLinux("ignores symlinked history lock owners before reclaiming stale locks", async () => {

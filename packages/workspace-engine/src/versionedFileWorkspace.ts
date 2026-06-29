@@ -1295,7 +1295,6 @@ function snapshotForBytes(bytes: Uint8Array): FileChangeSnapshot {
   const sizeBytes = bytes.byteLength;
   if (sizeBytes > MAX_HISTORY_TEXT_SNAPSHOT_BYTES) {
     return {
-      sha256: sha256Bytes(bytes),
       sizeBytes,
       truncated: true,
       unavailableReason: "too-large",
@@ -1322,7 +1321,6 @@ async function snapshotForOpenFile(
   const infoSizeBytes = Number(info.size);
   if (infoSizeBytes > MAX_HISTORY_TEXT_SNAPSHOT_BYTES) {
     return {
-      sha256: await sha256OpenFile(handle),
       sizeBytes: infoSizeBytes,
       truncated: true,
       unavailableReason: "too-large",
@@ -1335,7 +1333,6 @@ async function snapshotForOpenFile(
   if (truncated) {
     const currentInfo = await handle.stat();
     return {
-      sha256: await sha256OpenFile(handle),
       sizeBytes: Number(currentInfo.size),
       truncated: true,
       unavailableReason: "too-large",
@@ -1347,13 +1344,17 @@ async function snapshotForOpenFile(
 async function assertOpenFileContainsUtf8Text(
   handle: Awaited<ReturnType<typeof open>>,
   path: string,
+  maxBytes = MAX_READ_TEXT_FILE_BYTES,
 ): Promise<void> {
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const { bytes, truncated } = await readOpenFileBytesUpTo(handle, maxBytes);
+  if (truncated) {
+    throw new VersionedFileWorkspaceError(
+      "file-too-large",
+      `File ${path} is too large to read as text.`,
+    );
+  }
   try {
-    for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) {
-      decoder.decode(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk), { stream: true });
-    }
-    decoder.decode();
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch (error) {
     const wrapped = new VersionedFileWorkspaceError(
       "not-text",
@@ -1816,7 +1817,7 @@ async function listWorkspaceTextFileStats(rootDir: string): Promise<VersionedFil
       const mediaType = mediaTypeForPath(path);
       if (!isTextMediaType(mediaType, path)) continue;
       const absolute = await resolveContainedWorkspacePath(rootDir, path);
-      const opened = await openWorkspaceFileForRead(rootDir, path, absolute);
+      const opened = await openWorkspaceFileForReadIfPresent(rootDir, path, absolute);
       if (!opened) continue;
       try {
         const sizeBytes = Number(opened.info.size);
@@ -2266,6 +2267,17 @@ async function verifyBackupMatchesSnapshot(
       throw recoveryFailed(`Cannot restore ${path}: disk preimage backup text changed.`);
     }
   }
+}
+
+async function snapshotWithBackupDigest(
+  snapshot: FileChangeSnapshot,
+  backup: Awaited<ReturnType<typeof open>>,
+): Promise<FileChangeSnapshot> {
+  if (snapshot.unavailableReason !== "too-large" || snapshot.sha256) return snapshot;
+  return {
+    ...snapshot,
+    sha256: await sha256OpenFile(backup),
+  };
 }
 
 async function openInternalParentHandleForMutation(
@@ -2993,13 +3005,14 @@ async function createDiskPreimageBackup(
         );
       }
       await assertOpenFileContainsUtf8Text(opened.handle, workspacePath);
-      const snapshot = await snapshotForOpenFile(opened.handle, opened.info);
+      let snapshot = await snapshotForOpenFile(opened.handle, opened.info);
       try {
         await copyOpenFileContentsDurably(opened.handle, backupPath);
         await syncParentDirectoryBestEffort(backupPath);
         const backup = await open(backupPath, "r");
         try {
           await verifyBackupMatchesSnapshot(backup, snapshot, workspacePath);
+          snapshot = await snapshotWithBackupDigest(snapshot, backup);
         } finally {
           await backup.close();
         }
@@ -3494,6 +3507,13 @@ function snapshotsMatch(
     return current === null || current?.unavailableReason === "missing";
   }
   if (!expected) return false;
+  if (
+    expected.unavailableReason === "too-large" &&
+    current?.unavailableReason === "too-large" &&
+    typeof expected.sizeBytes === "number"
+  ) {
+    return current.sizeBytes === expected.sizeBytes;
+  }
   if (typeof expected.sha256 === "string") {
     return current?.sha256 === expected.sha256;
   }

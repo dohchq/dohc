@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, statSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -660,13 +660,59 @@ function delayMs(ms: number): Promise<void> {
 interface HistoryLockOwner {
   token: string;
   pid: number;
+  processIdentity?: HistoryLockProcessIdentity;
   createdAtMs: number;
   heartbeatAtMs: number;
 }
 
+interface HistoryLockProcessIdentity {
+  kind: "linux-proc-starttime";
+  value: string;
+}
+
+function readLinuxProcessStartTicks(pid: number): string | null {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const text = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = text.lastIndexOf(")");
+    if (commandEnd < 0) return null;
+    const fields = text.slice(commandEnd + 2).trim().split(/\s+/u);
+    const startTicks = fields[19];
+    return startTicks !== undefined && /^[0-9]+$/u.test(startTicks) ? startTicks : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIdentityForPid(pid: number): HistoryLockProcessIdentity | null {
+  const value = readLinuxProcessStartTicks(pid);
+  return value ? { kind: "linux-proc-starttime", value } : null;
+}
+
+function historyLockOwnerProcessStillMatches(owner: HistoryLockOwner): boolean {
+  if (!isProcessAlive(owner.pid) || owner.processIdentity === undefined) return false;
+  const current = processIdentityForPid(owner.pid);
+  return (
+    current !== null &&
+    current.kind === owner.processIdentity.kind &&
+    current.value === owner.processIdentity.value
+  );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function createHistoryLockOwner(token: string): HistoryLockOwner {
   const nowMs = Date.now();
-  return { token, pid: process.pid, createdAtMs: nowMs, heartbeatAtMs: nowMs };
+  const processIdentity = processIdentityForPid(process.pid);
+  return {
+    token,
+    pid: process.pid,
+    ...(processIdentity ? { processIdentity } : {}),
+    createdAtMs: nowMs,
+    heartbeatAtMs: nowMs,
+  };
 }
 
 function parseHistoryLockOwner(text: string): HistoryLockOwner | null {
@@ -676,6 +722,11 @@ function parseHistoryLockOwner(text: string): HistoryLockOwner | null {
       typeof value.token !== "string" ||
       typeof value.pid !== "number" ||
       !Number.isFinite(value.pid) ||
+      (value.processIdentity !== undefined &&
+        (!isObjectRecord(value.processIdentity) ||
+          value.processIdentity.kind !== "linux-proc-starttime" ||
+          typeof value.processIdentity.value !== "string" ||
+          !/^[0-9]+$/u.test(value.processIdentity.value))) ||
       typeof value.createdAtMs !== "number" ||
       !Number.isFinite(value.createdAtMs) ||
       typeof value.heartbeatAtMs !== "number" ||
@@ -851,14 +902,14 @@ async function reclaimStaleHistoryLock(rootRealPath: string, lockDir: string): P
     if (historyLockAgeMs(generation.owner.heartbeatAtMs, nowMs) <= HISTORY_LOCK_STALE_MS) {
       return false;
     }
-    if (isProcessAlive(generation.owner.pid)) return false;
+    if (historyLockOwnerProcessStillMatches(generation.owner)) return false;
     const currentOwner = await readHistoryLockOwner(generation.ownerPath);
     if (!currentOwner) return false;
     const currentHeartbeatAgeMs = historyLockAgeMs(currentOwner.heartbeatAtMs, nowMs);
     if (
       currentOwner.token !== generation.token ||
       currentHeartbeatAgeMs <= HISTORY_LOCK_STALE_MS ||
-      isProcessAlive(currentOwner.pid)
+      historyLockOwnerProcessStillMatches(currentOwner)
     ) {
       return false;
     }

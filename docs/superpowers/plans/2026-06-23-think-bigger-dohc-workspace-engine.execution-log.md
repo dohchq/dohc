@@ -58,7 +58,7 @@ approval.
 | P0A | Current System Inventory And Decisions | restacked on PR00; not approved | codex/think-bigger-p0a-inventory | sibling worktree | main/orchestrated | not opened | pending latest rerun after automated review follow-up fixes | docs + focused package tests | automated review rerun pending; blocked on PR00 docs-only exception approval, lane PR, and final approval. |
 | P0R | Rust Workspace Kernel Spike | restacked on P0A; not approved | codex/think-bigger-p0r-rust-kernel | sibling worktree | main/orchestrated | not opened | pending | cargo test + perf | Blocked on PR00 docs-only exception approval, P0A lane PR, P0R lane PR, tests, and automated review. |
 | P0B | Minimal Versioned Text Store | restacked on P0R; not approved | codex/think-bigger-p0b-versioned-store | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 docs-only local-agent-CLI exception approval, final approval, P0A/P0R lane decisions, and automated review. |
-| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `8cf9bc5` raised 5 issues; all 5 fixed locally and rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
+| P0C | File/API Write Capture And History | restacked on P0B; not approved | codex/think-bigger-p0c-file-history | sibling worktree | main/orchestrated | not opened | pending rerun after latest local fixes | workspace-engine/history/mcp/desktop + prior full feasible matrix | Latest completed review against `a935e96` raised 17 issues; valid fixes applied locally and rerun pending. Live-pg API/Postgres suites blocked locally by missing Docker/Postgres service. |
 | P0D | Compare, Clean Merge, Conflict Preservation | provisional branch pushed; not approved | codex/think-bigger-p0d-merge-conflicts | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + workspace-history + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0E | Minimal Chat Linked To File | provisional branch pushed; not approved | codex/think-bigger-p0e-linked-chat | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
 | P0F | Search And Policy Smoke | provisional branch pushed; not approved | codex/think-bigger-p0f-search-policy | sibling worktree | main/orchestrated | not opened | pending | workspace-engine + typecheck | Blocked on PR00 approval, stack reconciliation, lane PR, tests, and automated review. |
@@ -1643,6 +1643,7 @@ Date completed:
 - .github/workflows/desktop-release.yml
 - crates/workspace-kernel-spike/src/main.rs
 - scripts/workspace-kernel-spike/bench.mjs
+- services/workspace-api/src/main.ts
 - services/workspace-api/src/routes/shares.ts
 - services/workspace-api/src/routes/sharesRevocation.test.ts
 - packages/workspace-postgres/src/db/schema.ts
@@ -2996,6 +2997,25 @@ PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typ
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
 PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
 git diff --check
+# automated review follow-up fixes against a935e96 completed review pass
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api test src/routes/sharesRevocation.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedTextStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine test src/versionedFileWorkspace.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history test src/changeSetStore.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp test src/tools.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop test src/workspaces/workspaceActivity.test.ts src/workspaces/workspaceUiState.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core test src/paths.test.ts
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs test src/watchEvents.test.ts src/scan.test.ts
+cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp node scripts/workspace-kernel-spike/bench.mjs --files 2 --iterations 1
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-api typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-engine typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-history typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/mcp typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/desktop typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-core typecheck
+PATH="/tmp/dohc-node-v24.18.0/bin:$PATH" TMPDIR=/tmp pnpm --filter @dohc/workspace-fs typecheck
+git diff --check
 ```
 
 ### E2E / Visual / Manual QA
@@ -3021,26 +3041,56 @@ git diff --check
 
 ### automated review
 
-- Status: fix loop active; latest local fixes after the completed `8cf9bc5`
+- Status: fix loop active; latest local fixes after the completed `a935e96`
   review pass are complete and rerun pending.
-- Findings: latest completed review against commit `8cf9bc5` raised 5 issues
-  that are fixed locally here. The immediately previous review attempt against
-  commit `e268a03` timed out before a `complete` event, but streamed 5 issues
-  that were fixed in commit `8cf9bc5`. Previous completed passes raised 5
-  issues against commit `97529b0`, 8 issues against commit `f156b22`, 6 issues
-  against commit `a8ba2a3`, 9 issues against commit `5d097ed`, 10 issues
-  against commit `5805eae`, 9 issues against commit `bfc0ccc`, 8 issues
-  against commit `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues
-  against commit `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues
-  against commit `fa05e4f`, 7 issues against commit `d37c106`, 7 issues
-  against commit `3b3b575`, 14 issues against commit `db9d04a`, 10 issues
-  against commit `d4d734a`, 8 issues against commit `f57278b`, 12 issues
-  against commit `16362a9`, 10 issues against commit `4288332`, 12 issues
-  against commit `36aa361`, 15 issues against commit `4b91836`, 8 issues
-  against commit `112a935`, 10 issues against commit `dd77390`, 5 issues
-  against commit `1c49720`, 10 issues against commit `28e093d`, and 9 issues
-  against commit `8e1fa68`.
-- Latest fixes after completed review pass against commit `8cf9bc5`:
+- Findings: latest completed review against commit `a935e96` raised 17 issues.
+  Sixteen produced local fixes here; one duplicated desktop fallback-instance
+  concern was verified already satisfied by the root-keyed ephemeral store, with
+  the related unguarded fallback read path fixed. The previous completed review
+  against commit `8cf9bc5` raised 5 issues that were fixed in commit `a935e96`.
+  The immediately previous review attempt against commit `e268a03` timed out
+  before a `complete` event, but streamed 5 issues that were fixed in commit
+  `8cf9bc5`. Previous completed passes raised 5 issues against commit
+  `97529b0`, 8 issues against commit `f156b22`, 6 issues against commit
+  `a8ba2a3`, 9 issues against commit `5d097ed`, 10 issues against commit
+  `5805eae`, 9 issues against commit `bfc0ccc`, 8 issues against commit
+  `52e9a9c`, 7 issues against commit `8fe4727`, 6 issues against commit
+  `7bfd8e6`, 8 issues against commit `db2c93e`, 10 issues against commit
+  `fa05e4f`, 7 issues against commit `d37c106`, 7 issues against commit
+  `3b3b575`, 14 issues against commit `db9d04a`, 10 issues against commit
+  `d4d734a`, 8 issues against commit `f57278b`, 12 issues against commit
+  `16362a9`, 10 issues against commit `4288332`, 12 issues against commit
+  `36aa361`, 15 issues against commit `4b91836`, 8 issues against commit
+  `112a935`, 10 issues against commit `dd77390`, 5 issues against commit
+  `1c49720`, 10 issues against commit `28e093d`, and 9 issues against commit
+  `8e1fa68`.
+- Latest fixes after completed review pass against commit `a935e96`:
+  - Hocuspocus admin disconnect now propagates caller abort reasons separately
+    from internal timeout aborts.
+  - Share revocation completion keeps `disconnect_completed` rows for the
+    retention cleanup window instead of deleting them inline.
+  - History lock owners now store a Linux process-start identity when available,
+    so a reused live PID does not keep a stale lock unreclaimable.
+  - Desktop history reads soften fallback read failures too; the repeated
+    fallback-instance finding was verified already satisfied by the shared
+    root-keyed ephemeral store.
+  - Desktop release preflight now runs `@dohc/workspace-engine typecheck`.
+  - MCP optimistic `expectedSha256` checks now run inside the atomic publish
+    precondition immediately before rename/link.
+  - Rust and TypeScript scan/bench paths now share the `.dohc-write-*` ignore
+    contract, and the bench fixture writes exact `bytesPerFile` totals.
+  - Versioned persisted-state loading allows legacy ignored-segment paths while
+    new mutations still reject them.
+  - Share revocation UTC regex no longer accepts year `0000`, avoiding invalid
+    PostgreSQL timestamp casts in backlog stats.
+  - Versioned file listing tolerates files deleted between `readdir` and open.
+  - Store-lock stale checks prefer owner-file mtime over serialized heartbeat.
+  - Open-file UTF-8 checks and history snapshots are bounded; oversized live
+    preimages derive restorable blob hashes from verified backups.
+  - Versioned write metadata now caps persisted summary/correlation id strings.
+  - Share revocation tests distinguish retention cleanup deletes from
+    event-specific update/delete queries.
+- Previous fixes after completed review pass against commit `8cf9bc5`:
   - Share revocation retry selection now validates UTC timestamp strings inside
     each index-aligned branch, treats malformed/missing timestamps as due, and
     keeps the regex parameterized.
@@ -4651,6 +4701,22 @@ git diff --check
   - Latest completed `8cf9bc5` review follow-up typechecks passed for
     workspace-core, workspace-fs, workspace-history, MCP, desktop, and
     workspace-api; `git diff --check` also passed.
+  - Latest completed `a935e96` review follow-up focused reruns with Node
+    v24.18.0 and `TMPDIR=/tmp`: workspace-api `sharesRevocation.test.ts` 18
+    tests in 14ms; workspace-engine `versionedTextStore.test.ts` 67 tests in
+    9.95s; workspace-engine `versionedFileWorkspace.test.ts` 83 tests in
+    25.30s; workspace-history `changeSetStore.test.ts` 39 tests in 10.91s; MCP
+    `tools.test.ts` 50 tests in 4.57s; desktop `workspaceActivity.test.ts` and
+    `workspaceUiState.test.ts` 13 tests in 1.67s; workspace-core
+    `paths.test.ts` 44 tests in 13ms; workspace-fs `watchEvents.test.ts` and
+    `scan.test.ts` 27 tests in 2.25s.
+  - Latest completed `a935e96` review follow-up Rust checks passed:
+    `cargo test --manifest-path crates/workspace-kernel-spike/Cargo.toml` 3
+    tests passed, and the Rust/TS bench smoke with 2 files / 1 iteration
+    reported exact 2048 bytes on both implementations.
+  - Latest completed `a935e96` review follow-up typechecks passed for
+    workspace-api, workspace-engine, workspace-history, MCP, desktop,
+    workspace-core, and workspace-fs; `git diff --check` also passed.
 - Machine/CI context: local Codex machine. Earlier compatibility reruns used
   downloaded Node v24.18.0 with Corepack; the latest follow-up reruns used the
   same local Node v24.18.0 toolchain with pnpm. Filesystem-heavy engine tests used

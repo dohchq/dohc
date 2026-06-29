@@ -8,6 +8,7 @@ use std::time::Instant;
 use walkdir::{DirEntry, WalkDir};
 
 const IGNORED_SEGMENTS: &[&str] = &[".dohc", ".git", "node_modules"];
+const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 
 #[derive(Debug, Serialize)]
 struct ScanOutput {
@@ -228,7 +229,7 @@ fn scan_workspace(root: &Path) -> io::Result<ScanOutput> {
 
 fn should_descend(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy().to_lowercase();
-    !IGNORED_SEGMENTS.contains(&name.as_str())
+    !segment_is_ignored(&name)
 }
 
 fn relative_display(root: &Path, path: &Path) -> String {
@@ -242,7 +243,14 @@ fn has_ignored_segment(path: &str) -> bool {
     path.replace('\\', "/")
         .split('/')
         .map(|segment| segment.trim_end_matches(['.', ' ']).to_lowercase())
-        .any(|segment| IGNORED_SEGMENTS.contains(&segment.as_str()))
+        .any(|segment| segment_is_ignored(&segment))
+}
+
+fn segment_is_ignored(segment: &str) -> bool {
+    IGNORED_SEGMENTS.contains(&segment)
+        || IGNORED_FILE_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
 }
 
 fn is_database_sidecar(path: &Path) -> bool {
@@ -313,6 +321,8 @@ mod tests {
         write_file(temp.path().join(".DOHC/history.json"), b"hidden");
         write_file(temp.path().join(".GIT/config"), b"hidden");
         write_file(temp.path().join("node_modules/pkg/index.js"), b"hidden");
+        write_file(temp.path().join(".dohc-write-123.tmp"), b"hidden");
+        write_file(temp.path().join("notes/.dohc-write-456.tmp"), b"hidden");
         write_file(
             temp.path().join("finance/ledger.sqlite"),
             b"SQLite format 3\0",

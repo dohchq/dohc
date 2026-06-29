@@ -79,7 +79,6 @@ describe("revokeShare admin disconnect", () => {
       "update",
       "disconnect",
       "update",
-      "delete",
     ]);
   });
 
@@ -459,7 +458,6 @@ describe("revokeShare admin disconnect", () => {
       "disconnect",
       "update",
       "delete",
-      "delete",
     ]);
   });
 
@@ -625,7 +623,6 @@ describe("revokeShare admin disconnect", () => {
       "disconnect",
       "update",
       "delete",
-      "delete",
     ]);
     expect(disconnects).toEqual([{ workspaceId: "workspace-1", userId: "recipient-from-share" }]);
   });
@@ -727,7 +724,6 @@ describe("revokeShare admin disconnect", () => {
       "release",
       "disconnect",
       "update",
-      "delete",
       "delete",
     ]);
   });
@@ -967,7 +963,7 @@ describe("revokeShare admin disconnect", () => {
     expect(claimUpdates[0]?.[2]).toBe("recipient-from-share");
     expect(claimUpdates[0]?.[3]).toBe(300);
     expect(deleted.map((params) => params[0]).filter((param) => typeof param === "string"))
-      .toEqual(["bad-event", "event-1"]);
+      .toEqual([]);
     expect(events).toEqual([
       "delete",
       "connect",
@@ -981,10 +977,8 @@ describe("revokeShare admin disconnect", () => {
       "release",
       "disconnect",
       "update",
-      "delete",
       "disconnect",
       "update",
-      "delete",
       "delete",
     ]);
   });
@@ -1127,7 +1121,6 @@ describe("revokeShare admin disconnect", () => {
       "release",
       "disconnect",
       "update",
-      "delete",
       "delete",
     ]);
     expect(completedUpdates).toHaveLength(1);

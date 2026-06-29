@@ -154,7 +154,7 @@ function mergeHistoryRecords(
 function historyReadStores(rootPath: string) {
   const durable = createChangeSetStore(rootPath);
   const fallback = desktopHistoryFallbackStore(rootPath);
-  const durableRecordsOrEmpty = async (
+  const recordsOrEmpty = async (
     read: () => Promise<HistoryRecord[]>,
   ): Promise<HistoryRecord[]> => {
     try {
@@ -165,13 +165,17 @@ function historyReadStores(rootPath: string) {
   };
   return {
     async list() {
+      const [fallbackRecords, durableRecords] = await Promise.all([
+        recordsOrEmpty(() => fallback.list()),
+        recordsOrEmpty(() => durable.list()),
+      ]);
       return mergeHistoryRecords(
-        [...(await fallback.list()), ...(await durableRecordsOrEmpty(() => durable.list()))],
+        [...fallbackRecords, ...durableRecords],
         "newest-first",
       );
     },
     async get(id: string) {
-      const fallbackRecord = await fallback.get(id);
+      const fallbackRecord = await fallback.get(id).catch(() => null);
       if (fallbackRecord) return fallbackRecord;
       try {
         return await durable.get(id);

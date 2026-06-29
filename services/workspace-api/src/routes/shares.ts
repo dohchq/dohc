@@ -45,8 +45,10 @@ const SHARE_REVOCATION_WORKER_MAX_BATCH = 100;
 const SHARE_REVOCATION_COMPLETED_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const POSTGRES_UTC_ISO_FORMAT = `YYYY-MM-DD"T"HH24:MI:SS.MS"Z"`;
 const POSTGRES_UTC_ISO_NOW_SQL = `to_char(clock_timestamp() at time zone 'UTC', '${POSTGRES_UTC_ISO_FORMAT}')`;
+const POSTGRES_UTC_ISO_YEAR_RE =
+  "(?:[0-9]{3}[1-9]|[0-9]{2}[1-9][0-9]|[0-9][1-9][0-9]{2}|[1-9][0-9]{3})";
 const POSTGRES_UTC_ISO_DATE_RE =
-  "(?:(?:[0-9]{4}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29))";
+  `(?:(?:${POSTGRES_UTC_ISO_YEAR_RE}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29))`;
 const POSTGRES_UTC_ISO_TIME_RE = "(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{3}";
 const POSTGRES_UTC_ISO_TEXT_RE = `^${POSTGRES_UTC_ISO_DATE_RE}T${POSTGRES_UTC_ISO_TIME_RE}Z$`;
 
@@ -353,15 +355,6 @@ async function completeRevocationDisconnectEvent(
       .catch(() => undefined);
     return;
   }
-  await pool
-    .query(
-      `delete from workspace_events
-       where id = $1
-         and kind = 'share.revocation.disconnect_completed'
-         and payload->>'claimId' = $2`,
-      [eventId, claimId],
-    )
-    .catch(() => undefined);
 }
 
 async function requeueRevocationDisconnectEvent(

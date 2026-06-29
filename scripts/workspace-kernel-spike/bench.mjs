@@ -84,11 +84,17 @@ function run(command, args, options = {}) {
 
 async function createFixture({ files, bytesPerFile }) {
   const root = await mkdtemp(join(nativeTmpdir, "dohc-kernel-spike-"));
-  const payload = "x".repeat(bytesPerFile);
   for (let index = 0; index < files; index += 1) {
     const path = join(root, `dir-${index % 50}`, `file-${index}.txt`);
+    const prefix = `${index}:`;
+    const suffix = "\n";
+    const payloadBytes =
+      bytesPerFile - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
+    if (payloadBytes < 0) {
+      throw new Error("--bytes-per-file is too small for fixture metadata");
+    }
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `${index}:${payload}\n`);
+    await writeFile(path, `${prefix}${"x".repeat(payloadBytes)}${suffix}`);
   }
   await mkdir(join(root, ".dohc"), { recursive: true });
   await writeFile(join(root, ".dohc", "hidden.txt"), "hidden");

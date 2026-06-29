@@ -1024,6 +1024,15 @@ describe("versioned text store", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid-metadata" });
     await expect(
+      store.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: named.id,
+        path: "notes/today.md",
+        text: "Bad metadata\n",
+        metadata: { origin: "api", summary: "x".repeat(16 * 1024 + 1) },
+      }),
+    ).rejects.toMatchObject({ code: "invalid-metadata" });
+    await expect(
       store.readTextFile({
         workspaceId: "workspace-a",
         versionId: named.id,
@@ -1857,6 +1866,41 @@ describe("versioned text store", () => {
     expect(object).not.toHaveProperty("extra");
     expect(snapshot).not.toHaveProperty("extra");
     expect(snapshot?.metadata).not.toHaveProperty("extra");
+  });
+
+  it("loads legacy persisted paths under ignored scan segments", async () => {
+    const store = storeWithDeterministicIds();
+    const main = await store.ensureMainVersion({ workspaceId: "workspace-a" });
+    const write = await store.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/today.md",
+      text: "Legacy path\n",
+      metadata: apiWrite,
+    });
+    const statePath = join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH);
+    const raw = JSON.parse(await readFile(statePath, "utf8"));
+    const legacyPath = "pkg/node_modules/legacy.md";
+    const workspace = raw.workspaces["workspace-a"];
+    delete workspace.pathAliases.main["notes/today.md"];
+    workspace.pathAliases.main[legacyPath] = write.object.id;
+    workspace.snapshots.main[write.object.id].path = legacyPath;
+    workspace.moments[0].path = legacyPath;
+    await writeFile(statePath, `${JSON.stringify(raw)}\n`);
+    const reloaded = createVersionedTextStore(root);
+
+    await expect(
+      reloaded.listTextFiles({ workspaceId: "workspace-a", versionId: main.id }),
+    ).resolves.toMatchObject([{ path: legacyPath, text: "Legacy path\n" }]);
+    await expect(
+      reloaded.writeTextFile({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        path: legacyPath,
+        text: "still blocked for new writes\n",
+        metadata: apiWrite,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-path" });
   });
 
   it("rejects persisted object and moment ids that are blank", async () => {
